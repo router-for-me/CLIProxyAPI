@@ -110,33 +110,36 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	} else if dataType == "response.completed" {
 		template, _ = sjson.Set(template, "choices.0.finish_reason", "stop")
 		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "stop")
-	} else if dataType == "response.output_item.done" {
-		functionCallItemTemplate := `{"id": "","type": "function","function": {"name": "","arguments": ""}}`
-		itemResult := rootResult.Get("item")
-		if itemResult.Exists() {
-			if itemResult.Get("type").String() != "function_call" {
-				return []string{}
-			}
-			template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls", `[]`)
-			functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "id", itemResult.Get("call_id").String())
-			{
-				// Restore original tool name if it was shortened
-				name := itemResult.Get("name").String()
-				// Build reverse map on demand from original request tools
-				rev := buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
-				if orig, ok := rev[name]; ok {
-					name = orig
-				}
-				functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.name", name)
-			}
-			functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.arguments", itemResult.Get("arguments").String())
-			template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
-			template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
-		}
+    } else if dataType == "response.output_item.done" {
+        functionCallItemTemplate := `{"index":0,"id": "","type": "function","function": {"name": "","arguments": ""}}`
+        itemResult := rootResult.Get("item")
+        if itemResult.Exists() {
+            if itemResult.Get("type").String() != "function_call" {
+                return []string{}
+            }
+            template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls", `[]`)
+            functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "id", itemResult.Get("call_id").String())
+            {
+                // Restore original tool name if it was shortened
+                name := itemResult.Get("name").String()
+                // Build reverse map on demand from original request tools
+                rev := buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
+                if orig, ok := rev[name]; ok {
+                    name = orig
+                }
+                functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.name", name)
+            }
+            functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.arguments", itemResult.Get("arguments").String())
+            template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
+            template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
+            // Indicate that tool calls are the finish reason so clients dispatch tools
+            template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
+            template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
+        }
 
-	} else {
-		return []string{}
-	}
+    } else {
+        return []string{}
+    }
 
 	return []string{template}
 }
