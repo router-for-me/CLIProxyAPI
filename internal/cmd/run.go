@@ -346,7 +346,12 @@ func StartService(cfg *config.Config, configPath string) {
 				for _, c := range snapshot {
 					// Persist tokens/cookies then unregister/cleanup per client.
 					_ = c.SaveTokenToFile()
-					if u, ok := any(c).(interface{ UnregisterClient() }); ok {
+					switch u := any(c).(type) {
+					case interface {
+						UnregisterClientWithReason(interfaces.UnregisterReason)
+					}:
+						u.UnregisterClientWithReason(interfaces.UnregisterReasonShutdown)
+					case interface{ UnregisterClient() }:
 						u.UnregisterClient()
 					}
 				}

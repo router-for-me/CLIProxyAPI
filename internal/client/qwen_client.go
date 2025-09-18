@@ -496,8 +496,23 @@ func (c *QwenClient) GetRequestMutex() *sync.Mutex {
 }
 
 // UnregisterClient flushes cookie snapshot back into the main token file.
-func (c *QwenClient) UnregisterClient() {
+func (c *QwenClient) UnregisterClient() { c.unregisterClient(false) }
+
+// UnregisterClientWithReason allows the watcher to skip persistence when the auth file is removed.
+func (c *QwenClient) UnregisterClientWithReason(reason interfaces.UnregisterReason) {
+	skipPersist := reason == interfaces.UnregisterReasonAuthFileRemoved
+	c.unregisterClient(skipPersist)
+}
+
+func (c *QwenClient) unregisterClient(skipPersist bool) {
 	if c.snapshotManager == nil {
+		return
+	}
+	if skipPersist {
+		if c.tokenFilePath != "" {
+			log.Debugf("skipping Qwen snapshot flush because auth file is missing: %s", filepath.Base(c.tokenFilePath))
+			util.RemoveCookieSnapshots(c.tokenFilePath)
+		}
 		return
 	}
 	if err := c.snapshotManager.Flush(); err != nil {

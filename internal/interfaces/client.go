@@ -54,3 +54,15 @@ type Client interface {
 
 	RefreshTokens(ctx context.Context) error
 }
+
+// UnregisterReason describes the context for unregistering a client instance.
+type UnregisterReason string
+
+const (
+	// UnregisterReasonReload indicates a full reload is replacing the client.
+	UnregisterReasonReload UnregisterReason = "reload"
+	// UnregisterReasonShutdown indicates the service is shutting down.
+	UnregisterReasonShutdown UnregisterReason = "shutdown"
+	// UnregisterReasonAuthFileRemoved indicates the underlying auth file was deleted.
+	UnregisterReasonAuthFileRemoved UnregisterReason = "auth-file-removed"
+)

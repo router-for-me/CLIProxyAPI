@@ -61,13 +61,28 @@ type GeminiWebClient struct {
 	modelsRegistered bool
 }
 
-func (c *GeminiWebClient) UnregisterClient() {
+func (c *GeminiWebClient) UnregisterClient() { c.unregisterClient(false) }
+
+// UnregisterClientWithReason allows the watcher to avoid recreating deleted auth files.
+func (c *GeminiWebClient) UnregisterClientWithReason(reason interfaces.UnregisterReason) {
+	skipPersist := reason == interfaces.UnregisterReasonAuthFileRemoved
+	c.unregisterClient(skipPersist)
+}
+
+func (c *GeminiWebClient) unregisterClient(skipPersist bool) {
 	if c.cookiePersistCancel != nil {
 		c.cookiePersistCancel()
 		c.cookiePersistCancel = nil
 	}
-	// Flush cookie snapshot to main token file and remove snapshot
-	c.flushCookieSnapshotToMain()
+	if skipPersist {
+		if c.snapshotManager != nil && c.tokenFilePath != "" {
+			log.Debugf("skipping Gemini Web snapshot flush because auth file is missing: %s", filepath.Base(c.tokenFilePath))
+			util.RemoveCookieSnapshots(c.tokenFilePath)
+		}
+	} else {
+		// Flush cookie snapshot to main token file and remove snapshot
+		c.flushCookieSnapshotToMain()
+	}
 	if c.gwc != nil {
 		c.gwc.Close(0)
 		c.gwc = nil

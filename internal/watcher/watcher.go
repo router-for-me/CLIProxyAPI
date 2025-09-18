@@ -297,9 +297,7 @@ func (w *Watcher) reloadClients() {
 	// Unregister all old API key clients before creating new ones
 	log.Debugf("unregistering %d old API key clients", oldAPIKeyClientCount)
 	for _, oldClient := range w.apiKeyClients {
-		if u, ok := oldClient.(interface{ UnregisterClient() }); ok {
-			u.UnregisterClient()
-		}
+		unregisterClientWithReason(oldClient, interfaces.UnregisterReasonReload)
 	}
 
 	// Create new API key clients based on the new config
@@ -313,9 +311,7 @@ func (w *Watcher) reloadClients() {
 	// Unregister all old file-based clients
 	log.Debugf("unregistering %d old file-based clients", oldFileClientCount)
 	for _, oldClient := range w.clients {
-		if u, ok := any(oldClient).(interface{ UnregisterClient() }); ok {
-			u.UnregisterClient()
-		}
+		unregisterClientWithReason(oldClient, interfaces.UnregisterReasonReload)
 	}
 
 	// Update client maps
@@ -466,10 +462,10 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 	// If an old client exists, unregister it first
 	if oldClient, ok := w.clients[path]; ok {
-		if u, canUnregister := any(oldClient).(interface{ UnregisterClient() }); canUnregister {
+		if _, canUnregister := any(oldClient).(interface{ UnregisterClient() }); canUnregister {
 			log.Debugf("unregistering old client for updated file: %s", filepath.Base(path))
-			u.UnregisterClient()
 		}
+		unregisterClientWithReason(oldClient, interfaces.UnregisterReasonReload)
 	}
 
 	// Create new client (reads the file again internally; this is acceptable as the files are small and it keeps the change minimal)
@@ -511,10 +507,10 @@ func (w *Watcher) removeClient(path string) {
 
 	// Unregister client if it exists
 	if oldClient, ok := w.clients[path]; ok {
-		if u, canUnregister := any(oldClient).(interface{ UnregisterClient() }); canUnregister {
+		if _, canUnregister := any(oldClient).(interface{ UnregisterClient() }); canUnregister {
 			log.Debugf("unregistering client for removed file: %s", filepath.Base(path))
-			u.UnregisterClient()
 		}
+		unregisterClientWithReason(oldClient, interfaces.UnregisterReasonAuthFileRemoved)
 		delete(w.clients, path)
 		delete(w.lastAuthHashes, path)
 		log.Debugf("removed client for %s", filepath.Base(path))
@@ -548,6 +544,18 @@ func (w *Watcher) buildCombinedClientMap() map[string]interfaces.Client {
 	}
 
 	return combined
+}
+
+// unregisterClientWithReason attempts to call client-specific unregister hooks with context.
+func unregisterClientWithReason(c interfaces.Client, reason interfaces.UnregisterReason) {
+	switch u := any(c).(type) {
+	case interface {
+		UnregisterClientWithReason(interfaces.UnregisterReason)
+	}:
+		u.UnregisterClientWithReason(reason)
+	case interface{ UnregisterClient() }:
+		u.UnregisterClient()
+	}
 }
 
 // loadFileClients scans the auth directory and creates clients from .json files.
