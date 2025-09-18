@@ -37,7 +37,8 @@ const (
 // QwenClient implements the Client interface for OpenAI API
 type QwenClient struct {
 	ClientBase
-	qwenAuth *qwen.QwenAuth
+	qwenAuth      *qwen.QwenAuth
+	tokenFilePath string
 }
 
 // NewQwenClient creates a new OpenAI client instance
@@ -48,7 +49,7 @@ type QwenClient struct {
 //
 // Returns:
 //   - *QwenClient: A new Qwen client instance.
-func NewQwenClient(cfg *config.Config, ts *qwen.QwenTokenStorage) *QwenClient {
+func NewQwenClient(cfg *config.Config, ts *qwen.QwenTokenStorage, tokenFilePath ...string) *QwenClient {
 	httpClient := util.SetProxy(cfg, &http.Client{})
 
 	// Generate unique client ID
@@ -64,6 +65,19 @@ func NewQwenClient(cfg *config.Config, ts *qwen.QwenTokenStorage) *QwenClient {
 		},
 		qwenAuth: qwen.NewQwenAuth(cfg),
 	}
+
+	// If created with a known token file path, record it.
+	if len(tokenFilePath) > 0 && tokenFilePath[0] != "" {
+		client.tokenFilePath = tokenFilePath[0]
+	}
+
+	// If no explicit path provided but email exists, derive the canonical path.
+	if client.tokenFilePath == "" && ts != nil && ts.Email != "" {
+		client.tokenFilePath = filepath.Join(cfg.AuthDir, fmt.Sprintf("qwen-%s.json", ts.Email))
+	}
+
+	// Prefer cookie snapshot at startup if present.
+	_ = client.applyCookieSnapshot()
 
 	// Initialize model registry and register Qwen models
 	client.InitializeModelRegistry(clientID)
@@ -274,7 +288,13 @@ func (c *QwenClient) SendRawTokenCount(_ context.Context, _ string, _ []byte, _ 
 // Returns:
 //   - error: An error if the save operation fails, nil otherwise.
 func (c *QwenClient) SaveTokenToFile() error {
-	fileName := filepath.Join(c.cfg.AuthDir, fmt.Sprintf("qwen-%s.json", c.tokenStorage.(*qwen.QwenTokenStorage).Email))
+	ts := c.tokenStorage.(*qwen.QwenTokenStorage)
+	// When the client was created from an auth file, persist via cookie snapshot
+	if c.tokenFilePath != "" {
+		return c.saveCookieSnapshot(ts)
+	}
+	// Initial bootstrap (e.g., during OAuth flow) writes the main token file
+	fileName := filepath.Join(c.cfg.AuthDir, fmt.Sprintf("qwen-%s.json", ts.Email))
 	return c.tokenStorage.SaveTokenToFile(fileName)
 }
 
@@ -346,7 +366,7 @@ func (c *QwenClient) APIRequest(ctx context.Context, modelName, endpoint string,
 	}
 
 	var url string
-	if c.tokenStorage.(*qwen.QwenTokenStorage).ResourceURL == "" {
+	if c.tokenStorage.(*qwen.QwenTokenStorage).ResourceURL != "" {
 		url = fmt.Sprintf("https://%s/v1%s", c.tokenStorage.(*qwen.QwenTokenStorage).ResourceURL, endpoint)
 	} else {
 		url = fmt.Sprintf("%s%s", qwenEndpoint, endpoint)
@@ -445,5 +465,73 @@ func (c *QwenClient) IsModelQuotaExceeded(model string) bool {
 // Returns:
 //   - *sync.Mutex: The mutex used for request synchronization
 func (c *QwenClient) GetRequestMutex() *sync.Mutex {
+	return nil
+}
+
+// UnregisterClient flushes cookie snapshot back into the main token file.
+func (c *QwenClient) UnregisterClient() {
+	if c.tokenFilePath == "" {
+		return
+	}
+	base := c.tokenStorage.(*qwen.QwenTokenStorage)
+	if err := c.flushCookieSnapshotToMain(base); err != nil {
+		log.Errorf("Failed to flush Qwen cookie snapshot to main for %s: %v", filepath.Base(c.tokenFilePath), err)
+	}
+}
+
+// applyCookieSnapshot loads latest tokens from cookie snapshot if present.
+func (c *QwenClient) applyCookieSnapshot() error {
+	if c.tokenFilePath == "" {
+		return nil
+	}
+	ts := c.tokenStorage.(*qwen.QwenTokenStorage)
+	var latest qwen.QwenTokenStorage
+	if ok, err := util.TryReadCookieSnapshotInto(c.tokenFilePath, &latest); err != nil {
+		return err
+	} else if !ok {
+		return nil
+	}
+	if latest.AccessToken != "" {
+		ts.AccessToken = latest.AccessToken
+	}
+	if latest.RefreshToken != "" {
+		ts.RefreshToken = latest.RefreshToken
+	}
+	if latest.ResourceURL != "" {
+		ts.ResourceURL = latest.ResourceURL
+	}
+	if latest.Expire != "" {
+		ts.Expire = latest.Expire
+	}
+	return nil
+}
+
+// saveCookieSnapshot writes the token storage into the snapshot file next to the token file.
+func (c *QwenClient) saveCookieSnapshot(ts *qwen.QwenTokenStorage) error {
+	if c.tokenFilePath == "" || ts == nil {
+		return nil
+	}
+	ts.Type = "qwen"
+	return util.WriteCookieSnapshot(c.tokenFilePath, ts)
+}
+
+// flushCookieSnapshotToMain merges snapshot tokens into the main token file and removes the snapshot.
+func (c *QwenClient) flushCookieSnapshotToMain(base *qwen.QwenTokenStorage) error {
+	if c.tokenFilePath == "" {
+		return nil
+	}
+    var merged qwen.QwenTokenStorage
+    var fromSnapshot bool
+    if ok, _ := util.TryReadCookieSnapshotInto(c.tokenFilePath, &merged); ok {
+        fromSnapshot = true
+    }
+    if !fromSnapshot && base != nil {
+        merged = *base
+    }
+	merged.Type = "qwen"
+	if err := merged.SaveTokenToFile(c.tokenFilePath); err != nil {
+		return err
+	}
+	util.RemoveCookieSnapshots(c.tokenFilePath)
 	return nil
 }

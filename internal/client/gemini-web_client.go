@@ -65,8 +65,8 @@ func (c *GeminiWebClient) UnregisterClient() {
 		c.cookiePersistCancel()
 		c.cookiePersistCancel = nil
 	}
-	// Flush sidecar cookies to main token file and remove sidecar
-	c.flushCookiesSidecarToMain()
+	// Flush cookie snapshot to main token file and remove snapshot
+	c.flushCookieSnapshotToMain()
 	if c.gwc != nil {
 		c.gwc.Close(0)
 		c.gwc = nil
@@ -114,9 +114,9 @@ func NewGeminiWebClient(cfg *config.Config, ts *gemini.GeminiWebTokenStorage, to
 
 	client.InitializeModelRegistry(clientID)
 
-	// Prefer sidecar cookies at startup if present
-	if ok, err := geminiWeb.ApplyCookiesSidecarToTokenStorage(tokenFilePath, ts); err == nil && ok {
-		log.Debugf("Loaded Gemini Web cookies from sidecar: %s", filepath.Base(geminiWeb.CookiesSidecarPath(tokenFilePath)))
+	// Prefer cookie snapshot at startup if present
+	if ok, err := geminiWeb.ApplyCookieSnapshotToTokenStorage(tokenFilePath, ts); err == nil && ok {
+		log.Debugf("Loaded Gemini Web cookie snapshot: %s", filepath.Base(util.CookieSnapshotPath(tokenFilePath)))
 	}
 
 	client.gwc = geminiWeb.NewGeminiClient(ts.Secure1PSID, ts.Secure1PSIDTS, cfg.ProxyURL, geminiWeb.WithAccountLabel(strings.TrimSuffix(filepath.Base(tokenFilePath), ".json")))
@@ -782,7 +782,7 @@ func (c *GeminiWebClient) SendRawTokenCount(ctx context.Context, modelName strin
 	return []byte(fmt.Sprintf(`{"totalTokens":%d}`, est)), nil
 }
 
-// SaveTokenToFile persists current cookies to a sidecar file via gemini-web helpers.
+// SaveTokenToFile persists current cookies to a cookie snapshot via gemini-web helpers.
 func (c *GeminiWebClient) SaveTokenToFile() error {
 	ts := c.tokenStorage.(*gemini.GeminiWebTokenStorage)
 	if c.gwc != nil && c.gwc.Cookies != nil {
@@ -793,11 +793,11 @@ func (c *GeminiWebClient) SaveTokenToFile() error {
 			ts.Secure1PSIDTS = v
 		}
 	}
-	log.Debugf("Saving Gemini Web cookies sidecar to %s", filepath.Base(geminiWeb.CookiesSidecarPath(c.tokenFilePath)))
-	return geminiWeb.SaveCookiesSidecar(c.tokenFilePath, c.gwc.Cookies)
+	log.Debugf("Saving Gemini Web cookie snapshot to %s", filepath.Base(util.CookieSnapshotPath(c.tokenFilePath)))
+	return geminiWeb.SaveCookieSnapshot(c.tokenFilePath, c.gwc.Cookies)
 }
 
-// startCookiePersist periodically writes refreshed cookies into the sidecar file.
+// startCookiePersist periodically writes refreshed cookies into the cookie snapshot file.
 func (c *GeminiWebClient) startCookiePersist() {
 	if c.gwc == nil {
 		return
@@ -826,7 +826,7 @@ func (c *GeminiWebClient) startCookiePersist() {
 			case <-ticker.C:
 				if c.gwc != nil && c.gwc.Cookies != nil {
 					if err := c.SaveTokenToFile(); err != nil {
-						log.Errorf("Failed to persist cookies sidecar for %s: %v", c.GetEmail(), err)
+						log.Errorf("Failed to persist cookie snapshot for %s: %v", c.GetEmail(), err)
 					}
 				}
 			}
@@ -1019,22 +1019,18 @@ func (c *GeminiWebClient) backgroundInitRetry() {
 	}
 }
 
-// IsSelfPersistedToken compares provided token storage with currently active cookies.
-// Removed: IsSelfPersistedToken (no longer needed with sidecar-only periodic persistence)
-
-// flushCookiesSidecarToMain merges sidecar cookies into the main token file.
-func (c *GeminiWebClient) flushCookiesSidecarToMain() {
+// flushCookieSnapshotToMain merges snapshot cookies into the main token file.
+func (c *GeminiWebClient) flushCookieSnapshotToMain() {
 	if c.tokenFilePath == "" {
 		return
 	}
 	base := c.tokenStorage.(*gemini.GeminiWebTokenStorage)
-	if err := geminiWeb.FlushCookiesSidecarToMain(c.tokenFilePath, c.gwc.Cookies, base); err != nil {
-		log.Errorf("Failed to flush cookies sidecar to main for %s: %v", filepath.Base(c.tokenFilePath), err)
+	if err := geminiWeb.FlushCookieSnapshotToMain(c.tokenFilePath, c.gwc.Cookies, base); err != nil {
+		log.Errorf("Failed to flush cookie snapshot to main for %s: %v", filepath.Base(c.tokenFilePath), err)
 	}
 }
 
 // findReusableSession and storeConversationJSON live here as client bridges; hashing/records in gemini-web
-
 func (c *GeminiWebClient) getConfiguredGem() *geminiWeb.Gem {
 	if c.cfg.GeminiWeb.CodeMode {
 		return &geminiWeb.Gem{ID: "coding-partner", Name: "Coding partner", Predefined: true}

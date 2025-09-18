@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/luispater/CLIProxyAPI/v5/internal/auth/gemini"
+	"github.com/luispater/CLIProxyAPI/v5/internal/util"
 )
 
 // StoredMessage represents a single message in a conversation record.
@@ -268,42 +269,17 @@ func FindReusableSessionIn(items map[string]ConversationRecord, index map[string
 	return nil, nil
 }
 
-// CookiesSidecarPath derives the sidecar cookie file path from the main token JSON path.
-func CookiesSidecarPath(mainPath string) string {
-	if strings.HasSuffix(mainPath, ".json") {
-		return strings.TrimSuffix(mainPath, ".json") + ".cookies"
-	}
-	return mainPath + ".cookies"
-}
-
-// FileExists reports whether the given path exists and is a regular file.
-func FileExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	if st, err := os.Stat(path); err == nil && !st.IsDir() {
-		return true
-	}
-	return false
-}
-
-// ApplyCookiesSidecarToTokenStorage loads cookies from sidecar into the provided token storage.
-// Returns true when a sidecar was found and applied.
-func ApplyCookiesSidecarToTokenStorage(tokenFilePath string, ts *gemini.GeminiWebTokenStorage) (bool, error) {
+// ApplyCookieSnapshotToTokenStorage loads cookies from cookie snapshot into the provided token storage.
+// Returns true when a snapshot was found and applied.
+func ApplyCookieSnapshotToTokenStorage(tokenFilePath string, ts *gemini.GeminiWebTokenStorage) (bool, error) {
 	if ts == nil {
 		return false, nil
 	}
-	side := CookiesSidecarPath(tokenFilePath)
-	if !FileExists(side) {
-		return false, nil
-	}
-	data, err := os.ReadFile(side)
-	if err != nil || len(data) == 0 {
-		return false, err
-	}
 	var latest gemini.GeminiWebTokenStorage
-	if err := json.Unmarshal(data, &latest); err != nil {
+	if ok, err := util.TryReadCookieSnapshotInto(tokenFilePath, &latest); err != nil {
 		return false, err
+	} else if !ok {
+		return false, nil
 	}
 	if latest.Secure1PSID != "" {
 		ts.Secure1PSID = latest.Secure1PSID
@@ -314,10 +290,9 @@ func ApplyCookiesSidecarToTokenStorage(tokenFilePath string, ts *gemini.GeminiWe
 	return true, nil
 }
 
-// SaveCookiesSidecar writes the current cookies into a sidecar file next to the token file.
+// SaveCookieSnapshot writes the current cookies into a snapshot file next to the token file.
 // This keeps the main token JSON stable until an orderly flush.
-func SaveCookiesSidecar(tokenFilePath string, cookies map[string]string) error {
-	side := CookiesSidecarPath(tokenFilePath)
+func SaveCookieSnapshot(tokenFilePath string, cookies map[string]string) error {
 	ts := &gemini.GeminiWebTokenStorage{Type: "gemini-web"}
 	if v := cookies["__Secure-1PSID"]; v != "" {
 		ts.Secure1PSID = v
@@ -325,51 +300,35 @@ func SaveCookiesSidecar(tokenFilePath string, cookies map[string]string) error {
 	if v := cookies["__Secure-1PSIDTS"]; v != "" {
 		ts.Secure1PSIDTS = v
 	}
-	if err := os.MkdirAll(filepath.Dir(side), 0o700); err != nil {
-		return err
-	}
-	return ts.SaveTokenToFile(side)
+	return util.WriteCookieSnapshot(tokenFilePath, ts)
 }
 
-// FlushCookiesSidecarToMain merges the sidecar cookies into the main token file and removes the sidecar.
-// If sidecar is missing, it will combine the provided base token storage with the latest cookies.
-func FlushCookiesSidecarToMain(tokenFilePath string, cookies map[string]string, base *gemini.GeminiWebTokenStorage) error {
+// FlushCookieSnapshotToMain merges the cookie snapshot into the main token file and removes the snapshot.
+// If snapshot is missing, it will combine the provided base token storage with the latest cookies.
+func FlushCookieSnapshotToMain(tokenFilePath string, cookies map[string]string, base *gemini.GeminiWebTokenStorage) error {
 	if tokenFilePath == "" {
 		return nil
 	}
-	side := CookiesSidecarPath(tokenFilePath)
-	var merged gemini.GeminiWebTokenStorage
-	var fromSidecar bool
-	if FileExists(side) {
-		if data, err := os.ReadFile(side); err == nil && len(data) > 0 {
-			if err2 := json.Unmarshal(data, &merged); err2 == nil {
-				fromSidecar = true
-			}
-		}
-	}
-	if !fromSidecar {
-		if base != nil {
-			merged = *base
-		}
-		if v := cookies["__Secure-1PSID"]; v != "" {
-			merged.Secure1PSID = v
-		}
-		if v := cookies["__Secure-1PSIDTS"]; v != "" {
-			merged.Secure1PSIDTS = v
-		}
-	}
+    var merged gemini.GeminiWebTokenStorage
+    var fromSnapshot bool
+    if ok, _ := util.TryReadCookieSnapshotInto(tokenFilePath, &merged); ok {
+        fromSnapshot = true
+    }
+    if !fromSnapshot {
+        if base != nil {
+            merged = *base
+        }
+        if v := cookies["__Secure-1PSID"]; v != "" {
+            merged.Secure1PSID = v
+        }
+        if v := cookies["__Secure-1PSIDTS"]; v != "" {
+            merged.Secure1PSIDTS = v
+        }
+    }
 	merged.Type = "gemini-web"
-	if err := os.MkdirAll(filepath.Dir(tokenFilePath), 0o700); err != nil {
-		return err
-	}
 	if err := merged.SaveTokenToFile(tokenFilePath); err != nil {
 		return err
 	}
-	if FileExists(side) {
-		_ = os.Remove(side)
-	}
+	util.RemoveCookieSnapshots(tokenFilePath)
 	return nil
 }
-
-// IsSelfPersistedToken compares provided token storage with current cookies.
-// Removed: IsSelfPersistedToken (client-side no longer needs self-originated write detection)
