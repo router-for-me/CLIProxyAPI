@@ -87,3 +87,142 @@ func WriteCookieSnapshot(mainPath string, v any) error {
 
 // RemoveCookieSnapshots removes both modern and legacy snapshot files.
 func RemoveCookieSnapshots(mainPath string) { _ = RemoveFile(CookieSnapshotPath(mainPath)) }
+
+// Hooks provide customization points for snapshot lifecycle operations.
+type Hooks[T any] struct {
+	// Apply merges snapshot data into the in-memory store during Apply().
+	// Defaults to overwriting the store with the snapshot contents.
+	Apply func(store *T, snapshot *T)
+
+	// Snapshot prepares the payload to persist during Persist().
+	// Defaults to cloning the store value.
+	Snapshot func(store *T) *T
+
+	// Merge chooses which data to flush when a snapshot exists.
+	// Defaults to using the snapshot payload as-is.
+	Merge func(store *T, snapshot *T) *T
+
+	// WriteMain persists the merged payload into the canonical token path.
+	// Defaults to WriteJSON.
+	WriteMain func(path string, data *T) error
+}
+
+// Manager orchestrates cookie snapshot lifecycle for token storages.
+type Manager[T any] struct {
+	mainPath string
+	store    *T
+	hooks    Hooks[T]
+}
+
+// NewManager constructs a Manager bound to mainPath and store.
+func NewManager[T any](mainPath string, store *T, hooks Hooks[T]) *Manager[T] {
+	return &Manager[T]{
+		mainPath: mainPath,
+		store:    store,
+		hooks:    hooks,
+	}
+}
+
+// Apply loads snapshot data into the in-memory store if available.
+// Returns true when a snapshot was applied.
+func (m *Manager[T]) Apply() (bool, error) {
+	if m == nil || m.store == nil || m.mainPath == "" {
+		return false, nil
+	}
+	var snapshot T
+	ok, err := TryReadCookieSnapshotInto(m.mainPath, &snapshot)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	if m.hooks.Apply != nil {
+		m.hooks.Apply(m.store, &snapshot)
+	} else {
+		*m.store = snapshot
+	}
+	return true, nil
+}
+
+// Persist writes the current store state to the snapshot file.
+func (m *Manager[T]) Persist() error {
+	if m == nil || m.store == nil || m.mainPath == "" {
+		return nil
+	}
+	var payload *T
+	if m.hooks.Snapshot != nil {
+		payload = m.hooks.Snapshot(m.store)
+	} else {
+		clone := new(T)
+		*clone = *m.store
+		payload = clone
+	}
+	return WriteCookieSnapshot(m.mainPath, payload)
+}
+
+// FlushOptions configure Flush behaviour.
+type FlushOptions[T any] struct {
+	Fallback func() *T
+	Mutate   func(*T)
+}
+
+// FlushOption mutates FlushOptions.
+type FlushOption[T any] func(*FlushOptions[T])
+
+// WithFallback provides fallback payload when no snapshot exists.
+func WithFallback[T any](fn func() *T) FlushOption[T] {
+	return func(opts *FlushOptions[T]) { opts.Fallback = fn }
+}
+
+// WithMutate allows last-minute mutation of the payload before writing main file.
+func WithMutate[T any](fn func(*T)) FlushOption[T] {
+	return func(opts *FlushOptions[T]) { opts.Mutate = fn }
+}
+
+// Flush commits snapshot (or fallback) into the main token file and removes the snapshot.
+func (m *Manager[T]) Flush(options ...FlushOption[T]) error {
+	if m == nil || m.mainPath == "" {
+		return nil
+	}
+	cfg := FlushOptions[T]{}
+	for _, opt := range options {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	var snapshot T
+	ok, err := TryReadCookieSnapshotInto(m.mainPath, &snapshot)
+	if err != nil {
+		return err
+	}
+	var payload *T
+	if ok {
+		if m.hooks.Merge != nil {
+			payload = m.hooks.Merge(m.store, &snapshot)
+		} else {
+			payload = &snapshot
+		}
+	} else if cfg.Fallback != nil {
+		payload = cfg.Fallback()
+	} else if m.store != nil {
+		payload = m.store
+	}
+	if payload == nil {
+		return RemoveFile(CookieSnapshotPath(m.mainPath))
+	}
+	if cfg.Mutate != nil {
+		cfg.Mutate(payload)
+	}
+	if m.hooks.WriteMain != nil {
+		if err := m.hooks.WriteMain(m.mainPath, payload); err != nil {
+			return err
+		}
+	} else {
+		if err := WriteJSON(m.mainPath, payload); err != nil {
+			return err
+		}
+	}
+	RemoveCookieSnapshots(m.mainPath)
+	return nil
+}

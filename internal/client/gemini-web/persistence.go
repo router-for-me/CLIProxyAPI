@@ -9,9 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/luispater/CLIProxyAPI/v5/internal/auth/gemini"
-	"github.com/luispater/CLIProxyAPI/v5/internal/util"
 )
 
 // StoredMessage represents a single message in a conversation record.
@@ -267,68 +264,4 @@ func FindReusableSessionIn(items map[string]ConversationRecord, index map[string
 		searchEnd--
 	}
 	return nil, nil
-}
-
-// ApplyCookieSnapshotToTokenStorage loads cookies from cookie snapshot into the provided token storage.
-// Returns true when a snapshot was found and applied.
-func ApplyCookieSnapshotToTokenStorage(tokenFilePath string, ts *gemini.GeminiWebTokenStorage) (bool, error) {
-	if ts == nil {
-		return false, nil
-	}
-	var latest gemini.GeminiWebTokenStorage
-	if ok, err := util.TryReadCookieSnapshotInto(tokenFilePath, &latest); err != nil {
-		return false, err
-	} else if !ok {
-		return false, nil
-	}
-	if latest.Secure1PSID != "" {
-		ts.Secure1PSID = latest.Secure1PSID
-	}
-	if latest.Secure1PSIDTS != "" {
-		ts.Secure1PSIDTS = latest.Secure1PSIDTS
-	}
-	return true, nil
-}
-
-// SaveCookieSnapshot writes the current cookies into a snapshot file next to the token file.
-// This keeps the main token JSON stable until an orderly flush.
-func SaveCookieSnapshot(tokenFilePath string, cookies map[string]string) error {
-	ts := &gemini.GeminiWebTokenStorage{Type: "gemini-web"}
-	if v := cookies["__Secure-1PSID"]; v != "" {
-		ts.Secure1PSID = v
-	}
-	if v := cookies["__Secure-1PSIDTS"]; v != "" {
-		ts.Secure1PSIDTS = v
-	}
-	return util.WriteCookieSnapshot(tokenFilePath, ts)
-}
-
-// FlushCookieSnapshotToMain merges the cookie snapshot into the main token file and removes the snapshot.
-// If snapshot is missing, it will combine the provided base token storage with the latest cookies.
-func FlushCookieSnapshotToMain(tokenFilePath string, cookies map[string]string, base *gemini.GeminiWebTokenStorage) error {
-	if tokenFilePath == "" {
-		return nil
-	}
-    var merged gemini.GeminiWebTokenStorage
-    var fromSnapshot bool
-    if ok, _ := util.TryReadCookieSnapshotInto(tokenFilePath, &merged); ok {
-        fromSnapshot = true
-    }
-    if !fromSnapshot {
-        if base != nil {
-            merged = *base
-        }
-        if v := cookies["__Secure-1PSID"]; v != "" {
-            merged.Secure1PSID = v
-        }
-        if v := cookies["__Secure-1PSIDTS"]; v != "" {
-            merged.Secure1PSIDTS = v
-        }
-    }
-	merged.Type = "gemini-web"
-	if err := merged.SaveTokenToFile(tokenFilePath); err != nil {
-		return err
-	}
-	util.RemoveCookieSnapshots(tokenFilePath)
-	return nil
 }

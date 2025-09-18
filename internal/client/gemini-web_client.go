@@ -40,10 +40,11 @@ const (
 
 type GeminiWebClient struct {
 	ClientBase
-	gwc           *geminiWeb.GeminiClient
-	tokenFilePath string
-	convStore     map[string][]string
-	convMutex     sync.RWMutex
+	gwc             *geminiWeb.GeminiClient
+	tokenFilePath   string
+	snapshotManager *util.Manager[gemini.GeminiWebTokenStorage]
+	convStore       map[string][]string
+	convMutex       sync.RWMutex
 
 	// JSON-based conversation persistence
 	convData  map[string]geminiWeb.ConversationRecord
@@ -112,12 +113,32 @@ func NewGeminiWebClient(cfg *config.Config, ts *gemini.GeminiWebTokenStorage, to
 		client.convIndex = index
 	}
 
-	client.InitializeModelRegistry(clientID)
-
-	// Prefer cookie snapshot at startup if present
-	if ok, err := geminiWeb.ApplyCookieSnapshotToTokenStorage(tokenFilePath, ts); err == nil && ok {
-		log.Debugf("Loaded Gemini Web cookie snapshot: %s", filepath.Base(util.CookieSnapshotPath(tokenFilePath)))
+	if tokenFilePath != "" {
+		client.snapshotManager = util.NewManager[gemini.GeminiWebTokenStorage](
+			tokenFilePath,
+			ts,
+			util.Hooks[gemini.GeminiWebTokenStorage]{
+				Apply: func(store, snapshot *gemini.GeminiWebTokenStorage) {
+					if snapshot.Secure1PSID != "" {
+						store.Secure1PSID = snapshot.Secure1PSID
+					}
+					if snapshot.Secure1PSIDTS != "" {
+						store.Secure1PSIDTS = snapshot.Secure1PSIDTS
+					}
+				},
+				WriteMain: func(path string, data *gemini.GeminiWebTokenStorage) error {
+					return data.SaveTokenToFile(path)
+				},
+			},
+		)
+		if applied, err := client.snapshotManager.Apply(); err != nil {
+			log.Warnf("Failed to apply Gemini Web cookie snapshot for %s: %v", filepath.Base(tokenFilePath), err)
+		} else if applied {
+			log.Debugf("Loaded Gemini Web cookie snapshot: %s", filepath.Base(util.CookieSnapshotPath(tokenFilePath)))
+		}
 	}
+
+	client.InitializeModelRegistry(clientID)
 
 	client.gwc = geminiWeb.NewGeminiClient(ts.Secure1PSID, ts.Secure1PSIDTS, cfg.ProxyURL, geminiWeb.WithAccountLabel(strings.TrimSuffix(filepath.Base(tokenFilePath), ".json")))
 	timeoutSec := geminiWebDefaultTimeoutSec
@@ -793,8 +814,14 @@ func (c *GeminiWebClient) SaveTokenToFile() error {
 			ts.Secure1PSIDTS = v
 		}
 	}
+	if c.snapshotManager == nil {
+		if c.tokenFilePath == "" {
+			return nil
+		}
+		return ts.SaveTokenToFile(c.tokenFilePath)
+	}
 	log.Debugf("Saving Gemini Web cookie snapshot to %s", filepath.Base(util.CookieSnapshotPath(c.tokenFilePath)))
-	return geminiWeb.SaveCookieSnapshot(c.tokenFilePath, c.gwc.Cookies)
+	return c.snapshotManager.Persist()
 }
 
 // startCookiePersist periodically writes refreshed cookies into the cookie snapshot file.
@@ -1021,11 +1048,25 @@ func (c *GeminiWebClient) backgroundInitRetry() {
 
 // flushCookieSnapshotToMain merges snapshot cookies into the main token file.
 func (c *GeminiWebClient) flushCookieSnapshotToMain() {
-	if c.tokenFilePath == "" {
+	if c.snapshotManager == nil {
 		return
 	}
-	base := c.tokenStorage.(*gemini.GeminiWebTokenStorage)
-	if err := geminiWeb.FlushCookieSnapshotToMain(c.tokenFilePath, c.gwc.Cookies, base); err != nil {
+	ts := c.tokenStorage.(*gemini.GeminiWebTokenStorage)
+	var opts []util.FlushOption[gemini.GeminiWebTokenStorage]
+	if c.gwc != nil && c.gwc.Cookies != nil {
+		gwCookies := c.gwc.Cookies
+		opts = append(opts, util.WithFallback(func() *gemini.GeminiWebTokenStorage {
+			merged := *ts
+			if v := gwCookies["__Secure-1PSID"]; v != "" {
+				merged.Secure1PSID = v
+			}
+			if v := gwCookies["__Secure-1PSIDTS"]; v != "" {
+				merged.Secure1PSIDTS = v
+			}
+			return &merged
+		}))
+	}
+	if err := c.snapshotManager.Flush(opts...); err != nil {
 		log.Errorf("Failed to flush cookie snapshot to main for %s: %v", filepath.Base(c.tokenFilePath), err)
 	}
 }
