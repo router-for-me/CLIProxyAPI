@@ -65,4 +65,6 @@ const (
 	UnregisterReasonShutdown UnregisterReason = "shutdown"
 	// UnregisterReasonAuthFileRemoved indicates the underlying auth file was deleted.
 	UnregisterReasonAuthFileRemoved UnregisterReason = "auth-file-removed"
+	// UnregisterReasonAuthFileUpdated indicates the auth file content was modified.
+	UnregisterReasonAuthFileUpdated UnregisterReason = "auth-file-updated"
 )

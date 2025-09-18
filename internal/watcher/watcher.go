@@ -465,7 +465,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		if _, canUnregister := any(oldClient).(interface{ UnregisterClient() }); canUnregister {
 			log.Debugf("unregistering old client for updated file: %s", filepath.Base(path))
 		}
-		unregisterClientWithReason(oldClient, interfaces.UnregisterReasonReload)
+		unregisterClientWithReason(oldClient, interfaces.UnregisterReasonAuthFileUpdated)
 	}
 
 	// Create new client (reads the file again internally; this is acceptable as the files are small and it keeps the change minimal)

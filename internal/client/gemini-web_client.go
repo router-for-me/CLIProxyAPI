@@ -61,25 +61,31 @@ type GeminiWebClient struct {
 	modelsRegistered bool
 }
 
-func (c *GeminiWebClient) UnregisterClient() { c.unregisterClient(false) }
+func (c *GeminiWebClient) UnregisterClient() { c.unregisterClient(interfaces.UnregisterReasonReload) }
 
 // UnregisterClientWithReason allows the watcher to avoid recreating deleted auth files.
 func (c *GeminiWebClient) UnregisterClientWithReason(reason interfaces.UnregisterReason) {
-	skipPersist := reason == interfaces.UnregisterReasonAuthFileRemoved
-	c.unregisterClient(skipPersist)
+	c.unregisterClient(reason)
 }
 
-func (c *GeminiWebClient) unregisterClient(skipPersist bool) {
+func (c *GeminiWebClient) unregisterClient(reason interfaces.UnregisterReason) {
 	if c.cookiePersistCancel != nil {
 		c.cookiePersistCancel()
 		c.cookiePersistCancel = nil
 	}
-	if skipPersist {
+	switch reason {
+	case interfaces.UnregisterReasonAuthFileRemoved:
 		if c.snapshotManager != nil && c.tokenFilePath != "" {
 			log.Debugf("skipping Gemini Web snapshot flush because auth file is missing: %s", filepath.Base(c.tokenFilePath))
 			util.RemoveCookieSnapshots(c.tokenFilePath)
 		}
-	} else {
+	case interfaces.UnregisterReasonAuthFileUpdated:
+		if c.snapshotManager != nil {
+			if err := c.snapshotManager.Persist(); err != nil {
+				log.Errorf("Failed to persist Gemini Web cookies for %s: %v", filepath.Base(c.tokenFilePath), err)
+			}
+		}
+	default:
 		// Flush cookie snapshot to main token file and remove snapshot
 		c.flushCookieSnapshotToMain()
 	}

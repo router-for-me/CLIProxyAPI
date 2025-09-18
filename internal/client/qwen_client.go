@@ -496,26 +496,34 @@ func (c *QwenClient) GetRequestMutex() *sync.Mutex {
 }
 
 // UnregisterClient flushes cookie snapshot back into the main token file.
-func (c *QwenClient) UnregisterClient() { c.unregisterClient(false) }
+func (c *QwenClient) UnregisterClient() { c.unregisterClient(interfaces.UnregisterReasonReload) }
 
-// UnregisterClientWithReason allows the watcher to skip persistence when the auth file is removed.
+// UnregisterClientWithReason allows the watcher to adjust persistence behaviour.
 func (c *QwenClient) UnregisterClientWithReason(reason interfaces.UnregisterReason) {
-	skipPersist := reason == interfaces.UnregisterReasonAuthFileRemoved
-	c.unregisterClient(skipPersist)
+	c.unregisterClient(reason)
 }
 
-func (c *QwenClient) unregisterClient(skipPersist bool) {
+func (c *QwenClient) unregisterClient(reason interfaces.UnregisterReason) {
 	if c.snapshotManager == nil {
 		return
 	}
-	if skipPersist {
+	switch reason {
+	case interfaces.UnregisterReasonAuthFileRemoved:
 		if c.tokenFilePath != "" {
 			log.Debugf("skipping Qwen snapshot flush because auth file is missing: %s", filepath.Base(c.tokenFilePath))
 			util.RemoveCookieSnapshots(c.tokenFilePath)
 		}
-		return
-	}
-	if err := c.snapshotManager.Flush(); err != nil {
-		log.Errorf("Failed to flush Qwen cookie snapshot to main for %s: %v", filepath.Base(c.tokenFilePath), err)
+	case interfaces.UnregisterReasonAuthFileUpdated:
+		if err := c.snapshotManager.Persist(); err != nil {
+			log.Errorf("Failed to persist Qwen cookies for %s: %v", filepath.Base(c.tokenFilePath), err)
+		}
+	case interfaces.UnregisterReasonShutdown, interfaces.UnregisterReasonReload:
+		if err := c.snapshotManager.Flush(); err != nil {
+			log.Errorf("Failed to flush Qwen cookie snapshot to main for %s: %v", filepath.Base(c.tokenFilePath), err)
+		}
+	default:
+		if err := c.snapshotManager.Flush(); err != nil {
+			log.Errorf("Failed to flush Qwen cookie snapshot to main for %s: %v", filepath.Base(c.tokenFilePath), err)
+		}
 	}
 }
