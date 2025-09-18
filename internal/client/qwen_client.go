@@ -514,8 +514,9 @@ func (c *QwenClient) unregisterClient(reason interfaces.UnregisterReason) {
 			util.RemoveCookieSnapshots(c.tokenFilePath)
 		}
 	case interfaces.UnregisterReasonAuthFileUpdated:
-		if err := c.snapshotManager.Persist(); err != nil {
-			log.Errorf("Failed to persist Qwen cookies for %s: %v", filepath.Base(c.tokenFilePath), err)
+		if c.tokenFilePath != "" {
+			log.Debugf("skipping Qwen snapshot flush because auth file was updated: %s", filepath.Base(c.tokenFilePath))
+			util.RemoveCookieSnapshots(c.tokenFilePath)
 		}
 	case interfaces.UnregisterReasonShutdown, interfaces.UnregisterReasonReload:
 		if err := c.snapshotManager.Flush(); err != nil {

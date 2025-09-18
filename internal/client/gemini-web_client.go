@@ -80,10 +80,9 @@ func (c *GeminiWebClient) unregisterClient(reason interfaces.UnregisterReason) {
 			util.RemoveCookieSnapshots(c.tokenFilePath)
 		}
 	case interfaces.UnregisterReasonAuthFileUpdated:
-		if c.snapshotManager != nil {
-			if err := c.snapshotManager.Persist(); err != nil {
-				log.Errorf("Failed to persist Gemini Web cookies for %s: %v", filepath.Base(c.tokenFilePath), err)
-			}
+		if c.snapshotManager != nil && c.tokenFilePath != "" {
+			log.Debugf("skipping Gemini Web snapshot flush because auth file was updated: %s", filepath.Base(c.tokenFilePath))
+			util.RemoveCookieSnapshots(c.tokenFilePath)
 		}
 	default:
 		// Flush cookie snapshot to main token file and remove snapshot
