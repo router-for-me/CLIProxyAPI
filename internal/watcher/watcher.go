@@ -137,11 +137,19 @@ func (w *Watcher) processEvents(ctx context.Context) {
 
 // handleEvent processes individual file system events
 func (w *Watcher) handleEvent(event fsnotify.Event) {
+	// Filter only relevant events: config file or auth-dir JSON files.
+	isConfigEvent := event.Name == w.configPath && (event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create)
+	isAuthJSON := strings.HasPrefix(event.Name, w.authDir) && strings.HasSuffix(event.Name, ".json")
+	if !isConfigEvent && !isAuthJSON {
+		// Ignore unrelated files (e.g., cookie snapshots *.cookies) and other noise.
+		return
+	}
+
 	now := time.Now()
 	log.Debugf("file system event detected: %s %s", event.Op.String(), event.Name)
 
 	// Handle config file changes
-	if event.Name == w.configPath && (event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create) {
+	if isConfigEvent {
 		log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
 		data, err := os.ReadFile(w.configPath)
 		if err != nil {
@@ -172,8 +180,8 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// Handle auth directory changes incrementally
-	if strings.HasPrefix(event.Name, w.authDir) && strings.HasSuffix(event.Name, ".json") {
+	// Handle auth directory changes incrementally (.json only)
+	if isAuthJSON {
 		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 		if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
 			w.addOrUpdateClient(event.Name)
