@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/luispater/CLIProxyAPI/v5/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -45,6 +46,7 @@ type GeminiTokenStorage struct {
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
 func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) error {
+	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "gemini"
 	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)

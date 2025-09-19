@@ -841,7 +841,6 @@ func (c *GeminiWebClient) SaveTokenToFile() error {
 		}
 		return ts.SaveTokenToFile(c.tokenFilePath)
 	}
-	log.Debugf("Saving Gemini Web cookie snapshot to %s", filepath.Base(util.CookieSnapshotPath(c.tokenFilePath)))
 	return c.snapshotManager.Persist()
 }
 

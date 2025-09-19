@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/luispater/CLIProxyAPI/v5/internal/misc"
 )
 
 // CodexTokenStorage stores OAuth2 token information for OpenAI Codex API authentication.
@@ -42,6 +44,7 @@ type CodexTokenStorage struct {
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
 func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
+	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "codex"
 	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)

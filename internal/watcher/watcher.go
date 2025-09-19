@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"os"
@@ -141,7 +142,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	isConfigEvent := event.Name == w.configPath && (event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create)
 	isAuthJSON := strings.HasPrefix(event.Name, w.authDir) && strings.HasSuffix(event.Name, ".json")
 	if !isConfigEvent && !isAuthJSON {
-		// Ignore unrelated files (e.g., cookie snapshots *.cookies) and other noise.
+		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
 	}
 
@@ -417,18 +418,40 @@ func (w *Watcher) clientsToSlice(clientMap map[string]interfaces.Client) []inter
 // readAuthFileWithRetry attempts to read the auth file multiple times to work around
 // short-lived locks on Windows while token files are being written.
 func readAuthFileWithRetry(path string, attempts int, delay time.Duration) ([]byte, error) {
-	var lastErr error
-	for i := 0; i < attempts; i++ {
-		data, err := os.ReadFile(path)
+	read := func(target string) ([]byte, error) {
+		var lastErr error
+		for i := 0; i < attempts; i++ {
+			data, err := os.ReadFile(target)
+			if err == nil {
+				return data, nil
+			}
+			lastErr = err
+			if i < attempts-1 {
+				time.Sleep(delay)
+			}
+		}
+		return nil, lastErr
+	}
+
+	candidates := []string{
+		util.CookieSnapshotPath(path),
+		path,
+	}
+
+	for idx, candidate := range candidates {
+		data, err := read(candidate)
 		if err == nil {
 			return data, nil
 		}
-		lastErr = err
-		if i < attempts-1 {
-			time.Sleep(delay)
+		if errors.Is(err, os.ErrNotExist) {
+			if idx < len(candidates)-1 {
+				continue
+			}
 		}
+		return nil, err
 	}
-	return nil, lastErr
+
+	return nil, os.ErrNotExist
 }
 
 // addOrUpdateClient handles the addition or update of a single client.

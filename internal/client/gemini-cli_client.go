@@ -830,7 +830,6 @@ func (c *GeminiCLIClient) GetProjectList(ctx context.Context) (*interfaces.GCPPr
 //   - error: An error if the save operation fails, nil otherwise.
 func (c *GeminiCLIClient) SaveTokenToFile() error {
 	fileName := filepath.Join(c.cfg.AuthDir, fmt.Sprintf("%s-%s.json", c.tokenStorage.(*geminiAuth.GeminiTokenStorage).Email, c.tokenStorage.(*geminiAuth.GeminiTokenStorage).ProjectID))
-	log.Infof("Saving credentials to %s", fileName)
 	return c.tokenStorage.SaveTokenToFile(fileName)
 }
 

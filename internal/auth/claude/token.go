@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/luispater/CLIProxyAPI/v5/internal/misc"
 )
 
 // ClaudeTokenStorage stores OAuth2 token information for Anthropic Claude API authentication.
@@ -46,6 +48,7 @@ type ClaudeTokenStorage struct {
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
 func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) error {
+	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "claude"
 
 	// Create directory structure if it doesn't exist

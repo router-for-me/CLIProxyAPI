@@ -6,15 +6,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/luispater/CLIProxyAPI/v5/internal/misc"
 )
 
+const cookieSnapshotExt = ".cookie"
+
 // CookieSnapshotPath derives the cookie snapshot file path from the main token JSON path.
-// It replaces the .json suffix with .cookies, or appends .cookies if missing.
+// It replaces the .json suffix with .cookie, or appends .cookie if missing.
 func CookieSnapshotPath(mainPath string) string {
 	if strings.HasSuffix(mainPath, ".json") {
-		return strings.TrimSuffix(mainPath, ".json") + ".cookies"
+		return strings.TrimSuffix(mainPath, ".json") + cookieSnapshotExt
 	}
-	return mainPath + ".cookies"
+	return mainPath + cookieSnapshotExt
 }
 
 // IsRegularFile reports whether the given path exists and is a regular file.
@@ -66,9 +70,8 @@ func RemoveFile(path string) error {
 	return nil
 }
 
-// TryReadCookieSnapshotInto tries to read a cookie snapshot into v.
-// It attempts the .cookies suffix; returns (true, nil) when found and decoded,
-// or (false, nil) when none exists.
+// TryReadCookieSnapshotInto tries to read a cookie snapshot into v using the .cookie suffix.
+// Returns (true, nil) when a snapshot was decoded, or (false, nil) when none exists.
 func TryReadCookieSnapshotInto(mainPath string, v any) (bool, error) {
 	snap := CookieSnapshotPath(mainPath)
 	if err := ReadJSON(snap, v); err != nil {
@@ -80,13 +83,20 @@ func TryReadCookieSnapshotInto(mainPath string, v any) (bool, error) {
 	return true, nil
 }
 
-// WriteCookieSnapshot writes v to the snapshot path derived from mainPath using the .cookies suffix.
+// WriteCookieSnapshot writes v to the snapshot path derived from mainPath using the .cookie suffix.
 func WriteCookieSnapshot(mainPath string, v any) error {
-	return WriteJSON(CookieSnapshotPath(mainPath), v)
+	path := CookieSnapshotPath(mainPath)
+	misc.LogSavingCredentials(path)
+	if err := WriteJSON(path, v); err != nil {
+		return err
+	}
+	return nil
 }
 
-// RemoveCookieSnapshots removes both modern and legacy snapshot files.
-func RemoveCookieSnapshots(mainPath string) { _ = RemoveFile(CookieSnapshotPath(mainPath)) }
+// RemoveCookieSnapshots removes the snapshot file if it exists.
+func RemoveCookieSnapshots(mainPath string) {
+	_ = RemoveFile(CookieSnapshotPath(mainPath))
+}
 
 // Hooks provide customization points for snapshot lifecycle operations.
 type Hooks[T any] struct {
