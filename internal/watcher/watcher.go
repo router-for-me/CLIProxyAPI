@@ -26,6 +26,7 @@ import (
 	"github.com/luispater/CLIProxyAPI/v5/internal/client"
 	"github.com/luispater/CLIProxyAPI/v5/internal/config"
 	"github.com/luispater/CLIProxyAPI/v5/internal/interfaces"
+	"github.com/luispater/CLIProxyAPI/v5/internal/misc"
 	"github.com/luispater/CLIProxyAPI/v5/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -302,7 +303,7 @@ func (w *Watcher) reloadClients() {
 	}
 
 	// Create new API key clients based on the new config
-	newAPIKeyClients, glAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := buildAPIKeyClients(cfg)
+	newAPIKeyClients, glAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
 	log.Debugf("created %d new API key clients", len(newAPIKeyClients))
 
 	// Load file-based clients
@@ -604,6 +605,7 @@ func (w *Watcher) loadFileClients(cfg *config.Config) (map[string]interfaces.Cli
 		}
 		if !info.IsDir() && strings.HasSuffix(info.Name(), ".json") {
 			authFileCount++
+			misc.LogCredentialSeparator()
 			log.Debugf("processing auth file %d: %s", authFileCount, filepath.Base(path))
 			if cliClient, errCreate := w.createClientFromFile(path, cfg); errCreate == nil && cliClient != nil {
 				newClients[path] = cliClient
@@ -622,8 +624,7 @@ func (w *Watcher) loadFileClients(cfg *config.Config) (map[string]interfaces.Cli
 	return newClients, successfulAuthCount
 }
 
-// buildAPIKeyClients creates clients from API keys in the config.
-func buildAPIKeyClients(cfg *config.Config) (map[string]interfaces.Client, int, int, int, int) {
+func BuildAPIKeyClients(cfg *config.Config) (map[string]interfaces.Client, int, int, int, int) {
 	apiKeyClients := make(map[string]interfaces.Client)
 	glAPIKeyCount := 0
 	claudeAPIKeyCount := 0
@@ -633,6 +634,8 @@ func buildAPIKeyClients(cfg *config.Config) (map[string]interfaces.Client, int, 
 	if len(cfg.GlAPIKey) > 0 {
 		for _, key := range cfg.GlAPIKey {
 			httpClient := util.SetProxy(cfg, &http.Client{})
+			misc.LogCredentialSeparator()
+			log.Debug("Initializing with Gemini API Key...")
 			cliClient := client.NewGeminiClient(httpClient, cfg, key)
 			apiKeyClients[cliClient.GetClientID()] = cliClient
 			glAPIKeyCount++
@@ -640,6 +643,8 @@ func buildAPIKeyClients(cfg *config.Config) (map[string]interfaces.Client, int, 
 	}
 	if len(cfg.ClaudeKey) > 0 {
 		for i := range cfg.ClaudeKey {
+			misc.LogCredentialSeparator()
+			log.Debug("Initializing with Claude API Key...")
 			cliClient := client.NewClaudeClientWithKey(cfg, i)
 			apiKeyClients[cliClient.GetClientID()] = cliClient
 			claudeAPIKeyCount++
@@ -647,6 +652,8 @@ func buildAPIKeyClients(cfg *config.Config) (map[string]interfaces.Client, int, 
 	}
 	if len(cfg.CodexKey) > 0 {
 		for i := range cfg.CodexKey {
+			misc.LogCredentialSeparator()
+			log.Debug("Initializing with Codex API Key...")
 			cliClient := client.NewCodexClientWithKey(cfg, i)
 			apiKeyClients[cliClient.GetClientID()] = cliClient
 			codexAPIKeyCount++
@@ -655,9 +662,11 @@ func buildAPIKeyClients(cfg *config.Config) (map[string]interfaces.Client, int, 
 	if len(cfg.OpenAICompatibility) > 0 {
 		for _, compatConfig := range cfg.OpenAICompatibility {
 			for i := 0; i < len(compatConfig.APIKeys); i++ {
+				misc.LogCredentialSeparator()
+				log.Debugf("Initializing OpenAI compatibility client for provider: %s", compatConfig.Name)
 				compatClient, errClient := client.NewOpenAICompatibilityClient(cfg, &compatConfig, i)
 				if errClient != nil {
-					log.Errorf("failed to create OpenAI-compatibility client for %s: %v", compatConfig.Name, errClient)
+					log.Errorf("failed to create OpenAI compatibility client for %s: %v", compatConfig.Name, errClient)
 					continue
 				}
 				apiKeyClients[compatClient.GetClientID()] = compatClient
