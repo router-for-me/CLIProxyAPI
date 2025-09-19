@@ -139,7 +139,7 @@ func StartService(cfg *config.Config, configPath string) {
 				if err = json.Unmarshal(data, &ts); err == nil {
 					// For each valid Qwen token, create an authenticated client.
 					log.Info("Initializing qwen authentication for token...")
-					qwenClient := client.NewQwenClient(cfg, &ts)
+					qwenClient := client.NewQwenClient(cfg, &ts, path)
 					log.Info("Authentication successful.")
 					cliClients[path] = qwenClient
 					successfulAuthCount++

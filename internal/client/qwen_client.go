@@ -69,12 +69,12 @@ func NewQwenClient(cfg *config.Config, ts *qwen.QwenTokenStorage, tokenFilePath 
 
 	// If created with a known token file path, record it.
 	if len(tokenFilePath) > 0 && tokenFilePath[0] != "" {
-		client.tokenFilePath = tokenFilePath[0]
+		client.tokenFilePath = filepath.Clean(tokenFilePath[0])
 	}
 
 	// If no explicit path provided but email exists, derive the canonical path.
 	if client.tokenFilePath == "" && ts != nil && ts.Email != "" {
-		client.tokenFilePath = filepath.Join(cfg.AuthDir, fmt.Sprintf("qwen-%s.json", ts.Email))
+		client.tokenFilePath = filepath.Clean(filepath.Join(cfg.AuthDir, fmt.Sprintf("qwen-%s.json", ts.Email)))
 	}
 
 	if client.tokenFilePath != "" {
@@ -101,8 +101,10 @@ func NewQwenClient(cfg *config.Config, ts *qwen.QwenTokenStorage, tokenFilePath 
 				},
 			},
 		)
-		if _, err := client.snapshotManager.Apply(); err != nil {
+		if applied, err := client.snapshotManager.Apply(); err != nil {
 			log.Warnf("Failed to apply Qwen cookie snapshot for %s: %v", filepath.Base(client.tokenFilePath), err)
+		} else if applied {
+			log.Debugf("Loaded Qwen cookie snapshot: %s", filepath.Base(util.CookieSnapshotPath(client.tokenFilePath)))
 		}
 	}
 
@@ -504,27 +506,29 @@ func (c *QwenClient) UnregisterClientWithReason(reason interfaces.UnregisterReas
 }
 
 func (c *QwenClient) unregisterClient(reason interfaces.UnregisterReason) {
-	if c.snapshotManager == nil {
-		return
+	if c.snapshotManager != nil {
+		switch reason {
+		case interfaces.UnregisterReasonAuthFileRemoved:
+			if c.tokenFilePath != "" {
+				log.Debugf("skipping Qwen snapshot flush because auth file is missing: %s", filepath.Base(c.tokenFilePath))
+				util.RemoveCookieSnapshots(c.tokenFilePath)
+			}
+		case interfaces.UnregisterReasonAuthFileUpdated:
+			if c.tokenFilePath != "" {
+				log.Debugf("skipping Qwen snapshot flush because auth file was updated: %s", filepath.Base(c.tokenFilePath))
+				util.RemoveCookieSnapshots(c.tokenFilePath)
+			}
+		case interfaces.UnregisterReasonShutdown, interfaces.UnregisterReasonReload:
+			if err := c.snapshotManager.Flush(); err != nil {
+				log.Errorf("Failed to flush Qwen cookie snapshot to main for %s: %v", filepath.Base(c.tokenFilePath), err)
+			}
+		default:
+			if err := c.snapshotManager.Flush(); err != nil {
+				log.Errorf("Failed to flush Qwen cookie snapshot to main for %s: %v", filepath.Base(c.tokenFilePath), err)
+			}
+		}
+	} else if c.tokenFilePath != "" && (reason == interfaces.UnregisterReasonAuthFileRemoved || reason == interfaces.UnregisterReasonAuthFileUpdated) {
+		util.RemoveCookieSnapshots(c.tokenFilePath)
 	}
-	switch reason {
-	case interfaces.UnregisterReasonAuthFileRemoved:
-		if c.tokenFilePath != "" {
-			log.Debugf("skipping Qwen snapshot flush because auth file is missing: %s", filepath.Base(c.tokenFilePath))
-			util.RemoveCookieSnapshots(c.tokenFilePath)
-		}
-	case interfaces.UnregisterReasonAuthFileUpdated:
-		if c.tokenFilePath != "" {
-			log.Debugf("skipping Qwen snapshot flush because auth file was updated: %s", filepath.Base(c.tokenFilePath))
-			util.RemoveCookieSnapshots(c.tokenFilePath)
-		}
-	case interfaces.UnregisterReasonShutdown, interfaces.UnregisterReasonReload:
-		if err := c.snapshotManager.Flush(); err != nil {
-			log.Errorf("Failed to flush Qwen cookie snapshot to main for %s: %v", filepath.Base(c.tokenFilePath), err)
-		}
-	default:
-		if err := c.snapshotManager.Flush(); err != nil {
-			log.Errorf("Failed to flush Qwen cookie snapshot to main for %s: %v", filepath.Base(c.tokenFilePath), err)
-		}
-	}
+	c.ClientBase.UnregisterClient()
 }

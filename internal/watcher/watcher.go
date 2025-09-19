@@ -393,7 +393,7 @@ func (w *Watcher) createClientFromFile(path string, cfg *config.Config) (interfa
 	} else if tokenType == "qwen" {
 		var ts qwen.QwenTokenStorage
 		if err = json.Unmarshal(data, &ts); err == nil {
-			return client.NewQwenClient(cfg, &ts), nil
+			return client.NewQwenClient(cfg, &ts, path), nil
 		}
 	} else if tokenType == "gemini-web" {
 		var ts gemini.GeminiWebTokenStorage
