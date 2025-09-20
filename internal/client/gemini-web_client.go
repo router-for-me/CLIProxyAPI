@@ -837,13 +837,29 @@ func (c *GeminiWebClient) SaveTokenToFile() error {
 			ts.Secure1PSIDTS = v
 		}
 	}
+
+	currentTS := ts.Secure1PSIDTS
+	if currentTS != "" && currentTS == c.lastPersistedTS {
+		return nil
+	}
+
+	var err error
 	if c.snapshotManager == nil {
 		if c.tokenFilePath == "" {
-			return nil
+			err = nil
+		} else {
+			err = ts.SaveTokenToFile(c.tokenFilePath)
 		}
-		return ts.SaveTokenToFile(c.tokenFilePath)
+	} else {
+		err = c.snapshotManager.Persist()
 	}
-	return c.snapshotManager.Persist()
+	if err != nil {
+		return err
+	}
+	if currentTS != "" {
+		c.lastPersistedTS = currentTS
+	}
+	return nil
 }
 
 // startCookiePersist periodically writes refreshed cookies into the cookie snapshot file.
