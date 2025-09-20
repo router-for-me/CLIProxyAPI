@@ -10,6 +10,7 @@ require (
 	github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966
 	github.com/tidwall/gjson v1.18.0
 	github.com/tidwall/sjson v1.2.5
+	go.etcd.io/bbolt v1.3.8
 	golang.org/x/crypto v0.36.0
 	golang.org/x/net v0.37.1-0.20250305215238-2914f4677317
 	golang.org/x/oauth2 v0.30.0
