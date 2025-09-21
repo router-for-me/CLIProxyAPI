@@ -161,7 +161,16 @@ func NewGeminiWebClient(cfg *config.Config, ts *gemini.GeminiWebTokenStorage, to
 
 	client.InitializeModelRegistry(clientID)
 
-	client.gwc = geminiWeb.NewGeminiClient(ts.Secure1PSID, ts.Secure1PSIDTS, cfg.ProxyURL, geminiWeb.WithAccountLabel(strings.TrimSuffix(filepath.Base(tokenFilePath), ".json")))
+	client.gwc = geminiWeb.NewGeminiClient(
+		ts.Secure1PSID,
+		ts.Secure1PSIDTS,
+		cfg.ProxyURL,
+		geminiWeb.WithAccountLabel(strings.TrimSuffix(filepath.Base(tokenFilePath), ".json")),
+		// Persist only when refresh produces a new TS value
+		geminiWeb.WithOnCookiesRefreshed(func() {
+			_ = client.SaveTokenToFile()
+		}),
+	)
 	timeoutSec := geminiWebDefaultTimeoutSec
 	refreshIntervalSec := cfg.GeminiWeb.TokenRefreshSeconds
 	if refreshIntervalSec <= 0 {
@@ -175,14 +184,22 @@ func NewGeminiWebClient(cfg *config.Config, ts *gemini.GeminiWebTokenStorage, to
 		client.registerModelsOnce()
 		// Persist immediately once after successful init to capture fresh cookies
 		_ = client.SaveTokenToFile()
-		client.startCookiePersist()
 	}
 	return client, nil
 }
 
 func (c *GeminiWebClient) Init() error {
 	ts := c.tokenStorage.(*gemini.GeminiWebTokenStorage)
-	c.gwc = geminiWeb.NewGeminiClient(ts.Secure1PSID, ts.Secure1PSIDTS, c.cfg.ProxyURL, geminiWeb.WithAccountLabel(c.GetEmail()))
+	c.gwc = geminiWeb.NewGeminiClient(
+		ts.Secure1PSID,
+		ts.Secure1PSIDTS,
+		c.cfg.ProxyURL,
+		geminiWeb.WithAccountLabel(c.GetEmail()),
+		// Persist only when refresh produces a new TS value
+		geminiWeb.WithOnCookiesRefreshed(func() {
+			_ = c.SaveTokenToFile()
+		}),
+	)
 	timeoutSec := geminiWebDefaultTimeoutSec
 	refreshIntervalSec := c.cfg.GeminiWeb.TokenRefreshSeconds
 	if refreshIntervalSec <= 0 {
@@ -194,7 +211,6 @@ func (c *GeminiWebClient) Init() error {
 	c.registerModelsOnce()
 	// Persist immediately once after successful init to capture fresh cookies
 	_ = c.SaveTokenToFile()
-	c.startCookiePersist()
 	return nil
 }
 

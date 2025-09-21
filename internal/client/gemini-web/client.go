@@ -31,6 +31,9 @@ type GeminiClient struct {
 	rotateCancel    context.CancelFunc
 	insecure        bool
 	accountLabel    string
+	// onCookiesRefreshed is an optional callback invoked after cookies
+	// are refreshed and the __Secure-1PSIDTS value changes.
+	onCookiesRefreshed func()
 }
 
 var NanoBananaModel = map[string]struct{}{
@@ -71,6 +74,13 @@ func WithInsecureTLS(insecure bool) func(*GeminiClient) {
 // for logging purposes.
 func WithAccountLabel(label string) func(*GeminiClient) {
 	return func(c *GeminiClient) { c.accountLabel = label }
+}
+
+// WithOnCookiesRefreshed registers a callback invoked when cookies are refreshed
+// and the __Secure-1PSIDTS value changes. The callback runs in the background
+// refresh goroutine; keep it lightweight and non-blocking.
+func WithOnCookiesRefreshed(cb func()) func(*GeminiClient) {
+	return func(c *GeminiClient) { c.onCookiesRefreshed = cb }
 }
 
 // Init initializes the access token and http client.
@@ -158,6 +168,10 @@ func (c *GeminiClient) startAutoRefresh() {
 				return
 			case <-ticker.C:
 				// Step 1: rotate __Secure-1PSIDTS
+				oldTS := ""
+				if c.Cookies != nil {
+					oldTS = c.Cookies["__Secure-1PSIDTS"]
+				}
 				newTS, err := rotate1psidts(c.Cookies, c.Proxy, c.insecure)
 				if err != nil {
 					Warning("Failed to refresh cookies. Background auto refresh canceled: %v", err)
@@ -189,6 +203,17 @@ func (c *GeminiClient) startAutoRefresh() {
 					DebugRaw("Cookies refreshed [%s]. New __Secure-1PSIDTS: %s", c.accountLabel, MaskToken28(nextCookies["__Secure-1PSIDTS"]))
 				} else {
 					DebugRaw("Cookies refreshed. New __Secure-1PSIDTS: %s", MaskToken28(nextCookies["__Secure-1PSIDTS"]))
+				}
+
+				// Trigger persistence only when TS actually changes
+				if c.onCookiesRefreshed != nil {
+					currentTS := ""
+					if c.Cookies != nil {
+						currentTS = c.Cookies["__Secure-1PSIDTS"]
+					}
+					if currentTS != "" && currentTS != oldTS {
+						c.onCookiesRefreshed()
+					}
 				}
 			}
 		}
