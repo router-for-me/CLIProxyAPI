@@ -78,7 +78,7 @@ func ConvStorePath(tokenFilePath string) string {
 	}
 	convDir := filepath.Join(wd, "conv")
 	base := strings.TrimSuffix(filepath.Base(tokenFilePath), filepath.Ext(tokenFilePath))
-	return filepath.Join(convDir, base+".conv.json")
+	return filepath.Join(convDir, base+".bolt")
 }
 
 // ConvDataPath returns the path for full conversation persistence based on token file path.
@@ -89,63 +89,41 @@ func ConvDataPath(tokenFilePath string) string {
 	}
 	convDir := filepath.Join(wd, "conv")
 	base := strings.TrimSuffix(filepath.Base(tokenFilePath), filepath.Ext(tokenFilePath))
-	return filepath.Join(convDir, base+".data.json")
-}
-
-// toDBPath converts a legacy JSON path to a bbolt DB file path.
-// We keep the same directory and basename but replace the extension with .bolt.
-func toDBPath(jsonPath string) string {
-	dir := filepath.Dir(jsonPath)
-	base := strings.TrimSuffix(filepath.Base(jsonPath), filepath.Ext(jsonPath))
-	return filepath.Join(dir, base+".bolt")
+	return filepath.Join(convDir, base+".bolt")
 }
 
 // LoadConvStore reads the account-level metadata store from disk.
 func LoadConvStore(path string) (map[string][]string, error) {
-	// Prefer bbolt DB if present; otherwise fall back to legacy JSON file.
-	dbPath := toDBPath(path)
-	if _, err := os.Stat(dbPath); err == nil {
-		db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: time.Second})
-		if err == nil {
-			defer db.Close()
-			out := map[string][]string{}
-			err = db.View(func(tx *bolt.Tx) error {
-				b := tx.Bucket([]byte("account_meta"))
-				if b == nil {
-					return nil
-				}
-				return b.ForEach(func(k, v []byte) error {
-					var arr []string
-					if len(v) > 0 {
-						if e := json.Unmarshal(v, &arr); e != nil {
-							// Skip malformed entries instead of failing the whole load
-							return nil
-						}
-					}
-					out[string(k)] = arr
-					return nil
-				})
-			})
-			if err == nil {
-				return out, nil
-			}
-			// If DB read fails, fall through to legacy JSON as best-effort.
-		}
-	}
-	// Legacy JSON path
-	b, err := os.ReadFile(path)
-	if err != nil {
-		// Missing file is not an error; return empty map
-		return map[string][]string{}, nil
-	}
-	var tmp map[string][]string
-	if err := json.Unmarshal(b, &tmp); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	if tmp == nil {
-		tmp = map[string][]string{}
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: time.Second})
+	if err != nil {
+		return nil, err
 	}
-	return tmp, nil
+	defer db.Close()
+	out := map[string][]string{}
+	err = db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("account_meta"))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, v []byte) error {
+			var arr []string
+			if len(v) > 0 {
+				if e := json.Unmarshal(v, &arr); e != nil {
+					// Skip malformed entries instead of failing the whole load
+					return nil
+				}
+			}
+			out[string(k)] = arr
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // SaveConvStore writes the account-level metadata store to disk atomically.
@@ -153,11 +131,10 @@ func SaveConvStore(path string, data map[string][]string) error {
 	if data == nil {
 		data = map[string][]string{}
 	}
-	dbPath := toDBPath(path)
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: 2 * time.Second})
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 2 * time.Second})
 	if err != nil {
 		return err
 	}
@@ -193,68 +170,48 @@ func AccountMetaKey(email, modelName string) string {
 
 // LoadConvData reads the full conversation data and index from disk.
 func LoadConvData(path string) (map[string]ConversationRecord, map[string]string, error) {
-	// Prefer bbolt DB if present; otherwise fall back to legacy JSON file.
-	dbPath := toDBPath(path)
-	if _, err := os.Stat(dbPath); err == nil {
-		db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: time.Second})
-		if err == nil {
-			defer db.Close()
-			items := map[string]ConversationRecord{}
-			index := map[string]string{}
-			err = db.View(func(tx *bolt.Tx) error {
-				// Load conv_items
-				if b := tx.Bucket([]byte("conv_items")); b != nil {
-					if e := b.ForEach(func(k, v []byte) error {
-						var rec ConversationRecord
-						if len(v) > 0 {
-							if e2 := json.Unmarshal(v, &rec); e2 != nil {
-								// Skip malformed
-								return nil
-							}
-							items[string(k)] = rec
-						}
-						return nil
-					}); e != nil {
-						return e
-					}
-				}
-				// Load conv_index
-				if b := tx.Bucket([]byte("conv_index")); b != nil {
-					if e := b.ForEach(func(k, v []byte) error {
-						index[string(k)] = string(v)
-						return nil
-					}); e != nil {
-						return e
-					}
-				}
-				return nil
-			})
-			if err == nil {
-				return items, index, nil
-			}
-			// If DB read fails, fall through to legacy JSON as best-effort.
-		}
-	}
-	// Legacy JSON path
-	b, err := os.ReadFile(path)
-	if err != nil {
-		// Missing file is not an error; return empty sets
-		return map[string]ConversationRecord{}, map[string]string{}, nil
-	}
-	var wrapper struct {
-		Items map[string]ConversationRecord `json:"items"`
-		Index map[string]string             `json:"index"`
-	}
-	if err := json.Unmarshal(b, &wrapper); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, nil, err
 	}
-	if wrapper.Items == nil {
-		wrapper.Items = map[string]ConversationRecord{}
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: time.Second})
+	if err != nil {
+		return nil, nil, err
 	}
-	if wrapper.Index == nil {
-		wrapper.Index = map[string]string{}
+	defer db.Close()
+	items := map[string]ConversationRecord{}
+	index := map[string]string{}
+	err = db.View(func(tx *bolt.Tx) error {
+		// Load conv_items
+		if b := tx.Bucket([]byte("conv_items")); b != nil {
+			if e := b.ForEach(func(k, v []byte) error {
+				var rec ConversationRecord
+				if len(v) > 0 {
+					if e2 := json.Unmarshal(v, &rec); e2 != nil {
+						// Skip malformed
+						return nil
+					}
+					items[string(k)] = rec
+				}
+				return nil
+			}); e != nil {
+				return e
+			}
+		}
+		// Load conv_index
+		if b := tx.Bucket([]byte("conv_index")); b != nil {
+			if e := b.ForEach(func(k, v []byte) error {
+				index[string(k)] = string(v)
+				return nil
+			}); e != nil {
+				return e
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	return wrapper.Items, wrapper.Index, nil
+	return items, index, nil
 }
 
 // SaveConvData writes the full conversation data and index to disk atomically.
@@ -265,11 +222,10 @@ func SaveConvData(path string, items map[string]ConversationRecord, index map[st
 	if index == nil {
 		index = map[string]string{}
 	}
-	dbPath := toDBPath(path)
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: 2 * time.Second})
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 2 * time.Second})
 	if err != nil {
 		return err
 	}
