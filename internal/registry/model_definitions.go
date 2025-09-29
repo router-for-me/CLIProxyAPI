@@ -33,6 +33,14 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName: "Claude 4 Sonnet",
 		},
 		{
+			ID:          "claude-sonnet-4-5-20250929",
+			Object:      "model",
+			Created:     1727568000, // 2025-09-29
+			OwnedBy:     "anthropic",
+			Type:        "claude",
+			DisplayName: "Claude 4.5 Sonnet",
+		},
+		{
 			ID:          "claude-3-7-sonnet-20250219",
 			Object:      "model",
 			Created:     1708300800, // 2025-02-19

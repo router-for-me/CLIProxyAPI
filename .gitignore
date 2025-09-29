@@ -12,3 +12,4 @@ AGENTS.md
 CLAUDE.md
 *.exe
 temp/*
+cli-proxy-api
