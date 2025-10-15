@@ -143,6 +143,31 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	go func() {
 		defer close(out)
 		defer func() { _ = resp.Body.Close() }()
+
+		// If from == to (Claude → Claude), directly forward the SSE stream without translation
+		if from == to {
+			scanner := bufio.NewScanner(resp.Body)
+			buf := make([]byte, 20_971_520)
+			scanner.Buffer(buf, 20_971_520)
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				appendAPIResponseChunk(ctx, e.cfg, line)
+				if detail, ok := parseClaudeStreamUsage(line); ok {
+					reporter.publish(ctx, detail)
+				}
+				// Forward the line as-is to preserve SSE format
+				cloned := make([]byte, len(line)+1)
+				copy(cloned, line)
+				cloned[len(line)] = '\n'
+				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
+			}
+			if err = scanner.Err(); err != nil {
+				out <- cliproxyexecutor.StreamChunk{Err: err}
+			}
+			return
+		}
+
+		// For other formats, use translation
 		scanner := bufio.NewScanner(resp.Body)
 		buf := make([]byte, 20_971_520)
 		scanner.Buffer(buf, 20_971_520)
