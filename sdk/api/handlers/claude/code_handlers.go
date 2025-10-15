@@ -206,6 +206,8 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 	ticker := time.NewTicker(120 * time.Millisecond) // 80ms → 120ms
 	defer ticker.Stop()
 
+	var chunkIdx int
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -229,23 +231,31 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 
 		case chunk, ok := <-data:
 			if !ok {
-				// Stream ended, flush any remaining data
+				// Stream ended, flush remaining data
 				_ = writer.Flush()
 				cancel(nil)
 				return
 			}
-			// Write the chunk to the buffer. Add newlines for SSE formatting.
-			_, _ = writer.Write(chunk)
-			_, _ = writer.Write([]byte("\n\n"))
+
+			// 直接写入完整的 SSE 事件块（translator 已经格式化好）
+			// Translator 返回的是符合 SSE 规范的完整事件块，包含 event:、data: 和分隔符
+			// Handler 只需直接转发，无需重新组装
+			if len(chunk) > 0 {
+				_, _ = writer.Write(chunk)
+			}
+			chunkIdx++
 
 		case errMsg, ok := <-errs:
 			if !ok {
 				continue
 			}
 			if errMsg != nil {
-				// An error occurred, write it to the response
+				// An error occurred: emit as a proper SSE error event
 				errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+				_, _ = writer.WriteString("event: error\n")
+				_, _ = writer.WriteString("data: ")
 				_, _ = writer.Write(errorBytes)
+				_, _ = writer.WriteString("\n\n")
 				_ = writer.Flush()
 			}
 			var execErr error
