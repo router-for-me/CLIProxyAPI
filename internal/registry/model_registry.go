@@ -701,11 +701,8 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		return result
 
 	case "gemini":
-		result := map[string]any{}
-		if model.Name != "" {
-			result["name"] = model.Name
-		} else {
-			result["name"] = model.ID
+		result := map[string]any{
+			"name": model.ID,
 		}
 		if model.Version != "" {
 			result["version"] = model.Version
