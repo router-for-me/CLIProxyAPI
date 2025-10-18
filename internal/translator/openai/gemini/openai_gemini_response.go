@@ -97,8 +97,8 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 		var results []string
 
 		choices.ForEach(func(choiceIndex, choice gjson.Result) bool {
-			// Base Gemini response template
-			template := `{"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}]}`
+			// Base Gemini response template without finishReason; set when known
+			template := `{"candidates":[{"content":{"parts":[],"role":"model"},"index":0}]}`
 
 			// Set model if available
 			if model := root.Get("model"); model.Exists() {
@@ -514,8 +514,8 @@ func tryParseNumber(s string) (interface{}, bool) {
 func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	root := gjson.ParseBytes(rawJSON)
 
-	// Base Gemini response template
-	out := `{"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}]}`
+	// Base Gemini response template without finishReason; set when known
+	out := `{"candidates":[{"content":{"parts":[],"role":"model"},"index":0}]}`
 
 	// Set model if available
 	if model := root.Get("model"); model.Exists() {

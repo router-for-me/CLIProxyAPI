@@ -97,6 +97,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 
 	// Process the main content part of the response.
 	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
+	hasFunctionCall := false
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
 		for i := 0; i < len(partResults); i++ {
@@ -118,6 +119,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {
 				// Handle function call content.
+				hasFunctionCall = true
 				toolCallsResult := gjson.Get(template, "choices.0.delta.tool_calls")
 				functionCallIndex := (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex
 				(*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex++
@@ -167,6 +169,11 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 				template, _ = sjson.SetRaw(template, "choices.0.delta.images.-1", string(imagePayload))
 			}
 		}
+	}
+
+	if hasFunctionCall {
+		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
+		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
 	}
 
 	return []string{template}

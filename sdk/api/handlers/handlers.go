@@ -9,7 +9,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	conversation "github.com/router-for-me/CLIProxyAPI/v6/internal/provider/gemini-web/conversation"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -48,8 +47,6 @@ type BaseAPIHandler struct {
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
 }
-
-const geminiWebProvider = "gemini-web"
 
 // NewBaseAPIHandlers creates a new API handlers instance.
 // It takes a slice of clients and configuration as input.
@@ -136,21 +133,26 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	providers := util.GetProviderName(modelName)
+	normalizedModel, metadata := normalizeModelMetadata(modelName)
+	providers := util.GetProviderName(normalizedModel)
 	if len(providers) == 0 {
 		return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
-	metadata := h.buildGeminiWebMetadata(handlerType, providers, rawJSON)
 	req := coreexecutor.Request{
-		Model:   modelName,
+		Model:   normalizedModel,
 		Payload: cloneBytes(rawJSON),
+	}
+	if cloned := cloneMetadata(metadata); cloned != nil {
+		req.Metadata = cloned
 	}
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
 		OriginalRequest: cloneBytes(rawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
-		Metadata:        metadata,
+	}
+	if cloned := cloneMetadata(metadata); cloned != nil {
+		opts.Metadata = cloned
 	}
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
@@ -162,21 +164,26 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	providers := util.GetProviderName(modelName)
+	normalizedModel, metadata := normalizeModelMetadata(modelName)
+	providers := util.GetProviderName(normalizedModel)
 	if len(providers) == 0 {
 		return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
-	metadata := h.buildGeminiWebMetadata(handlerType, providers, rawJSON)
 	req := coreexecutor.Request{
-		Model:   modelName,
+		Model:   normalizedModel,
 		Payload: cloneBytes(rawJSON),
+	}
+	if cloned := cloneMetadata(metadata); cloned != nil {
+		req.Metadata = cloned
 	}
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
 		OriginalRequest: cloneBytes(rawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
-		Metadata:        metadata,
+	}
+	if cloned := cloneMetadata(metadata); cloned != nil {
+		opts.Metadata = cloned
 	}
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
@@ -188,24 +195,29 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
-	providers := util.GetProviderName(modelName)
+	normalizedModel, metadata := normalizeModelMetadata(modelName)
+	providers := util.GetProviderName(normalizedModel)
 	if len(providers) == 0 {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 		close(errChan)
 		return nil, errChan
 	}
-	metadata := h.buildGeminiWebMetadata(handlerType, providers, rawJSON)
 	req := coreexecutor.Request{
-		Model:   modelName,
+		Model:   normalizedModel,
 		Payload: cloneBytes(rawJSON),
+	}
+	if cloned := cloneMetadata(metadata); cloned != nil {
+		req.Metadata = cloned
 	}
 	opts := coreexecutor.Options{
 		Stream:          true,
 		Alt:             alt,
 		OriginalRequest: cloneBytes(rawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
-		Metadata:        metadata,
+	}
+	if cloned := cloneMetadata(metadata); cloned != nil {
+		opts.Metadata = cloned
 	}
 	chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
@@ -241,16 +253,32 @@ func cloneBytes(src []byte) []byte {
 	return dst
 }
 
-func (h *BaseAPIHandler) buildGeminiWebMetadata(handlerType string, providers []string, rawJSON []byte) map[string]any {
-	if !util.InArray(providers, geminiWebProvider) {
+func normalizeModelMetadata(modelName string) (string, map[string]any) {
+	baseModel, budget, include, matched := util.ParseGeminiThinkingSuffix(modelName)
+	if !matched {
+		return baseModel, nil
+	}
+	metadata := map[string]any{
+		util.GeminiOriginalModelMetadataKey: modelName,
+	}
+	if budget != nil {
+		metadata[util.GeminiThinkingBudgetMetadataKey] = *budget
+	}
+	if include != nil {
+		metadata[util.GeminiIncludeThoughtsMetadataKey] = *include
+	}
+	return baseModel, metadata
+}
+
+func cloneMetadata(src map[string]any) map[string]any {
+	if len(src) == 0 {
 		return nil
 	}
-	meta := make(map[string]any)
-	msgs := conversation.ExtractMessages(handlerType, rawJSON)
-	if len(msgs) > 0 {
-		meta[conversation.MetadataMessagesKey] = msgs
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
 	}
-	return meta
+	return dst
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.

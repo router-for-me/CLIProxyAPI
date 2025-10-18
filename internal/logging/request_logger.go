@@ -328,9 +328,19 @@ func (l *FileRequestLogger) formatLogContent(url, method string, headers map[str
 	// Request info
 	content.WriteString(l.formatRequestInfo(url, method, headers, body))
 
-	content.WriteString("=== API REQUEST ===\n")
-	content.Write(apiRequest)
-	content.WriteString("\n\n")
+	if len(apiRequest) > 0 {
+		if bytes.HasPrefix(apiRequest, []byte("=== API REQUEST")) {
+			content.Write(apiRequest)
+			if !bytes.HasSuffix(apiRequest, []byte("\n")) {
+				content.WriteString("\n")
+			}
+		} else {
+			content.WriteString("=== API REQUEST ===\n")
+			content.Write(apiRequest)
+			content.WriteString("\n")
+		}
+		content.WriteString("\n")
+	}
 
 	for i := 0; i < len(apiResponseErrors); i++ {
 		content.WriteString("=== API ERROR RESPONSE ===\n")
@@ -339,9 +349,19 @@ func (l *FileRequestLogger) formatLogContent(url, method string, headers map[str
 		content.WriteString("\n\n")
 	}
 
-	content.WriteString("=== API RESPONSE ===\n")
-	content.Write(apiResponse)
-	content.WriteString("\n\n")
+	if len(apiResponse) > 0 {
+		if bytes.HasPrefix(apiResponse, []byte("=== API RESPONSE")) {
+			content.Write(apiResponse)
+			if !bytes.HasSuffix(apiResponse, []byte("\n")) {
+				content.WriteString("\n")
+			}
+		} else {
+			content.WriteString("=== API RESPONSE ===\n")
+			content.Write(apiResponse)
+			content.WriteString("\n")
+		}
+		content.WriteString("\n")
+	}
 
 	// Response section
 	content.WriteString("=== RESPONSE ===\n")

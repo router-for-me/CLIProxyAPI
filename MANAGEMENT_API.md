@@ -639,19 +639,6 @@ These endpoints initiate provider login flows and return a URL to open in a brow
     { "status": "ok", "url": "https://..." }
     ```
 
-- POST `/gemini-web-token` — Save Gemini Web cookies directly
-  - Request:
-    ```bash
-    curl -H 'Authorization: Bearer <MANAGEMENT_KEY>' \
-      -H 'Content-Type: application/json' \
-      -d '{"secure_1psid": "<__Secure-1PSID>", "secure_1psidts": "<__Secure-1PSIDTS>", "label": "<LABEL>"}' \
-      http://localhost:8317/v0/management/gemini-web-token
-    ```
-  - Response:
-    ```json
-    { "status": "ok", "file": "gemini-web-<hash>.json" }
-    ```
-
 - GET `/qwen-auth-url` — Start Qwen login (device flow)
   - Request:
     ```bash

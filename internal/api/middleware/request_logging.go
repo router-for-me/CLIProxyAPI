@@ -19,7 +19,12 @@ import (
 func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
-		if strings.HasPrefix(path, "/v0/management") || path == "/keep-alive" {
+		shouldLog := false
+		if strings.HasPrefix(path, "/v1") {
+			shouldLog = true
+		}
+
+		if !shouldLog {
 			c.Next()
 			return
 		}

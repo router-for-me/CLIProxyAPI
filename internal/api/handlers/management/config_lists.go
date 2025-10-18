@@ -227,7 +227,14 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	for i := range arr {
 		normalizeOpenAICompatibilityEntry(&arr[i])
 	}
-	h.cfg.OpenAICompatibility = arr
+	// Filter out providers with empty base-url -> remove provider entirely
+	filtered := make([]config.OpenAICompatibility, 0, len(arr))
+	for i := range arr {
+		if strings.TrimSpace(arr[i].BaseURL) != "" {
+			filtered = append(filtered, arr[i])
+		}
+	}
+	h.cfg.OpenAICompatibility = filtered
 	h.persist(c)
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
@@ -241,6 +248,32 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		return
 	}
 	normalizeOpenAICompatibilityEntry(body.Value)
+	// If base-url becomes empty, delete the provider instead of updating
+	if strings.TrimSpace(body.Value.BaseURL) == "" {
+		if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.OpenAICompatibility) {
+			h.cfg.OpenAICompatibility = append(h.cfg.OpenAICompatibility[:*body.Index], h.cfg.OpenAICompatibility[*body.Index+1:]...)
+			h.persist(c)
+			return
+		}
+		if body.Name != nil {
+			out := make([]config.OpenAICompatibility, 0, len(h.cfg.OpenAICompatibility))
+			removed := false
+			for i := range h.cfg.OpenAICompatibility {
+				if !removed && h.cfg.OpenAICompatibility[i].Name == *body.Name {
+					removed = true
+					continue
+				}
+				out = append(out, h.cfg.OpenAICompatibility[i])
+			}
+			if removed {
+				h.cfg.OpenAICompatibility = out
+				h.persist(c)
+				return
+			}
+		}
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.OpenAICompatibility) {
 		h.cfg.OpenAICompatibility[*body.Index] = *body.Value
 		h.persist(c)
@@ -302,7 +335,17 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	h.cfg.CodexKey = arr
+	// Filter out codex entries with empty base-url (treat as removed)
+	filtered := make([]config.CodexKey, 0, len(arr))
+	for i := range arr {
+		entry := arr[i]
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		if entry.BaseURL == "" {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	h.cfg.CodexKey = filtered
 	h.persist(c)
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
@@ -315,17 +358,42 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodexKey) {
-		h.cfg.CodexKey[*body.Index] = *body.Value
-		h.persist(c)
-		return
-	}
-	if body.Match != nil {
-		for i := range h.cfg.CodexKey {
-			if h.cfg.CodexKey[i].APIKey == *body.Match {
-				h.cfg.CodexKey[i] = *body.Value
+	// If base-url becomes empty, delete instead of update
+	if strings.TrimSpace(body.Value.BaseURL) == "" {
+		if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodexKey) {
+			h.cfg.CodexKey = append(h.cfg.CodexKey[:*body.Index], h.cfg.CodexKey[*body.Index+1:]...)
+			h.persist(c)
+			return
+		}
+		if body.Match != nil {
+			out := make([]config.CodexKey, 0, len(h.cfg.CodexKey))
+			removed := false
+			for i := range h.cfg.CodexKey {
+				if !removed && h.cfg.CodexKey[i].APIKey == *body.Match {
+					removed = true
+					continue
+				}
+				out = append(out, h.cfg.CodexKey[i])
+			}
+			if removed {
+				h.cfg.CodexKey = out
 				h.persist(c)
 				return
+			}
+		}
+	} else {
+		if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodexKey) {
+			h.cfg.CodexKey[*body.Index] = *body.Value
+			h.persist(c)
+			return
+		}
+		if body.Match != nil {
+			for i := range h.cfg.CodexKey {
+				if h.cfg.CodexKey[i].APIKey == *body.Match {
+					h.cfg.CodexKey[i] = *body.Value
+					h.persist(c)
+					return
+				}
 			}
 		}
 	}
@@ -359,6 +427,8 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	if entry == nil {
 		return
 	}
+	// Trim base-url; empty base-url indicates provider should be removed by sanitization
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
 		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)

@@ -6,6 +6,8 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -25,28 +27,34 @@ type attemptInfo struct {
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg            *config.Config
-	configFilePath string
-	mu             sync.Mutex
-
-	attemptsMu     sync.Mutex
-	failedAttempts map[string]*attemptInfo // keyed by client IP
-	authManager    *coreauth.Manager
-	usageStats     *usage.RequestStatistics
-	tokenStore     coreauth.Store
-
-	localPassword string
+	cfg                 *config.Config
+	configFilePath      string
+	mu                  sync.Mutex
+	attemptsMu          sync.Mutex
+	failedAttempts      map[string]*attemptInfo // keyed by client IP
+	authManager         *coreauth.Manager
+	usageStats          *usage.RequestStatistics
+	tokenStore          coreauth.Store
+	localPassword       string
+	allowRemoteOverride bool
+	envSecret           string
+	logDir              string
 }
 
 // NewHandler creates a new management handler instance.
 func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Manager) *Handler {
+	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
+	envSecret = strings.TrimSpace(envSecret)
+
 	return &Handler{
-		cfg:            cfg,
-		configFilePath: configFilePath,
-		failedAttempts: make(map[string]*attemptInfo),
-		authManager:    manager,
-		usageStats:     usage.GetRequestStatistics(),
-		tokenStore:     sdkAuth.GetTokenStore(),
+		cfg:                 cfg,
+		configFilePath:      configFilePath,
+		failedAttempts:      make(map[string]*attemptInfo),
+		authManager:         manager,
+		usageStats:          usage.GetRequestStatistics(),
+		tokenStore:          sdkAuth.GetTokenStore(),
+		allowRemoteOverride: envSecret != "",
+		envSecret:           envSecret,
 	}
 }
 
@@ -62,6 +70,19 @@ func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageSt
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
 
+// SetLogDirectory updates the directory where main.log should be looked up.
+func (h *Handler) SetLogDirectory(dir string) {
+	if dir == "" {
+		return
+	}
+	if !filepath.IsAbs(dir) {
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+	}
+	h.logDir = dir
+}
+
 // Middleware enforces access control for management endpoints.
 // All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
@@ -72,6 +93,19 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		clientIP := c.ClientIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
+		cfg := h.cfg
+		var (
+			allowRemote bool
+			secretHash  string
+		)
+		if cfg != nil {
+			allowRemote = cfg.RemoteManagement.AllowRemote
+			secretHash = cfg.RemoteManagement.SecretKey
+		}
+		if h.allowRemoteOverride {
+			allowRemote = true
+		}
+		envSecret := h.envSecret
 
 		fail := func() {}
 		if !localClient {
@@ -92,7 +126,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			}
 			h.attemptsMu.Unlock()
 
-			if !h.cfg.RemoteManagement.AllowRemote {
+			if !allowRemote {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management disabled"})
 				return
 			}
@@ -112,8 +146,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				h.attemptsMu.Unlock()
 			}
 		}
-		secret := h.cfg.RemoteManagement.SecretKey
-		if secret == "" {
+		if secretHash == "" && envSecret == "" {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management key not set"})
 			return
 		}
@@ -149,7 +182,20 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			}
 		}
 
-		if err := bcrypt.CompareHashAndPassword([]byte(secret), []byte(provided)); err != nil {
+		if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
+			if !localClient {
+				h.attemptsMu.Lock()
+				if ai := h.failedAttempts[clientIP]; ai != nil {
+					ai.count = 0
+					ai.blockedUntil = time.Time{}
+				}
+				h.attemptsMu.Unlock()
+			}
+			c.Next()
+			return
+		}
+
+		if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
 			if !localClient {
 				fail()
 			}

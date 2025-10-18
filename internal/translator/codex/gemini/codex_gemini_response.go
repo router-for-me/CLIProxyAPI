@@ -5,7 +5,6 @@
 package gemini
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -152,159 +151,146 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 // Returns:
 //   - string: A Gemini-compatible JSON response containing all message content and metadata
 func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	scanner := bufio.NewScanner(bytes.NewReader(rawJSON))
-	buffer := make([]byte, 20_971_520)
-	scanner.Buffer(buffer, 20_971_520)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		// log.Debug(string(line))
-		if !bytes.HasPrefix(line, dataTag) {
-			continue
-		}
-		rawJSON = bytes.TrimSpace(rawJSON[5:])
+	rootResult := gjson.ParseBytes(rawJSON)
 
-		rootResult := gjson.ParseBytes(rawJSON)
-
-		// Verify this is a response.completed event
-		if rootResult.Get("type").String() != "response.completed" {
-			continue
-		}
-
-		// Base Gemini response template for non-streaming
-		template := `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"","createTime":"","responseId":""}`
-
-		// Set model version
-		template, _ = sjson.Set(template, "modelVersion", modelName)
-
-		// Set response metadata from the completed response
-		responseData := rootResult.Get("response")
-		if responseData.Exists() {
-			// Set response ID
-			if responseId := responseData.Get("id"); responseId.Exists() {
-				template, _ = sjson.Set(template, "responseId", responseId.String())
-			}
-
-			// Set creation time
-			if createdAt := responseData.Get("created_at"); createdAt.Exists() {
-				template, _ = sjson.Set(template, "createTime", time.Unix(createdAt.Int(), 0).Format(time.RFC3339Nano))
-			}
-
-			// Set usage metadata
-			if usage := responseData.Get("usage"); usage.Exists() {
-				inputTokens := usage.Get("input_tokens").Int()
-				outputTokens := usage.Get("output_tokens").Int()
-				totalTokens := inputTokens + outputTokens
-
-				template, _ = sjson.Set(template, "usageMetadata.promptTokenCount", inputTokens)
-				template, _ = sjson.Set(template, "usageMetadata.candidatesTokenCount", outputTokens)
-				template, _ = sjson.Set(template, "usageMetadata.totalTokenCount", totalTokens)
-			}
-
-			// Process output content to build parts array
-			var parts []interface{}
-			hasToolCall := false
-			var pendingFunctionCalls []interface{}
-
-			flushPendingFunctionCalls := func() {
-				if len(pendingFunctionCalls) > 0 {
-					// Add all pending function calls as individual parts
-					// This maintains the original Gemini API format while ensuring consecutive calls are grouped together
-					for _, fc := range pendingFunctionCalls {
-						parts = append(parts, fc)
-					}
-					pendingFunctionCalls = nil
-				}
-			}
-
-			if output := responseData.Get("output"); output.Exists() && output.IsArray() {
-				output.ForEach(func(key, value gjson.Result) bool {
-					itemType := value.Get("type").String()
-
-					switch itemType {
-					case "reasoning":
-						// Flush any pending function calls before adding non-function content
-						flushPendingFunctionCalls()
-
-						// Add thinking content
-						if content := value.Get("content"); content.Exists() {
-							part := map[string]interface{}{
-								"thought": true,
-								"text":    content.String(),
-							}
-							parts = append(parts, part)
-						}
-
-					case "message":
-						// Flush any pending function calls before adding non-function content
-						flushPendingFunctionCalls()
-
-						// Add regular text content
-						if content := value.Get("content"); content.Exists() && content.IsArray() {
-							content.ForEach(func(_, contentItem gjson.Result) bool {
-								if contentItem.Get("type").String() == "output_text" {
-									if text := contentItem.Get("text"); text.Exists() {
-										part := map[string]interface{}{
-											"text": text.String(),
-										}
-										parts = append(parts, part)
-									}
-								}
-								return true
-							})
-						}
-
-					case "function_call":
-						// Collect function call for potential merging with consecutive ones
-						hasToolCall = true
-						functionCall := map[string]interface{}{
-							"functionCall": map[string]interface{}{
-								"name": func() string {
-									n := value.Get("name").String()
-									rev := buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
-									if orig, ok := rev[n]; ok {
-										return orig
-									}
-									return n
-								}(),
-								"args": map[string]interface{}{},
-							},
-						}
-
-						// Parse and set arguments
-						if argsStr := value.Get("arguments").String(); argsStr != "" {
-							argsResult := gjson.Parse(argsStr)
-							if argsResult.IsObject() {
-								var args map[string]interface{}
-								if err := json.Unmarshal([]byte(argsStr), &args); err == nil {
-									functionCall["functionCall"].(map[string]interface{})["args"] = args
-								}
-							}
-						}
-
-						pendingFunctionCalls = append(pendingFunctionCalls, functionCall)
-					}
-					return true
-				})
-
-				// Handle any remaining pending function calls at the end
-				flushPendingFunctionCalls()
-			}
-
-			// Set the parts array
-			if len(parts) > 0 {
-				template, _ = sjson.SetRaw(template, "candidates.0.content.parts", mustMarshalJSON(parts))
-			}
-
-			// Set finish reason based on whether there were tool calls
-			if hasToolCall {
-				template, _ = sjson.Set(template, "candidates.0.finishReason", "STOP")
-			} else {
-				template, _ = sjson.Set(template, "candidates.0.finishReason", "STOP")
-			}
-		}
-		return template
+	// Verify this is a response.completed event
+	if rootResult.Get("type").String() != "response.completed" {
+		return ""
 	}
-	return ""
+
+	// Base Gemini response template for non-streaming
+	template := `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"","createTime":"","responseId":""}`
+
+	// Set model version
+	template, _ = sjson.Set(template, "modelVersion", modelName)
+
+	// Set response metadata from the completed response
+	responseData := rootResult.Get("response")
+	if responseData.Exists() {
+		// Set response ID
+		if responseId := responseData.Get("id"); responseId.Exists() {
+			template, _ = sjson.Set(template, "responseId", responseId.String())
+		}
+
+		// Set creation time
+		if createdAt := responseData.Get("created_at"); createdAt.Exists() {
+			template, _ = sjson.Set(template, "createTime", time.Unix(createdAt.Int(), 0).Format(time.RFC3339Nano))
+		}
+
+		// Set usage metadata
+		if usage := responseData.Get("usage"); usage.Exists() {
+			inputTokens := usage.Get("input_tokens").Int()
+			outputTokens := usage.Get("output_tokens").Int()
+			totalTokens := inputTokens + outputTokens
+
+			template, _ = sjson.Set(template, "usageMetadata.promptTokenCount", inputTokens)
+			template, _ = sjson.Set(template, "usageMetadata.candidatesTokenCount", outputTokens)
+			template, _ = sjson.Set(template, "usageMetadata.totalTokenCount", totalTokens)
+		}
+
+		// Process output content to build parts array
+		var parts []interface{}
+		hasToolCall := false
+		var pendingFunctionCalls []interface{}
+
+		flushPendingFunctionCalls := func() {
+			if len(pendingFunctionCalls) > 0 {
+				// Add all pending function calls as individual parts
+				// This maintains the original Gemini API format while ensuring consecutive calls are grouped together
+				for _, fc := range pendingFunctionCalls {
+					parts = append(parts, fc)
+				}
+				pendingFunctionCalls = nil
+			}
+		}
+
+		if output := responseData.Get("output"); output.Exists() && output.IsArray() {
+			output.ForEach(func(key, value gjson.Result) bool {
+				itemType := value.Get("type").String()
+
+				switch itemType {
+				case "reasoning":
+					// Flush any pending function calls before adding non-function content
+					flushPendingFunctionCalls()
+
+					// Add thinking content
+					if content := value.Get("content"); content.Exists() {
+						part := map[string]interface{}{
+							"thought": true,
+							"text":    content.String(),
+						}
+						parts = append(parts, part)
+					}
+
+				case "message":
+					// Flush any pending function calls before adding non-function content
+					flushPendingFunctionCalls()
+
+					// Add regular text content
+					if content := value.Get("content"); content.Exists() && content.IsArray() {
+						content.ForEach(func(_, contentItem gjson.Result) bool {
+							if contentItem.Get("type").String() == "output_text" {
+								if text := contentItem.Get("text"); text.Exists() {
+									part := map[string]interface{}{
+										"text": text.String(),
+									}
+									parts = append(parts, part)
+								}
+							}
+							return true
+						})
+					}
+
+				case "function_call":
+					// Collect function call for potential merging with consecutive ones
+					hasToolCall = true
+					functionCall := map[string]interface{}{
+						"functionCall": map[string]interface{}{
+							"name": func() string {
+								n := value.Get("name").String()
+								rev := buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
+								if orig, ok := rev[n]; ok {
+									return orig
+								}
+								return n
+							}(),
+							"args": map[string]interface{}{},
+						},
+					}
+
+					// Parse and set arguments
+					if argsStr := value.Get("arguments").String(); argsStr != "" {
+						argsResult := gjson.Parse(argsStr)
+						if argsResult.IsObject() {
+							var args map[string]interface{}
+							if err := json.Unmarshal([]byte(argsStr), &args); err == nil {
+								functionCall["functionCall"].(map[string]interface{})["args"] = args
+							}
+						}
+					}
+
+					pendingFunctionCalls = append(pendingFunctionCalls, functionCall)
+				}
+				return true
+			})
+
+			// Handle any remaining pending function calls at the end
+			flushPendingFunctionCalls()
+		}
+
+		// Set the parts array
+		if len(parts) > 0 {
+			template, _ = sjson.SetRaw(template, "candidates.0.content.parts", mustMarshalJSON(parts))
+		}
+
+		// Set finish reason based on whether there were tool calls
+		if hasToolCall {
+			template, _ = sjson.Set(template, "candidates.0.finishReason", "STOP")
+		} else {
+			template, _ = sjson.Set(template, "candidates.0.finishReason", "STOP")
+		}
+	}
+	return template
 }
 
 // buildReverseMapFromGeminiOriginal builds a map[short]original from original Gemini request tools.

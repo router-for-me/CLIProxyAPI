@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -18,20 +20,23 @@ type usageReporter struct {
 	model       string
 	authID      string
 	apiKey      string
+	source      string
 	requestedAt time.Time
 	once        sync.Once
 }
 
 func newUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *usageReporter {
+	apiKey := apiKeyFromContext(ctx)
 	reporter := &usageReporter{
 		provider:    provider,
 		model:       model,
 		requestedAt: time.Now(),
+		apiKey:      apiKey,
+		source:      util.HideAPIKey(resolveUsageSource(auth, apiKey)),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
 	}
-	reporter.apiKey = apiKeyFromContext(ctx)
 	return reporter
 }
 
@@ -52,6 +57,7 @@ func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
 		usage.PublishRecord(ctx, usage.Record{
 			Provider:    r.provider,
 			Model:       r.model,
+			Source:      r.source,
 			APIKey:      r.apiKey,
 			AuthID:      r.authID,
 			RequestedAt: r.requestedAt,
@@ -77,6 +83,30 @@ func apiKeyFromContext(ctx context.Context) string {
 		default:
 			return fmt.Sprintf("%v", value)
 		}
+	}
+	return ""
+}
+
+func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
+	if auth != nil {
+		if _, value := auth.AccountInfo(); value != "" {
+			return strings.TrimSpace(value)
+		}
+		if auth.Metadata != nil {
+			if email, ok := auth.Metadata["email"].(string); ok {
+				if trimmed := strings.TrimSpace(email); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+		if auth.Attributes != nil {
+			if key := strings.TrimSpace(auth.Attributes["api_key"]); key != "" {
+				return key
+			}
+		}
+	}
+	if trimmed := strings.TrimSpace(ctxAPIKey); trimmed != "" {
+		return trimmed
 	}
 	return ""
 }

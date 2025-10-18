@@ -10,9 +10,6 @@ const (
 	// GeminiCLI represents the Google Gemini CLI provider identifier.
 	GeminiCLI = "gemini-cli"
 
-	// GeminiWeb represents the Google Gemini Web provider identifier.
-	GeminiWeb = "gemini-web"
-
 	// Codex represents the OpenAI Codex provider identifier.
 	Codex = "codex"
 

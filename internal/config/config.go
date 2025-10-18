@@ -5,8 +5,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"syscall"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"golang.org/x/crypto/bcrypt"
@@ -51,42 +54,6 @@ type Config struct {
 
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
-
-	// GeminiWeb groups configuration for Gemini Web client
-	GeminiWeb GeminiWebConfig `yaml:"gemini-web" json:"gemini-web"`
-}
-
-// GeminiWebConfig nests Gemini Web related options under 'gemini-web'.
-type GeminiWebConfig struct {
-	// Context enables JSON-based conversation reuse.
-	// Defaults to true if not set in YAML (see LoadConfig).
-	Context bool `yaml:"context" json:"context"`
-
-	// GemMode selects a predefined Gem to attach for Gemini Web requests.
-	// Allowed values:
-	// - "coding-partner"
-	// - "writing-editor"
-	// When empty, no Gem is attached by configuration.
-	// This is independent from CodeMode below, which is kept for backwards compatibility.
-	GemMode string `yaml:"gem-mode" json:"gem-mode"`
-
-	// CodeMode enables legacy coding-mode behaviors for Gemini Web.
-	// Backwards compatibility: when true, the service behaves as before by
-	// attaching the predefined "Coding partner" Gem and enabling extra
-	// conveniences (e.g., XML wrapping hints). Prefer GemMode for selecting
-	// a Gem going forward.
-	CodeMode bool `yaml:"code-mode" json:"code-mode"`
-
-	// MaxCharsPerRequest caps the number of characters (runes) sent to
-	// Gemini Web in a single request. Long prompts will be split into
-	// multiple requests with a continuation hint, and only the final
-	// request will carry any files. When unset or <=0, a conservative
-	// default of 1,000,000 will be used.
-	MaxCharsPerRequest int `yaml:"max-chars-per-request" json:"max-chars-per-request"`
-
-	// DisableContinuationHint, when true, disables the continuation hint for split prompts.
-	// The hint is enabled by default.
-	DisableContinuationHint bool `yaml:"disable-continuation-hint,omitempty" json:"disable-continuation-hint,omitempty"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -187,19 +154,40 @@ type OpenAICompatibilityModel struct {
 //   - *Config: The loaded configuration
 //   - error: An error if the configuration could not be loaded
 func LoadConfig(configFile string) (*Config, error) {
+	return LoadConfigOptional(configFile, false)
+}
+
+// LoadConfigOptional reads YAML from configFile.
+// If optional is true and the file is missing, it returns an empty Config.
+// If optional is true and the file is empty or invalid, it returns an empty Config.
+func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Read the entire configuration file into memory.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
+		if optional {
+			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
+				// Missing and optional: return empty config (cloud deploy standby).
+				return &Config{}, nil
+			}
+		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
+	if optional && len(data) == 0 {
+		return &Config{}, nil
 	}
 
 	// Unmarshal the YAML data into the Config struct.
 	var cfg Config
 	// Set defaults before unmarshal so that absent keys keep defaults.
-	cfg.LoggingToFile = true
-	cfg.UsageStatisticsEnabled = true
-	cfg.GeminiWeb.Context = true
+	cfg.LoggingToFile = false
+	cfg.UsageStatisticsEnabled = false
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
+		if optional {
+			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
+			return &Config{}, nil
+		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
@@ -220,8 +208,53 @@ func LoadConfig(configFile string) (*Config, error) {
 	// Sync request authentication providers with inline API keys for backwards compatibility.
 	syncInlineAccessProvider(&cfg)
 
+	// Sanitize OpenAI compatibility providers: drop entries without base-url
+	sanitizeOpenAICompatibility(&cfg)
+
+	// Sanitize Codex keys: drop entries without base-url
+	sanitizeCodexKeys(&cfg)
+
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// sanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
+// not actionable, specifically those missing a BaseURL. It trims whitespace before
+// evaluation and preserves the relative order of remaining entries.
+func sanitizeOpenAICompatibility(cfg *Config) {
+	if cfg == nil || len(cfg.OpenAICompatibility) == 0 {
+		return
+	}
+	out := make([]OpenAICompatibility, 0, len(cfg.OpenAICompatibility))
+	for i := range cfg.OpenAICompatibility {
+		e := cfg.OpenAICompatibility[i]
+		e.Name = strings.TrimSpace(e.Name)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		if e.BaseURL == "" {
+			// Skip providers with no base-url; treated as removed
+			continue
+		}
+		out = append(out, e)
+	}
+	cfg.OpenAICompatibility = out
+}
+
+// sanitizeCodexKeys removes Codex API key entries missing a BaseURL.
+// It trims whitespace and preserves order for remaining entries.
+func sanitizeCodexKeys(cfg *Config) {
+	if cfg == nil || len(cfg.CodexKey) == 0 {
+		return
+	}
+	out := make([]CodexKey, 0, len(cfg.CodexKey))
+	for i := range cfg.CodexKey {
+		e := cfg.CodexKey[i]
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		if e.BaseURL == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+	cfg.CodexKey = out
 }
 
 func syncInlineAccessProvider(cfg *Config) {
@@ -293,6 +326,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
+	normalizeCollectionNodeStyles(original.Content[0])
 
 	// Write back.
 	f, err := os.Create(configFile)
@@ -531,5 +565,32 @@ func removeMapKey(mapNode *yaml.Node, key string) {
 			mapNode.Content = append(mapNode.Content[:i], mapNode.Content[i+2:]...)
 			return
 		}
+	}
+}
+
+// normalizeCollectionNodeStyles forces YAML collections to use block notation, keeping
+// lists and maps readable. Empty sequences retain flow style ([]) so empty list markers
+// remain compact.
+func normalizeCollectionNodeStyles(node *yaml.Node) {
+	if node == nil {
+		return
+	}
+	switch node.Kind {
+	case yaml.MappingNode:
+		node.Style = 0
+		for i := range node.Content {
+			normalizeCollectionNodeStyles(node.Content[i])
+		}
+	case yaml.SequenceNode:
+		if len(node.Content) == 0 {
+			node.Style = yaml.FlowStyle
+		} else {
+			node.Style = 0
+		}
+		for i := range node.Content {
+			normalizeCollectionNodeStyles(node.Content[i])
+		}
+	default:
+		// Scalars keep their existing style to preserve quoting
 	}
 }

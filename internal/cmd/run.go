@@ -53,3 +53,17 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 		log.Fatalf("proxy service exited with error: %v", err)
 	}
 }
+
+// WaitForCloudDeploy waits indefinitely for shutdown signals in cloud deploy mode
+// when no configuration file is available.
+func WaitForCloudDeploy() {
+	// Clarify that we are intentionally idle for configuration and not running the API server.
+	log.Info("Cloud deploy mode: No config found; standing by for configuration. API server is not started. Press Ctrl+C to exit.")
+
+	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// Block until shutdown signal is received
+	<-ctxSignal.Done()
+	log.Info("Cloud deploy mode: Shutdown signal received; exiting")
+}

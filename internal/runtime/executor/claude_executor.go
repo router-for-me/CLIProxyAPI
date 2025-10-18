@@ -54,16 +54,33 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	recordAPIRequest(ctx, e.cfg, body)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 	applyClaudeHeaders(httpReq, apiKey, false)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
 	defer func() {
@@ -71,6 +88,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
+	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -82,6 +100,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if hasZSTDEcoding(resp.Header.Get("Content-Encoding")) {
 		decoder, err = zstd.NewReader(resp.Body)
 		if err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
 			return cliproxyexecutor.Response{}, fmt.Errorf("failed to initialize zstd decoder: %w", err)
 		}
 		reader = decoder
@@ -89,6 +108,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
@@ -120,18 +140,36 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.SetRawBytes(body, "system", []byte(misc.ClaudeCodeInstructions))
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	recordAPIRequest(ctx, e.cfg, body)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	applyClaudeHeaders(httpReq, apiKey, true)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
+	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer func() { _ = resp.Body.Close() }()
 		b, _ := io.ReadAll(resp.Body)
@@ -143,6 +181,32 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	go func() {
 		defer close(out)
 		defer func() { _ = resp.Body.Close() }()
+
+		// If from == to (Claude → Claude), directly forward the SSE stream without translation
+		if from == to {
+			scanner := bufio.NewScanner(resp.Body)
+			buf := make([]byte, 20_971_520)
+			scanner.Buffer(buf, 20_971_520)
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				appendAPIResponseChunk(ctx, e.cfg, line)
+				if detail, ok := parseClaudeStreamUsage(line); ok {
+					reporter.publish(ctx, detail)
+				}
+				// Forward the line as-is to preserve SSE format
+				cloned := make([]byte, len(line)+1)
+				copy(cloned, line)
+				cloned[len(line)] = '\n'
+				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
+			}
+			if err = scanner.Err(); err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				out <- cliproxyexecutor.StreamChunk{Err: err}
+			}
+			return
+		}
+
+		// For other formats, use translation
 		scanner := bufio.NewScanner(resp.Body)
 		buf := make([]byte, 20_971_520)
 		scanner.Buffer(buf, 20_971_520)
@@ -159,6 +223,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 		if err = scanner.Err(); err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
 			out <- cliproxyexecutor.StreamChunk{Err: err}
 		}
 	}()
@@ -183,16 +248,33 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
-	recordAPIRequest(ctx, e.cfg, body)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 	applyClaudeHeaders(httpReq, apiKey, false)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
 	defer func() {
@@ -200,6 +282,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
+	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -210,6 +293,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if hasZSTDEcoding(resp.Header.Get("Content-Encoding")) {
 		decoder, err = zstd.NewReader(resp.Body)
 		if err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
 			return cliproxyexecutor.Response{}, fmt.Errorf("failed to initialize zstd decoder: %w", err)
 		}
 		reader = decoder
@@ -217,6 +301,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)

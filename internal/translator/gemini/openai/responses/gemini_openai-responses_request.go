@@ -150,7 +150,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					if outputResult.IsObject() {
 						functionResponse, _ = sjson.SetRaw(functionResponse, "functionResponse.response.content", outputResult.String())
 					} else {
-						functionResponse, _ = sjson.Set(functionResponse, "functionResponse.response.content", outputResult.String())
+						functionResponse, _ = sjson.Set(functionResponse, "functionResponse.response.content", output)
 					}
 				}
 
@@ -168,7 +168,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if tool.Get("type").String() == "function" {
-				funcDecl := `{"name":"","description":"","parameters":{}}`
+				funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
 
 				if name := tool.Get("name"); name.Exists() {
 					funcDecl, _ = sjson.Set(funcDecl, "name", name.String())
@@ -192,7 +192,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					}
 					// Set the overall type to OBJECT
 					cleaned, _ = sjson.Set(cleaned, "type", "OBJECT")
-					funcDecl, _ = sjson.SetRaw(funcDecl, "parameters", cleaned)
+					funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
 				}
 
 				geminiTools, _ = sjson.SetRaw(geminiTools, "0.functionDeclarations.-1", funcDecl)
@@ -261,6 +261,5 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", -1)
 		}
 	}
-
 	return []byte(out)
 }

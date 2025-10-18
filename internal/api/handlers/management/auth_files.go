@@ -3,8 +3,6 @@ package management
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +23,6 @@ import (
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
-	// legacy client removed
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -903,65 +900,6 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
-func (h *Handler) CreateGeminiWebToken(c *gin.Context) {
-	ctx := c.Request.Context()
-
-	var payload struct {
-		Secure1PSID   string `json:"secure_1psid"`
-		Secure1PSIDTS string `json:"secure_1psidts"`
-		Label         string `json:"label"`
-	}
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
-	}
-	payload.Secure1PSID = strings.TrimSpace(payload.Secure1PSID)
-	payload.Secure1PSIDTS = strings.TrimSpace(payload.Secure1PSIDTS)
-	payload.Label = strings.TrimSpace(payload.Label)
-	if payload.Secure1PSID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "secure_1psid is required"})
-		return
-	}
-	if payload.Secure1PSIDTS == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "secure_1psidts is required"})
-		return
-	}
-	if payload.Label == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "label is required"})
-		return
-	}
-
-	sha := sha256.New()
-	sha.Write([]byte(payload.Secure1PSID))
-	hash := hex.EncodeToString(sha.Sum(nil))
-	fileName := fmt.Sprintf("gemini-web-%s.json", hash[:16])
-
-	tokenStorage := &geminiAuth.GeminiWebTokenStorage{
-		Secure1PSID:   payload.Secure1PSID,
-		Secure1PSIDTS: payload.Secure1PSIDTS,
-		Label:         payload.Label,
-	}
-	// Provide a stable label (gemini-web-<hash>) for logging and identification
-	tokenStorage.Label = strings.TrimSuffix(fileName, ".json")
-
-	record := &coreauth.Auth{
-		ID:       fileName,
-		Provider: "gemini-web",
-		FileName: fileName,
-		Storage:  tokenStorage,
-	}
-
-	savedPath, errSave := h.saveTokenRecord(ctx, record)
-	if errSave != nil {
-		log.Errorf("Failed to save Gemini Web token: %v", errSave)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save token"})
-		return
-	}
-
-	fmt.Printf("Successfully saved Gemini Web token to: %s\n", savedPath)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "file": filepath.Base(savedPath)})
-}
-
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
 
@@ -1212,126 +1150,50 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to start callback server"})
 			return
 		}
-
-		go func() {
-			defer stopCallbackForwarder(iflowauth.CallbackPort)
-			fmt.Println("Waiting for authentication...")
-
-			waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-iflow-%s.oauth", state))
-			deadline := time.Now().Add(5 * time.Minute)
-			var resultMap map[string]string
-			for {
-				if time.Now().After(deadline) {
-					oauthStatus[state] = "Authentication failed"
-					fmt.Println("Authentication failed: timeout waiting for callback")
-					return
-				}
-				if data, errR := os.ReadFile(waitFile); errR == nil {
-					_ = os.Remove(waitFile)
-					_ = json.Unmarshal(data, &resultMap)
-					break
-				}
-				time.Sleep(500 * time.Millisecond)
-			}
-
-			if errStr := strings.TrimSpace(resultMap["error"]); errStr != "" {
-				oauthStatus[state] = "Authentication failed"
-				fmt.Printf("Authentication failed: %s\n", errStr)
-				return
-			}
-			if resultState := strings.TrimSpace(resultMap["state"]); resultState != state {
-				oauthStatus[state] = "Authentication failed"
-				fmt.Println("Authentication failed: state mismatch")
-				return
-			}
-
-			code := strings.TrimSpace(resultMap["code"])
-			if code == "" {
-				oauthStatus[state] = "Authentication failed"
-				fmt.Println("Authentication failed: code missing")
-				return
-			}
-
-			tokenData, errExchange := authSvc.ExchangeCodeForTokens(ctx, code, redirectURI)
-			if errExchange != nil {
-				oauthStatus[state] = "Authentication failed"
-				fmt.Printf("Authentication failed: %v\n", errExchange)
-				return
-			}
-
-			tokenStorage := authSvc.CreateTokenStorage(tokenData)
-			identifier := strings.TrimSpace(tokenStorage.Email)
-			if identifier == "" {
-				identifier = fmt.Sprintf("iflow-%d", time.Now().UnixMilli())
-				tokenStorage.Email = identifier
-			}
-			record := &coreauth.Auth{
-				ID:         fmt.Sprintf("iflow-%s.json", identifier),
-				Provider:   "iflow",
-				FileName:   fmt.Sprintf("iflow-%s.json", identifier),
-				Storage:    tokenStorage,
-				Metadata:   map[string]any{"email": identifier, "api_key": tokenStorage.APIKey},
-				Attributes: map[string]string{"api_key": tokenStorage.APIKey},
-			}
-
-			savedPath, errSave := h.saveTokenRecord(ctx, record)
-			if errSave != nil {
-				oauthStatus[state] = "Failed to save authentication tokens"
-				log.Fatalf("Failed to save authentication tokens: %v", errSave)
-				return
-			}
-
-			fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-			if tokenStorage.APIKey != "" {
-				fmt.Println("API key obtained and saved")
-			}
-			fmt.Println("You can now use iFlow services through this CLI")
-			delete(oauthStatus, state)
-		}()
-
-		oauthStatus[state] = ""
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
-		return
-	}
-
-	oauthServer := iflowauth.NewOAuthServer(iflowauth.CallbackPort)
-	if err := oauthServer.Start(); err != nil {
-		oauthStatus[state] = "Failed to start authentication server"
-		log.Errorf("Failed to start iFlow OAuth server: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to start local oauth server"})
-		return
 	}
 
 	go func() {
+		if isWebUI {
+			defer stopCallbackForwarder(iflowauth.CallbackPort)
+		}
 		fmt.Println("Waiting for authentication...")
-		defer func() {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			if err := oauthServer.Stop(stopCtx); err != nil {
-				log.Warnf("Failed to stop iFlow OAuth server: %v", err)
+
+		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-iflow-%s.oauth", state))
+		deadline := time.Now().Add(5 * time.Minute)
+		var resultMap map[string]string
+		for {
+			if time.Now().After(deadline) {
+				oauthStatus[state] = "Authentication failed"
+				fmt.Println("Authentication failed: timeout waiting for callback")
+				return
 			}
-		}()
-
-		result, err := oauthServer.WaitForCallback(5 * time.Minute)
-		if err != nil {
-			oauthStatus[state] = "Authentication failed"
-			fmt.Printf("Authentication failed: %v\n", err)
-			return
+			if data, errR := os.ReadFile(waitFile); errR == nil {
+				_ = os.Remove(waitFile)
+				_ = json.Unmarshal(data, &resultMap)
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
 		}
 
-		if result.Error != "" {
+		if errStr := strings.TrimSpace(resultMap["error"]); errStr != "" {
 			oauthStatus[state] = "Authentication failed"
-			fmt.Printf("Authentication failed: %s\n", result.Error)
+			fmt.Printf("Authentication failed: %s\n", errStr)
 			return
 		}
-
-		if result.State != state {
+		if resultState := strings.TrimSpace(resultMap["state"]); resultState != state {
 			oauthStatus[state] = "Authentication failed"
 			fmt.Println("Authentication failed: state mismatch")
 			return
 		}
 
-		tokenData, errExchange := authSvc.ExchangeCodeForTokens(ctx, result.Code, redirectURI)
+		code := strings.TrimSpace(resultMap["code"])
+		if code == "" {
+			oauthStatus[state] = "Authentication failed"
+			fmt.Println("Authentication failed: code missing")
+			return
+		}
+
+		tokenData, errExchange := authSvc.ExchangeCodeForTokens(ctx, code, redirectURI)
 		if errExchange != nil {
 			oauthStatus[state] = "Authentication failed"
 			fmt.Printf("Authentication failed: %v\n", errExchange)

@@ -37,7 +37,6 @@
 - 新增 Claude Code 支持（OAuth 登录）
 - 新增 Qwen Code 支持（OAuth 登录）
 - 新增 iFlow 支持（OAuth 登录）
-- 新增 Gemini Web 支持（通过 Cookie 登录）
 - 支持流式与非流式响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
@@ -76,6 +75,13 @@
    go build -o cli-proxy-api ./cmd/server
    ```
 
+### 通过 Homebrew 安装
+
+```bash
+brew install cliproxyapi
+brew services start cliproxyapi
+```
+
 ## 使用方法
 
 ### 图形客户端与官方 WebUI
@@ -89,6 +95,8 @@ CLIProxyAPI 的跨平台桌面图形客户端。
 CLIProxyAPI 的基于 Web 的管理中心。
 
 如果希望自行托管管理页面，可在配置中将 `remote-management.disable-control-panel` 设为 `true`，服务器将停止下载 `management.html`，并让 `/management.html` 返回 404。
+
+可以通过设置环境变量 `MANAGEMENT_STATIC_PATH` 来指定 `management.html` 的存储目录。
 
 ### 身份验证
 
@@ -105,13 +113,6 @@ CLIProxyAPI 的基于 Web 的管理中心。
   本地 OAuth 回调端口为 `8085`。
 
   选项：加上 `--no-browser` 可打印登录地址而不自动打开浏览器。本地 OAuth 回调端口为 `8085`。
-
-- Gemini Web (通过 Cookie):
-  此方法通过模拟浏览器行为，使用从 Gemini 网站获取的 Cookie 进行身份验证。
-  ```bash
-  ./cli-proxy-api --gemini-web-auth
-  ```
-  程序将提示您输入 `__Secure-1PSID` 和 `__Secure-1PSIDTS` 的值。请从您的浏览器开发者工具中获取这些 Cookie。
 
 - OpenAI（Codex/GPT，OAuth）：
   ```bash
@@ -270,6 +271,7 @@ console.log(await claudeResponse.json());
 - gemini-2.5-pro
 - gemini-2.5-flash
 - gemini-2.5-flash-lite
+- gemini-2.5-flash-image
 - gemini-2.5-flash-image-preview
 - gpt-5
 - gpt-5-codex
@@ -289,6 +291,7 @@ console.log(await claudeResponse.json());
 - deepseek-v3
 - kimi-k2
 - glm-4.5
+- glm-4.6
 - tstars2.0
 - 以及其他 iFlow 支持的模型
 - Gemini 模型在需要时自动切换到对应的 preview 版本
@@ -338,11 +341,6 @@ console.log(await claudeResponse.json());
 | `openai-compatibility.*.models`                       | object[] | []                 | 实际的模型名称。                                                            |
 | `openai-compatibility.*.models.*.name`                | string   | ""                 | 提供商支持的模型。                                                           |
 | `openai-compatibility.*.models.*.alias`               | string   | ""                 | 在API中使用的别名。                                                         |
-| `gemini-web`                            | object   | {}                 | Gemini Web 客户端的特定配置。                                                 |
-| `gemini-web.context`                    | boolean  | true               | 是否启用会话上下文重用，以实现连续对话。                                        |
-| `gemini-web.gem-mode`                   | string   | ""                | 选择要附加的预设 Gem（`coding-partner` 或 `writing-editor`）；为空表示不附加。 |
-| `gemini-web.max-chars-per-request`      | integer  | 1,000,000          | 单次请求发送给 Gemini Web 的最大字符数。                                        |
-| `gemini-web.disable-continuation-hint`  | boolean  | false              | 当提示被拆分时，是否禁用连续提示的暗示。                                        |
 
 ### 配置文件示例
 
@@ -366,6 +364,11 @@ remote-management:
 # 身份验证目录（支持 ~ 表示主目录）。如果你使用Windows，建议设置成`C:/cli-proxy-api/`。
 auth-dir: "~/.cli-proxy-api"
 
+# 请求认证使用的API密钥
+api-keys:
+  - "your-api-key-1"
+  - "your-api-key-2"
+
 # 启用调试日志
 debug: false
 
@@ -386,12 +389,6 @@ request-retry: 3
 quota-exceeded:
    switch-project: true # 当配额超限时是否自动切换到另一个项目
    switch-preview-model: true # 当配额超限时是否自动切换到预览模型
-
-# Gemini Web 客户端配置
-gemini-web:
-  context: true # 启用会话上下文重用
-  gem-mode: "" # 选择 Gem："coding-partner" 或 "writing-editor"；为空表示不附加
-  max-chars-per-request: 1000000 # 单次请求最大字符数
 
 # AIStduio Gemini API 的 API 密钥
 generative-language-api-key:
@@ -430,6 +427,71 @@ openai-compatibility:
       - name: "moonshotai/kimi-k2:free" # 实际的模型名称。
         alias: "kimi-k2" # 在API中使用的别名。
 ```
+
+### Git 支持的配置与令牌存储
+
+应用程序可配置为使用 Git 仓库作为后端，用于存储 `config.yaml` 配置文件和来自 `auth-dir` 目录的身份验证令牌。这允许对您的配置进行集中管理和版本控制。
+
+要启用此功能，请将 `GITSTORE_GIT_URL` 环境变量设置为您的 Git 仓库的 URL。
+
+**环境变量**
+
+| 变量                      | 必需 | 默认值    | 描述                                                 |
+|-------------------------|----|--------|----------------------------------------------------|
+| `MANAGEMENT_PASSWORD`   | 是  |        | 管理面板密码                                             |
+| `GITSTORE_GIT_URL`      | 是  |        | 要使用的 Git 仓库的 HTTPS URL。                            |
+| `GITSTORE_LOCAL_PATH`   | 否  | 当前工作目录 | 将克隆 Git 仓库的本地路径。在 Docker 内部，此路径默认为 `/CLIProxyAPI`。 |
+| `GITSTORE_GIT_USERNAME` | 否  |        | 用于 Git 身份验证的用户名。                                   |
+| `GITSTORE_GIT_TOKEN`    | 否  |        | 用于 Git 身份验证的个人访问令牌（或密码）。                           |
+
+**工作原理**
+
+1.  **克隆：** 启动时，应用程序会将远程 Git 仓库克隆到 `GITSTORE_LOCAL_PATH`。
+2.  **配置：** 然后，它会在克隆的仓库内的 `config` 目录中查找 `config.yaml` 文件。
+3.  **引导：** 如果仓库中不存在 `config/config.yaml`，应用程序会将本地的 `config.example.yaml` 复制到该位置，然后提交并推送到远程仓库作为初始配置。您必须确保 `config.example.yaml` 文件可用。
+4.  **令牌同步：** `auth-dir` 也在此仓库中管理。对身份验证令牌的任何更改（例如，通过新的登录）都会自动提交并推送到远程 Git 仓库。
+
+### PostgreSQL 支持的配置与令牌存储
+
+在托管环境中运行服务时，可以选择使用 PostgreSQL 来保存配置与令牌，借助托管数据库减轻本地文件管理压力。
+
+**环境变量**
+
+| 变量                      | 必需 | 默认值          | 描述                                                                 |
+|-------------------------|----|---------------|----------------------------------------------------------------------|
+| `MANAGEMENT_PASSWORD`   | 是  |               | 管理面板密码（启用远程管理时必需）。                                          |
+| `PGSTORE_DSN`           | 是  |               | PostgreSQL 连接串，例如 `postgresql://user:pass@host:5432/db`。       |
+| `PGSTORE_SCHEMA`        | 否  | public        | 创建表时使用的 schema；留空则使用默认 schema。                               |
+| `PGSTORE_LOCAL_PATH`    | 否  | 当前工作目录       | 本地镜像根目录，服务将在 `<值>/pgstore` 下写入缓存；若无法获取工作目录则退回 `/tmp/pgstore`。 |
+
+**工作原理**
+
+1.  **初始化：** 启动时通过 `PGSTORE_DSN` 连接数据库，确保 schema 存在，并在缺失时创建 `config_store` 与 `auth_store`。
+2.  **本地镜像：** 在 `<PGSTORE_LOCAL_PATH 或当前工作目录>/pgstore` 下建立可写缓存，复用 `config/config.yaml` 与 `auths/` 目录。
+3.  **引导：** 若数据库中无配置记录，会使用 `config.example.yaml` 初始化，并以固定标识 `config` 写入。
+4.  **令牌同步：** 配置与令牌的更改会写入 PostgreSQL，同时数据库中的内容也会反向同步至本地镜像，便于文件监听与管理接口继续工作。
+
+### 对象存储驱动的配置与令牌存储
+
+可以选择使用 S3 兼容的对象存储来托管配置与鉴权数据。
+
+**环境变量**
+
+| 变量                     | 是否必填 | 默认值             | 说明                                                                                                                     |
+|--------------------------|----------|--------------------|--------------------------------------------------------------------------------------------------------------------------|
+| `MANAGEMENT_PASSWORD`    | 是       |                    | 管理面板密码（启用远程管理时必需）。                                                                             |
+| `OBJECTSTORE_ENDPOINT`   | 是       |                    | 对象存储访问端点。可带 `http://` 或 `https://` 前缀指定协议（省略则默认 HTTPS）。                                      |
+| `OBJECTSTORE_BUCKET`     | 是       |                    | 用于存放 `config/config.yaml` 与 `auths/*.json` 的 Bucket 名称。                                                        |
+| `OBJECTSTORE_ACCESS_KEY` | 是       |                    | 对象存储账号的访问密钥 ID。                                                                                              |
+| `OBJECTSTORE_SECRET_KEY` | 是       |                    | 对象存储账号的访问密钥 Secret。                                                                                          |
+| `OBJECTSTORE_LOCAL_PATH` | 否       | 当前工作目录 (CWD) | 本地镜像根目录；服务会写入到 `<值>/objectstore`。                                                                         |
+
+**工作流程**
+
+1. **启动阶段：** 解析端点地址（识别协议前缀），创建 MinIO 兼容客户端并使用 Path-Style 模式，如 Bucket 不存在会自动创建。
+2. **本地镜像：** 在 `<OBJECTSTORE_LOCAL_PATH 或当前工作目录>/objectstore` 维护可写缓存，同步 `config/config.yaml` 与 `auths/`。
+3. **初始化：** 若 Bucket 中缺少配置文件，将以 `config.example.yaml` 为模板生成 `config/config.yaml` 并上传。
+4. **双向同步：** 本地变更会上传到对象存储，同时远端对象也会拉回到本地，保证文件监听、管理 API 与 CLI 命令行为一致。
 
 ### OpenAI 兼容上游提供商
 
@@ -477,21 +539,6 @@ openai-compatibility:
 ### 身份验证目录
 
 `auth-dir` 参数指定身份验证令牌的存储位置。当您运行登录命令时，应用程序将在此目录中创建包含 Google 账户身份验证令牌的 JSON 文件。多个账户可用于轮询。
-
-### 请求鉴权提供方
-
-通过 `auth.providers` 配置接入请求鉴权。内置的 `config-api-key` 提供方支持内联密钥：
-
-```
-auth:
-  providers:
-    - name: default
-      type: config-api-key
-      api-keys:
-        - your-api-key-1
-```
-
-调用时可在 `Authorization` 标头中携带密钥（或继续使用 `X-Goog-Api-Key`、`X-Api-Key`、查询参数 `key`）。为了兼容旧版本，顶层的 `api-keys` 字段仍然可用，并会自动同步到默认的 `config-api-key` 提供方。
 
 ### 官方生成式语言 API
 
@@ -599,12 +646,6 @@ auth.json:
 docker run --rm -p 8085:8085 -v /path/to/your/config.yaml:/CLIProxyAPI/config.yaml -v /path/to/your/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest /CLIProxyAPI/CLIProxyAPI --login
 ```
 
-运行以下命令进行登录（Gemini Web Cookie）：
-
-```bash
-docker run -it --rm -v /path/to/your/config.yaml:/CLIProxyAPI/config.yaml -v /path/to/your/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest /CLIProxyAPI/CLIProxyAPI --gemini-web-auth
-```
-
 运行以下命令进行登录（OpenAI OAuth，端口 1455）：
 
 ```bash
@@ -636,6 +677,18 @@ docker run --rm -p 11451:11451 -v /path/to/your/config.yaml:/CLIProxyAPI/config.
 docker run --rm -p 8317:8317 -v /path/to/your/config.yaml:/CLIProxyAPI/config.yaml -v /path/to/your/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest
 ```
 
+> [!NOTE]
+> 要在 Docker 中使用 Git 支持的配置存储，您可以使用 `-e` 标志传递 `GITSTORE_*` 环境变量。例如：
+>
+> ```bash
+> docker run --rm -p 8317:8317 \
+>   -e GITSTORE_GIT_URL="https://github.com/your/config-repo.git" \
+>   -e GITSTORE_GIT_TOKEN="your_personal_access_token" \
+>   -v /path/to/your/git-store:/CLIProxyAPI/remote \
+>   eceasy/cli-proxy-api:latest
+> ```
+> 在这种情况下，您可能不需要直接挂载 `config.yaml` 或 `auth-dir`，因为它们将由容器内的 Git 存储在 `GITSTORE_LOCAL_PATH`（默认为 `/CLIProxyAPI`，在此示例中我们将其设置为 `/CLIProxyAPI/remote`）进行管理。
+
 ## 使用 Docker Compose 运行
 
 1.  克隆仓库并进入目录：
@@ -650,6 +703,27 @@ docker run --rm -p 8317:8317 -v /path/to/your/config.yaml:/CLIProxyAPI/config.ya
     cp config.example.yaml config.yaml
     ```
     *（Windows 用户请注意：您可以在 CMD 或 PowerShell 中使用 `copy config.example.yaml config.yaml`。）*
+
+    要在 Docker Compose 中使用 Git 支持的配置存储，您可以将 `GITSTORE_*` 环境变量添加到 `docker-compose.yml` 文件中的 `cli-proxy-api` 服务定义下。例如：
+    ```yaml
+    services:
+      cli-proxy-api:
+        image: eceasy/cli-proxy-api:latest
+        container_name: cli-proxy-api
+        ports:
+          - "8317:8317"
+          - "8085:8085"
+          - "1455:1455"
+          - "54545:54545"
+          - "11451:11451"
+        environment:
+          - GITSTORE_GIT_URL=https://github.com/your/config-repo.git
+          - GITSTORE_GIT_TOKEN=your_personal_access_token
+        volumes:
+          - ./git-store:/CLIProxyAPI/remote # GITSTORE_LOCAL_PATH
+        restart: unless-stopped
+    ```
+    在使用 Git 存储时，您可能不需要直接挂载 `config.yaml` 或 `auth-dir`。
 
 3.  启动服务：
     -   **适用于大多数用户（推荐）：**
@@ -675,10 +749,6 @@ docker run --rm -p 8317:8317 -v /path/to/your/config.yaml:/CLIProxyAPI/config.ya
     - **Gemini**: 
     ```bash
     docker compose exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI -no-browser --login
-    ```
-    - **Gemini Web**:
-    ```bash
-    docker compose exec cli-proxy-api /CLIProxyAPI/CLIProxyAPI --gemini-web-auth
     ```
     - **OpenAI (Codex)**:
     ```bash

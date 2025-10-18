@@ -3,19 +3,144 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
-// recordAPIRequest stores the upstream request payload in Gin context for request logging.
-func recordAPIRequest(ctx context.Context, cfg *config.Config, payload []byte) {
-	if cfg == nil || !cfg.RequestLog || len(payload) == 0 {
+const (
+	apiAttemptsKey = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey  = "API_REQUEST"
+	apiResponseKey = "API_RESPONSE"
+)
+
+// upstreamRequestLog captures the outbound upstream request details for logging.
+type upstreamRequestLog struct {
+	URL       string
+	Method    string
+	Headers   http.Header
+	Body      []byte
+	Provider  string
+	AuthID    string
+	AuthLabel string
+	AuthType  string
+	AuthValue string
+}
+
+type upstreamAttempt struct {
+	index                int
+	request              string
+	response             *strings.Builder
+	responseIntroWritten bool
+	statusWritten        bool
+	headersWritten       bool
+	bodyStarted          bool
+	bodyHasContent       bool
+	errorWritten         bool
+}
+
+// recordAPIRequest stores the upstream request metadata in Gin context for request logging.
+func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
+	if cfg == nil || !cfg.RequestLog {
 		return
 	}
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
-		ginCtx.Set("API_REQUEST", bytes.Clone(payload))
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
 	}
+
+	attempts := getAttempts(ginCtx)
+	index := len(attempts) + 1
+
+	builder := &strings.Builder{}
+	builder.WriteString(fmt.Sprintf("=== API REQUEST %d ===\n", index))
+	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
+	if info.URL != "" {
+		builder.WriteString(fmt.Sprintf("Upstream URL: %s\n", info.URL))
+	} else {
+		builder.WriteString("Upstream URL: <unknown>\n")
+	}
+	if info.Method != "" {
+		builder.WriteString(fmt.Sprintf("HTTP Method: %s\n", info.Method))
+	}
+	if auth := formatAuthInfo(info); auth != "" {
+		builder.WriteString(fmt.Sprintf("Auth: %s\n", auth))
+	}
+	builder.WriteString("\nHeaders:\n")
+	writeHeaders(builder, info.Headers)
+	builder.WriteString("\nBody:\n")
+	if len(info.Body) > 0 {
+		builder.WriteString(string(bytes.Clone(info.Body)))
+	} else {
+		builder.WriteString("<empty>")
+	}
+	builder.WriteString("\n\n")
+
+	attempt := &upstreamAttempt{
+		index:    index,
+		request:  builder.String(),
+		response: &strings.Builder{},
+	}
+	attempts = append(attempts, attempt)
+	ginCtx.Set(apiAttemptsKey, attempts)
+	updateAggregatedRequest(ginCtx, attempts)
+}
+
+// recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
+func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+	if cfg == nil || !cfg.RequestLog {
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	attempts, attempt := ensureAttempt(ginCtx)
+	ensureResponseIntro(attempt)
+
+	if status > 0 && !attempt.statusWritten {
+		attempt.response.WriteString(fmt.Sprintf("Status: %d\n", status))
+		attempt.statusWritten = true
+	}
+	if !attempt.headersWritten {
+		attempt.response.WriteString("Headers:\n")
+		writeHeaders(attempt.response, headers)
+		attempt.headersWritten = true
+		attempt.response.WriteString("\n")
+	}
+
+	updateAggregatedResponse(ginCtx, attempts)
+}
+
+// recordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
+func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
+	if cfg == nil || !cfg.RequestLog || err == nil {
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	attempts, attempt := ensureAttempt(ginCtx)
+	ensureResponseIntro(attempt)
+
+	if attempt.bodyStarted && !attempt.bodyHasContent {
+		// Ensure body does not stay empty marker if error arrives first.
+		attempt.bodyStarted = false
+	}
+	if attempt.errorWritten {
+		attempt.response.WriteString("\n")
+	}
+	attempt.response.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
+	attempt.errorWritten = true
+
+	updateAggregatedResponse(ginCtx, attempts)
 }
 
 // appendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
@@ -27,15 +152,185 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if len(data) == 0 {
 		return
 	}
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
-		if existing, exists := ginCtx.Get("API_RESPONSE"); exists {
-			if prev, okBytes := existing.([]byte); okBytes {
-				prev = append(prev, data...)
-				prev = append(prev, []byte("\n\n")...)
-				ginCtx.Set("API_RESPONSE", prev)
-				return
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	attempts, attempt := ensureAttempt(ginCtx)
+	ensureResponseIntro(attempt)
+
+	if !attempt.headersWritten {
+		attempt.response.WriteString("Headers:\n")
+		writeHeaders(attempt.response, nil)
+		attempt.headersWritten = true
+		attempt.response.WriteString("\n")
+	}
+	if !attempt.bodyStarted {
+		attempt.response.WriteString("Body:\n")
+		attempt.bodyStarted = true
+	}
+	if attempt.bodyHasContent {
+		attempt.response.WriteString("\n\n")
+	}
+	attempt.response.WriteString(string(data))
+	attempt.bodyHasContent = true
+
+	updateAggregatedResponse(ginCtx, attempts)
+}
+
+func ginContextFrom(ctx context.Context) *gin.Context {
+	ginCtx, _ := ctx.Value("gin").(*gin.Context)
+	return ginCtx
+}
+
+func getAttempts(ginCtx *gin.Context) []*upstreamAttempt {
+	if ginCtx == nil {
+		return nil
+	}
+	if value, exists := ginCtx.Get(apiAttemptsKey); exists {
+		if attempts, ok := value.([]*upstreamAttempt); ok {
+			return attempts
+		}
+	}
+	return nil
+}
+
+func ensureAttempt(ginCtx *gin.Context) ([]*upstreamAttempt, *upstreamAttempt) {
+	attempts := getAttempts(ginCtx)
+	if len(attempts) == 0 {
+		attempt := &upstreamAttempt{
+			index:    1,
+			request:  "=== API REQUEST 1 ===\n<missing>\n\n",
+			response: &strings.Builder{},
+		}
+		attempts = []*upstreamAttempt{attempt}
+		ginCtx.Set(apiAttemptsKey, attempts)
+		updateAggregatedRequest(ginCtx, attempts)
+	}
+	return attempts, attempts[len(attempts)-1]
+}
+
+func ensureResponseIntro(attempt *upstreamAttempt) {
+	if attempt == nil || attempt.response == nil || attempt.responseIntroWritten {
+		return
+	}
+	attempt.response.WriteString(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index))
+	attempt.response.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
+	attempt.response.WriteString("\n")
+	attempt.responseIntroWritten = true
+}
+
+func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
+	if ginCtx == nil {
+		return
+	}
+	var builder strings.Builder
+	for _, attempt := range attempts {
+		builder.WriteString(attempt.request)
+	}
+	ginCtx.Set(apiRequestKey, []byte(builder.String()))
+}
+
+func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
+	if ginCtx == nil {
+		return
+	}
+	var builder strings.Builder
+	for idx, attempt := range attempts {
+		if attempt == nil || attempt.response == nil {
+			continue
+		}
+		responseText := attempt.response.String()
+		if responseText == "" {
+			continue
+		}
+		builder.WriteString(responseText)
+		if !strings.HasSuffix(responseText, "\n") {
+			builder.WriteString("\n")
+		}
+		if idx < len(attempts)-1 {
+			builder.WriteString("\n")
+		}
+	}
+	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+}
+
+func writeHeaders(builder *strings.Builder, headers http.Header) {
+	if builder == nil {
+		return
+	}
+	if len(headers) == 0 {
+		builder.WriteString("<none>\n")
+		return
+	}
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		values := headers[key]
+		if len(values) == 0 {
+			builder.WriteString(fmt.Sprintf("%s:\n", key))
+			continue
+		}
+		for _, value := range values {
+			builder.WriteString(fmt.Sprintf("%s: %s\n", key, sanitizeHeaderValue(key, value)))
+		}
+	}
+}
+
+func formatAuthInfo(info upstreamRequestLog) string {
+	var parts []string
+	if trimmed := strings.TrimSpace(info.Provider); trimmed != "" {
+		parts = append(parts, fmt.Sprintf("provider=%s", trimmed))
+	}
+	if trimmed := strings.TrimSpace(info.AuthID); trimmed != "" {
+		parts = append(parts, fmt.Sprintf("auth_id=%s", trimmed))
+	}
+	if trimmed := strings.TrimSpace(info.AuthLabel); trimmed != "" {
+		parts = append(parts, fmt.Sprintf("label=%s", trimmed))
+	}
+
+	authType := strings.ToLower(strings.TrimSpace(info.AuthType))
+	authValue := strings.TrimSpace(info.AuthValue)
+	switch authType {
+	case "api_key":
+		if authValue != "" {
+			parts = append(parts, fmt.Sprintf("type=api_key value=%s", util.HideAPIKey(authValue)))
+		} else {
+			parts = append(parts, "type=api_key")
+		}
+	case "oauth":
+		if authValue != "" {
+			parts = append(parts, fmt.Sprintf("type=oauth account=%s", authValue))
+		} else {
+			parts = append(parts, "type=oauth")
+		}
+	default:
+		if authType != "" {
+			if authValue != "" {
+				parts = append(parts, fmt.Sprintf("type=%s value=%s", authType, authValue))
+			} else {
+				parts = append(parts, fmt.Sprintf("type=%s", authType))
 			}
 		}
-		ginCtx.Set("API_RESPONSE", data)
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+func sanitizeHeaderValue(key, value string) string {
+	trimmedValue := strings.TrimSpace(value)
+	lowerKey := strings.ToLower(strings.TrimSpace(key))
+	switch {
+	case strings.Contains(lowerKey, "authorization"),
+		strings.Contains(lowerKey, "api-key"),
+		strings.Contains(lowerKey, "apikey"),
+		strings.Contains(lowerKey, "token"),
+		strings.Contains(lowerKey, "secret"):
+		return util.HideAPIKey(trimmedValue)
+	default:
+		return trimmedValue
 	}
 }

@@ -89,6 +89,7 @@ type modelStats struct {
 // RequestDetail stores the timestamp and token usage for a single request.
 type RequestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
+	Source    string     `json:"source"`
 	Tokens    TokenStats `json:"tokens"`
 }
 
@@ -188,7 +189,11 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		stats = &apiStats{Models: make(map[string]*modelStats)}
 		s.apis[statsKey] = stats
 	}
-	s.updateAPIStats(stats, modelName, RequestDetail{Timestamp: timestamp, Tokens: detail})
+	s.updateAPIStats(stats, modelName, RequestDetail{
+		Timestamp: timestamp,
+		Source:    record.Source,
+		Tokens:    detail,
+	})
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++

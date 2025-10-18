@@ -14,6 +14,7 @@ type Record struct {
 	Model       string
 	APIKey      string
 	AuthID      string
+	Source      string
 	RequestedAt time.Time
 	Detail      Detail
 }

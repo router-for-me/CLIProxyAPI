@@ -10,6 +10,10 @@ services:
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: cli-proxy-api
+    # env_file:
+    #   - .env
+    environment:
+      DEPLOY: ${DEPLOY:-}
     ports:
       - "8317:8317"
       - "8085:8085"
@@ -20,5 +24,4 @@ services:
       - ./config.yaml:/CLIProxyAPI/config.yaml
       - ./auths:/root/.cli-proxy-api
       - ./logs:/CLIProxyAPI/logs
-      - ./conv:/CLIProxyAPI/conv
     restart: unless-stopped

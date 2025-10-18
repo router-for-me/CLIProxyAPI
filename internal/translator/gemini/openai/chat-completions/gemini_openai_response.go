@@ -100,6 +100,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 	// Process the main content part of the response.
 	partsResult := gjson.GetBytes(rawJSON, "candidates.0.content.parts")
+	hasFunctionCall := false
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
 		for i := 0; i < len(partResults); i++ {
@@ -121,6 +122,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {
 				// Handle function call content.
+				hasFunctionCall = true
 				toolCallsResult := gjson.Get(template, "choices.0.delta.tool_calls")
 				functionCallIndex := (*param).(*convertGeminiResponseToOpenAIChatParams).FunctionIndex
 				(*param).(*convertGeminiResponseToOpenAIChatParams).FunctionIndex++
@@ -170,6 +172,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 				template, _ = sjson.SetRaw(template, "choices.0.delta.images.-1", string(imagePayload))
 			}
 		}
+	}
+
+	if hasFunctionCall {
+		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
+		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
 	}
 
 	return []string{template}
@@ -231,6 +238,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 	// Process the main content part of the response.
 	partsResult := gjson.GetBytes(rawJSON, "candidates.0.content.parts")
+	hasFunctionCall := false
 	if partsResult.IsArray() {
 		partsResults := partsResult.Array()
 		for i := 0; i < len(partsResults); i++ {
@@ -252,6 +260,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 				template, _ = sjson.Set(template, "choices.0.message.role", "assistant")
 			} else if functionCallResult.Exists() {
 				// Append function call content to the tool_calls array.
+				hasFunctionCall = true
 				toolCallsResult := gjson.Get(template, "choices.0.message.tool_calls")
 				if !toolCallsResult.Exists() || !toolCallsResult.IsArray() {
 					template, _ = sjson.SetRaw(template, "choices.0.message.tool_calls", `[]`)
@@ -295,6 +304,11 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 				template, _ = sjson.SetRaw(template, "choices.0.message.images.-1", string(imagePayload))
 			}
 		}
+	}
+
+	if hasFunctionCall {
+		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
+		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
 	}
 
 	return template

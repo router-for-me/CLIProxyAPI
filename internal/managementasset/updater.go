@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -23,10 +24,16 @@ const (
 	managementReleaseURL = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
 	managementAssetName  = "management.html"
 	httpUserAgent        = "CLIProxyAPI-management-updater"
+	updateCheckInterval  = 3 * time.Hour
 )
 
 // ManagementFileName exposes the control panel asset filename.
 const ManagementFileName = managementAssetName
+
+var (
+	lastUpdateCheckMu   sync.Mutex
+	lastUpdateCheckTime time.Time
+)
 
 func newHTTPClient(proxyURL string) *http.Client {
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -49,16 +56,40 @@ type releaseResponse struct {
 
 // StaticDir resolves the directory that stores the management control panel asset.
 func StaticDir(configFilePath string) string {
+	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
+		cleaned := filepath.Clean(override)
+		if strings.EqualFold(filepath.Base(cleaned), managementAssetName) {
+			return filepath.Dir(cleaned)
+		}
+		return cleaned
+	}
+
 	configFilePath = strings.TrimSpace(configFilePath)
 	if configFilePath == "" {
 		return ""
 	}
+
 	base := filepath.Dir(configFilePath)
+	fileInfo, err := os.Stat(configFilePath)
+	if err == nil {
+		if fileInfo.IsDir() {
+			base = configFilePath
+		}
+	}
+
 	return filepath.Join(base, "static")
 }
 
 // FilePath resolves the absolute path to the management control panel asset.
 func FilePath(configFilePath string) string {
+	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
+		cleaned := filepath.Clean(override)
+		if strings.EqualFold(filepath.Base(cleaned), managementAssetName) {
+			return cleaned
+		}
+		return filepath.Join(cleaned, ManagementFileName)
+	}
+
 	dir := StaticDir(configFilePath)
 	if dir == "" {
 		return ""
@@ -68,6 +99,7 @@ func FilePath(configFilePath string) string {
 
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
 // The function is designed to run in a background goroutine and will never panic.
+// It enforces a 3-hour rate limit to avoid frequent checks on config/auth file changes.
 func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -78,6 +110,18 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 		log.Debug("management asset sync skipped: empty static directory")
 		return
 	}
+
+	// Rate limiting: check only once every 3 hours
+	lastUpdateCheckMu.Lock()
+	now := time.Now()
+	timeSinceLastCheck := now.Sub(lastUpdateCheckTime)
+	if timeSinceLastCheck < updateCheckInterval {
+		lastUpdateCheckMu.Unlock()
+		log.Debugf("management asset update check skipped: last check was %v ago (interval: %v)", timeSinceLastCheck.Round(time.Second), updateCheckInterval)
+		return
+	}
+	lastUpdateCheckTime = now
+	lastUpdateCheckMu.Unlock()
 
 	if err := os.MkdirAll(staticDir, 0o755); err != nil {
 		log.WithError(err).Warn("failed to prepare static directory for management asset")
@@ -131,6 +175,10 @@ func fetchLatestAsset(ctx context.Context, client *http.Client) (*releaseAsset, 
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", httpUserAgent)
+	gitURL := strings.ToLower(strings.TrimSpace(os.Getenv("GITSTORE_GIT_URL")))
+	if tok := strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN")); tok != "" && strings.Contains(gitURL, "github.com") {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

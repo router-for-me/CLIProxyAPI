@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	client "github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -29,18 +28,6 @@ import (
 //   - []byte: The transformed request in Gemini CLI format.
 func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
-	var pathsToDelete []string
-	root := gjson.ParseBytes(rawJSON)
-	util.Walk(root, "", "additionalProperties", &pathsToDelete)
-	util.Walk(root, "", "$schema", &pathsToDelete)
-
-	var err error
-	for _, p := range pathsToDelete {
-		rawJSON, err = sjson.DeleteBytes(rawJSON, p)
-		if err != nil {
-			continue
-		}
-	}
 	rawJSON = bytes.Replace(rawJSON, []byte(`"url":{"type":"string","format":"uri",`), []byte(`"url":{"type":"string",`), -1)
 
 	// system instruction
@@ -92,7 +79,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						functionName := contentResult.Get("name").String()
 						functionArgs := contentResult.Get("input").String()
 						var args map[string]any
-						if err = json.Unmarshal([]byte(functionArgs), &args); err == nil {
+						if err := json.Unmarshal([]byte(functionArgs), &args); err == nil {
 							clientContent.Parts = append(clientContent.Parts, client.Part{FunctionCall: &client.FunctionCall{Name: functionName, Args: args}})
 						}
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
@@ -129,18 +116,10 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				inputSchema := inputSchemaResult.Raw
-				// Use comprehensive schema sanitization for Gemini API compatibility
-				if sanitizedSchema, sanitizeErr := util.SanitizeSchemaForGemini(inputSchema); sanitizeErr == nil {
-					inputSchema = sanitizedSchema
-				} else {
-					// Fallback to basic cleanup if sanitization fails
-					inputSchema, _ = sjson.Delete(inputSchema, "additionalProperties")
-					inputSchema, _ = sjson.Delete(inputSchema, "$schema")
-				}
 				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
-				tool, _ = sjson.SetRaw(tool, "parameters", inputSchema)
+				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
 				var toolDeclaration any
-				if err = json.Unmarshal([]byte(tool), &toolDeclaration); err == nil {
+				if err := json.Unmarshal([]byte(tool), &toolDeclaration); err == nil {
 					tools[0].FunctionDeclarations = append(tools[0].FunctionDeclarations, toolDeclaration)
 				}
 			}

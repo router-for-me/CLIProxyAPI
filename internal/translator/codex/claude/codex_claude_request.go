@@ -68,36 +68,79 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 		for i := 0; i < len(messageResults); i++ {
 			messageResult := messageResults[i]
+			messageRole := messageResult.Get("role").String()
+
+			newMessage := func() string {
+				msg := `{"type": "message","role":"","content":[]}`
+				msg, _ = sjson.Set(msg, "role", messageRole)
+				return msg
+			}
+
+			message := newMessage()
+			contentIndex := 0
+			hasContent := false
+
+			flushMessage := func() {
+				if hasContent {
+					template, _ = sjson.SetRaw(template, "input.-1", message)
+					message = newMessage()
+					contentIndex = 0
+					hasContent = false
+				}
+			}
+
+			appendTextContent := func(text string) {
+				partType := "input_text"
+				if messageRole == "assistant" {
+					partType = "output_text"
+				}
+				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.type", contentIndex), partType)
+				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.text", contentIndex), text)
+				contentIndex++
+				hasContent = true
+			}
+
+			appendImageContent := func(dataURL string) {
+				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.type", contentIndex), "input_image")
+				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.image_url", contentIndex), dataURL)
+				contentIndex++
+				hasContent = true
+			}
 
 			messageContentsResult := messageResult.Get("content")
 			if messageContentsResult.IsArray() {
 				messageContentResults := messageContentsResult.Array()
 				for j := 0; j < len(messageContentResults); j++ {
 					messageContentResult := messageContentResults[j]
-					messageContentTypeResult := messageContentResult.Get("type")
-					contentType := messageContentTypeResult.String()
+					contentType := messageContentResult.Get("type").String()
 
-					if contentType == "text" {
-						// Handle text content by creating appropriate message structure.
-						message := `{"type": "message","role":"","content":[]}`
-						messageRole := messageResult.Get("role").String()
-						message, _ = sjson.Set(message, "role", messageRole)
-
-						partType := "input_text"
-						if messageRole == "assistant" {
-							partType = "output_text"
+					switch contentType {
+					case "text":
+						appendTextContent(messageContentResult.Get("text").String())
+					case "image":
+						sourceResult := messageContentResult.Get("source")
+						if sourceResult.Exists() {
+							data := sourceResult.Get("data").String()
+							if data == "" {
+								data = sourceResult.Get("base64").String()
+							}
+							if data != "" {
+								mediaType := sourceResult.Get("media_type").String()
+								if mediaType == "" {
+									mediaType = sourceResult.Get("mime_type").String()
+								}
+								if mediaType == "" {
+									mediaType = "application/octet-stream"
+								}
+								dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
+								appendImageContent(dataURL)
+							}
 						}
-
-						currentIndex := len(gjson.Get(message, "content").Array())
-						message, _ = sjson.Set(message, fmt.Sprintf("content.%d.type", currentIndex), partType)
-						message, _ = sjson.Set(message, fmt.Sprintf("content.%d.text", currentIndex), messageContentResult.Get("text").String())
-						template, _ = sjson.SetRaw(template, "input.-1", message)
-					} else if contentType == "tool_use" {
-						// Handle tool use content by creating function call message.
+					case "tool_use":
+						flushMessage()
 						functionCallMessage := `{"type":"function_call"}`
 						functionCallMessage, _ = sjson.Set(functionCallMessage, "call_id", messageContentResult.Get("id").String())
 						{
-							// Shorten tool name if needed based on declared tools
 							name := messageContentResult.Get("name").String()
 							toolMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
 							if short, ok := toolMap[name]; ok {
@@ -109,28 +152,18 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						}
 						functionCallMessage, _ = sjson.Set(functionCallMessage, "arguments", messageContentResult.Get("input").Raw)
 						template, _ = sjson.SetRaw(template, "input.-1", functionCallMessage)
-					} else if contentType == "tool_result" {
-						// Handle tool result content by creating function call output message.
+					case "tool_result":
+						flushMessage()
 						functionCallOutputMessage := `{"type":"function_call_output"}`
 						functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "call_id", messageContentResult.Get("tool_use_id").String())
 						functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
 						template, _ = sjson.SetRaw(template, "input.-1", functionCallOutputMessage)
 					}
 				}
+				flushMessage()
 			} else if messageContentsResult.Type == gjson.String {
-				// Handle string content by creating appropriate message structure.
-				message := `{"type": "message","role":"","content":[]}`
-				messageRole := messageResult.Get("role").String()
-				message, _ = sjson.Set(message, "role", messageRole)
-
-				partType := "input_text"
-				if messageRole == "assistant" {
-					partType = "output_text"
-				}
-
-				message, _ = sjson.Set(message, "content.0.type", partType)
-				message, _ = sjson.Set(message, "content.0.text", messageContentsResult.String())
-				template, _ = sjson.SetRaw(template, "input.-1", message)
+				appendTextContent(messageContentsResult.String())
+				flushMessage()
 			}
 		}
 
@@ -153,6 +186,12 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		shortMap := buildShortNameMap(names)
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
+			// Special handling: map Claude web search tool to Codex web_search
+			if toolResult.Get("type").String() == "web_search_20250305" {
+				// Replace the tool content entirely with {"type":"web_search"}
+				template, _ = sjson.SetRaw(template, "tools.-1", `{"type":"web_search"}`)
+				continue
+			}
 			tool := toolResult.Raw
 			tool, _ = sjson.Set(tool, "type", "function")
 			// Apply shortened name if needed

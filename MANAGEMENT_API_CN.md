@@ -639,19 +639,6 @@
     { "status": "ok", "url": "https://..." }
     ```
 
-- POST `/gemini-web-token` — 直接保存 Gemini Web Cookie
-  - 请求：
-    ```bash
-    curl -H 'Authorization: Bearer <MANAGEMENT_KEY>' \
-      -H 'Content-Type: application/json' \
-      -d '{"secure_1psid": "<__Secure-1PSID>", "secure_1psidts": "<__Secure-1PSIDTS>", "label": "<LABEL>"}' \
-      http://localhost:8317/v0/management/gemini-web-token
-    ```
-  - 响应：
-    ```json
-    { "status": "ok", "file": "gemini-web-<hash>.json" }
-    ```
-
 - GET `/qwen-auth-url` — 开始 Qwen 登录（设备授权流程）
   - 请求：
     ```bash

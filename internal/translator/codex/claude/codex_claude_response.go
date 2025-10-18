@@ -7,7 +7,6 @@
 package claude
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -180,56 +179,58 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 // Returns:
 //   - string: A Claude Code-compatible JSON response containing all message content and metadata
 func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, _ *any) string {
-	scanner := bufio.NewScanner(bytes.NewReader(rawJSON))
-	buffer := make([]byte, 20_971_520)
-	scanner.Buffer(buffer, 20_971_520)
 	revNames := buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if !bytes.HasPrefix(line, dataTag) {
-			continue
-		}
-		payload := bytes.TrimSpace(line[len(dataTag):])
-		if len(payload) == 0 {
-			continue
-		}
+	rootResult := gjson.ParseBytes(rawJSON)
+	if rootResult.Get("type").String() != "response.completed" {
+		return ""
+	}
 
-		rootResult := gjson.ParseBytes(payload)
-		if rootResult.Get("type").String() != "response.completed" {
-			continue
-		}
+	responseData := rootResult.Get("response")
+	if !responseData.Exists() {
+		return ""
+	}
 
-		responseData := rootResult.Get("response")
-		if !responseData.Exists() {
-			continue
-		}
+	response := map[string]interface{}{
+		"id":            responseData.Get("id").String(),
+		"type":          "message",
+		"role":          "assistant",
+		"model":         responseData.Get("model").String(),
+		"content":       []interface{}{},
+		"stop_reason":   nil,
+		"stop_sequence": nil,
+		"usage": map[string]interface{}{
+			"input_tokens":  responseData.Get("usage.input_tokens").Int(),
+			"output_tokens": responseData.Get("usage.output_tokens").Int(),
+		},
+	}
 
-		response := map[string]interface{}{
-			"id":            responseData.Get("id").String(),
-			"type":          "message",
-			"role":          "assistant",
-			"model":         responseData.Get("model").String(),
-			"content":       []interface{}{},
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage": map[string]interface{}{
-				"input_tokens":  responseData.Get("usage.input_tokens").Int(),
-				"output_tokens": responseData.Get("usage.output_tokens").Int(),
-			},
-		}
+	var contentBlocks []interface{}
+	hasToolCall := false
 
-		var contentBlocks []interface{}
-		hasToolCall := false
-
-		if output := responseData.Get("output"); output.Exists() && output.IsArray() {
-			output.ForEach(func(_, item gjson.Result) bool {
-				switch item.Get("type").String() {
-				case "reasoning":
-					thinkingBuilder := strings.Builder{}
-					if summary := item.Get("summary"); summary.Exists() {
-						if summary.IsArray() {
-							summary.ForEach(func(_, part gjson.Result) bool {
+	if output := responseData.Get("output"); output.Exists() && output.IsArray() {
+		output.ForEach(func(_, item gjson.Result) bool {
+			switch item.Get("type").String() {
+			case "reasoning":
+				thinkingBuilder := strings.Builder{}
+				if summary := item.Get("summary"); summary.Exists() {
+					if summary.IsArray() {
+						summary.ForEach(func(_, part gjson.Result) bool {
+							if txt := part.Get("text"); txt.Exists() {
+								thinkingBuilder.WriteString(txt.String())
+							} else {
+								thinkingBuilder.WriteString(part.String())
+							}
+							return true
+						})
+					} else {
+						thinkingBuilder.WriteString(summary.String())
+					}
+				}
+				if thinkingBuilder.Len() == 0 {
+					if content := item.Get("content"); content.Exists() {
+						if content.IsArray() {
+							content.ForEach(func(_, part gjson.Result) bool {
 								if txt := part.Get("text"); txt.Exists() {
 									thinkingBuilder.WriteString(txt.String())
 								} else {
@@ -238,114 +239,96 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 								return true
 							})
 						} else {
-							thinkingBuilder.WriteString(summary.String())
+							thinkingBuilder.WriteString(content.String())
 						}
 					}
-					if thinkingBuilder.Len() == 0 {
-						if content := item.Get("content"); content.Exists() {
-							if content.IsArray() {
-								content.ForEach(func(_, part gjson.Result) bool {
-									if txt := part.Get("text"); txt.Exists() {
-										thinkingBuilder.WriteString(txt.String())
-									} else {
-										thinkingBuilder.WriteString(part.String())
-									}
-									return true
-								})
-							} else {
-								thinkingBuilder.WriteString(content.String())
-							}
-						}
-					}
-					if thinkingBuilder.Len() > 0 {
-						contentBlocks = append(contentBlocks, map[string]interface{}{
-							"type":     "thinking",
-							"thinking": thinkingBuilder.String(),
-						})
-					}
-				case "message":
-					if content := item.Get("content"); content.Exists() {
-						if content.IsArray() {
-							content.ForEach(func(_, part gjson.Result) bool {
-								if part.Get("type").String() == "output_text" {
-									text := part.Get("text").String()
-									if text != "" {
-										contentBlocks = append(contentBlocks, map[string]interface{}{
-											"type": "text",
-											"text": text,
-										})
-									}
-								}
-								return true
-							})
-						} else {
-							text := content.String()
-							if text != "" {
-								contentBlocks = append(contentBlocks, map[string]interface{}{
-									"type": "text",
-									"text": text,
-								})
-							}
-						}
-					}
-				case "function_call":
-					hasToolCall = true
-					name := item.Get("name").String()
-					if original, ok := revNames[name]; ok {
-						name = original
-					}
-
-					toolBlock := map[string]interface{}{
-						"type":  "tool_use",
-						"id":    item.Get("call_id").String(),
-						"name":  name,
-						"input": map[string]interface{}{},
-					}
-
-					if argsStr := item.Get("arguments").String(); argsStr != "" {
-						var args interface{}
-						if err := json.Unmarshal([]byte(argsStr), &args); err == nil {
-							toolBlock["input"] = args
-						}
-					}
-
-					contentBlocks = append(contentBlocks, toolBlock)
 				}
-				return true
-			})
-		}
+				if thinkingBuilder.Len() > 0 {
+					contentBlocks = append(contentBlocks, map[string]interface{}{
+						"type":     "thinking",
+						"thinking": thinkingBuilder.String(),
+					})
+				}
+			case "message":
+				if content := item.Get("content"); content.Exists() {
+					if content.IsArray() {
+						content.ForEach(func(_, part gjson.Result) bool {
+							if part.Get("type").String() == "output_text" {
+								text := part.Get("text").String()
+								if text != "" {
+									contentBlocks = append(contentBlocks, map[string]interface{}{
+										"type": "text",
+										"text": text,
+									})
+								}
+							}
+							return true
+						})
+					} else {
+						text := content.String()
+						if text != "" {
+							contentBlocks = append(contentBlocks, map[string]interface{}{
+								"type": "text",
+								"text": text,
+							})
+						}
+					}
+				}
+			case "function_call":
+				hasToolCall = true
+				name := item.Get("name").String()
+				if original, ok := revNames[name]; ok {
+					name = original
+				}
 
-		if len(contentBlocks) > 0 {
-			response["content"] = contentBlocks
-		}
+				toolBlock := map[string]interface{}{
+					"type":  "tool_use",
+					"id":    item.Get("call_id").String(),
+					"name":  name,
+					"input": map[string]interface{}{},
+				}
 
-		if stopReason := responseData.Get("stop_reason"); stopReason.Exists() && stopReason.String() != "" {
-			response["stop_reason"] = stopReason.String()
-		} else if hasToolCall {
-			response["stop_reason"] = "tool_use"
-		} else {
-			response["stop_reason"] = "end_turn"
-		}
+				if argsStr := item.Get("arguments").String(); argsStr != "" {
+					var args interface{}
+					if err := json.Unmarshal([]byte(argsStr), &args); err == nil {
+						toolBlock["input"] = args
+					}
+				}
 
-		if stopSequence := responseData.Get("stop_sequence"); stopSequence.Exists() && stopSequence.String() != "" {
-			response["stop_sequence"] = stopSequence.Value()
-		}
-
-		if responseData.Get("usage.input_tokens").Exists() || responseData.Get("usage.output_tokens").Exists() {
-			response["usage"] = map[string]interface{}{
-				"input_tokens":  responseData.Get("usage.input_tokens").Int(),
-				"output_tokens": responseData.Get("usage.output_tokens").Int(),
+				contentBlocks = append(contentBlocks, toolBlock)
 			}
-		}
-
-		responseJSON, err := json.Marshal(response)
-		if err != nil {
-			return ""
-		}
-		return string(responseJSON)
+			return true
+		})
 	}
 
-	return ""
+	if len(contentBlocks) > 0 {
+		response["content"] = contentBlocks
+	}
+
+	if stopReason := responseData.Get("stop_reason"); stopReason.Exists() && stopReason.String() != "" {
+		response["stop_reason"] = stopReason.String()
+	} else if hasToolCall {
+		response["stop_reason"] = "tool_use"
+	} else {
+		response["stop_reason"] = "end_turn"
+	}
+
+	if stopSequence := responseData.Get("stop_sequence"); stopSequence.Exists() && stopSequence.String() != "" {
+		response["stop_sequence"] = stopSequence.Value()
+	}
+
+	if responseData.Get("usage.input_tokens").Exists() || responseData.Get("usage.output_tokens").Exists() {
+		response["usage"] = map[string]interface{}{
+			"input_tokens":  responseData.Get("usage.input_tokens").Int(),
+			"output_tokens": responseData.Get("usage.output_tokens").Int(),
+		}
+	}
+
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return ""
+	}
+	return string(responseJSON)
 }
 
 // buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.

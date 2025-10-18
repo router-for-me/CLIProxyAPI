@@ -7,7 +7,9 @@ package geminiCLI
 
 import (
 	"bytes"
+	"fmt"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -24,5 +26,24 @@ func ConvertGeminiCLIRequestToGemini(_ string, inputRawJSON []byte, _ bool) []by
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "system_instruction", []byte(gjson.GetBytes(rawJSON, "systemInstruction").Raw))
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "systemInstruction")
 	}
+
+	toolsResult := gjson.GetBytes(rawJSON, "tools")
+	if toolsResult.Exists() && toolsResult.IsArray() {
+		toolResults := toolsResult.Array()
+		for i := 0; i < len(toolResults); i++ {
+			functionDeclarationsResult := gjson.GetBytes(rawJSON, fmt.Sprintf("tools.%d.function_declarations", i))
+			if functionDeclarationsResult.Exists() && functionDeclarationsResult.IsArray() {
+				functionDeclarationsResults := functionDeclarationsResult.Array()
+				for j := 0; j < len(functionDeclarationsResults); j++ {
+					parametersResult := gjson.GetBytes(rawJSON, fmt.Sprintf("tools.%d.function_declarations.%d.parameters", i, j))
+					if parametersResult.Exists() {
+						strJson, _ := util.RenameKey(string(rawJSON), fmt.Sprintf("tools.%d.function_declarations.%d.parameters", i, j), fmt.Sprintf("tools.%d.function_declarations.%d.parametersJsonSchema", i, j))
+						rawJSON = []byte(strJson)
+					}
+				}
+			}
+		}
+	}
+
 	return rawJSON
 }

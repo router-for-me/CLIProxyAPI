@@ -1,25 +1,32 @@
+# Binaries
+cli-proxy-api
+*.exe
+
+# Configuration
 config.yaml
+.env
+
+# Generated content
 bin/*
-docs/*
 logs/*
 conv/*
+temp/*
+pgstore/*
+gitstore/*
+objectstore/*
+static/*
+
+# Authentication data
 auths/*
 !auths/.gitkeep
-.vscode/*
-.claude/*
-.serena/*
+
+# Documentation
+docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
-*.exe
-temp/*
-cli-proxy-api
-static/*
-.spec-workflow/config.example.toml
-.spec-workflow/templates/design-template.md
-.spec-workflow/templates/product-template.md
-.spec-workflow/templates/requirements-template.md
-.spec-workflow/templates/structure-template.md
-.spec-workflow/templates/tasks-template.md
-.spec-workflow/templates/tech-template.md
-.spec-workflow/user-templates/README.md
+
+# Tooling metadata
+.vscode/*
+.claude/*
+.serena/*

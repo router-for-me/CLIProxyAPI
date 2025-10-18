@@ -14,8 +14,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	geminiwebclient "github.com/router-for-me/CLIProxyAPI/v6/internal/provider/gemini-web"
-	conversation "github.com/router-for-me/CLIProxyAPI/v6/internal/provider/gemini-web/conversation"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -207,23 +205,6 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	}
 	GlobalModelRegistry().UnregisterClient(id)
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
-		if strings.EqualFold(existing.Provider, "gemini-web") {
-			// Prefer the stable cookie label stored in metadata when available.
-			var label string
-			if existing.Metadata != nil {
-				if v, ok := existing.Metadata["label"].(string); ok {
-					label = strings.TrimSpace(v)
-				}
-			}
-			if label == "" {
-				label = strings.TrimSpace(existing.Label)
-			}
-			if label != "" {
-				if err := conversation.RemoveMatchesByLabel(label); err != nil {
-					log.Debugf("failed to remove gemini web sticky entries for %s: %v", label, err)
-				}
-			}
-		}
 		existing.Disabled = true
 		existing.Status = coreauth.StatusDisabled
 		if _, err := s.coreManager.Update(ctx, existing); err != nil {
@@ -271,9 +252,6 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
 	case "gemini-cli":
 		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
-	case "gemini-web":
-		s.coreManager.RegisterExecutor(executor.NewGeminiWebExecutor(s.cfg))
-		s.coreManager.EnableGeminiWebStickySelector()
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "codex":
@@ -536,8 +514,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = registry.GetGeminiModels()
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
-	case "gemini-web":
-		models = geminiwebclient.GetGeminiWebAliasedModels()
 	case "claude":
 		models = registry.GetClaudeModels()
 	case "codex":

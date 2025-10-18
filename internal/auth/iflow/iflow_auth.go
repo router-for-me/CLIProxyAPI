@@ -138,6 +138,7 @@ func (ia *IFlowAuth) doTokenRequest(ctx context.Context, req *http.Request) (*IF
 	}
 
 	if tokenResp.AccessToken == "" {
+		log.Debug(string(body))
 		return nil, fmt.Errorf("iflow token: missing access token in response")
 	}
 

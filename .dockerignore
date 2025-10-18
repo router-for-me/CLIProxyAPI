@@ -17,9 +17,6 @@ MANAGEMENT_API.md
 MANAGEMENT_API_CN.md
 LICENSE
 
-# Example configuration
-config.example.yaml
-
 # Runtime data folders (should be mounted as volumes)
 auths/*
 logs/*

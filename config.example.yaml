@@ -79,19 +79,3 @@ quota-exceeded:
 #    models: # The models supported by the provider.
 #      - name: "moonshotai/kimi-k2:free" # The actual model name.
 #        alias: "kimi-k2" # The alias used in the API.
-
-# Gemini Web settings
-#gemini-web:
-#    # Conversation reuse: set to true to enable (default), false to disable.
-#    context: true
-#    # Maximum characters per single request to Gemini Web. Requests exceeding this
-#    # size split into chunks. Only the last chunk carries files and yields the final answer.
-#    max-chars-per-request: 1000000
-#    # Disable the short continuation hint appended to intermediate chunks
-#    # when splitting long prompts. Default is false (hint enabled by default).
-#    disable-continuation-hint: false
-#    # Gem selection (Gem Mode):
-#    #   - "coding-partner": attach the predefined Coding partner Gem
-#    #   - "writing-editor": attach the predefined Writing editor Gem
-#    #   - empty: do not attach any Gem
-#    gem-mode: ""

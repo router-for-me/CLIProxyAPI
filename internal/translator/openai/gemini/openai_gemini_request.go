@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"strings"
 
@@ -100,14 +101,40 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				"content": "",
 			}
 
-			var contentParts []string
+			var textBuilder strings.Builder
+			var aggregatedParts []interface{}
+			onlyTextContent := true
 			var toolCalls []interface{}
 
 			if parts.Exists() && parts.IsArray() {
 				parts.ForEach(func(_, part gjson.Result) bool {
 					// Handle text parts
 					if text := part.Get("text"); text.Exists() {
-						contentParts = append(contentParts, text.String())
+						formattedText := text.String()
+						textBuilder.WriteString(formattedText)
+						aggregatedParts = append(aggregatedParts, map[string]interface{}{
+							"type": "text",
+							"text": formattedText,
+						})
+					}
+
+					// Handle inline data (e.g., images)
+					if inlineData := part.Get("inlineData"); inlineData.Exists() {
+						onlyTextContent = false
+
+						mimeType := inlineData.Get("mimeType").String()
+						if mimeType == "" {
+							mimeType = "application/octet-stream"
+						}
+						data := inlineData.Get("data").String()
+						imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
+
+						aggregatedParts = append(aggregatedParts, map[string]interface{}{
+							"type": "image_url",
+							"image_url": map[string]interface{}{
+								"url": imageURL,
+							},
+						})
 					}
 
 					// Handle function calls (Gemini) -> tool calls (OpenAI)
@@ -175,8 +202,12 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			}
 
 			// Set content
-			if len(contentParts) > 0 {
-				msg["content"] = strings.Join(contentParts, "")
+			if len(aggregatedParts) > 0 {
+				if onlyTextContent {
+					msg["content"] = textBuilder.String()
+				} else {
+					msg["content"] = aggregatedParts
+				}
 			}
 
 			// Set tool calls if any

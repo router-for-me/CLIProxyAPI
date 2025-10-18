@@ -285,9 +285,6 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 			log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
 		} else if accountType == "oauth" {
 			log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
-		} else if accountType == "cookie" {
-			// Only Gemini Web uses cookie; print stable account label as-is.
-			log.Debugf("Use Cookie %s for model %s", accountInfo, req.Model)
 		}
 
 		tried[auth.ID] = struct{}{}
@@ -333,8 +330,6 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 			log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
 		} else if accountType == "oauth" {
 			log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
-		} else if accountType == "cookie" {
-			log.Debugf("Use Cookie %s for model %s", accountInfo, req.Model)
 		}
 
 		tried[auth.ID] = struct{}{}
@@ -380,8 +375,6 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
 		} else if accountType == "oauth" {
 			log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
-		} else if accountType == "cookie" {
-			log.Debugf("Use Cookie %s for model %s", accountInfo, req.Model)
 		}
 
 		tried[auth.ID] = struct{}{}
@@ -787,27 +780,31 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	candidates := make([]*Auth, 0, len(m.auths))
-	for _, auth := range m.auths {
-		if auth.Provider != provider || auth.Disabled {
+	for _, candidate := range m.auths {
+		if candidate.Provider != provider || candidate.Disabled {
 			continue
 		}
-		if _, used := tried[auth.ID]; used {
+		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		candidates = append(candidates, auth.Clone())
+		candidates = append(candidates, candidate)
 	}
-	m.mu.RUnlock()
 	if len(candidates) == 0 {
+		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	auth, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
+	selected, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
 	if errPick != nil {
+		m.mu.RUnlock()
 		return nil, nil, errPick
 	}
-	if auth == nil {
+	if selected == nil {
+		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
-	return auth, executor, nil
+	authCopy := selected.Clone()
+	m.mu.RUnlock()
+	return authCopy, executor, nil
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {

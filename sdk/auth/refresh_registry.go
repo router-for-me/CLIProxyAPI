@@ -13,7 +13,6 @@ func init() {
 	registerRefreshLead("iflow", func() Authenticator { return NewIFlowAuthenticator() })
 	registerRefreshLead("gemini", func() Authenticator { return NewGeminiAuthenticator() })
 	registerRefreshLead("gemini-cli", func() Authenticator { return NewGeminiAuthenticator() })
-	registerRefreshLead("gemini-web", func() Authenticator { return NewGeminiWebAuthenticator() })
 }
 
 func registerRefreshLead(provider string, factory func() Authenticator) {

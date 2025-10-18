@@ -67,9 +67,20 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
+	rawJSON = bytes.TrimSpace(rawJSON)
+	if len(rawJSON) == 0 {
+		return []string{}
+	}
+	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+		return []string{}
+	}
+
 	root := gjson.ParseBytes(rawJSON)
-	obj := root.Get("object").String()
-	if obj != "chat.completion.chunk" {
+	obj := root.Get("object")
+	if obj.Exists() && obj.String() != "" && obj.String() != "chat.completion.chunk" {
+		return []string{}
+	}
+	if !root.Get("choices").Exists() || !root.Get("choices").IsArray() {
 		return []string{}
 	}
 
