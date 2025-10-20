@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"encoding/json"
 	"strings"
 	"sync"
 
@@ -29,19 +30,27 @@ type LogFormatter struct{}
 
 // Format renders a single log entry with custom formatting.
 func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
-	var buffer *bytes.Buffer
-	if entry.Buffer != nil {
-		buffer = entry.Buffer
-	} else {
-		buffer = &bytes.Buffer{}
-	}
+    	var buffer *bytes.Buffer
+    	if entry.Buffer != nil {
+    		buffer = entry.Buffer
+    	} else {
+    		buffer = &bytes.Buffer{}
+    	}
 
-	timestamp := entry.Time.Format("2006-01-02 15:04:05")
-	message := strings.TrimRight(entry.Message, "\r\n")
-	formatted := fmt.Sprintf("[%s] [%s] [%s:%d] %s\n", timestamp, entry.Level, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
-	buffer.WriteString(formatted)
+		timestamp := entry.Time.Format("2006-01-02 15:04:05")
+		message := strings.TrimRight(entry.Message, "\r\n")
+		formatted := fmt.Sprintf("[%s] [%s] [%s:%d] %s", timestamp, entry.Level, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
 
-	return buffer.Bytes(), nil
+		// Append structured fields as JSON when present to preserve structured logs
+		if len(entry.Data) > 0 {
+			if b, err := json.Marshal(entry.Data); err == nil {
+				formatted = formatted + " " + string(b)
+			}
+		}
+		formatted = formatted + "\n"
+		buffer.WriteString(formatted)
+
+		return buffer.Bytes(), nil
 }
 
 // SetupBaseLogger configures the shared logrus instance and Gin writers.
@@ -50,6 +59,7 @@ func SetupBaseLogger() {
 	setupOnce.Do(func() {
 		log.SetOutput(os.Stdout)
 		log.SetReportCaller(true)
+		// Reuse existing formatter to keep prior debug output behavior
 		log.SetFormatter(&LogFormatter{})
 
 		ginInfoWriter = log.StandardLogger().Writer()

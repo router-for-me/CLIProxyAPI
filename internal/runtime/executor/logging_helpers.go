@@ -4,20 +4,35 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
 	apiAttemptsKey = "API_UPSTREAM_ATTEMPTS"
 	apiRequestKey  = "API_REQUEST"
 	apiResponseKey = "API_RESPONSE"
+
+	// log field keys
+	logKeyRequestID      = "request_id"
+	logKeyIsStreaming    = "is_streaming"
+	logKeyReqDurationSec = "request_duration_seconds"
+	logKeyStrDurationSec = "stream_duration_seconds"
+	logKeyInputTokens    = "input_tokens"
+	logKeyOutputTokens   = "output_tokens"
+	logKeyTotalTokens    = "total_tokens"
+	logKeyTPSCompletion  = "tps_completion"
+	logKeyTPSTotal       = "tps_total"
+	logKeyMeasuredAt     = "measured_at"
 )
 
 // upstreamRequestLog captures the outbound upstream request details for logging.
@@ -43,6 +58,13 @@ type upstreamAttempt struct {
 	bodyStarted          bool
 	bodyHasContent       bool
 	errorWritten         bool
+
+	// TPS measurement fields
+	requestedAt          time.Time
+	firstOutputAt        time.Time
+	lastOutputAt         time.Time
+	inputTokens          int64
+    outputTokens         int64
 }
 
 // recordAPIRequest stores the upstream request metadata in Gin context for request logging.
@@ -59,6 +81,7 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	index := len(attempts) + 1
 
 	builder := &strings.Builder{}
+	requestedAt := time.Now()
 	builder.WriteString(fmt.Sprintf("=== API REQUEST %d ===\n", index))
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
 	if info.URL != "" {
@@ -83,9 +106,10 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	builder.WriteString("\n\n")
 
 	attempt := &upstreamAttempt{
-		index:    index,
-		request:  builder.String(),
-		response: &strings.Builder{},
+		index:       index,
+		request:     builder.String(),
+		response:    &strings.Builder{},
+		requestedAt: requestedAt,
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
@@ -168,12 +192,18 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if !attempt.bodyStarted {
 		attempt.response.WriteString("Body:\n")
 		attempt.bodyStarted = true
+		// mark first output time when body begins
+		if attempt.firstOutputAt.IsZero() {
+			attempt.firstOutputAt = time.Now()
+		}
 	}
 	if attempt.bodyHasContent {
 		attempt.response.WriteString("\n\n")
 	}
 	attempt.response.WriteString(string(data))
 	attempt.bodyHasContent = true
+	// update last output time for streaming window
+	attempt.lastOutputAt = time.Now()
 
 	updateAggregatedResponse(ginCtx, attempts)
 }
@@ -253,6 +283,76 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 		}
 	}
 	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+
+	// Emit structured TPS metrics to global logger (log-only, not response)
+	if len(attempts) > 0 {
+		// Check dedicated TPS gate as well as general request log
+		var cfg *config.Config
+		if cfgAny, ok := ginCtx.Get("config"); ok {
+			if c, ok2 := cfgAny.(*config.Config); ok2 {
+				cfg = c
+			}
+		}
+		if cfg != nil && !cfg.TPSLog {
+			return
+		}
+		last := attempts[len(attempts)-1]
+		// compute windows
+		var (
+			reqWindowSec float64
+			streamWindowSec float64
+		)
+		if !last.requestedAt.IsZero() {
+			reqWindowSec = time.Since(last.requestedAt).Seconds()
+		}
+		if !last.firstOutputAt.IsZero() && !last.lastOutputAt.IsZero() {
+			streamWindowSec = last.lastOutputAt.Sub(last.firstOutputAt).Seconds()
+		}
+		// compute TPS with guards and round to 2 decimals
+		var tpsCompletion float64
+		if last.outputTokens <= 0 {
+			// no outputs → define as 0.00 (explicit per spec)
+			tpsCompletion = 0
+		} else {
+			window := streamWindowSec
+			if window <= 0 {
+				// fallback to request window for non-stream responses
+				window = reqWindowSec
+			}
+			if window > 0 {
+				tpsCompletion = round2(float64(last.outputTokens) / window)
+			}
+		}
+        var tpsTotal float64
+        if reqWindowSec > 0 && (last.inputTokens+last.outputTokens) > 0 {
+            tpsTotal = round2(float64(last.inputTokens+last.outputTokens) / reqWindowSec)
+        }
+        // expose latest TPS values on Gin context; sample recording happens at request finalization
+        ginCtx.Set("API_TPS_COMPLETION", tpsCompletion)
+        ginCtx.Set("API_TPS_TOTAL", tpsTotal)
+		// generate request id if missing
+		rid := uuid.New().String()
+		// Reuse global logging module (same formatter and outputs)
+		log.WithFields(log.Fields{
+			logKeyRequestID:      rid,
+			logKeyIsStreaming:    !last.firstOutputAt.IsZero(),
+			logKeyReqDurationSec: round2(reqWindowSec),
+			logKeyStrDurationSec: round2(streamWindowSec),
+			logKeyInputTokens:    last.inputTokens,
+			logKeyOutputTokens:   last.outputTokens,
+			logKeyTotalTokens:    last.inputTokens + last.outputTokens,
+			logKeyTPSCompletion:  round2(tpsCompletion),
+			logKeyTPSTotal:       round2(tpsTotal),
+			logKeyMeasuredAt:     time.Now().Format(time.RFC3339Nano),
+		}).Info("per-request-tps")
+	}
+}
+
+func round2(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	return math.Round(v*100) / 100
 }
 
 func writeHeaders(builder *strings.Builder, headers http.Header) {

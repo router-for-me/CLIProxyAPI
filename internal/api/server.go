@@ -229,6 +229,44 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
 	}
+
+	// Expose config pointer to Gin context for downstream middlewares/helpers
+	engine.Use(func(c *gin.Context) {
+		c.Set("config", cfg)
+		c.Next()
+	})
+
+	// TPS sample finalizer (records exactly once per /v1 request)
+	engine.Use(func(c *gin.Context) {
+		c.Next()
+		path := c.Request.URL.Path
+		if !strings.HasPrefix(path, "/v1") {
+			return
+		}
+		if recordedAny, ok := c.Get("API_TPS_RECORDED"); ok {
+			if b, ok2 := recordedAny.(bool); ok2 && b {
+				return
+			}
+		}
+		var completion, total float64
+		var have bool
+		if v, ok := c.Get("API_TPS_COMPLETION"); ok {
+			if f, ok2 := v.(float64); ok2 {
+				completion = f
+				have = true
+			}
+		}
+		if v, ok := c.Get("API_TPS_TOTAL"); ok {
+			if f, ok2 := v.(float64); ok2 {
+				total = f
+				have = true
+			}
+		}
+		if have {
+			usage.RecordTPSSample(completion, total)
+			c.Set("API_TPS_RECORDED", true)
+		}
+	})
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
@@ -383,6 +421,7 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/tps", s.mgmt.GetTPSAggregates)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigFile)
@@ -427,6 +466,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/request-log", s.mgmt.GetRequestLog)
 		mgmt.PUT("/request-log", s.mgmt.PutRequestLog)
 		mgmt.PATCH("/request-log", s.mgmt.PutRequestLog)
+
+		mgmt.GET("/tps-log", s.mgmt.GetTPSLog)
+		mgmt.PUT("/tps-log", s.mgmt.PutTPSLog)
+		mgmt.PATCH("/tps-log", s.mgmt.PutTPSLog)
 
 		mgmt.GET("/request-retry", s.mgmt.GetRequestRetry)
 		mgmt.PUT("/request-retry", s.mgmt.PutRequestRetry)

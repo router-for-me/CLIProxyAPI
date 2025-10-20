@@ -53,6 +53,26 @@ func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
 	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 && detail.TotalTokens == 0 {
 		return
 	}
+
+    // Update per-attempt counters for TPS calculation (max seen to avoid double count)
+    if ginCtx := ginContextFrom(ctx); ginCtx != nil {
+        if attempts, attempt := ensureAttempt(ginCtx); attempt != nil {
+            // Ensure requestedAt is set even when request-log is disabled,
+            // so request window exists for TPS fallback on non-stream paths.
+            if attempt.requestedAt.IsZero() && !r.requestedAt.IsZero() {
+                attempt.requestedAt = r.requestedAt
+            }
+            if detail.InputTokens > attempt.inputTokens {
+                attempt.inputTokens = detail.InputTokens
+            }
+            if detail.OutputTokens > attempt.outputTokens {
+                attempt.outputTokens = detail.OutputTokens
+            }
+            // propagate to context to keep latest snapshot
+            updateAggregatedResponse(ginCtx, attempts)
+        }
+    }
+
 	r.once.Do(func() {
 		usage.PublishRecord(ctx, usage.Record{
 			Provider:    r.provider,
