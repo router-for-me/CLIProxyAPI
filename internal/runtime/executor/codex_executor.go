@@ -82,16 +82,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if from == "claude" {
 		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
 		if userIDResult.Exists() {
-			var cache codexCache
-			var hasKey bool
 			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
-			if cache, hasKey = codexCacheMap[key]; !hasKey || cache.Expire.Before(time.Now()) {
-				cache = codexCache{
-					ID:     uuid.New().String(),
-					Expire: time.Now().Add(1 * time.Hour),
-				}
-				codexCacheMap[key] = cache
-			}
+			cache := loadOrCreateCache(key, time.Hour, func() string {
+				return uuid.New().String()
+			})
 			additionalHeaders["Conversation_id"] = cache.ID
 			additionalHeaders["Session_id"] = cache.ID
 			body, _ = sjson.SetBytes(body, "prompt_cache_key", cache.ID)
@@ -209,16 +203,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if from == "claude" {
 		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
 		if userIDResult.Exists() {
-			var cache codexCache
-			var hasKey bool
 			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
-			if cache, hasKey = codexCacheMap[key]; !hasKey || cache.Expire.Before(time.Now()) {
-				cache = codexCache{
-					ID:     uuid.New().String(),
-					Expire: time.Now().Add(1 * time.Hour),
-				}
-				codexCacheMap[key] = cache
-			}
+			cache := loadOrCreateCache(key, time.Hour, func() string {
+				return uuid.New().String()
+			})
 			additionalHeaders["Conversation_id"] = cache.ID
 			additionalHeaders["Session_id"] = cache.ID
 			body, _ = sjson.SetBytes(body, "prompt_cache_key", cache.ID)
