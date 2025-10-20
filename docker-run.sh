@@ -25,22 +25,64 @@ echo "CLIProxyAPI Runtime Docker Script"
 echo "=================================="
 echo ""
 
-# --- Step 1: Check if binary exists ---
+# --- Step 1: Check if binary exists, if not offer to build ---
 if [ ! -f "./${BINARY_NAME}" ]; then
-    echo -e "${RED}Error: Binary '${BINARY_NAME}' not found in current directory.${NC}"
+    echo -e "${YELLOW}Binary '${BINARY_NAME}' not found in current directory.${NC}"
     echo ""
-    echo "Please build the binary first using one of these methods:"
-    echo ""
-    echo "1. Build for Linux (if you're on Linux):"
-    echo "   CGO_ENABLED=0 GOOS=linux go build -ldflags='-s -w' -o ./CLIProxyAPI ./cmd/server/"
-    echo ""
-    echo "2. Build for Linux (if you're on macOS/Windows):"
-    echo "   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o ./CLIProxyAPI ./cmd/server/"
-    echo ""
-    exit 1
+    read -r -p "Do you want to build it now? [Y/n]: " build_response
+    build_response=${build_response:-Y}
+    
+    if [[ "$build_response" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "Detecting architecture..."
+        HOST_ARCH=$(uname -m)
+        echo "Host architecture: ${HOST_ARCH}"
+        
+        # Determine target architecture
+        if [[ "${HOST_ARCH}" == "x86_64" ]]; then
+            TARGET_ARCH="amd64"
+            DOCKER_PLATFORM="linux/amd64"
+        elif [[ "${HOST_ARCH}" == "aarch64" ]] || [[ "${HOST_ARCH}" == "arm64" ]]; then
+            TARGET_ARCH="arm64"
+            DOCKER_PLATFORM="linux/arm64"
+        else
+            echo -e "${RED}Unsupported architecture: ${HOST_ARCH}${NC}"
+            exit 1
+        fi
+        
+        echo "Building for: linux/${TARGET_ARCH}"
+        echo ""
+        
+        if CGO_ENABLED=0 GOOS=linux GOARCH=${TARGET_ARCH} go build -ldflags='-s -w' -o ./CLIProxyAPI ./cmd/server/; then
+            echo -e "${GREEN}✓ Binary built successfully${NC}"
+        else
+            echo -e "${RED}Error: Failed to build binary${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${RED}Cannot continue without binary${NC}"
+        exit 1
+    fi
 fi
 
 echo -e "${GREEN}✓ Binary found: ${BINARY_NAME}${NC}"
+
+# Check binary architecture
+echo "Checking binary architecture..."
+BINARY_INFO=$(file ./${BINARY_NAME})
+echo "Binary info: ${BINARY_INFO}"
+
+# Detect host architecture for Docker platform
+HOST_ARCH=$(uname -m)
+if [[ "${HOST_ARCH}" == "x86_64" ]]; then
+    DOCKER_PLATFORM="linux/amd64"
+elif [[ "${HOST_ARCH}" == "aarch64" ]] || [[ "${HOST_ARCH}" == "arm64" ]]; then
+    DOCKER_PLATFORM="linux/arm64"
+else
+    DOCKER_PLATFORM="linux/amd64"  # default
+fi
+
+echo "Docker platform: ${DOCKER_PLATFORM}"
 
 # --- Step 2: Check if config.yaml exists ---
 if [ ! -f "./${CONFIG_FILE}" ]; then
@@ -68,8 +110,8 @@ echo -e "${GREEN}✓ Config file found: ${CONFIG_FILE}${NC}"
 
 # --- Step 3: Build Docker image ---
 echo ""
-echo "Building Docker image..."
-if docker build -f Dockerfile.runtime -t "${IMAGE_NAME}:latest" .; then
+echo "Building Docker image for ${DOCKER_PLATFORM}..."
+if docker build --platform "${DOCKER_PLATFORM}" -f Dockerfile.runtime -t "${IMAGE_NAME}:latest" .; then
     echo -e "${GREEN}✓ Docker image built successfully${NC}"
 else
     echo -e "${RED}Error: Failed to build Docker image${NC}"
