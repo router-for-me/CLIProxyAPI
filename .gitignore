@@ -30,3 +30,13 @@ GEMINI.md
 .vscode/*
 .claude/*
 .serena/*
+*.test
+vendor/
+*.out
+*.log
+.env*
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp

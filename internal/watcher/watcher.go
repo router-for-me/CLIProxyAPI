@@ -809,8 +809,8 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			}
 			out = append(out, a)
 		}
-		for i := range cfg.OpenAICompatibility {
-			compat := &cfg.OpenAICompatibility[i]
+        for i := range cfg.OpenAICompatibility {
+            compat := &cfg.OpenAICompatibility[i]
 			providerName := strings.ToLower(strings.TrimSpace(compat.Name))
 			if providerName == "" {
 				providerName = "openai-compatibility"
@@ -881,8 +881,35 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 					}
 					out = append(out, a)
 					createdEntries++
-				}
-			}
+        }
+
+        // Packycode synthesized auth (Provider=codex)
+        if cfg.Packycode.Enabled {
+            base := strings.TrimSpace(cfg.Packycode.BaseURL)
+            if base != "" {
+                key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
+                id, token := idGen.next("packycode:codex", key, base)
+                attrs := map[string]string{
+                    "source":   "config:packycode",
+                    "base_url": base,
+                }
+                if key != "" {
+                    attrs["api_key"] = key
+                }
+                a := &coreauth.Auth{
+                    ID:         id,
+                    Provider:   "codex",
+                    Label:      "packycode",
+                    Status:     coreauth.StatusActive,
+                    Attributes: attrs,
+                    CreatedAt:  now,
+                    UpdatedAt:  now,
+                }
+                out = append(out, a)
+                _ = token // reserved for future tokenized source labels if needed
+            }
+        }
+    }
 			if createdEntries == 0 {
 				idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 				id, token := idGen.next(idKind, base)
@@ -1284,13 +1311,39 @@ func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
-	// OpenAI compatibility providers (summarized)
-	if compat := diffOpenAICompatibility(oldCfg.OpenAICompatibility, newCfg.OpenAICompatibility); len(compat) > 0 {
-		changes = append(changes, "openai-compatibility:")
-		for _, c := range compat {
-			changes = append(changes, "  "+c)
-		}
-	}
+    // OpenAI compatibility providers (summarized)
+    if compat := diffOpenAICompatibility(oldCfg.OpenAICompatibility, newCfg.OpenAICompatibility); len(compat) > 0 {
+        changes = append(changes, "openai-compatibility:")
+        for _, c := range compat {
+            changes = append(changes, "  "+c)
+        }
+    }
+
+    // Packycode (explicit fields)
+    if oldCfg.Packycode.Enabled != newCfg.Packycode.Enabled {
+        changes = append(changes, fmt.Sprintf("packycode.enabled: %t -> %t", oldCfg.Packycode.Enabled, newCfg.Packycode.Enabled))
+    }
+    if strings.TrimSpace(oldCfg.Packycode.BaseURL) != strings.TrimSpace(newCfg.Packycode.BaseURL) {
+        changes = append(changes, fmt.Sprintf("packycode.base-url: %s -> %s", strings.TrimSpace(oldCfg.Packycode.BaseURL), strings.TrimSpace(newCfg.Packycode.BaseURL)))
+    }
+    if oldCfg.Packycode.RequiresOpenAIAuth != newCfg.Packycode.RequiresOpenAIAuth {
+        changes = append(changes, fmt.Sprintf("packycode.requires-openai-auth: %t -> %t", oldCfg.Packycode.RequiresOpenAIAuth, newCfg.Packycode.RequiresOpenAIAuth))
+    }
+    if !strings.EqualFold(strings.TrimSpace(oldCfg.Packycode.WireAPI), strings.TrimSpace(newCfg.Packycode.WireAPI)) {
+        changes = append(changes, fmt.Sprintf("packycode.wire-api: %s -> %s", strings.TrimSpace(oldCfg.Packycode.WireAPI), strings.TrimSpace(newCfg.Packycode.WireAPI)))
+    }
+    if oldCfg.Packycode.Privacy.DisableResponseStorage != newCfg.Packycode.Privacy.DisableResponseStorage {
+        changes = append(changes, fmt.Sprintf("packycode.privacy.disable-response-storage: %t -> %t", oldCfg.Packycode.Privacy.DisableResponseStorage, newCfg.Packycode.Privacy.DisableResponseStorage))
+    }
+    if strings.TrimSpace(oldCfg.Packycode.Defaults.Model) != strings.TrimSpace(newCfg.Packycode.Defaults.Model) {
+        changes = append(changes, fmt.Sprintf("packycode.defaults.model: %s -> %s", strings.TrimSpace(oldCfg.Packycode.Defaults.Model), strings.TrimSpace(newCfg.Packycode.Defaults.Model)))
+    }
+    if !strings.EqualFold(strings.TrimSpace(oldCfg.Packycode.Defaults.ModelReasoningEffort), strings.TrimSpace(newCfg.Packycode.Defaults.ModelReasoningEffort)) {
+        changes = append(changes, fmt.Sprintf("packycode.defaults.model-reasoning-effort: %s -> %s", strings.TrimSpace(oldCfg.Packycode.Defaults.ModelReasoningEffort), strings.TrimSpace(newCfg.Packycode.Defaults.ModelReasoningEffort)))
+    }
+    if strings.TrimSpace(oldCfg.Packycode.Credentials.OpenAIAPIKey) != strings.TrimSpace(newCfg.Packycode.Credentials.OpenAIAPIKey) {
+        changes = append(changes, "packycode.credentials.openai-api-key: updated")
+    }
 
 	return changes
 }

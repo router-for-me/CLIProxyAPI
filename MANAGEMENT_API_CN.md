@@ -687,3 +687,16 @@
 
 - 变更会写回 YAML 配置文件，并由文件监控器热重载配置与客户端。
 - `allow-remote-management` 与 `remote-management-key` 不能通过 API 修改，需在配置文件中设置。
+
+## Packycode 管理端点
+
+- GET `/packycode` — 获取 Packycode 配置块
+  - 响应示例：
+    ```json
+    {"packycode": {"enabled":false,"base-url":"","requires-openai-auth":true,"wire-api":"responses","privacy":{"disable-response-storage":true},"defaults":{"model":"gpt-5","model-reasoning-effort":"high"},"credentials":{"openai-api-key":""}}}
+    ```
+- PUT `/packycode` — 覆盖 Packycode 配置块
+  - 请求体：`PackycodeConfig` 对象（或 `{ "packycode": PackycodeConfig }` 包裹）
+  - 说明：`effective-source` 为只读字段，忽略客户端提供的值。
+- PATCH `/packycode` — 局部更新 Packycode 配置块
+  - 支持对以下字段进行更新：`enabled`、`base-url`、`requires-openai-auth`、`wire-api`、`privacy.disable-response-storage`、`defaults.model`、`defaults.model-reasoning-effort`、`credentials.openai-api-key`。

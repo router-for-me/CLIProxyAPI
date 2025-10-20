@@ -8,6 +8,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"crypto/sha256"
+	"encoding/hex"
 	"io/fs"
 	"net/url"
 	"os"
@@ -21,10 +23,12 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -57,6 +61,7 @@ func main() {
 	var projectID string
 	var configPath string
 	var password string
+	var registerPackycode bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -68,6 +73,7 @@ func main() {
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&password, "password", "", "")
+	flag.BoolVar(&registerPackycode, "packycode", false, "Register Packycode OpenAI models at startup (requires valid packycode config)")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -355,6 +361,13 @@ func main() {
 		cfg = &config.Config{}
 	}
 
+	// Optional: proactively register Packycode models when requested via CLI flag.
+	if registerPackycode {
+		if err := registerPackycodeModels(cfg); err != nil {
+			log.Fatalf("failed to register packycode models: %v", err)
+		}
+	}
+
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
 	if isCloudDeploy {
@@ -436,4 +449,38 @@ func main() {
 		// Start the main proxy service
 		cmd.StartService(cfg, configFilePath, password)
 	}
+}
+
+// registerPackycodeModels registers OpenAI/GPT models under provider 'codex' when
+// packycode is enabled and configuration passes validation.
+func registerPackycodeModels(cfg *config.Config) error {
+    if cfg == nil {
+        return fmt.Errorf("config is nil")
+    }
+    // Validate strictly; when disabled, nothing to do
+    if err := config.ValidatePackycode(cfg); err != nil {
+        return fmt.Errorf("invalid packycode configuration: %w", err)
+    }
+    if !cfg.Packycode.Enabled {
+        log.Info("packycode flag ignored: packycode.enabled=false")
+        return nil
+    }
+    base := strings.TrimSpace(cfg.Packycode.BaseURL)
+    key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
+    // Build a stable client ID for model registry fallback
+    h := sha256.New()
+    h.Write([]byte("packycode:models"))
+    h.Write([]byte{0})
+    h.Write([]byte(base))
+    h.Write([]byte{0})
+    h.Write([]byte(key))
+    digest := hex.EncodeToString(h.Sum(nil))
+    if len(digest) > 12 {
+        digest = digest[:12]
+    }
+    clientID := "packycode:models:" + digest
+    models := registry.GetOpenAIModels()
+    cliproxy.GlobalModelRegistry().RegisterClient(clientID, "codex", models)
+    log.Infof("registered packycode models into registry (client=%s, provider=codex, models=%d)", clientID, len(models))
+    return nil
 }

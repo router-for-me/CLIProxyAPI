@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"sync"
 	"time"
@@ -362,6 +364,9 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnAfterStart(s)
 	}
 
+	// Ensure Packycode models are registered for /v1/models visibility
+	s.ensurePackycodeModelsRegistered(s.cfg)
+
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
 		if newCfg == nil {
@@ -378,6 +383,8 @@ func (s *Service) Run(ctx context.Context) error {
 		s.cfgMu.Lock()
 		s.cfg = newCfg
 		s.cfgMu.Unlock()
+		// Keep model registry in sync for Packycode
+		s.ensurePackycodeModelsRegistered(newCfg)
 		s.rebindExecutors()
 
 	}
@@ -470,6 +477,94 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		usage.StopDefault()
 	})
 	return shutdownErr
+}
+
+// packycodeModelsClientID computes a stable registry client ID for Packycode models
+// based on base-url and openai api key. Returns (id, true) when packycode is enabled
+// and configuration is valid; otherwise ("", false).
+func (s *Service) packycodeModelsClientID(cfg *config.Config) (string, bool) {
+    if cfg == nil || !cfg.Packycode.Enabled {
+        return "", false
+    }
+    if err := config.ValidatePackycode(cfg); err != nil {
+        return "", false
+    }
+    base := strings.TrimSpace(cfg.Packycode.BaseURL)
+    key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
+    h := sha256.New()
+    h.Write([]byte("packycode:models"))
+    h.Write([]byte{0})
+    h.Write([]byte(base))
+    h.Write([]byte{0})
+    h.Write([]byte(key))
+    digest := hex.EncodeToString(h.Sum(nil))
+    if len(digest) > 12 {
+        digest = digest[:12]
+    }
+    return "packycode:models:" + digest, true
+}
+
+// ensurePackycodeModelsRegistered registers/unregisters Packycode OpenAI models
+// in the global model registry depending on current configuration state.
+func (s *Service) ensurePackycodeModelsRegistered(cfg *config.Config) {
+    id, ok := s.packycodeModelsClientID(cfg)
+    if !ok {
+        // Best-effort removal using deterministic ID if any
+        // Build ID ignoring enabled flag to attempt cleanup when toggled off
+        base := strings.TrimSpace(cfg.Packycode.BaseURL)
+        key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
+        h := sha256.New()
+        h.Write([]byte("packycode:models"))
+        h.Write([]byte{0})
+        h.Write([]byte(base))
+        h.Write([]byte{0})
+        h.Write([]byte(key))
+        digest := hex.EncodeToString(h.Sum(nil))
+        if len(digest) > 12 {
+            digest = digest[:12]
+        }
+        if digest != "" {
+            GlobalModelRegistry().UnregisterClient("packycode:models:" + digest)
+        }
+        return
+    }
+    // Ensure executor exists early to avoid executor_not_found
+    if s.coreManager != nil {
+        s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg))
+    }
+    models := registry.GetOpenAIModels()
+    GlobalModelRegistry().RegisterClient(id, "codex", models)
+    // Also ensure there is at least one runtime auth for provider 'codex'
+    if s.coreManager != nil {
+        base := strings.TrimSpace(cfg.Packycode.BaseURL)
+        key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
+        // Derive a stable auth ID similar to watcher synth rule
+        ah := sha256.New()
+        ah.Write([]byte("packycode:codex"))
+        ah.Write([]byte{0})
+        ah.Write([]byte(key))
+        ah.Write([]byte{0})
+        ah.Write([]byte(base))
+        ad := hex.EncodeToString(ah.Sum(nil))
+        if len(ad) > 12 { ad = ad[:12] }
+        authID := "packycode:codex:" + ad
+        now := time.Now()
+        runtimeAuth := &coreauth.Auth{
+            ID:         authID,
+            Provider:   "codex",
+            Label:      "packycode",
+            Status:     coreauth.StatusActive,
+            Attributes: map[string]string{"api_key": key, "base_url": base, "source": "packycode"},
+            CreatedAt:  now,
+            UpdatedAt:  now,
+        }
+        // Register or update
+        if _, ok := s.coreManager.GetByID(authID); ok {
+            _, _ = s.coreManager.Update(context.Background(), runtimeAuth)
+        } else {
+            _, _ = s.coreManager.Register(context.Background(), runtimeAuth)
+        }
+    }
 }
 
 func (s *Service) ensureAuthDir() error {

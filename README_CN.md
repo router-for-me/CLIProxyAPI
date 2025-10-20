@@ -418,6 +418,78 @@ openai-compatibility:
     api-key-entries:
       - api-key: "sk-or-v1-...b780"
         proxy-url: "socks5://proxy.example.com:1080" # 可选:针对该密钥的代理设置
+
+# 启用 Packycode（可选）
+packycode:
+  enabled: true
+  base-url: "https://codex-api.packycode.com/v1"
+  requires-openai-auth: true
+  wire-api: "responses"
+  privacy:
+    disable-response-storage: true
+  defaults:
+    model: "gpt-5"
+    model-reasoning-effort: "high"
+  credentials:
+    openai-api-key: "sk-OPENAI-XXXX..."
+
+### 使用 Packycode（快速验证）
+
+1) 在 `config.yaml` 中添加 `packycode` 字段（见上方示例），或使用管理接口开启：
+
+```bash
+curl -X PATCH \
+  -H "Authorization: Bearer <MANAGEMENT_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "packycode": {
+      "enabled": true,
+      "base-url": "https://codex-api.packycode.com/v1",
+      "requires-openai-auth": true,
+      "wire-api": "responses",
+      "privacy": {"disable-response-storage": true},
+      "defaults": {"model": "gpt-5", "model-reasoning-effort": "high"},
+      "credentials": {"openai-api-key": "sk-OPENAI-XXXX..."}
+    }
+  }' \
+  http://localhost:8317/v0/management/packycode
+```
+
+2) 使配置生效：重启服务或等待热重载（默认自动）。
+
+3) 通过 Claude Code 兼容入口发起一次典型请求（`POST /v1/messages`），应收到正常响应。若出错，请查看「常见错误与修复（Packycode）」与日志。
+
+### 快速停用/恢复 & 故障定位（Packycode）
+
+- 停用：
+  ```bash
+  curl -X PATCH -H "Authorization: Bearer <MANAGEMENT_KEY>" -H "Content-Type: application/json" \
+    -d '{"packycode": {"enabled": false}}' \
+    http://localhost:8317/v0/management/packycode
+  ```
+  停用后，Watcher 会移除合成的 Packycode Auth，流量将不再路由到上游。
+
+- 恢复：将 `enabled` 设回 `true`，并确保 `base-url` 与（如启用）`credentials.openai-api-key` 合法。
+
+- 日志观察：热重载后日志会包含客户端统计，如 `... + X OpenAI-compat + Y Packycode`；当停用 Packycode 时，`Packycode` 计数应为 0。
+
+### 常见错误与修复（Packycode）
+
+- `base-url` 为空或不合法：
+  - 现象：保存配置时报 422，消息包含 `base-url is required` 或 `base-url must be a valid http(s) URL`。
+  - 修复：设置为 `https://codex-api.packycode.com/v1`（或你的有效上游 URL）。
+
+- `requires-openai-auth=true` 但未提供 `credentials.openai-api-key`：
+  - 现象：保存配置时报 422，消息包含 `credentials.openai-api-key is required`。
+  - 修复：添加有效 OpenAI API Key。
+
+- `wire-api` 不是 `responses`：
+  - 现象：保存配置时报 422，消息包含 `wire-api must be "responses"`。
+  - 修复：将 `wire-api` 设为 `responses`。
+
+- `defaults.model-reasoning-effort` 非法：
+  - 现象：保存配置时报 422，消息包含 `defaults.model-reasoning-effort must be one of: low, medium, high`。
+  - 修复：设为 `low|medium|high` 之一（默认 `high`）。
       - api-key: "sk-or-v1-...b781" # 不进行额外代理设置
     # 旧格式(仍支持，但无法为每个密钥指定代理):
     # api-keys:

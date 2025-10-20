@@ -687,3 +687,16 @@ Generic error format:
 
 - Changes are written back to the YAML config file and hot‑reloaded by the file watcher and clients.
 - `allow-remote-management` and `remote-management-key` cannot be changed via the API; configure them in the config file.
+
+## Packycode Endpoints
+
+- GET `/packycode` — Get the Packycode configuration block
+  - Example response:
+    ```json
+    {"packycode": {"enabled":false,"base-url":"","requires-openai-auth":true,"wire-api":"responses","privacy":{"disable-response-storage":true},"defaults":{"model":"gpt-5","model-reasoning-effort":"high"},"credentials":{"openai-api-key":""}}}
+    ```
+- PUT `/packycode` — Replace the Packycode configuration block
+  - Body: a `PackycodeConfig` object (or `{ "packycode": PackycodeConfig }` wrapper)
+  - Note: `effective-source` is read-only and ignored if provided.
+- PATCH `/packycode` — Partially update the Packycode configuration block
+  - Supports updating: `enabled`, `base-url`, `requires-openai-auth`, `wire-api`, `privacy.disable-response-storage`, `defaults.model`, `defaults.model-reasoning-effort`, `credentials.openai-api-key`.

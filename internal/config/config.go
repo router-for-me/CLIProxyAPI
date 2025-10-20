@@ -5,11 +5,12 @@
 package config
 
 import (
-	"errors"
-	"fmt"
-	"os"
-	"strings"
-	"syscall"
+    "errors"
+    "fmt"
+    "net/url"
+    "os"
+    "strings"
+    "syscall"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"golang.org/x/crypto/bcrypt"
@@ -18,7 +19,7 @@ import (
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
-	config.SDKConfig `yaml:",inline"`
+    config.SDKConfig `yaml:",inline"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
 
@@ -52,8 +53,42 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
-	// RemoteManagement nests management-related options under 'remote-management'.
-	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
+    // RemoteManagement nests management-related options under 'remote-management'.
+    RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
+
+    // Packycode holds configuration for Packycode upstream provider integration.
+    Packycode PackycodeConfig `yaml:"packycode" json:"packycode"`
+}
+
+// PackycodeConfig represents configuration for routing Claude Code compatible
+// traffic to the Packycode upstream.
+type PackycodeConfig struct {
+    Enabled             bool                  `yaml:"enabled" json:"enabled"`
+    BaseURL             string                `yaml:"base-url" json:"base-url"`
+    RequiresOpenAIAuth  bool                  `yaml:"requires-openai-auth" json:"requires-openai-auth"`
+    WireAPI             string                `yaml:"wire-api" json:"wire-api"`
+    Privacy             PackycodePrivacy      `yaml:"privacy" json:"privacy"`
+    Defaults            PackycodeDefaults     `yaml:"defaults" json:"defaults"`
+    Credentials         PackycodeCredentials  `yaml:"credentials" json:"credentials"`
+    // EffectiveSource is a read-only indicator of where the effective
+    // configuration was loaded from (e.g., config.yaml | env | codex-cli)
+    EffectiveSource     string                `yaml:"effective-source,omitempty" json:"effective-source,omitempty"`
+}
+
+// PackycodePrivacy groups privacy related options.
+type PackycodePrivacy struct {
+    DisableResponseStorage bool `yaml:"disable-response-storage" json:"disable-response-storage"`
+}
+
+// PackycodeDefaults groups default request options.
+type PackycodeDefaults struct {
+    Model                string `yaml:"model" json:"model"`
+    ModelReasoningEffort string `yaml:"model-reasoning-effort" json:"model-reasoning-effort"`
+}
+
+// PackycodeCredentials groups upstream credentials.
+type PackycodeCredentials struct {
+    OpenAIAPIKey string `yaml:"openai-api-key" json:"openai-api-key"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -179,10 +214,17 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	// Unmarshal the YAML data into the Config struct.
-	var cfg Config
-	// Set defaults before unmarshal so that absent keys keep defaults.
-	cfg.LoggingToFile = false
-	cfg.UsageStatisticsEnabled = false
+    var cfg Config
+    // Set defaults before unmarshal so that absent keys keep defaults.
+    cfg.LoggingToFile = false
+    cfg.UsageStatisticsEnabled = false
+    // Packycode defaults
+    cfg.Packycode.Enabled = false
+    cfg.Packycode.RequiresOpenAIAuth = true
+    cfg.Packycode.WireAPI = "responses"
+    cfg.Packycode.Privacy.DisableResponseStorage = true
+    cfg.Packycode.Defaults.Model = "gpt-5"
+    cfg.Packycode.Defaults.ModelReasoningEffort = "high"
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -205,17 +247,108 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
 	}
 
-	// Sync request authentication providers with inline API keys for backwards compatibility.
-	syncInlineAccessProvider(&cfg)
+    // Sync request authentication providers with inline API keys for backwards compatibility.
+    syncInlineAccessProvider(&cfg)
 
-	// Sanitize OpenAI compatibility providers: drop entries without base-url
-	sanitizeOpenAICompatibility(&cfg)
+    // Sanitize OpenAI compatibility providers: drop entries without base-url
+    sanitizeOpenAICompatibility(&cfg)
 
-	// Sanitize Codex keys: drop entries without base-url
-	sanitizeCodexKeys(&cfg)
+    // Sanitize Codex keys: drop entries without base-url
+    sanitizeCodexKeys(&cfg)
 
-	// Return the populated configuration struct.
-	return &cfg, nil
+    // Normalize and sanitize Packycode configuration
+    sanitizePackycode(&cfg)
+    if !optional {
+        if err := ValidatePackycode(&cfg); err != nil {
+            return nil, fmt.Errorf("invalid packycode configuration: %w", err)
+        }
+    }
+
+    // Mark effective source for Packycode if any relevant fields are present
+    if (cfg.Packycode.Enabled || strings.TrimSpace(cfg.Packycode.BaseURL) != "" || cfg.Packycode.RequiresOpenAIAuth || cfg.Packycode.Credentials.OpenAIAPIKey != "") && cfg.Packycode.EffectiveSource == "" {
+        cfg.Packycode.EffectiveSource = "config.yaml"
+    }
+
+    // Return the populated configuration struct.
+    return &cfg, nil
+}
+
+// sanitizePackycode normalizes and validates Packycode configuration to a safe baseline.
+// Early phase behaviour: coerce to expected defaults rather than returning hard errors.
+func sanitizePackycode(cfg *Config) {
+    if cfg == nil {
+        return
+    }
+    pc := &cfg.Packycode
+    pc.BaseURL = strings.TrimSpace(pc.BaseURL)
+    if pc.WireAPI == "" || !strings.EqualFold(pc.WireAPI, "responses") {
+        pc.WireAPI = "responses"
+    }
+    // Enforce privacy default (do not persist responses by default)
+    if !pc.Privacy.DisableResponseStorage {
+        pc.Privacy.DisableResponseStorage = true
+    }
+    // Clamp effort to allowed set if provided; otherwise keep default
+    switch strings.ToLower(strings.TrimSpace(pc.Defaults.ModelReasoningEffort)) {
+    case "", "high", "medium", "low":
+        if pc.Defaults.ModelReasoningEffort == "" {
+            pc.Defaults.ModelReasoningEffort = "high"
+        }
+    default:
+        pc.Defaults.ModelReasoningEffort = "high"
+    }
+}
+
+// ValidatePackycode performs strict validation for the Packycode configuration.
+// It ensures required fields are present and values are constrained to allowed sets.
+// Returns nil when configuration is valid or Packycode is disabled.
+func ValidatePackycode(cfg *Config) error {
+    if cfg == nil {
+        return nil
+    }
+    pc := cfg.Packycode
+    if !pc.Enabled {
+        return nil
+    }
+
+    var problems []string
+    // base-url: required and must be http/https URL
+    base := strings.TrimSpace(pc.BaseURL)
+    if base == "" {
+        problems = append(problems, "base-url is required when packycode.enabled=true")
+    } else {
+        if u, err := url.Parse(base); err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+            problems = append(problems, "base-url must be a valid http(s) URL")
+        }
+    }
+
+    // wire-api must be "responses"
+    if strings.TrimSpace(strings.ToLower(pc.WireAPI)) != "responses" {
+        problems = append(problems, "wire-api must be \"responses\"")
+    }
+
+    // requires-openai-auth implies credentials.openai-api-key required
+    if pc.RequiresOpenAIAuth {
+        if strings.TrimSpace(pc.Credentials.OpenAIAPIKey) == "" {
+            problems = append(problems, "credentials.openai-api-key is required when requires-openai-auth=true")
+        }
+    }
+
+    // defaults.model-reasoning-effort enumeration
+    switch strings.ToLower(strings.TrimSpace(pc.Defaults.ModelReasoningEffort)) {
+    case "low", "medium", "high":
+        // ok
+    default:
+        // Allow empty (defaulted by sanitizer) but if provided invalid, report
+        if strings.TrimSpace(pc.Defaults.ModelReasoningEffort) != "" {
+            problems = append(problems, "defaults.model-reasoning-effort must be one of: low, medium, high")
+        }
+    }
+
+    if len(problems) > 0 {
+        return fmt.Errorf(strings.Join(problems, "; "))
+    }
+    return nil
 }
 
 // sanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
@@ -344,13 +477,15 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 }
 
 func sanitizeConfigForPersist(cfg *Config) *Config {
-	if cfg == nil {
-		return nil
-	}
-	clone := *cfg
-	clone.SDKConfig = cfg.SDKConfig
-	clone.SDKConfig.Access = config.AccessConfig{}
-	return &clone
+    if cfg == nil {
+        return nil
+    }
+    clone := *cfg
+    clone.SDKConfig = cfg.SDKConfig
+    clone.SDKConfig.Access = config.AccessConfig{}
+    // Do not persist read-only/effective fields
+    clone.Packycode.EffectiveSource = ""
+    return &clone
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]

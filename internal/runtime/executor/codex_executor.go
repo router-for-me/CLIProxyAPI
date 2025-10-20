@@ -135,7 +135,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
-		log.Debugf("request error, error status: %d, error body: %s", resp.StatusCode, string(b))
+		log.Debugf("request error, error status: %d, error body: %s", resp.StatusCode, safeErrorPreview(b))
 		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
 	}
 	data, err := io.ReadAll(resp.Body)
@@ -267,7 +267,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			return nil, readErr
 		}
 		appendAPIResponseChunk(ctx, e.cfg, b)
-		log.Debugf("request error, error status: %d, error body: %s", resp.StatusCode, string(b))
+		log.Debugf("request error, error status: %d, error body: %s", resp.StatusCode, safeErrorPreview(b))
 		return nil, statusErr{code: resp.StatusCode, msg: string(b)}
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -345,6 +345,17 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+// safeErrorPreview returns a redacted description of an error payload without exposing
+// user content. It preserves the original log format placeholder while providing
+// minimal diagnostics.
+func safeErrorPreview(b []byte) string {
+    if len(b) == 0 {
+        return "[empty]"
+    }
+    // Replace body with a redacted marker and length to aid debugging without content leakage.
+    return fmt.Sprintf("[redacted,len=%d]", len(b))
 }
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string) {

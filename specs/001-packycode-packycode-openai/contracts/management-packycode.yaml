@@ -1,0 +1,102 @@
+openapi: 3.0.3
+info:
+  title: CLIProxyAPI Management - Packycode
+  version: 1.0.0
+servers:
+  - url: http://localhost:8317/v0/management
+paths:
+  /packycode:
+    get:
+      summary: Get Packycode configuration
+      operationId: getPackycode
+      responses:
+        '200':
+          description: Current Packycode configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackycodeConfig'
+    put:
+      summary: Replace Packycode configuration
+      operationId: putPackycode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PackycodeConfigInput'
+      responses:
+        '200':
+          description: Updated Packycode configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackycodeConfig'
+    patch:
+      summary: Partially update Packycode configuration
+      operationId: patchPackycode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PackycodeConfigPatch'
+      responses:
+        '200':
+          description: Updated Packycode configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackycodeConfig'
+components:
+  schemas:
+    PackycodeConfig:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        base-url:
+          type: string
+          example: https://codex-api.packycode.com/v1
+        requires-openai-auth:
+          type: boolean
+          default: true
+        wire-api:
+          type: string
+          enum: [responses]
+          default: responses
+        privacy:
+          type: object
+          properties:
+            disable-response-storage:
+              type: boolean
+              default: true
+        defaults:
+          type: object
+          properties:
+            model:
+              type: string
+              default: gpt-5
+            model-reasoning-effort:
+              type: string
+              enum: [low, medium, high]
+              default: high
+        credentials:
+          type: object
+          properties:
+            openai-api-key:
+              type: string
+        effective-source:
+          type: string
+          readOnly: true
+          description: Effective configuration source (config.yaml | env | codex-cli)
+      required: [base-url]
+    PackycodeConfigInput:
+      allOf:
+        - $ref: '#/components/schemas/PackycodeConfig'
+      required: [base-url]
+    PackycodeConfigPatch:
+      type: object
+      description: Any subset of PackycodeConfig fields (except effective-source)
+      additionalProperties: true
