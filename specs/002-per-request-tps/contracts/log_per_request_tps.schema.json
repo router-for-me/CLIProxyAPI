@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Per Request TPS Log Entry",
+  "type": "object",
+  "properties": {
+    "request_id": { "type": "string" },
+    "is_streaming": { "type": "boolean" },
+    "request_duration_seconds": { "type": "number", "minimum": 0 },
+    "stream_duration_seconds": { "type": "number", "minimum": 0 },
+    "input_tokens": { "type": "number", "minimum": 0 },
+    "output_tokens": { "type": "number", "minimum": 0 },
+    "total_tokens": { "type": "number", "minimum": 0 },
+    "tps_completion": { "type": "number", "minimum": 0 },
+    "tps_total": { "type": "number", "minimum": 0 },
+    "measured_at": { "type": "string", "format": "date-time" }
+  },
+  "required": [
+    "request_id",
+    "is_streaming",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "tps_completion",
+    "measured_at"
+  ],
+  "additionalProperties": true
+}

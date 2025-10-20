@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
@@ -49,7 +50,9 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		c.Writer = wrapper
 
 		// Process the request
+		start := time.Now()
 		c.Next()
+		_ = start // reserved for future latency measurements if needed
 
 		// Finalize logging after request processing
 		if err = wrapper.Finalize(c); err != nil {
