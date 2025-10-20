@@ -10,18 +10,18 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 # Install timezone data for TZ support
 RUN apk add --no-cache tzdata ca-certificates
 
-# Create application directory
-RUN mkdir -p /CLIProxyAPI
+# Create application and config directories
+RUN mkdir -p /app /config /data/auths
 
 # Copy the pre-built binary from your local machine
 # Make sure you have built the binary before running docker build
-COPY ./CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+COPY ./CLIProxyAPI /app/CLIProxyAPI
 
 # Make sure the binary is executable
-RUN chmod +x /CLIProxyAPI/CLIProxyAPI
+RUN chmod +x /app/CLIProxyAPI
 
 # Set working directory
-WORKDIR /CLIProxyAPI
+WORKDIR /app
 
 # Expose the default port
 EXPOSE 8317
@@ -30,10 +30,6 @@ EXPOSE 8317
 ENV TZ=Asia/Shanghai
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
 
-# The config.yaml should be mounted from the host at runtime
-# Volume mount point for config and auth directory
-VOLUME ["/CLIProxyAPI"]
-
-# Run the application
-CMD ["./CLIProxyAPI"]
+# Run the application with config file from /config
+CMD ["./CLIProxyAPI", "--config", "/config/config.yaml"]
 

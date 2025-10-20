@@ -93,11 +93,14 @@ echo ""
 # Get absolute path for mounting
 CONFIG_DIR="$(cd "$(dirname "${CONFIG_FILE}")" && pwd)"
 
+# Create auths directory if it doesn't exist
+mkdir -p "${CONFIG_DIR}/auths"
+
 docker run -d \
     --name "${CONTAINER_NAME}" \
     -p "${PORT}:${PORT}" \
-    -v "${CONFIG_DIR}/${CONFIG_FILE}:/CLIProxyAPI/config.yaml:ro" \
-    -v "${CONFIG_DIR}/auths:/CLIProxyAPI/auths" \
+    -v "${CONFIG_DIR}/${CONFIG_FILE}:/config/config.yaml:ro" \
+    -v "${CONFIG_DIR}/auths:/data/auths" \
     --restart unless-stopped \
     "${IMAGE_NAME}:latest"
 
@@ -107,7 +110,10 @@ if [ $? -eq 0 ]; then
     echo "Container Information:"
     echo "  Name: ${CONTAINER_NAME}"
     echo "  Port: ${PORT}"
-    echo "  Config: ${CONFIG_DIR}/${CONFIG_FILE}"
+    echo "  Config: ${CONFIG_DIR}/${CONFIG_FILE} -> /config/config.yaml"
+    echo "  Auths:  ${CONFIG_DIR}/auths -> /data/auths"
+    echo ""
+    echo -e "${YELLOW}Note: Make sure your config.yaml has 'auth-dir: /data/auths'${NC}"
     echo ""
     echo "Useful commands:"
     echo "  View logs:    docker logs -f ${CONTAINER_NAME}"
