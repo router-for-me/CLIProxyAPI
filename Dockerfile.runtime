@@ -1,0 +1,39 @@
+# Runtime-only Dockerfile for CLIProxyAPI
+# This Dockerfile assumes you have already built the binary locally
+# and will copy it from the build context.
+
+FROM alpine:3.22.0
+
+# Use China mainland mirror for apk
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+
+# Install timezone data for TZ support
+RUN apk add --no-cache tzdata ca-certificates
+
+# Create application directory
+RUN mkdir -p /CLIProxyAPI
+
+# Copy the pre-built binary from your local machine
+# Make sure you have built the binary before running docker build
+COPY ./CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+
+# Make sure the binary is executable
+RUN chmod +x /CLIProxyAPI/CLIProxyAPI
+
+# Set working directory
+WORKDIR /CLIProxyAPI
+
+# Expose the default port
+EXPOSE 8317
+
+# Set timezone to Asia/Shanghai
+ENV TZ=Asia/Shanghai
+RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
+
+# The config.yaml should be mounted from the host at runtime
+# Volume mount point for config and auth directory
+VOLUME ["/CLIProxyAPI"]
+
+# Run the application
+CMD ["./CLIProxyAPI"]
+
