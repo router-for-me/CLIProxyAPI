@@ -35,6 +35,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// DisableCooling disables quota cooldown scheduling when true.
+	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
@@ -230,17 +233,18 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	// Unmarshal the YAML data into the Config struct.
-    var cfg Config
-    // Set defaults before unmarshal so that absent keys keep defaults.
-    cfg.LoggingToFile = false
-    cfg.UsageStatisticsEnabled = false
-    // Packycode defaults
-    cfg.Packycode.Enabled = false
-    cfg.Packycode.RequiresOpenAIAuth = true
-    cfg.Packycode.WireAPI = "responses"
-    cfg.Packycode.Privacy.DisableResponseStorage = true
-    cfg.Packycode.Defaults.Model = "gpt-5"
-    cfg.Packycode.Defaults.ModelReasoningEffort = "high"
+	var cfg Config
+	// Set defaults before unmarshal so that absent keys keep defaults.
+	cfg.LoggingToFile = false
+	cfg.UsageStatisticsEnabled = false
+	cfg.DisableCooling = false
+	// Packycode defaults
+	cfg.Packycode.Enabled = false
+	cfg.Packycode.RequiresOpenAIAuth = true
+	cfg.Packycode.WireAPI = "responses"
+	cfg.Packycode.Privacy.DisableResponseStorage = true
+	cfg.Packycode.Defaults.Model = "gpt-5"
+	cfg.Packycode.Defaults.ModelReasoningEffort = "high"
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.

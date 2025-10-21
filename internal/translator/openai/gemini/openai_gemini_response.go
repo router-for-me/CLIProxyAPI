@@ -141,35 +141,46 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					toolIndex := int(toolCall.Get("index").Int())
 					toolID := toolCall.Get("id").String()
 					toolType := toolCall.Get("type").String()
+					function := toolCall.Get("function")
 
-					if toolType == "function" {
-						function := toolCall.Get("function")
-						functionName := function.Get("name").String()
-						functionArgs := function.Get("arguments").String()
+					// Skip non-function tool calls explicitly marked as other types.
+					if toolType != "" && toolType != "function" {
+						return true
+					}
 
-						// Initialize accumulator if needed
-						if _, exists := (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex]; !exists {
-							(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex] = &ToolCallAccumulator{
-								ID:   toolID,
-								Name: functionName,
-							}
-						}
+					// OpenAI streaming deltas may omit the type field while still carrying function data.
+					if !function.Exists() {
+						return true
+					}
 
-						// Update ID if provided
-						if toolID != "" {
-							(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex].ID = toolID
-						}
+					functionName := function.Get("name").String()
+					functionArgs := function.Get("arguments").String()
 
-						// Update name if provided
-						if functionName != "" {
-							(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex].Name = functionName
-						}
-
-						// Accumulate arguments
-						if functionArgs != "" {
-							(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex].Arguments.WriteString(functionArgs)
+					// Initialize accumulator if needed so later deltas without type can append arguments.
+					if _, exists := (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex]; !exists {
+						(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex] = &ToolCallAccumulator{
+							ID:   toolID,
+							Name: functionName,
 						}
 					}
+
+					acc := (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex]
+
+					// Update ID if provided
+					if toolID != "" {
+						acc.ID = toolID
+					}
+
+					// Update name if provided
+					if functionName != "" {
+						acc.Name = functionName
+					}
+
+					// Accumulate arguments
+					if functionArgs != "" {
+						acc.Arguments.WriteString(functionArgs)
+					}
+
 					return true
 				})
 
