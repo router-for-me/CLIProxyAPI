@@ -493,6 +493,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/request-retry", s.mgmt.PutRequestRetry)
 		mgmt.PATCH("/request-retry", s.mgmt.PutRequestRetry)
 
+		// providers/models listing for management UI
+		mgmt.GET("/providers", s.mgmt.GetProviders)
+		mgmt.GET("/models", s.mgmt.GetModels)
+
 		mgmt.GET("/claude-api-key", s.mgmt.GetClaudeKeys)
 		mgmt.PUT("/claude-api-key", s.mgmt.PutClaudeKeys)
 		mgmt.PATCH("/claude-api-key", s.mgmt.PatchClaudeKey)

@@ -258,6 +258,9 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "codex":
 		s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg))
+	case "packycode":
+		// 外部 provider=packycode → 内部复用 codex 执行器
+		s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg))
 	case "qwen":
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "zhipu":
@@ -532,11 +535,13 @@ func (s *Service) ensurePackycodeModelsRegistered(cfg *config.Config) {
     }
     // Ensure executor exists early to avoid executor_not_found
     if s.coreManager != nil {
+        // Register codex executor but expose provider name as 'packycode' via alias (handled in ensureExecutorsForAuth)
         s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg))
     }
     models := registry.GetOpenAIModels()
-    GlobalModelRegistry().RegisterClient(id, "codex", models)
-    // Also ensure there is at least one runtime auth for provider 'codex'
+    // Register models under external provider key 'packycode' (internally still served by codex executor)
+    GlobalModelRegistry().RegisterClient(id, "packycode", models)
+    // Also ensure there is at least one runtime auth for provider 'packycode'
     if s.coreManager != nil {
         base := strings.TrimSpace(cfg.Packycode.BaseURL)
         key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
@@ -553,7 +558,7 @@ func (s *Service) ensurePackycodeModelsRegistered(cfg *config.Config) {
         now := time.Now()
         runtimeAuth := &coreauth.Auth{
             ID:         authID,
-            Provider:   "codex",
+            Provider:   "packycode",
             Label:      "packycode",
             Status:     coreauth.StatusActive,
             Attributes: map[string]string{"api_key": key, "base_url": base, "source": "packycode"},
@@ -614,6 +619,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "claude":
 		models = registry.GetClaudeModels()
 	case "codex":
+		models = registry.GetOpenAIModels()
+	case "packycode":
+		// 对外 provider=packycode 映射到 OpenAI(GPT) 模型集合
 		models = registry.GetOpenAIModels()
 	case "qwen":
 		models = registry.GetQwenModels()

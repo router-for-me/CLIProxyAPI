@@ -732,6 +732,30 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	cfg := w.config
 	w.clientsMutex.RUnlock()
 	if cfg != nil {
+		// Packycode synthesized auth (External Provider=packycode; internal mapped to codex executor)
+		if cfg.Packycode.Enabled {
+			base := strings.TrimSpace(cfg.Packycode.BaseURL)
+			if base != "" {
+				key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
+				id, token := idGen.next("packycode:codex", key, base)
+				attrs := map[string]string{
+					"source":   "config:packycode",
+					"base_url": base,
+				}
+				if key != "" { attrs["api_key"] = key }
+				a := &coreauth.Auth{
+					ID:         id,
+					Provider:   "packycode",
+					Label:      "packycode",
+					Status:     coreauth.StatusActive,
+					Attributes: attrs,
+					CreatedAt:  now,
+					UpdatedAt:  now,
+				}
+				out = append(out, a)
+				_ = token
+			}
+		}
 		// Gemini official API keys -> synthesize auths
 		for i := range cfg.GlAPIKey {
 			k := strings.TrimSpace(cfg.GlAPIKey[i])
@@ -912,7 +936,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 					createdEntries++
         }
 
-        // Packycode synthesized auth (Provider=codex)
+        // Packycode synthesized auth (External Provider=packycode; internal mapped to codex executor)
         if cfg.Packycode.Enabled {
             base := strings.TrimSpace(cfg.Packycode.BaseURL)
             if base != "" {
@@ -927,7 +951,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
                 }
                 a := &coreauth.Auth{
                     ID:         id,
-                    Provider:   "codex",
+                    Provider:   "packycode",
                     Label:      "packycode",
                     Status:     coreauth.StatusActive,
                     Attributes: attrs,

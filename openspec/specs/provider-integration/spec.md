@@ -3,6 +3,18 @@
 ## Purpose
 TBD - created by archiving change add-zhipu-api-support. Update Purpose after archive.
 ## Requirements
+### Requirement: Packycode Provider Exposure (Alias to Codex)
+系统 SHALL 将 `packycode` 作为对外 provider 暴露，并在内部执行路径上映射到 Codex 执行器与 OpenAI 模型集合；所有对外列表与筛选（/v1/models、/v0/management/providers、/v0/management/models、/v0/management/tps）均应识别 `packycode`，同时保持既有 Codex 行为不变。
+
+参见：openspec/changes/tps-specified-model/specs/provider-integration/packycode-provider-alias.md
+
+#### Scenario: Management listing and filtering
+- **WHEN** 管理端启用
+- **THEN**
+  - `GET /v0/management/providers` 返回包含 `packycode` 在内的 provider 列表
+  - `GET /v0/management/models?provider=packycode` 返回由 `packycode` 提供的模型（模型元数据含 `providers` 列）
+  - `GET /v0/management/tps?...&provider=packycode` 支持按 `packycode` 过滤窗口聚合
+
 ### Requirement: Zhipu Provider Integration (Direct)
 系统 SHALL 在 provider registry 中注册一个 `zhipu` 提供商，占位于执行路径，不改变现有 OpenAI‑compat 行为。
 

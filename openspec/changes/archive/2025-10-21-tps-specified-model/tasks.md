@@ -9,8 +9,8 @@
 ## 2. Validation
 
 - [x] 2.1 单元测试：`per-request-tps` 事件包含 `provider` 与 `model` 字段（以及可选 `provider_model`）
-- [ ] 2.2 单元测试：聚合器过滤逻辑（provider-only、model-only、provider+model；含边界：不存在样本、零值）
-- [ ] 2.3 端到端测试：`GET /v0/management/tps?window=5m&provider=zhipu&model=glm-4.6` 返回仅该组合样本；`?provider=zhipu` 与 `?model=glm-4.6` 单独也能正确过滤
+- [x] 2.2 单元测试：聚合器过滤逻辑（provider-only、model-only、provider+model；含边界：不存在样本、零值）
+- [x] 2.3 端到端测试：`GET /v0/management/tps?window=5m&provider=zhipu&model=glm-4.6` 返回仅该组合样本；`?provider=zhipu` 与 `?model=glm-4.6` 单独也能正确过滤（参考新增 packycode/zhipu 用例）
 
 ## 3. Non-Goals / Compatibility
 

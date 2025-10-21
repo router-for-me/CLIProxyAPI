@@ -66,7 +66,7 @@ CLIProxyAPI 是一个为本地与容器环境提供 OpenAI/Gemini/Claude/Codex �
 - 认证登录：支持 Gemini/OpenAI/Claude/Qwen/iFlow 的本地 OAuth 登录流程；各自监听端口：8085/1455/54545/—/11451（README.md）。
 - 多账户负载均衡：同一 Provider 多账户轮询；部分能力仅限本地回环以确保安全（README.md “NOTE”）。
 - 管理 API：`/v0/management/**` 提供配置读写、日志、用量与密钥管理；启用条件为配置或环境提供管理密钥（internal/api/server.go:291）。
-- 可选 Packycode：开启后将 Claude Code 兼容请求透传至上游（cmd/server/main.go:454）。
+- 可选 Packycode：对外 provider=packycode，对内映射至 Codex 执行器与 OpenAI 模型集；/v1/models 可见，管理端可列举/筛选（参见 openspec/changes/tps-specified-model/specs/provider-integration/packycode-provider-alias.md）。
 
 ## Important Constraints
 - 安全缺省：

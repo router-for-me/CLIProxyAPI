@@ -485,7 +485,8 @@ func registerPackycodeModels(cfg *config.Config) error {
     }
     clientID := "packycode:models:" + digest
     models := registry.GetOpenAIModels()
-    cliproxy.GlobalModelRegistry().RegisterClient(clientID, "codex", models)
-    log.Infof("registered packycode models into registry (client=%s, provider=codex, models=%d)", clientID, len(models))
+    // 对外 provider=packycode（内部仍由 codex 执行器处理）
+    cliproxy.GlobalModelRegistry().RegisterClient(clientID, "packycode", models)
+    log.Infof("registered packycode models into registry (client=%s, provider=packycode, models=%d)", clientID, len(models))
     return nil
 }
