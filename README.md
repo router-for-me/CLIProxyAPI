@@ -1,5 +1,37 @@
 # CLI Proxy API
 
+---
+
+## 🔔 Important: Amp CLI Support Fork
+
+**This is a specialized fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) that adds support for the Amp CLI tool.**
+
+### Why This Fork Exists
+
+The **Amp CLI** requires custom routing patterns to function properly. The upstream CLIProxyAPI project maintainers opted not to merge Amp-specific routing support into the main codebase.
+
+### Which Version Should You Use?
+
+- **Use this fork** if you want to run **both Factory CLI and Amp CLI** with the same proxy server
+- **Use upstream** ([router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)) if you only need Factory CLI support
+
+### 📖 Complete Setup Guide
+
+**→ [USING_WITH_FACTORY_AND_AMP.md](USING_WITH_FACTORY_AND_AMP.md)** - Comprehensive guide for using this proxy with both Factory CLI (Droid) and Amp CLI and IDE extensions, including OAuth setup, configuration examples, and troubleshooting.
+
+### Key Differences
+
+This fork includes:
+- ✅ **Amp CLI route aliases** (`/api/provider/{provider}/v1...`)
+- ✅ **Amp upstream proxy support** for OAuth and management routes
+- ✅ **Automatic gzip decompression** for Amp upstream responses
+- ✅ **Smart secret management** with precedence: config > env > file
+- ✅ **All Factory CLI features** from upstream (fully compatible)
+
+All Amp-specific code is isolated in the `internal/api/modules/amp` module, making it easy to sync upstream changes with minimal conflicts.
+
+---
+
 English | [中文](README_CN.md)
 
 A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
@@ -40,6 +72,15 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
+### Fork-Specific: Amp CLI Support 🔥
+- **Full Amp CLI integration** via provider route aliases (`/api/provider/{provider}/v1...`)
+- **Amp upstream proxy** for OAuth authentication and management routes
+- **Smart secret management** with configurable precedence (config > env > file)
+- **Automatic gzip decompression** for Amp upstream responses
+- **5-minute secret caching** to reduce file I/O overhead
+- **Zero conflict** with Factory CLI - use both tools simultaneously
+- **Modular architecture** for easy upstream sync (90% reduction in merge conflicts)
+
 ## Getting Started
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
@@ -78,7 +119,7 @@ Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with A
 
 Browser-based tool to translate SRT subtitles using your Gemini subscription via CLIProxyAPI with automatic validation/error correction - no API keys needed
 
-> [!NOTE]  
+> [!NOTE]
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 
 ## License

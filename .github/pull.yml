@@ -1,0 +1,17 @@
+# Configuration for Pull app - https://github.com/wei/pull
+# 
+# Pull bot is DISABLED for this repository.
+# 
+# This fork contains active development (Amp CLI integration) and should be
+# manually synced with upstream via periodic rebasing to maintain a clean
+# linear history.
+#
+# To sync with upstream manually:
+#   git fetch upstream
+#   git rebase upstream/main
+#   git push origin main --force-with-lease
+#
+# Pull bot remains active for other repositories.
+
+version: "1"
+rules: []

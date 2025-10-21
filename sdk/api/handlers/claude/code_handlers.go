@@ -8,9 +8,12 @@ package claude
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
 
@@ -153,6 +157,23 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 		cliCancel(errMsg.Error)
 		return
 	}
+
+	// Decompress gzipped responses - Claude API sometimes returns gzip without Content-Encoding header
+	// This fixes title generation and other non-streaming responses that arrive compressed
+	if len(resp) >= 2 && resp[0] == 0x1f && resp[1] == 0x8b {
+		gzReader, err := gzip.NewReader(bytes.NewReader(resp))
+		if err != nil {
+			log.Warnf("failed to decompress gzipped Claude response: %v", err)
+		} else {
+			defer gzReader.Close()
+			if decompressed, err := io.ReadAll(gzReader); err != nil {
+				log.Warnf("failed to read decompressed Claude response: %v", err)
+			} else {
+				resp = decompressed
+			}
+		}
+	}
+
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
