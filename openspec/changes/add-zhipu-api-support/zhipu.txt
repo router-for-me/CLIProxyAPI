@@ -1,0 +1,536 @@
+# HTTP API 调用
+
+智谱AI 提供基于 RESTful 架构的应用程序接口，通过标准的 HTTP 协议与智谱AI 的模型服务进行交互。无论您使用什么编程语言或开发框架，都可以通过 HTTP 请求来调用智谱AI 的各种 AI 模型。
+
+### 核心优势
+
+<CardGroup cols={2}>
+  <Card title="跨平台兼容" icon={<svg style={{maskImage: "url(/resource/icon/globe.svg)", maskRepeat: "no-repeat", maskPosition: "center center",}} className={"h-6 w-6 bg-primary dark:bg-primary-light !m-0 shrink-0"}/>}>
+    支持所有支持 HTTP 协议的编程语言和平台
+  </Card>
+
+  <Card title="标准协议" icon={<svg style={{maskImage: "url(/resource/icon/shield-check.svg)", maskRepeat: "no-repeat", maskPosition: "center center",}} className={"h-6 w-6 bg-primary dark:bg-primary-light !m-0 shrink-0"}/>}>
+    基于 RESTful 设计，遵循 HTTP 标准，易于理解和使用
+  </Card>
+
+  <Card title="灵活集成" icon={<svg style={{maskImage: "url(/resource/icon/puzzle-piece.svg)", maskRepeat: "no-repeat", maskPosition: "center center",}} className={"h-6 w-6 bg-primary dark:bg-primary-light !m-0 shrink-0"}/>}>
+    可以集成到任何现有的应用程序和系统中
+  </Card>
+
+  <Card title="实时调用" icon={<svg style={{maskImage: "url(/resource/icon/bolt.svg)", maskRepeat: "no-repeat", maskPosition: "center center",}} className={"h-6 w-6 bg-primary dark:bg-primary-light !m-0 shrink-0"}/>}>
+    支持同步和异步调用，满足不同场景需求
+  </Card>
+</CardGroup>
+
+## 获取 API Key
+
+1. 访问 [智谱AI 开放平台](https://bigmodel.cn)
+2. 注册并登录您的账户
+3. 在 [API Keys](https://bigmodel.cn/usercenter/proj-mgmt/apikeys) 管理页面创建 API Key
+4. 复制您的 API Key 以供使用
+
+## API 基础信息
+
+### 请求地址
+
+```
+https://open.bigmodel.cn/api/paas/v4/
+```
+
+### 请求头要求
+
+<mcreference link="https://bigmodel.cn/dev/api/http-call/http-para" index="0">0</mcreference>
+
+```http  theme={null}
+Content-Type: application/json
+Authorization: Bearer YOUR_API_KEY
+```
+
+### 支持的鉴权方式
+
+<Tabs>
+  <Tab title="API Key 鉴权">
+    最简单的鉴权方式，直接使用您的 API Key：
+
+    ```bash  theme={null}
+    curl --location 'https://open.bigmodel.cn/api/paas/v4/chat/completions' \
+    --header 'Authorization: Bearer YOUR_API_KEY' \
+    --header 'Content-Type: application/json' \
+    --data '{
+        "model": "glm-4.6",
+        "messages": [
+            {
+                "role": "user",
+                "content": "你好"
+            }
+        ]
+    }'
+    ```
+  </Tab>
+
+  <Tab title="JWT Token 鉴权">
+    使用 JWT Token 进行鉴权，适合需要更高安全性的场景：
+    安装依赖 PyJWT
+
+    ```shell  theme={null}
+    pip install PyJWT
+    ```
+
+    ```python  theme={null}
+    import time
+    import jwt
+
+    def generate_token(apikey: str, exp_seconds: int):
+        try:
+            id, secret = apikey.split(".")
+        except Exception as e:
+            raise Exception("invalid apikey", e)
+
+        payload = {
+            "api_key": id,
+            "exp": int(round(time.time() * 1000)) + exp_seconds * 1000,
+            "timestamp": int(round(time.time() * 1000)),
+        }
+
+        return jwt.encode(
+            payload,
+            secret,
+            algorithm="HS256",
+            headers={"alg": "HS256", "sign_type": "SIGN"},
+        )
+
+    # 使用生成的 token
+    token = generate_token("your-api-key", 3600)  # 1 小时有效期
+    ```
+  </Tab>
+</Tabs>
+
+## 基础调用示例
+
+### 简单对话（端到端本地验证）
+
+```bash
+# 本项目 e2e 测试（需可用 key 与 base-url），设置环境变量后运行：
+export E2E_ZHIPU_API_KEY="YOUR_API_KEY"
+export E2E_ZHIPU_BASE_URL="https://open.bigmodel.cn/api/paas/v4"
+go test ./tests/e2e -run ZhipuE2E -v
+
+# 直接 curl（与执行器一致的 OpenAI-compatible 接口）
+curl --location 'https://open.bigmodel.cn/api/paas/v4/chat/completions' \
+  --header 'Authorization: Bearer YOUR_API_KEY' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "model": "glm-4.6",
+    "messages": [{"role": "user", "content": "请介绍一下人工智能的发展历程"}],
+    "temperature": 1.0,
+    "max_tokens": 1024
+  }'
+```
+
+### 流式响应
+
+```bash  theme={null}
+curl --location 'https://open.bigmodel.cn/api/paas/v4/chat/completions' \
+--header 'Authorization: Bearer YOUR_API_KEY' \
+--header 'Content-Type: application/json' \
+--data '{
+    "model": "glm-4.6",
+    "messages": [
+        {
+            "role": "user",
+            "content": "写一首关于春天的诗"
+        }
+    ],
+    "stream": true
+}'
+```
+
+### 多轮对话
+
+```bash  theme={null}
+curl --location 'https://open.bigmodel.cn/api/paas/v4/chat/completions' \
+--header 'Authorization: Bearer YOUR_API_KEY' \
+--header 'Content-Type: application/json' \
+--data '{
+    "model": "glm-4.6",
+    "messages": [
+        {
+            "role": "system",
+            "content": "你是一个专业的编程助手"
+        },
+        {
+            "role": "user",
+            "content": "什么是递归？"
+        },
+        {
+            "role": "assistant",
+            "content": "递归是一种编程技术，函数调用自身来解决问题..."
+        },
+        {
+            "role": "user",
+            "content": "能给我一个 Python 递归的例子吗？"
+        }
+    ]
+}'
+```
+
+## 常用编程语言示例
+
+<Tabs>
+  <Tab title="Python">
+    ```python  theme={null}
+    import requests
+    import json
+
+    def call_zhipu_api(messages, model="glm-4.6"):
+        url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+
+        headers = {
+            "Authorization": "Bearer YOUR_API_KEY",
+            "Content-Type": "application/json"
+        }
+
+        data = {
+            "model": model,
+            "messages": messages,
+            "temperature": 1.0
+        }
+
+        response = requests.post(url, headers=headers, json=data)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"API调用失败: {response.status_code}, {response.text}")
+
+    # 使用示例
+    messages = [
+        {"role": "user", "content": "你好，请介绍一下自己"}
+    ]
+
+    result = call_zhipu_api(messages)
+    print(result['choices'][0]['message']['content'])
+    ```
+  </Tab>
+
+  <Tab title="JavaScript">
+    ```javascript  theme={null}
+    async function callZhipuAPI(messages, model = 'glm-4.6') {
+        const url = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer YOUR_API_KEY',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: model,
+                messages: messages,
+                temperature: 0.6
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`API 调用失败: ${response.status}`);
+        }
+
+        return await response.json();
+    }
+
+    // 使用示例
+    const messages = [
+        { role: 'user', content: '你好，请介绍一下自己' }
+    ];
+
+    callZhipuAPI(messages)
+        .then(result => {
+            console.log(result.choices[0].message.content);
+        })
+        .catch(error => {
+            console.error('错误:', error);
+        });
+    ```
+  </Tab>
+
+  <Tab title="Java">
+    ```java  theme={null}
+    import com.fasterxml.jackson.databind.ObjectMapper;
+    import okhttp3.MediaType;
+    import okhttp3.OkHttpClient;
+    import okhttp3.Request;
+    import okhttp3.RequestBody;
+    import okhttp3.Response;
+    import java.util.Collections;
+    import java.util.HashMap;
+    import java.util.Map;
+
+    public class AgentExample {
+
+        public static void main(String[] args) throws Exception {
+
+            OkHttpClient client = new OkHttpClient();
+            ObjectMapper mapper = new ObjectMapper();
+            Map<String, String> messages = new HashMap<>(8);
+            messages.put("role", "user");
+            messages.put("content", "你好，请介绍一下自己");
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("model", "glm-4.6");
+            requestBody.put("messages", Collections.singletonList(messages));
+            requestBody.put("temperature", 0.6);
+
+            String jsonBody = mapper.writeValueAsString(requestBody);
+            MediaType JSON = MediaType.get("application/json; charset=utf-8");
+            RequestBody body = RequestBody.create(JSON, jsonBody);
+            Request request = new Request.Builder()
+                .url("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+                .addHeader("Authorization", "Bearer your_api_key")
+                .addHeader("Content-Type", "application/json")
+                .post(body)
+                .build();
+            try (Response response = client.newCall(request).execute()) {
+                System.out.println(response.body().string());
+            }
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## 错误处理
+
+### 常见错误码
+
+| 错误码 | 说明      | 解决方案            |
+| --- | ------- | --------------- |
+| 401 | 未授权     | 检查 API Key 是否正确 |
+| 429 | 请求过于频繁  | 降低请求频率，实施重试机制   |
+| 500 | 服务器内部错误 | 稍后重试，如持续出现请联系支持 |
+
+更多错误码和解决方案请参考 [API 错误码文档](/cn/faq/api-code)
+
+## 实践建议
+
+<CardGroup cols={2}>
+  <Card title="安全性">
+    * 妥善保管 API Key，不要在代码中硬编码
+    * 使用环境变量或配置文件存储敏感信息
+    * 定期轮换 API Key
+  </Card>
+
+  <Card title="性能优化">
+    * 实施连接池和会话复用
+    * 合理设置超时时间
+    * 使用异步请求处理高并发场景
+  </Card>
+
+  <Card title="错误处理">
+    * 实施指数退避重试机制
+    * 记录详细的错误日志
+    * 设置合理的超时和重试次数
+  </Card>
+
+  <Card title="监控">
+    * 监控 API 调用频率和成功率
+    * 跟踪响应时间和错误率
+    * 设置告警机制
+  </Card>
+</CardGroup>
+
+## 更多资源
+
+<CardGroup cols={2}>
+  <Card title="API 文档" icon={<svg style={{maskImage: "url(/resource/icon/book.svg)", maskRepeat: "no-repeat", maskPosition: "center center",}} className={"h-6 w-6 bg-primary dark:bg-primary-light !m-0 shrink-0"}/>} href="/cn/api/introduction">
+    查看完整的 API 接口文档和参数说明
+  </Card>
+
+  <Card title="技术支持" icon={<svg style={{maskImage: "url(/resource/icon/headset.svg)", maskRepeat: "no-repeat", maskPosition: "center center",}} className={"h-6 w-6 bg-primary dark:bg-primary-light !m-0 shrink-0"}/>} href="https://bigmodel.cn/online-book/customerService">
+    获取技术支持和帮助
+  </Card>
+</CardGroup>
+
+<Note>
+  建议在生产环境中使用 HTTPS 协议，并实施适当的安全措施来保护您的 API 密钥和数据传输。
+</Note>
+
+
+
+# 迁移至 GLM-4.6
+
+<Tip>
+  本文介绍如何将调用从 GLM-4.5 或其它早期模型迁移到我们迄今为止最强的编码模型 Z.ai GLM-4.6，涵盖采样参数差异、流式工具调用等要点。
+</Tip>
+
+## GLM-4.6 的特性
+
+* 支持更大上下文与输出：最大上下文 200K，最大输出 128K。
+* 新增支持工具调用过程的流式输出（`tool_stream=true`），实时获取工具调用参数。
+* 同 GLM-4.5 系列，支持深度思考（`thinking={ type: "enabled" }`）。
+* 更卓越的代码性能和先进的推理能力。
+
+## 迁移清单（Checklist）
+
+* [ ] 更新模型编码为 `glm-4.6`
+* [ ] 采样参数：`temperature` 默认值 `1.0`, `top_p` 默认值 `0.95`，建议只选一个进行调参
+* [ ] 深度思考：按需关闭或启用 `thinking={ type: "enabled" }`，用于复杂推理/编码
+* [ ] 流式响应：启用 `stream=true` 并正确处理 `delta.reasoning_content` 与 `delta.content`
+* [ ] 流式工具调用：启用 `stream=true` 和 `tool_stream=true` 并流式拼接 `delta.tool_calls[*].function.arguments`
+* [ ] 最大输出与上下文：合理设置 `max_tokens`（GLM-4.6 最大输出 128K，上下文 200K）
+* [ ] Prompt 优化：配合深度思考，采用更明确的指令与约束
+* [ ] 开发环境验证：进行用例测试与回归，关注随机性、延迟、工具流中的参数完整性
+
+## 开始迁移
+
+### 1. 更新模型编码
+
+* 将 `model` 更新为 `glm-4.6`。
+
+```python  theme={null}
+resp = client.chat.completions.create(
+    model="glm-4.6",
+    messages=[{"role": "user", "content": "简述 GLM-4.6 的优势"}]
+)
+```
+
+### 2. 更新采样参数
+
+* `temperature`：控制随机性；数值更高更发散，数值更低更稳定。
+* `top_p`：控制核采样；更高值扩大候选集，更低值收敛候选集。
+* `temperature` 默认为 `1.0`, `top_p` 默认为 `0.95`, 不建议同时调整两者。
+
+```python  theme={null}
+# Plan A：使用 temperature（推荐）
+resp = client.chat.completions.create(
+    model="glm-4.6",
+    messages=[{"role": "user", "content": "写一段更具创意的品牌介绍"}],
+    temperature=1.0
+)
+
+# Plan B：使用 top_p
+resp = client.chat.completions.create(
+    model="glm-4.6",
+    messages=[{"role": "user", "content": "生成更稳定的技术说明"}],
+    top_p=0.8
+)
+```
+
+### 3. 深度思考（可选）
+
+* GLM-4.6 延续支持深度思考能力，默认为开启。
+* 在复杂推理、编码任务中，建议开启：
+
+```python  theme={null}
+resp = client.chat.completions.create(
+    model="glm-4.6",
+    messages=[{"role": "user", "content": "为我设计一个三层微服务架构"}],
+    thinking={"type": "enabled"}
+)
+```
+
+### 4. 流式输出与流式工具调用（可选）
+
+* GLM-4.6 独家支持工具调用过程的实时流式构建与输出，默认 `False` 关闭，需同时打开：
+  * `stream=True`：开启响应的流式输出
+  * `tool_stream=True`：开启工具调用参数的流式输出
+
+```python  theme={null}
+response = client.chat.completions.create(
+    model="glm-4.6",
+    messages=[{"role": "user", "content": "北京天气怎么样"}],
+    tools=[
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "获取指定地点当前的天气情况",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "城市，例如：北京、上海"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                    },
+                    "required": ["location"]
+                }
+            }
+        }
+    ],
+    stream=True,
+    tool_stream=True,
+)
+
+# 初始化流式收集变量
+reasoning_content = ""
+content = ""
+final_tool_calls = {}
+reasoning_started = False
+content_started = False
+
+# 处理流式响应
+for chunk in response:
+    if not chunk.choices:
+        continue
+
+    delta = chunk.choices[0].delta
+
+    # 流式推理过程输出
+    if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+        if not reasoning_started and delta.reasoning_content.strip():
+            print("\n🧠 思考过程：")
+            reasoning_started = True
+        reasoning_content += delta.reasoning_content
+        print(delta.reasoning_content, end="", flush=True)
+
+    # 流式回答内容输出
+    if hasattr(delta, 'content') and delta.content:
+        if not content_started and delta.content.strip():
+            print("\n\n💬 回答内容：")
+            content_started = True
+        content += delta.content
+        print(delta.content, end="", flush=True)
+
+    # 流式工具调用信息（参数拼接）
+    if delta.tool_calls:
+        for tool_call in delta.tool_calls:
+            idx = tool_call.index
+            if idx not in final_tool_calls:
+                final_tool_calls[idx] = tool_call
+                final_tool_calls[idx].function.arguments = tool_call.function.arguments
+            else:
+                final_tool_calls[idx].function.arguments += tool_call.function.arguments
+
+# 输出最终的工具调用信息
+if final_tool_calls:
+    print("\n📋 命中 Function Calls :")
+    for idx, tool_call in final_tool_calls.items():
+        print(f"  {idx}: 函数名: {tool_call.function.name}, 参数: {tool_call.function.arguments}")
+```
+
+详见：[工具流式输出文档](/cn/guide/tools/stream-tool)
+
+### 5. 测试与回归
+
+> 在开发环境中先行验证迁移后的调用是否稳定，关注：
+
+* 响应是否符合预期、是否出现过度随机或过度保守的输出
+* 工具流式构建与输出是否正常
+* 长上下文与深度思考场景下的延迟与成本
+
+## 更多资源
+
+<CardGroup cols={2}>
+  <Card title="核心参数" icon={<svg style={{maskImage: "url(/resource/icon/star.svg)", maskRepeat: "no-repeat", maskPosition: "center center",}} className={"h-6 w-6 bg-primary dark:bg-primary-light !m-0 shrink-0"}/>} href="/cn/guide/start/concept-param">
+    模型常见参数概念与采样建议
+  </Card>
+
+  <Card title="工具流式输出" icon={<svg style={{maskImage: "url(/resource/icon/code.svg)", maskRepeat: "no-repeat", maskPosition: "center center",}} className={"h-6 w-6 bg-primary dark:bg-primary-light !m-0 shrink-0"}/>} href="/cn/guide/tools/stream-tool">
+    查看工具流式输出使用详情
+  </Card>
+
+  <Card title="API 参考" icon={<svg style={{maskImage: "url(/resource/icon/book.svg)", maskRepeat: "no-repeat", maskPosition: "center center",}} className={"h-6 w-6 bg-primary dark:bg-primary-light !m-0 shrink-0"}/>} href="/cn/api/introduction">
+    查看完整的 API 文档
+  </Card>
+
+  <Card title="技术支持" icon={<svg style={{maskImage: "url(/resource/icon/headset.svg)", maskRepeat: "no-repeat", maskPosition: "center center",}} className={"h-6 w-6 bg-primary dark:bg-primary-light !m-0 shrink-0"}/>} href="https://bigmodel.cn/online-book/customerService">
+    获取技术支持和帮助
+  </Card>
+</CardGroup>

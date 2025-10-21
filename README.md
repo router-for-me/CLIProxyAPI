@@ -319,6 +319,7 @@ The server uses a YAML configuration file (`config.yaml`) located in the project
 | `claude-api-key.base-url`                          | string   | ""                 | Custom Claude API endpoint, if you use a third-party API endpoint.                                                                                                                        |
 | `claude-api-key.proxy-url`                         | string   | ""                 | Proxy URL for this specific API key. Overrides the global proxy-url setting. Supports socks5/http/https protocols.                                                                        |
 | `openai-compatibility`                             | object[] | []                 | Upstream OpenAI-compatible providers configuration (name, base-url, api-keys, models).                                                                                                    |
+| `zhipu-api-key`                                    | object[] | []                 | List of Zhipu GLM API keys. Each entry supports `api-key`, optional `base-url`, and optional `proxy-url`.                                                                                 |
 | `openai-compatibility.*.name`                      | string   | ""                 | The name of the provider. It will be used in the user agent and other places.                                                                                                             |
 | `openai-compatibility.*.base-url`                  | string   | ""                 | The base URL of the provider.                                                                                                                                                             |
 | `openai-compatibility.*.api-keys`                  | string[] | []                 | (Deprecated) The API keys for the provider. Use api-key-entries instead for per-key proxy support.                                                                                        |
@@ -396,6 +397,12 @@ claude-api-key:
   - api-key: "sk-atSM..."
     base-url: "https://www.example.com" # use the custom claude API endpoint
     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+
+# Zhipu API keys (Alpha: direct provider path not implemented; used for future enablement)
+zhipu-api-key:
+  - api-key: "glmsk-..."
+    # base-url: "https://open.bigmodel.cn/api/paas/v4" # optional: use official Zhipu endpoint or leave empty for defaults
+    # proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy
 
 # OpenAI compatibility providers
 openai-compatibility:

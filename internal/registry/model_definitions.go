@@ -388,6 +388,31 @@ func GetQwenModels() []*ModelInfo {
 	}
 }
 
+// GetZhipuModels returns the standard Zhipu GLM model definitions
+func GetZhipuModels() []*ModelInfo {
+	created := time.Now().Unix()
+	return []*ModelInfo{
+		{
+			ID:          "glm-4.5",
+			Object:      "model",
+			Created:     created,
+			OwnedBy:     "zhipu",
+			Type:        "zhipu",
+			DisplayName: "GLM-4.5",
+			Description: "Zhipu GLM 4.5 general model",
+		},
+		{
+			ID:          "glm-4.6",
+			Object:      "model",
+			Created:     created,
+			OwnedBy:     "zhipu",
+			Type:        "zhipu",
+			DisplayName: "GLM-4.6",
+			Description: "Zhipu GLM 4.6 general model",
+		},
+	}
+}
+
 // GetIFlowModels returns supported models for iFlow OAuth accounts.
 
 func GetIFlowModels() []*ModelInfo {

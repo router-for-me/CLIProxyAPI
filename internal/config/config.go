@@ -58,6 +58,9 @@ type Config struct {
 
     // Packycode holds configuration for Packycode upstream provider integration.
     Packycode PackycodeConfig `yaml:"packycode" json:"packycode"`
+
+    // ZhipuKey defines a list of Zhipu API key configurations.
+    ZhipuKey []ZhipuKey `yaml:"zhipu-api-key" json:"zhipu-api-key"`
 }
 
 // PackycodeConfig represents configuration for routing Claude Code compatible
@@ -137,6 +140,19 @@ type CodexKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
+}
+
+// ZhipuKey represents the configuration for a Zhipu API key.
+type ZhipuKey struct {
+    // APIKey is the authentication key for accessing Zhipu GLM API services.
+    APIKey string `yaml:"api-key" json:"api-key"`
+
+    // BaseURL is the base URL for the Zhipu API endpoint.
+    // If empty, the default Zhipu API URL will be used.
+    BaseURL string `yaml:"base-url" json:"base-url"`
+
+    // ProxyURL overrides the global proxy setting for this API key if provided.
+    ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 }
 
 // OpenAICompatibility represents the configuration for OpenAI API compatibility

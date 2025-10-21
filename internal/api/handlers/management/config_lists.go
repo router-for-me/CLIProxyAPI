@@ -423,6 +423,42 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+// zhipu-api-key: []ZhipuKey
+func (h *Handler) GetZhipuKeys(c *gin.Context) {
+    c.JSON(200, gin.H{"zhipu-api-key": h.cfg.ZhipuKey})
+}
+func (h *Handler) PutZhipuKeys(c *gin.Context) {
+    data, err := c.GetRawData()
+    if err != nil { c.JSON(400, gin.H{"error": "failed to read body"}); return }
+    var arr []config.ZhipuKey
+    if err = json.Unmarshal(data, &arr); err != nil {
+        var obj struct{ Items []config.ZhipuKey `json:"items"` }
+        if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 { c.JSON(400, gin.H{"error": "invalid body"}); return }
+        arr = obj.Items
+    }
+    // keep as-is; allow empty base-url (defaults handled by executor)
+    h.cfg.ZhipuKey = arr
+    h.persist(c)
+}
+func (h *Handler) PatchZhipuKey(c *gin.Context) {
+    var body struct{ Index *int `json:"index"`; Match *string `json:"match"`; Value *config.ZhipuKey `json:"value"` }
+    if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil { c.JSON(400, gin.H{"error": "invalid body"}); return }
+    if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.ZhipuKey) { h.cfg.ZhipuKey[*body.Index] = *body.Value; h.persist(c); return }
+    if body.Match != nil {
+        for i := range h.cfg.ZhipuKey { if h.cfg.ZhipuKey[i].APIKey == *body.Match { h.cfg.ZhipuKey[i] = *body.Value; h.persist(c); return } }
+    }
+    c.JSON(404, gin.H{"error": "item not found"})
+}
+func (h *Handler) DeleteZhipuKey(c *gin.Context) {
+    if val := c.Query("api-key"); val != "" {
+        out := make([]config.ZhipuKey, 0, len(h.cfg.ZhipuKey))
+        for _, v := range h.cfg.ZhipuKey { if v.APIKey != val { out = append(out, v) } }
+        h.cfg.ZhipuKey = out; h.persist(c); return
+    }
+    if idxStr := c.Query("index"); idxStr != "" { var idx int; if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx >= 0 && idx < len(h.cfg.ZhipuKey) { h.cfg.ZhipuKey = append(h.cfg.ZhipuKey[:idx], h.cfg.ZhipuKey[idx+1:]...); h.persist(c); return } }
+    c.JSON(400, gin.H{"error": "missing api-key or index"})
+}
+
 func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	if entry == nil {
 		return

@@ -781,34 +781,63 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			}
 			out = append(out, a)
 		}
-		// Codex API keys -> synthesize auths
-		for i := range cfg.CodexKey {
-			ck := cfg.CodexKey[i]
-			key := strings.TrimSpace(ck.APIKey)
-			if key == "" {
-				continue
-			}
-			id, token := idGen.next("codex:apikey", key, ck.BaseURL)
-			attrs := map[string]string{
-				"source":  fmt.Sprintf("config:codex[%s]", token),
-				"api_key": key,
-			}
-			if ck.BaseURL != "" {
-				attrs["base_url"] = ck.BaseURL
-			}
-			proxyURL := strings.TrimSpace(ck.ProxyURL)
-			a := &coreauth.Auth{
-				ID:         id,
-				Provider:   "codex",
-				Label:      "codex-apikey",
-				Status:     coreauth.StatusActive,
-				ProxyURL:   proxyURL,
-				Attributes: attrs,
-				CreatedAt:  now,
-				UpdatedAt:  now,
-			}
-			out = append(out, a)
-		}
+        // Codex API keys -> synthesize auths
+        for i := range cfg.CodexKey {
+            ck := cfg.CodexKey[i]
+            key := strings.TrimSpace(ck.APIKey)
+            if key == "" {
+                continue
+            }
+            id, token := idGen.next("codex:apikey", key, ck.BaseURL)
+            attrs := map[string]string{
+                "source":  fmt.Sprintf("config:codex[%s]", token),
+                "api_key": key,
+            }
+            if ck.BaseURL != "" {
+                attrs["base_url"] = ck.BaseURL
+            }
+            proxyURL := strings.TrimSpace(ck.ProxyURL)
+            a := &coreauth.Auth{
+                ID:         id,
+                Provider:   "codex",
+                Label:      "codex-apikey",
+                Status:     coreauth.StatusActive,
+                ProxyURL:   proxyURL,
+                Attributes: attrs,
+                CreatedAt:  now,
+                UpdatedAt:  now,
+            }
+            out = append(out, a)
+        }
+        // Zhipu API keys -> synthesize auths
+        for i := range cfg.ZhipuKey {
+            zk := cfg.ZhipuKey[i]
+            key := strings.TrimSpace(zk.APIKey)
+            if key == "" {
+                continue
+            }
+            base := strings.TrimSpace(zk.BaseURL)
+            proxyURL := strings.TrimSpace(zk.ProxyURL)
+            id, token := idGen.next("zhipu:apikey", key, base, proxyURL)
+            attrs := map[string]string{
+                "source":  fmt.Sprintf("config:zhipu[%s]", token),
+                "api_key": key,
+            }
+            if base != "" {
+                attrs["base_url"] = base
+            }
+            a := &coreauth.Auth{
+                ID:         id,
+                Provider:   "zhipu",
+                Label:      "zhipu-apikey",
+                Status:     coreauth.StatusActive,
+                ProxyURL:   proxyURL,
+                Attributes: attrs,
+                CreatedAt:  now,
+                UpdatedAt:  now,
+            }
+            out = append(out, a)
+        }
         for i := range cfg.OpenAICompatibility {
             compat := &cfg.OpenAICompatibility[i]
 			providerName := strings.ToLower(strings.TrimSpace(compat.Name))

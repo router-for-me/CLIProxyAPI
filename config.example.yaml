@@ -93,3 +93,9 @@ quota-exceeded:
 #    model-reasoning-effort: "high" # one of: low|medium|high
 #  credentials:
 #    openai-api-key: "sk-OPENAI-XXXX..."
+
+# Zhipu API keys (optional; direct provider)
+#zhipu-api-key:
+#  - api-key: "glmsk-..."
+#    # base-url: "https://open.bigmodel.cn/api/paas/v4" # optional
+#    # proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy

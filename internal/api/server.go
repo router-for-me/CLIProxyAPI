@@ -485,6 +485,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/codex-api-key", s.mgmt.PatchCodexKey)
 		mgmt.DELETE("/codex-api-key", s.mgmt.DeleteCodexKey)
 
+		// zhipu-api-key management
+		mgmt.GET("/zhipu-api-key", s.mgmt.GetZhipuKeys)
+		mgmt.PUT("/zhipu-api-key", s.mgmt.PutZhipuKeys)
+		mgmt.PATCH("/zhipu-api-key", s.mgmt.PatchZhipuKey)
+		mgmt.DELETE("/zhipu-api-key", s.mgmt.DeleteZhipuKey)
+
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
