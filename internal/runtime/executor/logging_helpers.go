@@ -330,21 +330,38 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
         // expose latest TPS values on Gin context; sample recording happens at request finalization
         ginCtx.Set("API_TPS_COMPLETION", tpsCompletion)
         ginCtx.Set("API_TPS_TOTAL", tpsTotal)
-		// generate request id if missing
-		rid := uuid.New().String()
-		// Reuse global logging module (same formatter and outputs)
-		log.WithFields(log.Fields{
-			logKeyRequestID:      rid,
-			logKeyIsStreaming:    !last.firstOutputAt.IsZero(),
-			logKeyReqDurationSec: round2(reqWindowSec),
-			logKeyStrDurationSec: round2(streamWindowSec),
-			logKeyInputTokens:    last.inputTokens,
-			logKeyOutputTokens:   last.outputTokens,
-			logKeyTotalTokens:    last.inputTokens + last.outputTokens,
-			logKeyTPSCompletion:  round2(tpsCompletion),
-			logKeyTPSTotal:       round2(tpsTotal),
-			logKeyMeasuredAt:     time.Now().Format(time.RFC3339Nano),
-		}).Info("per-request-tps")
+        // fetch optional provider/model from context for logging enrichment
+        var provider, model string
+        if v, ok := ginCtx.Get("API_PROVIDER"); ok {
+            if s, ok2 := v.(string); ok2 {
+                provider = s
+            }
+        }
+        if v, ok := ginCtx.Get("API_MODEL_ID"); ok {
+            if s, ok2 := v.(string); ok2 {
+                model = s
+            }
+        }
+
+        // generate request id if missing
+        rid := uuid.New().String()
+        // Reuse global logging module (same formatter and outputs)
+        log.WithFields(log.Fields{
+            logKeyRequestID:      rid,
+            logKeyIsStreaming:    !last.firstOutputAt.IsZero(),
+            logKeyReqDurationSec: round2(reqWindowSec),
+            logKeyStrDurationSec: round2(streamWindowSec),
+            logKeyInputTokens:    last.inputTokens,
+            logKeyOutputTokens:   last.outputTokens,
+            logKeyTotalTokens:    last.inputTokens + last.outputTokens,
+            logKeyTPSCompletion:  round2(tpsCompletion),
+            logKeyTPSTotal:       round2(tpsTotal),
+            logKeyMeasuredAt:     time.Now().Format(time.RFC3339Nano),
+            // provider/model enrichment for per-request-tps log
+            "provider":           provider,
+            "model":              model,
+            "provider_model":     strings.Trim(strings.Join([]string{provider, model}, "/"), "/"),
+        }).Info("per-request-tps")
 	}
 }
 

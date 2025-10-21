@@ -4,16 +4,16 @@
 package usage
 
 import (
-	"context"
-	"fmt"
-	"math"
-	"sort"
-	"sync"
-	"sync/atomic"
-	"time"
+    "context"
+    "fmt"
+    "math"
+    "sort"
+    "sync"
+    "sync/atomic"
+    "time"
 
-	"github.com/gin-gonic/gin"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+    "github.com/gin-gonic/gin"
+    coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 var statisticsEnabled atomic.Bool
@@ -367,12 +367,24 @@ type timedValue struct {
     v  float64
 }
 
+// taggedValue stores a sample value with provider/model attribution
+type taggedValue struct {
+    ts       time.Time
+    v        float64
+    provider string
+    model    string
+}
+
 type tpsAggregator struct {
     mu             sync.RWMutex
     completion     []timedValue
     total          []timedValue
     completionSum  float64
     totalSum       float64
+
+    // Optional tagged series for provider/model filtering
+    completionTagged []taggedValue
+    totalTagged      []taggedValue
 }
 
 var defaultTPSAggregator = &tpsAggregator{}
@@ -417,6 +429,35 @@ func RecordTPSSample(completion, total float64) {
     if added > 0 {
         recordAndMaybeCleanLocked(agg)
     }
+}
+
+// RecordTPSSampleTagged ingests a TPS observation and associates it with provider/model.
+// Also updates the untagged series to keep default aggregates intact.
+func RecordTPSSampleTagged(provider, model string, completion, total float64) {
+    agg := defaultTPSAggregator
+    if agg == nil {
+        return
+    }
+    now := time.Now()
+    agg.mu.Lock()
+    // First, append to untagged series (mirrors RecordTPSSample logic, but inline to avoid double locking)
+    if finite(completion) {
+        agg.completion = append(agg.completion, timedValue{ts: now, v: completion})
+        agg.completionSum += completion
+    }
+    if finite(total) {
+        agg.total = append(agg.total, timedValue{ts: now, v: total})
+        agg.totalSum += total
+    }
+    // Then, append tagged entries for filtering
+    if finite(completion) {
+        agg.completionTagged = append(agg.completionTagged, taggedValue{ts: now, v: completion, provider: provider, model: model})
+    }
+    if finite(total) {
+        agg.totalTagged = append(agg.totalTagged, taggedValue{ts: now, v: total, provider: provider, model: model})
+    }
+    recordAndMaybeCleanLocked(agg)
+    agg.mu.Unlock()
 }
 
 func recordAndMaybeCleanLocked(agg *tpsAggregator) {
@@ -566,6 +607,79 @@ func GetTPSAggregatesWindow(window time.Duration) TPSAggregateSnapshot {
         for i := range agg.total {
             tv := agg.total[i]
             if tv.ts.Before(cutoff) {
+                continue
+            }
+            n++
+            sum += tv.v
+            vals = append(vals, tv.v)
+        }
+        if n > 0 {
+            snap.Total.Count = int64(n)
+            snap.Total.Avg = round2f(sum / float64(n))
+            snap.Total.Median = medianOf(vals)
+        }
+    }
+    agg.mu.RUnlock()
+    return snap
+}
+
+// GetTPSAggregatesWindowFiltered returns windowed aggregates filtered by provider and/or model.
+// If both provider and model are empty, it falls back to GetTPSAggregatesWindow.
+func GetTPSAggregatesWindowFiltered(window time.Duration, provider, model string) TPSAggregateSnapshot {
+    if provider == "" && model == "" {
+        return GetTPSAggregatesWindow(window)
+    }
+    if window <= 0 {
+        // treat as unbounded window
+        window = time.Since(serverStart)
+    }
+    agg := defaultTPSAggregator
+    snap := TPSAggregateSnapshot{Since: time.Now().Add(-window)}
+    if agg == nil {
+        return snap
+    }
+    cutoff := time.Now().Add(-window)
+    agg.mu.RLock()
+    // completion filtered
+    {
+        var n int
+        var sum float64
+        vals := make([]float64, 0)
+        for i := range agg.completionTagged {
+            tv := agg.completionTagged[i]
+            if tv.ts.Before(cutoff) {
+                continue
+            }
+            if provider != "" && tv.provider != provider {
+                continue
+            }
+            if model != "" && tv.model != model {
+                continue
+            }
+            n++
+            sum += tv.v
+            vals = append(vals, tv.v)
+        }
+        if n > 0 {
+            snap.Completion.Count = int64(n)
+            snap.Completion.Avg = round2f(sum / float64(n))
+            snap.Completion.Median = medianOf(vals)
+        }
+    }
+    // total filtered
+    {
+        var n int
+        var sum float64
+        vals := make([]float64, 0)
+        for i := range agg.totalTagged {
+            tv := agg.totalTagged[i]
+            if tv.ts.Before(cutoff) {
+                continue
+            }
+            if provider != "" && tv.provider != provider {
+                continue
+            }
+            if model != "" && tv.model != model {
                 continue
             }
             n++

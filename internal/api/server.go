@@ -248,25 +248,41 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 				return
 			}
 		}
-		var completion, total float64
-		var have bool
-		if v, ok := c.Get("API_TPS_COMPLETION"); ok {
-			if f, ok2 := v.(float64); ok2 {
-				completion = f
-				have = true
-			}
-		}
-		if v, ok := c.Get("API_TPS_TOTAL"); ok {
-			if f, ok2 := v.(float64); ok2 {
-				total = f
-				have = true
-			}
-		}
-		if have {
-			usage.RecordTPSSample(completion, total)
-			c.Set("API_TPS_RECORDED", true)
-		}
-	})
+        var completion, total float64
+        var have bool
+        if v, ok := c.Get("API_TPS_COMPLETION"); ok {
+            if f, ok2 := v.(float64); ok2 {
+                completion = f
+                have = true
+            }
+        }
+        if v, ok := c.Get("API_TPS_TOTAL"); ok {
+            if f, ok2 := v.(float64); ok2 {
+                total = f
+                have = true
+            }
+        }
+        if have {
+            // optional provider/model attribution
+            var provider, model string
+            if v, ok := c.Get("API_PROVIDER"); ok {
+                if s, ok2 := v.(string); ok2 {
+                    provider = s
+                }
+            }
+            if v, ok := c.Get("API_MODEL_ID"); ok {
+                if s, ok2 := v.(string); ok2 {
+                    model = s
+                }
+            }
+            if provider != "" || model != "" {
+                usage.RecordTPSSampleTagged(provider, model, completion, total)
+            } else {
+                usage.RecordTPSSample(completion, total)
+            }
+            c.Set("API_TPS_RECORDED", true)
+        }
+    })
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)

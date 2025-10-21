@@ -34,10 +34,19 @@ func newUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		apiKey:      apiKey,
 		source:      util.HideAPIKey(resolveUsageSource(auth, apiKey)),
 	}
-	if auth != nil {
-		reporter.authID = auth.ID
-	}
-	return reporter
+    if auth != nil {
+        reporter.authID = auth.ID
+    }
+    // propagate provider/model to Gin context for downstream TPS sampling
+    if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+        if provider != "" {
+            ginCtx.Set("API_PROVIDER", provider)
+        }
+        if model != "" {
+            ginCtx.Set("API_MODEL_ID", model)
+        }
+    }
+    return reporter
 }
 
 func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
@@ -70,6 +79,13 @@ func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
             }
             // propagate to context to keep latest snapshot
             updateAggregatedResponse(ginCtx, attempts)
+            // also ensure provider/model attribution is visible to finalizer
+            if r.provider != "" {
+                ginCtx.Set("API_PROVIDER", r.provider)
+            }
+            if r.model != "" {
+                ginCtx.Set("API_MODEL_ID", r.model)
+            }
         }
     }
 
