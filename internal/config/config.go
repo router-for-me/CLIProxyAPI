@@ -574,7 +574,7 @@ func removeMapKey(mapNode *yaml.Node, key string) {
 
 // normalizeCollectionNodeStyles forces YAML collections to use block notation, keeping
 // lists and maps readable. Empty sequences retain flow style ([]) so empty list markers
-// remain compact.
+// remain compact. Also standardizes string quoting for consistency.
 func normalizeCollectionNodeStyles(node *yaml.Node) {
 	if node == nil {
 		return
@@ -594,7 +594,12 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 		for i := range node.Content {
 			normalizeCollectionNodeStyles(node.Content[i])
 		}
+	case yaml.ScalarNode:
+		// Apply quotes to all string values for consistency
+		if node.Tag == "!!str" && node.Value != "" {
+			node.Style = yaml.DoubleQuotedStyle
+		}
 	default:
-		// Scalars keep their existing style to preserve quoting
+		// Keep other styles as-is
 	}
 }
