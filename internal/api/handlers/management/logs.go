@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 const (
@@ -144,6 +145,9 @@ func (h *Handler) logDirectory() string {
 	}
 	if h.logDir != "" {
 		return h.logDir
+	}
+	if base := util.WritablePath(); base != "" {
+		return filepath.Join(base, "logs")
 	}
 	if h.configFilePath != "" {
 		dir := filepath.Dir(h.configFilePath)

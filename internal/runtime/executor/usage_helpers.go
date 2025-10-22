@@ -41,6 +41,23 @@ func newUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 }
 
 func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
+	r.publishWithOutcome(ctx, detail, false)
+}
+
+func (r *usageReporter) publishFailure(ctx context.Context) {
+	r.publishWithOutcome(ctx, usage.Detail{}, true)
+}
+
+func (r *usageReporter) trackFailure(ctx context.Context, errPtr *error) {
+	if r == nil || errPtr == nil {
+		return
+	}
+	if *errPtr != nil {
+		r.publishFailure(ctx)
+	}
+}
+
+func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {
 	if r == nil {
 		return
 	}
@@ -50,7 +67,7 @@ func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
 			detail.TotalTokens = total
 		}
 	}
-	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 && detail.TotalTokens == 0 {
+	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 && detail.TotalTokens == 0 && !failed {
 		return
 	}
 	r.once.Do(func() {
@@ -61,6 +78,7 @@ func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
 			APIKey:      r.apiKey,
 			AuthID:      r.authID,
 			RequestedAt: r.requestedAt,
+			Failed:      failed,
 			Detail:      detail,
 		})
 	})

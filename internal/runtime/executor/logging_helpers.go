@@ -275,7 +275,8 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 			continue
 		}
 		for _, value := range values {
-			builder.WriteString(fmt.Sprintf("%s: %s\n", key, sanitizeHeaderValue(key, value)))
+			masked := util.MaskSensitiveHeaderValue(key, value)
+			builder.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
 		}
 	}
 }
@@ -318,19 +319,4 @@ func formatAuthInfo(info upstreamRequestLog) string {
 	}
 
 	return strings.Join(parts, ", ")
-}
-
-func sanitizeHeaderValue(key, value string) string {
-	trimmedValue := strings.TrimSpace(value)
-	lowerKey := strings.ToLower(strings.TrimSpace(key))
-	switch {
-	case strings.Contains(lowerKey, "authorization"),
-		strings.Contains(lowerKey, "api-key"),
-		strings.Contains(lowerKey, "apikey"),
-		strings.Contains(lowerKey, "token"),
-		strings.Contains(lowerKey, "secret"):
-		return util.HideAPIKey(trimmedValue)
-	default:
-		return trimmedValue
-	}
 }

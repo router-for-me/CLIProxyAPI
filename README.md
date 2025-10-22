@@ -797,6 +797,10 @@ Those projects are based on CLIProxyAPI:
 
 Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with AI coding tools - no API keys needed
 
+### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
+
+Browser-based tool to translate SRT subtitles using your Gemini subscription via CLIProxyAPI with automatic validation/error correction - no API keys needed
+
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 

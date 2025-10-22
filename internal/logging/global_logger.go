@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -72,7 +73,10 @@ func ConfigureLogOutput(loggingToFile bool) error {
 	defer writerMu.Unlock()
 
 	if loggingToFile {
-		const logDir = "logs"
+		logDir := "logs"
+		if base := util.WritablePath(); base != "" {
+			logDir = filepath.Join(base, "logs")
+		}
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			return fmt.Errorf("logging: failed to create log directory: %w", err)
 		}

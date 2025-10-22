@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,7 +41,16 @@ const (
 	refreshCheckInterval  = 5 * time.Second
 	refreshPendingBackoff = time.Minute
 	refreshFailureBackoff = 5 * time.Minute
+	quotaBackoffBase      = time.Second
+	quotaBackoffMax       = 30 * time.Minute
 )
+
+var quotaCooldownDisabled atomic.Bool
+
+// SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
+func SetQuotaCooldownDisabled(disable bool) {
+	quotaCooldownDisabled.Store(disable)
+}
 
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
@@ -532,9 +542,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					suspendReason = "payment_required"
 					shouldSuspendModel = true
 				case 429:
-					next := now.Add(30 * time.Minute)
+					cooldown, nextLevel := nextQuotaCooldown(state.Quota.BackoffLevel)
+					var next time.Time
+					if cooldown > 0 {
+						next = now.Add(cooldown)
+					}
 					state.NextRetryAfter = next
-					state.Quota = QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next}
+					state.Quota = QuotaState{
+						Exceeded:      true,
+						Reason:        "quota",
+						NextRecoverAt: next,
+						BackoffLevel:  nextLevel,
+					}
 					suspendReason = "quota"
 					shouldSuspendModel = true
 					setModelQuota = true
@@ -608,6 +627,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	earliestRetry := time.Time{}
 	quotaExceeded := false
 	quotaRecover := time.Time{}
+	maxBackoffLevel := 0
 	for _, state := range auth.ModelStates {
 		if state == nil {
 			continue
@@ -636,6 +656,9 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 			if quotaRecover.IsZero() || (!state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.Before(quotaRecover)) {
 				quotaRecover = state.Quota.NextRecoverAt
 			}
+			if state.Quota.BackoffLevel > maxBackoffLevel {
+				maxBackoffLevel = state.Quota.BackoffLevel
+			}
 		}
 	}
 	auth.Unavailable = allUnavailable
@@ -648,10 +671,12 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
 		auth.Quota.NextRecoverAt = quotaRecover
+		auth.Quota.BackoffLevel = maxBackoffLevel
 	} else {
 		auth.Quota.Exceeded = false
 		auth.Quota.Reason = ""
 		auth.Quota.NextRecoverAt = time.Time{}
+		auth.Quota.BackoffLevel = 0
 	}
 }
 
@@ -685,6 +710,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.Exceeded = false
 	auth.Quota.Reason = ""
 	auth.Quota.NextRecoverAt = time.Time{}
+	auth.Quota.BackoffLevel = 0
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
 	auth.UpdatedAt = now
@@ -734,8 +760,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, now time.Time) {
 		auth.StatusMessage = "quota exhausted"
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
-		auth.Quota.NextRecoverAt = now.Add(30 * time.Minute)
-		auth.NextRetryAfter = auth.Quota.NextRecoverAt
+		cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel)
+		var next time.Time
+		if cooldown > 0 {
+			next = now.Add(cooldown)
+		}
+		auth.Quota.NextRecoverAt = next
+		auth.Quota.BackoffLevel = nextLevel
+		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
 		auth.NextRetryAfter = now.Add(1 * time.Minute)
@@ -744,6 +776,24 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, now time.Time) {
 			auth.StatusMessage = "request failed"
 		}
 	}
+}
+
+// nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
+func nextQuotaCooldown(prevLevel int) (time.Duration, int) {
+	if prevLevel < 0 {
+		prevLevel = 0
+	}
+	if quotaCooldownDisabled.Load() {
+		return 0, prevLevel
+	}
+	cooldown := quotaBackoffBase * time.Duration(1<<prevLevel)
+	if cooldown < quotaBackoffBase {
+		cooldown = quotaBackoffBase
+	}
+	if cooldown >= quotaBackoffMax {
+		return quotaBackoffMax, prevLevel
+	}
+	return cooldown, prevLevel + 1
 }
 
 // List returns all auth entries currently known by the manager.

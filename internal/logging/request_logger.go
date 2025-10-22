@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 // RequestLogger defines the interface for logging HTTP requests and responses.
@@ -485,7 +486,8 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 	content.WriteString("=== HEADERS ===\n")
 	for key, values := range headers {
 		for _, value := range values {
-			content.WriteString(fmt.Sprintf("%s: %s\n", key, value))
+			masked := util.MaskSensitiveHeaderValue(key, value)
+			content.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
 		}
 	}
 	content.WriteString("\n")

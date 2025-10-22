@@ -91,6 +91,7 @@ type RequestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
 	Source    string     `json:"source"`
 	Tokens    TokenStats `json:"tokens"`
+	Failed    bool       `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -165,7 +166,11 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if statsKey == "" {
 		statsKey = resolveAPIIdentifier(ctx, record)
 	}
-	success := resolveSuccess(ctx)
+	failed := record.Failed
+	if !failed {
+		failed = !resolveSuccess(ctx)
+	}
+	success := !failed
 	modelName := record.Model
 	if modelName == "" {
 		modelName = "unknown"
@@ -193,6 +198,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Timestamp: timestamp,
 		Source:    record.Source,
 		Tokens:    detail,
+		Failed:    failed,
 	})
 
 	s.requestsByDay[dayKey]++

@@ -4,6 +4,8 @@
 package util
 
 import (
+	"strings"
+
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 )
@@ -140,4 +142,49 @@ func HideAPIKey(apiKey string) string {
 		return apiKey[:1] + "..." + apiKey[len(apiKey)-1:]
 	}
 	return apiKey
+}
+
+// maskAuthorizationHeader masks the Authorization header value while preserving the auth type prefix.
+// Common formats: "Bearer <token>", "Basic <credentials>", "ApiKey <key>", etc.
+// It preserves the prefix (e.g., "Bearer ") and only masks the token/credential part.
+//
+// Parameters:
+//   - value: The Authorization header value
+//
+// Returns:
+//   - string: The masked Authorization value with prefix preserved
+func MaskAuthorizationHeader(value string) string {
+	parts := strings.SplitN(strings.TrimSpace(value), " ", 2)
+	if len(parts) < 2 {
+		return HideAPIKey(value)
+	}
+	return parts[0] + " " + HideAPIKey(parts[1])
+}
+
+// MaskSensitiveHeaderValue masks sensitive header values while preserving expected formats.
+//
+// Behavior by header key (case-insensitive):
+//   - "Authorization": Preserve the auth type prefix (e.g., "Bearer ") and mask only the credential part.
+//   - Headers containing "api-key": Mask the entire value using HideAPIKey.
+//   - Others: Return the original value unchanged.
+//
+// Parameters:
+//   - key:   The HTTP header name to inspect (case-insensitive matching).
+//   - value: The header value to mask when sensitive.
+//
+// Returns:
+//   - string: The masked value according to the header type; unchanged if not sensitive.
+func MaskSensitiveHeaderValue(key, value string) string {
+	lowerKey := strings.ToLower(strings.TrimSpace(key))
+	switch {
+	case lowerKey == "authorization":
+		return MaskAuthorizationHeader(value)
+	case strings.Contains(lowerKey, "api-key"),
+		strings.Contains(lowerKey, "apikey"),
+		strings.Contains(lowerKey, "token"),
+		strings.Contains(lowerKey, "secret"):
+		return HideAPIKey(value)
+	default:
+		return value
+	}
 }
