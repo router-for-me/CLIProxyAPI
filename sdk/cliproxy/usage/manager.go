@@ -16,6 +16,7 @@ type Record struct {
 	AuthID      string
 	Source      string
 	RequestedAt time.Time
+	Failed      bool
 	Detail      Detail
 }
 

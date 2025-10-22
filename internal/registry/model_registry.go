@@ -352,14 +352,14 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	if model == nil {
 		return nil
 	}
-	copy := *model
+	copyModel := *model
 	if len(model.SupportedGenerationMethods) > 0 {
-		copy.SupportedGenerationMethods = append([]string(nil), model.SupportedGenerationMethods...)
+		copyModel.SupportedGenerationMethods = append([]string(nil), model.SupportedGenerationMethods...)
 	}
 	if len(model.SupportedParameters) > 0 {
-		copy.SupportedParameters = append([]string(nil), model.SupportedParameters...)
+		copyModel.SupportedParameters = append([]string(nil), model.SupportedParameters...)
 	}
-	return &copy
+	return &copyModel
 }
 
 // UnregisterClient removes a client and decrements counts for its models
@@ -532,17 +532,25 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 			}
 		}
 
-		suspendedClients := 0
+		cooldownSuspended := 0
+		otherSuspended := 0
 		if registration.SuspendedClients != nil {
-			suspendedClients = len(registration.SuspendedClients)
+			for _, reason := range registration.SuspendedClients {
+				if strings.EqualFold(reason, "quota") {
+					cooldownSuspended++
+					continue
+				}
+				otherSuspended++
+			}
 		}
-		effectiveClients := availableClients - expiredClients - suspendedClients
+
+		effectiveClients := availableClients - expiredClients - otherSuspended
 		if effectiveClients < 0 {
 			effectiveClients = 0
 		}
 
-		// Only include models that have available clients
-		if effectiveClients > 0 {
+		// Include models that have available clients, or those solely cooling down.
+		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			model := r.convertModelToMap(registration.Info, handlerType)
 			if model != nil {
 				models = append(models, model)

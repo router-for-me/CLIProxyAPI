@@ -13,8 +13,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -33,7 +35,82 @@ const ManagementFileName = managementAssetName
 var (
 	lastUpdateCheckMu   sync.Mutex
 	lastUpdateCheckTime time.Time
+
+	currentConfigPtr    atomic.Pointer[config.Config]
+	disableControlPanel atomic.Bool
+	schedulerOnce       sync.Once
+	schedulerConfigPath atomic.Value
 )
+
+// SetCurrentConfig stores the latest configuration snapshot for management asset decisions.
+func SetCurrentConfig(cfg *config.Config) {
+	if cfg == nil {
+		currentConfigPtr.Store(nil)
+		return
+	}
+
+	prevDisabled := disableControlPanel.Load()
+	currentConfigPtr.Store(cfg)
+	disableControlPanel.Store(cfg.RemoteManagement.DisableControlPanel)
+
+	if prevDisabled && !cfg.RemoteManagement.DisableControlPanel {
+		lastUpdateCheckMu.Lock()
+		lastUpdateCheckTime = time.Time{}
+		lastUpdateCheckMu.Unlock()
+	}
+}
+
+// StartAutoUpdater launches a background goroutine that periodically ensures the management asset is up to date.
+// It respects the disable-control-panel flag on every iteration and supports hot-reloaded configurations.
+func StartAutoUpdater(ctx context.Context, configFilePath string) {
+	configFilePath = strings.TrimSpace(configFilePath)
+	if configFilePath == "" {
+		log.Debug("management asset auto-updater skipped: empty config path")
+		return
+	}
+
+	schedulerConfigPath.Store(configFilePath)
+
+	schedulerOnce.Do(func() {
+		go runAutoUpdater(ctx)
+	})
+}
+
+func runAutoUpdater(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	ticker := time.NewTicker(updateCheckInterval)
+	defer ticker.Stop()
+
+	runOnce := func() {
+		cfg := currentConfigPtr.Load()
+		if cfg == nil {
+			log.Debug("management asset auto-updater skipped: config not yet available")
+			return
+		}
+		if disableControlPanel.Load() {
+			log.Debug("management asset auto-updater skipped: control panel disabled")
+			return
+		}
+
+		configPath, _ := schedulerConfigPath.Load().(string)
+		staticDir := StaticDir(configPath)
+		EnsureLatestManagementHTML(ctx, staticDir, cfg.ProxyURL)
+	}
+
+	runOnce()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runOnce()
+		}
+	}
+}
 
 func newHTTPClient(proxyURL string) *http.Client {
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -107,6 +184,11 @@ func FilePath(configFilePath string) string {
 func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	if disableControlPanel.Load() {
+		log.Debug("management asset sync skipped: control panel disabled by configuration")
+		return
 	}
 
 	staticDir = strings.TrimSpace(staticDir)

@@ -36,13 +36,14 @@ func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
 func (e *ClaudeExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
 
-func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	apiKey, baseURL := claudeCreds(auth)
 
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	defer reporter.trackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
@@ -56,7 +57,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return cliproxyexecutor.Response{}, err
+		return resp, err
 	}
 	applyClaudeHeaders(httpReq, apiKey, false)
 	var authID, authLabel, authType, authValue string
@@ -78,30 +79,31 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	})
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	resp, err := httpClient.Do(httpReq)
+	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		return cliproxyexecutor.Response{}, err
+		return resp, err
 	}
 	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
+		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
-		log.Debugf("request error, error status: %d, error body: %s", resp.StatusCode, string(b))
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
+		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, string(b))
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return resp, err
 	}
-	reader := io.Reader(resp.Body)
+	reader := io.Reader(httpResp.Body)
 	var decoder *zstd.Decoder
-	if hasZSTDEcoding(resp.Header.Get("Content-Encoding")) {
-		decoder, err = zstd.NewReader(resp.Body)
+	if hasZSTDEcoding(httpResp.Header.Get("Content-Encoding")) {
+		decoder, err = zstd.NewReader(httpResp.Body)
 		if err != nil {
 			recordAPIResponseError(ctx, e.cfg, err)
-			return cliproxyexecutor.Response{}, fmt.Errorf("failed to initialize zstd decoder: %w", err)
+			return resp, fmt.Errorf("failed to initialize zstd decoder: %w", err)
 		}
 		reader = decoder
 		defer decoder.Close()
@@ -109,7 +111,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		return cliproxyexecutor.Response{}, err
+		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
 	if stream {
@@ -124,16 +126,18 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
-	return cliproxyexecutor.Response{Payload: []byte(out)}, nil
+	resp = cliproxyexecutor.Response{Payload: []byte(out)}
+	return resp, nil
 }
 
-func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
 	apiKey, baseURL := claudeCreds(auth)
 
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	defer reporter.trackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
@@ -164,27 +168,35 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	})
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	resp, err := httpClient.Do(httpReq)
+	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer func() { _ = resp.Body.Close() }()
-		b, _ := io.ReadAll(resp.Body)
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
-		log.Debugf("request error, error status: %d, error body: %s", resp.StatusCode, string(b))
-		return nil, statusErr{code: resp.StatusCode, msg: string(b)}
+		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, string(b))
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
+		}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
+	stream = out
 	go func() {
 		defer close(out)
-		defer func() { _ = resp.Body.Close() }()
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("response body close error: %v", errClose)
+			}
+		}()
 
 		// If from == to (Claude → Claude), directly forward the SSE stream without translation
 		if from == to {
-			scanner := bufio.NewScanner(resp.Body)
+			scanner := bufio.NewScanner(httpResp.Body)
 			buf := make([]byte, 20_971_520)
 			scanner.Buffer(buf, 20_971_520)
 			for scanner.Scan() {
@@ -199,15 +211,16 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				cloned[len(line)] = '\n'
 				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
 			}
-			if err = scanner.Err(); err != nil {
-				recordAPIResponseError(ctx, e.cfg, err)
-				out <- cliproxyexecutor.StreamChunk{Err: err}
+			if errScan := scanner.Err(); errScan != nil {
+				recordAPIResponseError(ctx, e.cfg, errScan)
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: errScan}
 			}
 			return
 		}
 
 		// For other formats, use translation
-		scanner := bufio.NewScanner(resp.Body)
+		scanner := bufio.NewScanner(httpResp.Body)
 		buf := make([]byte, 20_971_520)
 		scanner.Buffer(buf, 20_971_520)
 		var param any
@@ -222,12 +235,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 			}
 		}
-		if err = scanner.Err(); err != nil {
-			recordAPIResponseError(ctx, e.cfg, err)
-			out <- cliproxyexecutor.StreamChunk{Err: err}
+		if errScan := scanner.Err(); errScan != nil {
+			recordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.publishFailure(ctx)
+			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
 	}()
-	return out, nil
+	return stream, nil
 }
 
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
