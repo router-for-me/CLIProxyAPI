@@ -156,7 +156,19 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
-		return nil, &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
+		status := http.StatusInternalServerError
+		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+			if code := se.StatusCode(); code > 0 {
+				status = code
+			}
+		}
+		var addon http.Header
+		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+			if hdr := he.Headers(); hdr != nil {
+				addon = hdr.Clone()
+			}
+		}
+		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	return cloneBytes(resp.Payload), nil
 }
@@ -187,7 +199,19 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
-		return nil, &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
+		status := http.StatusInternalServerError
+		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+			if code := se.StatusCode(); code > 0 {
+				status = code
+			}
+		}
+		var addon http.Header
+		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+			if hdr := he.Headers(); hdr != nil {
+				addon = hdr.Clone()
+			}
+		}
+		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	return cloneBytes(resp.Payload), nil
 }
@@ -222,7 +246,19 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
+		status := http.StatusInternalServerError
+		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+			if code := se.StatusCode(); code > 0 {
+				status = code
+			}
+		}
+		var addon http.Header
+		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+			if hdr := he.Headers(); hdr != nil {
+				addon = hdr.Clone()
+			}
+		}
+		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 		close(errChan)
 		return nil, errChan
 	}
@@ -233,7 +269,19 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		defer close(errChan)
 		for chunk := range chunks {
 			if chunk.Err != nil {
-				errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: chunk.Err}
+				status := http.StatusInternalServerError
+				if se, ok := chunk.Err.(interface{ StatusCode() int }); ok && se != nil {
+					if code := se.StatusCode(); code > 0 {
+						status = code
+					}
+				}
+				var addon http.Header
+				if he, ok := chunk.Err.(interface{ Headers() http.Header }); ok && he != nil {
+					if hdr := he.Headers(); hdr != nil {
+						addon = hdr.Clone()
+					}
+				}
+				errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: chunk.Err, Addon: addon}
 				return
 			}
 			if len(chunk.Payload) > 0 {
@@ -286,6 +334,17 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
+	}
+	if msg != nil && msg.Addon != nil {
+		for key, values := range msg.Addon {
+			if len(values) == 0 {
+				continue
+			}
+			c.Writer.Header().Del(key)
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
 	}
 	c.Status(status)
 	if msg != nil && msg.Error != nil {

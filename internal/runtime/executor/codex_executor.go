@@ -79,28 +79,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 
-	additionalHeaders := make(map[string]string)
-	if from == "claude" {
-		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
-		if userIDResult.Exists() {
-			var cache codexCache
-			var hasKey bool
-			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
-			if cache, hasKey = codexCacheMap[key]; !hasKey || cache.Expire.Before(time.Now()) {
-				cache = codexCache{
-					ID:     uuid.New().String(),
-					Expire: time.Now().Add(1 * time.Hour),
-				}
-				codexCacheMap[key] = cache
-			}
-			additionalHeaders["Conversation_id"] = cache.ID
-			additionalHeaders["Session_id"] = cache.ID
-			body, _ = sjson.SetBytes(body, "prompt_cache_key", cache.ID)
-		}
-	}
-
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return resp, err
 	}
@@ -110,9 +90,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
-	}
-	for k, v := range additionalHeaders {
-		httpReq.Header.Set(k, v)
 	}
 	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 		URL:       url,
@@ -214,28 +191,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 
-	additionalHeaders := make(map[string]string)
-	if from == "claude" {
-		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
-		if userIDResult.Exists() {
-			var cache codexCache
-			var hasKey bool
-			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
-			if cache, hasKey = codexCacheMap[key]; !hasKey || cache.Expire.Before(time.Now()) {
-				cache = codexCache{
-					ID:     uuid.New().String(),
-					Expire: time.Now().Add(1 * time.Hour),
-				}
-				codexCacheMap[key] = cache
-			}
-			additionalHeaders["Conversation_id"] = cache.ID
-			additionalHeaders["Session_id"] = cache.ID
-			body, _ = sjson.SetBytes(body, "prompt_cache_key", cache.ID)
-		}
-	}
-
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return nil, err
 	}
@@ -245,9 +202,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
-	}
-	for k, v := range additionalHeaders {
-		httpReq.Header.Set(k, v)
 	}
 	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 		URL:       url,
@@ -363,6 +317,33 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {
+	var cache codexCache
+	if from == "claude" {
+		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
+		if userIDResult.Exists() {
+			var hasKey bool
+			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
+			if cache, hasKey = codexCacheMap[key]; !hasKey || cache.Expire.Before(time.Now()) {
+				cache = codexCache{
+					ID:     uuid.New().String(),
+					Expire: time.Now().Add(1 * time.Hour),
+				}
+				codexCacheMap[key] = cache
+			}
+		}
+	}
+
+	rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Conversation_id", cache.ID)
+	httpReq.Header.Set("Session_id", cache.ID)
+	return httpReq, nil
 }
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string) {

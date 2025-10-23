@@ -3,21 +3,38 @@
 // more specific domain packages. It includes embedded instructional text for Codex-related operations.
 package misc
 
-import _ "embed"
+import (
+	"embed"
+	_ "embed"
+	"strings"
+)
 
-// CodexInstructions holds the content of the codex_instructions.txt file,
-// which is embedded into the application binary at compile time. This variable
-// contains instructional text used for Codex-related operations and model guidance.
-//
-//go:embed gpt_5_instructions.txt
-var GPT5Instructions string
+//go:embed codex_instructions
+var codexInstructionsDir embed.FS
 
-//go:embed gpt_5_codex_instructions.txt
-var GPT5CodexInstructions string
+func CodexInstructionsForModel(modelName, systemInstructions string) (bool, string) {
+	entries, _ := codexInstructionsDir.ReadDir("codex_instructions")
 
-func CodexInstructions(modelName string) string {
-	if modelName == "gpt-5-codex" {
-		return GPT5CodexInstructions
+	lastPrompt := ""
+	lastCodexPrompt := ""
+	// lastReviewPrompt := ""
+	for _, entry := range entries {
+		content, _ := codexInstructionsDir.ReadFile("codex_instructions/" + entry.Name())
+		if systemInstructions == string(content) {
+			return true, ""
+		}
+		if strings.HasPrefix(entry.Name(), "gpt_5_codex_prompt.md") {
+			lastCodexPrompt = string(content)
+		} else if strings.HasPrefix(entry.Name(), "prompt.md") {
+			lastPrompt = string(content)
+		} else if strings.HasPrefix(entry.Name(), "review_prompt.md") {
+			// lastReviewPrompt = string(content)
+		}
 	}
-	return GPT5Instructions
+
+	if strings.Contains(modelName, "codex") {
+		return false, lastCodexPrompt
+	} else {
+		return false, lastPrompt
+	}
 }

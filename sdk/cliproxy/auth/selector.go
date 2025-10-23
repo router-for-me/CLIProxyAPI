@@ -2,7 +2,12 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -13,6 +18,84 @@ import (
 type RoundRobinSelector struct {
 	mu      sync.Mutex
 	cursors map[string]int
+}
+
+type blockReason int
+
+const (
+	blockReasonNone blockReason = iota
+	blockReasonCooldown
+	blockReasonDisabled
+	blockReasonOther
+)
+
+type modelCooldownError struct {
+	model    string
+	resetIn  time.Duration
+	provider string
+}
+
+func newModelCooldownError(model, provider string, resetIn time.Duration) *modelCooldownError {
+	if resetIn < 0 {
+		resetIn = 0
+	}
+	return &modelCooldownError{
+		model:    model,
+		provider: provider,
+		resetIn:  resetIn,
+	}
+}
+
+func (e *modelCooldownError) Error() string {
+	modelName := e.model
+	if modelName == "" {
+		modelName = "requested model"
+	}
+	message := fmt.Sprintf("All credentials for model %s are cooling down", modelName)
+	if e.provider != "" {
+		message = fmt.Sprintf("%s via provider %s", message, e.provider)
+	}
+	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
+	if resetSeconds < 0 {
+		resetSeconds = 0
+	}
+	displayDuration := e.resetIn
+	if displayDuration > 0 && displayDuration < time.Second {
+		displayDuration = time.Second
+	} else {
+		displayDuration = displayDuration.Round(time.Second)
+	}
+	errorBody := map[string]any{
+		"code":          "model_cooldown",
+		"message":       message,
+		"model":         e.model,
+		"reset_time":    displayDuration.String(),
+		"reset_seconds": resetSeconds,
+	}
+	if e.provider != "" {
+		errorBody["provider"] = e.provider
+	}
+	payload := map[string]any{"error": errorBody}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Sprintf(`{"error":{"code":"model_cooldown","message":"%s"}}`, message)
+	}
+	return string(data)
+}
+
+func (e *modelCooldownError) StatusCode() int {
+	return http.StatusTooManyRequests
+}
+
+func (e *modelCooldownError) Headers() http.Header {
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
+	if resetSeconds < 0 {
+		resetSeconds = 0
+	}
+	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
+	return headers
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
@@ -27,14 +110,30 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	}
 	available := make([]*Auth, 0, len(auths))
 	now := time.Now()
+	cooldownCount := 0
+	var earliest time.Time
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
-		if isAuthBlockedForModel(candidate, model, now) {
+		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
+		if !blocked {
+			available = append(available, candidate)
 			continue
 		}
-		available = append(available, candidate)
+		if reason == blockReasonCooldown {
+			cooldownCount++
+			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
+				earliest = next
+			}
+		}
 	}
 	if len(available) == 0 {
+		if cooldownCount == len(auths) && !earliest.IsZero() {
+			resetIn := earliest.Sub(now)
+			if resetIn < 0 {
+				resetIn = 0
+			}
+			return nil, newModelCooldownError(model, provider, resetIn)
+		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 	// Make round-robin deterministic even if caller's candidate order is unstable.
@@ -55,41 +154,54 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	return available[index%len(available)], nil
 }
 
-func isAuthBlockedForModel(auth *Auth, model string, now time.Time) bool {
+func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
-		return true
+		return true, blockReasonOther, time.Time{}
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
-		return true
+		return true, blockReasonDisabled, time.Time{}
 	}
-	// If a specific model is requested, prefer its per-model state over any aggregated
-	// auth-level unavailable flag. This prevents a failure on one model (e.g., 429 quota)
-	// from blocking other models of the same provider that have no errors.
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			if state, ok := auth.ModelStates[model]; ok && state != nil {
 				if state.Status == StatusDisabled {
-					return true
+					return true, blockReasonDisabled, time.Time{}
 				}
 				if state.Unavailable {
 					if state.NextRetryAfter.IsZero() {
-						return false
+						return false, blockReasonNone, time.Time{}
 					}
 					if state.NextRetryAfter.After(now) {
-						return true
+						next := state.NextRetryAfter
+						if !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now) {
+							next = state.Quota.NextRecoverAt
+						}
+						if next.Before(now) {
+							next = now
+						}
+						if state.Quota.Exceeded {
+							return true, blockReasonCooldown, next
+						}
+						return true, blockReasonOther, next
 					}
 				}
-				// Explicit state exists and is not blocking.
-				return false
+				return false, blockReasonNone, time.Time{}
 			}
 		}
-		// No explicit state for this model; do not block based on aggregated
-		// auth-level unavailable status. Allow trying this model.
-		return false
+		return false, blockReasonNone, time.Time{}
 	}
-	// No specific model context: fall back to auth-level unavailable window.
 	if auth.Unavailable && auth.NextRetryAfter.After(now) {
-		return true
+		next := auth.NextRetryAfter
+		if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+			next = auth.Quota.NextRecoverAt
+		}
+		if next.Before(now) {
+			next = now
+		}
+		if auth.Quota.Exceeded {
+			return true, blockReasonCooldown, next
+		}
+		return true, blockReasonOther, next
 	}
-	return false
+	return false, blockReasonNone, time.Time{}
 }
