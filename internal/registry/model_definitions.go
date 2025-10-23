@@ -250,19 +250,6 @@ func GetOpenAIModels() []*ModelInfo {
 			SupportedParameters: []string{"tools"},
 		},
 		{
-			ID:                  "gpt-5-mini",
-			Object:              "model",
-			Created:             time.Now().Unix(),
-			OwnedBy:             "openai",
-			Type:                "openai",
-			Version:             "gpt-5-2025-08-07",
-			DisplayName:         "GPT 5 Mini",
-			Description:         "Minimal effort variant, alias of gpt-5-minimal.",
-			ContextLength:       400000,
-			MaxCompletionTokens: 128000,
-			SupportedParameters: []string{"tools"},
-		},
-		{
 			ID:                  "gpt-5-low",
 			Object:              "model",
 			Created:             time.Now().Unix(),
@@ -373,7 +360,18 @@ func GetOpenAIModels() []*ModelInfo {
 // For now it mirrors the OpenAI models to provide a compatible set while
 // upstream Copilot model inventory is integrated.
 func GetCopilotModels() []*ModelInfo {
-    return GetOpenAIModels()
+    created := time.Now().Unix()
+    return []*ModelInfo{
+        {
+            ID:          "gpt-5-mini",
+            Object:      "model",
+            Created:     created,
+            OwnedBy:     "copilot",
+            Type:        "copilot",
+            DisplayName: "GPT 5 Mini",
+            Description: "Copilot-exclusive lightweight GPT-5 variant",
+        },
+    }
 }
 
 // GetQwenModels returns the standard Qwen model definitions
