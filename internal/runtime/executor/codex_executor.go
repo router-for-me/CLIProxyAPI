@@ -366,32 +366,6 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
     httpReq.Header.Set("Session_id", cache.ID)
     return httpReq, nil
 }
-func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {
-	var cache codexCache
-	if from == "claude" {
-		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
-		if userIDResult.Exists() {
-			var hasKey bool
-			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
-			if cache, hasKey = codexCacheMap[key]; !hasKey || cache.Expire.Before(time.Now()) {
-				cache = codexCache{
-					ID:     uuid.New().String(),
-					Expire: time.Now().Add(1 * time.Hour),
-				}
-				codexCacheMap[key] = cache
-			}
-		}
-	}
-
-	rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Conversation_id", cache.ID)
-	httpReq.Header.Set("Session_id", cache.ID)
-	return httpReq, nil
-}
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string) {
 	r.Header.Set("Content-Type", "application/json")
