@@ -32,6 +32,9 @@ logging-to-file: false
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# Only capture Codex bash JSON to separate files; suppress all other request logs
+codex-json-capture-only: false
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 

@@ -356,6 +356,13 @@ func GetOpenAIModels() []*ModelInfo {
 	}
 }
 
+// GetCopilotModels returns model definitions exposed via the Copilot provider.
+// For now it mirrors the OpenAI models to provide a compatible set while
+// upstream Copilot model inventory is integrated.
+func GetCopilotModels() []*ModelInfo {
+    return GetOpenAIModels()
+}
+
 // GetQwenModels returns the standard Qwen model definitions
 func GetQwenModels() []*ModelInfo {
 	return []*ModelInfo{

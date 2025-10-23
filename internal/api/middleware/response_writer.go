@@ -237,15 +237,32 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 			finalHeaders[key] = headerValues
 		}
 
-		var apiRequestBody []byte
-		apiRequest, isExist := c.Get("API_REQUEST")
-		if isExist {
-			var ok bool
-			apiRequestBody, ok = apiRequest.([]byte)
-			if !ok {
-				apiRequestBody = nil
-			}
-		}
+        var apiRequestBody []byte
+        apiRequest, isExist := c.Get("API_REQUEST")
+        if isExist {
+            var ok bool
+            apiRequestBody, ok = apiRequest.([]byte)
+            if !ok {
+                apiRequestBody = nil
+            }
+        }
+
+        // Write filtered upstream JSON capture to a dedicated auxiliary log
+        if v, ok := c.Get("API_JSON_CAPTURE"); ok && w.logger != nil && w.logger.IsEnabled() {
+            if filtered, ok2 := v.([]byte); ok2 && len(filtered) > 0 {
+                var provider, model, url string
+                if pv, okp := c.Get("API_JSON_CAPTURE_PROVIDER"); okp {
+                    if s, ok := pv.(string); ok { provider = s }
+                }
+                if mv, okm := c.Get("API_MODEL_ID"); okm {
+                    if s, ok := mv.(string); ok { model = s }
+                }
+                if uv, oku := c.Get("API_JSON_CAPTURE_URL"); oku {
+                    if s, ok := uv.(string); ok { url = s }
+                }
+                _ = w.logger.LogAuxJSONCapture(url, provider, model, filtered)
+            }
+        }
 
 		var apiResponseBody []byte
 		apiResponse, isExist := c.Get("API_RESPONSE")

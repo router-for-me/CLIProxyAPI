@@ -138,6 +138,51 @@ CLIProxyAPI 的基于 Web 的管理中心。
   ```
   选项：加上 `--no-browser` 可打印登录地址而不自动打开浏览器。本地 OAuth 回调端口为 `11451`。
 
+- Copilot（GitHub 设备流；也保留回调式）
+  - CLI 参数（无需管理端 API）：
+    ```bash
+    ./cli-proxy-api --copilot-auth-login
+    # 示例输出：
+    # Visit https://github.com/login/device and enter the code: ABCD-EFGH
+    # Authentication saved to /home/you/.cli-proxy-api/copilot-*.json
+    ```
+  - 设备流（推荐，无需本地回调端口）：
+    1) 申请 device_code（管理接口；需管理密钥）
+       ```bash
+       curl -s -H "Authorization: Bearer <MANAGEMENT_KEY>" \
+         http://localhost:53555/v0/management/copilot-device-code | jq
+       # => {
+       #   "status": "ok",
+       #   "device_code": "...",
+       #   "user_code": "ABCD-EFGH",
+       #   "verification_uri": "https://github.com/login/device",
+       #   "interval": 5,
+       #   "expires_in": 900,
+       #   "tips": "打开 https://github.com/login/device 并输入 user_code 完成授权，后端将自动继续。"
+       # }
+       ```
+    2) 打开 `verification_uri`，输入 `user_code` 授权。
+    3) 轮询状态直到完成：
+       ```bash
+       curl -s -H "Authorization: Bearer <MANAGEMENT_KEY>" \
+         "http://localhost:53555/v0/management/copilot-device-status?device_code=<DEVICE_CODE>" | jq
+       # => {"status": "wait" | "ok" | "error", "error": "..."}
+       ```
+    4) 当 status=ok 时，服务会将 Copilot token JSON 写入 `auth-dir`，且 `/v1/models` 下会出现 provider=copilot 的模型。
+
+  - 回调式（保留，与其它 Provider 一致）：
+    1) `GET /v0/management/copilot-auth-url` → 返回 `{url,state}`
+    2) 浏览器授权后，服务端接受 `GET /copilot/callback`
+    3) 写入 `auth-dir`。
+
+  - 可选配置覆盖（非必填，内置默认可用）：
+    ```yaml
+    copilot-oauth:
+      github-base-url: "https://github.com"
+      github-api-base-url: "https://api.github.com"
+      github-client-id: "Iv1.b507a08c87ecfe98"
+    ```
+
 ### 启动服务器
 
 身份验证完成后，启动服务器：
@@ -146,20 +191,22 @@ CLIProxyAPI 的基于 Web 的管理中心。
 ./cli-proxy-api
 ```
 
-默认情况下，服务器在端口 8317 上运行。
+默认情况下，服务器在端口 53555 上运行。
 
 ### API 端点
+
+
 
 #### 列出模型
 
 ```
-GET http://localhost:8317/v1/models
+GET http://localhost:53555/v1/models
 ```
 
 #### 聊天补全
 
 ```
-POST http://localhost:8317/v1/chat/completions
+POST http://localhost:53555/v1/chat/completions
 ```
 
 请求体示例：
@@ -183,7 +230,7 @@ POST http://localhost:8317/v1/chat/completions
 #### Claude 消息（SSE 兼容）
 
 ```
-POST http://localhost:8317/v1/messages
+POST http://localhost:53555/v1/messages
 ```
 
 ### 与 OpenAI 库一起使用
@@ -197,7 +244,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="dummy",  # 不使用但必需
-    base_url="http://localhost:8317/v1"
+    base_url="http://localhost:53555/v1"
 )
 
 # Gemini 示例
@@ -215,7 +262,7 @@ gpt = client.chat.completions.create(
 # Claude 示例（使用 messages 端点）
 import requests
 claude_response = requests.post(
-    "http://localhost:8317/v1/messages",
+    "http://localhost:53555/v1/messages",
     json={
         "model": "claude-3-5-sonnet-20241022",
         "messages": [{"role": "user", "content": "用一句话总结这个项目"}],
@@ -235,7 +282,7 @@ import OpenAI from 'openai';
 
 const openai = new OpenAI({
   apiKey: 'dummy', // 不使用但必需
-  baseURL: 'http://localhost:8317/v1',
+  baseURL: 'http://localhost:53555/v1',
 });
 
 // Gemini
@@ -251,7 +298,7 @@ const gpt = await openai.chat.completions.create({
 });
 
 // Claude 示例（使用 messages 端点）
-const claudeResponse = await fetch('http://localhost:8317/v1/messages', {
+const claudeResponse = await fetch('http://localhost:53555/v1/messages', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
@@ -308,7 +355,7 @@ console.log(await claudeResponse.json());
 
 | 参数                                      | 类型       | 默认值                | 描述                                                                  |
 |-----------------------------------------|----------|--------------------|---------------------------------------------------------------------|
-| `port`                                  | integer  | 8317               | 服务器将监听的端口号。                                                         |
+| `port`                                  | integer  | 53555               | 服务器将监听的端口号。                                                         |
 | `auth-dir`                              | string   | "~/.cli-proxy-api" | 存储身份验证令牌的目录。支持使用 `~` 来表示主目录。如果你使用Windows，建议设置成`C:/cli-proxy-api/`。  |
 | `proxy-url`                             | string   | ""                 | 代理URL。支持socks5/http/https协议。例如：socks5://user:pass@192.168.1.1:1080/ |
 | `request-retry`                         | integer  | 0                  | 请求重试次数。如果HTTP响应码为403、408、500、502、503或504，将会触发重试。                    |
@@ -346,7 +393,7 @@ console.log(await claudeResponse.json());
 
 ```yaml
 # 服务器端口
-port: 8317
+port: 53555
 
 # 管理 API 设置
 remote-management:
@@ -452,7 +499,7 @@ curl -X PATCH \
       "credentials": {"openai-api-key": "sk-OPENAI-XXXX..."}
     }
   }' \
-  http://localhost:8317/v0/management/packycode
+  http://localhost:53555/v0/management/packycode
 ```
 
 2) 使配置生效：重启服务或等待热重载（默认自动）。
@@ -465,7 +512,7 @@ curl -X PATCH \
   ```bash
   curl -X PATCH -H "Authorization: Bearer <MANAGEMENT_KEY>" -H "Content-Type: application/json" \
     -d '{"packycode": {"enabled": false}}' \
-    http://localhost:8317/v0/management/packycode
+    http://localhost:53555/v0/management/packycode
   ```
   停用后，Watcher 会移除合成的 Packycode Auth，流量将不再路由到上游。
 
@@ -606,7 +653,7 @@ openai-compatibility:
 
 使用方式：在 `/v1/chat/completions` 中将 `model` 设为别名（如 `kimi-k2`），代理将自动路由到对应提供商与模型。
 
-并且，对于这些与OpenAI兼容的提供商模型，您始终可以通过将CODE_ASSIST_ENDPOINT设置为 http://127.0.0.1:8317 来使用Gemini CLI。
+并且，对于这些与OpenAI兼容的提供商模型，您始终可以通过将CODE_ASSIST_ENDPOINT设置为 http://127.0.0.1:53555 来使用Gemini CLI。
 
 ### 身份验证目录
 
@@ -625,7 +672,7 @@ openai-compatibility:
 启动 CLI 代理 API 服务器，然后将 `CODE_ASSIST_ENDPOINT` 环境变量设置为 CLI 代理 API 服务器的 URL。
 
 ```bash
-export CODE_ASSIST_ENDPOINT="http://127.0.0.1:8317"
+export CODE_ASSIST_ENDPOINT="http://127.0.0.1:53555"
 ```
 
 服务器将中继 `loadCodeAssist`、`onboardUser` 和 `countTokens` 请求。并自动在多个账户之间轮询文本生成请求。
@@ -640,7 +687,7 @@ export CODE_ASSIST_ENDPOINT="http://127.0.0.1:8317"
 
 使用 Gemini 模型：
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=gemini-2.5-pro
 export ANTHROPIC_SMALL_FAST_MODEL=gemini-2.5-flash
@@ -648,7 +695,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=gemini-2.5-flash
 
 使用 OpenAI GPT 5 模型：
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=gpt-5
 export ANTHROPIC_SMALL_FAST_MODEL=gpt-5-minimal
@@ -656,7 +703,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=gpt-5-minimal
 
 使用 OpenAI GPT 5 Codex 模型:
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=gpt-5-codex
 export ANTHROPIC_SMALL_FAST_MODEL=gpt-5-codex-low
@@ -665,7 +712,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=gpt-5-codex-low
 
 使用 Claude 模型：
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=claude-sonnet-4-20250514
 export ANTHROPIC_SMALL_FAST_MODEL=claude-3-5-haiku-20241022
@@ -673,7 +720,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=claude-3-5-haiku-20241022
 
 使用 Qwen 模型：
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=qwen3-coder-plus
 export ANTHROPIC_SMALL_FAST_MODEL=qwen3-coder-flash
@@ -681,7 +728,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=qwen3-coder-flash
 
 使用 iFlow 模型：
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=qwen3-max
 export ANTHROPIC_SMALL_FAST_MODEL=qwen3-235b-a22b-instruct
@@ -699,7 +746,7 @@ model_reasoning_effort = "high"
 
 [model_providers.cliproxyapi]
 name = "cliproxyapi"
-base_url = "http://127.0.0.1:8317/v1"
+base_url = "http://127.0.0.1:53555/v1"
 wire_api = "responses"
 ```
 
@@ -746,14 +793,14 @@ docker run --rm -p 11451:11451 -v /path/to/your/config.yaml:/CLIProxyAPI/config.
 运行以下命令启动服务器：
 
 ```bash
-docker run --rm -p 8317:8317 -v /path/to/your/config.yaml:/CLIProxyAPI/config.yaml -v /path/to/your/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest
+docker run --rm -p 53555:53555 -v /path/to/your/config.yaml:/CLIProxyAPI/config.yaml -v /path/to/your/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest
 ```
 
 > [!NOTE]
 > 要在 Docker 中使用 Git 支持的配置存储，您可以使用 `-e` 标志传递 `GITSTORE_*` 环境变量。例如：
 >
 > ```bash
-> docker run --rm -p 8317:8317 \
+> docker run --rm -p 53555:53555 \
 >   -e GITSTORE_GIT_URL="https://github.com/your/config-repo.git" \
 >   -e GITSTORE_GIT_TOKEN="your_personal_access_token" \
 >   -v /path/to/your/git-store:/CLIProxyAPI/remote \
@@ -783,7 +830,7 @@ docker run --rm -p 8317:8317 -v /path/to/your/config.yaml:/CLIProxyAPI/config.ya
         image: eceasy/cli-proxy-api:latest
         container_name: cli-proxy-api
         ports:
-          - "8317:8317"
+          - "53555:53555"
           - "8085:8085"
           - "1455:1455"
           - "54545:54545"
