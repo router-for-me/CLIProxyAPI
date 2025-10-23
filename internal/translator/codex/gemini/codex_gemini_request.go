@@ -42,8 +42,8 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	out := `{"model":"","instructions":"","input":[]}`
 
 	// Inject standard Codex instructions
-	instructions := misc.CodexInstructions(modelName)
-	out, _ = sjson.SetRaw(out, "instructions", instructions)
+	_, instructions := misc.CodexInstructionsForModel(modelName, "")
+	out, _ = sjson.Set(out, "instructions", instructions)
 
 	root := gjson.ParseBytes(rawJSON)
 
