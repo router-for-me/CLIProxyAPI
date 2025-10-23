@@ -183,6 +183,17 @@ CLIProxyAPI 的基于 Web 的管理中心。
       github-client-id: "Iv1.b507a08c87ecfe98"
     ```
 
+  - Copilot 模型与破坏性变更（重要）：
+    - Copilot 现为独立库存，不再镜像 OpenAI 模型列表；
+    - 目前 Copilot 仅暴露一个模型：`gpt-5-mini`（仅 provider=copilot）；
+    - 若需要其它 GPT-5 变体（如 `gpt-5`、`gpt-5-minimal`、`gpt-5-codex-*`），请改用 `codex/openai` provider；
+    - 设备码申请必须 `Accept: application/json`（服务端已自动设置）；
+    - Copilot token 交换需要携带 `User-Agent`、`OpenAI-Intent`、`Editor-Plugin-*`、`Editor-Version`、`X-GitHub-Api-Version` 等头（服务端已自动设置）；
+    - 迁移建议：
+      - 在使用 provider=copilot 时，将 `model` 切换为 `gpt-5-mini`；
+      - 其它 GPT-5 变体请通过 `codex`/`openai` 路由；
+      - 通过 `/v1/models` 与管理端接口核对 provider↔model 的对应关系。
+
 ### 启动服务器
 
 身份验证完成后，启动服务器：

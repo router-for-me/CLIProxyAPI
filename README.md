@@ -169,6 +169,17 @@ You can authenticate for Gemini, OpenAI, Claude, Qwen, and/or iFlow. All can coe
       github-client-id: "Iv1.b507a08c87ecfe98"
     ```
 
+  - Copilot models and breaking changes (important):
+    - Copilot now exposes its own inventory and does NOT mirror OpenAI models.
+    - Currently, Copilot exposes a single model: `gpt-5-mini` (provider=copilot only).
+    - If you need other GPT-5 variants (e.g., `gpt-5`, `gpt-5-minimal`, `gpt-5-codex-*`), use provider `codex`/`openai` instead of `copilot`.
+    - Device code request MUST include `Accept: application/json` (the server does this for you).
+    - Copilot token exchange requires headers like `User-Agent`, `OpenAI-Intent`, `Editor-Plugin-*`, `Editor-Version`, and `X-GitHub-Api-Version` (the server sets these automatically).
+    - Migration:
+      - Switch your `model` to `gpt-5-mini` when using provider `copilot`.
+      - For non-mini GPT-5 models, route via `codex`/`openai` providers.
+      - Verify `/v1/models` and management endpoints show the expected provider-model mapping.
+
 
 ### Starting the Server
 
