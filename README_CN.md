@@ -72,7 +72,7 @@
 
 2. 构建应用程序：
    ```bash
-   go build -o cli-proxy-api ./cmd/server
+   go build -o cli-proxy-api.exe ./cmd/server
    ```
 
 ### 通过 Homebrew 安装
