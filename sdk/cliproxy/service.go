@@ -257,13 +257,13 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "codex":
-		s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg, "codex"))
+		s.coreManager.RegisterExecutor(executor.NewCodexExecutorWithID(s.cfg, "codex"))
 	case "packycode":
 		// 外部 provider=packycode → 内部复用 codex 执行器
-		s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg, "packycode"))
+		s.coreManager.RegisterExecutor(executor.NewCodexExecutorWithID(s.cfg, "packycode"))
 	case "copilot":
 		// copilot 先复用 Codex 执行器（Responses API 语义），以 provider 标识区分来源
-		s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg, "copilot"))
+		s.coreManager.RegisterExecutor(executor.NewCodexExecutorWithID(s.cfg, "copilot"))
 	case "qwen":
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "zhipu":
@@ -539,7 +539,7 @@ func (s *Service) ensurePackycodeModelsRegistered(cfg *config.Config) {
     // Ensure executor exists early to avoid executor_not_found
     if s.coreManager != nil {
         // Register codex executor but expose provider name as 'packycode' via alias (handled in ensureExecutorsForAuth)
-        s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg, "packycode"))
+        s.coreManager.RegisterExecutor(executor.NewCodexExecutorWithID(s.cfg, "packycode"))
     }
     models := registry.GetOpenAIModels()
     // Register models under external provider key 'packycode' (internally still served by codex executor)
