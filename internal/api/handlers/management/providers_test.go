@@ -150,4 +150,15 @@ func TestGetModels_FilterByCopilot(t *testing.T) {
     if len(body.Data) == 0 {
         t.Fatalf("expected some models for provider copilot")
     }
+    // Ensure gpt-5-mini is visible after registry seeded
+    var hasMini bool
+    for _, m := range body.Data {
+        if id, ok := m["id"].(string); ok && id == "gpt-5-mini" {
+            hasMini = true
+            break
+        }
+    }
+    if !hasMini {
+        t.Fatalf("expected gpt-5-mini in copilot models list")
+    }
 }
