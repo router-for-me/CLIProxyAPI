@@ -166,6 +166,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		lastBody = append([]byte(nil), data...)
 		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, string(data))
 		if httpResp.StatusCode == 429 {
+			log.Debugf("gemini cli executor: rate limited, retrying with next model")
 			continue
 		}
 
@@ -281,6 +282,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			lastBody = append([]byte(nil), data...)
 			log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, string(data))
 			if httpResp.StatusCode == 429 {
+				log.Debugf("gemini cli executor: rate limited, retrying with next model")
 				continue
 			}
 			err = statusErr{code: httpResp.StatusCode, msg: string(data)}
@@ -451,6 +453,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		lastStatus = resp.StatusCode
 		lastBody = append([]byte(nil), data...)
 		if resp.StatusCode == 429 {
+			log.Debugf("gemini cli executor: rate limited, retrying with next model")
 			continue
 		}
 		break
