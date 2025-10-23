@@ -12,6 +12,10 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
+	// CodexJSONCaptureOnly enables minimal Codex upstream JSON capture while disabling
+	// standard request/response logging output.
+	CodexJSONCaptureOnly bool `yaml:"codex-json-capture-only" json:"codex-json-capture-only"`
+
 	// TPSLog gates emission of per-request TPS structured logs independently of RequestLog.
 	TPSLog bool `yaml:"tps-log" json:"tps-log"`
 

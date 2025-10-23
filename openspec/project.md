@@ -74,7 +74,7 @@ CLIProxyAPI 是一个为本地与容器环境提供 OpenAI/Gemini/Claude/Codex �
   - 管理密钥可由配置或环境变量注入；启用后才注册管理路由。
   - Gemini CLI 相关端点限制本地访问，避免未鉴权的远程调用。
 - 日志与合规：支持按配置切换文件落盘；请求日志与 TPS 采样可控，避免过量持久化。
-- 部署与端口：服务端口默认 8317；OAuth 回调端口分别用于登录；容器镜像为 Alpine 运行时，多架构（amd64/arm64）。
+- 部署与端口：服务端口默认 53555；OAuth 回调端口分别用于登录；容器镜像为 Alpine 运行时，多架构（amd64/arm64）。
 - 资源与伸缩：上游配额耗尽时可按配置切换项目与 preview 模型（config.example.yaml）。
 
 ## External Dependencies

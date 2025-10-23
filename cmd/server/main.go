@@ -59,7 +59,8 @@ func main() {
 	var claudeLogin bool
 	var qwenLogin bool
 	var iflowLogin bool
-	var noBrowser bool
+    var noBrowser bool
+    var copilotAuthLogin bool
 	var projectID string
 	var configPath string
 	var password string
@@ -71,7 +72,9 @@ func main() {
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
-	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
+    flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
+    flag.BoolVar(&copilotAuthLogin, "copilot-auth-login", false, "Login to Copilot via GitHub Device Flow")
+    flag.BoolVar(&copilotAuthLogin, "copilot-login", false, "Alias of --copilot-auth-login")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&password, "password", "", "")
@@ -439,11 +442,13 @@ func main() {
 	} else if claudeLogin {
 		// Handle Claude login
 		cmd.DoClaudeLogin(cfg, options)
-	} else if qwenLogin {
-		cmd.DoQwenLogin(cfg, options)
-	} else if iflowLogin {
-		cmd.DoIFlowLogin(cfg, options)
-	} else {
+    } else if qwenLogin {
+        cmd.DoQwenLogin(cfg, options)
+    } else if copilotAuthLogin {
+        cmd.DoCopilotAuthLogin(cfg, options)
+    } else if iflowLogin {
+        cmd.DoIFlowLogin(cfg, options)
+    } else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
 			// No config file available, just wait for shutdown

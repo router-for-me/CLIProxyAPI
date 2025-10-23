@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -69,13 +70,114 @@ type upstreamAttempt struct {
 
 // recordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
-	ginCtx := ginContextFrom(ctx)
-	if ginCtx == nil {
-		return
-	}
+    if cfg == nil || (!cfg.RequestLog && !cfg.CodexJSONCaptureOnly) {
+        return
+    }
+    ginCtx := ginContextFrom(ctx)
+    if ginCtx == nil {
+        return
+    }
+
+    isCaptureOnly := cfg.CodexJSONCaptureOnly
+
+    // Special JSON capture for Codex/Packycode when model is gpt-5-codex*
+    // This stores the filtered upstream JSON body and related identifiers into Gin context
+    // for downstream consumers (e.g., response writer logger, debugging tools).
+    model := strings.TrimSpace(gjson.GetBytes(info.Body, "model").String())
+    isCodexProvider := strings.EqualFold(info.Provider, "codex") || strings.EqualFold(info.Provider, "packycode")
+    isCodexVariant := util.InArray([]string{"gpt-5-codex-low", "gpt-5-codex-medium", "gpt-5-codex-high"}, model)
+
+    if isCodexProvider && isCodexVariant {
+        inputs := gjson.GetBytes(info.Body, "input").Array()
+        var items []string
+        for i := range inputs {
+            it := inputs[i]
+            if !strings.EqualFold(it.Get("type").String(), "function_call") {
+                continue
+            }
+            name := strings.ToLower(strings.TrimSpace(it.Get("name").String()))
+            if !(strings.Contains(name, "bash") || strings.Contains(name, "shell")) {
+                continue
+            }
+            var b strings.Builder
+            b.WriteString("{\"type\":\"function_call\",\"name\":")
+            b.WriteString(fmt.Sprintf("%q", it.Get("name").String()))
+            if v := it.Get("call_id"); v.Exists() {
+                b.WriteString(",\"call_id\":")
+                b.WriteString(v.Raw)
+            }
+            if v := it.Get("arguments"); v.Exists() {
+                b.WriteString(",\"arguments\":")
+                b.WriteString(v.Raw)
+            }
+            b.WriteString("}")
+            items = append(items, b.String())
+        }
+
+        instructions := strings.TrimSpace(gjson.GetBytes(info.Body, "instructions").String())
+        tools := gjson.GetBytes(info.Body, "tools").Array()
+        var bashTools []string
+        for i := range tools {
+            t := tools[i]
+            name := strings.ToLower(strings.TrimSpace(t.Get("name").String()))
+            if !(strings.Contains(name, "bash") || strings.Contains(name, "shell")) {
+                continue
+            }
+            var sb strings.Builder
+            sb.WriteString("{\"type\":\"function\",\"name\":")
+            sb.WriteString(fmt.Sprintf("%q", t.Get("name").String()))
+            if v := t.Get("description"); v.Exists() {
+                sb.WriteString(",\"description\":")
+                sb.WriteString(v.Raw)
+            }
+            if v := t.Get("parameters"); v.Exists() {
+                sb.WriteString(",\"parameters\":")
+                sb.WriteString(v.Raw)
+            }
+            sb.WriteString("}")
+            bashTools = append(bashTools, sb.String())
+        }
+
+        var filtered []byte
+        {
+            var sb strings.Builder
+            sb.WriteString("{")
+            sb.WriteString(fmt.Sprintf("\"model\":%q", model))
+            if instructions != "" {
+                sb.WriteString(",\"instructions\":")
+                sb.WriteString(fmt.Sprintf("%q", instructions))
+            }
+            if len(bashTools) > 0 {
+                sb.WriteString(",\"tools\":[")
+                sb.WriteString(strings.Join(bashTools, ","))
+                sb.WriteString("]")
+            }
+            if len(items) > 0 {
+                sb.WriteString(",\"input\":[")
+                sb.WriteString(strings.Join(items, ","))
+                sb.WriteString("]")
+            }
+            sb.WriteString("}")
+            filtered = []byte(sb.String())
+        }
+
+        ginCtx.Set("API_JSON_CAPTURE", filtered)
+        ginCtx.Set("API_JSON_CAPTURE_PROVIDER", strings.ToLower(info.Provider))
+        ginCtx.Set("API_JSON_CAPTURE_URL", info.URL)
+        ginCtx.Set("API_PROVIDER", strings.ToLower(info.Provider))
+        ginCtx.Set("API_MODEL_ID", model)
+
+        if isCaptureOnly {
+            return
+        }
+    } else if isCaptureOnly {
+        // Capture-only mode with non-Codex request: skip entirely.
+        return
+    }
+
+    if !cfg.RequestLog {
+        return
+    }
 
 	attempts := getAttempts(ginCtx)
 	index := len(attempts) + 1

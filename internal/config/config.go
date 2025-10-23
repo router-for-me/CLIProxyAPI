@@ -38,6 +38,8 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// CodexJSONCaptureOnly is provided via embedded SDKConfig. Do not redeclare here.
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
@@ -64,6 +66,9 @@ type Config struct {
 
     // ZhipuKey defines a list of Zhipu API key configurations.
     ZhipuKey []ZhipuKey `yaml:"zhipu-api-key" json:"zhipu-api-key"`
+
+    // Copilot contains OAuth settings for the Copilot provider.
+    Copilot CopilotOAuth `yaml:"copilot-oauth" json:"copilot-oauth"`
 }
 
 // PackycodeConfig represents configuration for routing Claude Code compatible
@@ -156,6 +161,24 @@ type ZhipuKey struct {
 
     // ProxyURL overrides the global proxy setting for this API key if provided.
     ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
+}
+
+// CopilotOAuth defines OAuth endpoints and parameters for Copilot provider.
+type CopilotOAuth struct {
+    // AuthURL is the authorization endpoint (e.g., https://.../oauth/authorize)
+    AuthURL string `yaml:"auth-url" json:"auth-url"`
+    // TokenURL is the token exchange endpoint (e.g., https://.../oauth/token)
+    TokenURL string `yaml:"token-url" json:"token-url"`
+    // ClientID identifies the OAuth client application.
+    ClientID string `yaml:"client-id" json:"client-id"`
+    // RedirectPort is the localhost port for the temporary callback forwarder.
+    RedirectPort int `yaml:"redirect-port" json:"redirect-port"`
+    // Scope is the OAuth scope string.
+    Scope string `yaml:"scope" json:"scope"`
+    // Optional overrides for GitHub Device Flow endpoints and client id
+    GitHubBaseURL    string `yaml:"github-base-url" json:"github-base-url"`
+    GitHubAPIBaseURL string `yaml:"github-api-base-url" json:"github-api-base-url"`
+    GitHubClientID   string `yaml:"github-client-id" json:"github-client-id"`
 }
 
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
@@ -278,6 +301,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
     // Normalize and sanitize Packycode configuration
     sanitizePackycode(&cfg)
+    // Normalize Copilot OAuth defaults
+    sanitizeCopilotOAuth(&cfg)
     if !optional {
         if err := ValidatePackycode(&cfg); err != nil {
             return nil, fmt.Errorf("invalid packycode configuration: %w", err)
@@ -316,6 +341,27 @@ func sanitizePackycode(cfg *Config) {
         }
     default:
         pc.Defaults.ModelReasoningEffort = "high"
+    }
+}
+
+// sanitizeCopilotOAuth applies safe defaults and trims Copilot OAuth settings.
+func sanitizeCopilotOAuth(cfg *Config) {
+    if cfg == nil {
+        return
+    }
+    c := &cfg.Copilot
+    c.AuthURL = strings.TrimSpace(c.AuthURL)
+    c.TokenURL = strings.TrimSpace(c.TokenURL)
+    c.ClientID = strings.TrimSpace(c.ClientID)
+    c.Scope = strings.TrimSpace(c.Scope)
+    c.GitHubBaseURL = strings.TrimSpace(c.GitHubBaseURL)
+    c.GitHubAPIBaseURL = strings.TrimSpace(c.GitHubAPIBaseURL)
+    c.GitHubClientID = strings.TrimSpace(c.GitHubClientID)
+    if c.RedirectPort == 0 {
+        c.RedirectPort = 54556
+    }
+    if c.Scope == "" {
+        c.Scope = "openid email profile offline_access"
     }
 }
 

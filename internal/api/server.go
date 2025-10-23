@@ -53,10 +53,20 @@ type ServerOption func(*serverOptionConfig)
 
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
+	enabled := cfg.RequestLog || cfg.CodexJSONCaptureOnly
+	var logger logging.RequestLogger
 	if base := util.WritablePath(); base != "" {
-		return logging.NewFileRequestLogger(cfg.RequestLog, filepath.Join(base, "logs"), configDir)
+		logger = logging.NewFileRequestLogger(enabled, filepath.Join(base, "logs"), configDir)
+	} else {
+		logger = logging.NewFileRequestLogger(enabled, "logs", configDir)
 	}
-	return logging.NewFileRequestLogger(cfg.RequestLog, "logs", configDir)
+	if setter, ok := logger.(interface{ SetEnabled(bool) }); ok {
+		setter.SetEnabled(enabled)
+	}
+	if captureSetter, ok := logger.(interface{ SetCaptureOnly(bool) }); ok {
+		captureSetter.SetCaptureOnly(cfg.CodexJSONCaptureOnly)
+	}
+	return logger
 }
 
 // WithMiddleware appends additional Gin middleware during server construction.
@@ -131,6 +141,7 @@ type Server struct {
 	// requestLogger is the request logger instance for dynamic configuration updates.
 	requestLogger logging.RequestLogger
 	loggerToggle  func(bool)
+	loggerCaptureToggle func(bool)
 
 	// configFilePath is the absolute path to the YAML config file for persistence.
 	configFilePath string
@@ -195,17 +206,22 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Add request logging middleware (positioned after recovery, before auth)
 	// Resolve logs directory relative to the configuration file directory.
-	var requestLogger logging.RequestLogger
-	var toggle func(bool)
+    var requestLogger logging.RequestLogger
+    var toggle func(bool)
+    var captureToggle func(bool)
 	if optionState.requestLoggerFactory != nil {
 		requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
 	}
-	if requestLogger != nil {
-		engine.Use(middleware.RequestLoggingMiddleware(requestLogger))
-		if setter, ok := requestLogger.(interface{ SetEnabled(bool) }); ok {
-			toggle = setter.SetEnabled
-		}
-	}
+    if requestLogger != nil {
+        engine.Use(middleware.RequestLoggingMiddleware(requestLogger))
+        if setter, ok := requestLogger.(interface{ SetEnabled(bool) }); ok {
+            toggle = setter.SetEnabled
+        }
+        if captureSetter, ok := requestLogger.(interface{ SetCaptureOnly(bool) }); ok {
+            captureSetter.SetCaptureOnly(cfg.CodexJSONCaptureOnly)
+            captureToggle = captureSetter.SetCaptureOnly
+        }
+    }
 
 	engine.Use(corsMiddleware())
 	wd, err := os.Getwd()
@@ -223,8 +239,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
 		cfg:                 cfg,
 		accessManager:       accessManager,
-		requestLogger:       requestLogger,
-		loggerToggle:        toggle,
+        requestLogger:       requestLogger,
+        loggerToggle:        toggle,
+        loggerCaptureToggle: captureToggle,
 		configFilePath:      configFilePath,
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
@@ -410,6 +427,19 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
+	// Copilot OAuth callback endpoint
+	s.engine.GET("/copilot/callback", func(c *gin.Context) {
+		code := c.Query("code")
+		state := c.Query("state")
+		errStr := c.Query("error")
+		if state != "" {
+			file := fmt.Sprintf("%s/.oauth-copilot-%s.oauth", s.cfg.AuthDir, state)
+			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	})
+
 	s.engine.GET("/iflow/callback", func(c *gin.Context) {
 		code := c.Query("code")
 		state := c.Query("state")
@@ -481,9 +511,14 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/logs", s.mgmt.GetLogs)
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
-		mgmt.GET("/request-log", s.mgmt.GetRequestLog)
-		mgmt.PUT("/request-log", s.mgmt.PutRequestLog)
-		mgmt.PATCH("/request-log", s.mgmt.PutRequestLog)
+        mgmt.GET("/request-log", s.mgmt.GetRequestLog)
+        mgmt.PUT("/request-log", s.mgmt.PutRequestLog)
+        mgmt.PATCH("/request-log", s.mgmt.PutRequestLog)
+
+        // Codex JSON capture only
+        mgmt.GET("/codex-json-capture-only", s.mgmt.GetCodexJSONCaptureOnly)
+        mgmt.PUT("/codex-json-capture-only", s.mgmt.PutCodexJSONCaptureOnly)
+        mgmt.PATCH("/codex-json-capture-only", s.mgmt.PutCodexJSONCaptureOnly)
 
 		mgmt.GET("/tps-log", s.mgmt.GetTPSLog)
 		mgmt.PUT("/tps-log", s.mgmt.PutTPSLog)
@@ -533,6 +568,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/gemini-cli-auth-url", s.mgmt.RequestGeminiCLIToken)
 		mgmt.GET("/qwen-auth-url", s.mgmt.RequestQwenToken)
 		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
+		// GitHub Device Flow for Copilot (no callback required)
+		mgmt.GET("/copilot-device-code", s.mgmt.RequestCopilotDeviceCode)
+		mgmt.GET("/copilot-device-status", s.mgmt.GetCopilotDeviceStatus)
+		mgmt.GET("/copilot-auth-url", s.mgmt.RequestCopilotToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
 }
@@ -756,23 +795,38 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		_ = yaml.Unmarshal(s.oldConfigYaml, &oldCfg)
 	}
 
-	// Update request logger enabled state if it has changed
-	previousRequestLog := false
-	if oldCfg != nil {
-		previousRequestLog = oldCfg.RequestLog
-	}
-	if s.requestLogger != nil && (oldCfg == nil || previousRequestLog != cfg.RequestLog) {
-		if s.loggerToggle != nil {
-			s.loggerToggle(cfg.RequestLog)
-		} else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
-			toggler.SetEnabled(cfg.RequestLog)
-		}
-		if oldCfg != nil {
-			log.Debugf("request logging updated from %t to %t", previousRequestLog, cfg.RequestLog)
-		} else {
-			log.Debugf("request logging toggled to %t", cfg.RequestLog)
-		}
-	}
+    // Update request logger enabled state if it has changed
+    previousRequestLog := false
+    if oldCfg != nil {
+        previousRequestLog = oldCfg.RequestLog
+    }
+    if s.requestLogger != nil && (oldCfg == nil || previousRequestLog != cfg.RequestLog) {
+        if s.loggerToggle != nil {
+            s.loggerToggle(cfg.RequestLog || cfg.CodexJSONCaptureOnly)
+        } else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
+            toggler.SetEnabled(cfg.RequestLog || cfg.CodexJSONCaptureOnly)
+        }
+        if oldCfg != nil {
+            log.Debugf("request logging updated from %t to %t", previousRequestLog, cfg.RequestLog)
+        } else {
+            log.Debugf("request logging toggled to %t", cfg.RequestLog)
+        }
+    }
+
+    // Update capture-only toggle when changed
+    if s.requestLogger != nil {
+        prevCapture := false
+        if oldCfg != nil {
+            prevCapture = oldCfg.CodexJSONCaptureOnly
+        }
+        if oldCfg == nil || prevCapture != cfg.CodexJSONCaptureOnly {
+            if s.loggerCaptureToggle != nil {
+                s.loggerCaptureToggle(cfg.CodexJSONCaptureOnly)
+            } else if captureSetter, ok := s.requestLogger.(interface{ SetCaptureOnly(bool) }); ok {
+                captureSetter.SetCaptureOnly(cfg.CodexJSONCaptureOnly)
+            }
+        }
+    }
 
 	if oldCfg != nil && oldCfg.LoggingToFile != cfg.LoggingToFile {
 		if err := logging.ConfigureLogOutput(cfg.LoggingToFile); err != nil {
