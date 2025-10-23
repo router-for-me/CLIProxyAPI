@@ -48,6 +48,7 @@ func DoCopilotAuthLogin(cfg *config.Config, options *LoginOptions) {
     httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
     req, _ := http.NewRequestWithContext(ctx, http.MethodPost, deviceCodeURL, strings.NewReader(form.Encode()))
     req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    req.Header.Set("Accept", "application/json")
     resp, err := httpClient.Do(req)
     if err != nil {
         fmt.Printf("Copilot login failed: request device code error: %v\n", err)
@@ -108,6 +109,13 @@ func DoCopilotAuthLogin(cfg *config.Config, options *LoginOptions) {
     req, _ = http.NewRequestWithContext(ctx, http.MethodGet, copilotTokenURL, nil)
     req.Header.Set("Authorization", "token "+ghToken)
     req.Header.Set("Accept", "application/json")
+    // Provide headers commonly required by Copilot token endpoint
+    req.Header.Set("User-Agent", "cli-proxy-copilot")
+    req.Header.Set("OpenAI-Intent", "copilot-cli-login")
+    req.Header.Set("Editor-Plugin-Name", "cli-proxy")
+    req.Header.Set("Editor-Plugin-Version", "1.0.0")
+    req.Header.Set("Editor-Version", "cli/1.0")
+    req.Header.Set("X-GitHub-Api-Version", "2023-07-07")
     resp, err = httpClient.Do(req)
     if err != nil {
         fmt.Printf("Copilot login failed: token request error: %v\n", err)

@@ -74,6 +74,7 @@ func (h *Handler) RequestCopilotDeviceCode(c *gin.Context) {
     }
     req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, urlStr, strings.NewReader(form.Encode()))
     req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    req.Header.Set("Accept", "application/json")
     httpClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
     resp, err := httpClient.Do(req)
     if err != nil {
@@ -143,6 +144,12 @@ func (h *Handler) pollCopilotDeviceFlow(dc deviceCodeResp) {
     req, _ := http.NewRequestWithContext(ctx, http.MethodGet, copilotURL, nil)
     req.Header.Set("Authorization", "token "+ghToken)
     req.Header.Set("Accept", "application/json")
+    req.Header.Set("User-Agent", "cli-proxy-copilot")
+    req.Header.Set("OpenAI-Intent", "copilot-cli-login")
+    req.Header.Set("Editor-Plugin-Name", "cli-proxy")
+    req.Header.Set("Editor-Plugin-Version", "1.0.0")
+    req.Header.Set("Editor-Version", "cli/1.0")
+    req.Header.Set("X-GitHub-Api-Version", "2023-07-07")
     resp, err := httpClient.Do(req)
     if err != nil || resp == nil { deviceFlowStatus[dc.DeviceCode] = "error: token_request_failed"; return }
     defer func(){ _ = resp.Body.Close() }()
