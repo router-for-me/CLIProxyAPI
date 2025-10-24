@@ -26,6 +26,15 @@ Then Go forwards to PAB using an SSE-compatible stream and relays chunks to clie
 When PAB returns an HTTP error (>=400)
 Then Go MUST return the same status and a JSON error body preserving message/code when present.
 
+#### Requirement: Diagnostic and Observability
+- The Python Agent Bridge (PAB) SHALL expose a diagnostic endpoint `POST /debug/upstream-check` that performs a server-side upstream request to `${ANTHROPIC_BASE_URL}/v1/chat/completions` with a 90s timeout and returns:
+  - `status`: upstream HTTP status code (when available)
+  - `body`: upstream JSON body or text (truncated if needed)
+  - `error`: structured object when transport errors occur with a `type` classifier in {`DNS`, `ECONNREFUSED`, `ETIMEDOUT`, `SSL`, `HTTP_4xx/5xx`, other}
+- The PAB SHALL emit structured error logs for SDK and upstream errors with fields:
+  - `category` (one of classifiers above), `url`, `auth_preview` (masked token), `model`, `env_keys`, `traceback`
+- For streaming mode, the PAB SHALL emit an SSE error event and end with `[DONE]` instead of returning HTTP 500 directly.
+
 #### Scenario: Rollback by configuration
 Given claude-agent-sdk-for-python.enabled=false
 When client requests provider="zhipu"
