@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Provider Model Inventory Exposure (Copilot Rules)
 The system SHALL treat `copilot` as an independent provider whose model inventory is not mirrored from OpenAI.
