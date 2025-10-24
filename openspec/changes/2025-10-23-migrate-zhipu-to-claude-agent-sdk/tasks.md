@@ -29,3 +29,11 @@
   - [x] 采集无外部实例下的运行日志，确认日志中包含 `model: 'glm-4.6'` 与助手文本。
   - [x] 新增 `tests/test_query_cli_default_model.sh`，断言日志包含 `glm-4.6`。
   - [x] 生成验证报告 `VERIFICATION.md`，记录补丁片段、OpenSpec diff 与完整测试结果。
+
+- [x] 10. 修复 app.py 的 model 参数传递问题：
+  - [x] 非流式调用（第 119 行）：添加显式 `model` 参数到 `ClaudeAgentOptions`。
+  - [x] 流式调用（第 187 行）：添加显式 `model` 参数到 `ClaudeAgentOptions`。
+  - [x] 修复流式响应类型：将 `PlainTextResponse` 改为 `StreamingResponse`。
+  - [x] 测试非流式调用验证通过（返回中文回复，模型: glm-4.6）。
+  - [x] 测试流式调用验证通过（SSE 格式正确，逐块返回内容）。
+  - [x] 日志检查确认无 `sdk_query_error` 或 `sdk_stream_error`。

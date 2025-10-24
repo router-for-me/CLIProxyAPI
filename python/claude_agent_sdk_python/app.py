@@ -3,7 +3,7 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import logging
 import traceback
 import socket
@@ -116,7 +116,10 @@ async def chat_completions(req: Request) -> Response:
     async def run_non_stream() -> Dict[str, Any]:
         content_texts: List[str] = []
         try:
-            options = ClaudeAgentOptions(env={k: str(v) for k, v in env_map.items()})
+            options = ClaudeAgentOptions(
+                env={k: str(v) for k, v in env_map.items()},
+                model=model
+            )
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(prompt)
                 async for msg in client.receive_response():
@@ -181,7 +184,7 @@ async def chat_completions(req: Request) -> Response:
                 "ANTHROPIC_MODEL": model,
                 **{k: os.getenv(k, "") for k in ("API_TIMEOUT_MS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")},
             }
-            async with ClaudeSDKClient(options=ClaudeAgentOptions(env=opts)) as client:
+            async with ClaudeSDKClient(options=ClaudeAgentOptions(env=opts, model=model)) as client:
                 await client.query(prompt)
                 async for msg in client.receive_response():
                     if isinstance(msg, AssistantMessage):
@@ -221,7 +224,7 @@ async def chat_completions(req: Request) -> Response:
             # end marker
             yield "data: [DONE]\n\n"
 
-    return PlainTextResponse(
+    return StreamingResponse(
         content=sse_generator(), status_code=200, media_type="text/event-stream"
     )
 
