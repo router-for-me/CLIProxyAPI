@@ -6,11 +6,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	copilotoauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -336,6 +338,54 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if auth == nil {
 		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
 	}
+
+	// Copilot branch: use GitHub device-flow token to fetch new copilot token
+	if e.Identifier() == "copilot" {
+		var ghPAT string
+		if auth.Metadata != nil {
+			if v, ok := auth.Metadata["github_access_token"].(string); ok {
+				ghPAT = strings.TrimSpace(v)
+			}
+		}
+		if ghPAT == "" {
+			// nothing to do
+			return auth, nil
+		}
+		apiBase := strings.TrimSuffix(e.cfg.Copilot.GitHubAPIBaseURL, "/")
+		if apiBase == "" {
+			apiBase = strings.TrimSuffix(copilotoauth.DefaultGitHubAPIBaseURL, "/")
+		}
+		url := apiBase + copilotoauth.DefaultCopilotTokenPath
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req.Header.Set("Authorization", "token "+ghPAT)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "cli-proxy-copilot")
+		req.Header.Set("OpenAI-Intent", "copilot-cli-refresh")
+		req.Header.Set("Editor-Plugin-Name", "cli-proxy")
+		req.Header.Set("Editor-Plugin-Version", "1.0.0")
+		req.Header.Set("Editor-Version", "cli/1.0")
+		req.Header.Set("X-GitHub-Api-Version", "2023-07-07")
+		httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+		resp, err := httpClient.Do(req)
+		if err != nil { return nil, err }
+		defer func(){ _ = resp.Body.Close() }()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			b, _ := io.ReadAll(resp.Body)
+			return nil, statusErr{code: resp.StatusCode, msg: string(b)}
+		}
+		var out struct{ Token string `json:"token"`; ExpiresAt int64 `json:"expires_at"`; RefreshIn int `json:"refresh_in"` }
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil { return nil, err }
+		if auth.Metadata == nil { auth.Metadata = make(map[string]any) }
+		auth.Metadata["access_token"] = out.Token
+		auth.Metadata["expires_at"] = out.ExpiresAt
+		auth.Metadata["refresh_in"] = out.RefreshIn
+		auth.Metadata["expired"] = time.Now().Add(time.Duration(out.RefreshIn) * time.Second).Format(time.RFC3339)
+		auth.Metadata["type"] = "copilot"
+		auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+		return auth, nil
+	}
+
+	// Default (Codex/OpenAI) refresh using refresh_token
 	var refreshToken string
 	if auth.Metadata != nil {
 		if v, ok := auth.Metadata["refresh_token"].(string); ok && v != "" {

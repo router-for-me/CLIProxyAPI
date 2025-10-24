@@ -32,12 +32,27 @@ func (e *ZhipuExecutor) Identifier() string { return "zhipu" }
 func (e *ZhipuExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
 
 func (e *ZhipuExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+    // If Claude Agent SDK for Python (config key: claude-agent-sdk-for-python) is explicitly disabled, fallback to legacy direct execution
+    if e.cfg != nil && !e.cfg.PythonAgent.Enabled {
+        compat := NewOpenAICompatExecutor("zhipu", e.cfg)
+        return compat.Execute(ctx, auth, req, opts)
+    }
     token, _ := zhipuCreds(auth)
     reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
     from := opts.SourceFormat
     to := sdktranslator.FromString("openai")
     body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-    bridgeURL := strings.TrimSpace(os.Getenv("CLAUDE_AGENT_SDK_URL"))
+    // bridgeURL selection priority:
+    // 1) if Claude Agent SDK for Python is enabled and baseURL present in config, use it
+    // 2) env CLAUDE_AGENT_SDK_URL
+    // 3) ensureClaudePythonBridge (may return default or error)
+    var bridgeURL string
+    if e.cfg != nil && e.cfg.PythonAgent.Enabled && strings.TrimSpace(e.cfg.PythonAgent.BaseURL) != "" {
+        bridgeURL = strings.TrimSpace(e.cfg.PythonAgent.BaseURL)
+    }
+    if bridgeURL == "" {
+        bridgeURL = strings.TrimSpace(os.Getenv("CLAUDE_AGENT_SDK_URL"))
+    }
     if bridgeURL == "" {
         var err error
         bridgeURL, err = ensureClaudePythonBridge(ctx, e.cfg, auth)
@@ -75,12 +90,27 @@ func (e *ZhipuExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 }
 
 func (e *ZhipuExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+    // If python agent is explicitly disabled, fallback to legacy direct streaming execution
+    if e.cfg != nil && !e.cfg.PythonAgent.Enabled {
+        compat := NewOpenAICompatExecutor("zhipu", e.cfg)
+        return compat.ExecuteStream(ctx, auth, req, opts)
+    }
     token, _ := zhipuCreds(auth)
     reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
     from := opts.SourceFormat
     to := sdktranslator.FromString("openai")
     body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-    bridgeURL := strings.TrimSpace(os.Getenv("CLAUDE_AGENT_SDK_URL"))
+    // bridgeURL selection priority:
+    // 1) config claude-agent-sdk-for-python.baseURL when Claude Agent SDK for Python is enabled
+    // 2) env CLAUDE_AGENT_SDK_URL
+    // 3) ensureClaudePythonBridge
+    var bridgeURL string
+    if e.cfg != nil && e.cfg.PythonAgent.Enabled && strings.TrimSpace(e.cfg.PythonAgent.BaseURL) != "" {
+        bridgeURL = strings.TrimSpace(e.cfg.PythonAgent.BaseURL)
+    }
+    if bridgeURL == "" {
+        bridgeURL = strings.TrimSpace(os.Getenv("CLAUDE_AGENT_SDK_URL"))
+    }
     if bridgeURL == "" {
         var err error
         bridgeURL, err = ensureClaudePythonBridge(ctx, e.cfg, auth)

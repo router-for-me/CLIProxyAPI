@@ -6,13 +6,13 @@
      - ANTHROPIC_AUTH_TOKEN="<zhipu api-key>"
    - Go 不直接用该 key 访问上游，避免直连路径限制。
 - [x] 3. 配置与开关：
-   - 通过 CLAUDE_AGENT_SDK_URL（默认 http://127.0.0.1:35331）指向 SDK 服务地址；保留临时回退 legacy ZhipuExecutor 的能力（过渡期）。
+  - 新增 Claude Agent SDK for Python（配置键 `claude-agent-sdk-for-python`）：enabled（默认 true）、baseURL（默认 http://127.0.0.1:35331）；支持 env CLAUDE_AGENT_SDK_URL 覆盖；禁用时回退 legacy ZhipuExecutor。
 - [x] 4. 模型注册：保持 GetZhipuModels 不变（glm-4.5/4.6）。
 - [x] 5. 观测：usage/metrics 增加 backend=claude-agent-sdk-python。
 - [x] 6. 测试：
-   - 单元：目标地址构造、错误/超时处理、流式切片。
-   - 集成：mock /v1/chat/completions（非流/流式）。
-   - E2E：在 SDK 服务设置 ANTHROPIC_* 环境变量后，验证 glm-4.6 连通。
+  - 单元：配置解析（enabled/baseURL 默认与 trim）、执行器禁用回退（非流/流）、执行器正向路径（非流/流，SSE [DONE]）。
+  - 集成：mock /v1/chat/completions（非流/流式）。
+  - E2E：在 SDK 服务设置 ANTHROPIC_* 环境变量后，验证 glm-4.6 连通。
 - [x] 7. 文档：
    - config.example.yaml 注释 CLAUDE_AGENT_SDK_URL（已完成）。
    - README/部署说明：如何从 config.yaml 提取 zhipu api-key 并以环境变量注入 SDK 服务。

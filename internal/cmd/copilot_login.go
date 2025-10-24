@@ -173,7 +173,15 @@ func DoCopilotAuthLogin(cfg *config.Config, options *LoginOptions) {
     baseURL := deriveBaseURL(out.Token)
 
     id := fmt.Sprintf("copilot-%d.json", time.Now().UnixMilli())
-    record := &coreauth.Auth{ ID: id, Provider: "copilot", FileName: id, Storage: storage, Metadata: map[string]any{"access_token": out.Token, "expires_at": out.ExpiresAt, "refresh_in": out.RefreshIn, "expired": storage.Expire}, CreatedAt: time.Now(), UpdatedAt: time.Now(), Status: coreauth.StatusActive }
+    // Persist github access token to enable background refresh
+    meta := map[string]any{
+        "access_token":          out.Token,
+        "expires_at":            out.ExpiresAt,
+        "refresh_in":            out.RefreshIn,
+        "expired":               storage.Expire,
+        "github_access_token":   ghToken,
+    }
+    record := &coreauth.Auth{ ID: id, Provider: "copilot", FileName: id, Storage: storage, Metadata: meta, CreatedAt: time.Now(), UpdatedAt: time.Now(), Status: coreauth.StatusActive }
     if baseURL != "" {
         record.Attributes = map[string]string{"base_url": baseURL}
     }

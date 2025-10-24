@@ -64,6 +64,9 @@ type Config struct {
     // Packycode holds configuration for Packycode upstream provider integration.
     Packycode PackycodeConfig `yaml:"packycode" json:"packycode"`
 
+    // Claude Agent SDK for Python config (key: claude-agent-sdk-for-python)
+    PythonAgent PythonAgentConfig `yaml:"claude-agent-sdk-for-python" json:"claude-agent-sdk-for-python"`
+
     // ZhipuKey defines a list of Zhipu API key configurations.
     ZhipuKey []ZhipuKey `yaml:"zhipu-api-key" json:"zhipu-api-key"`
 
@@ -100,6 +103,15 @@ type PackycodeDefaults struct {
 // PackycodeCredentials groups upstream credentials.
 type PackycodeCredentials struct {
     OpenAIAPIKey string `yaml:"openai-api-key" json:"openai-api-key"`
+}
+
+// PythonAgentConfig controls the optional Claude Agent SDK for Python bridge
+// (config key: claude-agent-sdk-for-python) used to route provider=zhipu requests via a
+// local/sidecar HTTP service.
+type PythonAgentConfig struct {
+    Enabled bool              `yaml:"enabled" json:"enabled"`
+    BaseURL string            `yaml:"baseURL" json:"baseURL"`
+    Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -261,13 +273,16 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
-	// Packycode defaults
-	cfg.Packycode.Enabled = false
-	cfg.Packycode.RequiresOpenAIAuth = true
-	cfg.Packycode.WireAPI = "responses"
-	cfg.Packycode.Privacy.DisableResponseStorage = true
-	cfg.Packycode.Defaults.Model = "gpt-5"
-	cfg.Packycode.Defaults.ModelReasoningEffort = "high"
+    // Packycode defaults
+    cfg.Packycode.Enabled = false
+    cfg.Packycode.RequiresOpenAIAuth = true
+    cfg.Packycode.WireAPI = "responses"
+    cfg.Packycode.Privacy.DisableResponseStorage = true
+    cfg.Packycode.Defaults.Model = "gpt-5"
+    cfg.Packycode.Defaults.ModelReasoningEffort = "high"
+    // PythonAgent defaults
+    cfg.PythonAgent.Enabled = true
+    cfg.PythonAgent.BaseURL = "http://127.0.0.1:35331"
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -303,6 +318,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
     sanitizePackycode(&cfg)
     // Normalize Copilot OAuth defaults
     sanitizeCopilotOAuth(&cfg)
+    // Trim python agent baseURL
+    cfg.PythonAgent.BaseURL = strings.TrimSpace(cfg.PythonAgent.BaseURL)
     if !optional {
         if err := ValidatePackycode(&cfg); err != nil {
             return nil, fmt.Errorf("invalid packycode configuration: %w", err)

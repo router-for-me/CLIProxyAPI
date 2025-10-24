@@ -43,8 +43,9 @@
 
 ## Status
 - [x] Implemented in Go: provider=zhipu requests are forwarded to Python Agent SDK `/v1/chat/completions` (stream/non-stream).
-- [x] Config surfaced: `CLAUDE_AGENT_SDK_URL` with default `http://127.0.0.1:35331`; `config.example.yaml` docs updated.
-- [x] Tests: unit tests for executor identifier/errors, model registry, and watcher synthesis are passing.
+- [x] Config surfaced: Claude Agent SDK for Python (config key `claude-agent-sdk-for-python`): `enabled` (default true), `baseURL` (default `http://127.0.0.1:35331`), and env `CLAUDE_AGENT_SDK_URL` override; `config.example.yaml` docs updated.
+- [x] Bridge URL selection priority: config.claude-agent-sdk-for-python.baseURL → env `CLAUDE_AGENT_SDK_URL` → ensureClaudePythonBridge default; rollback to legacy when `claude-agent-sdk-for-python.enabled=false`.
+- [x] Tests: unit tests added for config parsing, executor rollback (enabled=false), and positive paths to Python Bridge (non-stream/stream) with SSE `[DONE]` handling.
 - [ ] Optional E2E: requires running Python SDK with `ANTHROPIC_*` envs.
 
 ## Success Metrics
