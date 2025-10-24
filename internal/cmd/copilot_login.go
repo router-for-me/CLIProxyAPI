@@ -143,6 +143,8 @@ func DoCopilotAuthLogin(cfg *config.Config, options *LoginOptions) {
         AccessToken: out.Token,
         LastRefresh: time.Now().Format(time.RFC3339),
         Expire:      expTime.Format(time.RFC3339),
+        ExpiresAt:   out.ExpiresAt,
+        RefreshIn:   out.RefreshIn,
     }
     // derive proxy endpoint from token (key: proxy-ep)
     deriveBaseURL := func(tok string) string {
@@ -171,7 +173,7 @@ func DoCopilotAuthLogin(cfg *config.Config, options *LoginOptions) {
     baseURL := deriveBaseURL(out.Token)
 
     id := fmt.Sprintf("copilot-%d.json", time.Now().UnixMilli())
-    record := &coreauth.Auth{ ID: id, Provider: "copilot", FileName: id, Storage: storage, Metadata: map[string]any{"access_token": out.Token}, CreatedAt: time.Now(), UpdatedAt: time.Now(), Status: coreauth.StatusActive }
+    record := &coreauth.Auth{ ID: id, Provider: "copilot", FileName: id, Storage: storage, Metadata: map[string]any{"access_token": out.Token, "expires_at": out.ExpiresAt, "refresh_in": out.RefreshIn, "expired": storage.Expire}, CreatedAt: time.Now(), UpdatedAt: time.Now(), Status: coreauth.StatusActive }
     if baseURL != "" {
         record.Attributes = map[string]string{"base_url": baseURL}
     }
@@ -195,4 +197,3 @@ func DoCopilotAuthLogin(cfg *config.Config, options *LoginOptions) {
     }
     log.Info("Copilot authentication successful!")
 }
-

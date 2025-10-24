@@ -67,6 +67,65 @@ func TestDoCopilotAuthLogin_SavesFile(t *testing.T) {
     }
 }
 
+// Validate that login persists refresh_in and expires_at into the JSON file (via Storage fields)
+func TestDoCopilotAuthLogin_PersistsRefreshInfo(t *testing.T) {
+    t.Parallel()
+
+    mux := http.NewServeMux()
+    mux.HandleFunc("/login/device/code", func(w http.ResponseWriter, r *http.Request) {
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "device_code":      "dev-xyz",
+            "user_code":        "ABCD-EFGH",
+            "verification_uri": "https://github.com/login/device",
+            "expires_in":       5,
+            "interval":         0,
+        })
+    })
+    mux.HandleFunc("/login/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "access_token": "gh_pat_fake",
+        })
+    })
+    wantMs := time.Now().Add(45 * time.Minute).UnixMilli()
+    mux.HandleFunc("/copilot_internal/v2/token", func(w http.ResponseWriter, r *http.Request) {
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "token":       "copilot_token_fake",
+            "expires_at":  wantMs,
+            "refresh_in":  2700,
+        })
+    })
+    fake := httptest.NewServer(mux)
+    defer fake.Close()
+
+    dir := t.TempDir()
+    cfg := &config.Config{AuthDir: dir}
+    cfg.Copilot.GitHubBaseURL = fake.URL
+    cfg.Copilot.GitHubAPIBaseURL = fake.URL
+    cfg.Copilot.GitHubClientID = "test-client"
+
+    DoCopilotAuthLogin(cfg, &LoginOptions{NoBrowser: true})
+
+    // Read the saved JSON and assert keys
+    entries, err := os.ReadDir(dir)
+    if err != nil { t.Fatalf("readdir: %v", err) }
+    var path string
+    for _, e := range entries {
+        if e.IsDir() { continue }
+        if filepath.Ext(e.Name()) == ".json" {
+            path = filepath.Join(dir, e.Name())
+            break
+        }
+    }
+    if path == "" { t.Fatalf("expected a json auth file to be saved in %s", dir) }
+    data, err := os.ReadFile(path)
+    if err != nil { t.Fatalf("read file: %v", err) }
+    var js map[string]any
+    if err := json.Unmarshal(data, &js); err != nil { t.Fatalf("unmarshal: %v", err) }
+    if _, ok := js["refresh_in"]; !ok { t.Fatalf("missing refresh_in in auth file") }
+    if _, ok := js["expires_at"]; !ok { t.Fatalf("missing expires_at in auth file") }
+    if _, ok := js["expired"]; !ok { t.Fatalf("missing expired (RFC3339) in auth file") }
+}
+
 // Ensure we send Accept: application/json to the device code endpoint; otherwise GitHub returns form-encoded body.
 func TestDoCopilotAuthLogin_DeviceCodeAcceptJSON(t *testing.T) {
     t.Parallel()

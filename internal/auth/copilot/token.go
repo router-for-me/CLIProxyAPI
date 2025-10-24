@@ -25,6 +25,10 @@ type TokenStorage struct {
     Email        string `json:"email"`
     Type         string `json:"type"`
     Expire       string `json:"expired"`
+    // ExpiresAt persists absolute expiry in unix seconds or milliseconds, as provided by upstream.
+    ExpiresAt    int64  `json:"expires_at,omitempty"`
+    // RefreshIn persists the server-provided refresh interval in seconds for preemptive refresh.
+    RefreshIn    int    `json:"refresh_in,omitempty"`
 }
 
 // SaveTokenToFile serializes the Copilot token storage to a JSON file.
@@ -48,4 +52,3 @@ func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
     }
     return nil
 }
-

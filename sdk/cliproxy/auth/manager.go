@@ -1,17 +1,18 @@
 package auth
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"strconv"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
+    "context"
+    "encoding/json"
+    "errors"
+    "net/http"
+    "strconv"
+    "strings"
+    "sync"
+    "sync/atomic"
+    "time"
 
-	"github.com/google/uuid"
+    "github.com/google/uuid"
+    appconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -104,11 +105,17 @@ type Manager struct {
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
-	// Optional HTTP RoundTripper provider injected by host.
-	rtProvider RoundTripperProvider
+    // Optional HTTP RoundTripper provider injected by host.
+    rtProvider RoundTripperProvider
 
-	// Auto refresh state
-	refreshCancel context.CancelFunc
+    // Optional global SDK config snapshot used for provider-specific refresh tuning.
+    cfg *appconfig.SDKConfig
+
+    // Auto refresh state
+    refreshCancel context.CancelFunc
+
+    // timeNow provides current time; overridden in tests.
+    timeNow func() time.Time
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -119,14 +126,22 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	if hook == nil {
 		hook = NoopHook{}
 	}
-	return &Manager{
-		store:           store,
-		executors:       make(map[string]ProviderExecutor),
-		selector:        selector,
-		hook:            hook,
-		auths:           make(map[string]*Auth),
-		providerOffsets: make(map[string]int),
-	}
+    return &Manager{
+        store:           store,
+        executors:       make(map[string]ProviderExecutor),
+        selector:        selector,
+        hook:            hook,
+        auths:           make(map[string]*Auth),
+        providerOffsets: make(map[string]int),
+        timeNow:         time.Now,
+    }
+}
+
+// SetSDKConfig provides a configuration snapshot for refresh tuning.
+func (m *Manager) SetSDKConfig(cfg *appconfig.SDKConfig) {
+    m.mu.Lock()
+    m.cfg = cfg
+    m.mu.Unlock()
 }
 
 // SetStore swaps the underlying persistence store.
@@ -908,26 +923,121 @@ func (m *Manager) StopAutoRefresh() {
 }
 
 func (m *Manager) checkRefreshes(ctx context.Context) {
-	// log.Debugf("checking refreshes")
-	now := time.Now()
-	snapshot := m.snapshotAuths()
-	for _, a := range snapshot {
-		typ, _ := a.AccountInfo()
-		if typ != "api_key" {
-			if !m.shouldRefresh(a, now) {
-				continue
-			}
-			log.Debugf("checking refresh for %s, %s, %s", a.Provider, a.ID, typ)
+    // log.Debugf("checking refreshes")
+    now := m.timeNow()
+    snapshot := m.snapshotAuths()
+    for _, a := range snapshot {
+        typ, _ := a.AccountInfo()
+        if typ != "api_key" {
+            if !m.shouldRefresh(a, now) {
+                continue
+            }
+            log.Debugf("checking refresh for %s, %s, %s", a.Provider, a.ID, typ)
 
-			if exec := m.executorFor(a.Provider); exec == nil {
-				continue
-			}
-			if !m.markRefreshPending(a.ID, now) {
-				continue
-			}
-			go m.refreshAuth(ctx, a.ID)
-		}
-	}
+            if exec := m.executorFor(a.Provider); exec == nil {
+                continue
+            }
+            if !m.markRefreshPending(a.ID, now) {
+                continue
+            }
+            go m.refreshAuth(ctx, a.ID)
+        }
+    }
+}
+
+// shouldRefresh overrides: when provider=copilot and metadata contains refresh_in,
+// prefer scheduling a preemptive refresh at last_refresh + refresh_in - safety_margin.
+// Fallback to existing logic otherwise.
+func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
+    if a == nil || a.Disabled {
+        return false
+    }
+    // Provider-specific preemptive refresh for Copilot using refresh_in
+    if strings.EqualFold(a.Provider, "copilot") && a.Metadata != nil {
+        var refreshInSeconds int64
+        if v, ok := a.Metadata["refresh_in"].(int); ok && v > 0 {
+            refreshInSeconds = int64(v)
+        } else if v, ok := a.Metadata["refresh_in"].(int64); ok && v > 0 {
+            refreshInSeconds = v
+        } else if v, ok := a.Metadata["refresh_in"].(float64); ok && v > 0 {
+            refreshInSeconds = int64(v)
+        }
+        if refreshInSeconds > 0 {
+            // safety margin from SDK config, default 60s, clamp to [5,300]
+            safety := int64(60)
+            m.mu.RLock()
+            if m.cfg != nil && m.cfg.Copilot.RefreshSafetyMarginSeconds > 0 {
+                s := m.cfg.Copilot.RefreshSafetyMarginSeconds
+                if s < 5 { s = 5 }
+                if s > 300 { s = 300 }
+                safety = int64(s)
+            }
+            m.mu.RUnlock()
+            // Prefer last_refresh metadata; fall back to LastRefreshedAt or CreatedAt
+            last := a.LastRefreshedAt
+            if last.IsZero() {
+                if ts, ok := lookupMetadataTime(a.Metadata, "last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"); ok {
+                    last = ts
+                } else {
+                    last = a.CreatedAt
+                }
+            }
+            if !last.IsZero() {
+                next := last.Add(time.Duration(refreshInSeconds-safety) * time.Second)
+                if now.After(next) || now.Equal(next) {
+                    log.Debugf("preemptive refresh (copilot): id=%s last=%s refresh_in=%ds safety=%ds next=%s now=%s", a.ID, last.UTC().Format(time.RFC3339), refreshInSeconds, safety, next.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
+                    return true
+                }
+                return false
+            }
+        }
+    }
+    // fallback to existing logic (moved original body here)
+    if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
+        return false
+    }
+    if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
+        return evaluator.ShouldRefresh(now, a)
+    }
+    lastRefresh := a.LastRefreshedAt
+    if lastRefresh.IsZero() {
+        if ts, ok := authLastRefreshTimestamp(a); ok {
+            lastRefresh = ts
+        }
+    }
+    expiry, hasExpiry := a.ExpirationTime()
+    if interval := authPreferredInterval(a); interval > 0 {
+        if hasExpiry && !expiry.IsZero() {
+            if !expiry.After(now) {
+                return true
+            }
+            if expiry.Sub(now) <= interval {
+                return true
+            }
+        }
+        if lastRefresh.IsZero() {
+            return true
+        }
+        return now.Sub(lastRefresh) >= interval
+    }
+    provider := strings.ToLower(a.Provider)
+    lead := ProviderRefreshLead(provider, a.Runtime)
+    if lead == nil {
+        return false
+    }
+    if *lead <= 0 {
+        if hasExpiry && !expiry.IsZero() {
+            return now.After(expiry)
+        }
+        return false
+    }
+    if hasExpiry && !expiry.IsZero() {
+        return time.Until(expiry) <= *lead
+    }
+    if !lastRefresh.IsZero() {
+        return now.Sub(lastRefresh) >= *lead
+    }
+    return true
 }
 
 func (m *Manager) snapshotAuths() []*Auth {
@@ -938,61 +1048,6 @@ func (m *Manager) snapshotAuths() []*Auth {
 		out = append(out, a.Clone())
 	}
 	return out
-}
-
-func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
-	if a == nil || a.Disabled {
-		return false
-	}
-	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
-		return false
-	}
-	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
-		return evaluator.ShouldRefresh(now, a)
-	}
-
-	lastRefresh := a.LastRefreshedAt
-	if lastRefresh.IsZero() {
-		if ts, ok := authLastRefreshTimestamp(a); ok {
-			lastRefresh = ts
-		}
-	}
-
-	expiry, hasExpiry := a.ExpirationTime()
-
-	if interval := authPreferredInterval(a); interval > 0 {
-		if hasExpiry && !expiry.IsZero() {
-			if !expiry.After(now) {
-				return true
-			}
-			if expiry.Sub(now) <= interval {
-				return true
-			}
-		}
-		if lastRefresh.IsZero() {
-			return true
-		}
-		return now.Sub(lastRefresh) >= interval
-	}
-
-	provider := strings.ToLower(a.Provider)
-	lead := ProviderRefreshLead(provider, a.Runtime)
-	if lead == nil {
-		return false
-	}
-	if *lead <= 0 {
-		if hasExpiry && !expiry.IsZero() {
-			return now.After(expiry)
-		}
-		return false
-	}
-	if hasExpiry && !expiry.IsZero() {
-		return time.Until(expiry) <= *lead
-	}
-	if !lastRefresh.IsZero() {
-		return now.Sub(lastRefresh) >= *lead
-	}
-	return true
 }
 
 func authPreferredInterval(a *Auth) time.Duration {

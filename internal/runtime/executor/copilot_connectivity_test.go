@@ -1,24 +1,25 @@
 package executor
 
 import (
+    "context"
+    "encoding/json"
     "net/http"
     "net/http/httptest"
     "testing"
 
+    "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
     cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
     cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-    "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
     sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
-    "context"
 )
 
 // Minimal connectivity test to ensure requests with model "gpt-5-mini" route via Copilot (CodexExecutor) without unknown-provider errors.
 func TestCopilot_GPT5Mini_Connectivity(t *testing.T) {
-    // Fake upstream Codex endpoint returning a single SSE completion event
+    // Fake upstream Copilot endpoint returning a minimal non-stream JSON completion
     mux := http.NewServeMux()
-    mux.HandleFunc("/responses", func(w http.ResponseWriter, r *http.Request) {
-        w.Header().Set("Content-Type", "text/event-stream")
-        _, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"ok\"}}\n\n"))
+    mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+        _, _ = w.Write([]byte(`{"id":"cmpl_test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}`))
     })
     fake := httptest.NewServer(mux)
     defer fake.Close()
@@ -49,5 +50,21 @@ func TestCopilot_GPT5Mini_Connectivity(t *testing.T) {
     if len(resp.Payload) == 0 {
         t.Fatalf("empty payload")
     }
-}
 
+    // Assert returned JSON contains expected assistant content "ok"
+    var parsed struct {
+        Choices []struct {
+            Index   int `json:"index"`
+            Message struct {
+                Role    string `json:"role"`
+                Content string `json:"content"`
+            } `json:"message"`
+        } `json:"choices"`
+    }
+    if err := json.Unmarshal(resp.Payload, &parsed); err != nil {
+        t.Fatalf("invalid json payload: %v", err)
+    }
+    if len(parsed.Choices) == 0 || parsed.Choices[0].Message.Content != "ok" {
+        t.Fatalf("unexpected content, want 'ok', got: %+v", parsed)
+    }
+}

@@ -41,3 +41,17 @@ TBD - created by archiving change add-zhipu-api-support. Update Purpose after ar
 - **THEN** 以 SSE 方式转发 `${base-url}/chat/completions` 的流响应
 - **AND** 逐行传入翻译器，保留使用量统计并输出流式片段
 
+### Requirement: Provider Model Inventory Exposure (Copilot Rules)
+The system SHALL treat `copilot` as an independent provider whose model inventory is not mirrored from OpenAI.
+
+#### Scenario: Copilot-only model visibility
+- GIVEN provider `copilot`
+- WHEN listing models via `/v1/models` or management API
+- THEN the system SHALL expose only `gpt-5-mini`
+- AND that model SHALL NOT appear under providers `codex`, `openai`, or any OpenAI-compat provider
+
+#### Scenario: Provider filtering behavior
+- WHEN requesting `GET /v0/management/models?provider=copilot`
+- THEN results SHALL include `gpt-5-mini` with `providers` containing `copilot`
+- AND `GET /v0/management/providers` SHALL include `copilot` as a distinct provider
+
