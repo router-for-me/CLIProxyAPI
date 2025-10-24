@@ -31,6 +31,7 @@ Then Go MUST return the same status and a JSON error body preserving message/cod
   - `status`: upstream HTTP status code (when available)
   - `body`: upstream JSON body or text (truncated if needed)
   - `error`: structured object when transport errors occur with a `type` classifier in {`DNS`, `ECONNREFUSED`, `ETIMEDOUT`, `SSL`, `HTTP_4xx/5xx`, other}
+- The diagnostic endpoint MUST also attempt the following paths in order: `/chat/completions`, `/v1/chat/completions`, `/v1/messages` (Anthropic style; include `anthropic-version` header), to accommodate different upstream gateways.
 - The PAB SHALL emit structured error logs for SDK and upstream errors with fields:
   - `category` (one of classifiers above), `url`, `auth_preview` (masked token), `model`, `env_keys`, `traceback`
 - For streaming mode, the PAB SHALL emit an SSE error event and end with `[DONE]` instead of returning HTTP 500 directly.

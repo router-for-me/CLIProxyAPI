@@ -41,6 +41,21 @@
 - Go 端通过 CLAUDE_AGENT_SDK_URL 指向 SDK 服务地址，可灰度切换；必要时可临时回退 legacy ZhipuExecutor（过渡期保留）。
 - 监控：在 usage/metrics 中新增“backend=claude-agent-sdk-python”维度。
 
+## Diagnostics & Observability
+
+为便于在生产环境快速定位上游连通/路径/权限/模型问题，本变更同步引入以下诊断与可观测能力（仅用于排障，不影响对外 API）：
+
+- 暴露服务端诊断端点：`POST /debug/upstream-check`
+  - 运行于 Python Agent Bridge（PAB）内部，以 90s 超时在服务器侧直接请求 `${ANTHROPIC_BASE_URL}` 的上游接口。
+  - 尝试路径（按序）：`/chat/completions`、`/v1/chat/completions`、`/v1/messages`（Anthropic 风格，携带 `anthropic-version`）。
+  - 返回字段：`url`、`status`、`body` 或结构化 `error`（分类含 `DNS`、`ECONNREFUSED`、`ETIMEDOUT`、`SSL`、`HTTP_4xx/5xx` 等）。
+
+- 结构化错误日志（PAB）：
+  - 字段：`category`、`url`、`auth_preview`（掩码）、`model`、`env_keys`、`traceback`。
+
+- 流式错误处理：
+  - 当流式路径出错时，以 SSE 错误事件输出并以 `[DONE]` 收尾，避免直接 HTTP 500 破坏客户端消费。
+
 ## Status
 - [x] Implemented in Go: provider=zhipu requests are forwarded to Python Agent SDK `/v1/chat/completions` (stream/non-stream).
 - [x] Config surfaced: Claude Agent SDK for Python (config key `claude-agent-sdk-for-python`): `enabled` (default true), `baseURL` (default `http://127.0.0.1:35331`), and env `CLAUDE_AGENT_SDK_URL` override; `config.example.yaml` docs updated.

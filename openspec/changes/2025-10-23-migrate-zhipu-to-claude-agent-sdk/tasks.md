@@ -16,3 +16,8 @@
 - [x] 7. 文档：
    - config.example.yaml 注释 CLAUDE_AGENT_SDK_URL（已完成）。
    - README/部署说明：如何从 config.yaml 提取 zhipu api-key 并以环境变量注入 SDK 服务。
+
+- [ ] 8. 诊断与可观测性（PAB）：
+  - [x] 暴露 `POST /debug/upstream-check`（90s 超时；尝试 `/chat/completions`、`/v1/chat/completions`、`/v1/messages`）。
+  - [x] 输出结构化错误日志（category/url/auth_preview/model/env_keys/traceback）。
+  - [x] 流式错误以 SSE 错误事件输出并以 `[DONE]` 收尾，避免直接 500。
