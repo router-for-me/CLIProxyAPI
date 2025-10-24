@@ -62,6 +62,23 @@ func ParseGeminiThinkingSuffix(model string) (string, *int, *bool, bool) {
 	return base, &budgetValue, nil, true
 }
 
+func NormalizeGeminiThinkingModel(modelName string) (string, map[string]any) {
+	baseModel, budget, include, matched := ParseGeminiThinkingSuffix(modelName)
+	if !matched {
+		return baseModel, nil
+	}
+	metadata := map[string]any{
+		GeminiOriginalModelMetadataKey: modelName,
+	}
+	if budget != nil {
+		metadata[GeminiThinkingBudgetMetadataKey] = *budget
+	}
+	if include != nil {
+		metadata[GeminiIncludeThoughtsMetadataKey] = *include
+	}
+	return baseModel, metadata
+}
+
 func ApplyGeminiThinkingConfig(body []byte, budget *int, includeThoughts *bool) []byte {
 	if budget == nil && includeThoughts == nil {
 		return body

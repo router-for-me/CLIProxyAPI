@@ -2,6 +2,7 @@ package amp
 
 import (
 	"net"
+	"net/http/httputil"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -17,7 +18,7 @@ import (
 func localhostOnlyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		clientIP := c.ClientIP()
-		
+
 		// Parse the IP to handle both IPv4 and IPv6
 		ip := net.ParseIP(clientIP)
 		if ip == nil {
@@ -27,7 +28,7 @@ func localhostOnlyMiddleware() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// Check if IP is loopback (127.0.0.1 or ::1)
 		if !ip.IsLoopback() {
 			log.Warnf("Amp management: non-localhost IP %s attempted access, denying", clientIP)
@@ -36,7 +37,7 @@ func localhostOnlyMiddleware() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		c.Next()
 	}
 }
@@ -50,13 +51,13 @@ func noCORSMiddleware() gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Methods", "")
 		c.Header("Access-Control-Allow-Headers", "")
 		c.Header("Access-Control-Allow-Credentials", "")
-		
+
 		// For OPTIONS preflight, deny with 403
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(403)
 			return
 		}
-		
+
 		c.Next()
 	}
 }
@@ -66,10 +67,10 @@ func noCORSMiddleware() gin.HandlerFunc {
 // If restrictToLocalhost is true, routes will only accept connections from 127.0.0.1/::1.
 func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, proxyHandler gin.HandlerFunc, restrictToLocalhost bool) {
 	ampAPI := engine.Group("/api")
-	
+
 	// Always disable CORS for management routes to prevent browser-based attacks
 	ampAPI.Use(noCORSMiddleware())
-	
+
 	// Apply localhost-only restriction if configured
 	if restrictToLocalhost {
 		ampAPI.Use(localhostOnlyMiddleware())
@@ -112,6 +113,12 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(baseHandler)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(baseHandler)
 
+	// Create fallback handler wrapper that forwards to ampcode.com when provider not found
+	// Uses lazy evaluation to access proxy (which is created after routes are registered)
+	fallbackHandler := NewFallbackHandler(func() *httputil.ReverseProxy {
+		return m.proxy
+	})
+
 	// Provider-specific routes under /api/provider/:provider
 	ampProviders := engine.Group("/api/provider")
 	if auth != nil {
@@ -136,31 +143,33 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	}
 
 	// Root-level routes (for providers that omit /v1, like groq/cerebras)
-	provider.GET("/models", ampModelsHandler)
-	provider.POST("/chat/completions", openaiHandlers.ChatCompletions)
-	provider.POST("/completions", openaiHandlers.Completions)
-	provider.POST("/responses", openaiResponsesHandlers.Responses)
+	// Wrap handlers with fallback logic to forward to ampcode.com when provider not found
+	provider.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback (no body to check)
+	provider.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
+	provider.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
+	provider.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
 
 	// /v1 routes (OpenAI/Claude-compatible endpoints)
 	v1Amp := provider.Group("/v1")
 	{
-		v1Amp.GET("/models", ampModelsHandler)
+		v1Amp.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback
 
-		// OpenAI-compatible endpoints
-		v1Amp.POST("/chat/completions", openaiHandlers.ChatCompletions)
-		v1Amp.POST("/completions", openaiHandlers.Completions)
-		v1Amp.POST("/responses", openaiResponsesHandlers.Responses)
+		// OpenAI-compatible endpoints with fallback
+		v1Amp.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
+		v1Amp.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
+		v1Amp.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
 
-		// Claude/Anthropic-compatible endpoints
-		v1Amp.POST("/messages", claudeCodeHandlers.ClaudeMessages)
-		v1Amp.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
+		// Claude/Anthropic-compatible endpoints with fallback
+		v1Amp.POST("/messages", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeMessages))
+		v1Amp.POST("/messages/count_tokens", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeCountTokens))
 	}
 
 	// /v1beta routes (Gemini native API)
+	// Note: Gemini handler extracts model from URL path, so fallback logic needs special handling
 	v1betaAmp := provider.Group("/v1beta")
 	{
 		v1betaAmp.GET("/models", geminiHandlers.GeminiModels)
-		v1betaAmp.POST("/models/:action", geminiHandlers.GeminiHandler)
+		v1betaAmp.POST("/models/:action", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
 		v1betaAmp.GET("/models/:action", geminiHandlers.GeminiGetHandler)
 	}
 }

@@ -356,20 +356,7 @@ func cloneBytes(src []byte) []byte {
 }
 
 func normalizeModelMetadata(modelName string) (string, map[string]any) {
-	baseModel, budget, include, matched := util.ParseGeminiThinkingSuffix(modelName)
-	if !matched {
-		return baseModel, nil
-	}
-	metadata := map[string]any{
-		util.GeminiOriginalModelMetadataKey: modelName,
-	}
-	if budget != nil {
-		metadata[util.GeminiThinkingBudgetMetadataKey] = *budget
-	}
-	if include != nil {
-		metadata[util.GeminiIncludeThoughtsMetadataKey] = *include
-	}
-	return baseModel, metadata
+	return util.NormalizeGeminiThinkingModel(modelName)
 }
 
 func cloneMetadata(src map[string]any) map[string]any {
