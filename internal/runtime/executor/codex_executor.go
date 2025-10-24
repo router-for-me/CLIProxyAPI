@@ -492,17 +492,67 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string) {
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
-	if a == nil {
-		return "", ""
-	}
-	if a.Attributes != nil {
-		apiKey = a.Attributes["api_key"]
-		baseURL = a.Attributes["base_url"]
-	}
-	if apiKey == "" && a.Metadata != nil {
-		if v, ok := a.Metadata["access_token"].(string); ok {
-			apiKey = v
-		}
-	}
-	return
+    if a == nil {
+        return "", ""
+    }
+    // Prefer attributes when explicitly provided (e.g., api_key/base_url via management API)
+    if a.Attributes != nil {
+        apiKey = a.Attributes["api_key"]
+        baseURL = a.Attributes["base_url"]
+    }
+    // Fallback to persisted metadata from auth JSON
+    if a.Metadata != nil {
+        if apiKey == "" {
+            if v, ok := a.Metadata["access_token"].(string); ok {
+                apiKey = v
+            }
+        }
+        // Some flows persist base_url into metadata rather than attributes.
+        if baseURL == "" {
+            if v, ok := a.Metadata["base_url"].(string); ok {
+                baseURL = v
+            }
+        }
+    }
+    // Copilot-specific convenience: derive base_url from access_token when absent.
+    // The Copilot token often embeds a "proxy-ep=" hint (e.g., proxy.individual.githubcopilot.com).
+    // We map it to "https://<proxy-ep>/backend-api/codex" to keep existing routing behavior.
+    if strings.EqualFold(a.Provider, "copilot") && baseURL == "" && strings.TrimSpace(apiKey) != "" {
+        if derived := deriveCopilotBaseFromToken(apiKey); derived != "" {
+            baseURL = derived
+        }
+    }
+    return
+}
+
+// deriveCopilotBaseFromToken extracts proxy endpoint from a Copilot access_token when present.
+// Example token fragment: "...;proxy-ep=proxy.individual.githubcopilot.com;..."
+// Returns: "https://<proxy-ep>/backend-api/codex" or empty string when not derivable.
+func deriveCopilotBaseFromToken(tok string) string {
+    tok = strings.TrimSpace(tok)
+    if tok == "" {
+        return ""
+    }
+    // Quick path: look for "proxy-ep=" marker
+    const marker = "proxy-ep="
+    if idx := strings.Index(tok, marker); idx >= 0 {
+        rest := tok[idx+len(marker):]
+        // end at next semicolon or string end
+        if end := strings.IndexByte(rest, ';'); end >= 0 {
+            rest = rest[:end]
+        }
+        host := strings.TrimSpace(rest)
+        if host != "" {
+            // If already has scheme keep it, else default to https
+            if !strings.Contains(host, "://") {
+                host = "https://" + host
+            }
+            host = strings.TrimRight(host, "/")
+            if !strings.HasSuffix(host, "/backend-api/codex") {
+                host += "/backend-api/codex"
+            }
+            return host
+        }
+    }
+    return ""
 }

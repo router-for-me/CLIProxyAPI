@@ -4,15 +4,16 @@
 package cliproxy
 
 import (
-	"context"
-	"errors"
-	"fmt"
-	"os"
-	"crypto/sha256"
-	"encoding/hex"
-	"strings"
-	"sync"
-	"time"
+    "context"
+    "errors"
+    "fmt"
+    "os"
+    "crypto/sha256"
+    "encoding/hex"
+    "net/url"
+    "strings"
+    "sync"
+    "time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -182,7 +183,13 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		return
 	}
 	auth = auth.Clone()
-	s.ensureExecutorsForAuth(auth)
+    s.ensureExecutorsForAuth(auth)
+    // Diagnostics: preview effective base_url for copilot (masked)
+    if strings.EqualFold(strings.TrimSpace(auth.Provider), "copilot") {
+        if preview := copilotBaseURLPreview(auth); preview != "" {
+            log.Infof("copilot auth registered: id=%s base_url=%s", auth.ID, preview)
+        }
+    }
 	s.registerModelsForAuth(auth)
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok && existing != nil {
 		auth.CreatedAt = existing.CreatedAt
@@ -288,6 +295,60 @@ func (s *Service) rebindExecutors() {
 	for _, auth := range auths {
 		s.ensureExecutorsForAuth(auth)
 	}
+}
+
+// copilotBaseURLPreview computes a safe-to-log preview of the effective base URL for Copilot.
+// Priority: attributes.base_url > metadata.base_url > derive from access_token.proxy-ep.
+// The returned value is masked to scheme+host only (e.g., https://proxy.example.com).
+func copilotBaseURLPreview(a *coreauth.Auth) string {
+    if a == nil {
+        return ""
+    }
+    // 1) Attributes
+    if a.Attributes != nil {
+        if v := strings.TrimSpace(a.Attributes["base_url"]); v != "" {
+            if host := maskURLHost(v); host != "" { return host }
+        }
+    }
+    // 2) Metadata
+    if a.Metadata != nil {
+        if v, ok := a.Metadata["base_url"].(string); ok {
+            if host := maskURLHost(v); host != "" { return host }
+        }
+        // 3) Derive from access_token proxy-ep
+        if v, ok := a.Metadata["access_token"].(string); ok {
+            if derived := deriveCopilotBaseFromTokenPreview(v); derived != "" {
+                if host := maskURLHost(derived); host != "" { return host }
+            }
+        }
+    }
+    return ""
+}
+
+// deriveCopilotBaseFromTokenPreview extracts a base like https://<proxy-ep>/backend-api/codex from token when possible.
+func deriveCopilotBaseFromTokenPreview(tok string) string {
+    tok = strings.TrimSpace(tok)
+    if tok == "" { return "" }
+    const marker = "proxy-ep="
+    idx := strings.Index(tok, marker)
+    if idx < 0 { return "" }
+    rest := tok[idx+len(marker):]
+    if end := strings.IndexByte(rest, ';'); end >= 0 { rest = rest[:end] }
+    ep := strings.TrimSpace(rest)
+    if ep == "" { return "" }
+    if !strings.Contains(ep, "://") { ep = "https://" + ep }
+    ep = strings.TrimRight(ep, "/")
+    if !strings.HasSuffix(ep, "/backend-api/codex") { ep += "/backend-api/codex" }
+    return ep
+}
+
+// maskURLHost reduces a URL to scheme://host for safe logging; returns empty on parse failure.
+func maskURLHost(raw string) string {
+    raw = strings.TrimSpace(raw)
+    if raw == "" { return "" }
+    u, err := url.Parse(raw)
+    if err != nil || u.Scheme == "" || u.Host == "" { return "" }
+    return u.Scheme + "://" + u.Host
 }
 
 // Run starts the service and blocks until the context is cancelled or the server stops.

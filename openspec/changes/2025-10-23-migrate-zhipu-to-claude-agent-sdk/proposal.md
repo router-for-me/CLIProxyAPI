@@ -69,3 +69,47 @@
 
 ## Appendix
 - Python 侧建议：优先使用 ClaudeSDKClient（会话/流式/中断/钩子可用）。
+
+## Change: Query CLI defaults and isolation
+
+为便于本地/CI 直接验证 Python Agent SDK，对 repo 内 `python/claude_agent_sdk_python/query_cli.py` 增强如下：
+
+- 新增 `--model` 参数：高优先级覆盖默认与环境变量。
+- 默认模型：在未显式提供时，使用 `glm-4.6`。
+- 子进程隔离：默认以子进程重入执行，避免复用已运行的 Claude Code 实例与旧会话。
+
+示例：
+
+```bash
+# 指定模型（优先级最高）
+ANTHROPIC_BASE_URL="https://open.bigmodel.cn/api/anthropic" \
+ANTHROPIC_AUTH_TOKEN="<token>" \
+PYTHONPATH=python \
+python python/claude_agent_sdk_python/query_cli.py --model glm-4.6 "Hello"
+
+# 使用默认模型（不设置 ANTHROPIC_MODEL、不加 --model）
+ANTHROPIC_BASE_URL="https://open.bigmodel.cn/api/anthropic" \
+ANTHROPIC_AUTH_TOKEN="<token>" \
+PYTHONPATH=python \
+python python/claude_agent_sdk_python/query_cli.py "Hello"
+```
+
+关键片段（节选）：
+
+```python
+# 默认模型（导入 SDK 前）
+if not os.getenv("ANTHROPIC_MODEL", "").strip():
+    os.environ["ANTHROPIC_MODEL"] = "glm-4.6"
+
+# --model 参数与子进程隔离
+parser.add_argument("--model", dest="model", help="Override model (high precedence)")
+parser.add_argument("--no-subproc", dest="no_subproc", action="store_true", help="Do not force subprocess isolation")
+...
+if args.model and args.model.strip():
+    os.environ["ANTHROPIC_MODEL"] = args.model.strip()
+...
+if not args.no_subproc:
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--no-subproc", *extra]
+    rc = subprocess.call(cmd, env=os.environ.copy())
+    raise SystemExit(rc)
+```

@@ -1,0 +1,6 @@
+port: 53356
+debug: true
+remote-management:
+  allow-remote: true
+  secret-key: $2a$10$VqtXqAt1pBoVWVJU6Dne4OLy.Hoa9BX6lsqvVrVkVqyA78jKlrNz6
+auth-dir: /home/adam/.cli-proxy-api

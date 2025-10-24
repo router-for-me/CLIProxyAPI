@@ -21,3 +21,10 @@
   - [x] 暴露 `POST /debug/upstream-check`（90s 超时；尝试 `/chat/completions`、`/v1/chat/completions`、`/v1/messages`）。
   - [x] 输出结构化错误日志（category/url/auth_preview/model/env_keys/traceback）。
   - [x] 流式错误以 SSE 错误事件输出并以 `[DONE]` 收尾，避免直接 500。
+
+- [ ] 9. 本地 Query CLI 增强与验证：
+  - [x] 新增 `--model` 参数，覆盖默认与环境变量。
+  - [x] 默认模型 `glm-4.6`（未设置 ANTHROPIC_MODEL 且无 --model 时）。
+  - [x] 默认子进程隔离，避免复用旧会话/实例。
+  - [ ] 采集无外部实例下的运行日志，确认日志中包含 `model: 'glm-4.6'` 与助手文本。
+  - [ ] 可选：新增 `tests/test_query_cli_default_model.sh`，断言日志包含 `glm-4.6`。

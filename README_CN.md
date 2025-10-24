@@ -261,6 +261,22 @@ POST http://localhost:53355/v1/chat/completions
 }
 ```
 
+### Copilot 基础域（base_url）来源优先级与排错
+
+当使用 provider=copilot 时，执行器会按如下优先级确定上游基础域 base_url（用于路由到正确的 Copilot 上游）：
+
+1) Attributes.base_url（最高优先级）
+2) Metadata.base_url（来自认证 JSON 内的 `base_url` 字段）
+3) 从 access_token 内的 `proxy-ep=` 片段派生（例如 `proxy-ep=proxy.individual.githubcopilot.com` 将派生 `https://proxy.individual.githubcopilot.com/backend-api/codex`）
+
+常见 401/403 排查清单：
+- base_url 指向默认域而非企业/个人代理域：请检查是否正确写入 Attributes.base_url / Metadata.base_url，或 access_token 是否包含正确的 `proxy-ep=` 片段。
+- access_token 已更新但 base_url 未更新：建议删除旧的 copilot-*.json 重新登录，或在管理端更新该条凭据的 base_url。
+- 缺失 Authorization Bearer：内部会自动注入；若自定义调用链路，请确保未覆盖掉 Authorization 头。
+- 上游策略/配额拒绝：查看响应体与 `Retry-After`，或使用 `/debug/upstream-check` 诊断端点确认类别（DNS/SSL/HTTP_4xx/5xx）。
+
+服务在注册/更新 copilot 凭据时会在日志打印“安全脱敏”的 base_url 预览（仅 scheme://host），便于现场核对是否命中预期域。
+
 说明：
 - 使用 "gemini-*" 模型（例如 "gemini-2.5-pro"）来调用 Gemini，使用 "gpt-*" 模型（例如 "gpt-5"）来调用 OpenAI，使用 "claude-*" 模型（例如 "claude-3-5-sonnet-20241022"）来调用 Claude，使用 "qwen-*" 模型（例如 "qwen3-coder-plus"）来调用 Qwen，或者使用 iFlow 支持的模型（例如 "tstars2.0"、"deepseek-v3.1"、"kimi-k2" 等）来调用 iFlow。代理服务会自动将请求路由到相应的提供商。
 

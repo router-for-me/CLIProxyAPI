@@ -17,6 +17,24 @@ Given provider="zhipu" and model="glm-4.6"
 When client POSTs /v1/chat/completions without stream=true
 Then Go forwards the translated request to PAB and returns the JSON result unchanged in OpenAI format.
 
+#### Change: Local Query CLI behavior
+- 新增 `python/claude_agent_sdk_python/query_cli.py` 的约定：
+  - 当未设置 `ANTHROPIC_MODEL` 且未使用 `--model` 参数时，默认使用 `glm-4.6`。
+  - 提供 `--model` 参数以高优先级覆盖默认与环境变量。
+  - 默认启用子进程隔离，避免复用已运行的 Claude Code 实例。
+
+示例：
+```bash
+# 默认使用 glm-4.6（不设置 ANTHROPIC_MODEL）
+ANTHROPIC_BASE_URL="https://open.bigmodel.cn/api/anthropic" \
+ANTHROPIC_AUTH_TOKEN="<token>" \
+PYTHONPATH=python \
+python python/claude_agent_sdk_python/query_cli.py "Hello"
+
+# 显式覆盖模型
+PYTHONPATH=python python python/claude_agent_sdk_python/query_cli.py --model glm-4.6 "Hello"
+```
+
 #### Scenario: Streaming chat completions
 Given provider="zhipu" and model="glm-4.6" with stream=true
 When client POSTs /v1/chat/completions

@@ -116,9 +116,9 @@ async def chat_completions(req: Request) -> Response:
     async def run_non_stream() -> Dict[str, Any]:
         content_texts: List[str] = []
         try:
-            async with ClaudeSDKClient() as client:
-                options = ClaudeAgentOptions(env={k: str(v) for k, v in env_map.items()})
-                await client.query(prompt, options=options)
+            options = ClaudeAgentOptions(env={k: str(v) for k, v in env_map.items()})
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(prompt)
                 async for msg in client.receive_response():
                     if isinstance(msg, AssistantMessage):
                         for block in msg.content:
@@ -175,14 +175,14 @@ async def chat_completions(req: Request) -> Response:
             return
 
         try:
-            async with ClaudeSDKClient() as client:
-                options = ClaudeAgentOptions(env={
-                    "ANTHROPIC_BASE_URL": base_url,
-                    "ANTHROPIC_AUTH_TOKEN": token,
-                    "ANTHROPIC_MODEL": model,
-                    **{k: os.getenv(k, "") for k in ("API_TIMEOUT_MS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")},
-                })
-                await client.query(prompt, options=options)
+            opts = {
+                "ANTHROPIC_BASE_URL": base_url,
+                "ANTHROPIC_AUTH_TOKEN": token,
+                "ANTHROPIC_MODEL": model,
+                **{k: os.getenv(k, "") for k in ("API_TIMEOUT_MS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")},
+            }
+            async with ClaudeSDKClient(options=ClaudeAgentOptions(env=opts)) as client:
+                await client.query(prompt)
                 async for msg in client.receive_response():
                     if isinstance(msg, AssistantMessage):
                         for block in msg.content:
@@ -245,47 +245,64 @@ async def upstream_check(req: Request) -> Response:
             }
         }, status_code=500)
 
-    url = base_url.rstrip("/") + "/v1/chat/completions"
-    body = {"model": model, "messages": messages, "stream": False}
-    data = json.dumps(body).encode("utf-8")
-    req_obj = urllib.request.Request(url, data=data, method="POST")
-    req_obj.add_header("Content-Type", "application/json")
-    req_obj.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req_obj, timeout=90) as resp:
-            raw = resp.read()
-            text = raw.decode("utf-8", errors="replace")
-            try:
-                parsed = json.loads(text)
-            except Exception:
-                parsed = None
-            return JSONResponse({
-                "url": url,
-                "status": resp.getcode(),
-                "body": parsed if parsed is not None else text,
-            })
-    except Exception as e:
-        tb = traceback.format_exc()
-        cat = ""
-        if isinstance(e, urllib.error.HTTPError):
-            cat = f"HTTP_{e.code}"
-            try:
-                err_text = e.read().decode("utf-8", errors="replace")
-            except Exception:
-                err_text = str(e)
-            _log_structured(logging.ERROR, "upstream_http_error", url=url, status=e.code, body_preview=err_text[:512])
-            return JSONResponse({
-                "url": url,
-                "status": e.code,
-                "error": {"type": cat, "message": err_text},
-            }, status_code=200)
+    # Try multiple common upstream paths based on provided base_url
+    # 1) OpenAI-compatible chat completions
+    # 2) OpenAI-compatible v1 chat completions
+    # 3) Anthropic messages API (requires anthropic-version)
+    paths = [
+        "/chat/completions",
+        "/v1/chat/completions",
+        "/v1/messages",
+    ]
+    last_err: Optional[Dict[str, Any]] = None
+    for suffix in paths:
+        url = base_url.rstrip("/") + suffix
+        if suffix == "/v1/messages":
+            # Anthropic-style body
+            body = {"model": model, "messages": messages, "max_tokens": 64}
         else:
-            cat = _classify_error(e)
-            _log_structured(logging.ERROR, "upstream_transport_error", category=cat, url=url, traceback=tb)
-            return JSONResponse({
-                "url": url,
-                "error": {"type": cat, "message": str(e)},
-            }, status_code=200)
+            # OpenAI-compatible body
+            body = {"model": model, "messages": messages, "stream": False}
+        data = json.dumps(body).encode("utf-8")
+        req_obj = urllib.request.Request(url, data=data, method="POST")
+        req_obj.add_header("Content-Type", "application/json")
+        req_obj.add_header("Authorization", f"Bearer {token}")
+        # Some gateways expect x-api-key; Anthropic expects anthropic-version
+        req_obj.add_header("x-api-key", token)
+        if suffix == "/v1/messages":
+            req_obj.add_header("anthropic-version", "2023-06-01")
+        try:
+            with urllib.request.urlopen(req_obj, timeout=90) as resp:
+                raw = resp.read()
+                text = raw.decode("utf-8", errors="replace")
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+                return JSONResponse({
+                    "url": url,
+                    "status": resp.getcode(),
+                    "body": parsed if parsed is not None else text,
+                })
+        except Exception as e:
+            tb = traceback.format_exc()
+            if isinstance(e, urllib.error.HTTPError):
+                err_text = None
+                try:
+                    err_text = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    err_text = str(e)
+                last_err = {"url": url, "type": f"HTTP_{e.code}", "message": err_text}
+                _log_structured(logging.ERROR, "upstream_http_error", url=url, status=e.code, body_preview=(err_text or "")[:512])
+                # If 404, try next suffix; else return immediately
+                if e.code != 404:
+                    return JSONResponse({"url": url, "status": e.code, "error": last_err}, status_code=200)
+            else:
+                cat = _classify_error(e)
+                _log_structured(logging.ERROR, "upstream_transport_error", category=cat, url=url, traceback=tb)
+                return JSONResponse({"url": url, "error": {"type": cat, "message": str(e)}}, status_code=200)
+    # If all attempts failed, return last error (likely 404)
+    return JSONResponse(last_err or {"error": {"type": "UNKNOWN", "message": "all attempts failed"}}, status_code=200)
 
 
 if __name__ == "__main__":
