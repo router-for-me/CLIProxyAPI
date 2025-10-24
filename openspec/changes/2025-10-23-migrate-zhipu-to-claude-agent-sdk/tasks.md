@@ -1,0 +1,18 @@
+- [x] 1. 转发执行路径（保持 ./cli-proxy-api 不变）：
+   - provider=zhipu → ZhipuExecutor 将 OpenAI 兼容请求转发到 CLAUDE_AGENT_SDK_URL 的 /v1/chat/completions（SSE/非流保持一致）。
+- [x] 2. 凭据桥接（从 config.yaml → SDK 环境变量）：
+   - 运维在部署 claude agent sdk python 服务时，将 config.yaml 的 zhipu api-key 映射为：
+     - ANTHROPIC_BASE_URL="https://open.bigmodel.cn/api/anthropic"
+     - ANTHROPIC_AUTH_TOKEN="<zhipu api-key>"
+   - Go 不直接用该 key 访问上游，避免直连路径限制。
+- [x] 3. 配置与开关：
+   - 通过 CLAUDE_AGENT_SDK_URL（默认 http://127.0.0.1:35331）指向 SDK 服务地址；保留临时回退 legacy ZhipuExecutor 的能力（过渡期）。
+- [x] 4. 模型注册：保持 GetZhipuModels 不变（glm-4.5/4.6）。
+- [x] 5. 观测：usage/metrics 增加 backend=claude-agent-sdk-python。
+- [x] 6. 测试：
+   - 单元：目标地址构造、错误/超时处理、流式切片。
+   - 集成：mock /v1/chat/completions（非流/流式）。
+   - E2E：在 SDK 服务设置 ANTHROPIC_* 环境变量后，验证 glm-4.6 连通。
+- [x] 7. 文档：
+   - config.example.yaml 注释 CLAUDE_AGENT_SDK_URL（已完成）。
+   - README/部署说明：如何从 config.yaml 提取 zhipu api-key 并以环境变量注入 SDK 服务。
