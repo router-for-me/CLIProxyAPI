@@ -59,6 +59,47 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
+	// Special-case Copilot: call Copilot chat/completions with Bearer token and required headers
+	if e.Identifier() == "copilot" {
+		base := baseURL
+		if base == "" || strings.Contains(base, "chatgpt.com") {
+			base = "https://api.githubcopilot.com"
+		}
+		base = strings.TrimSuffix(base, "/")
+		base = strings.TrimSuffix(base, "/backend-api/codex")
+		url := base + "/chat/completions"
+		// Use original OpenAI JSON; force non-stream
+		body := bytes.Clone(opts.OriginalRequest)
+		body, _ = sjson.SetBytes(body, "stream", false)
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil { return resp, err }
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "application/json")
+		if strings.TrimSpace(apiKey) != "" { httpReq.Header.Set("Authorization", "Bearer "+apiKey) }
+		// Minimal Copilot headers (aligning with official clients)
+		httpReq.Header.Set("user-agent", "GitHubCopilotChat/0.26.7")
+		httpReq.Header.Set("editor-version", "vscode/1.0")
+		httpReq.Header.Set("editor-plugin-version", "copilot-chat/0.26.7")
+		httpReq.Header.Set("openai-intent", "conversation-panel")
+		httpReq.Header.Set("x-github-api-version", "2025-04-01")
+		httpReq.Header.Set("x-request-id", uuid.NewString())
+		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{URL: url, Method: http.MethodPost, Headers: httpReq.Header.Clone(), Body: body, Provider: e.Identifier()})
+		httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+		httpResp, err := httpClient.Do(httpReq)
+		if err != nil { recordAPIResponseError(ctx, e.cfg, err); return resp, err }
+		defer func() { _ = httpResp.Body.Close() }()
+		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+			b, _ := io.ReadAll(httpResp.Body)
+			appendAPIResponseChunk(ctx, e.cfg, b)
+			return resp, statusErr{code: httpResp.StatusCode, msg: string(b)}
+		}
+		data, err := io.ReadAll(httpResp.Body)
+		if err != nil { recordAPIResponseError(ctx, e.cfg, err); return resp, err }
+		appendAPIResponseChunk(ctx, e.cfg, data)
+		resp = cliproxyexecutor.Response{Payload: data}
+		return resp, nil
+	}
 	to := sdktranslator.FromString("codex")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 
@@ -369,6 +410,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string) {
 	r.Header.Set("Content-Type", "application/json")
+	// Use Authorization Bearer for all providers including copilot
 	r.Header.Set("Authorization", "Bearer "+token)
 
 	var ginHeaders http.Header

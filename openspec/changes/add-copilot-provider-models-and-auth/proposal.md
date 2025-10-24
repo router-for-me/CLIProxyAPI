@@ -26,7 +26,8 @@
 
 - 执行器路由：
   - 取消将 `gpt-5-mini` 视作 `gpt-5-minimal` 的别名重写；
-  - 保持现状使用 CodexExecutor 处理 Copilot 请求（后续可引入 Copilot 专属执行器，作为增量提案）。
+  - 为 provider=copilot 增加特判：改为调用 `https://api.githubcopilot.com/chat/completions`（或团队域名），以 Authorization: Bearer 出站，并补齐必要头（`user-agent`/`editor-*`/`openai-intent`/`x-github-api-version`/`x-request-id`）；
+  - 其余 provider 仍走 Codex Responses API；后续如需再引入 Copilot 专属执行器，可作为增量提案。
 
 ## Impact
 

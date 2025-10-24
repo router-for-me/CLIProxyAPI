@@ -133,14 +133,48 @@ func DoCopilotAuthLogin(cfg *config.Config, options *LoginOptions) {
     }
 
     // 4) Persist auth
-    expire := time.UnixMilli(out.ExpiresAt).Format(time.RFC3339)
+    var expTime time.Time
+    if out.ExpiresAt > 1_000_000_000_000 { // ms
+        expTime = time.UnixMilli(out.ExpiresAt)
+    } else if out.ExpiresAt > 0 { // s
+        expTime = time.Unix(out.ExpiresAt, 0)
+    }
     storage := &copilot.TokenStorage{
         AccessToken: out.Token,
         LastRefresh: time.Now().Format(time.RFC3339),
-        Expire:      expire,
+        Expire:      expTime.Format(time.RFC3339),
     }
+    // derive proxy endpoint from token (key: proxy-ep)
+    deriveBaseURL := func(tok string) string {
+        parts := strings.Split(tok, ";")
+        var ep string
+        for _, p := range parts {
+            p = strings.TrimSpace(p)
+            if strings.HasPrefix(p, "proxy-ep=") {
+                ep = strings.TrimPrefix(p, "proxy-ep=")
+                break
+            }
+        }
+        if ep == "" { return "" }
+        // if full URL provided, keep scheme/host, else prefix https://
+        if strings.Contains(ep, "://") {
+            ep = strings.TrimRight(ep, "/")
+        } else {
+            ep = "https://" + strings.TrimRight(ep, "/")
+        }
+        // ensure codex base path suffix
+        if !strings.HasSuffix(ep, "/backend-api/codex") {
+            ep = ep + "/backend-api/codex"
+        }
+        return ep
+    }
+    baseURL := deriveBaseURL(out.Token)
+
     id := fmt.Sprintf("copilot-%d.json", time.Now().UnixMilli())
     record := &coreauth.Auth{ ID: id, Provider: "copilot", FileName: id, Storage: storage, Metadata: map[string]any{"access_token": out.Token}, CreatedAt: time.Now(), UpdatedAt: time.Now(), Status: coreauth.StatusActive }
+    if baseURL != "" {
+        record.Attributes = map[string]string{"base_url": baseURL}
+    }
 
     store := sdkAuth.GetTokenStore()
     if setter, ok := store.(interface{ SetBaseDir(string) }); ok {

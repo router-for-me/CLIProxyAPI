@@ -10,6 +10,8 @@
 - [ ] 2.4 Management API: Add required headers to token exchange request
 - [ ] 2.5 Registry: `GetCopilotModels()` returns only `gpt-5-mini`; remove `gpt-5-mini` from OpenAI list
 - [ ] 2.6 Executor: Remove aliasing `gpt-5-mini` → minimal rewrite in CodexExecutor
+- [ ] 2.7 Executor: Special-case Copilot → call `https://api.githubcopilot.com/chat/completions` with Bearer + required headers
+- [ ] 2.8 Auth manager: ensure latest copilot auth is selected; document watcher reload procedure
 
 ## 3. Tests
 - [ ] 3.1 CLI: device-code Accept header test (form-encoded fallback simulation)
