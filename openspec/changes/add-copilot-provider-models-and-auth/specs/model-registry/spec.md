@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Provider Model Inventory Exposure
 The system SHALL expose available models per provider via the global model registry and HTTP APIs.
