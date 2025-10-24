@@ -140,11 +140,12 @@ func DoCopilotAuthLogin(cfg *config.Config, options *LoginOptions) {
         expTime = time.Unix(out.ExpiresAt, 0)
     }
     storage := &copilot.TokenStorage{
-        AccessToken: out.Token,
-        LastRefresh: time.Now().Format(time.RFC3339),
-        Expire:      expTime.Format(time.RFC3339),
-        ExpiresAt:   out.ExpiresAt,
-        RefreshIn:   out.RefreshIn,
+        AccessToken:        out.Token,
+        LastRefresh:        time.Now().Format(time.RFC3339),
+        Expire:             expTime.Format(time.RFC3339),
+        ExpiresAt:          out.ExpiresAt,
+        RefreshIn:          out.RefreshIn,
+        GitHubAccessToken:  ghToken,
     }
     // derive proxy endpoint from token (key: proxy-ep)
     deriveBaseURL := func(tok string) string {

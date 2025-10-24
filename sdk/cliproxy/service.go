@@ -325,6 +325,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
+		s.rebindExecutors()
 	}
 
 	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
@@ -372,8 +373,9 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnAfterStart(s)
 	}
 
-	// Ensure Packycode models are registered for /v1/models visibility
+	// Ensure Packycode and Copilot models are registered for /v1/models visibility
 	s.ensurePackycodeModelsRegistered(s.cfg)
+	s.ensureCopilotModelsRegistered(s.cfg)
 
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
@@ -391,8 +393,9 @@ func (s *Service) Run(ctx context.Context) error {
 		s.cfgMu.Lock()
 		s.cfg = newCfg
 		s.cfgMu.Unlock()
-		// Keep model registry in sync for Packycode
+		// Keep model registry in sync for Packycode and Copilot
 		s.ensurePackycodeModelsRegistered(newCfg)
+		s.ensureCopilotModelsRegistered(newCfg)
 		s.rebindExecutors()
 
 	}
@@ -596,6 +599,20 @@ func (s *Service) ensureAuthDir() error {
 }
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
+// ensureCopilotModelsRegistered registers base Copilot inventory even before any auth is added,
+// so that /v1/models can advertise provider=copilot and its models. When a real copilot auth
+// appears, registerModelsForAuth will re-register with the auth ID, superseding this seed.
+func (s *Service) ensureCopilotModelsRegistered(cfg *config.Config) {
+	id := "copilot:models:seed"
+	models := registry.GetCopilotModels()
+	if len(models) == 0 {
+		registry.GetGlobalRegistry().UnregisterClient(id)
+		return
+	}
+	// Register under provider key 'copilot'
+	registry.GetGlobalRegistry().RegisterClient(id, "copilot", models)
+}
+
 func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if a == nil || a.ID == "" {
 		return

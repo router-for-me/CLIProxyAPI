@@ -157,9 +157,9 @@ func (h *Handler) pollCopilotDeviceFlow(dc deviceCodeResp) {
     body, _ := io.ReadAll(resp.Body)
     var ctk struct{ Token string `json:"token"`; ExpiresAt int64 `json:"expires_at"`; RefreshIn int `json:"refresh_in"` }
     if err := json.Unmarshal(body, &ctk); err != nil { deviceFlowStatus[dc.DeviceCode] = "error: invalid_token_response"; return }
-    storage := &copilottoken.TokenStorage{ AccessToken: ctk.Token, LastRefresh: time.Now().Format(time.RFC3339), Expire: time.UnixMilli(ctk.ExpiresAt).Format(time.RFC3339) }
+    storage := &copilottoken.TokenStorage{ AccessToken: ctk.Token, LastRefresh: time.Now().Format(time.RFC3339), Expire: time.UnixMilli(ctk.ExpiresAt).Format(time.RFC3339), ExpiresAt: ctk.ExpiresAt, RefreshIn: ctk.RefreshIn, GitHubAccessToken: ghToken }
     id := fmt.Sprintf("copilot-%d", time.Now().UnixMilli())
-    record := &coreauth.Auth{ ID: id+".json", Provider: "copilot", FileName: id+".json", Storage: storage, Metadata: map[string]any{"access_token": ctk.Token} }
+    record := &coreauth.Auth{ ID: id+".json", Provider: "copilot", FileName: id+".json", Storage: storage }
     if _, err := h.saveTokenRecord(ctx, record); err != nil {
         deviceFlowStatus[dc.DeviceCode] = "error: save_failed"
         return

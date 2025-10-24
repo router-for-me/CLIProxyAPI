@@ -19,7 +19,7 @@ func TestCopilotCallback_WritesStateFile(t *testing.T) {
     gin.SetMode(gin.TestMode)
 
     tmpDir := t.TempDir()
-    cfg := &config.Config{Port: 53555, AuthDir: tmpDir}
+    cfg := &config.Config{Port: 53355, AuthDir: tmpDir}
     srv := NewServer(cfg, nil, &sdkaccess.Manager{}, filepath.Join(tmpDir, "config.yaml"))
 
     // Fire callback

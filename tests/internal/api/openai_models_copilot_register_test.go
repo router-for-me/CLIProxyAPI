@@ -26,7 +26,7 @@ func TestOpenAIModels_AfterRegisterCopilotAuth_Visible(t *testing.T) {
     gin.SetMode(gin.TestMode)
 
     tmp := t.TempDir()
-    cfg := &config.Config{Port: 53555, AuthDir: tmp}
+    cfg := &config.Config{Port: 53355, AuthDir: tmp}
 
     // 构建 Service（用 builder），并注入 core manager
     tokenStore := sdkAuth.GetTokenStore()

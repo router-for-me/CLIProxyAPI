@@ -136,7 +136,7 @@ You can authenticate for Gemini, OpenAI, Claude, Qwen, and/or iFlow. All can coe
     1) Request a device code (Management API; requires management key)
        ```bash
        curl -s -H "Authorization: Bearer <MANAGEMENT_KEY>" \
-         http://localhost:53555/v0/management/copilot-device-code | jq
+         http://localhost:53355/v0/management/copilot-device-code | jq
        # => {
        #   "status": "ok",
        #   "device_code": "...",
@@ -151,7 +151,7 @@ You can authenticate for Gemini, OpenAI, Claude, Qwen, and/or iFlow. All can coe
     3) Poll status until ready:
        ```bash
        curl -s -H "Authorization: Bearer <MANAGEMENT_KEY>" \
-         "http://localhost:53555/v0/management/copilot-device-status?device_code=<DEVICE_CODE>" | jq
+         "http://localhost:53355/v0/management/copilot-device-status?device_code=<DEVICE_CODE>" | jq
        # => {"status": "wait" | "ok" | "error", "error": "..."}
        ```
     4) When status=ok, a Copilot token JSON is persisted under `auth-dir` and models become visible under `/v1/models` (provider=copilot).
@@ -189,7 +189,7 @@ Once authenticated, start the server:
 ./cli-proxy-api
 ```
 
-By default, the server runs on port 53555.
+By default, the server runs on port 53355.
 
 ### API Endpoints
 
@@ -198,13 +198,13 @@ By default, the server runs on port 53555.
 #### List Models
 
 ```
-GET http://localhost:53555/v1/models
+GET http://localhost:53355/v1/models
 ```
 
 #### Chat Completions
 
 ```
-POST http://localhost:53555/v1/chat/completions
+POST http://localhost:53355/v1/chat/completions
 ```
 
 Request body example:
@@ -228,7 +228,7 @@ Notes:
 #### Claude Messages (SSE-compatible)
 
 ```
-POST http://localhost:53555/v1/messages
+POST http://localhost:53355/v1/messages
 ```
 
 ### Using with OpenAI Libraries
@@ -260,7 +260,7 @@ gpt = client.chat.completions.create(
 # Claude example (using messages endpoint)
 import requests
 claude_response = requests.post(
-    "http://localhost:53555/v1/messages",
+    "http://localhost:53355/v1/messages",
     json={
         "model": "claude-3-5-sonnet-20241022",
         "messages": [{"role": "user", "content": "Summarize this project in one sentence."}],
@@ -280,7 +280,7 @@ import OpenAI from 'openai';
 
 const openai = new OpenAI({
   apiKey: 'dummy', // Not used but required
-  baseURL: 'http://localhost:53555/v1',
+  baseURL: 'http://localhost:53355/v1',
 });
 
 // Gemini
@@ -296,7 +296,7 @@ const gpt = await openai.chat.completions.create({
 });
 
 // Claude example (using messages endpoint)
-const claudeResponse = await fetch('http://localhost:53555/v1/messages', {
+const claudeResponse = await fetch('http://localhost:53355/v1/messages', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
@@ -353,7 +353,7 @@ The server uses a YAML configuration file (`config.yaml`) located in the project
 
 | Parameter                               | Type     | Default            | Description                                                                                                                                                                               |
 |-----------------------------------------|----------|--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `port`                                  | integer  | 53555              | The port number on which the server will listen.                                                                                                                                          |
+| `port`                                  | integer  | 53355              | The port number on which the server will listen.                                                                                                                                          |
 | `auth-dir`                              | string   | "~/.cli-proxy-api" | Directory where authentication tokens are stored. Supports using `~` for the home directory. If you use Windows, please set the directory like this: `C:/cli-proxy-api/`                  |
 | `proxy-url`                             | string   | ""                 | Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/                                                                                            |
 | `request-retry`                         | integer  | 0                  | Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.                                                                      |
@@ -392,7 +392,7 @@ The server uses a YAML configuration file (`config.yaml`) located in the project
 
 ```yaml
 # Server port
-port: 53555
+port: 53355
 
 # Management API settings
 remote-management:
@@ -590,7 +590,7 @@ Call OpenAI's endpoint `/v1/chat/completions` with `model` set to the alias (e.g
 
 Also, you may call Claude's endpoint `/v1/messages`, Gemini's `/v1beta/models/model-name:streamGenerateContent` or `/v1beta/models/model-name:generateContent`.
 
-And you can always use Gemini CLI with `CODE_ASSIST_ENDPOINT` set to `http://127.0.0.1:53555` for these OpenAI-compatible provider's models.
+And you can always use Gemini CLI with `CODE_ASSIST_ENDPOINT` set to `http://127.0.0.1:53355` for these OpenAI-compatible provider's models.
 
 
 ### Authentication Directory
@@ -610,7 +610,7 @@ The server watches the config file and the `auth-dir` for changes and reloads cl
 Start CLI Proxy API server, and then set the `CODE_ASSIST_ENDPOINT` environment variable to the URL of the CLI Proxy API server.
 
 ```bash
-export CODE_ASSIST_ENDPOINT="http://127.0.0.1:53555"
+export CODE_ASSIST_ENDPOINT="http://127.0.0.1:53355"
 ```
 
 The server will relay the `loadCodeAssist`, `onboardUser`, and `countTokens` requests. And automatically load balance the text generation requests between the multiple accounts.
@@ -625,7 +625,7 @@ Start CLI Proxy API server, and then set the `ANTHROPIC_BASE_URL`, `ANTHROPIC_AU
 
 Using Gemini models:
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53355
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=gemini-2.5-pro
 export ANTHROPIC_SMALL_FAST_MODEL=gemini-2.5-flash
@@ -633,7 +633,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=gemini-2.5-flash
 
 Using OpenAI GPT 5 models:
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53355
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=gpt-5
 export ANTHROPIC_SMALL_FAST_MODEL=gpt-5-minimal
@@ -641,7 +641,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=gpt-5-minimal
 
 Using OpenAI GPT 5 Codex models:
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53355
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=gpt-5-codex
 export ANTHROPIC_SMALL_FAST_MODEL=gpt-5-codex-low
@@ -649,7 +649,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=gpt-5-codex-low
 
 Using Claude models:
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53355
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=claude-sonnet-4-20250514
 export ANTHROPIC_SMALL_FAST_MODEL=claude-3-5-haiku-20241022
@@ -657,7 +657,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=claude-3-5-haiku-20241022
 
 Using Qwen models:
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53355
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=qwen3-coder-plus
 export ANTHROPIC_SMALL_FAST_MODEL=qwen3-coder-flash
@@ -665,7 +665,7 @@ export ANTHROPIC_SMALL_FAST_MODEL=qwen3-coder-flash
 
 Using iFlow models:
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:53555
+export ANTHROPIC_BASE_URL=http://127.0.0.1:53355
 export ANTHROPIC_AUTH_TOKEN=sk-dummy
 export ANTHROPIC_MODEL=qwen3-max
 export ANTHROPIC_SMALL_FAST_MODEL=qwen3-235b-a22b-instruct
@@ -683,7 +683,7 @@ model_reasoning_effort = "high"
 
 [model_providers.cliproxyapi]
 name = "cliproxyapi"
-base_url = "http://127.0.0.1:53555/v1"
+base_url = "http://127.0.0.1:53355/v1"
 wire_api = "responses"
 ```
 
@@ -729,14 +729,14 @@ docker run --rm -p 11451:11451 -v /path/to/your/config.yaml:/CLIProxyAPI/config.
 Run the following command to start the server:
 
 ```bash
-docker run --rm -p 53555:53555 -v /path/to/your/config.yaml:/CLIProxyAPI/config.yaml -v /path/to/your/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest
+docker run --rm -p 53355:53355 -v /path/to/your/config.yaml:/CLIProxyAPI/config.yaml -v /path/to/your/auth-dir:/root/.cli-proxy-api eceasy/cli-proxy-api:latest
 ```
 
 > [!NOTE]
 > To use the Git-backed configuration store with Docker, you can pass the `GITSTORE_*` environment variables using the `-e` flag. For example:
 >
 > ```bash
-> docker run --rm -p 53555:53555 \
+> docker run --rm -p 53355:53355 \
 >   -e GITSTORE_GIT_URL="https://github.com/your/config-repo.git" \
 >   -e GITSTORE_GIT_TOKEN="your_personal_access_token" \
 >   -v /path/to/your/git-store:/CLIProxyAPI/remote \
@@ -766,7 +766,7 @@ docker run --rm -p 53555:53555 -v /path/to/your/config.yaml:/CLIProxyAPI/config.
         image: eceasy/cli-proxy-api:latest
         container_name: cli-proxy-api
         ports:
-          - "53555:53555"
+          - "53355:53355"
           - "8085:8085"
           - "1455:1455"
           - "54545:54545"

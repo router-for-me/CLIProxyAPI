@@ -29,6 +29,8 @@ type TokenStorage struct {
     ExpiresAt    int64  `json:"expires_at,omitempty"`
     // RefreshIn persists the server-provided refresh interval in seconds for preemptive refresh.
     RefreshIn    int    `json:"refresh_in,omitempty"`
+    // GitHubAccessToken persists the GitHub device flow access token used to refresh Copilot tokens.
+    GitHubAccessToken string `json:"github_access_token,omitempty"`
 }
 
 // SaveTokenToFile serializes the Copilot token storage to a JSON file.

@@ -22,7 +22,7 @@ func TestModels_ContainsCopilotWhenAuthRegistered(t *testing.T) {
     gin.SetMode(gin.TestMode)
 
     tmp := t.TempDir()
-    cfg := &config.Config{Port: 53555, AuthDir: tmp}
+    cfg := &config.Config{Port: 53355, AuthDir: tmp}
 
     // Prepare core auth manager and register a copilot auth (token contents are irrelevant for listing)
     coreMgr := coreauth.NewManager(coreauth.NewFileStore(filepath.Join(tmp, "auth")), coreauth.NoopSelector{}, coreauth.NoopHook{})

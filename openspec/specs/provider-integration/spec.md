@@ -47,11 +47,23 @@ The system SHALL treat `copilot` as an independent provider whose model inventor
 #### Scenario: Copilot-only model visibility
 - GIVEN provider `copilot`
 - WHEN listing models via `/v1/models` or management API
-- THEN the system SHALL expose only `gpt-5-mini`
+- THEN the system SHALL expose `gpt-5-mini` and `grok-code-fast-1`
 - AND that model SHALL NOT appear under providers `codex`, `openai`, or any OpenAI-compat provider
 
 #### Scenario: Provider filtering behavior
 - WHEN requesting `GET /v0/management/models?provider=copilot`
 - THEN results SHALL include `gpt-5-mini` with `providers` containing `copilot`
 - AND `GET /v0/management/providers` SHALL include `copilot` as a distinct provider
+
+#### Scenario: Copilot inventory available pre-auth (seed)
+- GIVEN no copilot auth has been registered
+- WHEN the service starts or reloads configuration
+- THEN the system SHALL register a seed inventory for provider `copilot` so `/v1/models` can advertise its models
+- AND once a real copilot auth is added, the registry entry SHALL be re-registered under that auth ID, superseding the seed
+
+#### Scenario: Copilot token preemptive refresh (refresh_in)
+- GIVEN an active copilot auth with metadata.refresh_in and metadata.github_access_token
+- WHEN current_time >= (last_refresh + refresh_in - safety_margin)
+- THEN the system SHALL invoke the copilot refresh path using GitHub API `/copilot_internal/v2/token`
+- AND update `access_token`, `expires_at`, `refresh_in`, and `last_refresh` on success
 

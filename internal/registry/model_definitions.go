@@ -371,6 +371,15 @@ func GetCopilotModels() []*ModelInfo {
             DisplayName: "GPT 5 Mini",
             Description: "Copilot-exclusive lightweight GPT-5 variant",
         },
+        {
+            ID:          "grok-code-fast-1",
+            Object:      "model",
+            Created:     created,
+            OwnedBy:     "copilot",
+            Type:        "copilot",
+            DisplayName: "Grok Code Fast 1",
+            Description: "Grok code generation fast model via Copilot upstream",
+        },
     }
 }
 

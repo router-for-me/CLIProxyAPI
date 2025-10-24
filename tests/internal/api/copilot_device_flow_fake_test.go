@@ -4,6 +4,7 @@ import (
     "encoding/json"
     "net/http"
     "net/http/httptest"
+    "os"
     "path/filepath"
     "testing"
     "time"
@@ -63,5 +64,28 @@ func TestCopilotDeviceFlow_FakeServer_E2E_Min(t *testing.T) {
     }
     // allow background poller to run once
     time.Sleep(1500 * time.Millisecond)
+
+    // Verify a copilot auth file is created with refresh_in, expires_at and github_access_token
+    entries, err := os.ReadDir(cfg.AuthDir)
+    if err != nil { t.Fatalf("readdir: %v", err) }
+    found := false
+    for _, e := range entries {
+        if e.IsDir() { continue }
+        if filepath.Ext(e.Name()) != ".json" { continue }
+        full := filepath.Join(cfg.AuthDir, e.Name())
+        data, errR := os.ReadFile(full)
+        if errR != nil { t.Fatalf("read file: %v", errR) }
+        var js map[string]any
+        if err := json.Unmarshal(data, &js); err != nil { t.Fatalf("unmarshal: %v", err) }
+        if js["type"] == "copilot" {
+            // keys should be present
+            if _, ok := js["refresh_in"]; !ok { t.Fatalf("missing refresh_in in saved auth file") }
+            if _, ok := js["expires_at"]; !ok { t.Fatalf("missing expires_at in saved auth file") }
+            if v, ok := js["github_access_token"].(string); !ok || v == "" { t.Fatalf("missing github_access_token in saved auth file") }
+            found = true
+            break
+        }
+    }
+    if !found { t.Fatalf("expected a copilot auth json saved to %s", cfg.AuthDir) }
 }
 

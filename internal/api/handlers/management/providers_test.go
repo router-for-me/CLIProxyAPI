@@ -150,15 +150,20 @@ func TestGetModels_FilterByCopilot(t *testing.T) {
     if len(body.Data) == 0 {
         t.Fatalf("expected some models for provider copilot")
     }
-    // Ensure gpt-5-mini is visible after registry seeded
+    // Ensure gpt-5-mini and grok-code-fast-1 are visible after registry seeded (when defined)
     var hasMini bool
+    var hasGrok bool
     for _, m := range body.Data {
-        if id, ok := m["id"].(string); ok && id == "gpt-5-mini" {
-            hasMini = true
-            break
+        if id, ok := m["id"].(string); ok {
+            if id == "gpt-5-mini" { hasMini = true }
+            if id == "grok-code-fast-1" { hasGrok = true }
         }
     }
     if !hasMini {
         t.Fatalf("expected gpt-5-mini in copilot models list")
+    }
+    // grok-code-fast-1 should be present once registry defines it
+    if !hasGrok {
+        t.Fatalf("expected grok-code-fast-1 in copilot models list")
     }
 }
