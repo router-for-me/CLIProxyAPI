@@ -8,6 +8,7 @@ import (
     "errors"
     "fmt"
     "os"
+    "os/exec"
     "crypto/sha256"
     "encoding/hex"
     "net/url"
@@ -82,6 +83,9 @@ type Service struct {
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
+
+	// pythonBridgeCmd holds the running Python bridge process
+	pythonBridgeCmd *exec.Cmd
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
@@ -424,6 +428,17 @@ func (s *Service) Run(ctx context.Context) error {
 		s.authManager = newDefaultAuthManager()
 	}
 
+	// Start Python bridge if enabled
+	if s.cfg != nil && s.cfg.PythonAgent.Enabled {
+		cmd, url, err := executor.StartPythonBridge(ctx, s.cfg)
+		if err != nil {
+			log.Warnf("Failed to start Python bridge: %v", err)
+		} else {
+			s.pythonBridgeCmd = cmd
+			log.Infof("Python bridge available at %s", url)
+		}
+	}
+
 	if s.hooks.OnBeforeStart != nil {
 		s.hooks.OnBeforeStart(s.cfg)
 	}
@@ -541,6 +556,14 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.authQueueStop != nil {
 			s.authQueueStop()
 			s.authQueueStop = nil
+		}
+
+		// Stop Python bridge if running
+		if s.pythonBridgeCmd != nil {
+			if err := executor.StopPythonBridge(s.pythonBridgeCmd); err != nil {
+				log.Errorf("failed to stop Python bridge: %v", err)
+			}
+			s.pythonBridgeCmd = nil
 		}
 
 		// no legacy clients to persist
