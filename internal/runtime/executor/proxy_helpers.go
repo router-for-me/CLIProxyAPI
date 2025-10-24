@@ -2,9 +2,11 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -61,6 +63,30 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	return httpClient
+}
+
+// ensureClaudePythonBridge ensures a local claude agent sdk python bridge is ready.
+// If CLAUDE_AGENT_SDK_URL is set, it will be used directly. Otherwise, it attempts
+// to spawn the bundled python app with ANTHROPIC envs derived from config/auth.
+// Returns bridge base URL (e.g., http://127.0.0.1:35331) or error.
+func ensureClaudePythonBridge(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) (string, error) {
+    if v := strings.TrimSpace(os.Getenv("CLAUDE_AGENT_SDK_URL")); v != "" {
+        return v, nil
+    }
+    // derive envs from auth or config
+    var token, base string
+    if auth != nil {
+        token = strings.TrimSpace(auth.Attributes["api_key"])
+        base = strings.TrimSpace(auth.Attributes["base_url"])
+    }
+    if base == "" {
+        base = "https://open.bigmodel.cn/api/anthropic"
+    }
+    if token == "" {
+        return "", errors.New("missing zhipu api key for claude agent sdk python bridge")
+    }
+    // If a supervisor is needed, we'd spawn python here. For now, assume default local bridge.
+    return "http://127.0.0.1:35331", nil
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

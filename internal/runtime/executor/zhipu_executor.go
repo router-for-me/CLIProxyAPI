@@ -7,6 +7,7 @@ import (
     "fmt"
     "io"
     "net/http"
+    "os"
     "strings"
 
     "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -31,17 +32,20 @@ func (e *ZhipuExecutor) Identifier() string { return "zhipu" }
 func (e *ZhipuExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
 
 func (e *ZhipuExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-    token, baseURL := zhipuCreds(auth)
-    if strings.TrimSpace(baseURL) == "" {
-        // Require base-url to avoid accidental network calls in default configs/tests.
-        return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
-    }
+    token, _ := zhipuCreds(auth)
     reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
     from := opts.SourceFormat
     to := sdktranslator.FromString("openai")
     body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-
-    url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+    bridgeURL := strings.TrimSpace(os.Getenv("CLAUDE_AGENT_SDK_URL"))
+    if bridgeURL == "" {
+        var err error
+        bridgeURL, err = ensureClaudePythonBridge(ctx, e.cfg, auth)
+        if err != nil {
+            return cliproxyexecutor.Response{}, err
+        }
+    }
+    url := strings.TrimSuffix(bridgeURL, "/") + "/v1/chat/completions"
     httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
     if err != nil { return cliproxyexecutor.Response{}, err }
     applyZhipuHeaders(httpReq, token, false)
@@ -71,16 +75,20 @@ func (e *ZhipuExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 }
 
 func (e *ZhipuExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
-    token, baseURL := zhipuCreds(auth)
-    if strings.TrimSpace(baseURL) == "" {
-        return nil, statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
-    }
+    token, _ := zhipuCreds(auth)
     reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
     from := opts.SourceFormat
     to := sdktranslator.FromString("openai")
     body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-
-    url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+    bridgeURL := strings.TrimSpace(os.Getenv("CLAUDE_AGENT_SDK_URL"))
+    if bridgeURL == "" {
+        var err error
+        bridgeURL, err = ensureClaudePythonBridge(ctx, e.cfg, auth)
+        if err != nil {
+            return nil, err
+        }
+    }
+    url := strings.TrimSuffix(bridgeURL, "/") + "/v1/chat/completions"
     httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
     if err != nil { return nil, err }
     applyZhipuHeaders(httpReq, token, true)
