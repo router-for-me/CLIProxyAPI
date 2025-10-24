@@ -97,12 +97,6 @@ quota-exceeded:
 #  credentials:
 #    openai-api-key: "sk-OPENAI-XXXX..."
 
-# Zhipu API keys (optional; direct provider)
-#zhipu-api-key:
-#  - api-key: "glmsk-..."
-#    # base-url: "https://open.bigmodel.cn/api/paas/v4" # optional
-#    # proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy
-
 # -----------------------------------------------------------------------------
 # Claude Agent SDK for Python（外部服务）对接说明：
 # Go 服务将 provider=zhipu 的请求转发到本地/Sidecar 的 Python 服务：
