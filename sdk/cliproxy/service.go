@@ -189,6 +189,16 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
         if preview := copilotBaseURLPreview(auth); preview != "" {
             log.Infof("copilot auth registered: id=%s base_url=%s", auth.ID, preview)
         }
+        // Defensive: when auth.Attributes.base_url points to a codex backend path, it cannot
+        // serve Copilot chat/completions and often returns 401. Clear it so executor falls back
+        // to the canonical https://api.githubcopilot.com host. Explicit non-codex base_url is kept.
+        if auth.Attributes != nil {
+            if raw := strings.TrimSpace(auth.Attributes["base_url"]); raw != "" {
+                if strings.HasSuffix(strings.TrimRight(raw, "/"), "/backend-api/codex") {
+                    delete(auth.Attributes, "base_url")
+                }
+            }
+        }
     }
 	s.registerModelsForAuth(auth)
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok && existing != nil {

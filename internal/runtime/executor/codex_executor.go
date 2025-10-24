@@ -62,14 +62,27 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	from := opts.SourceFormat
 	// Special-case Copilot: call Copilot chat/completions with Bearer token and required headers
-	if e.Identifier() == "copilot" {
-		base := baseURL
-		if base == "" || strings.Contains(base, "chatgpt.com") {
-			base = "https://api.githubcopilot.com"
-		}
-		base = strings.TrimSuffix(base, "/")
-		base = strings.TrimSuffix(base, "/backend-api/codex")
-		url := base + "/chat/completions"
+    if e.Identifier() == "copilot" {
+        // Copilot chat completions endpoint selection:
+        // 1) Prefer explicit base_url (attributes/metadata), trimming any legacy codex suffix
+        // 2) Else derive from access_token's proxy-ep= hint (may include codex suffix) and trim
+        // 3) Else fall back to canonical https://api.githubcopilot.com
+        candidate := strings.TrimSpace(baseURL)
+        if candidate == "" {
+            // derive from token if possible
+            if tok := strings.TrimSpace(apiKey); tok != "" {
+                if derived := deriveCopilotBaseFromToken(tok); derived != "" {
+                    candidate = derived
+                }
+            }
+        }
+        // remove any trailing codex backend path and trailing slash
+        candidate = strings.TrimSuffix(strings.TrimSuffix(candidate, "/"), "/backend-api/codex")
+        base := candidate
+        if base == "" {
+            base = "https://api.githubcopilot.com"
+        }
+        url := strings.TrimSuffix(base, "/") + "/chat/completions"
 		// Use original OpenAI JSON; force non-stream
 		body := bytes.Clone(opts.OriginalRequest)
 		body, _ = sjson.SetBytes(body, "stream", false)
