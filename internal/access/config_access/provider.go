@@ -57,10 +57,12 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	authHeaderGoogle := r.Header.Get("X-Goog-Api-Key")
 	authHeaderAnthropic := r.Header.Get("X-Api-Key")
 	queryKey := ""
+	queryAuthToken := ""
 	if r.URL != nil {
 		queryKey = r.URL.Query().Get("key")
+		queryAuthToken = r.URL.Query().Get("auth_token")
 	}
-	if authHeader == "" && authHeaderGoogle == "" && authHeaderAnthropic == "" && queryKey == "" {
+	if authHeader == "" && authHeaderGoogle == "" && authHeaderAnthropic == "" && queryKey == "" && queryAuthToken == "" {
 		return nil, sdkaccess.ErrNoCredentials
 	}
 
@@ -74,6 +76,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		{authHeaderGoogle, "x-goog-api-key"},
 		{authHeaderAnthropic, "x-api-key"},
 		{queryKey, "query-key"},
+		{queryAuthToken, "query-auth-token"},
 	}
 
 	for _, candidate := range candidates {

@@ -40,6 +40,9 @@ type Config struct {
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
+	// WebsocketAuth enables or disables authentication for the WebSocket API.
+	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
+
 	// GlAPIKey is the API key for the generative language API.
 	GlAPIKey []string `yaml:"generative-language-api-key" json:"generative-language-api-key"`
 

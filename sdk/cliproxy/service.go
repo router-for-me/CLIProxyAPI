@@ -421,6 +421,22 @@ func (s *Service) Run(ctx context.Context) error {
 	s.ensureWebsocketGateway()
 	if s.server != nil && s.wsGateway != nil {
 		s.server.AttachWebsocketRoute(s.wsGateway.Path(), s.wsGateway.Handler())
+		s.server.SetWebsocketAuthChangeHandler(func(oldEnabled, newEnabled bool) {
+			if oldEnabled == newEnabled {
+				return
+			}
+			if !oldEnabled && newEnabled {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if errStop := s.wsGateway.Stop(ctx); errStop != nil {
+					log.Warnf("failed to reset websocket connections after ws-auth change %t -> %t: %v", oldEnabled, newEnabled, errStop)
+					return
+				}
+				log.Debugf("ws-auth enabled; existing websocket sessions terminated to enforce authentication")
+				return
+			}
+			log.Debugf("ws-auth disabled; existing websocket sessions remain connected")
+		})
 	}
 
 	if s.hooks.OnBeforeStart != nil {
@@ -460,7 +476,6 @@ func (s *Service) Run(ctx context.Context) error {
 		s.cfg = newCfg
 		s.cfgMu.Unlock()
 		s.rebindExecutors()
-
 	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)

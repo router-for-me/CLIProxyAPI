@@ -43,6 +43,9 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
 
+# When true, enable authentication for the WebSocket API (/v1/ws).
+ws-auth: false
+
 # API keys for official Generative Language API
 #generative-language-api-key:
 #  - "AIzaSy...01"

@@ -140,8 +140,10 @@ type Server struct {
 	currentPath string
 
 	// wsRoutes tracks registered websocket upgrade paths.
-	wsRouteMu sync.Mutex
-	wsRoutes  map[string]struct{}
+	wsRouteMu     sync.Mutex
+	wsRoutes      map[string]struct{}
+	wsAuthChanged func(bool, bool)
+	wsAuthEnabled atomic.Bool
 
 	// management handler
 	mgmt *managementHandlers.Handler
@@ -235,6 +237,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
 	}
+	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
@@ -398,10 +401,20 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	s.wsRoutes[trimmed] = struct{}{}
 	s.wsRouteMu.Unlock()
 
-	s.engine.GET(trimmed, func(c *gin.Context) {
+	authMiddleware := AuthMiddleware(s.accessManager)
+	conditionalAuth := func(c *gin.Context) {
+		if !s.wsAuthEnabled.Load() {
+			c.Next()
+			return
+		}
+		authMiddleware(c)
+	}
+	finalHandler := func(c *gin.Context) {
 		handler.ServeHTTP(c.Writer, c.Request)
 		c.Abort()
-	})
+	}
+
+	s.engine.GET(trimmed, conditionalAuth, finalHandler)
 }
 
 func (s *Server) registerManagementRoutes() {
@@ -803,6 +816,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	s.applyAccessConfig(oldCfg, cfg)
 	s.cfg = cfg
+	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
+		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
+	}
 	managementasset.SetCurrentConfig(cfg)
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
@@ -841,6 +858,13 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		codexAPIKeyCount,
 		openAICompatCount,
 	)
+}
+
+func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
+	if s == nil {
+		return
+	}
+	s.wsAuthChanged = fn
 }
 
 // (management handlers moved to internal/api/handlers/management)
