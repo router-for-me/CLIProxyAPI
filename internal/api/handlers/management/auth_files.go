@@ -18,13 +18,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-    "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
-    "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-    copilot "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
-    geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
-    iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
-    copilottoken "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
-    "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	copilot "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
+	copilottoken "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
+	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
+	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -37,8 +37,8 @@ import (
 )
 
 var (
-    oauthStatus = make(map[string]string)
-    deviceFlowStatus = make(map[string]string) // keyed by device_code; ""=wait, "ok" or error message
+	oauthStatus      = make(map[string]string)
+	deviceFlowStatus = make(map[string]string) // keyed by device_code; ""=wait, "ok" or error message
 )
 
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
@@ -56,139 +56,165 @@ const (
 
 // deviceCodeResp models GitHub Device Flow response
 type deviceCodeResp struct {
-    DeviceCode     string `json:"device_code"`
-    UserCode       string `json:"user_code"`
-    VerificationURI string `json:"verification_uri"`
-    ExpiresIn      int    `json:"expires_in"`
-    Interval       int    `json:"interval"`
+	DeviceCode      string `json:"device_code"`
+	UserCode        string `json:"user_code"`
+	VerificationURI string `json:"verification_uri"`
+	ExpiresIn       int    `json:"expires_in"`
+	Interval        int    `json:"interval"`
 }
 
 // RequestCopilotDeviceCode 启动 GitHub Device Flow，返回用户可操作的 code 与验证链接
 func (h *Handler) RequestCopilotDeviceCode(c *gin.Context) {
-    base := strings.TrimSuffix(h.cfg.Copilot.GitHubBaseURL, "/")
-    if base == "" { base = strings.TrimSuffix(copilot.DefaultGitHubBaseURL, "/") }
-    urlStr := base + copilot.DefaultGitHubDeviceCodePath
-    form := url.Values{
-        "client_id": {firstNonEmpty(h.cfg.Copilot.GitHubClientID, copilot.DefaultGitHubClientID)},
-        "scope":     {copilot.DefaultGitHubScope},
-    }
-    req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, urlStr, strings.NewReader(form.Encode()))
-    req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-    req.Header.Set("Accept", "application/json")
-    httpClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
-    resp, err := httpClient.Do(req)
-    if err != nil {
-        c.JSON(http.StatusBadGateway, gin.H{"error": "device_code request failed"})
-        return
-    }
-    defer func(){ _ = resp.Body.Close() }()
-    body, _ := io.ReadAll(resp.Body)
-    if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-        c.JSON(http.StatusBadGateway, gin.H{"error": "device_code request error", "status": resp.StatusCode})
-        return
-    }
-    var out deviceCodeResp
-    if err := json.Unmarshal(body, &out); err != nil {
-        c.JSON(http.StatusBadGateway, gin.H{"error": "invalid device_code response"})
-        return
-    }
-    deviceFlowStatus[out.DeviceCode] = "" // pending
-    go h.pollCopilotDeviceFlow(out)
-    c.JSON(http.StatusOK, gin.H{
-        "status": "ok",
-        "device_code": out.DeviceCode,
-        "user_code": out.UserCode,
-        "verification_uri": out.VerificationURI,
-        "interval": out.Interval,
-        "expires_in": out.ExpiresIn,
-        "tips": "Open https://github.com/login/device and enter the user_code to approve; the CLI will continue automatically.",
-    })
+	base := strings.TrimSuffix(h.cfg.Copilot.GitHubBaseURL, "/")
+	if base == "" {
+		base = strings.TrimSuffix(copilot.DefaultGitHubBaseURL, "/")
+	}
+	urlStr := base + copilot.DefaultGitHubDeviceCodePath
+	form := url.Values{
+		"client_id": {firstNonEmpty(h.cfg.Copilot.GitHubClientID, copilot.DefaultGitHubClientID)},
+		"scope":     {copilot.DefaultGitHubScope},
+	}
+	req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, urlStr, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	httpClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "device_code request failed"})
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "device_code request error", "status": resp.StatusCode})
+		return
+	}
+	var out deviceCodeResp
+	if err := json.Unmarshal(body, &out); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid device_code response"})
+		return
+	}
+	deviceFlowStatus[out.DeviceCode] = "" // pending
+	go h.pollCopilotDeviceFlow(out)
+	c.JSON(http.StatusOK, gin.H{
+		"status":           "ok",
+		"device_code":      out.DeviceCode,
+		"user_code":        out.UserCode,
+		"verification_uri": out.VerificationURI,
+		"interval":         out.Interval,
+		"expires_in":       out.ExpiresIn,
+		"tips":             "Open https://github.com/login/device and enter the user_code to approve; the CLI will continue automatically.",
+	})
 }
 
 func (h *Handler) pollCopilotDeviceFlow(dc deviceCodeResp) {
-    ctx := context.Background()
-    base := strings.TrimSuffix(h.cfg.Copilot.GitHubBaseURL, "/")
-    if base == "" { base = strings.TrimSuffix(copilot.DefaultGitHubBaseURL, "/") }
-    urlStr := base + copilot.DefaultGitHubAccessTokenPath
-    interval := dc.Interval + 1
-    if interval <= 0 { interval = 5 }
-    deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
-    var ghToken string
-    httpClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
-    for time.Now().Before(deadline) {
-        form := url.Values{
-            "client_id":  {firstNonEmpty(h.cfg.Copilot.GitHubClientID, copilot.DefaultGitHubClientID)},
-            "device_code":{dc.DeviceCode},
-            "grant_type": {"urn:ietf:params:oauth:grant-type:device_code"},
-        }
-        req, _ := http.NewRequestWithContext(ctx, http.MethodPost, urlStr, strings.NewReader(form.Encode()))
-        req.Header.Set("Accept", "application/json")
-        req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-        resp, err := httpClient.Do(req)
-        if err == nil && resp != nil {
-            body, _ := io.ReadAll(resp.Body)
-            _ = resp.Body.Close()
-            var token struct{ AccessToken string `json:"access_token"` }
-            _ = json.Unmarshal(body, &token)
-            if strings.TrimSpace(token.AccessToken) != "" {
-                ghToken = token.AccessToken
-                break
-            }
-        }
-        time.Sleep(time.Duration(interval) * time.Second)
-    }
-    if ghToken == "" { deviceFlowStatus[dc.DeviceCode] = "timeout"; return }
-    apiBase := strings.TrimSuffix(h.cfg.Copilot.GitHubAPIBaseURL, "/")
-    if apiBase == "" { apiBase = strings.TrimSuffix(copilot.DefaultGitHubAPIBaseURL, "/") }
-    copilotURL := apiBase + copilot.DefaultCopilotTokenPath
-    req, _ := http.NewRequestWithContext(ctx, http.MethodGet, copilotURL, nil)
-    req.Header.Set("Authorization", "token "+ghToken)
-    req.Header.Set("Accept", "application/json")
-    req.Header.Set("User-Agent", "cli-proxy-copilot")
-    req.Header.Set("OpenAI-Intent", "copilot-cli-login")
-    req.Header.Set("Editor-Plugin-Name", "cli-proxy")
-    req.Header.Set("Editor-Plugin-Version", "1.0.0")
-    req.Header.Set("Editor-Version", "cli/1.0")
-    req.Header.Set("X-GitHub-Api-Version", "2023-07-07")
-    resp, err := httpClient.Do(req)
-    if err != nil || resp == nil { deviceFlowStatus[dc.DeviceCode] = "error: token_request_failed"; return }
-    defer func(){ _ = resp.Body.Close() }()
-    if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices { deviceFlowStatus[dc.DeviceCode] = fmt.Sprintf("error: status_%d", resp.StatusCode); return }
-    body, _ := io.ReadAll(resp.Body)
-    var ctk struct{ Token string `json:"token"`; ExpiresAt int64 `json:"expires_at"`; RefreshIn int `json:"refresh_in"` }
-    if err := json.Unmarshal(body, &ctk); err != nil { deviceFlowStatus[dc.DeviceCode] = "error: invalid_token_response"; return }
-    storage := &copilottoken.TokenStorage{ AccessToken: ctk.Token, LastRefresh: time.Now().Format(time.RFC3339), Expire: time.UnixMilli(ctk.ExpiresAt).Format(time.RFC3339), ExpiresAt: ctk.ExpiresAt, RefreshIn: ctk.RefreshIn, GitHubAccessToken: ghToken }
-    id := fmt.Sprintf("copilot-%d", time.Now().UnixMilli())
-    record := &coreauth.Auth{ ID: id+".json", Provider: "copilot", FileName: id+".json", Storage: storage }
-    if _, err := h.saveTokenRecord(ctx, record); err != nil {
-        deviceFlowStatus[dc.DeviceCode] = "error: save_failed"
-        return
-    }
-    deviceFlowStatus[dc.DeviceCode] = "ok"
+	ctx := context.Background()
+	base := strings.TrimSuffix(h.cfg.Copilot.GitHubBaseURL, "/")
+	if base == "" {
+		base = strings.TrimSuffix(copilot.DefaultGitHubBaseURL, "/")
+	}
+	urlStr := base + copilot.DefaultGitHubAccessTokenPath
+	interval := dc.Interval + 1
+	if interval <= 0 {
+		interval = 5
+	}
+	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
+	var ghToken string
+	httpClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
+	for time.Now().Before(deadline) {
+		form := url.Values{
+			"client_id":   {firstNonEmpty(h.cfg.Copilot.GitHubClientID, copilot.DefaultGitHubClientID)},
+			"device_code": {dc.DeviceCode},
+			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+		}
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, urlStr, strings.NewReader(form.Encode()))
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, err := httpClient.Do(req)
+		if err == nil && resp != nil {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			var token struct {
+				AccessToken string `json:"access_token"`
+			}
+			_ = json.Unmarshal(body, &token)
+			if strings.TrimSpace(token.AccessToken) != "" {
+				ghToken = token.AccessToken
+				break
+			}
+		}
+		time.Sleep(time.Duration(interval) * time.Second)
+	}
+	if ghToken == "" {
+		deviceFlowStatus[dc.DeviceCode] = "timeout"
+		return
+	}
+	apiBase := strings.TrimSuffix(h.cfg.Copilot.GitHubAPIBaseURL, "/")
+	if apiBase == "" {
+		apiBase = strings.TrimSuffix(copilot.DefaultGitHubAPIBaseURL, "/")
+	}
+	copilotURL := apiBase + copilot.DefaultCopilotTokenPath
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, copilotURL, nil)
+	req.Header.Set("Authorization", "token "+ghToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "cli-proxy-copilot")
+	req.Header.Set("OpenAI-Intent", "copilot-cli-login")
+	req.Header.Set("Editor-Plugin-Name", "cli-proxy")
+	req.Header.Set("Editor-Plugin-Version", "1.0.0")
+	req.Header.Set("Editor-Version", "cli/1.0")
+	req.Header.Set("X-GitHub-Api-Version", "2023-07-07")
+	resp, err := httpClient.Do(req)
+	if err != nil || resp == nil {
+		deviceFlowStatus[dc.DeviceCode] = "error: token_request_failed"
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		deviceFlowStatus[dc.DeviceCode] = fmt.Sprintf("error: status_%d", resp.StatusCode)
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var ctk struct {
+		Token     string `json:"token"`
+		ExpiresAt int64  `json:"expires_at"`
+		RefreshIn int    `json:"refresh_in"`
+	}
+	if err := json.Unmarshal(body, &ctk); err != nil {
+		deviceFlowStatus[dc.DeviceCode] = "error: invalid_token_response"
+		return
+	}
+	storage := &copilottoken.TokenStorage{AccessToken: ctk.Token, LastRefresh: time.Now().Format(time.RFC3339), Expire: time.UnixMilli(ctk.ExpiresAt).Format(time.RFC3339), ExpiresAt: ctk.ExpiresAt, RefreshIn: ctk.RefreshIn, GitHubAccessToken: ghToken}
+	id := fmt.Sprintf("copilot-%d", time.Now().UnixMilli())
+	record := &coreauth.Auth{ID: id + ".json", Provider: "copilot", FileName: id + ".json", Storage: storage}
+	if _, err := h.saveTokenRecord(ctx, record); err != nil {
+		deviceFlowStatus[dc.DeviceCode] = "error: save_failed"
+		return
+	}
+	deviceFlowStatus[dc.DeviceCode] = "ok"
 }
 
 // GetCopilotDeviceStatus 查询设备流进度：返回 wait/ok/error
 func (h *Handler) GetCopilotDeviceStatus(c *gin.Context) {
-    code := strings.TrimSpace(c.Query("device_code"))
-    if code == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "missing device_code"})
-        return
-    }
-    if s, ok := deviceFlowStatus[code]; ok {
-        defer delete(deviceFlowStatus, code)
-        if s == "" {
-            c.JSON(http.StatusOK, gin.H{"status": "wait"})
-            return
-        }
-        if strings.HasPrefix(s, "error") {
-            c.JSON(http.StatusOK, gin.H{"status": "error", "error": s})
-            return
-        }
-        c.JSON(http.StatusOK, gin.H{"status": "ok"})
-        return
-    }
-    // 未知视为 ok（与 GetAuthStatus 一致策略）
-    c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	code := strings.TrimSpace(c.Query("device_code"))
+	if code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing device_code"})
+		return
+	}
+	if s, ok := deviceFlowStatus[code]; ok {
+		defer delete(deviceFlowStatus, code)
+		if s == "" {
+			c.JSON(http.StatusOK, gin.H{"status": "wait"})
+			return
+		}
+		if strings.HasPrefix(s, "error") {
+			c.JSON(http.StatusOK, gin.H{"status": "error", "error": s})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+	// 未知视为 ok（与 GetAuthStatus 一致策略）
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 type callbackForwarder struct {
@@ -269,12 +295,12 @@ func isWebUIRequest(c *gin.Context) bool {
 }
 
 func firstNonEmpty(values ...string) string {
-    for _, v := range values {
-        if s := strings.TrimSpace(v); s != "" {
-            return s
-        }
-    }
-    return ""
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
@@ -1684,178 +1710,54 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	delete(oauthStatus, state)
 }
 
-// RequestCopilotToken initializes Copilot OAuth flow (skeleton for parity)
+// RequestCopilotToken returns a browser URL and CSRF state for Copilot OAuth login.
 func (h *Handler) RequestCopilotToken(c *gin.Context) {
-    ctx := context.Background()
-
-    fmt.Println("Initializing Copilot authentication...")
-
-    // Reuse Codex PKCE generation pattern
-    pkceCodes, err := codex.GeneratePKCECodes()
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to generate PKCE"})
-        return
-    }
-
-    // Random state for CSRF protection
-    state, err := misc.GenerateRandomState()
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to generate state"})
-        return
-    }
-
-    // Build Authorization URL from configuration
-    cop := h.cfg.Copilot
-    // Fall back to defaults when not configured, to mirror other providers
-    authURLBase := strings.TrimSpace(cop.AuthURL)
-    tokenURL := strings.TrimSpace(cop.TokenURL)
-    clientID := strings.TrimSpace(cop.ClientID)
-    scope := strings.TrimSpace(cop.Scope)
-    cbPort := cop.RedirectPort
-    if authURLBase == "" { authURLBase = copilot.DefaultAuthURL }
-    if tokenURL == "" { tokenURL = copilot.DefaultTokenURL }
-    if clientID == "" { clientID = copilot.DefaultClientID }
-    if scope == "" { scope = copilot.DefaultScope }
-    if cbPort == 0 { cbPort = copilot.DefaultRedirectPort }
-
-    redirect := fmt.Sprintf("http://localhost:%d/auth/callback", cbPort)
-    params := url.Values{
-        "client_id":             {clientID},
-        "response_type":         {"code"},
-        "redirect_uri":          {redirect},
-        "scope":                 {scope},
-        "state":                 {state},
-        "code_challenge":        {pkceCodes.CodeChallenge},
-        "code_challenge_method": {"S256"},
-        "prompt":                {"login"},
-    }
-    authURL := fmt.Sprintf("%s?%s", authURLBase, params.Encode())
-
-    // Web UI detection: spin a local forwarder on 54556 to bounce back to main port /copilot/callback
-    isWebUI := isWebUIRequest(c)
-    copilotCallbackPort := cbPort
-    if isWebUI {
-        targetURL, errTarget := h.managementCallbackURL("/copilot/callback")
-        if errTarget != nil {
-            log.WithError(errTarget).Error("failed to compute copilot callback target")
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
-            return
-        }
-        if _, errStart := startCallbackForwarder(copilotCallbackPort, "copilot", targetURL); errStart != nil {
-            log.WithError(errStart).Error("failed to start copilot callback forwarder")
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
-            return
-        }
-    }
-
-    go func() {
-        if isWebUI {
-            defer stopCallbackForwarder(copilotCallbackPort)
-        }
-
-        // Wait for callback file like other providers
-        waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-copilot-%s.oauth", state))
-        deadline := time.Now().Add(5 * time.Minute)
-        var code string
-        for {
-            if time.Now().After(deadline) {
-                oauthStatus[state] = "Timeout waiting for OAuth callback"
-                log.Error("copilot oauth: timeout waiting for callback")
-                return
-            }
-            if data, errR := os.ReadFile(waitFile); errR == nil {
-                var m map[string]string
-                _ = json.Unmarshal(data, &m)
-                _ = os.Remove(waitFile)
-                if errStr := m["error"]; strings.TrimSpace(errStr) != "" {
-                    oauthStatus[state] = "Bad Request"
-                    log.Errorf("copilot oauth error: %s", errStr)
-                    return
-                }
-                if m["state"] != state {
-                    oauthStatus[state] = "State code error"
-                    log.Error("copilot oauth: state mismatch")
-                    return
-                }
-                code = m["code"]
-                break
-            }
-            time.Sleep(500 * time.Millisecond)
-        }
-
-        // Exchange code for tokens (temporary endpoint placeholder)
-        form := url.Values{
-            "grant_type":    {"authorization_code"},
-            "client_id":     {clientID},
-            "code":          {code},
-            "redirect_uri":  {redirect},
-            "code_verifier": {pkceCodes.CodeVerifier},
-        }
-        httpClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
-        req, _ := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(form.Encode()))
-        req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-        req.Header.Set("Accept", "application/json")
-        resp, errDo := httpClient.Do(req)
-        if errDo != nil {
-            oauthStatus[state] = "Failed to exchange authorization code for tokens"
-            log.Errorf("copilot oauth: token exchange failed: %v", errDo)
-            return
-        }
-        defer func() { _ = resp.Body.Close() }()
-        body, _ := io.ReadAll(resp.Body)
-        if resp.StatusCode != http.StatusOK {
-            oauthStatus[state] = fmt.Sprintf("Token exchange failed with status %d", resp.StatusCode)
-            log.Errorf("copilot oauth: token exchange status %d: %s", resp.StatusCode, string(body))
-            return
-        }
-
-        var tResp struct {
-            AccessToken  string `json:"access_token"`
-            RefreshToken string `json:"refresh_token"`
-            IDToken      string `json:"id_token"`
-            ExpiresIn    int    `json:"expires_in"`
-            Account      struct {
-                Email string `json:"email"`
-            } `json:"account"`
-        }
-        if errU := json.Unmarshal(body, &tResp); errU != nil {
-            oauthStatus[state] = "Failed to parse token response"
-            log.Errorf("copilot oauth: parse token response: %v", errU)
-            return
-        }
-
-        // Persist using copilot token storage
-        storage := &copilottoken.TokenStorage{
-            IDToken:      tResp.IDToken,
-            AccessToken:  tResp.AccessToken,
-            RefreshToken: tResp.RefreshToken,
-            LastRefresh:  time.Now().Format(time.RFC3339),
-            Email:        strings.TrimSpace(tResp.Account.Email),
-            Expire:       time.Now().Add(time.Duration(tResp.ExpiresIn) * time.Second).Format(time.RFC3339),
-        }
-
-        identifier := storage.Email
-        if identifier == "" {
-            identifier = fmt.Sprintf("copilot-%d", time.Now().UnixMilli())
-            storage.Email = identifier
-        }
-        record := &coreauth.Auth{
-            ID:       fmt.Sprintf("copilot-%s.json", identifier),
-            Provider: "copilot",
-            FileName: fmt.Sprintf("copilot-%s.json", identifier),
-            Storage:  storage,
-            Metadata: map[string]any{"email": storage.Email},
-        }
-        if _, errSave := h.saveTokenRecord(ctx, record); errSave != nil {
-            oauthStatus[state] = "Failed to save authentication tokens"
-            log.Errorf("copilot oauth: save token error: %v", errSave)
-            return
-        }
-
-        delete(oauthStatus, state)
-        fmt.Println("Authentication successful. You can now use Copilot services through this CLI")
-    }()
-
-    oauthStatus[state] = ""
-    c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"status": "error", "error": "copilot auth not configured"})
+		return
+	}
+	state, err := misc.GenerateRandomState()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to generate state"})
+		return
+	}
+	pkce, err := codex.GeneratePKCECodes()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to generate code challenge"})
+		return
+	}
+	cfg := h.cfg.Copilot
+	authURL := strings.TrimSpace(cfg.AuthURL)
+	if authURL == "" {
+		authURL = copilot.DefaultAuthURL
+	}
+	clientID := strings.TrimSpace(cfg.ClientID)
+	if clientID == "" {
+		clientID = copilot.DefaultClientID
+	}
+	scope := strings.TrimSpace(cfg.Scope)
+	if scope == "" {
+		scope = copilot.DefaultScope
+	}
+	redirectPort := cfg.RedirectPort
+	if redirectPort == 0 {
+		redirectPort = copilot.DefaultRedirectPort
+	}
+	redirectURI := fmt.Sprintf("http://localhost:%d/copilot/oauth/callback", redirectPort)
+	params := url.Values{
+		"client_id":             {clientID},
+		"response_type":         {"code"},
+		"redirect_uri":          {redirectURI},
+		"scope":                 {scope},
+		"state":                 {state},
+		"code_challenge":        {pkce.CodeChallenge},
+		"code_challenge_method": {"S256"},
+		"prompt":                {"login"},
+	}
+	fullURL := strings.TrimRight(authURL, "?") + "?" + params.Encode()
+	c.JSON(http.StatusOK, gin.H{
+		"status": "ok",
+		"url":    fullURL,
+		"state":  state,
+	})
 }

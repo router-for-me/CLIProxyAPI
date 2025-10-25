@@ -2,31 +2,29 @@
 
 ## ADDED Requirements
 
-### Requirement: Copilot Chat Completions 必须使用流式响应
+### Requirement: Copilot Chat Completions 使用流式传输
 
-The system SHALL enforce streaming mode (`stream=true`) for all GitHub Copilot chat/completions requests, as the upstream API explicitly rejects non-streaming requests with 400 Bad Request.
+The system SHALL always negotiate streaming transport with the Copilot chat/completions endpoint (`stream=true`) and correctly consume upstream Server-Sent Events (SSE).
 
-**Rationale**: GitHub Copilot chat/completions endpoint does not support `stream=false`. Historical logs and error messages confirm: `{"error":{"message":"Bad request: \"stream\": false is not supported"}}`.
+**Rationale**: The GitHub Copilot chat/completions API rejects `stream=false` requests. Local callers may still prefer non-streaming semantics; the proxy must bridge this gap by aggregating the SSE stream.
 
-#### Scenario: Streaming enforced for chat/completions
-- **GIVEN** a request to provider `copilot` with model `gpt-5-mini`
-- **WHEN** the request is routed to CodexExecutor for Copilot
-- **THEN** the system SHALL set `stream=true` in the upstream request body
-- **AND** SHALL NOT override it to `stream=false`
-- **AND** SHALL use `ExecuteStream()` path to handle SSE response
+#### Scenario: Upstream streaming negotiated
+- **GIVEN** any request routed to provider `copilot`
+- **WHEN** building the upstream payload
+- **THEN** the system SHALL set `stream=true`
+- **AND** SHALL send the request with `Accept: text/event-stream`
 
-#### Scenario: Non-streaming explicitly rejected
-- **GIVEN** upstream Copilot API requirement
-- **WHEN** attempting to send `stream=false` in request body
-- **THEN** upstream SHALL return 400 Bad Request
-- **AND** error message SHALL contain "stream: false is not supported"
+#### Scenario: Non-streaming caller support
+- **GIVEN** a caller request with `stream=false`
+- **WHEN** the upstream SSE completes with a `response.completed` event
+- **THEN** the system SHALL aggregate the stream into a single chat completion payload
+- **AND** SHALL return HTTP 200 with the OpenAI-style JSON body
 
-#### Scenario: SSE format handling
-- **GIVEN** a streaming response from Copilot chat/completions
-- **WHEN** processing SSE events
-- **THEN** the system SHALL correctly parse `event:` and `data:` prefixes
-- **AND** SHALL extract JSON payloads from `data:` lines
-- **AND** SHALL handle `[DONE]` termination signal
+#### Scenario: Streaming caller propagation
+- **GIVEN** a caller request with `stream=true`
+- **WHEN** the upstream emits SSE events
+- **THEN** the system SHALL translate each chunk into OpenAI-compatible streaming events
+- **AND** SHALL forward them to the caller until `[DONE]`
 
 ---
 
@@ -63,74 +61,45 @@ The system SHALL determine the Copilot chat/completions endpoint using a priorit
 
 ---
 
-### Requirement: Copilot OAuth 认证流程规范
+### Requirement: Copilot 请求头语义
 
-The system SHALL implement GitHub Device Flow OAuth to obtain Copilot access tokens, following the official GitHub authentication specification.
+The system SHALL attach Copilot-specific HTTP headers that reflect caller intent and upstream requirements.
 
-**Rationale**: Copilot uses a two-tier OAuth model: GitHub Device Flow grants GitHub tokens, which are then exchanged for Copilot tokens.
+#### Scenario: Streaming response headers
+- **GIVEN** a Copilot chat/completions request
+- **WHEN** constructing upstream headers
+- **THEN** the system SHALL set `Content-Type: application/json`
+- **AND** SHALL set `Accept: text/event-stream`
+- **AND** SHALL include GitHub Copilot client headers (`user-agent`, `editor-version`, `editor-plugin-version`, `openai-intent`, `x-github-api-version`, `x-request-id`)
 
-#### Scenario: Device Flow initiation
-- **GIVEN** user invokes `--copilot-auth-login`
-- **WHEN** `DoCopilotAuthLogin()` executes
-- **THEN** the system SHALL:
-  1. POST to `${GitHubBaseURL}/login/device/code` with `client_id` and `scope`
-  2. Receive `device_code`, `user_code`, and `verification_uri`
-  3. Display `user_code` and open browser to `verification_uri`
-  4. Poll `${GitHubBaseURL}/login/oauth/access_token` until user authorizes
-  5. Receive `github_access_token`
+#### Scenario: Agent initiator detection
+- **GIVEN** the translated payload contains any `assistant` or `tool` role messages
+- **WHEN** preparing headers
+- **THEN** the system SHALL set `X-Initiator: agent`
+- **ELSE** it SHALL set `X-Initiator: user`
 
-#### Scenario: Copilot token exchange
-- **GIVEN** a valid `github_access_token`
-- **WHEN** exchanging for Copilot token
-- **THEN** the system SHALL:
-  1. GET `${GitHubAPIBaseURL}/copilot_internal/v2/token`
-  2. Set header `Authorization: token <github_access_token>`
-  3. Receive JSON with `token`, `expires_at`, `refresh_in`
-  4. Store as `auth.Metadata["access_token"]`, `auth.Metadata["expires_at"]`, `auth.Metadata["refresh_in"]`
-
-#### Scenario: Token persistence
-- **GIVEN** a successful Copilot token exchange
-- **WHEN** persisting auth record
-- **THEN** the system SHALL serialize to JSON file with structure:
-  ```json
-  {
-    "access_token": "<copilot_token>",
-    "github_access_token": "<github_token>",
-    "expires_at": 1234567890,
-    "refresh_in": 28800
-  }
-  ```
-- **AND** file SHALL be named `copilot-<timestamp>.json`
+#### Scenario: Vision payload hint
+- **GIVEN** the payload includes any image content blocks
+- **WHEN** preparing headers
+- **THEN** the system SHALL set `copilot-vision-request: true`
 
 ---
 
-### Requirement: Copilot Token 预刷新策略
+### Requirement: Copilot Anthropic 兼容桥接
 
-The system SHALL proactively refresh Copilot tokens before expiration using the `refresh_in` metadata field provided by GitHub API.
+The system SHALL expose the Copilot provider through the Anthropic Messages facade so that Claude Code clients can consume Copilot-specific models such as `gpt-5-mini`.
 
-**Rationale**: Copilot tokens have short lifetimes (typically 8 hours) and require preemptive refresh to avoid auth failures.
+#### Scenario: Anthropic → Copilot translation
+- **GIVEN** an Anthropic Messages payload targeting `gpt-5-mini`
+- **WHEN** routing through the Anthropic handler
+- **THEN** the system SHALL translate messages, tool calls, and metadata into OpenAI chat/completions format without altering the model identifier
+- **AND** SHALL forward the translated payload to the Copilot executor
 
-#### Scenario: Refresh timing calculation
-- **GIVEN** auth with `metadata.refresh_in = 28800` (8 hours) and `RefreshSafetyMarginSeconds = 60`
-- **WHEN** checking `shouldRefresh()` at time `T`
-- **THEN** refresh SHALL be triggered when `T >= last_refresh + (28800 - 60) seconds`
-- **AND** new token SHALL be fetched via GitHub API
-
-#### Scenario: Refresh execution
-- **GIVEN** a Copilot auth requiring refresh
-- **WHEN** `Refresh()` is invoked
-- **THEN** the system SHALL:
-  1. Extract `github_access_token` from `auth.Metadata`
-  2. GET `${GitHubAPIBaseURL}/copilot_internal/v2/token` with GitHub token
-  3. Update `auth.Metadata["access_token"]`, `auth.Metadata["refresh_in"]`, `auth.Metadata["expires_at"]`
-  4. Persist updated auth record
-
-#### Scenario: Refresh failure handling
-- **GIVEN** a refresh request that fails (e.g., GitHub token expired)
-- **WHEN** `Refresh()` returns error
-- **THEN** the system SHALL log the error
-- **AND** SHALL mark auth as disabled or retry based on error type
-- **AND** SHALL NOT invalidate existing access token immediately (allow graceful degradation)
+#### Scenario: Copilot → Anthropic streaming translation
+- **GIVEN** an upstream Copilot SSE stream
+- **WHEN** serving an Anthropic client
+- **THEN** the system SHALL translate each Copilot chunk into Anthropic-compatible SSE events
+- **AND** SHALL emit a final Anthropic message once the upstream sends `[DONE]`
 
 ---
 
@@ -261,16 +230,15 @@ The system SHALL define clear YAML configuration structure for Copilot OAuth set
 
 ### Requirement: Provider Model Inventory Exposure (Copilot Rules)
 
-**Updated**: Clarified that Copilot chat/completions endpoint requires streaming.
+**Updated**: Clarified that Copilot chat/completions requests must negotiate streaming transport while supporting stream aggregation for non-stream callers.
 
-The system SHALL treat `copilot` as an independent provider whose model inventory is not mirrored from OpenAI, **and enforce streaming mode for all chat/completions requests**.
+The system SHALL treat `copilot` as an independent provider whose model inventory is not mirrored from OpenAI, **and SHALL negotiate SSE transport (`stream=true`) whenever issuing chat/completions**.
 
-#### Scenario: Copilot streaming enforcement (ADDED)
-- **GIVEN** a request to provider `copilot`
-- **WHEN** executing via CodexExecutor
+#### Scenario: Copilot streaming support (ADDED)
+- **GIVEN** a request routed to provider `copilot`
+- **WHEN** constructing the upstream payload
 - **THEN** the system SHALL set `stream=true`
-- **AND** SHALL use `ExecuteStream()` pathway
-- **AND** SHALL NOT force `stream=false`
+- **AND** SHALL deliver either incremental SSE events or an aggregated response based on the caller’s `stream` flag
 
 *(Other scenarios from provider-integration spec remain unchanged)*
 
