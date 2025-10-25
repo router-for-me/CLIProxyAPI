@@ -142,11 +142,16 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		s.provider = strings.ToLower(s.id)
 	}
 	m.sessMutex.Lock()
+	var replaced *session
 	if existing, ok := m.sessions[s.provider]; ok {
-		existing.cleanup(errors.New("replaced by new connection"))
+		replaced = existing
 	}
 	m.sessions[s.provider] = s
 	m.sessMutex.Unlock()
+
+	if replaced != nil {
+		replaced.cleanup(errors.New("replaced by new connection"))
+	}
 	if m.onConnected != nil {
 		m.onConnected(s.provider)
 	}

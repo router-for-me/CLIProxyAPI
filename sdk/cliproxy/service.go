@@ -203,7 +203,9 @@ func (s *Service) wsOnConnected(provider string) {
 	}
 	if s.coreManager != nil {
 		if existing, ok := s.coreManager.GetByID(provider); ok && existing != nil {
-			return
+			if !existing.Disabled && existing.Status == coreauth.StatusActive {
+				return
+			}
 		}
 	}
 	now := time.Now().UTC()
@@ -225,6 +227,10 @@ func (s *Service) wsOnDisconnected(provider string, reason error) {
 		return
 	}
 	if reason != nil {
+		if strings.Contains(reason.Error(), "replaced by new connection") {
+			log.Infof("websocket provider replaced: %s", provider)
+			return
+		}
 		log.Warnf("websocket provider disconnected: %s (%v)", provider, reason)
 	} else {
 		log.Infof("websocket provider disconnected: %s", provider)
