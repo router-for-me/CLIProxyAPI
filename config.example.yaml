@@ -113,14 +113,17 @@ copilot:
 #    openai-api-key: "sk-OPENAI-XXXX..."
 
 # -----------------------------------------------------------------------------
-# Claude Agent SDK for Python（外部服务）对接说明：
-# Go 服务将 provider=zhipu 的请求转发到本地/Sidecar 的 Python 服务：
-#   - 默认地址：http://127.0.0.1:35331
-#   - 可通过环境变量覆盖：
-#       export CLAUDE_AGENT_SDK_URL="http://127.0.0.1:35331"
-# Python 服务需设置以下环境变量以直连智谱 GLM（通过官方兼容层）：
-#   - export ANTHROPIC_BASE_URL="https://open.bigmodel.cn/api/anthropic"
-#   - export ANTHROPIC_AUTH_TOKEN="<Zhipu API Key>"
+# Claude Agent SDK for Python（外部服务）对接说明（Breaking Change）：
+# - provider=zhipu 仅通过 Python Bridge 路由（无 legacy 回退；禁用将报错）。
+# - Bridge URL 默认仅允许本地地址（127.0.0.1/localhost/::1）。
+# - 如需放开远端（仅限受控环境），需显式设置：
+#     export CLAUDE_AGENT_SDK_ALLOW_REMOTE=true
+# - Bridge URL 优先级：config.baseURL > 环境变量 CLAUDE_AGENT_SDK_URL > 内部默认。
+# 示例：
+#   export CLAUDE_AGENT_SDK_URL="http://127.0.0.1:35331"
+# Python 服务需设置以下环境变量以直连智谱 GLM（官方 Anthropic 兼容层）：
+#   export ANTHROPIC_BASE_URL="https://open.bigmodel.cn/api/anthropic"
+#   export ANTHROPIC_AUTH_TOKEN="<Zhipu API Key>"
 # 调用时在 OpenAI 兼容入参中使用模型名："glm-4.6"（或 "glm-4.5"）。
 # -----------------------------------------------------------------------------
 

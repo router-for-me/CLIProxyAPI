@@ -139,8 +139,8 @@ type Server struct {
 	accessManager *sdkaccess.Manager
 
 	// requestLogger is the request logger instance for dynamic configuration updates.
-	requestLogger logging.RequestLogger
-	loggerToggle  func(bool)
+	requestLogger       logging.RequestLogger
+	loggerToggle        func(bool)
 	loggerCaptureToggle func(bool)
 
 	// configFilePath is the absolute path to the YAML config file for persistence.
@@ -206,22 +206,22 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Add request logging middleware (positioned after recovery, before auth)
 	// Resolve logs directory relative to the configuration file directory.
-    var requestLogger logging.RequestLogger
-    var toggle func(bool)
-    var captureToggle func(bool)
+	var requestLogger logging.RequestLogger
+	var toggle func(bool)
+	var captureToggle func(bool)
 	if optionState.requestLoggerFactory != nil {
 		requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
 	}
-    if requestLogger != nil {
-        engine.Use(middleware.RequestLoggingMiddleware(requestLogger))
-        if setter, ok := requestLogger.(interface{ SetEnabled(bool) }); ok {
-            toggle = setter.SetEnabled
-        }
-        if captureSetter, ok := requestLogger.(interface{ SetCaptureOnly(bool) }); ok {
-            captureSetter.SetCaptureOnly(cfg.CodexJSONCaptureOnly)
-            captureToggle = captureSetter.SetCaptureOnly
-        }
-    }
+	if requestLogger != nil {
+		engine.Use(middleware.RequestLoggingMiddleware(requestLogger))
+		if setter, ok := requestLogger.(interface{ SetEnabled(bool) }); ok {
+			toggle = setter.SetEnabled
+		}
+		if captureSetter, ok := requestLogger.(interface{ SetCaptureOnly(bool) }); ok {
+			captureSetter.SetCaptureOnly(cfg.CodexJSONCaptureOnly)
+			captureToggle = captureSetter.SetCaptureOnly
+		}
+	}
 
 	engine.Use(corsMiddleware())
 	wd, err := os.Getwd()
@@ -239,9 +239,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
 		cfg:                 cfg,
 		accessManager:       accessManager,
-        requestLogger:       requestLogger,
-        loggerToggle:        toggle,
-        loggerCaptureToggle: captureToggle,
+		requestLogger:       requestLogger,
+		loggerToggle:        toggle,
+		loggerCaptureToggle: captureToggle,
 		configFilePath:      configFilePath,
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
@@ -265,41 +265,41 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 				return
 			}
 		}
-        var completion, total float64
-        var have bool
-        if v, ok := c.Get("API_TPS_COMPLETION"); ok {
-            if f, ok2 := v.(float64); ok2 {
-                completion = f
-                have = true
-            }
-        }
-        if v, ok := c.Get("API_TPS_TOTAL"); ok {
-            if f, ok2 := v.(float64); ok2 {
-                total = f
-                have = true
-            }
-        }
-        if have {
-            // optional provider/model attribution
-            var provider, model string
-            if v, ok := c.Get("API_PROVIDER"); ok {
-                if s, ok2 := v.(string); ok2 {
-                    provider = s
-                }
-            }
-            if v, ok := c.Get("API_MODEL_ID"); ok {
-                if s, ok2 := v.(string); ok2 {
-                    model = s
-                }
-            }
-            if provider != "" || model != "" {
-                usage.RecordTPSSampleTagged(provider, model, completion, total)
-            } else {
-                usage.RecordTPSSample(completion, total)
-            }
-            c.Set("API_TPS_RECORDED", true)
-        }
-    })
+		var completion, total float64
+		var have bool
+		if v, ok := c.Get("API_TPS_COMPLETION"); ok {
+			if f, ok2 := v.(float64); ok2 {
+				completion = f
+				have = true
+			}
+		}
+		if v, ok := c.Get("API_TPS_TOTAL"); ok {
+			if f, ok2 := v.(float64); ok2 {
+				total = f
+				have = true
+			}
+		}
+		if have {
+			// optional provider/model attribution
+			var provider, model string
+			if v, ok := c.Get("API_PROVIDER"); ok {
+				if s, ok2 := v.(string); ok2 {
+					provider = s
+				}
+			}
+			if v, ok := c.Get("API_MODEL_ID"); ok {
+				if s, ok2 := v.(string); ok2 {
+					model = s
+				}
+			}
+			if provider != "" || model != "" {
+				usage.RecordTPSSampleTagged(provider, model, completion, total)
+			} else {
+				usage.RecordTPSSample(completion, total)
+			}
+			c.Set("API_TPS_RECORDED", true)
+		}
+	})
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
@@ -511,14 +511,14 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/logs", s.mgmt.GetLogs)
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
-        mgmt.GET("/request-log", s.mgmt.GetRequestLog)
-        mgmt.PUT("/request-log", s.mgmt.PutRequestLog)
-        mgmt.PATCH("/request-log", s.mgmt.PutRequestLog)
+		mgmt.GET("/request-log", s.mgmt.GetRequestLog)
+		mgmt.PUT("/request-log", s.mgmt.PutRequestLog)
+		mgmt.PATCH("/request-log", s.mgmt.PutRequestLog)
 
-        // Codex JSON capture only
-        mgmt.GET("/codex-json-capture-only", s.mgmt.GetCodexJSONCaptureOnly)
-        mgmt.PUT("/codex-json-capture-only", s.mgmt.PutCodexJSONCaptureOnly)
-        mgmt.PATCH("/codex-json-capture-only", s.mgmt.PutCodexJSONCaptureOnly)
+		// Codex JSON capture only
+		mgmt.GET("/codex-json-capture-only", s.mgmt.GetCodexJSONCaptureOnly)
+		mgmt.PUT("/codex-json-capture-only", s.mgmt.PutCodexJSONCaptureOnly)
+		mgmt.PATCH("/codex-json-capture-only", s.mgmt.PutCodexJSONCaptureOnly)
 
 		mgmt.GET("/tps-log", s.mgmt.GetTPSLog)
 		mgmt.PUT("/tps-log", s.mgmt.PutTPSLog)
@@ -795,38 +795,38 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		_ = yaml.Unmarshal(s.oldConfigYaml, &oldCfg)
 	}
 
-    // Update request logger enabled state if it has changed
-    previousRequestLog := false
-    if oldCfg != nil {
-        previousRequestLog = oldCfg.RequestLog
-    }
-    if s.requestLogger != nil && (oldCfg == nil || previousRequestLog != cfg.RequestLog) {
-        if s.loggerToggle != nil {
-            s.loggerToggle(cfg.RequestLog || cfg.CodexJSONCaptureOnly)
-        } else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
-            toggler.SetEnabled(cfg.RequestLog || cfg.CodexJSONCaptureOnly)
-        }
-        if oldCfg != nil {
-            log.Debugf("request logging updated from %t to %t", previousRequestLog, cfg.RequestLog)
-        } else {
-            log.Debugf("request logging toggled to %t", cfg.RequestLog)
-        }
-    }
+	// Update request logger enabled state if it has changed
+	previousRequestLog := false
+	if oldCfg != nil {
+		previousRequestLog = oldCfg.RequestLog
+	}
+	if s.requestLogger != nil && (oldCfg == nil || previousRequestLog != cfg.RequestLog) {
+		if s.loggerToggle != nil {
+			s.loggerToggle(cfg.RequestLog || cfg.CodexJSONCaptureOnly)
+		} else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
+			toggler.SetEnabled(cfg.RequestLog || cfg.CodexJSONCaptureOnly)
+		}
+		if oldCfg != nil {
+			log.Debugf("request logging updated from %t to %t", previousRequestLog, cfg.RequestLog)
+		} else {
+			log.Debugf("request logging toggled to %t", cfg.RequestLog)
+		}
+	}
 
-    // Update capture-only toggle when changed
-    if s.requestLogger != nil {
-        prevCapture := false
-        if oldCfg != nil {
-            prevCapture = oldCfg.CodexJSONCaptureOnly
-        }
-        if oldCfg == nil || prevCapture != cfg.CodexJSONCaptureOnly {
-            if s.loggerCaptureToggle != nil {
-                s.loggerCaptureToggle(cfg.CodexJSONCaptureOnly)
-            } else if captureSetter, ok := s.requestLogger.(interface{ SetCaptureOnly(bool) }); ok {
-                captureSetter.SetCaptureOnly(cfg.CodexJSONCaptureOnly)
-            }
-        }
-    }
+	// Update capture-only toggle when changed
+	if s.requestLogger != nil {
+		prevCapture := false
+		if oldCfg != nil {
+			prevCapture = oldCfg.CodexJSONCaptureOnly
+		}
+		if oldCfg == nil || prevCapture != cfg.CodexJSONCaptureOnly {
+			if s.loggerCaptureToggle != nil {
+				s.loggerCaptureToggle(cfg.CodexJSONCaptureOnly)
+			} else if captureSetter, ok := s.requestLogger.(interface{ SetCaptureOnly(bool) }); ok {
+				captureSetter.SetCaptureOnly(cfg.CodexJSONCaptureOnly)
+			}
+		}
+	}
 
 	if oldCfg != nil && oldCfg.LoggingToFile != cfg.LoggingToFile {
 		if err := logging.ConfigureLogOutput(cfg.LoggingToFile); err != nil {

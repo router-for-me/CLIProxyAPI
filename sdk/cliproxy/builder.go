@@ -180,10 +180,10 @@ func (b *Builder) Build() (*Service, error) {
 		authManager = newDefaultAuthManager()
 	}
 
-    accessManager := b.accessManager
-    if accessManager == nil {
-        accessManager = sdkaccess.NewManager()
-    }
+	accessManager := b.accessManager
+	if accessManager == nil {
+		accessManager = sdkaccess.NewManager()
+	}
 
 	providers, err := sdkaccess.BuildProviders(&b.cfg.SDKConfig)
 	if err != nil {
@@ -191,18 +191,18 @@ func (b *Builder) Build() (*Service, error) {
 	}
 	accessManager.SetProviders(providers)
 
-    coreManager := b.coreManager
-    if coreManager == nil {
-        tokenStore := sdkAuth.GetTokenStore()
-        if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
-            dirSetter.SetBaseDir(b.cfg.AuthDir)
-        }
-        coreManager = coreauth.NewManager(tokenStore, nil, nil)
-    }
-    // Provide SDK config snapshot so provider-specific refresh tuning can read margin.
-    if b.cfg != nil {
-        coreManager.SetSDKConfig(&b.cfg.SDKConfig)
-    }
+	coreManager := b.coreManager
+	if coreManager == nil {
+		tokenStore := sdkAuth.GetTokenStore()
+		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
+			dirSetter.SetBaseDir(b.cfg.AuthDir)
+		}
+		coreManager = coreauth.NewManager(tokenStore, nil, nil)
+	}
+	// Provide SDK config snapshot so provider-specific refresh tuning can read margin.
+	if b.cfg != nil {
+		coreManager.SetSDKConfig(&b.cfg.SDKConfig)
+	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 

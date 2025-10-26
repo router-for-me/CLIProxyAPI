@@ -61,123 +61,123 @@ type upstreamAttempt struct {
 	errorWritten         bool
 
 	// TPS measurement fields
-	requestedAt          time.Time
-	firstOutputAt        time.Time
-	lastOutputAt         time.Time
-	inputTokens          int64
-    outputTokens         int64
+	requestedAt   time.Time
+	firstOutputAt time.Time
+	lastOutputAt  time.Time
+	inputTokens   int64
+	outputTokens  int64
 }
 
 // recordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
-    if cfg == nil || (!cfg.RequestLog && !cfg.CodexJSONCaptureOnly) {
-        return
-    }
-    ginCtx := ginContextFrom(ctx)
-    if ginCtx == nil {
-        return
-    }
+	if cfg == nil || (!cfg.RequestLog && !cfg.CodexJSONCaptureOnly) {
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
 
-    isCaptureOnly := cfg.CodexJSONCaptureOnly
+	isCaptureOnly := cfg.CodexJSONCaptureOnly
 
-    // Special JSON capture for Codex/Packycode when model is gpt-5-codex*
-    // This stores the filtered upstream JSON body and related identifiers into Gin context
-    // for downstream consumers (e.g., response writer logger, debugging tools).
-    model := strings.TrimSpace(gjson.GetBytes(info.Body, "model").String())
-    isCodexProvider := strings.EqualFold(info.Provider, "codex") || strings.EqualFold(info.Provider, "packycode")
-    isCodexVariant := util.InArray([]string{"gpt-5-codex-low", "gpt-5-codex-medium", "gpt-5-codex-high"}, model)
+	// Special JSON capture for Codex/Packycode when model is gpt-5-codex*
+	// This stores the filtered upstream JSON body and related identifiers into Gin context
+	// for downstream consumers (e.g., response writer logger, debugging tools).
+	model := strings.TrimSpace(gjson.GetBytes(info.Body, "model").String())
+	isCodexProvider := strings.EqualFold(info.Provider, "codex") || strings.EqualFold(info.Provider, "packycode")
+	isCodexVariant := util.InArray([]string{"gpt-5-codex-low", "gpt-5-codex-medium", "gpt-5-codex-high"}, model)
 
-    if isCodexProvider && isCodexVariant {
-        inputs := gjson.GetBytes(info.Body, "input").Array()
-        var items []string
-        for i := range inputs {
-            it := inputs[i]
-            if !strings.EqualFold(it.Get("type").String(), "function_call") {
-                continue
-            }
-            name := strings.ToLower(strings.TrimSpace(it.Get("name").String()))
-            if !(strings.Contains(name, "bash") || strings.Contains(name, "shell")) {
-                continue
-            }
-            var b strings.Builder
-            b.WriteString("{\"type\":\"function_call\",\"name\":")
-            b.WriteString(fmt.Sprintf("%q", it.Get("name").String()))
-            if v := it.Get("call_id"); v.Exists() {
-                b.WriteString(",\"call_id\":")
-                b.WriteString(v.Raw)
-            }
-            if v := it.Get("arguments"); v.Exists() {
-                b.WriteString(",\"arguments\":")
-                b.WriteString(v.Raw)
-            }
-            b.WriteString("}")
-            items = append(items, b.String())
-        }
+	if isCodexProvider && isCodexVariant {
+		inputs := gjson.GetBytes(info.Body, "input").Array()
+		var items []string
+		for i := range inputs {
+			it := inputs[i]
+			if !strings.EqualFold(it.Get("type").String(), "function_call") {
+				continue
+			}
+			name := strings.ToLower(strings.TrimSpace(it.Get("name").String()))
+			if !(strings.Contains(name, "bash") || strings.Contains(name, "shell")) {
+				continue
+			}
+			var b strings.Builder
+			b.WriteString("{\"type\":\"function_call\",\"name\":")
+			b.WriteString(fmt.Sprintf("%q", it.Get("name").String()))
+			if v := it.Get("call_id"); v.Exists() {
+				b.WriteString(",\"call_id\":")
+				b.WriteString(v.Raw)
+			}
+			if v := it.Get("arguments"); v.Exists() {
+				b.WriteString(",\"arguments\":")
+				b.WriteString(v.Raw)
+			}
+			b.WriteString("}")
+			items = append(items, b.String())
+		}
 
-        instructions := strings.TrimSpace(gjson.GetBytes(info.Body, "instructions").String())
-        tools := gjson.GetBytes(info.Body, "tools").Array()
-        var bashTools []string
-        for i := range tools {
-            t := tools[i]
-            name := strings.ToLower(strings.TrimSpace(t.Get("name").String()))
-            if !(strings.Contains(name, "bash") || strings.Contains(name, "shell")) {
-                continue
-            }
-            var sb strings.Builder
-            sb.WriteString("{\"type\":\"function\",\"name\":")
-            sb.WriteString(fmt.Sprintf("%q", t.Get("name").String()))
-            if v := t.Get("description"); v.Exists() {
-                sb.WriteString(",\"description\":")
-                sb.WriteString(v.Raw)
-            }
-            if v := t.Get("parameters"); v.Exists() {
-                sb.WriteString(",\"parameters\":")
-                sb.WriteString(v.Raw)
-            }
-            sb.WriteString("}")
-            bashTools = append(bashTools, sb.String())
-        }
+		instructions := strings.TrimSpace(gjson.GetBytes(info.Body, "instructions").String())
+		tools := gjson.GetBytes(info.Body, "tools").Array()
+		var bashTools []string
+		for i := range tools {
+			t := tools[i]
+			name := strings.ToLower(strings.TrimSpace(t.Get("name").String()))
+			if !(strings.Contains(name, "bash") || strings.Contains(name, "shell")) {
+				continue
+			}
+			var sb strings.Builder
+			sb.WriteString("{\"type\":\"function\",\"name\":")
+			sb.WriteString(fmt.Sprintf("%q", t.Get("name").String()))
+			if v := t.Get("description"); v.Exists() {
+				sb.WriteString(",\"description\":")
+				sb.WriteString(v.Raw)
+			}
+			if v := t.Get("parameters"); v.Exists() {
+				sb.WriteString(",\"parameters\":")
+				sb.WriteString(v.Raw)
+			}
+			sb.WriteString("}")
+			bashTools = append(bashTools, sb.String())
+		}
 
-        var filtered []byte
-        {
-            var sb strings.Builder
-            sb.WriteString("{")
-            sb.WriteString(fmt.Sprintf("\"model\":%q", model))
-            if instructions != "" {
-                sb.WriteString(",\"instructions\":")
-                sb.WriteString(fmt.Sprintf("%q", instructions))
-            }
-            if len(bashTools) > 0 {
-                sb.WriteString(",\"tools\":[")
-                sb.WriteString(strings.Join(bashTools, ","))
-                sb.WriteString("]")
-            }
-            if len(items) > 0 {
-                sb.WriteString(",\"input\":[")
-                sb.WriteString(strings.Join(items, ","))
-                sb.WriteString("]")
-            }
-            sb.WriteString("}")
-            filtered = []byte(sb.String())
-        }
+		var filtered []byte
+		{
+			var sb strings.Builder
+			sb.WriteString("{")
+			sb.WriteString(fmt.Sprintf("\"model\":%q", model))
+			if instructions != "" {
+				sb.WriteString(",\"instructions\":")
+				sb.WriteString(fmt.Sprintf("%q", instructions))
+			}
+			if len(bashTools) > 0 {
+				sb.WriteString(",\"tools\":[")
+				sb.WriteString(strings.Join(bashTools, ","))
+				sb.WriteString("]")
+			}
+			if len(items) > 0 {
+				sb.WriteString(",\"input\":[")
+				sb.WriteString(strings.Join(items, ","))
+				sb.WriteString("]")
+			}
+			sb.WriteString("}")
+			filtered = []byte(sb.String())
+		}
 
-        ginCtx.Set("API_JSON_CAPTURE", filtered)
-        ginCtx.Set("API_JSON_CAPTURE_PROVIDER", strings.ToLower(info.Provider))
-        ginCtx.Set("API_JSON_CAPTURE_URL", info.URL)
-        ginCtx.Set("API_PROVIDER", strings.ToLower(info.Provider))
-        ginCtx.Set("API_MODEL_ID", model)
+		ginCtx.Set("API_JSON_CAPTURE", filtered)
+		ginCtx.Set("API_JSON_CAPTURE_PROVIDER", strings.ToLower(info.Provider))
+		ginCtx.Set("API_JSON_CAPTURE_URL", info.URL)
+		ginCtx.Set("API_PROVIDER", strings.ToLower(info.Provider))
+		ginCtx.Set("API_MODEL_ID", model)
 
-        if isCaptureOnly {
-            return
-        }
-    } else if isCaptureOnly {
-        // Capture-only mode with non-Codex request: skip entirely.
-        return
-    }
+		if isCaptureOnly {
+			return
+		}
+	} else if isCaptureOnly {
+		// Capture-only mode with non-Codex request: skip entirely.
+		return
+	}
 
-    if !cfg.RequestLog {
-        return
-    }
+	if !cfg.RequestLog {
+		return
+	}
 
 	attempts := getAttempts(ginCtx)
 	index := len(attempts) + 1
@@ -401,7 +401,7 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 		last := attempts[len(attempts)-1]
 		// compute windows
 		var (
-			reqWindowSec float64
+			reqWindowSec    float64
 			streamWindowSec float64
 		)
 		if !last.requestedAt.IsZero() {
@@ -425,45 +425,45 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 				tpsCompletion = round2(float64(last.outputTokens) / window)
 			}
 		}
-        var tpsTotal float64
-        if reqWindowSec > 0 && (last.inputTokens+last.outputTokens) > 0 {
-            tpsTotal = round2(float64(last.inputTokens+last.outputTokens) / reqWindowSec)
-        }
-        // expose latest TPS values on Gin context; sample recording happens at request finalization
-        ginCtx.Set("API_TPS_COMPLETION", tpsCompletion)
-        ginCtx.Set("API_TPS_TOTAL", tpsTotal)
-        // fetch optional provider/model from context for logging enrichment
-        var provider, model string
-        if v, ok := ginCtx.Get("API_PROVIDER"); ok {
-            if s, ok2 := v.(string); ok2 {
-                provider = s
-            }
-        }
-        if v, ok := ginCtx.Get("API_MODEL_ID"); ok {
-            if s, ok2 := v.(string); ok2 {
-                model = s
-            }
-        }
+		var tpsTotal float64
+		if reqWindowSec > 0 && (last.inputTokens+last.outputTokens) > 0 {
+			tpsTotal = round2(float64(last.inputTokens+last.outputTokens) / reqWindowSec)
+		}
+		// expose latest TPS values on Gin context; sample recording happens at request finalization
+		ginCtx.Set("API_TPS_COMPLETION", tpsCompletion)
+		ginCtx.Set("API_TPS_TOTAL", tpsTotal)
+		// fetch optional provider/model from context for logging enrichment
+		var provider, model string
+		if v, ok := ginCtx.Get("API_PROVIDER"); ok {
+			if s, ok2 := v.(string); ok2 {
+				provider = s
+			}
+		}
+		if v, ok := ginCtx.Get("API_MODEL_ID"); ok {
+			if s, ok2 := v.(string); ok2 {
+				model = s
+			}
+		}
 
-        // generate request id if missing
-        rid := uuid.New().String()
-        // Reuse global logging module (same formatter and outputs)
-        log.WithFields(log.Fields{
-            logKeyRequestID:      rid,
-            logKeyIsStreaming:    !last.firstOutputAt.IsZero(),
-            logKeyReqDurationSec: round2(reqWindowSec),
-            logKeyStrDurationSec: round2(streamWindowSec),
-            logKeyInputTokens:    last.inputTokens,
-            logKeyOutputTokens:   last.outputTokens,
-            logKeyTotalTokens:    last.inputTokens + last.outputTokens,
-            logKeyTPSCompletion:  round2(tpsCompletion),
-            logKeyTPSTotal:       round2(tpsTotal),
-            logKeyMeasuredAt:     time.Now().Format(time.RFC3339Nano),
-            // provider/model enrichment for per-request-tps log
-            "provider":           provider,
-            "model":              model,
-            "provider_model":     strings.Trim(strings.Join([]string{provider, model}, "/"), "/"),
-        }).Info("per-request-tps")
+		// generate request id if missing
+		rid := uuid.New().String()
+		// Reuse global logging module (same formatter and outputs)
+		log.WithFields(log.Fields{
+			logKeyRequestID:      rid,
+			logKeyIsStreaming:    !last.firstOutputAt.IsZero(),
+			logKeyReqDurationSec: round2(reqWindowSec),
+			logKeyStrDurationSec: round2(streamWindowSec),
+			logKeyInputTokens:    last.inputTokens,
+			logKeyOutputTokens:   last.outputTokens,
+			logKeyTotalTokens:    last.inputTokens + last.outputTokens,
+			logKeyTPSCompletion:  round2(tpsCompletion),
+			logKeyTPSTotal:       round2(tpsTotal),
+			logKeyMeasuredAt:     time.Now().Format(time.RFC3339Nano),
+			// provider/model enrichment for per-request-tps log
+			"provider":       provider,
+			"model":          model,
+			"provider_model": strings.Trim(strings.Join([]string{provider, model}, "/"), "/"),
+		}).Info("per-request-tps")
 	}
 }
 

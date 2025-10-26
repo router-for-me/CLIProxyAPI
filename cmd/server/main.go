@@ -5,11 +5,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
-	"crypto/sha256"
-	"encoding/hex"
 	"io/fs"
 	"net/url"
 	"os"
@@ -29,8 +29,8 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -59,8 +59,8 @@ func main() {
 	var claudeLogin bool
 	var qwenLogin bool
 	var iflowLogin bool
-    var noBrowser bool
-    var copilotAuthLogin bool
+	var noBrowser bool
+	var copilotAuthLogin bool
 	var projectID string
 	var configPath string
 	var password string
@@ -72,9 +72,9 @@ func main() {
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
-    flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
-    flag.BoolVar(&copilotAuthLogin, "copilot-auth-login", false, "Login to Copilot via GitHub Device Flow")
-    flag.BoolVar(&copilotAuthLogin, "copilot-login", false, "Alias of --copilot-auth-login")
+	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
+	flag.BoolVar(&copilotAuthLogin, "copilot-auth-login", false, "Login to Copilot via GitHub Device Flow")
+	flag.BoolVar(&copilotAuthLogin, "copilot-login", false, "Alias of --copilot-auth-login")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&password, "password", "", "")
@@ -442,13 +442,13 @@ func main() {
 	} else if claudeLogin {
 		// Handle Claude login
 		cmd.DoClaudeLogin(cfg, options)
-    } else if qwenLogin {
-        cmd.DoQwenLogin(cfg, options)
-    } else if copilotAuthLogin {
-        cmd.DoCopilotAuthLogin(cfg, options)
-    } else if iflowLogin {
-        cmd.DoIFlowLogin(cfg, options)
-    } else {
+	} else if qwenLogin {
+		cmd.DoQwenLogin(cfg, options)
+	} else if copilotAuthLogin {
+		cmd.DoCopilotAuthLogin(cfg, options)
+	} else if iflowLogin {
+		cmd.DoIFlowLogin(cfg, options)
+	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
 			// No config file available, just wait for shutdown
@@ -464,34 +464,34 @@ func main() {
 // registerPackycodeModels registers OpenAI/GPT models under provider 'codex' when
 // packycode is enabled and configuration passes validation.
 func registerPackycodeModels(cfg *config.Config) error {
-    if cfg == nil {
-        return fmt.Errorf("config is nil")
-    }
-    // Validate strictly; when disabled, nothing to do
-    if err := config.ValidatePackycode(cfg); err != nil {
-        return fmt.Errorf("invalid packycode configuration: %w", err)
-    }
-    if !cfg.Packycode.Enabled {
-        log.Info("packycode flag ignored: packycode.enabled=false")
-        return nil
-    }
-    base := strings.TrimSpace(cfg.Packycode.BaseURL)
-    key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
-    // Build a stable client ID for model registry fallback
-    h := sha256.New()
-    h.Write([]byte("packycode:models"))
-    h.Write([]byte{0})
-    h.Write([]byte(base))
-    h.Write([]byte{0})
-    h.Write([]byte(key))
-    digest := hex.EncodeToString(h.Sum(nil))
-    if len(digest) > 12 {
-        digest = digest[:12]
-    }
-    clientID := "packycode:models:" + digest
-    models := registry.GetOpenAIModels()
-    // 对外 provider=packycode（内部仍由 codex 执行器处理）
-    cliproxy.GlobalModelRegistry().RegisterClient(clientID, "packycode", models)
-    log.Infof("registered packycode models into registry (client=%s, provider=packycode, models=%d)", clientID, len(models))
-    return nil
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	// Validate strictly; when disabled, nothing to do
+	if err := config.ValidatePackycode(cfg); err != nil {
+		return fmt.Errorf("invalid packycode configuration: %w", err)
+	}
+	if !cfg.Packycode.Enabled {
+		log.Info("packycode flag ignored: packycode.enabled=false")
+		return nil
+	}
+	base := strings.TrimSpace(cfg.Packycode.BaseURL)
+	key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
+	// Build a stable client ID for model registry fallback
+	h := sha256.New()
+	h.Write([]byte("packycode:models"))
+	h.Write([]byte{0})
+	h.Write([]byte(base))
+	h.Write([]byte{0})
+	h.Write([]byte(key))
+	digest := hex.EncodeToString(h.Sum(nil))
+	if len(digest) > 12 {
+		digest = digest[:12]
+	}
+	clientID := "packycode:models:" + digest
+	models := registry.GetOpenAIModels()
+	// 对外 provider=packycode（内部仍由 codex 执行器处理）
+	cliproxy.GlobalModelRegistry().RegisterClient(clientID, "packycode", models)
+	log.Infof("registered packycode models into registry (client=%s, provider=packycode, models=%d)", clientID, len(models))
+	return nil
 }

@@ -30,13 +30,13 @@ import (
 )
 
 var copilotExclusiveModelIDs = map[string]struct{}{
-	"gpt-5-mini":    {},
+	"gpt-5-mini":       {},
 	"grok-code-fast-1": {},
-	"gpt-5":         {},
-	"gpt-4.1":       {},
-	"gpt-4":         {},
-	"gpt-4o-mini":   {},
-	"gpt-3.5-turbo": {},
+	"gpt-5":            {},
+	"gpt-4.1":          {},
+	"gpt-4":            {},
+	"gpt-4o-mini":      {},
+	"gpt-3.5-turbo":    {},
 }
 
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.

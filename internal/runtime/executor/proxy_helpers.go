@@ -73,73 +73,103 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 // to spawn the bundled python app with ANTHROPIC envs derived from config/auth.
 // Returns bridge base URL (e.g., http://127.0.0.1:35331) or error.
 func ensureClaudePythonBridge(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) (string, error) {
-    if v := strings.TrimSpace(os.Getenv("CLAUDE_AGENT_SDK_URL")); v != "" {
-        return v, nil
-    }
+	if v := strings.TrimSpace(os.Getenv("CLAUDE_AGENT_SDK_URL")); v != "" {
+		// Validate env URL for scheme/host safety
+		if err := validateLocalBridgeURL(v); err != nil {
+			return "", err
+		}
+		return v, nil
+	}
 
-    // Check if auto-start is disabled
-    if cfg == nil || !cfg.PythonAgent.Enabled {
-        return "", errors.New("python agent bridge disabled in config")
-    }
+	// Check if auto-start is disabled
+	if cfg == nil || !cfg.PythonAgent.Enabled {
+		return "", errors.New("python agent bridge disabled in config")
+	}
 
-    // If already started (check context), return URL
-    if existingURL := ctx.Value("python_bridge_url"); existingURL != nil {
-        if url, ok := existingURL.(string); ok && url != "" {
-            return url, nil
-        }
-    }
+	// If already started (check context), return URL
+	if existingURL := ctx.Value("python_bridge_url"); existingURL != nil {
+		if url, ok := existingURL.(string); ok && url != "" {
+			return url, nil
+		}
+	}
 
-    // Derive target URL from config
-    targetURL := strings.TrimSpace(cfg.PythonAgent.BaseURL)
-    if targetURL == "" {
-        targetURL = "http://127.0.0.1:35331"
-    }
+	// Derive target URL from config
+	targetURL := strings.TrimSpace(cfg.PythonAgent.BaseURL)
+	if targetURL == "" {
+		targetURL = "http://127.0.0.1:35331"
+	}
 
-    // Check if bridge is already running (health check)
-    if checkBridgeHealth(ctx, targetURL) {
-        log.Infof("Python bridge already running at %s", targetURL)
-        return targetURL, nil
-    }
+	if err := validateLocalBridgeURL(targetURL); err != nil {
+		return "", err
+	}
 
-    // Prepare to spawn python process
-    log.Infof("Starting Python Agent Bridge at %s...", targetURL)
+	// Check if bridge is already running (health check)
+	if checkBridgeHealth(ctx, targetURL) {
+		log.Infof("Python bridge already running at %s", targetURL)
+		return targetURL, nil
+	}
 
-    // Build environment variables from config
-    envVars := os.Environ()
-    if cfg.PythonAgent.Env != nil {
-        for k, v := range cfg.PythonAgent.Env {
-            envVars = append(envVars, k+"="+v)
-        }
-    }
+	// Prepare to spawn python process
+	log.Infof("Starting Python Agent Bridge at %s...", targetURL)
 
-    // Extract port from URL
-    port := "35331" // default
-    if u, err := url.Parse(targetURL); err == nil && u.Port() != "" {
-        port = u.Port()
-    }
-    envVars = append(envVars, "PORT="+port)
+	// Build environment variables from config
+	envVars := os.Environ()
+	if cfg.PythonAgent.Env != nil {
+		for k, v := range cfg.PythonAgent.Env {
+			envVars = append(envVars, k+"="+v)
+		}
+	}
 
-    // Note: Actual process start is handled by service layer
-    // This function validates config and returns target URL
-    return targetURL, nil
+	// Extract port from URL
+	port := "35331" // default
+	if u, err := url.Parse(targetURL); err == nil && u.Port() != "" {
+		port = u.Port()
+	}
+	envVars = append(envVars, "PORT="+port)
+
+	// Note: Actual process start is handled by service layer
+	// This function validates config and returns target URL
+	return targetURL, nil
+}
+
+// validateLocalBridgeURL ensures the bridge URL is http(s) and host is local-only by default.
+// Allowed hosts: 127.0.0.1, localhost, ::1. To relax this, explicitly set
+// CLAUDE_AGENT_SDK_ALLOW_REMOTE=true (primarily for controlled environments).
+func validateLocalBridgeURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("invalid CLAUDE Agent SDK URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported scheme for CLAUDE Agent SDK URL: %s (use http/https)", u.Scheme)
+	}
+	host := strings.ToLower(u.Hostname())
+	allowRemote := strings.EqualFold(strings.TrimSpace(os.Getenv("CLAUDE_AGENT_SDK_ALLOW_REMOTE")), "true")
+	if allowRemote {
+		return nil
+	}
+	if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+		return nil
+	}
+	return fmt.Errorf("python agent bridge URL must be local-only unless CLAUDE_AGENT_SDK_ALLOW_REMOTE=true; got host=%s. To fix: set claude-agent-sdk-for-python.baseURL to http://127.0.0.1:35331 or export CLAUDE_AGENT_SDK_URL=http://127.0.0.1:35331", host)
 }
 
 // checkBridgeHealth performs a quick health check on the bridge URL
 func checkBridgeHealth(ctx context.Context, baseURL string) bool {
-    healthURL := strings.TrimSuffix(baseURL, "/") + "/healthz"
-    req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
-    if err != nil {
-        return false
-    }
+	healthURL := strings.TrimSuffix(baseURL, "/") + "/healthz"
+	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
+	if err != nil {
+		return false
+	}
 
-    client := &http.Client{Timeout: 2 * time.Second}
-    resp, err := client.Do(req)
-    if err != nil {
-        return false
-    }
-    defer resp.Body.Close()
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
 
-    return resp.StatusCode == http.StatusOK
+	return resp.StatusCode == http.StatusOK
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

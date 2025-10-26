@@ -144,15 +144,15 @@ func (h *Handler) PutLoggingToFile(c *gin.Context) {
 // Request log
 func (h *Handler) GetRequestLog(c *gin.Context) { c.JSON(200, gin.H{"request-log": h.cfg.RequestLog}) }
 func (h *Handler) PutRequestLog(c *gin.Context) {
-    h.updateBoolField(c, func(v bool) { h.cfg.RequestLog = v })
+	h.updateBoolField(c, func(v bool) { h.cfg.RequestLog = v })
 }
 
 // Codex JSON Capture Only
 func (h *Handler) GetCodexJSONCaptureOnly(c *gin.Context) {
-    c.JSON(200, gin.H{"codex-json-capture-only": h.cfg.CodexJSONCaptureOnly})
+	c.JSON(200, gin.H{"codex-json-capture-only": h.cfg.CodexJSONCaptureOnly})
 }
 func (h *Handler) PutCodexJSONCaptureOnly(c *gin.Context) {
-    h.updateBoolField(c, func(v bool) { h.cfg.CodexJSONCaptureOnly = v })
+	h.updateBoolField(c, func(v bool) { h.cfg.CodexJSONCaptureOnly = v })
 }
 
 // TPS log

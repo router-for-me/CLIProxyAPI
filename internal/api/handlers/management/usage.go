@@ -1,11 +1,11 @@
 package management
 
 import (
-    "net/http"
-    "time"
+	"net/http"
+	"time"
 
-    "github.com/gin-gonic/gin"
-    "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 // GetUsageStatistics returns the in-memory request statistics snapshot.

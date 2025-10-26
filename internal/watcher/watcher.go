@@ -742,7 +742,9 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 					"source":   "config:packycode",
 					"base_url": base,
 				}
-				if key != "" { attrs["api_key"] = key }
+				if key != "" {
+					attrs["api_key"] = key
+				}
 				a := &coreauth.Auth{
 					ID:         id,
 					Provider:   "packycode",
@@ -805,65 +807,65 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			}
 			out = append(out, a)
 		}
-        // Codex API keys -> synthesize auths
-        for i := range cfg.CodexKey {
-            ck := cfg.CodexKey[i]
-            key := strings.TrimSpace(ck.APIKey)
-            if key == "" {
-                continue
-            }
-            id, token := idGen.next("codex:apikey", key, ck.BaseURL)
-            attrs := map[string]string{
-                "source":  fmt.Sprintf("config:codex[%s]", token),
-                "api_key": key,
-            }
-            if ck.BaseURL != "" {
-                attrs["base_url"] = ck.BaseURL
-            }
-            proxyURL := strings.TrimSpace(ck.ProxyURL)
-            a := &coreauth.Auth{
-                ID:         id,
-                Provider:   "codex",
-                Label:      "codex-apikey",
-                Status:     coreauth.StatusActive,
-                ProxyURL:   proxyURL,
-                Attributes: attrs,
-                CreatedAt:  now,
-                UpdatedAt:  now,
-            }
-            out = append(out, a)
-        }
-        // Zhipu API keys -> synthesize auths
-        for i := range cfg.ZhipuKey {
-            zk := cfg.ZhipuKey[i]
-            key := strings.TrimSpace(zk.APIKey)
-            if key == "" {
-                continue
-            }
-            base := strings.TrimSpace(zk.BaseURL)
-            proxyURL := strings.TrimSpace(zk.ProxyURL)
-            id, token := idGen.next("zhipu:apikey", key, base, proxyURL)
-            attrs := map[string]string{
-                "source":  fmt.Sprintf("config:zhipu[%s]", token),
-                "api_key": key,
-            }
-            if base != "" {
-                attrs["base_url"] = base
-            }
-            a := &coreauth.Auth{
-                ID:         id,
-                Provider:   "zhipu",
-                Label:      "zhipu-apikey",
-                Status:     coreauth.StatusActive,
-                ProxyURL:   proxyURL,
-                Attributes: attrs,
-                CreatedAt:  now,
-                UpdatedAt:  now,
-            }
-            out = append(out, a)
-        }
-        for i := range cfg.OpenAICompatibility {
-            compat := &cfg.OpenAICompatibility[i]
+		// Codex API keys -> synthesize auths
+		for i := range cfg.CodexKey {
+			ck := cfg.CodexKey[i]
+			key := strings.TrimSpace(ck.APIKey)
+			if key == "" {
+				continue
+			}
+			id, token := idGen.next("codex:apikey", key, ck.BaseURL)
+			attrs := map[string]string{
+				"source":  fmt.Sprintf("config:codex[%s]", token),
+				"api_key": key,
+			}
+			if ck.BaseURL != "" {
+				attrs["base_url"] = ck.BaseURL
+			}
+			proxyURL := strings.TrimSpace(ck.ProxyURL)
+			a := &coreauth.Auth{
+				ID:         id,
+				Provider:   "codex",
+				Label:      "codex-apikey",
+				Status:     coreauth.StatusActive,
+				ProxyURL:   proxyURL,
+				Attributes: attrs,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+			out = append(out, a)
+		}
+		// Zhipu API keys -> synthesize auths
+		for i := range cfg.ZhipuKey {
+			zk := cfg.ZhipuKey[i]
+			key := strings.TrimSpace(zk.APIKey)
+			if key == "" {
+				continue
+			}
+			base := strings.TrimSpace(zk.BaseURL)
+			proxyURL := strings.TrimSpace(zk.ProxyURL)
+			id, token := idGen.next("zhipu:apikey", key, base, proxyURL)
+			attrs := map[string]string{
+				"source":  fmt.Sprintf("config:zhipu[%s]", token),
+				"api_key": key,
+			}
+			if base != "" {
+				attrs["base_url"] = base
+			}
+			a := &coreauth.Auth{
+				ID:         id,
+				Provider:   "zhipu",
+				Label:      "zhipu-apikey",
+				Status:     coreauth.StatusActive,
+				ProxyURL:   proxyURL,
+				Attributes: attrs,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+			out = append(out, a)
+		}
+		for i := range cfg.OpenAICompatibility {
+			compat := &cfg.OpenAICompatibility[i]
 			providerName := strings.ToLower(strings.TrimSpace(compat.Name))
 			if providerName == "" {
 				providerName = "openai-compatibility"
@@ -934,35 +936,35 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 					}
 					out = append(out, a)
 					createdEntries++
-        }
+				}
 
-        // Packycode synthesized auth (External Provider=packycode; internal mapped to codex executor)
-        if cfg.Packycode.Enabled {
-            base := strings.TrimSpace(cfg.Packycode.BaseURL)
-            if base != "" {
-                key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
-                id, token := idGen.next("packycode:codex", key, base)
-                attrs := map[string]string{
-                    "source":   "config:packycode",
-                    "base_url": base,
-                }
-                if key != "" {
-                    attrs["api_key"] = key
-                }
-                a := &coreauth.Auth{
-                    ID:         id,
-                    Provider:   "packycode",
-                    Label:      "packycode",
-                    Status:     coreauth.StatusActive,
-                    Attributes: attrs,
-                    CreatedAt:  now,
-                    UpdatedAt:  now,
-                }
-                out = append(out, a)
-                _ = token // reserved for future tokenized source labels if needed
-            }
-        }
-    }
+				// Packycode synthesized auth (External Provider=packycode; internal mapped to codex executor)
+				if cfg.Packycode.Enabled {
+					base := strings.TrimSpace(cfg.Packycode.BaseURL)
+					if base != "" {
+						key := strings.TrimSpace(cfg.Packycode.Credentials.OpenAIAPIKey)
+						id, token := idGen.next("packycode:codex", key, base)
+						attrs := map[string]string{
+							"source":   "config:packycode",
+							"base_url": base,
+						}
+						if key != "" {
+							attrs["api_key"] = key
+						}
+						a := &coreauth.Auth{
+							ID:         id,
+							Provider:   "packycode",
+							Label:      "packycode",
+							Status:     coreauth.StatusActive,
+							Attributes: attrs,
+							CreatedAt:  now,
+							UpdatedAt:  now,
+						}
+						out = append(out, a)
+						_ = token // reserved for future tokenized source labels if needed
+					}
+				}
+			}
 			if createdEntries == 0 {
 				idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 				id, token := idGen.next(idKind, base)
@@ -1367,39 +1369,39 @@ func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
-    // OpenAI compatibility providers (summarized)
-    if compat := diffOpenAICompatibility(oldCfg.OpenAICompatibility, newCfg.OpenAICompatibility); len(compat) > 0 {
-        changes = append(changes, "openai-compatibility:")
-        for _, c := range compat {
-            changes = append(changes, "  "+c)
-        }
-    }
+	// OpenAI compatibility providers (summarized)
+	if compat := diffOpenAICompatibility(oldCfg.OpenAICompatibility, newCfg.OpenAICompatibility); len(compat) > 0 {
+		changes = append(changes, "openai-compatibility:")
+		for _, c := range compat {
+			changes = append(changes, "  "+c)
+		}
+	}
 
-    // Packycode (explicit fields)
-    if oldCfg.Packycode.Enabled != newCfg.Packycode.Enabled {
-        changes = append(changes, fmt.Sprintf("packycode.enabled: %t -> %t", oldCfg.Packycode.Enabled, newCfg.Packycode.Enabled))
-    }
-    if strings.TrimSpace(oldCfg.Packycode.BaseURL) != strings.TrimSpace(newCfg.Packycode.BaseURL) {
-        changes = append(changes, fmt.Sprintf("packycode.base-url: %s -> %s", strings.TrimSpace(oldCfg.Packycode.BaseURL), strings.TrimSpace(newCfg.Packycode.BaseURL)))
-    }
-    if oldCfg.Packycode.RequiresOpenAIAuth != newCfg.Packycode.RequiresOpenAIAuth {
-        changes = append(changes, fmt.Sprintf("packycode.requires-openai-auth: %t -> %t", oldCfg.Packycode.RequiresOpenAIAuth, newCfg.Packycode.RequiresOpenAIAuth))
-    }
-    if !strings.EqualFold(strings.TrimSpace(oldCfg.Packycode.WireAPI), strings.TrimSpace(newCfg.Packycode.WireAPI)) {
-        changes = append(changes, fmt.Sprintf("packycode.wire-api: %s -> %s", strings.TrimSpace(oldCfg.Packycode.WireAPI), strings.TrimSpace(newCfg.Packycode.WireAPI)))
-    }
-    if oldCfg.Packycode.Privacy.DisableResponseStorage != newCfg.Packycode.Privacy.DisableResponseStorage {
-        changes = append(changes, fmt.Sprintf("packycode.privacy.disable-response-storage: %t -> %t", oldCfg.Packycode.Privacy.DisableResponseStorage, newCfg.Packycode.Privacy.DisableResponseStorage))
-    }
-    if strings.TrimSpace(oldCfg.Packycode.Defaults.Model) != strings.TrimSpace(newCfg.Packycode.Defaults.Model) {
-        changes = append(changes, fmt.Sprintf("packycode.defaults.model: %s -> %s", strings.TrimSpace(oldCfg.Packycode.Defaults.Model), strings.TrimSpace(newCfg.Packycode.Defaults.Model)))
-    }
-    if !strings.EqualFold(strings.TrimSpace(oldCfg.Packycode.Defaults.ModelReasoningEffort), strings.TrimSpace(newCfg.Packycode.Defaults.ModelReasoningEffort)) {
-        changes = append(changes, fmt.Sprintf("packycode.defaults.model-reasoning-effort: %s -> %s", strings.TrimSpace(oldCfg.Packycode.Defaults.ModelReasoningEffort), strings.TrimSpace(newCfg.Packycode.Defaults.ModelReasoningEffort)))
-    }
-    if strings.TrimSpace(oldCfg.Packycode.Credentials.OpenAIAPIKey) != strings.TrimSpace(newCfg.Packycode.Credentials.OpenAIAPIKey) {
-        changes = append(changes, "packycode.credentials.openai-api-key: updated")
-    }
+	// Packycode (explicit fields)
+	if oldCfg.Packycode.Enabled != newCfg.Packycode.Enabled {
+		changes = append(changes, fmt.Sprintf("packycode.enabled: %t -> %t", oldCfg.Packycode.Enabled, newCfg.Packycode.Enabled))
+	}
+	if strings.TrimSpace(oldCfg.Packycode.BaseURL) != strings.TrimSpace(newCfg.Packycode.BaseURL) {
+		changes = append(changes, fmt.Sprintf("packycode.base-url: %s -> %s", strings.TrimSpace(oldCfg.Packycode.BaseURL), strings.TrimSpace(newCfg.Packycode.BaseURL)))
+	}
+	if oldCfg.Packycode.RequiresOpenAIAuth != newCfg.Packycode.RequiresOpenAIAuth {
+		changes = append(changes, fmt.Sprintf("packycode.requires-openai-auth: %t -> %t", oldCfg.Packycode.RequiresOpenAIAuth, newCfg.Packycode.RequiresOpenAIAuth))
+	}
+	if !strings.EqualFold(strings.TrimSpace(oldCfg.Packycode.WireAPI), strings.TrimSpace(newCfg.Packycode.WireAPI)) {
+		changes = append(changes, fmt.Sprintf("packycode.wire-api: %s -> %s", strings.TrimSpace(oldCfg.Packycode.WireAPI), strings.TrimSpace(newCfg.Packycode.WireAPI)))
+	}
+	if oldCfg.Packycode.Privacy.DisableResponseStorage != newCfg.Packycode.Privacy.DisableResponseStorage {
+		changes = append(changes, fmt.Sprintf("packycode.privacy.disable-response-storage: %t -> %t", oldCfg.Packycode.Privacy.DisableResponseStorage, newCfg.Packycode.Privacy.DisableResponseStorage))
+	}
+	if strings.TrimSpace(oldCfg.Packycode.Defaults.Model) != strings.TrimSpace(newCfg.Packycode.Defaults.Model) {
+		changes = append(changes, fmt.Sprintf("packycode.defaults.model: %s -> %s", strings.TrimSpace(oldCfg.Packycode.Defaults.Model), strings.TrimSpace(newCfg.Packycode.Defaults.Model)))
+	}
+	if !strings.EqualFold(strings.TrimSpace(oldCfg.Packycode.Defaults.ModelReasoningEffort), strings.TrimSpace(newCfg.Packycode.Defaults.ModelReasoningEffort)) {
+		changes = append(changes, fmt.Sprintf("packycode.defaults.model-reasoning-effort: %s -> %s", strings.TrimSpace(oldCfg.Packycode.Defaults.ModelReasoningEffort), strings.TrimSpace(newCfg.Packycode.Defaults.ModelReasoningEffort)))
+	}
+	if strings.TrimSpace(oldCfg.Packycode.Credentials.OpenAIAPIKey) != strings.TrimSpace(newCfg.Packycode.Credentials.OpenAIAPIKey) {
+		changes = append(changes, "packycode.credentials.openai-api-key: updated")
+	}
 
 	return changes
 }

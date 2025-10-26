@@ -4,16 +4,16 @@
 package usage
 
 import (
-    "context"
-    "fmt"
-    "math"
-    "sort"
-    "sync"
-    "sync/atomic"
-    "time"
+	"context"
+	"fmt"
+	"math"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
 
-    "github.com/gin-gonic/gin"
-    coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/gin-gonic/gin"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 var statisticsEnabled atomic.Bool
@@ -341,11 +341,11 @@ func normaliseDetail(detail coreusage.Detail) TokenStats {
 }
 
 func formatHour(hour int) string {
-    if hour < 0 {
-        hour = 0
-    }
-    hour = hour % 24
-    return fmt.Sprintf("%02d", hour)
+	if hour < 0 {
+		hour = 0
+	}
+	hour = hour % 24
+	return fmt.Sprintf("%02d", hour)
 }
 
 // --- TPS Aggregation (since server start) ---
@@ -356,350 +356,350 @@ var serverStart = time.Now()
 
 // TPSAggregateSnapshot presents summary statistics of observed TPS samples.
 type TPSAggregateSnapshot struct {
-    Since time.Time `json:"since"`
-    Completion TPSSummary `json:"completion"`
-    Total      TPSSummary `json:"total"`
+	Since      time.Time  `json:"since"`
+	Completion TPSSummary `json:"completion"`
+	Total      TPSSummary `json:"total"`
 }
 
 // TPSSummary holds mean/median and count for a metric.
 type TPSSummary struct {
-    Count  int64   `json:"count"`
-    Avg    float64 `json:"avg"`
-    Median float64 `json:"median"`
+	Count  int64   `json:"count"`
+	Avg    float64 `json:"avg"`
+	Median float64 `json:"median"`
 }
 
 type timedValue struct {
-    ts time.Time
-    v  float64
+	ts time.Time
+	v  float64
 }
 
 // taggedValue stores a sample value with provider/model attribution
 type taggedValue struct {
-    ts       time.Time
-    v        float64
-    provider string
-    model    string
+	ts       time.Time
+	v        float64
+	provider string
+	model    string
 }
 
 type tpsAggregator struct {
-    mu             sync.RWMutex
-    completion     []timedValue
-    total          []timedValue
-    completionSum  float64
-    totalSum       float64
+	mu            sync.RWMutex
+	completion    []timedValue
+	total         []timedValue
+	completionSum float64
+	totalSum      float64
 
-    // Optional tagged series for provider/model filtering
-    completionTagged []taggedValue
-    totalTagged      []taggedValue
+	// Optional tagged series for provider/model filtering
+	completionTagged []taggedValue
+	totalTagged      []taggedValue
 }
 
 var defaultTPSAggregator = &tpsAggregator{}
 
 // Cleanup configuration (can be tuned if needed)
 var (
-    tpsMaxRetention    = 24 * time.Hour
-    tpsCleanupInterval = 1 * time.Minute
-    tpsMinSamples      = 10
-    tpsCleanEveryN     = 1000
+	tpsMaxRetention    = 24 * time.Hour
+	tpsCleanupInterval = 1 * time.Minute
+	tpsMinSamples      = 10
+	tpsCleanEveryN     = 1000
 )
 
 func init() {
-    // start background cleanup goroutine
-    go backgroundTPSCleanup()
+	// start background cleanup goroutine
+	go backgroundTPSCleanup()
 }
 
 // RecordTPSSample ingests one observation of completion/total TPS.
 // Values can be zero; negative/NaN/Inf are ignored.
 func RecordTPSSample(completion, total float64) {
-    agg := defaultTPSAggregator
-    if agg == nil {
-        return
-    }
-    agg.mu.Lock()
-    defer agg.mu.Unlock()
-    if !finite(completion) && !finite(total) {
-        return
-    }
-    now := time.Now()
-    added := 0
-    if finite(completion) {
-        agg.completion = append(agg.completion, timedValue{ts: now, v: completion})
-        agg.completionSum += completion
-        added++
-    }
-    if finite(total) {
-        agg.total = append(agg.total, timedValue{ts: now, v: total})
-        agg.totalSum += total
-        added++
-    }
-    if added > 0 {
-        recordAndMaybeCleanLocked(agg)
-    }
+	agg := defaultTPSAggregator
+	if agg == nil {
+		return
+	}
+	agg.mu.Lock()
+	defer agg.mu.Unlock()
+	if !finite(completion) && !finite(total) {
+		return
+	}
+	now := time.Now()
+	added := 0
+	if finite(completion) {
+		agg.completion = append(agg.completion, timedValue{ts: now, v: completion})
+		agg.completionSum += completion
+		added++
+	}
+	if finite(total) {
+		agg.total = append(agg.total, timedValue{ts: now, v: total})
+		agg.totalSum += total
+		added++
+	}
+	if added > 0 {
+		recordAndMaybeCleanLocked(agg)
+	}
 }
 
 // RecordTPSSampleTagged ingests a TPS observation and associates it with provider/model.
 // Also updates the untagged series to keep default aggregates intact.
 func RecordTPSSampleTagged(provider, model string, completion, total float64) {
-    agg := defaultTPSAggregator
-    if agg == nil {
-        return
-    }
-    now := time.Now()
-    agg.mu.Lock()
-    // First, append to untagged series (mirrors RecordTPSSample logic, but inline to avoid double locking)
-    if finite(completion) {
-        agg.completion = append(agg.completion, timedValue{ts: now, v: completion})
-        agg.completionSum += completion
-    }
-    if finite(total) {
-        agg.total = append(agg.total, timedValue{ts: now, v: total})
-        agg.totalSum += total
-    }
-    // Then, append tagged entries for filtering
-    if finite(completion) {
-        agg.completionTagged = append(agg.completionTagged, taggedValue{ts: now, v: completion, provider: provider, model: model})
-    }
-    if finite(total) {
-        agg.totalTagged = append(agg.totalTagged, taggedValue{ts: now, v: total, provider: provider, model: model})
-    }
-    recordAndMaybeCleanLocked(agg)
-    agg.mu.Unlock()
+	agg := defaultTPSAggregator
+	if agg == nil {
+		return
+	}
+	now := time.Now()
+	agg.mu.Lock()
+	// First, append to untagged series (mirrors RecordTPSSample logic, but inline to avoid double locking)
+	if finite(completion) {
+		agg.completion = append(agg.completion, timedValue{ts: now, v: completion})
+		agg.completionSum += completion
+	}
+	if finite(total) {
+		agg.total = append(agg.total, timedValue{ts: now, v: total})
+		agg.totalSum += total
+	}
+	// Then, append tagged entries for filtering
+	if finite(completion) {
+		agg.completionTagged = append(agg.completionTagged, taggedValue{ts: now, v: completion, provider: provider, model: model})
+	}
+	if finite(total) {
+		agg.totalTagged = append(agg.totalTagged, taggedValue{ts: now, v: total, provider: provider, model: model})
+	}
+	recordAndMaybeCleanLocked(agg)
+	agg.mu.Unlock()
 }
 
 func recordAndMaybeCleanLocked(agg *tpsAggregator) {
-    // simple counter via slice lengths; when large enough, trigger a quick cleanup
-    totalCount := len(agg.completion) + len(agg.total)
-    if totalCount%tpsCleanEveryN == 0 {
-        // unlock-lock pattern avoided; we already hold the lock
-        cutoff := time.Now().Add(-tpsMaxRetention)
-        pruneLocked(agg, cutoff)
-    }
+	// simple counter via slice lengths; when large enough, trigger a quick cleanup
+	totalCount := len(agg.completion) + len(agg.total)
+	if totalCount%tpsCleanEveryN == 0 {
+		// unlock-lock pattern avoided; we already hold the lock
+		cutoff := time.Now().Add(-tpsMaxRetention)
+		pruneLocked(agg, cutoff)
+	}
 }
 
 func backgroundTPSCleanup() {
-    ticker := time.NewTicker(tpsCleanupInterval)
-    defer ticker.Stop()
-    for range ticker.C {
-        agg := defaultTPSAggregator
-        if agg == nil {
-            continue
-        }
-        cutoff := time.Now().Add(-tpsMaxRetention)
-        agg.mu.Lock()
-        pruneLocked(agg, cutoff)
-        agg.mu.Unlock()
-    }
+	ticker := time.NewTicker(tpsCleanupInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		agg := defaultTPSAggregator
+		if agg == nil {
+			continue
+		}
+		cutoff := time.Now().Add(-tpsMaxRetention)
+		agg.mu.Lock()
+		pruneLocked(agg, cutoff)
+		agg.mu.Unlock()
+	}
 }
 
 func pruneLocked(agg *tpsAggregator, cutoff time.Time) {
-    // prune completion
-    if n := len(agg.completion); n > tpsMinSamples {
-        kept := agg.completion[:0]
-        var sum float64
-        for i := 0; i < n; i++ {
-            tv := agg.completion[i]
-            if tv.ts.Before(cutoff) {
-                continue
-            }
-            kept = append(kept, tv)
-            sum += tv.v
-        }
-        if len(kept) < tpsMinSamples && n > 0 {
-            // ensure at least latest tpsMinSamples retained
-            start := n - tpsMinSamples
-            if start < 0 {
-                start = 0
-            }
-            kept = append([]timedValue(nil), agg.completion[start:]...)
-            sum = 0
-            for i := range kept {
-                sum += kept[i].v
-            }
-        }
-        agg.completion = kept
-        agg.completionSum = sum
-    }
-    // prune total
-    if n := len(agg.total); n > tpsMinSamples {
-        kept := agg.total[:0]
-        var sum float64
-        for i := 0; i < n; i++ {
-            tv := agg.total[i]
-            if tv.ts.Before(cutoff) {
-                continue
-            }
-            kept = append(kept, tv)
-            sum += tv.v
-        }
-        if len(kept) < tpsMinSamples && n > 0 {
-            start := n - tpsMinSamples
-            if start < 0 {
-                start = 0
-            }
-            kept = append([]timedValue(nil), agg.total[start:]...)
-            sum = 0
-            for i := range kept {
-                sum += kept[i].v
-            }
-        }
-        agg.total = kept
-        agg.totalSum = sum
-    }
+	// prune completion
+	if n := len(agg.completion); n > tpsMinSamples {
+		kept := agg.completion[:0]
+		var sum float64
+		for i := 0; i < n; i++ {
+			tv := agg.completion[i]
+			if tv.ts.Before(cutoff) {
+				continue
+			}
+			kept = append(kept, tv)
+			sum += tv.v
+		}
+		if len(kept) < tpsMinSamples && n > 0 {
+			// ensure at least latest tpsMinSamples retained
+			start := n - tpsMinSamples
+			if start < 0 {
+				start = 0
+			}
+			kept = append([]timedValue(nil), agg.completion[start:]...)
+			sum = 0
+			for i := range kept {
+				sum += kept[i].v
+			}
+		}
+		agg.completion = kept
+		agg.completionSum = sum
+	}
+	// prune total
+	if n := len(agg.total); n > tpsMinSamples {
+		kept := agg.total[:0]
+		var sum float64
+		for i := 0; i < n; i++ {
+			tv := agg.total[i]
+			if tv.ts.Before(cutoff) {
+				continue
+			}
+			kept = append(kept, tv)
+			sum += tv.v
+		}
+		if len(kept) < tpsMinSamples && n > 0 {
+			start := n - tpsMinSamples
+			if start < 0 {
+				start = 0
+			}
+			kept = append([]timedValue(nil), agg.total[start:]...)
+			sum = 0
+			for i := range kept {
+				sum += kept[i].v
+			}
+		}
+		agg.total = kept
+		agg.totalSum = sum
+	}
 }
 
 // GetTPSAggregates returns the current TPS aggregate snapshot.
 func GetTPSAggregates() TPSAggregateSnapshot {
-    agg := defaultTPSAggregator
-    if agg == nil {
-        return TPSAggregateSnapshot{Since: serverStart}
-    }
-    agg.mu.RLock()
-    defer agg.mu.RUnlock()
+	agg := defaultTPSAggregator
+	if agg == nil {
+		return TPSAggregateSnapshot{Since: serverStart}
+	}
+	agg.mu.RLock()
+	defer agg.mu.RUnlock()
 
-    snap := TPSAggregateSnapshot{Since: serverStart}
-    // completion
-    if n := len(agg.completion); n > 0 {
-        snap.Completion.Count = int64(n)
-        snap.Completion.Avg = round2f(agg.completionSum / float64(n))
-        snap.Completion.Median = medianOf(extractValues(agg.completion))
-    }
-    // total
-    if n := len(agg.total); n > 0 {
-        snap.Total.Count = int64(n)
-        snap.Total.Avg = round2f(agg.totalSum / float64(n))
-        snap.Total.Median = medianOf(extractValues(agg.total))
-    }
-    return snap
+	snap := TPSAggregateSnapshot{Since: serverStart}
+	// completion
+	if n := len(agg.completion); n > 0 {
+		snap.Completion.Count = int64(n)
+		snap.Completion.Avg = round2f(agg.completionSum / float64(n))
+		snap.Completion.Median = medianOf(extractValues(agg.completion))
+	}
+	// total
+	if n := len(agg.total); n > 0 {
+		snap.Total.Count = int64(n)
+		snap.Total.Avg = round2f(agg.totalSum / float64(n))
+		snap.Total.Median = medianOf(extractValues(agg.total))
+	}
+	return snap
 }
 
 // GetTPSAggregatesWindow returns snapshot limited to the last 'window' duration.
 // If window <= 0, this is equivalent to GetTPSAggregates().
 func GetTPSAggregatesWindow(window time.Duration) TPSAggregateSnapshot {
-    if window <= 0 {
-        return GetTPSAggregates()
-    }
-    agg := defaultTPSAggregator
-    snap := TPSAggregateSnapshot{Since: time.Now().Add(-window)}
-    if agg == nil {
-        return snap
-    }
-    cutoff := time.Now().Add(-window)
-    agg.mu.RLock()
-    // completion windowed
-    {
-        var n int
-        var sum float64
-        vals := make([]float64, 0)
-        for i := range agg.completion {
-            tv := agg.completion[i]
-            if tv.ts.Before(cutoff) {
-                continue
-            }
-            n++
-            sum += tv.v
-            vals = append(vals, tv.v)
-        }
-        if n > 0 {
-            snap.Completion.Count = int64(n)
-            snap.Completion.Avg = round2f(sum / float64(n))
-            snap.Completion.Median = medianOf(vals)
-        }
-    }
-    // total windowed
-    {
-        var n int
-        var sum float64
-        vals := make([]float64, 0)
-        for i := range agg.total {
-            tv := agg.total[i]
-            if tv.ts.Before(cutoff) {
-                continue
-            }
-            n++
-            sum += tv.v
-            vals = append(vals, tv.v)
-        }
-        if n > 0 {
-            snap.Total.Count = int64(n)
-            snap.Total.Avg = round2f(sum / float64(n))
-            snap.Total.Median = medianOf(vals)
-        }
-    }
-    agg.mu.RUnlock()
-    return snap
+	if window <= 0 {
+		return GetTPSAggregates()
+	}
+	agg := defaultTPSAggregator
+	snap := TPSAggregateSnapshot{Since: time.Now().Add(-window)}
+	if agg == nil {
+		return snap
+	}
+	cutoff := time.Now().Add(-window)
+	agg.mu.RLock()
+	// completion windowed
+	{
+		var n int
+		var sum float64
+		vals := make([]float64, 0)
+		for i := range agg.completion {
+			tv := agg.completion[i]
+			if tv.ts.Before(cutoff) {
+				continue
+			}
+			n++
+			sum += tv.v
+			vals = append(vals, tv.v)
+		}
+		if n > 0 {
+			snap.Completion.Count = int64(n)
+			snap.Completion.Avg = round2f(sum / float64(n))
+			snap.Completion.Median = medianOf(vals)
+		}
+	}
+	// total windowed
+	{
+		var n int
+		var sum float64
+		vals := make([]float64, 0)
+		for i := range agg.total {
+			tv := agg.total[i]
+			if tv.ts.Before(cutoff) {
+				continue
+			}
+			n++
+			sum += tv.v
+			vals = append(vals, tv.v)
+		}
+		if n > 0 {
+			snap.Total.Count = int64(n)
+			snap.Total.Avg = round2f(sum / float64(n))
+			snap.Total.Median = medianOf(vals)
+		}
+	}
+	agg.mu.RUnlock()
+	return snap
 }
 
 // GetTPSAggregatesWindowFiltered returns windowed aggregates filtered by provider and/or model.
 // If both provider and model are empty, it falls back to GetTPSAggregatesWindow.
 func GetTPSAggregatesWindowFiltered(window time.Duration, provider, model string) TPSAggregateSnapshot {
-    if provider == "" && model == "" {
-        return GetTPSAggregatesWindow(window)
-    }
-    if window <= 0 {
-        // treat as unbounded window
-        window = time.Since(serverStart)
-    }
-    agg := defaultTPSAggregator
-    snap := TPSAggregateSnapshot{Since: time.Now().Add(-window)}
-    if agg == nil {
-        return snap
-    }
-    cutoff := time.Now().Add(-window)
-    agg.mu.RLock()
-    // completion filtered
-    {
-        var n int
-        var sum float64
-        vals := make([]float64, 0)
-        for i := range agg.completionTagged {
-            tv := agg.completionTagged[i]
-            if tv.ts.Before(cutoff) {
-                continue
-            }
-            if provider != "" && tv.provider != provider {
-                continue
-            }
-            if model != "" && tv.model != model {
-                continue
-            }
-            n++
-            sum += tv.v
-            vals = append(vals, tv.v)
-        }
-        if n > 0 {
-            snap.Completion.Count = int64(n)
-            snap.Completion.Avg = round2f(sum / float64(n))
-            snap.Completion.Median = medianOf(vals)
-        }
-    }
-    // total filtered
-    {
-        var n int
-        var sum float64
-        vals := make([]float64, 0)
-        for i := range agg.totalTagged {
-            tv := agg.totalTagged[i]
-            if tv.ts.Before(cutoff) {
-                continue
-            }
-            if provider != "" && tv.provider != provider {
-                continue
-            }
-            if model != "" && tv.model != model {
-                continue
-            }
-            n++
-            sum += tv.v
-            vals = append(vals, tv.v)
-        }
-        if n > 0 {
-            snap.Total.Count = int64(n)
-            snap.Total.Avg = round2f(sum / float64(n))
-            snap.Total.Median = medianOf(vals)
-        }
-    }
-    agg.mu.RUnlock()
-    return snap
+	if provider == "" && model == "" {
+		return GetTPSAggregatesWindow(window)
+	}
+	if window <= 0 {
+		// treat as unbounded window
+		window = time.Since(serverStart)
+	}
+	agg := defaultTPSAggregator
+	snap := TPSAggregateSnapshot{Since: time.Now().Add(-window)}
+	if agg == nil {
+		return snap
+	}
+	cutoff := time.Now().Add(-window)
+	agg.mu.RLock()
+	// completion filtered
+	{
+		var n int
+		var sum float64
+		vals := make([]float64, 0)
+		for i := range agg.completionTagged {
+			tv := agg.completionTagged[i]
+			if tv.ts.Before(cutoff) {
+				continue
+			}
+			if provider != "" && tv.provider != provider {
+				continue
+			}
+			if model != "" && tv.model != model {
+				continue
+			}
+			n++
+			sum += tv.v
+			vals = append(vals, tv.v)
+		}
+		if n > 0 {
+			snap.Completion.Count = int64(n)
+			snap.Completion.Avg = round2f(sum / float64(n))
+			snap.Completion.Median = medianOf(vals)
+		}
+	}
+	// total filtered
+	{
+		var n int
+		var sum float64
+		vals := make([]float64, 0)
+		for i := range agg.totalTagged {
+			tv := agg.totalTagged[i]
+			if tv.ts.Before(cutoff) {
+				continue
+			}
+			if provider != "" && tv.provider != provider {
+				continue
+			}
+			if model != "" && tv.model != model {
+				continue
+			}
+			n++
+			sum += tv.v
+			vals = append(vals, tv.v)
+		}
+		if n > 0 {
+			snap.Total.Count = int64(n)
+			snap.Total.Avg = round2f(sum / float64(n))
+			snap.Total.Median = medianOf(vals)
+		}
+	}
+	agg.mu.RUnlock()
+	return snap
 }
 
 // ServerStartTime exposes the module init time for external use.
@@ -709,35 +709,35 @@ func ServerStartTime() time.Time { return serverStart }
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func medianOf(values []float64) float64 {
-    if len(values) == 0 {
-        return 0
-    }
-    // copy to avoid mutating underlying slice
-    cp := make([]float64, len(values))
-    copy(cp, values)
-    sort.Float64s(cp)
-    n := len(cp)
-    if n%2 == 1 {
-        return round2f(cp[n/2])
-    }
-    return round2f((cp[n/2-1] + cp[n/2]) / 2)
+	if len(values) == 0 {
+		return 0
+	}
+	// copy to avoid mutating underlying slice
+	cp := make([]float64, len(values))
+	copy(cp, values)
+	sort.Float64s(cp)
+	n := len(cp)
+	if n%2 == 1 {
+		return round2f(cp[n/2])
+	}
+	return round2f((cp[n/2-1] + cp[n/2]) / 2)
 }
 
 // round2f rounds to 2 decimal places with guards.
 func round2f(v float64) float64 {
-    if math.IsNaN(v) || math.IsInf(v, 0) {
-        return 0
-    }
-    return math.Round(v*100) / 100
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	return math.Round(v*100) / 100
 }
 
 func extractValues(tvs []timedValue) []float64 {
-    if len(tvs) == 0 {
-        return nil
-    }
-    vals := make([]float64, len(tvs))
-    for i := range tvs {
-        vals[i] = tvs[i].v
-    }
-    return vals
+	if len(tvs) == 0 {
+		return nil
+	}
+	vals := make([]float64, len(tvs))
+	for i := range tvs {
+		vals[i] = tvs[i].v
+	}
+	return vals
 }

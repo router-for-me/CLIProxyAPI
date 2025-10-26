@@ -154,41 +154,41 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
-    for {
-        select {
-        case <-c.Request.Context().Done():
-            cancel(c.Request.Context().Err())
-            return
-        case chunk, ok := <-data:
-            if !ok {
-                _, _ = c.Writer.Write([]byte("\n"))
-                flusher.Flush()
-                cancel(nil)
-                return
-            }
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			cancel(c.Request.Context().Err())
+			return
+		case chunk, ok := <-data:
+			if !ok {
+				_, _ = c.Writer.Write([]byte("\n"))
+				flusher.Flush()
+				cancel(nil)
+				return
+			}
 
-            if bytes.HasPrefix(chunk, []byte("event:")) {
-                _, _ = c.Writer.Write([]byte("\n"))
-            }
-            _, _ = c.Writer.Write(chunk)
-            _, _ = c.Writer.Write([]byte("\n"))
+			if bytes.HasPrefix(chunk, []byte("event:")) {
+				_, _ = c.Writer.Write([]byte("\n"))
+			}
+			_, _ = c.Writer.Write(chunk)
+			_, _ = c.Writer.Write([]byte("\n"))
 
-            flusher.Flush()
-        case errMsg, ok := <-errs:
-            if !ok {
-                continue
-            }
-            if errMsg != nil {
-                h.WriteErrorResponse(c, errMsg)
-                flusher.Flush()
-            }
-            var execErr error
-            if errMsg != nil {
-                execErr = errMsg.Error
-            }
-            cancel(execErr)
-            return
-        case <-time.After(500 * time.Millisecond):
-        }
-    }
+			flusher.Flush()
+		case errMsg, ok := <-errs:
+			if !ok {
+				continue
+			}
+			if errMsg != nil {
+				h.WriteErrorResponse(c, errMsg)
+				flusher.Flush()
+			}
+			var execErr error
+			if errMsg != nil {
+				execErr = errMsg.Error
+			}
+			cancel(execErr)
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }

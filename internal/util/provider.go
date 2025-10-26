@@ -47,6 +47,13 @@ func GetProviderName(modelName string) []string {
 		providers = append(providers, name)
 	}
 
+	// Force GLM family (glm-*) to route exclusively to zhipu to avoid ambiguity
+	// when multiple providers register the same model ID.
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	if strings.HasPrefix(lower, "glm-") {
+		return []string{"zhipu"}
+	}
+
 	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelName) {
 		appendProvider(provider)
 	}

@@ -11,8 +11,8 @@ import (
 func TestSnapshotCoreAuths_ZhipuAPIKey(t *testing.T) {
 	cfg := &appconfig.Config{}
 	cfg.ZhipuKey = []appconfig.ZhipuKey{{
-		APIKey:  "glmsk-123",
-		BaseURL: "https://example.zhipu/api/paas/v4",
+		APIKey:   "glmsk-123",
+		BaseURL:  "https://example.zhipu/api/paas/v4",
 		ProxyURL: "socks5://127.0.0.1:1080",
 	}}
 

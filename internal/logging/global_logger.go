@@ -2,11 +2,11 @@ package logging
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"encoding/json"
 	"strings"
 	"sync"
 
@@ -30,27 +30,27 @@ type LogFormatter struct{}
 
 // Format renders a single log entry with custom formatting.
 func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
-    	var buffer *bytes.Buffer
-    	if entry.Buffer != nil {
-    		buffer = entry.Buffer
-    	} else {
-    		buffer = &bytes.Buffer{}
-    	}
+	var buffer *bytes.Buffer
+	if entry.Buffer != nil {
+		buffer = entry.Buffer
+	} else {
+		buffer = &bytes.Buffer{}
+	}
 
-		timestamp := entry.Time.Format("2006-01-02 15:04:05")
-		message := strings.TrimRight(entry.Message, "\r\n")
-		formatted := fmt.Sprintf("[%s] [%s] [%s:%d] %s", timestamp, entry.Level, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
+	timestamp := entry.Time.Format("2006-01-02 15:04:05")
+	message := strings.TrimRight(entry.Message, "\r\n")
+	formatted := fmt.Sprintf("[%s] [%s] [%s:%d] %s", timestamp, entry.Level, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
 
-		// Append structured fields as JSON when present to preserve structured logs
-		if len(entry.Data) > 0 {
-			if b, err := json.Marshal(entry.Data); err == nil {
-				formatted = formatted + " " + string(b)
-			}
+	// Append structured fields as JSON when present to preserve structured logs
+	if len(entry.Data) > 0 {
+		if b, err := json.Marshal(entry.Data); err == nil {
+			formatted = formatted + " " + string(b)
 		}
-		formatted = formatted + "\n"
-		buffer.WriteString(formatted)
+	}
+	formatted = formatted + "\n"
+	buffer.WriteString(formatted)
 
-		return buffer.Bytes(), nil
+	return buffer.Bytes(), nil
 }
 
 // SetupBaseLogger configures the shared logrus instance and Gin writers.

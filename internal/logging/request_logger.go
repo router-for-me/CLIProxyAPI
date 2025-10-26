@@ -52,16 +52,16 @@ type RequestLogger interface {
 	//   - error: An error if logging initialization fails, nil otherwise
 	LogStreamingRequest(url, method string, headers map[string][]string, body []byte) (StreamingLogWriter, error)
 
-    // IsEnabled returns whether request logging is currently enabled.
+	// IsEnabled returns whether request logging is currently enabled.
 	//
 	// Returns:
 	//   - bool: True if logging is enabled, false otherwise
-    IsEnabled() bool
+	IsEnabled() bool
 
-    // LogAuxJSONCapture writes a minimal, filtered upstream JSON capture to a
-    // separate log file to avoid mixing with primary request/response logs.
-    // The content SHOULD be a compact JSON payload.
-    LogAuxJSONCapture(url, provider, model string, capture []byte) error
+	// LogAuxJSONCapture writes a minimal, filtered upstream JSON capture to a
+	// separate log file to avoid mixing with primary request/response logs.
+	// The content SHOULD be a compact JSON payload.
+	LogAuxJSONCapture(url, provider, model string, capture []byte) error
 }
 
 // StreamingLogWriter handles real-time logging of streaming response chunks.
@@ -122,9 +122,9 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string) *FileR
 		}
 	}
 	return &FileRequestLogger{
-		enabled:    enabled,
+		enabled:     enabled,
 		captureOnly: false,
-		logsDir:   logsDir,
+		logsDir:     logsDir,
 	}
 }
 
@@ -160,44 +160,50 @@ func (l *FileRequestLogger) LogAuxJSONCapture(url, provider, model string, captu
 		return nil
 	}
 
-    // Ensure subdir exists: <logsDir>/gpt-5-codex-json-captures
-    capDir := filepath.Join(l.logsDir, "gpt-5-codex-json-captures")
-    if _, err := os.Stat(capDir); os.IsNotExist(err) {
-        if err2 := os.MkdirAll(capDir, 0o755); err2 != nil {
-            return fmt.Errorf("failed to create capture logs directory: %w", err2)
-        }
-    }
+	// Ensure subdir exists: <logsDir>/gpt-5-codex-json-captures
+	capDir := filepath.Join(l.logsDir, "gpt-5-codex-json-captures")
+	if _, err := os.Stat(capDir); os.IsNotExist(err) {
+		if err2 := os.MkdirAll(capDir, 0o755); err2 != nil {
+			return fmt.Errorf("failed to create capture logs directory: %w", err2)
+		}
+	}
 
-    // Build filename: <path>-<provider>-<model>-<timestamp>.json
-    base := l.captureBaseName(url, provider, model)
-    filePath := filepath.Join(capDir, base+".json")
+	// Build filename: <path>-<provider>-<model>-<timestamp>.json
+	base := l.captureBaseName(url, provider, model)
+	filePath := filepath.Join(capDir, base+".json")
 
-    // Write compact JSON with trailing newline for readability in editors
-    if err := os.WriteFile(filePath, append(capture, '\n'), 0o644); err != nil {
-        return fmt.Errorf("failed to write capture file: %w", err)
-    }
-    return nil
+	// Write compact JSON with trailing newline for readability in editors
+	if err := os.WriteFile(filePath, append(capture, '\n'), 0o644); err != nil {
+		return fmt.Errorf("failed to write capture file: %w", err)
+	}
+	return nil
 }
 
 // captureBaseName constructs a sanitized base filename for capture logs.
 func (l *FileRequestLogger) captureBaseName(url, provider, model string) string {
-    // Derive path part from URL (strip query) and sanitize
-    path := url
-    if strings.Contains(url, "?") {
-        path = strings.Split(url, "?")[0]
-    }
-    if strings.HasPrefix(path, "/") {
-        path = path[1:]
-    }
-    pathPart := l.sanitizeForFilename(path)
-    provPart := l.sanitizeForFilename(strings.TrimSpace(provider))
-    modelPart := l.sanitizeForFilename(strings.TrimSpace(model))
-    ts := time.Now().Format("2006-01-02T150405-.000000000")
-    ts = strings.Replace(ts, ".", "", -1)
-    if pathPart == "" { pathPart = "root" }
-    if provPart == "" { provPart = "provider" }
-    if modelPart == "" { modelPart = "model" }
-    return fmt.Sprintf("%s-%s-%s-%s", pathPart, provPart, modelPart, ts)
+	// Derive path part from URL (strip query) and sanitize
+	path := url
+	if strings.Contains(url, "?") {
+		path = strings.Split(url, "?")[0]
+	}
+	if strings.HasPrefix(path, "/") {
+		path = path[1:]
+	}
+	pathPart := l.sanitizeForFilename(path)
+	provPart := l.sanitizeForFilename(strings.TrimSpace(provider))
+	modelPart := l.sanitizeForFilename(strings.TrimSpace(model))
+	ts := time.Now().Format("2006-01-02T150405-.000000000")
+	ts = strings.Replace(ts, ".", "", -1)
+	if pathPart == "" {
+		pathPart = "root"
+	}
+	if provPart == "" {
+		provPart = "provider"
+	}
+	if modelPart == "" {
+		modelPart = "model"
+	}
+	return fmt.Sprintf("%s-%s-%s-%s", pathPart, provPart, modelPart, ts)
 }
 
 // LogRequest logs a complete non-streaming request/response cycle to a file.
