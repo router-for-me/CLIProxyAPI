@@ -207,7 +207,28 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *QwenExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{Payload: []byte{}}, fmt.Errorf("not implemented")
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("openai")
+	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+
+	modelName := gjson.GetBytes(body, "model").String()
+	if strings.TrimSpace(modelName) == "" {
+		modelName = req.Model
+	}
+
+	enc, err := tokenizerForModel(modelName)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("qwen executor: tokenizer init failed: %w", err)
+	}
+
+	count, err := countOpenAIChatTokens(enc, body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("qwen executor: token counting failed: %w", err)
+	}
+
+	usageJSON := buildOpenAIUsageJSON(count)
+	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
+	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
 }
 
 func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {

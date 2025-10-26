@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -608,4 +609,8 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 	}
 
 	return out
+}
+
+func GeminiTokenCount(ctx context.Context, count int64) string {
+	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
 }

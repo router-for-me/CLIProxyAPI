@@ -12,8 +12,9 @@ func init() {
 		Codex,
 		ConvertClaudeRequestToCodex,
 		interfaces.TranslateResponse{
-			Stream:    ConvertCodexResponseToClaude,
-			NonStream: ConvertCodexResponseToClaudeNonStream,
+			Stream:     ConvertCodexResponseToClaude,
+			NonStream:  ConvertCodexResponseToClaudeNonStream,
+			TokenCount: ClaudeTokenCount,
 		},
 	)
 }

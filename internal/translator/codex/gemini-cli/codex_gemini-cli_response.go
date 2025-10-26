@@ -6,6 +6,7 @@ package geminiCLI
 
 import (
 	"context"
+	"fmt"
 
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/gemini"
 	"github.com/tidwall/sjson"
@@ -53,4 +54,8 @@ func ConvertCodexResponseToGeminiCLINonStream(ctx context.Context, modelName str
 	json := `{"response": {}}`
 	strJSON, _ = sjson.SetRaw(json, "response", strJSON)
 	return strJSON
+}
+
+func GeminiCLITokenCount(ctx context.Context, count int64) string {
+	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
 }

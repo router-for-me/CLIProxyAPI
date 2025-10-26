@@ -479,7 +479,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	filePath := managementasset.FilePath(s.currentPath)
+	filePath := managementasset.FilePath(s.configFilePath)
 	if strings.TrimSpace(filePath) == "" {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
@@ -487,7 +487,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
-			go managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.currentPath), cfg.ProxyURL)
+			go managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL)
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
@@ -776,7 +776,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 
 	if !cfg.RemoteManagement.DisableControlPanel {
-		staticDir := managementasset.StaticDir(s.currentPath)
+		staticDir := managementasset.StaticDir(s.configFilePath)
 		go managementasset.EnsureLatestManagementHTML(context.Background(), staticDir, cfg.ProxyURL)
 	}
 	if s.mgmt != nil {

@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -74,7 +73,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	if hasOfficialInstructions {
 		return rawJSON
 	}
-	log.Debugf("instructions not matched, %s\n", originalInstructions)
+	// log.Debugf("instructions not matched, %s\n", originalInstructions)
 
 	if len(inputResults) > 0 {
 		newInput := "[]"
