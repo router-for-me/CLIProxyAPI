@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -629,4 +630,8 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 		return ""
 	}
 	return string(responseJSON)
+}
+
+func ClaudeTokenCount(ctx context.Context, count int64) string {
+	return fmt.Sprintf(`{"input_tokens":%d}`, count)
 }

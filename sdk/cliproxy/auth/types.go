@@ -156,7 +156,17 @@ func (a *Auth) AccountInfo() (string, string) {
 		if v, ok := a.Metadata["email"].(string); ok {
 			return "oauth", v
 		}
-	} else if a.Attributes != nil {
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a.Provider)), "aistudio-") {
+		if label := strings.TrimSpace(a.Label); label != "" {
+			return "oauth", label
+		}
+		if id := strings.TrimSpace(a.ID); id != "" {
+			return "oauth", id
+		}
+		return "oauth", "aistudio"
+	}
+	if a.Attributes != nil {
 		if v := a.Attributes["api_key"]; v != "" {
 			return "api_key", v
 		}

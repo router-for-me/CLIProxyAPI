@@ -219,7 +219,29 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{Payload: []byte{}}, fmt.Errorf("not implemented")
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("openai")
+	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+
+	modelForCounting := req.Model
+	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+		translated = e.overrideModel(translated, modelOverride)
+		modelForCounting = modelOverride
+	}
+
+	enc, err := tokenizerForModel(modelForCounting)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("openai compat executor: tokenizer init failed: %w", err)
+	}
+
+	count, err := countOpenAIChatTokens(enc, translated)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("openai compat executor: token counting failed: %w", err)
+	}
+
+	usageJSON := buildOpenAIUsageJSON(count)
+	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
+	return cliproxyexecutor.Response{Payload: []byte(translatedUsage)}, nil
 }
 
 // Refresh is a no-op for API-key based compatibility providers.

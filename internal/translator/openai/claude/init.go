@@ -12,8 +12,9 @@ func init() {
 		OpenAI,
 		ConvertClaudeRequestToOpenAI,
 		interfaces.TranslateResponse{
-			Stream:    ConvertOpenAIResponseToClaude,
-			NonStream: ConvertOpenAIResponseToClaudeNonStream,
+			Stream:     ConvertOpenAIResponseToClaude,
+			NonStream:  ConvertOpenAIResponseToClaudeNonStream,
+			TokenCount: ClaudeTokenCount,
 		},
 	)
 }

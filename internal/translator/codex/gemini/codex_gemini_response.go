@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -329,4 +330,8 @@ func mustMarshalJSON(v interface{}) string {
 		panic(err)
 	}
 	return string(data)
+}
+
+func GeminiTokenCount(ctx context.Context, count int64) string {
+	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
 }

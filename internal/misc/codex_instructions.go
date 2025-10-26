@@ -20,7 +20,7 @@ func CodexInstructionsForModel(modelName, systemInstructions string) (bool, stri
 	// lastReviewPrompt := ""
 	for _, entry := range entries {
 		content, _ := codexInstructionsDir.ReadFile("codex_instructions/" + entry.Name())
-		if systemInstructions == string(content) {
+		if strings.HasPrefix(systemInstructions, string(content)) {
 			return true, ""
 		}
 		if strings.HasPrefix(entry.Name(), "gpt_5_codex_prompt.md") {

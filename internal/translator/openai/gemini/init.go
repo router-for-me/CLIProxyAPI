@@ -12,8 +12,9 @@ func init() {
 		OpenAI,
 		ConvertGeminiRequestToOpenAI,
 		interfaces.TranslateResponse{
-			Stream:    ConvertOpenAIResponseToGemini,
-			NonStream: ConvertOpenAIResponseToGeminiNonStream,
+			Stream:     ConvertOpenAIResponseToGemini,
+			NonStream:  ConvertOpenAIResponseToGeminiNonStream,
+			TokenCount: GeminiTokenCount,
 		},
 	)
 }

@@ -354,3 +354,7 @@ func buildReverseMapFromClaudeOriginalShortToOriginal(original []byte) map[strin
 	}
 	return rev
 }
+
+func ClaudeTokenCount(ctx context.Context, count int64) string {
+	return fmt.Sprintf(`{"input_tokens":%d}`, count)
+}

@@ -12,8 +12,9 @@ func init() {
 		Codex,
 		ConvertGeminiRequestToCodex,
 		interfaces.TranslateResponse{
-			Stream:    ConvertCodexResponseToGemini,
-			NonStream: ConvertCodexResponseToGeminiNonStream,
+			Stream:     ConvertCodexResponseToGemini,
+			NonStream:  ConvertCodexResponseToGeminiNonStream,
+			TokenCount: GeminiTokenCount,
 		},
 	)
 }
