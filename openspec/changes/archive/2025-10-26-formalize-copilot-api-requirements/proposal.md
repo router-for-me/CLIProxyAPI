@@ -1,6 +1,6 @@
 # Formalize GitHub Copilot API Requirements
 
-## Problem Statement
+## Why
 
 当前 Copilot 集成仍然强绑定 Codex Executor 与 OpenAI 路径，存在以下问题：
 
@@ -9,7 +9,7 @@
 3. **扩展受限**：后续若 Copilot 引入新的认证、公有模型或错误语义，将与 Codex 路径互相牵制，难以独立演进。
 4. **测试覆盖不足**：复用路径导致 Copilot 与 Codex 难以分别验证，回归风险高。
 
-## Proposed Solution
+## What Changes
 
 将 Copilot 集成解耦为独立执行路径，包含：
 

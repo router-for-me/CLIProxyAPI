@@ -13,6 +13,11 @@ import urllib.request
 import urllib.error
 from functools import partial
 
+# 配置日志级别（支持环境变量 PYTHONLOGLEVEL 或默认 INFO）
+logging.basicConfig(
+    level=os.getenv("PYTHONLOGLEVEL", "INFO").upper(),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 app = FastAPI(title="claude agent sdk python bridge", version="0.1.0")
 
@@ -115,18 +120,64 @@ async def chat_completions(req: Request) -> Response:
 
     async def run_non_stream() -> Dict[str, Any]:
         content_texts: List[str] = []
+        tool_calls_list: List[Dict[str, Any]] = []
         try:
             options = ClaudeAgentOptions(
                 env={k: str(v) for k, v in env_map.items()},
                 model=model
             )
             async with ClaudeSDKClient(options=options) as client:
+                _log_structured(logging.INFO, "sdk_query_start", prompt_preview=prompt[:100])
                 await client.query(prompt)
                 async for msg in client.receive_response():
                     if isinstance(msg, AssistantMessage):
-                        for block in msg.content:
+                        block_index = 0
+                        for block in getattr(msg, "content", []):
+                            block_type = type(block).__name__
                             if isinstance(block, TextBlock):
-                                content_texts.append(block.text)
+                                text = getattr(block, "text", "") or ""
+                                preview = text[:100] if text else ""
+                                _log_structured(
+                                    logging.DEBUG,
+                                    "content_block_received",
+                                    index=block_index,
+                                    type=block_type,
+                                    preview=preview,
+                                    has_tool_calls_before=len(tool_calls_list) > 0
+                                )
+                                if text:
+                                    content_texts.append(text)
+                            elif hasattr(block, "id") and hasattr(block, "name") and hasattr(block, "input"):
+                                block_name = getattr(block, "name", "")
+                                _log_structured(
+                                    logging.DEBUG,
+                                    "content_block_received",
+                                    index=block_index,
+                                    type=block_type,
+                                    tool_name=block_name,
+                                    has_tool_calls_before=len(tool_calls_list) > 0
+                                )
+                                raw_args = getattr(block, "input", {}) or {}
+                                if not isinstance(raw_args, dict):
+                                    try:
+                                        raw_args = dict(raw_args)  # type: ignore[arg-type]
+                                    except Exception:
+                                        raw_args = {}
+                                try:
+                                    arguments_json = json.dumps(raw_args, ensure_ascii=False)
+                                except (TypeError, ValueError):
+                                    arguments_json = "{}"
+                                tool_calls_list.append(
+                                    {
+                                        "id": getattr(block, "id", ""),
+                                        "type": "function",
+                                        "function": {
+                                            "name": block_name,
+                                            "arguments": arguments_json,
+                                        },
+                                    }
+                                )
+                            block_index += 1
         except Exception as e:
             tb = traceback.format_exc()
             _log_structured(
@@ -149,6 +200,16 @@ async def chat_completions(req: Request) -> Response:
                 }
             }
         text = "".join(content_texts) if content_texts else ""
+        message_dict: Dict[str, Any] = {"role": "assistant"}
+
+        if tool_calls_list:
+            message_dict["content"] = text if text else None
+            message_dict["tool_calls"] = tool_calls_list
+            finish_reason = "tool_calls"
+        else:
+            message_dict["content"] = text
+            finish_reason = "stop"
+
         return {
             "id": "chatcmpl-bridge",
             "object": "chat.completion",
@@ -157,8 +218,8 @@ async def chat_completions(req: Request) -> Response:
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": text},
-                    "finish_reason": "stop",
+                    "message": message_dict,
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None},
@@ -184,12 +245,72 @@ async def chat_completions(req: Request) -> Response:
                 "ANTHROPIC_MODEL": model,
                 **{k: os.getenv(k, "") for k in ("API_TIMEOUT_MS", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")},
             }
+            _log_structured(logging.INFO, "sdk_stream_start", prompt_preview=prompt[:100])
+            tool_calls_count = 0
             async with ClaudeSDKClient(options=ClaudeAgentOptions(env=opts, model=model)) as client:
                 await client.query(prompt)
                 async for msg in client.receive_response():
                     if isinstance(msg, AssistantMessage):
-                        for block in msg.content:
-                            if hasattr(block, "text") and isinstance(block.text, str):
+                        block_index = 0
+                        for block in getattr(msg, "content", []):
+                            block_type = type(block).__name__
+                            if isinstance(block, TextBlock):
+                                text_piece = getattr(block, "text", "") or ""
+                                preview = text_piece[:100] if text_piece else ""
+                                _log_structured(
+                                    logging.DEBUG,
+                                    "content_block_stream",
+                                    index=block_index,
+                                    type=block_type,
+                                    preview=preview,
+                                    has_tool_calls_before=tool_calls_count > 0
+                                )
+                                if not text_piece:
+                                    block_index += 1
+                                    continue
+                                chunk = {
+                                    "id": "chatcmpl-bridge",
+                                    "object": "chat.completion.chunk",
+                                    "created": int(asyncio.get_event_loop().time()),
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": text_piece},
+                                        "finish_reason": None,
+                                        }
+                                    ],
+                                }
+                                yield "data: " + __import__("json").dumps(chunk) + "\n\n"
+                            elif hasattr(block, "id") and hasattr(block, "name") and hasattr(block, "input"):
+                                block_name = getattr(block, "name", "")
+                                _log_structured(
+                                    logging.DEBUG,
+                                    "content_block_stream",
+                                    index=block_index,
+                                    type=block_type,
+                                    tool_name=block_name,
+                                    has_tool_calls_before=tool_calls_count > 0
+                                )
+                                tool_calls_count += 1
+                                raw_args = getattr(block, "input", {}) or {}
+                                if not isinstance(raw_args, dict):
+                                    try:
+                                        raw_args = dict(raw_args)  # type: ignore[arg-type]
+                                    except Exception:
+                                        raw_args = {}
+                                try:
+                                    arguments_json = json.dumps(raw_args, ensure_ascii=False)
+                                except (TypeError, ValueError):
+                                    arguments_json = "{}"
+                                tool_call = {
+                                    "id": getattr(block, "id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": block_name,
+                                        "arguments": arguments_json,
+                                    }
+                                }
                                 chunk = {
                                     "id": "chatcmpl-bridge",
                                     "object": "chat.completion.chunk",
@@ -198,12 +319,13 @@ async def chat_completions(req: Request) -> Response:
                                     "choices": [
                                         {
                                             "index": 0,
-                                            "delta": {"content": block.text},
+                                            "delta": {"tool_calls": [tool_call]},
                                             "finish_reason": None,
                                         }
                                     ],
                                 }
                                 yield "data: " + __import__("json").dumps(chunk) + "\n\n"
+                            block_index += 1
         except Exception as e:
             tb = traceback.format_exc()
             _log_structured(
@@ -221,8 +343,9 @@ async def chat_completions(req: Request) -> Response:
             }) + "}\n\n"
             yield "data: [DONE]\n\n"
             return
-            # end marker
-            yield "data: [DONE]\n\n"
+
+        # Normal completion: send end marker
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         content=sse_generator(), status_code=200, media_type="text/event-stream"

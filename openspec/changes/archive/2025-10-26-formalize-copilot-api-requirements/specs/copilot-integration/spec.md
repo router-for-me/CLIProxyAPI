@@ -274,24 +274,6 @@ The system SHALL preserve structured message content and tool metadata when tran
 
 ---
 
-## MODIFIED Requirements
-
-### Requirement: Provider Model Inventory Exposure (Copilot Rules)
-
-**Updated**: Clarified that Copilot chat/completions requests must negotiate streaming transport while supporting stream aggregation for non-stream callers.
-
-The system SHALL treat `copilot` as an independent provider whose model inventory is not mirrored from OpenAI, **and SHALL negotiate SSE transport (`stream=true`) whenever issuing chat/completions**.
-
-#### Scenario: Copilot streaming support (ADDED)
-- **GIVEN** a request routed to provider `copilot`
-- **WHEN** constructing the upstream payload
-- **THEN** the system SHALL set `stream=true`
-- **AND** SHALL deliver either incremental SSE events or an aggregated response based on the caller’s `stream` flag
-
-*(Other scenarios from provider-integration spec remain unchanged)*
-
----
-
 ## Implementation Notes
 
 ### Code Locations

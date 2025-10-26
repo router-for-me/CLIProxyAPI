@@ -1,5 +1,8 @@
-## MODIFIED Requirements
+# python-agent-bridge-routing Specification
 
+## Purpose
+TBD - created by archiving change 2025-10-26-zhipu-legacy-executor-clean. Update Purpose after archive.
+## Requirements
 ### Requirement: Route zhipu via Python Agent Bridge (Default and Mandatory)
 The system MUST route provider="zhipu" requests to a Python Agent Bridge (PAB) using Claude Agent SDK for Python to call GLM models. This MUST be the default behavior; configuration MUST NOT provide a legacy fallback path once cleanup is complete.
 
@@ -28,3 +31,4 @@ Bridge URL selection priority MUST be: (1) config.claude-agent-sdk-for-python.ba
 Given all three sources configured with different values
 When resolving the bridge URL
 Then config.claude-agent-sdk-for-python.baseURL is used; if empty, fallback to env; else use ensureClaudePythonBridge default.
+
