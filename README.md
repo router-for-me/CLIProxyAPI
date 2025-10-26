@@ -170,15 +170,21 @@ You can authenticate for Gemini, OpenAI, Claude, Qwen, and/or iFlow. All can coe
     ```
 
   - Copilot models and breaking changes (important):
-    - Copilot now exposes its own inventory and does NOT mirror OpenAI models.
-    - Currently, Copilot exposes a single model: `gpt-5-mini` (provider=copilot only).
-    - If you need other GPT-5 variants (e.g., `gpt-5`, `gpt-5-minimal`, `gpt-5-codex-*`), use provider `codex`/`openai` instead of `copilot`.
+    - Copilot requests now run through a dedicated `CopilotExecutor`, fully decoupled from Codex/OpenAI paths.
+    - Copilot exposes its own inventory and does **not** mirror OpenAI models. The seed inventory currently includes:
+      - `gpt-5-mini`
+      - `gpt-5`
+      - `gpt-4.1`
+      - `gpt-4`
+      - `gpt-4o-mini`
+      - `gpt-3.5-turbo`
     - Device code request MUST include `Accept: application/json` (the server does this for you).
-    - Copilot token exchange requires headers like `User-Agent`, `OpenAI-Intent`, `Editor-Plugin-*`, `Editor-Version`, and `X-GitHub-Api-Version` (the server sets these automatically).
+    - Copilot chat/completions calls are forced to `stream=true` and the proxy aggregates SSE responses for non-streaming callers.
+    - Copilot token exchange and chat requests automatically attach required headers such as `User-Agent`, `OpenAI-Intent`, `Editor-Plugin-*`, `Editor-Version`, `X-GitHub-Api-Version`, `copilot-integration-id`, and `x-vscode-user-agent-library-version`.
     - Migration:
-      - Switch your `model` to `gpt-5-mini` when using provider `copilot`.
-      - For non-mini GPT-5 models, route via `codex`/`openai` providers.
-      - Verify `/v1/models` and management endpoints show the expected provider-model mapping.
+      - Keep using provider `copilot` when targeting the models listed above; `/v1/models` and management endpoints now label them explicitly as `provider=copilot`.
+      - Use provider `codex`/`openai` for any remaining OpenAI-hosted inventory.
+      - Verify `/v1/models` and management endpoints show the expected provider-model mapping before rolling out to users.
 
 
 ### Starting the Server

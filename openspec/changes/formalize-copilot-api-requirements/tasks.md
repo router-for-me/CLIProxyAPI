@@ -1,98 +1,77 @@
 # Implementation Tasks
 
-## Phase 1: Critical Bug Fix (P0)
+## Phase 1: 架构拆分与执行器抽离
 
-- [ ] **Fix stream=false override in codex_executor.go**
-  - Location: `internal/runtime/executor/codex_executor.go:88`
-  - Change: `sjson.SetBytes(body, "stream", false)` → `sjson.SetBytes(body, "stream", true)`
-  - Validation: 运行 Copilot chat/completions 请求，验证返回 200 而非 400
-  - Test: 创建测试用例验证 Copilot 流式响应
+- [x] **实现独立 CopilotExecutor**
+  - 新建 `internal/runtime/executor/copilot_executor.go`（或等效模块）
+  - 提取现有 Codex Executor 中 Copilot 专属逻辑（请求头、SSE 聚合、vision 检测、X-Initiator）
+  - 保留 Codex Executor 中 Codex/OpenAI 逻辑不受影响
+  - Test: 单元测试覆盖 Copilot 执行器的非流式与流式路径
+- [x] **对齐 Copilot 请求头与 payload 兼容性**
+  - 参考 `copilot-api` 实现补充 `copilot-integration-id`、`x-vscode-user-agent-library-version` 等 headers
+  - 确保 messages 支持字符串与多段结构（text/image）、工具调用 (`tool_calls`/`tool_choice`)
+  - Test: 针对富文本与 tool call 场景的执行器测试
 
-- [ ] **Verify streaming response handling**
-  - 确认 `ExecuteStream()` 路径正确处理 SSE 格式
-  - 验证 `jsonPayload()` 正确解析 `event:` 和 `data:` 前缀
-  - Test: 验证完整的流式响应周期（开始 → 增量 → 完成）
+- [x] **重构认证与执行器注册流程**
+  - `sdk/cliproxy/auth/manager.go`：为 CopilotExecutor 注册独立 provider id（如 `copilot`）
+  - `sdk/cliproxy/service.go`：调整 `ensureExecutorsForAuth` 与 `registerModelsForAuth`，确保 Copilot auth 仅绑定新执行器并同步 `grok-code-fast-1` 等模型
+  - 验证 OAuth 刷新逻辑仍然可用（Copilot refresh evaluator）
 
-## Phase 2: Specification Documentation
+## Phase 2: 模型注册与路由解耦
 
-- [ ] **Create copilot-integration spec delta**
-  - 文件: `openspec/changes/formalize-copilot-api-requirements/specs/copilot-integration/spec.md`
-  - 内容: 添加所有 Copilot API 要求（见下方详细规范）
+- [x] **独立 Copilot 模型注册器**
+  - 在 `internal/registry` 下新增 Copilot 专属模型表
+  - `util.GetProviderName` 仅返回 Copilot provider，对应模型从 Codex provider 移除
+  - 管理端 `/v0/management/models`、`/v1/models` 返回的 provider 信息保持准确
+- [x] **同步 Copilot `/models` 清单**
+  - Seed 数据包含 `gpt-5-mini`、`grok-code-fast-1`、`gpt-5`、`gpt-4.1`、`gpt-4`、`gpt-4o-mini`、`gpt-3.5-turbo`
+  - 设计可扩展机制以添加 upstream 新模型（preview/enterprise）
 
-- [ ] **Document endpoint selection rules**
-  - 明确优先级: attributes.base_url → metadata.base_url → token 派生 → 默认
-  - 默认端点: `https://api.githubcopilot.com/chat/completions`
-  - Token 派生逻辑: 解析 `proxy-ep=<host>` 提示
+- [x] **API Handler 路由调整**
+  - `sdk/api/handlers/openai`：在 `ExecuteWithAuthManager` 前保留模型→provider 映射，但确保 Copilot 模型走独立 provider
+  - `sdk/api/handlers/claude`/`messages` 等路径复用 CopilotExecutor 输出（必要时更新翻译层）
+  - Test: handler 级别测试覆盖 `provider=copilot` 请求
 
-- [ ] **Document authentication requirements**
-  - OAuth Device Flow: GitHub Device Code → GitHub Token → Copilot Token
-  - Token 刷新: 基于 `metadata.refresh_in` 预刷新策略
-  - Bearer Token: `Authorization: Bearer <access_token>`
+## Phase 3: OpenSpec & 文档同步
 
-- [ ] **Document required HTTP headers**
-  - `Authorization: Bearer <token>`
-  - `user-agent: GitHubCopilotChat/0.26.7`
-  - `editor-version: vscode/1.0`
-  - `editor-plugin-version: copilot-chat/0.26.7`
-  - `openai-intent: conversation-panel`
-  - `x-github-api-version: 2025-04-01`
-  - `x-request-id: <UUID>`
+- [x] **更新 copilot-integration 规范**
+  - 描述独立执行器、模型注册与请求路由的边界
+  - 明确 Copilot 与 Codex 使用不同 provider id、端点与重试策略
 
-- [ ] **Document supported models**
-  - `gpt-5-mini`
-  - `grok-code-fast-1`
-  - 其他 Copilot 专属模型
+- [x] **整理配置与管理文档**
+  - README/config.example.yaml：新增 CopilotExecutor 部署说明、限制与故障排查
+  - 管理端文档强调 `provider=copilot` 独立性
 
-- [ ] **Document error handling**
-  - 400 Bad Request: 流式参数错误
-  - 401 Unauthorized: Token 无效或过期
-  - 429 Too Many Requests: 速率限制
-  - 500 Internal Server Error: 上游错误
+## Phase 4: 验证与回归
 
-## Phase 3: Validation & Testing
-
-- [ ] **Run openspec validate**
+- [x] **Run openspec validate**
   - `openspec validate formalize-copilot-api-requirements --strict`
-  - 解决所有验证错误
+  - 修复新增规范文件的校验问题
 
-- [ ] **Integration testing**
-  - 测试 OAuth Device Flow 登录
-  - 测试 chat/completions 请求（流式 + 非流式）
-  - 测试 token 刷新机制
-  - 测试端点选择优先级
-
-- [ ] **Log verification**
-  - 验证请求日志格式正确
-  - 确认敏感信息被正确遮蔽
-
-## Phase 4: Documentation Update
-
-- [ ] **Update README.md**
-  - 添加 Copilot 配置说明
-  - 添加已知限制（必须使用流式）
-
-- [ ] **Update config.example.yaml**
-  - 添加 Copilot OAuth 配置示例
-  - 注释说明各字段含义
+- [x] **集成 & 回归测试**
+  - OAuth Device Flow、token 刷新
+  - `/v1/chat/completions`、`/v1/messages`（流式/非流式）对 Copilot 模型的路径
+  - 验证 Codex/OpenAI 模型未被回归
+  - 日志：确认敏感字段遮蔽仍然生效
 
 ## Validation Checklist
 
-每个任务完成后验证：
-- [ ] 代码符合 Go 代码规范（gofmt/goimports）
-- [ ] 日志记录适当（使用 logrus 分级）
-- [ ] 错误处理完整（不吞错）
-- [ ] 测试覆盖关键路径
-- [ ] OpenSpec 验证通过
+每个阶段完成后验证：
+- [x] Go 代码通过 gofmt/goimports
+- [x] 独立 Copilot 执行器与 Codex 执行器互不影响
+- [x] 流式/非流式测试覆盖 Copilot 关键路径
+- [x] 管理端与开放接口返回的 provider/id 正确
+- [x] OpenSpec 校验通过
 
 ## Dependencies
 
-- 无外部依赖
-- 修改限于现有 Copilot 实现，不引入新组件
+- 无新增外部依赖
+- 需要对现有 Copilot 认证、执行器和注册流程进行重构
 
 ## Estimated Effort
 
-- Phase 1: 30 分钟（代码修改 + 测试）
-- Phase 2: 2 小时（编写规范文档）
-- Phase 3: 1 小时（验证测试）
-- Phase 4: 30 分钟（文档更新）
-- **总计**: 约 4 小时
+- Phase 1: 2 小时（执行器拆分 + 测试）
+- Phase 2: 1.5 小时（模型注册与路由）
+- Phase 3: 1 小时（规范与文档）
+- Phase 4: 1 小时（验证与回归）
+- **总计**: 约 5.5 小时

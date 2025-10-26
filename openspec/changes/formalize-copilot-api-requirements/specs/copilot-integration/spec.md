@@ -2,6 +2,26 @@
 
 ## ADDED Requirements
 
+### Requirement: Copilot 执行器独立
+
+The system SHALL route every Copilot request through a dedicated executor rather than the shared Codex executor.
+
+**Rationale**: Copilot 与 Codex 拥有不同的协议细节与模型列表，解耦可以降低维护风险。
+
+#### Scenario: Provider-based executor selection
+- **GIVEN** the auth manager selects provider `copilot`
+- **WHEN** invoking the execution pipeline
+- **THEN** the system SHALL instantiate or reuse `CopilotExecutor`
+- **AND** SHALL NOT invoke `CodexExecutor` for the same request
+
+#### Scenario: Codex 路径保持独立
+- **GIVEN** a request targeting Codex/OpenAI 模型
+- **WHEN**执行执行器选择
+- **THEN** the system SHALL continue调用 `CodexExecutor`
+- **AND** Copilot 执行器 SHALL NOT register itself as provider for非 Copilot 模型
+
+---
+
 ### Requirement: Copilot Chat Completions 使用流式传输
 
 The system SHALL always negotiate streaming transport with the Copilot chat/completions endpoint (`stream=true`) and correctly consume upstream Server-Sent Events (SSE).
@@ -111,7 +131,7 @@ The system SHALL include all required HTTP headers when making requests to GitHu
 
 #### Scenario: Mandatory headers for chat/completions
 - **GIVEN** a Copilot chat/completions request
-- **WHEN** building HTTP request via `applyCodexHeaders()`
+- **WHEN** the Copilot executor builds the upstream HTTP request
 - **THEN** the system SHALL set:
   - `Authorization: Bearer <access_token>`
   - `Content-Type: application/json`
@@ -119,9 +139,11 @@ The system SHALL include all required HTTP headers when making requests to GitHu
   - `user-agent: GitHubCopilotChat/0.26.7`
   - `editor-version: vscode/1.0`
   - `editor-plugin-version: copilot-chat/0.26.7`
+  - `copilot-integration-id: vscode-chat`
   - `openai-intent: conversation-panel`
   - `x-github-api-version: 2025-04-01`
   - `x-request-id: <UUID>`
+  - `x-vscode-user-agent-library-version: electron-fetch`
 
 #### Scenario: User-Agent version consistency
 - **GIVEN** upstream Copilot API version requirements
@@ -139,11 +161,17 @@ The system SHALL maintain an accurate inventory of Copilot-specific models that 
 
 #### Scenario: Copilot-only models
 - **GIVEN** provider `copilot`
-- **WHEN** listing models via `/v1/models` or management API
-- **THEN** the system SHALL expose:
+- **WHEN** listing models via `/v1/models` 或管理端
+- **THEN** the system SHALL expose upstream `/models` 返回的可用模型，至少包含：
   - `gpt-5-mini`
   - `grok-code-fast-1`
-- **AND** these models SHALL NOT appear under `openai`, `codex`, or `openai-compat` providers
+  - `gpt-5`
+  - `gpt-4.1`
+  - `gpt-4`
+  - `gpt-4o-mini`
+  - `gpt-3.5-turbo`
+- **AND** 当 upstream 暴露额外预览或企业模型时，系统 SHOULD 及时同步
+- **AND** 上述模型 SHALL NOT 出现在 `openai`、`codex` 或 `openai-compat` provider 下
 
 #### Scenario: Model registry seeding
 - **GIVEN** no copilot auth registered
@@ -223,6 +251,26 @@ The system SHALL define clear YAML configuration structure for Copilot OAuth set
 - **WHEN** calculating refresh timing
 - **THEN** the system SHALL subtract this value from `refresh_in`
 - **AND** default SHALL be 60 seconds
+
+---
+
+### Requirement: Copilot Chat Completions Payload 兼容性
+
+The system SHALL preserve structured message content and tool metadata when translating to Copilot chat/completions payloads.
+
+**Rationale**: 官方 Copilot API 支持富文本、图像及工具调用格式；代理需要完整透传以保持兼容性。
+
+#### Scenario: Structured content blocks
+- **GIVEN** a caller message whose `content` 字段为数组（包含 `type: "text"` 或 `type: "image_url"`）
+- **WHEN** 构建 Copilot 请求
+- **THEN** the system SHALL 原样复制数组及各项字段
+- **AND** SHALL 触发 vision header (`copilot-vision-request: true`) 当存在图像块时
+
+#### Scenario: Tool call propagation
+- **GIVEN** caller payload包含 `tool_calls` 或 `tool_choice`
+- **WHEN** 翻译为 Copilot 请求
+- **THEN** the system SHALL 复制函数名与 JSON 字符串参数
+- **AND** SHALL 确保 Copilot 返回的工具调用以 OpenAI 结构映射回调用方
 
 ---
 

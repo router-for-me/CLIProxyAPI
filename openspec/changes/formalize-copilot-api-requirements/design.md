@@ -6,21 +6,23 @@ CLIProxyAPI 当前实现对 GitHub Copilot 的支持存在多个与官方 API �
 
 ## Design Decisions
 
-### 1. 复用 Codex Executor vs 创建独立 Copilot Executor
+### 1. 创建独立的 Copilot Executor
 
-**决策**: 保持复用 CodexExecutor，通过 `identifier="copilot"` 区分
+**决策**: 从 CodexExecutor 拆分 Copilot 专属逻辑，创建 `CopilotExecutor`
 
 **理由**:
-- ✅ 最小化代码变更，降低风险
-- ✅ Copilot 与 Codex 共享大部分 HTTP 客户端逻辑（代理、超时、请求头）
-- ✅ 通过 `if e.Identifier() == "copilot"` 条件分支已实现差异化处理
-- ⚠️ 缺点：端点逻辑混合在同一执行器中，可读性略降
+- ✅ Copilot 拥有独特的请求头、SSE 聚合、vision 检测，集中管理更易维护
+- ✅ 与 Codex/OpenAI 执行路径解耦，降低彼此回归风险
+- ✅ 便于后续扩展 Copilot 专属功能（例如模型差异化、重试策略、错误语义）
+- ⚠️ 需要确保 OAuth 刷新与管理端注册流程平滑迁移
 
 **替代方案考虑**:
-- 创建 `CopilotChatExecutor`: 优点是清晰分离，缺点是代码重复，维护成本高
+- 继续复用 CodexExecutor：短期改动较小，但随着差异增多，维护成本持续攀升
 
-**未来优化路径**:
-- 如果 Copilot 差异化需求增加（如特殊重试策略、不同认证方式），可重构为独立执行器
+**拆分范围**:
+- 请求构建：headers、vision、X-Initiator 逻辑移入新执行器
+- 响应处理：SSE 聚合与 usage 统计在 CopilotExecutor 内部完成
+- 认证刷新：保留现有机制造型，但入口切换到新执行器
 
 ---
 
@@ -41,42 +43,45 @@ CLIProxyAPI 当前实现对 GitHub Copilot 的支持存在多个与官方 API �
 ```
 
 **影响分析**:
-- 现有用户: 无影响（当前实现本身就失败）
-- 新用户: 正常工作
-- 向后兼容性: 完全兼容
+- 现有用户：需要验证请求仍然成功，路径切换结果透明
+- Codex/OpenAI 用户：不再共享 Copilot 分支，降低风险
+- 向后兼容性：provider 名称保持 `copilot`，无需外部配置迁移
 
 ---
 
 ### 3. 端点选择优先级设计
 
-**决策**: 四级优先级链，支持灵活配置和 token 自动派生
+**决策**: 三级优先级链，仅依赖显式配置与官方默认域
 
 **优先级**:
 1. `auth.Attributes["base_url"]` - 用户显式配置
 2. `auth.Metadata["base_url"]` - 元数据覆盖
-3. Token 派生 `proxy-ep=<host>` - 自动检测
-4. 默认 `https://api.githubcopilot.com` - 官方端点
+3. 默认 `https://api.githubcopilot.com` - 官方端点
 
 **理由**:
 - ✅ 支持企业自建代理（优先级 1）
 - ✅ 支持动态配置（优先级 2）
-- ✅ 支持个人 Copilot token（优先级 3，常见格式）
-- ✅ 提供稳定后备（优先级 4）
+- ✅ 默认回落到官方域，避免复用已弃用的 `proxy-ep` 路径
 
 **端点路径处理**:
-- ❌ 拒绝 `/backend-api/codex` 后缀（Codex Responses API 专用）
-- ✅ 统一使用 `/chat/completions` 端点（Copilot Chat API）
+- ✅ 默认 `https://api.githubcopilot.com/chat/completions`
+- ✅ 支持显式配置 `base_url` 覆盖
 
 **实现细节**:
 ```go
 // service.go:199-205 - 清理无效路径
 if strings.HasSuffix(strings.TrimRight(raw, "/"), "/backend-api/codex") {
-    delete(auth.Attributes, "base_url")  // 强制回退到默认或 token 派生
+    delete(auth.Attributes, "base_url")  // 强制回退到默认域
 }
 
-// codex_executor.go:65-85 - 端点选择
-candidate := attributes.base_url || metadata.base_url || deriveCopilotBaseFromToken(token)
-if candidate == "" { candidate = "https://api.githubcopilot.com" }
+// copilot_executor.go:300+ - 端点选择
+candidate := strings.TrimSpace(attributes.base_url)
+if candidate == "" {
+    candidate = strings.TrimSpace(metadata.base_url)
+}
+if candidate == "" {
+    candidate = "https://api.githubcopilot.com"
+}
 url := strings.TrimSuffix(candidate, "/") + "/chat/completions"
 ```
 
@@ -182,9 +187,14 @@ x-request-id: <UUID>
 
 **决策**: Copilot 模型独立于 OpenAI/Codex，使用 seed 预注册机制
 
-**模型列表**:
+**模型列表（基于 Copilot `/models` 响应）**:
 - `gpt-5-mini`
-- `grok-code-fast-1`
+- `gpt-5`
+- `gpt-4.1`
+- `gpt-4`
+- `gpt-4o-mini`
+- `gpt-3.5-turbo`
+> 备注：若 upstream 返回 preview/enterprise 模型，应追加到 seed 表并同步管理端展示。
 
 **Seed 注册流程**:
 ```
@@ -194,7 +204,7 @@ ensureCopilotModelsRegistered()
   ↓
 GlobalModelRegistry().Register(
   clientID: "copilot:models:seed",
-  models: [gpt-5-mini, grok-code-fast-1]
+  models: [gpt-5-mini, gpt-5, gpt-4.1, gpt-4, gpt-4o-mini, gpt-3.5-turbo]
 )
   ↓
 用户添加 Copilot auth
@@ -204,7 +214,7 @@ applyCoreAuthAddOrUpdate()
 GlobalModelRegistry().UnregisterClient("copilot:models:seed")
 GlobalModelRegistry().Register(
   clientID: auth.ID,
-  models: [gpt-5-mini, grok-code-fast-1]
+  models: [gpt-5-mini, gpt-5, gpt-4.1, gpt-4, gpt-4o-mini, gpt-3.5-turbo]
 )
 ```
 
@@ -288,9 +298,9 @@ GlobalModelRegistry().Register(
 - **理由**: 避免用户困惑，确保 Copilot 请求始终成功
 
 ### Trade-off 2: 复用 Codex Executor vs 独立执行器
-- **选择**: 复用
-- **替代**: 创建 CopilotChatExecutor
-- **理由**: 减少代码重复，降低维护成本（当前差异化需求少）
+- **选择**: 独立执行器
+- **替代**: 继续复用 CodexExecutor
+- **理由**: 随 Copilot 差异化需求增加，解耦能降低维护成本并提升可测试性
 
 ### Trade-off 3: 端点硬编码 vs 全配置化
 - **选择**: 默认硬编码 + 配置覆盖
@@ -319,34 +329,33 @@ GlobalModelRegistry().Register(
 ## Migration Path
 
 ### 从当前实现迁移
-1. **无配置变更**: 用户无需修改 YAML
-2. **无数据迁移**: 现有 auth JSON 文件完全兼容
-3. **行为变更**: 从失败（400）→ 成功（200），纯改进
+1. **执行器切换**: 在注册阶段将 Copilot auth 绑定到新执行器
+2. **模型注册更新**: 重新 seed Copilot 模型，确保 provider 信息正确
+3. **配置兼容**: 现有 YAML/OAuth 文件无需调整，内部路由自动迁移
 
 ### 向后兼容性
-- ✅ 配置文件格式不变
-- ✅ API 接口不变
-- ✅ 认证流程不变
-- ✅ 日志格式不变（仅内容变化：stream=true）
+- ✅ 对外接口保持一致（/v1/chat/completions、/v1/models 等）
+- ✅ Copilot auth JSON/刷新策略沿用现有字段
+- ⚠️ 需要验证旧日志/指标面板是否识别新的 provider id
 
 ---
 
 ## Testing Strategy
 
 ### 单元测试
-- [ ] `deriveCopilotBaseFromToken()` - 各种 token 格式
-- [ ] `shouldRefresh()` - 刷新时机计算
-- [ ] `sanitizeCopilotOAuth()` - 配置默认值
+- [ ] `CopilotExecutor` 非流式调用 → 翻译输出/usage 统计
+- [ ] `CopilotExecutor` 流式聚合 → message_start/complete 流程
+- [ ] `registerModelsForAuth()` → `provider=copilot` 时仅注册 Copilot 模型
 
 ### 集成测试
-- [ ] OAuth Device Flow - Mock GitHub API
-- [ ] Token 刷新 - Mock GitHub API
-- [ ] 端点选择 - 各优先级场景
+- [ ] Manager 选择器：Copilot provider 走独立执行器
+- [ ] OAuth Refresh：拆分后仍能触发刷新并更新 metadata
+- [ ] `/v1/models`：Copilot 模型展示正确 provider
 
 ### E2E 测试
-- [ ] Chat/completions 请求 - Mock Copilot API
-- [ ] SSE 流式响应 - 完整生命周期
-- [ ] 错误处理 - 各 HTTP 状态码
+- [ ] Chat/completions 流式/非流式
+- [ ] `/v1/messages` 透传 Copilot 输出
+- [ ] 管理端 `/v0/management/models?provider=copilot`
 
 ---
 

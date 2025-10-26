@@ -83,6 +83,21 @@ quota-exceeded:
 #      - name: "moonshotai/kimi-k2:free" # The actual model name.
 #        alias: "kimi-k2" # The alias used in the API.
 
+# GitHub Copilot OAuth (optional). Defaults are embedded so this block is not required.
+#copilot-oauth:
+#  auth-url: "https://github.com/login/oauth/authorize"
+#  token-url: "https://github.com/login/oauth/access_token"
+#  client-id: "<GitHub OAuth App Client ID>"
+#  redirect-port: 54556
+#  scope: "openid email profile offline_access"
+#  github-base-url: "https://github.com"
+#  github-api-base-url: "https://api.github.com"
+#  github-client-id: "<GitHub Device Flow Client ID>"
+
+# Copilot runtime tuning knobs (optional)
+copilot:
+  refresh-safety-margin-seconds: 60
+
 # Packycode (optional): forward Claude Code compatible requests to the Packycode upstream
 #packycode:
 #  enabled: false

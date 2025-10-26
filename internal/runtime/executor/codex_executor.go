@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	copilotoauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -63,104 +61,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
-	// Special-case Copilot: call Copilot chat/completions with streaming semantics and required headers.
-	if e.Identifier() == "copilot" {
-		candidate := resolveCopilotBaseURL(strings.TrimSpace(baseURL), strings.TrimSpace(apiKey))
-		if candidate == "" {
-			candidate = "https://api.githubcopilot.com"
-		}
-		url := strings.TrimSuffix(candidate, "/") + "/chat/completions"
-		var (
-			original   = bytes.Clone(opts.OriginalRequest)
-			httpBody   = enforceCopilotStreamFlag(bytes.Clone(opts.OriginalRequest))
-			translated = bytes.Clone(opts.OriginalRequest)
-		)
-
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(httpBody))
-		if errReq != nil {
-			return resp, errReq
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Accept", "text/event-stream")
-		if strings.TrimSpace(apiKey) != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-		httpReq.Header.Set("user-agent", "GitHubCopilotChat/0.26.7")
-		httpReq.Header.Set("editor-version", "vscode/1.0")
-		httpReq.Header.Set("editor-plugin-version", "copilot-chat/0.26.7")
-		httpReq.Header.Set("openai-intent", "conversation-panel")
-		httpReq.Header.Set("x-github-api-version", "2025-04-01")
-		httpReq.Header.Set("x-request-id", uuid.NewString())
-		if initiator := detectCopilotInitiator(original); initiator != "" {
-			httpReq.Header.Set("X-Initiator", initiator)
-		}
-		if detectCopilotVision(original) {
-			httpReq.Header.Set("copilot-vision-request", "true")
-		}
-
-		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-			URL:      url,
-			Method:   http.MethodPost,
-			Headers:  httpReq.Header.Clone(),
-			Body:     httpBody,
-			Provider: e.Identifier(),
-		})
-
-		httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-		httpResp, errDo := httpClient.Do(httpReq)
-		if errDo != nil {
-			recordAPIResponseError(ctx, e.cfg, errDo)
-			return resp, errDo
-		}
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("codex executor: close response body error: %v", errClose)
-			}
-		}()
-
-		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			data, _ := io.ReadAll(httpResp.Body)
-			appendAPIResponseChunk(ctx, e.cfg, data)
-			return resp, statusErr{code: httpResp.StatusCode, msg: string(data)}
-		}
-
-		// Aggregate streaming response into a single OpenAI chat completion.
-		var (
-			param any
-			final string
-		)
-		scanner := bufio.NewScanner(httpResp.Body)
-		buf := make([]byte, 20_971_520)
-		scanner.Buffer(buf, 20_971_520)
-		for scanner.Scan() {
-			line := bytes.Clone(scanner.Bytes())
-			appendAPIResponseChunk(ctx, e.cfg, line)
-			if !bytes.HasPrefix(line, dataTag) {
-				continue
-			}
-			data := bytes.TrimSpace(line[len(dataTag):])
-			if bytes.Equal(data, []byte("[DONE]")) {
-				break
-			}
-			if gjson.GetBytes(data, "type").String() == "response.completed" {
-				if detail, ok := parseCodexUsage(data); ok {
-					reporter.publish(ctx, detail)
-				}
-				final = sdktranslator.TranslateNonStream(ctx, sdktranslator.FromString("codex"), from, req.Model, original, translated, data, &param)
-				break
-			}
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			return resp, errScan
-		}
-		if final == "" {
-			return resp, statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
-		}
-		resp = cliproxyexecutor.Response{Payload: []byte(final)}
-		return resp, nil
-	}
 	to := sdktranslator.FromString("codex")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 
@@ -274,105 +174,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
-
-	if e.Identifier() == "copilot" {
-		candidate := resolveCopilotBaseURL(strings.TrimSpace(baseURL), strings.TrimSpace(apiKey))
-		if candidate == "" {
-			candidate = "https://api.githubcopilot.com"
-		}
-		url := strings.TrimSuffix(candidate, "/") + "/chat/completions"
-		var (
-			original   = bytes.Clone(opts.OriginalRequest)
-			httpBody   = enforceCopilotStreamFlag(bytes.Clone(opts.OriginalRequest))
-			translated = bytes.Clone(opts.OriginalRequest)
-		)
-
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(httpBody))
-		if errReq != nil {
-			return nil, errReq
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Accept", "text/event-stream")
-		if strings.TrimSpace(apiKey) != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-		httpReq.Header.Set("user-agent", "GitHubCopilotChat/0.26.7")
-		httpReq.Header.Set("editor-version", "vscode/1.0")
-		httpReq.Header.Set("editor-plugin-version", "copilot-chat/0.26.7")
-		httpReq.Header.Set("openai-intent", "conversation-panel")
-		httpReq.Header.Set("x-github-api-version", "2025-04-01")
-		httpReq.Header.Set("x-request-id", uuid.NewString())
-		if initiator := detectCopilotInitiator(original); initiator != "" {
-			httpReq.Header.Set("X-Initiator", initiator)
-		}
-		if detectCopilotVision(original) {
-			httpReq.Header.Set("copilot-vision-request", "true")
-		}
-
-		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-			URL:      url,
-			Method:   http.MethodPost,
-			Headers:  httpReq.Header.Clone(),
-			Body:     httpBody,
-			Provider: e.Identifier(),
-		})
-
-		httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-		httpResp, errDo := httpClient.Do(httpReq)
-		if errDo != nil {
-			recordAPIResponseError(ctx, e.cfg, errDo)
-			return nil, errDo
-		}
-		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			data, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, data)
-			return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
-		}
-
-		out := make(chan cliproxyexecutor.StreamChunk)
-		stream = out
-		go func() {
-			defer close(out)
-			defer func() {
-				if errClose := httpResp.Body.Close(); errClose != nil {
-					log.Errorf("codex executor: close response body error: %v", errClose)
-				}
-			}()
-			var param any
-			scanner := bufio.NewScanner(httpResp.Body)
-			buf := make([]byte, 20_971_520)
-			scanner.Buffer(buf, 20_971_520)
-			for scanner.Scan() {
-				line := bytes.Clone(scanner.Bytes())
-				appendAPIResponseChunk(ctx, e.cfg, line)
-				trimmed := bytes.TrimSpace(line)
-				if !bytes.HasPrefix(trimmed, dataTag) {
-					continue
-				}
-				payload := bytes.TrimSpace(trimmed[len(dataTag):])
-				if bytes.Equal(payload, []byte("[DONE]")) {
-					break
-				}
-				chunks := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("codex"), from, req.Model, original, translated, line, &param)
-				for _, chunk := range chunks {
-					out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk)}
-				}
-				if gjson.GetBytes(payload, "type").String() == "response.completed" {
-					if detail, ok := parseCodexUsage(payload); ok {
-						reporter.publish(ctx, detail)
-					}
-				}
-			}
-			if errScan := scanner.Err(); errScan != nil {
-				recordAPIResponseError(ctx, e.cfg, errScan)
-				reporter.publishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: errScan}
-			}
-		}()
-		return stream, nil
-	}
 
 	to := sdktranslator.FromString("codex")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
@@ -498,62 +299,6 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
 	}
 
-	// Copilot branch: use GitHub device-flow token to fetch new copilot token
-	if e.Identifier() == "copilot" {
-		var ghPAT string
-		if auth.Metadata != nil {
-			if v, ok := auth.Metadata["github_access_token"].(string); ok {
-				ghPAT = strings.TrimSpace(v)
-			}
-		}
-		if ghPAT == "" {
-			// nothing to do
-			return auth, nil
-		}
-		apiBase := strings.TrimSuffix(e.cfg.Copilot.GitHubAPIBaseURL, "/")
-		if apiBase == "" {
-			apiBase = strings.TrimSuffix(copilotoauth.DefaultGitHubAPIBaseURL, "/")
-		}
-		url := apiBase + copilotoauth.DefaultCopilotTokenPath
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		req.Header.Set("Authorization", "token "+ghPAT)
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", "cli-proxy-copilot")
-		req.Header.Set("OpenAI-Intent", "copilot-cli-refresh")
-		req.Header.Set("Editor-Plugin-Name", "cli-proxy")
-		req.Header.Set("Editor-Plugin-Version", "1.0.0")
-		req.Header.Set("Editor-Version", "cli/1.0")
-		req.Header.Set("X-GitHub-Api-Version", "2023-07-07")
-		httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			b, _ := io.ReadAll(resp.Body)
-			return nil, statusErr{code: resp.StatusCode, msg: string(b)}
-		}
-		var out struct {
-			Token     string `json:"token"`
-			ExpiresAt int64  `json:"expires_at"`
-			RefreshIn int    `json:"refresh_in"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			return nil, err
-		}
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["access_token"] = out.Token
-		auth.Metadata["expires_at"] = out.ExpiresAt
-		auth.Metadata["refresh_in"] = out.RefreshIn
-		auth.Metadata["expired"] = time.Now().Add(time.Duration(out.RefreshIn) * time.Second).Format(time.RFC3339)
-		auth.Metadata["type"] = "copilot"
-		auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
-		return auth, nil
-	}
-
 	// Default (Codex/OpenAI) refresh using refresh_token
 	var refreshToken string
 	if auth.Metadata != nil {
@@ -629,7 +374,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string) {
 	r.Header.Set("Content-Type", "application/json")
-	// Use Authorization Bearer for all providers including copilot
+	// Use Authorization Bearer for every provider (Codex/OpenAI-aligned)
 	r.Header.Set("Authorization", "Bearer "+token)
 
 	var ginHeaders http.Header
@@ -683,109 +428,7 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 			}
 		}
 	}
-	// Copilot-specific convenience: derive base_url from access_token when absent.
-	// The Copilot token often embeds a "proxy-ep=" hint (e.g., proxy.individual.githubcopilot.com).
-	// We map it to "https://<proxy-ep>/backend-api/codex" to keep existing routing behavior.
-	if strings.EqualFold(a.Provider, "copilot") && baseURL == "" && strings.TrimSpace(apiKey) != "" {
-		if derived := deriveCopilotBaseFromToken(apiKey); derived != "" {
-			baseURL = derived
-		}
-	}
 	return
-}
-
-// deriveCopilotBaseFromToken extracts proxy endpoint from a Copilot access_token when present.
-// Example token fragment: "...;proxy-ep=proxy.individual.githubcopilot.com;..."
-// Returns: "https://<proxy-ep>/backend-api/codex" or empty string when not derivable.
-func deriveCopilotBaseFromToken(tok string) string {
-	tok = strings.TrimSpace(tok)
-	if tok == "" {
-		return ""
-	}
-	// Quick path: look for "proxy-ep=" marker
-	const marker = "proxy-ep="
-	if idx := strings.Index(tok, marker); idx >= 0 {
-		rest := tok[idx+len(marker):]
-		// end at next semicolon or string end
-		if end := strings.IndexByte(rest, ';'); end >= 0 {
-			rest = rest[:end]
-		}
-		host := strings.TrimSpace(rest)
-		if host != "" {
-			// If already has scheme keep it, else default to https
-			if !strings.Contains(host, "://") {
-				host = "https://" + host
-			}
-			host = strings.TrimRight(host, "/")
-			if !strings.HasSuffix(host, "/backend-api/codex") {
-				host += "/backend-api/codex"
-			}
-			return host
-		}
-	}
-	return ""
-}
-
-func resolveCopilotBaseURL(baseURL, apiKey string) string {
-	candidate := strings.TrimSpace(baseURL)
-	if candidate == "" && strings.TrimSpace(apiKey) != "" {
-		if derived := deriveCopilotBaseFromToken(apiKey); derived != "" {
-			candidate = derived
-		}
-	}
-	candidate = strings.TrimSuffix(strings.TrimSuffix(candidate, "/"), "/backend-api/codex")
-	return candidate
-}
-
-func enforceCopilotStreamFlag(body []byte) []byte {
-	if !gjson.ParseBytes(body).Get("stream").Exists() {
-		body, _ = sjson.SetBytes(body, "stream", true)
-		return body
-	}
-	body, _ = sjson.SetBytes(body, "stream", true)
-	return body
-}
-
-func detectCopilotInitiator(body []byte) string {
-	messages := gjson.GetBytes(body, "messages")
-	if !messages.IsArray() {
-		return "user"
-	}
-	for _, msg := range messages.Array() {
-		role := strings.ToLower(strings.TrimSpace(msg.Get("role").String()))
-		if role == "assistant" || role == "tool" {
-			return "agent"
-		}
-	}
-	return "user"
-}
-
-func detectCopilotVision(body []byte) bool {
-	if gjson.GetBytes(body, "copilot_vision_request").Bool() {
-		return true
-	}
-	messages := gjson.GetBytes(body, "messages")
-	if !messages.IsArray() {
-		return false
-	}
-	for _, msg := range messages.Array() {
-		content := msg.Get("content")
-		if !content.Exists() {
-			continue
-		}
-		if content.IsArray() {
-			for _, block := range content.Array() {
-				if strings.EqualFold(block.Get("type").String(), "image_url") {
-					return true
-				}
-			}
-		} else if content.Type == gjson.String {
-			if strings.Contains(content.String(), "image_url") {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func translateForCodex(from sdktranslator.Format, model string, payload []byte, stream bool) []byte {

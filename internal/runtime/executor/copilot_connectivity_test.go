@@ -81,7 +81,7 @@ func TestCopilotExecute_StreamsSSEAndTranslates(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5-mini", Payload: payload}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai"), OriginalRequest: payload}
 
-	exec := NewCodexExecutorWithID(&config.Config{}, "copilot")
+	exec := NewCopilotExecutor(&config.Config{})
 	resp, err := exec.Execute(context.Background(), auth, req, opts)
 	if err != nil {
 		t.Fatalf("execute error: %v", err)
@@ -110,6 +110,12 @@ func TestCopilotExecute_StreamsSSEAndTranslates(t *testing.T) {
 	if headerCopy.Get("copilot-vision-request") != "" {
 		t.Fatalf("unexpected vision header present")
 	}
+	if got := headerCopy.Get("copilot-integration-id"); got != "vscode-chat" {
+		t.Fatalf("expected copilot-integration-id vscode-chat, got %q", got)
+	}
+	if got := headerCopy.Get("x-vscode-user-agent-library-version"); got != "electron-fetch" {
+		t.Fatalf("expected x-vscode-user-agent-library-version electron-fetch, got %q", got)
+	}
 
 	var parsed struct {
 		Choices []struct {
@@ -136,6 +142,7 @@ func TestCopilotExecute_SetsAgentAndVisionHeaders(t *testing.T) {
 
 	var (
 		mu        sync.Mutex
+		gotBody   []byte
 		gotHeader http.Header
 	)
 
@@ -145,8 +152,10 @@ func TestCopilotExecute_SetsAgentAndVisionHeaders(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected flusher")
 		}
+		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		gotHeader = r.Header.Clone()
+		gotBody = append([]byte(nil), body...)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
 		emitCopilotSSE(w, flusher, "agent")
@@ -156,17 +165,18 @@ func TestCopilotExecute_SetsAgentAndVisionHeaders(t *testing.T) {
 	defer fake.Close()
 
 	auth := newTestCopilotAuth(fake.URL)
-	payload := []byte(`{"model":"gpt-5-mini","messages":[{"role":"assistant","content":"tool reply"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/img.png"}}]}]}`)
+	payload := []byte(`{"model":"gpt-5-mini","messages":[{"role":"assistant","content":"tool reply"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/img.png"}}]}],"tool_calls":[{"id":"call_1","type":"function","function":{"name":"do","arguments":"{\"k\":\"v\"}"}}],"tool_choice":{"type":"function","function":{"name":"do"}}}`)
 	req := cliproxyexecutor.Request{Model: "gpt-5-mini", Payload: payload}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai"), OriginalRequest: payload}
 
-	exec := NewCodexExecutorWithID(&config.Config{}, "copilot")
+	exec := NewCopilotExecutor(&config.Config{})
 	if _, err := exec.Execute(context.Background(), auth, req, opts); err != nil {
 		t.Fatalf("execute error: %v", err)
 	}
 
 	mu.Lock()
 	headerCopy := gotHeader.Clone()
+	bodyCopy := append([]byte(nil), gotBody...)
 	mu.Unlock()
 
 	if got := headerCopy.Get("X-Initiator"); got != "agent" {
@@ -174,6 +184,18 @@ func TestCopilotExecute_SetsAgentAndVisionHeaders(t *testing.T) {
 	}
 	if got := headerCopy.Get("copilot-vision-request"); got != "true" {
 		t.Fatalf("expected copilot-vision-request true, got %q", got)
+	}
+	if got := headerCopy.Get("copilot-integration-id"); got != "vscode-chat" {
+		t.Fatalf("expected copilot-integration-id vscode-chat, got %q", got)
+	}
+	if got := headerCopy.Get("x-vscode-user-agent-library-version"); got != "electron-fetch" {
+		t.Fatalf("expected x-vscode-user-agent-library-version electron-fetch, got %q", got)
+	}
+	if !gjson.GetBytes(bodyCopy, "tool_calls").Exists() {
+		t.Fatalf("expected tool_calls to be present in upstream payload: %s", bodyCopy)
+	}
+	if !gjson.GetBytes(bodyCopy, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice to be present in upstream payload: %s", bodyCopy)
 	}
 }
 
@@ -205,7 +227,7 @@ func TestCopilotExecuteStream_TranslatesChunks(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5-mini", Payload: payload}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai"), OriginalRequest: payload}
 
-	exec := NewCodexExecutorWithID(&config.Config{}, "copilot")
+	exec := NewCopilotExecutor(&config.Config{})
 	stream, err := exec.ExecuteStream(context.Background(), auth, req, opts)
 	if err != nil {
 		t.Fatalf("ExecuteStream error: %v", err)
@@ -238,5 +260,78 @@ func TestCopilotExecuteStream_TranslatesChunks(t *testing.T) {
 
 	if got := headerCopy.Get("Accept"); got != "text/event-stream" {
 		t.Fatalf("expected Accept text/event-stream, got %q", got)
+	}
+	if got := headerCopy.Get("copilot-integration-id"); got != "vscode-chat" {
+		t.Fatalf("expected copilot-integration-id vscode-chat, got %q", got)
+	}
+	if got := headerCopy.Get("x-vscode-user-agent-library-version"); got != "electron-fetch" {
+		t.Fatalf("expected x-vscode-user-agent-library-version electron-fetch, got %q", got)
+	}
+}
+
+func TestCopilotExecute_AggregatesOpenAIStyleSSE(t *testing.T) {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatalf("expected http.Flusher")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-abc\",\"created\":1700000000,\"model\":\"gpt-5-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-abc\",\"created\":1700000000,\"model\":\"gpt-5-mini\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-abc\",\"created\":1700000000,\"model\":\"gpt-5-mini\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"completion_tokens\":5,\"prompt_tokens\":3,\"total_tokens\":8}}\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	auth := newTestCopilotAuth(server.URL)
+	payload := []byte(`{"model":"gpt-5-mini","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5-mini", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai"), OriginalRequest: payload}
+
+	exec := NewCopilotExecutor(&config.Config{})
+	resp, err := exec.Execute(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("execute error: %v", err)
+	}
+
+	var parsed struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage struct {
+			CompletionTokens int `json:"completion_tokens"`
+			PromptTokens     int `json:"prompt_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(resp.Payload, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if parsed.ID != "chatcmpl-abc" {
+		t.Fatalf("unexpected response id: %q", parsed.ID)
+	}
+	if len(parsed.Choices) == 0 || parsed.Choices[0].Message.Content != "Hello" {
+		t.Fatalf("expected aggregated message \"Hello\", got %+v", parsed.Choices)
+	}
+	if parsed.Choices[0].FinishReason != "stop" {
+		t.Fatalf("expected finish_reason stop, got %q", parsed.Choices[0].FinishReason)
+	}
+	if parsed.Usage.TotalTokens != 8 {
+		t.Fatalf("expected usage total_tokens=8, got %d", parsed.Usage.TotalTokens)
 	}
 }

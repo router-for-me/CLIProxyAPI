@@ -357,30 +357,76 @@ func GetOpenAIModels() []*ModelInfo {
 }
 
 // GetCopilotModels returns model definitions exposed via the Copilot provider.
-// For now it mirrors the OpenAI models to provide a compatible set while
-// upstream Copilot model inventory is integrated.
 func GetCopilotModels() []*ModelInfo {
-    created := time.Now().Unix()
-    return []*ModelInfo{
-        {
-            ID:          "gpt-5-mini",
-            Object:      "model",
-            Created:     created,
-            OwnedBy:     "copilot",
-            Type:        "copilot",
-            DisplayName: "GPT 5 Mini",
-            Description: "Copilot-exclusive lightweight GPT-5 variant",
-        },
-        {
-            ID:          "grok-code-fast-1",
-            Object:      "model",
-            Created:     created,
-            OwnedBy:     "copilot",
-            Type:        "copilot",
-            DisplayName: "Grok Code Fast 1",
-            Description: "Grok code generation fast model via Copilot upstream",
-        },
-    }
+	created := time.Now().Unix()
+	return []*ModelInfo{
+		{
+			ID:                  "gpt-5-mini",
+			Object:              "model",
+			Created:             created,
+			OwnedBy:             "copilot",
+			Type:                "copilot",
+			DisplayName:         "GPT-5 Mini",
+			Description:         "Lightweight GitHub Copilot GPT-5 tier tuned for rapid responses.",
+			SupportedParameters: []string{"stream"},
+		},
+		{
+			ID:                  "grok-code-fast-1",
+			Object:              "model",
+			Created:             created,
+			OwnedBy:             "copilot",
+			Type:                "copilot",
+			DisplayName:         "Grok Code Fast",
+			Description:         "X Grok 快速代码生成模型，通过 Copilot 提供。",
+			SupportedParameters: []string{"stream"},
+		},
+		{
+			ID:                  "gpt-5",
+			Object:              "model",
+			Created:             created,
+			OwnedBy:             "copilot",
+			Type:                "copilot",
+			DisplayName:         "GPT-5",
+			Description:         "Flagship Copilot GPT-5 model for general chat and coding.",
+			SupportedParameters: []string{"stream"},
+		},
+		{
+			ID:          "gpt-4.1",
+			Object:      "model",
+			Created:     created,
+			OwnedBy:     "copilot",
+			Type:        "copilot",
+			DisplayName: "GPT-4.1",
+			Description: "Copilot GPT-4.1 model offering balanced reasoning and latency.",
+		},
+		{
+			ID:          "gpt-4",
+			Object:      "model",
+			Created:     created,
+			OwnedBy:     "copilot",
+			Type:        "copilot",
+			DisplayName: "GPT-4",
+			Description: "Legacy GPT-4 model available through GitHub Copilot.",
+		},
+		{
+			ID:          "gpt-4o-mini",
+			Object:      "model",
+			Created:     created,
+			OwnedBy:     "copilot",
+			Type:        "copilot",
+			DisplayName: "GPT-4o Mini",
+			Description: "Optimized GPT-4o Mini profile tailored for Copilot workloads.",
+		},
+		{
+			ID:          "gpt-3.5-turbo",
+			Object:      "model",
+			Created:     created,
+			OwnedBy:     "copilot",
+			Type:        "copilot",
+			DisplayName: "GPT-3.5 Turbo",
+			Description: "Baseline GPT-3.5 Turbo compatibility model offered by Copilot.",
+		},
+	}
 }
 
 // GetQwenModels returns the standard Qwen model definitions

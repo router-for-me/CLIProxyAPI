@@ -15,9 +15,8 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
-// End-to-end: Attributes lacks base_url; access_token carries proxy-ep with scheme+host.
-// Executor must derive base from token and hit /chat/completions on that host.
-func TestCopilot_DerivedBaseFromToken_Connectivity(t *testing.T) {
+// End-to-end: Without explicit base_url, executor should fall back to default host.
+func TestCopilot_DefaultBaseURL_Connectivity(t *testing.T) {
 	var (
 		mu        sync.Mutex
 		requested bool
@@ -38,11 +37,15 @@ func TestCopilot_DerivedBaseFromToken_Connectivity(t *testing.T) {
 	fake := httptest.NewServer(mux)
 	defer fake.Close()
 
+	originalDefault := copilotDefaultBaseURL
+	copilotDefaultBaseURL = fake.URL
+	t.Cleanup(func() { copilotDefaultBaseURL = originalDefault })
+
 	auth := &cliproxyauth.Auth{
-		ID:       "copilot:test-derived",
+		ID:       "copilot:test-default",
 		Provider: "copilot",
 		Metadata: map[string]any{
-			"access_token": "tid=abc;proxy-ep=" + fake.URL + ";exp=1",
+			"access_token": "tid=abc;exp=1",
 		},
 		Status: cliproxyauth.StatusActive,
 	}
@@ -51,7 +54,7 @@ func TestCopilot_DerivedBaseFromToken_Connectivity(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5-mini", Payload: payload}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai"), OriginalRequest: payload}
 
-	exec := NewCodexExecutorWithID(&config.Config{}, "copilot")
+	exec := NewCopilotExecutor(&config.Config{})
 	resp, err := exec.Execute(context.Background(), auth, req, opts)
 	if err != nil {
 		t.Fatalf("execute error: %v", err)

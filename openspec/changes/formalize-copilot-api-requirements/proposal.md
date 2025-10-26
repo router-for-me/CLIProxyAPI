@@ -2,64 +2,60 @@
 
 ## Problem Statement
 
-CLIProxyAPI 当前对 GitHub Copilot 的支持存在多个与官方 API 规范不符的实现：
+当前 Copilot 集成仍然强绑定 Codex Executor 与 OpenAI 路径，存在以下问题：
 
-1. **严重缺陷**：`codex_executor.go` 强制设置 `stream=false`，导致所有 Copilot chat/completions 请求失败（400 Bad Request: "stream: false is not supported"）
-2. **端点混淆**：Copilot 复用 Codex 执行器，但端点路径在 `/chat/completions` 与 `/backend-api/codex` 之间不清晰
-3. **认证规范缺失**：Token 格式验证不明确，仅依赖 `provider="copilot"` 配置匹配
-4. **日志安全风险**：`access_token` 可能完整记录在 metadata 中，仅 Authorization header 被遮蔽
-5. **参数验证缺失**：不支持的参数被静默丢弃，无告警
+1. **职责混杂**：Copilot 专属逻辑（SSE 聚合、vision header、X-Initiator、token 刷新）深嵌在 `codex_executor.go` 中，影响 Codex/OpenAI 维护。
+2. **模型注册不清晰**：Copilot 模型通过 Codex provider 暴露，在 `/v1/models` 与管理端查询时难以区分，provider 轮询逻辑也受影响。
+3. **扩展受限**：后续若 Copilot 引入新的认证、公有模型或错误语义，将与 Codex 路径互相牵制，难以独立演进。
+4. **测试覆盖不足**：复用路径导致 Copilot 与 Codex 难以分别验证，回归风险高。
 
 ## Proposed Solution
 
-通过规范化 GitHub Copilot 的集成要求，明确以下方面：
+将 Copilot 集成解耦为独立执行路径，包含：
 
-1. **流式响应要求**：强制 Copilot chat/completions 使用 `stream=true`
-2. **端点规范**：明确 Copilot 使用 `/chat/completions` 端点，与 Codex Responses API 分离
-3. **认证机制**：规范 OAuth Device Flow、Token 格式、Bearer 认证
-4. **请求头规范**：明确必需的请求头（user-agent, editor-version, x-github-api-version 等）
-5. **错误处理**：规范化错误响应和重试策略
-6. **模型参数**：定义支持的模型和参数集合
+1. **创建 CopilotExecutor**：抽出 Copilot HTTP/流式处理逻辑，保留 Codex Executor 专注 Codex/OpenAI。
+2. **独立 provider/model 注册**：Copilot 模型仅绑定 Copilot provider，管理端与 `/v1/models` 清楚显示所属。
+3. **认证与路由重构**：`sdk/cliproxy/auth` 基于 provider 选择执行器，Copilot auth 不再经过 Codex 逻辑分支。
+4. **规范同步**：更新 `copilot-integration` 规范，明确独立执行器、请求头、模型清单、错误语义。
+5. **测试与文档**：补齐 Copilot 专属单元/集成测试，更新 README 与 config 示例。
 
 ## Scope
 
 ### In Scope
-- 创建 `copilot-integration` 规范，明确所有 GitHub Copilot API 要求
-- 修复 `stream=false` 强制覆盖缺陷
-- 明确端点选择优先级（attributes.base_url → metadata.base_url → token 派生 → 默认）
-- 规范化 Copilot 认证流程（OAuth Device Flow + Bearer Token）
-- 定义必需的 HTTP 请求头
-- 明确支持的模型列表（gpt-5-mini, grok-code-fast-1 等）
+- 创建独立的 `CopilotExecutor` 与相关路由，确保 Copilot 与 Codex 执行路径解耦。
+- 拆分模型注册、provider 轮询、管理端查询，确保 `provider=copilot` 单独存在。
+- 更新 `copilot-integration` 规范、配置与 README，描述独立组件及其接口要求。
+- 补齐 Copilot 执行器的单元测试与集成测试，覆盖流式/非流式、OAuth 刷新、模型查询。
 
 ### Out of Scope
-- 创建独立的 Copilot 执行器（保留复用 Codex 执行器的现状，通过 identifier 区分）
-- 参数验证告警机制（后续优化）
-- 日志遮蔽增强（后续安全改进）
+- 新增 Copilot 模型种类（遵循上游返回即可）。
+- 重构 OAuth Device Flow 交互界面（保留现有 CLI 流程）。
+- 额外的安全增强（例如 metadata 全量遮蔽）在后续改进中处理。
 
 ## Impact Analysis
 
 ### Benefits
-- ✅ 修复所有 Copilot 请求失败的严重缺陷
-- ✅ 提供明确的 Copilot 集成规范，便于维护和验证
-- ✅ 符合 GitHub Copilot 官方 API 要求
-- ✅ 改善开发者体验，减少配置错误
+- ✅ Copilot 与 Codex 代码路径分离，降低互相干扰的风险。
+- ✅ 管理端与模型列表更清晰，便于调试与权限排查。
+- ✅ 未来可针对 Copilot 定制重试、错误处理或模型能力，而不影响 Codex。
+- ✅ 测试与调试粒度提高，便于独立验证。
 
 ### Risks
-- ⚠️ 修改流式参数可能影响现有 Copilot 用户（但当前实现本身就是失败的）
-- ⚠️ 端点配置变更需要验证与现有 token 派生逻辑的兼容性
+- ⚠️ 拆分过程中需确保 OAuth/刷新逻辑无回归。
+- ⚠️ 现有调用方若依赖旧的 provider 名称，需要额外兼容或迁移说明。
 
 ### Migration Path
-- 无需数据迁移
-- 代码修改向后兼容（仅修复缺陷）
-- 配置文件无需更新
+- 保留历史配置字段（如 `provider=copilot`）但更新内部路由。
+- 必要时提供一次性迁移脚本/说明，确保管理端与日志能看到新的 provider。
+- 验证 Copilot 模型在 `/v1/models` 中依旧可见，并在管理端查询时显式标注。
 
 ## Success Criteria
 
-1. ✅ 所有 Copilot chat/completions 请求成功（非 400 错误）
-2. ✅ 流式响应正常工作（SSE 格式正确）
-3. ✅ OAuth Device Flow 认证流程符合官方规范
-4. ✅ 请求头完整性符合官方要求
-5. ✅ `openspec validate` 通过，无冲突
+1. ✅ Copilot 请求全部经过独立执行器，Codex 路径不再依赖 Copilot 分支。
+2. ✅ `/v1/models` 与管理端返回中，Copilot 模型仅归属 `copilot` provider。
+3. ✅ OAuth Device Flow、token 刷新、流式/非流式调用通过自动化测试。
+4. ✅ `copilot-integration` 规范更新并通过 `openspec validate`。
+5. ✅ README/config 示例描述新的架构与运维要点。
 
 ## Related Work
 - 参考现有 `provider-integration` 规范中的 Copilot 相关要求

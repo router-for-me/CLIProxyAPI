@@ -210,15 +210,21 @@ CLIProxyAPI 的基于 Web 的管理中心。
     ```
 
   - Copilot 模型与破坏性变更（重要）：
-    - Copilot 现为独立库存，不再镜像 OpenAI 模型列表；
-    - 目前 Copilot 仅暴露一个模型：`gpt-5-mini`（仅 provider=copilot）；
-    - 若需要其它 GPT-5 变体（如 `gpt-5`、`gpt-5-minimal`、`gpt-5-codex-*`），请改用 `codex/openai` provider；
+    - Copilot 请求现已通过独立的 `CopilotExecutor` 执行，与 Codex/OpenAI 完全解耦；
+    - Copilot 拥有独立库存，不再镜像 OpenAI 模型列表，当前默认种子包含：
+      - `gpt-5-mini`
+      - `gpt-5`
+      - `gpt-4.1`
+      - `gpt-4`
+      - `gpt-4o-mini`
+      - `gpt-3.5-turbo`
     - 设备码申请必须 `Accept: application/json`（服务端已自动设置）；
-    - Copilot token 交换需要携带 `User-Agent`、`OpenAI-Intent`、`Editor-Plugin-*`、`Editor-Version`、`X-GitHub-Api-Version` 等头（服务端已自动设置）；
+    - Copilot chat/completions 始终以 `stream=true` 与上游通信；非流式调用由代理聚合 SSE；
+    - Copilot token 交换与 chat 请求会自动附带 `User-Agent`、`OpenAI-Intent`、`Editor-Plugin-*`、`Editor-Version`、`X-GitHub-Api-Version`、`copilot-integration-id`、`x-vscode-user-agent-library-version` 等必需头；
     - 迁移建议：
-      - 在使用 provider=copilot 时，将 `model` 切换为 `gpt-5-mini`；
-      - 其它 GPT-5 变体请通过 `codex`/`openai` 路由；
-      - 通过 `/v1/models` 与管理端接口核对 provider↔model 的对应关系。
+      - 若目标模型在上述列表中，请使用 provider=copilot；`/v1/models` 与管理端会明确标注 `provider=copilot`；
+      - 其它 OpenAI/GPT 模型请继续通过 `codex`/`openai` 路由；
+      - 上线前请通过 `/v1/models` 与管理端接口核对 provider↔model 的对应关系。
 
 ### 启动服务器
 
