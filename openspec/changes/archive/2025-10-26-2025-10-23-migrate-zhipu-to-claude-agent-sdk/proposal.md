@@ -1,5 +1,15 @@
 # Proposal: migrate-zhipu-to-claude-agent-sdk
 
+## Why
+本变更的动机是统一通过 Claude Agent SDK Python 调用 GLM（智谱）模型，获得一致的 hooks、工具与可观测能力，并避免 Go 直连上游所带来的充值/限流/兼容性等维护成本。
+
+## What Changes
+- 将 provider="zhipu" 的执行路径迁移为通过 Python Agent Bridge（Claude Agent SDK for Python）转发至上游 GLM。
+- 保持对外 OpenAI 兼容 API（/v1/chat/completions 与 /v1/models）不变，兼容流式与非流式。
+- 新增配置开关 `claude-agent-sdk-for-python`（默认启用）与 `baseURL` 优先级路由；支持回退到 legacy 执行器。
+- 增加诊断端点 `/debug/upstream-check` 与结构化错误日志，提升排障能力。
+- 本地 Query CLI 支持 `--model` 覆盖与子进程隔离，默认模型设为 `glm-4.6`。
+
 ## Summary
 将现有对 Zhipu/GLM 的直连执行链路（Go: ZhipuExecutor → HTTP 调用 open.bigmodel.cn/chat/completions）下线，替换为通过“claude agent sdk python”执行的统一代理。Go 负责将 OpenAI 兼容请求打包并转发到 SDK 暴露的 /v1/chat/completions（包含流式与非流式），保持对外 API 与调用方式不变（./cli-proxy-api 不变）。
 

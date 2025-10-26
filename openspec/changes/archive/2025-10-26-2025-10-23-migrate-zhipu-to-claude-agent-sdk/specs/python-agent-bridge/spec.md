@@ -1,11 +1,16 @@
-## MODIFIED Requirements: Zhipu Provider Execution
+## ADDED Requirements
 
-#### Requirement: Replace direct Zhipu HTTP executor with Python Agent SDK bridge
+### Requirement: Replace direct Zhipu HTTP executor with Python Agent SDK bridge
 - The system MUST route all provider="zhipu" executions to a Python Agent Bridge (PAB) that uses Claude Agent SDK (Python) to call GLM models.
 - The Go service MUST expose the same OpenAI-compatible endpoints (/v1/chat/completions, streaming and non-streaming) unchanged.
 - The PAB MUST support both streaming and non-streaming responses and error pass-through semantics.
 
-#### Requirement: bridge URL selection priority
+#### Scenario: Forwarding via Python Agent Bridge
+- **GIVEN** provider="zhipu" and model starts with "glm-"
+- **WHEN** the client sends a valid OpenAI-compatible request to `/v1/chat/completions`
+- **THEN** the Go service forwards the request body to the Python Agent Bridge and returns the response without semantic changes in OpenAI format.
+
+### Requirement: bridge URL selection priority
 - When Claude Agent SDK for Python is enabled (claude-agent-sdk-for-python.enabled=true), the bridge base URL MUST be selected with the following priority:
   1) config.claude-agent-sdk-for-python.baseURL (if non-empty)
   2) environment variable CLAUDE_AGENT_SDK_URL (if non-empty)
@@ -44,7 +49,7 @@ Then Go forwards to PAB using an SSE-compatible stream and relays chunks to clie
 When PAB returns an HTTP error (>=400)
 Then Go MUST return the same status and a JSON error body preserving message/code when present.
 
-#### Requirement: Diagnostic and Observability
+### Requirement: Diagnostic and Observability
 - The Python Agent Bridge (PAB) SHALL expose a diagnostic endpoint `POST /debug/upstream-check` that performs a server-side upstream request to `${ANTHROPIC_BASE_URL}/v1/chat/completions` with a 90s timeout and returns:
   - `status`: upstream HTTP status code (when available)
   - `body`: upstream JSON body or text (truncated if needed)
@@ -59,9 +64,9 @@ Given claude-agent-sdk-for-python.enabled=false
 When client requests provider="zhipu"
 Then system MUST route via legacy Go ZhipuExecutor (OpenAI-compatible direct execution), not the Python Agent Bridge.
 
-## ADDED Requirements: Configuration & Rollout
+## ADDED Requirements
 
-#### Requirement: Claude Agent SDK for Python config (key: claude-agent-sdk-for-python)
+### Requirement: Claude Agent SDK for Python config (key: claude-agent-sdk-for-python)
 - Config MUST include (under key `claude-agent-sdk-for-python`):
   - enabled (bool, default true)
   - baseURL (string, default http://127.0.0.1:35331)
