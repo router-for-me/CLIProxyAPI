@@ -1,0 +1,12 @@
+Changes:
+  2025-10-27-update-claude-zhipu-detection     12/15 tasks
+  packycode-codex-toggle-20251028              No tasks
+---
+Specs:
+  002-per-request-tps      requirements 1
+  auth                     requirements 1
+  copilot-integration      requirements 10
+  legacy-fallback          requirements 1
+  model-registry           requirements 1
+  provider-integration     requirements 4
+

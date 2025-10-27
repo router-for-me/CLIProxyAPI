@@ -628,6 +628,8 @@ func (s *Service) Run(ctx context.Context) error {
 	// Ensure Packycode and Copilot models are registered for /v1/models visibility
 	s.ensurePackycodeModelsRegistered(s.cfg)
 	s.ensureCopilotModelsRegistered(s.cfg)
+	// Enforce Codex toggle based on Packycode state
+	s.enforceCodexToggle(s.cfg)
 
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
@@ -649,6 +651,8 @@ func (s *Service) Run(ctx context.Context) error {
 		s.ensurePackycodeModelsRegistered(newCfg)
 		s.ensureCopilotModelsRegistered(newCfg)
 		s.rebindExecutors()
+		// Re-apply codex toggle on config changes
+		s.enforceCodexToggle(newCfg)
 	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
@@ -841,6 +845,56 @@ func (s *Service) ensurePackycodeModelsRegistered(cfg *config.Config) {
 		} else {
 			_, _ = s.coreManager.Register(context.Background(), runtimeAuth)
 		}
+	}
+}
+
+// enforceCodexToggle disables or re-enables codex auths according to packycode.enabled.
+// When packycode is enabled: disable all provider=codex auths and mark attribute toggle_by=packycode.
+// When packycode is disabled: re-enable only those codex auths previously disabled by this toggle.
+func (s *Service) enforceCodexToggle(cfg *config.Config) {
+	if s == nil || s.coreManager == nil || cfg == nil {
+		return
+	}
+	enableCodex := !cfg.Packycode.Enabled
+	auths := s.coreManager.List()
+	now := time.Now()
+	for _, a := range auths {
+		if a == nil || !strings.EqualFold(a.Provider, "codex") {
+			continue
+		}
+		// Ensure attributes map exists
+		if a.Attributes == nil {
+			a.Attributes = make(map[string]string)
+		}
+		toggledBy := strings.TrimSpace(a.Attributes["toggle_by"])
+		if !enableCodex {
+			// packycode enabled -> disable codex
+			if a.Disabled {
+				// already disabled, keep mark
+				if toggledBy == "" {
+					a.Attributes["toggle_by"] = "packycode"
+				}
+			} else {
+				a.Disabled = true
+				a.Status = coreauth.StatusDisabled
+				a.Attributes["toggle_by"] = "packycode"
+				a.UpdatedAt = now
+			}
+		} else {
+			// packycode disabled -> re-enable codex only if disabled by packycode
+			if a.Disabled && strings.EqualFold(toggledBy, "packycode") {
+				a.Disabled = false
+				a.Status = coreauth.StatusActive
+				delete(a.Attributes, "toggle_by")
+				a.UpdatedAt = now
+			} else {
+				continue
+			}
+		}
+		// Persist via Update
+		_, _ = s.coreManager.Update(context.Background(), a)
+		// Re-register models for the auth to reflect provider availability
+		s.registerModelsForAuth(a)
 	}
 }
 
