@@ -8,7 +8,6 @@ package claude
 import (
 	"bytes"
 	"encoding/json"
-	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -79,7 +78,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			if system.IsArray() {
 				systemResults := system.Array()
 				for i := 0; i < len(systemResults); i++ {
-					systemMsgJSON, _ = sjson.SetRaw(systemMsgJSON, "content.-1", systemResults[i].Raw)
+					if contentItem, ok := convertClaudeContentPart(systemResults[i]); ok {
+						systemMsgJSON, _ = sjson.SetRaw(systemMsgJSON, "content.-1", contentItem)
+					}
 				}
 			}
 		}
@@ -94,29 +95,16 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 			// Handle content
 			if contentResult.Exists() && contentResult.IsArray() {
-				var textParts []string
+				var contentItems []string
 				var toolCalls []interface{}
 
 				contentResult.ForEach(func(_, part gjson.Result) bool {
 					partType := part.Get("type").String()
 
 					switch partType {
-					case "text":
-						textParts = append(textParts, part.Get("text").String())
-
-					case "image":
-						// Convert Anthropic image format to OpenAI format
-						if source := part.Get("source"); source.Exists() {
-							sourceType := source.Get("type").String()
-							if sourceType == "base64" {
-								mediaType := source.Get("media_type").String()
-								data := source.Get("data").String()
-								imageURL := "data:" + mediaType + ";base64," + data
-
-								// For now, add as text since OpenAI image handling is complex
-								// In a real implementation, you'd need to handle this properly
-								textParts = append(textParts, "[Image: "+imageURL+"]")
-							}
+					case "text", "image":
+						if contentItem, ok := convertClaudeContentPart(part); ok {
+							contentItems = append(contentItems, contentItem)
 						}
 
 					case "tool_use":
@@ -149,13 +137,17 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				})
 
 				// Create main message if there's text content or tool calls
-				if len(textParts) > 0 || len(toolCalls) > 0 {
+				if len(contentItems) > 0 || len(toolCalls) > 0 {
 					msgJSON := `{"role":"","content":""}`
 					msgJSON, _ = sjson.Set(msgJSON, "role", role)
 
 					// Set content
-					if len(textParts) > 0 {
-						msgJSON, _ = sjson.Set(msgJSON, "content", strings.Join(textParts, ""))
+					if len(contentItems) > 0 {
+						contentArrayJSON := "[]"
+						for _, contentItem := range contentItems {
+							contentArrayJSON, _ = sjson.SetRaw(contentArrayJSON, "-1", contentItem)
+						}
+						msgJSON, _ = sjson.SetRaw(msgJSON, "content", contentArrayJSON)
 					} else {
 						msgJSON, _ = sjson.Set(msgJSON, "content", "")
 					}
@@ -166,7 +158,20 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						msgJSON, _ = sjson.SetRaw(msgJSON, "tool_calls", string(toolCallsJSON))
 					}
 
-					if gjson.Get(msgJSON, "content").String() != "" || len(toolCalls) != 0 {
+					contentValue := gjson.Get(msgJSON, "content")
+					hasContent := false
+					switch {
+					case !contentValue.Exists():
+						hasContent = false
+					case contentValue.Type == gjson.String:
+						hasContent = contentValue.String() != ""
+					case contentValue.IsArray():
+						hasContent = len(contentValue.Array()) > 0
+					default:
+						hasContent = contentValue.Raw != "" && contentValue.Raw != "null"
+					}
+
+					if hasContent || len(toolCalls) != 0 {
 						messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(msgJSON).Value())
 					}
 				}
@@ -236,4 +241,54 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return []byte(out)
+}
+
+func convertClaudeContentPart(part gjson.Result) (string, bool) {
+	partType := part.Get("type").String()
+
+	switch partType {
+	case "text":
+		if !part.Get("text").Exists() {
+			return "", false
+		}
+		textContent := `{"type":"text","text":""}`
+		textContent, _ = sjson.Set(textContent, "text", part.Get("text").String())
+		return textContent, true
+
+	case "image":
+		var imageURL string
+
+		if source := part.Get("source"); source.Exists() {
+			sourceType := source.Get("type").String()
+			switch sourceType {
+			case "base64":
+				mediaType := source.Get("media_type").String()
+				if mediaType == "" {
+					mediaType = "application/octet-stream"
+				}
+				data := source.Get("data").String()
+				if data != "" {
+					imageURL = "data:" + mediaType + ";base64," + data
+				}
+			case "url":
+				imageURL = source.Get("url").String()
+			}
+		}
+
+		if imageURL == "" {
+			imageURL = part.Get("url").String()
+		}
+
+		if imageURL == "" {
+			return "", false
+		}
+
+		imageContent := `{"type":"image_url","image_url":{"url":""}}`
+		imageContent, _ = sjson.Set(imageContent, "image_url.url", imageURL)
+
+		return imageContent, true
+
+	default:
+		return "", false
+	}
 }

@@ -49,8 +49,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
+	modelForUpstream := req.Model
+	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+		body, _ = sjson.SetBytes(body, "model", modelOverride)
+		modelForUpstream = modelOverride
+	}
 
-	if !strings.HasPrefix(req.Model, "claude-3-5-haiku") {
+	if !strings.HasPrefix(modelForUpstream, "claude-3-5-haiku") {
 		body, _ = sjson.SetRawBytes(body, "system", []byte(misc.ClaudeCodeInstructions))
 	}
 
@@ -141,6 +146,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+		body, _ = sjson.SetBytes(body, "model", modelOverride)
+	}
 	body, _ = sjson.SetRawBytes(body, "system", []byte(misc.ClaudeCodeInstructions))
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
@@ -256,8 +264,13 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
+	modelForUpstream := req.Model
+	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+		body, _ = sjson.SetBytes(body, "model", modelOverride)
+		modelForUpstream = modelOverride
+	}
 
-	if !strings.HasPrefix(req.Model, "claude-3-5-haiku") {
+	if !strings.HasPrefix(modelForUpstream, "claude-3-5-haiku") {
 		body, _ = sjson.SetRawBytes(body, "system", []byte(misc.ClaudeCodeInstructions))
 	}
 
@@ -356,6 +369,73 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func (e *ClaudeExecutor) resolveUpstreamModel(alias string, auth *cliproxyauth.Auth) string {
+	if alias == "" {
+		return ""
+	}
+	entry := e.resolveClaudeConfig(auth)
+	if entry == nil {
+		return ""
+	}
+	for i := range entry.Models {
+		model := entry.Models[i]
+		name := strings.TrimSpace(model.Name)
+		modelAlias := strings.TrimSpace(model.Alias)
+		if modelAlias != "" {
+			if strings.EqualFold(modelAlias, alias) {
+				if name != "" {
+					return name
+				}
+				return alias
+			}
+			continue
+		}
+		if name != "" && strings.EqualFold(name, alias) {
+			return name
+		}
+	}
+	return ""
+}
+
+func (e *ClaudeExecutor) resolveClaudeConfig(auth *cliproxyauth.Auth) *config.ClaudeKey {
+	if auth == nil || e.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range e.cfg.ClaudeKey {
+		entry := &e.cfg.ClaudeKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && attrBase != "" {
+			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if attrBase == "" || cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range e.cfg.ClaudeKey {
+			entry := &e.cfg.ClaudeKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
 }
 
 func hasZSTDEcoding(contentEncoding string) bool {
