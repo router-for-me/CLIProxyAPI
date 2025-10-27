@@ -3,7 +3,7 @@
 - [x] 1.2 添加测试（MiniMax）：当 `provider=claude` 且 `base_url=https://api.minimaxi.com/anthropic` 时，仅注册 `MiniMax-M2`，不注册任何 `claude-*`，并将 Provider 识别为 `MiniMax`。
 - [x] 1.3 修改 `sdk/cliproxy/service.go::registerModelsForAuth`（阶段一临时）：实现 Zhipu 与 MiniMax 的检测与注册策略。
 - [x] 1.4 添加 provider 标识测试：验证上述两种侦测路径下 `util.GetProviderName` 分别返回 `zhipu` 与 `minimax`。
-- [x] 1.5 架构重构：引入 AnthropicCompatExecutor 基类，抽离 Claude 执行器通用逻辑。（阶段性达成：通过专属薄封装执行器最小实现，后续将把通用逻辑上提为共享基类）
+- [x] 1.5 架构重构：引入 AnthropicCompatExecutor 基类，抽离 Claude 执行器通用逻辑（已落地，minimax/zhipu 执行器改为基类实例化）。
 - [x] 1.6 新增执行器：GlmAnthropicExecutor（identifier=`zhipu`）与 MiniMaxAnthropicExecutor（identifier=`minimax`）。
 - [x] 1.7 更新注册与路由：
       - `registerModelsForAuth` 将 Zhipu/MiniMax 模型注册回归各自 provider（`zhipu`/`minimax`）。
