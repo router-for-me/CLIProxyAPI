@@ -21,8 +21,8 @@ func TestRegisterModelsForAuth_ClaudeBaseURL_MiniMaxAnthropic_ProviderMinimax(t 
 	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(a.ID) })
 
 	provs := util.GetProviderName("MiniMax-M2")
-	if len(provs) == 0 || provs[0] != "claude" {
-		t.Fatalf("expected provider starts with claude for MiniMax-M2, got %#v", provs)
+	if len(provs) == 0 || provs[0] != "minimax" {
+		t.Fatalf("expected provider starts with minimax for MiniMax-M2, got %#v", provs)
 	}
 }
 
@@ -40,7 +40,7 @@ func TestRegisterModelsForAuth_ClaudeBaseURL_ZhipuAnthropic_ProviderZhipu(t *tes
 	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(a.ID) })
 
 	provs := util.GetProviderName("glm-4.6")
-	if len(provs) == 0 || provs[0] != "claude" {
-		t.Fatalf("expected provider starts with claude for glm-4.6, got %#v", provs)
+	if len(provs) == 0 || provs[0] != "zhipu" {
+		t.Fatalf("expected provider starts with zhipu for glm-4.6, got %#v", provs)
 	}
 }

@@ -4,15 +4,20 @@
 
 ## What Changes
 - 检测 `provider=claude` 的认证条目上 `attributes.base_url`：
-  - 当为 `https://open.bigmodel.cn/api/anthropic`（智谱 Anthropic 兼容端点）：仅在模型注册表登记 `glm-4.6`，且不登记任何 `claude-*` 模型。
-  - 当为 `https://api.minimaxi.com/anthropic`（MiniMax Anthropic 兼容端点）：登记 Provider `MiniMax` 与模型 `MiniMax-M2`，且不登记任何 `claude-*` 模型。
+  - 当为 `https://open.bigmodel.cn/api/anthropic`（智谱 Anthropic 兼容端点）：登记 `glm-4.6`；不登记任何 `claude-*` 模型。
+  - 当为 `https://api.minimaxi.com/anthropic`（MiniMax Anthropic 兼容端点）：登记 `MiniMax-M2`；不登记任何 `claude-*` 模型。
   - 其它情形：保持既有 Claude 模型注册行为不变（登记 `claude-*` 清单）。
 
-- 执行器策略（新增）：对于任何 Claude API（`provider=claude`）下识别到的上游 provider（含官方/智谱/MiniMax），系统 SHALL 默认使用 Claude 执行器处理请求（非回退机制，而是默认映射）。
+- 执行器架构（更新）：引入 AnthropicCompatExecutor 基类，并将 Anthropic 兼容上游分离为专属执行器：
+  - 官方 Claude：ClaudeExecutor（identifier=`claude`）
+  - 智谱兼容：GlmAnthropicExecutor（identifier=`zhipu`）
+  - MiniMax 兼容：MiniMaxAnthropicExecutor（identifier=`minimax`）
+  系统 SHALL 依据上游归属路由到对应执行器（非“默认 Claude”，亦非“回退”）。
 
 ## Impact
 - 受影响代码：
-  - `sdk/cliproxy/service.go::registerModelsForAuth`（模型注册保持不变）
-  - `sdk/cliproxy/service.go::ensureExecutorsForAuth` 与 provider→executor 路由（明确约束为 Claude 执行器默认处理 Claude API 兼容端点）
-  - `internal/util/provider.go`（如有需要，撤销“回退”语义，改为“默认选择 Claude 执行器”）
-- 受影响接口：`/v1/models`（在 User-Agent 为 `claude-cli` 时使用 Claude handler 列表）。
+  - `internal/runtime/executor/` 新增 AnthropicCompatExecutor 及两个具体执行器（zhipu/minimax）。
+  - `sdk/cliproxy/service.go::registerModelsForAuth`：Zhipu/MiniMax 模型注册回归到各自 provider（`zhipu`/`minimax`）。
+  - `sdk/cliproxy/service.go::ensureExecutorsForAuth`：当 `provider=claude` 但 `base_url` 指向兼容端点时，合成运行时 auth（provider 改写为 `zhipu`/`minimax`）并注册对应执行器。
+  - `internal/util/provider.go`：provider 选择与模型前缀严格映射（`glm-*`→`zhipu`，`minimax-*`→`minimax`，`claude-*`→`claude`）。
+- 受影响接口：`/v1/models`（展示不受影响；Claude/OpenAI handler 均从注册表读取可用清单）。

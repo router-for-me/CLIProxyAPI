@@ -354,6 +354,52 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		}
 		return
 	}
+	// For Claude auths pointing to Anthropic-compatible endpoints, synthesize runtime auths
+	// under dedicated providers and ensure executors are registered accordingly.
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "claude") && a.Attributes != nil {
+		base := strings.TrimSpace(a.Attributes["base_url"])
+		key := strings.TrimSpace(a.Attributes["api_key"])
+		if base != "" && key != "" {
+			if strings.EqualFold(base, "https://open.bigmodel.cn/api/anthropic") {
+				// Ensure zhipu anthropic executor (dedicated)
+				s.coreManager.RegisterExecutor(executor.NewGlmAnthropicExecutor(s.cfg))
+				// Synthesize runtime auth for provider=zhipu
+				now := time.Now()
+				runtimeAuth := &coreauth.Auth{
+					ID:         a.ID + ":zhipu",
+					Provider:   "zhipu",
+					Label:      a.Label,
+					Status:     coreauth.StatusActive,
+					ProxyURL:   a.ProxyURL,
+					Attributes: map[string]string{"api_key": key, "base_url": base, "source": "claude-compat:zhipu"},
+					CreatedAt:  now,
+					UpdatedAt:  now,
+				}
+				if _, ok := s.coreManager.GetByID(runtimeAuth.ID); !ok {
+					_, _ = s.coreManager.Register(context.Background(), runtimeAuth)
+				}
+			} else if strings.EqualFold(base, "https://api.minimaxi.com/anthropic") {
+				// Ensure minimax executor
+				s.coreManager.RegisterExecutor(executor.NewMiniMaxExecutor(s.cfg))
+				// Synthesize runtime auth for provider=minimax
+				now := time.Now()
+				runtimeAuth := &coreauth.Auth{
+					ID:         a.ID + ":minimax",
+					Provider:   "minimax",
+					Label:      a.Label,
+					Status:     coreauth.StatusActive,
+					ProxyURL:   a.ProxyURL,
+					Attributes: map[string]string{"api_key": key, "base_url": base, "source": "claude-compat:minimax"},
+					CreatedAt:  now,
+					UpdatedAt:  now,
+				}
+				if _, ok := s.coreManager.GetByID(runtimeAuth.ID); !ok {
+					_, _ = s.coreManager.Register(context.Background(), runtimeAuth)
+				}
+			}
+		}
+	}
+
 	switch strings.ToLower(a.Provider) {
 	case "gemini":
 		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
@@ -373,6 +419,8 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "zhipu":
 		s.coreManager.RegisterExecutor(executor.NewZhipuExecutor(s.cfg))
+	case "minimax":
+		s.coreManager.RegisterExecutor(executor.NewMiniMaxExecutor(s.cfg))
 	case "iflow":
 		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
 	default:
@@ -877,10 +925,10 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
 	case "claude":
-		// 检测：当 claude 的 base_url 指向特定 Anthropic 兼容端点时，按后端仅注册对应模型，并将 provider 标记为实际后端
+		// 检测：当 claude 的 base_url 指向特定 Anthropic 兼容端点时，按后端仅注册对应模型，并将 provider 标记为对应专属执行器（zhipu/minimax）
 		if a.Attributes != nil {
 			if v := strings.TrimSpace(a.Attributes["base_url"]); v != "" {
-				// 智谱 Anthropic 兼容 → 默认使用 Claude 执行器对外提供（provider=claude），模型=glm-4.6
+				// 智谱 Anthropic 兼容 → provider=zhipu，模型=glm-4.6
 				if strings.EqualFold(v, "https://open.bigmodel.cn/api/anthropic") {
 					z := registry.GetZhipuModels()
 					only := make([]*ModelInfo, 0, 1)
@@ -890,10 +938,10 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							break
 						}
 					}
-					GlobalModelRegistry().RegisterClient(a.ID, "claude", only)
+					GlobalModelRegistry().RegisterClient(a.ID, "zhipu", only)
 					return
 				}
-				// MiniMax Anthropic 兼容 → 默认使用 Claude 执行器对外提供（provider=claude），模型=MiniMax-M2
+				// MiniMax Anthropic 兼容 → provider=minimax，模型=MiniMax-M2
 				if strings.EqualFold(v, "https://api.minimaxi.com/anthropic") {
 					mm := registry.GetMiniMaxModels()
 					only := make([]*ModelInfo, 0, 1)
@@ -903,7 +951,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							break
 						}
 					}
-					GlobalModelRegistry().RegisterClient(a.ID, "claude", only)
+					GlobalModelRegistry().RegisterClient(a.ID, "minimax", only)
 					return
 				}
 			}

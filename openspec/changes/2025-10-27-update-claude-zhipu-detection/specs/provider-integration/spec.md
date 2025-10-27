@@ -18,17 +18,25 @@
 - WHEN `provider=claude` 且 `attributes.base_url` 为空或不等于上述地址
 - THEN 系统 SHALL 按既有逻辑注册 Claude 模型清单（`claude-*`）。
 
-### Requirement: Executor Mapping for Claude API
-系统 SHALL 对于任何由 `provider=claude` 派生的兼容端点（含官方/智谱/MiniMax），默认使用 Claude 执行器对外提供服务（非回退机制）。
+### Requirement: Anthropic-compatible Executor Mapping
+系统 SHALL 为 Anthropic 兼容上游采用“专属执行器”映射，而非统一走 Claude 执行器：
+- 官方 Claude → ClaudeExecutor（`provider=claude`）
+- 智谱兼容 → GlmAnthropicExecutor（`provider=zhipu`）
+- MiniMax 兼容 → MiniMaxAnthropicExecutor（`provider=minimax`）
 
-#### Scenario: Use Claude executor for Zhipu-compatible endpoint
-- GIVEN `provider=claude` 的认证条目指向 `https://open.bigmodel.cn/api/anthropic`
-- WHEN 通过 Claude 或 OpenAI 兼容入口请求对应模型（如 `glm-4.6`）
-- THEN 系统 SHALL 使用 Claude 执行器处理请求
-- AND 请求通过该 base_url 完成上游交互
+#### Scenario: Route glm-* to zhipu executor
+- GIVEN `provider=claude` 的认证条目其 `attributes.base_url` 等于 `https://open.bigmodel.cn/api/anthropic`
+- WHEN 请求 `glm-4.6`
+- THEN 系统 SHALL 注册/路由至 `provider=zhipu`
+- AND SHALL 使用 GlmAnthropicExecutor 完成上游交互
 
-#### Scenario: Use Claude executor for MiniMax-compatible endpoint
-- GIVEN `provider=claude` 的认证条目指向 `https://api.minimaxi.com/anthropic`
-- WHEN 通过 Claude 或 OpenAI 兼容入口请求对应模型（如 `MiniMax-M2`）
-- THEN 系统 SHALL 使用 Claude 执行器处理请求
-- AND 请求通过该 base_url 完成上游交互
+#### Scenario: Route MiniMax-* to minimax executor
+- GIVEN `provider=claude` 的认证条目其 `attributes.base_url` 等于 `https://api.minimaxi.com/anthropic`
+- WHEN 请求 `MiniMax-M2`
+- THEN 系统 SHALL 注册/路由至 `provider=minimax`
+- AND SHALL 使用 MiniMaxAnthropicExecutor 完成上游交互
+
+#### Scenario: Official Claude models
+- GIVEN `provider=claude` 且 `attributes.base_url` 为空或为官方地址
+- WHEN 请求 `claude-*`
+- THEN 系统 SHALL 使用 ClaudeExecutor 完成上游交互
