@@ -67,3 +67,14 @@ The system SHALL treat `copilot` as an independent provider whose model inventor
 - THEN the system SHALL invoke the copilot refresh path using GitHub API `/copilot_internal/v2/token`
 - AND update `access_token`, `expires_at`, `refresh_in`, and `last_refresh` on success
 
+### Requirement: Claude base_url detection for Zhipu Anthropic compatibility
+系统 SHALL 基于 `provider=claude` 的认证条目 `attributes.base_url` 进行上游兼容层识别，以确保模型清单准确反映可用后端。
+
+#### Scenario: base_url equals https://open.bigmodel.cn/api/anthropic
+- WHEN `provider=claude` 的认证条目存在且 `attributes.base_url` 等于 `https://open.bigmodel.cn/api/anthropic`
+- THEN 系统 SHALL 仅向注册表登记模型 `glm-4.6`
+- AND 系统 SHALL 不登记任何 `claude-*` 模型
+
+#### Scenario: base_url is empty or other endpoints
+- WHEN `provider=claude` 且 `attributes.base_url` 为空或不等于上述地址
+- THEN 系统 SHALL 维持既有逻辑，登记 Claude 官方模型清单（`claude-*`）。

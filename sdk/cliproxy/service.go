@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -95,8 +94,7 @@ type Service struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
-	// pythonBridgeCmd holds the running Python bridge process
-	pythonBridgeCmd *exec.Cmd
+	// Python bridge removed
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
@@ -536,16 +534,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.authManager = newDefaultAuthManager()
 	}
 
-	// Start Python bridge if enabled
-	if s.cfg != nil && s.cfg.PythonAgent.Enabled {
-		cmd, url, err := executor.StartPythonBridge(ctx, s.cfg)
-		if err != nil {
-			log.Warnf("Failed to start Python bridge: %v", err)
-		} else {
-			s.pythonBridgeCmd = cmd
-			log.Infof("Python bridge available at %s", url)
-		}
-	}
+	// Python bridge removed
 
 	s.ensureWebsocketGateway()
 	if s.server != nil && s.wsGateway != nil {
@@ -694,13 +683,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.authQueueStop = nil
 		}
 
-		// Stop Python bridge if running
-		if s.pythonBridgeCmd != nil {
-			if err := executor.StopPythonBridge(s.pythonBridgeCmd); err != nil {
-				log.Errorf("failed to stop Python bridge: %v", err)
-			}
-			s.pythonBridgeCmd = nil
-		}
+		// Python bridge removed
 
 		// no legacy clients to persist
 
@@ -894,6 +877,37 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
 	case "claude":
+		// 检测：当 claude 的 base_url 指向特定 Anthropic 兼容端点时，按后端仅注册对应模型，并将 provider 标记为实际后端
+		if a.Attributes != nil {
+			if v := strings.TrimSpace(a.Attributes["base_url"]); v != "" {
+				// 智谱 Anthropic 兼容 → 默认使用 Claude 执行器对外提供（provider=claude），模型=glm-4.6
+				if strings.EqualFold(v, "https://open.bigmodel.cn/api/anthropic") {
+					z := registry.GetZhipuModels()
+					only := make([]*ModelInfo, 0, 1)
+					for i := range z {
+						if z[i] != nil && strings.TrimSpace(z[i].ID) == "glm-4.6" {
+							only = append(only, z[i])
+							break
+						}
+					}
+					GlobalModelRegistry().RegisterClient(a.ID, "claude", only)
+					return
+				}
+				// MiniMax Anthropic 兼容 → 默认使用 Claude 执行器对外提供（provider=claude），模型=MiniMax-M2
+				if strings.EqualFold(v, "https://api.minimaxi.com/anthropic") {
+					mm := registry.GetMiniMaxModels()
+					only := make([]*ModelInfo, 0, 1)
+					for i := range mm {
+						if mm[i] != nil && strings.TrimSpace(mm[i].ID) == "MiniMax-M2" {
+							only = append(only, mm[i])
+							break
+						}
+					}
+					GlobalModelRegistry().RegisterClient(a.ID, "claude", only)
+					return
+				}
+			}
+		}
 		models = registry.GetClaudeModels()
 	case "codex":
 		models = filterModelsByID(registry.GetOpenAIModels(), copilotExclusiveModelIDs)

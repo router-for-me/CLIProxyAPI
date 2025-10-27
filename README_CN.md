@@ -30,31 +30,12 @@
 
 现已新增国内提供商：[Qwen Code](https://github.com/QwenLM/qwen-code)、[iFlow](https://iflow.cn/)。
 
-### Zhipu 通过 Claude Agent SDK for Python 桥接
+### Zhipu 直连（不依赖 Python 侧组件）
 
-在该模式下，服务将 OpenAI 兼容的 `/v1/chat/completions` 请求转发给本地/Sidecar 的 Claude Agent SDK for Python 服务。
+当前版本已移除对外部 Python 侧组件的依赖。请直接使用：
 
-环境变量：
-
-```bash
-export CLAUDE_AGENT_SDK_URL="http://127.0.0.1:35331"
-export ANTHROPIC_BASE_URL="https://open.bigmodel.cn/api/anthropic"
-export ANTHROPIC_AUTH_TOKEN="<Zhipu API Key>"
-```
-
-配置（config.yaml）：
-
-```yaml
-# 破坏性变更：仅支持新键 claude-agent-sdk-for-python
-claude-agent-sdk-for-python:
-  enabled: true
-  baseURL: "http://127.0.0.1:35331"
-  # env:
-  #   ANTHROPIC_BASE_URL: "https://open.bigmodel.cn/api/anthropic"
-  #   ANTHROPIC_AUTH_TOKEN: "glmsk-..."
-```
-
-禁用回退：当 `enabled=false` 时，回退到 legacy ZhipuExecutor（OpenAI 兼容直连）。
+- `zhipu-api-key` 直连官方 OpenAI 兼容端点；或
+- `claude-api-key` 指向 Zhipu 的 Anthropic 兼容端点（如 `https://open.bigmodel.cn/api/anthropic`）。
 
 ## 功能特性
 

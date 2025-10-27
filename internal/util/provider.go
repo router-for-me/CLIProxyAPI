@@ -48,19 +48,31 @@ func GetProviderName(modelName string) []string {
 		providers = append(providers, name)
 	}
 
-	// Force GLM family (glm-*) to route exclusively to zhipu to avoid ambiguity
-	// when multiple providers register the same model ID.
-	lower := strings.ToLower(strings.TrimSpace(modelName))
-	if strings.HasPrefix(lower, "glm-") {
-		return []string{"zhipu"}
-	}
-
+	// Prefer providers registered in the global model registry (dynamic detection),
+	// which allows Claude@Zhipu Anthropic 兼容端点将 glm-* 暴露在 provider=claude 下。
 	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelName) {
 		appendProvider(provider)
 	}
 
-	if len(providers) > 0 {
-		return providers
+	// Augment fallback mappings without overriding dynamic detection ordering.
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	// When targeting MiniMax models (e.g., MiniMax-M2), fall back to 'claude' executor path
+	// which handles Anthropic-compatible endpoints when available via claude-api-key.
+	if strings.HasPrefix(lower, "minimax-") {
+		appendProvider("claude")
+	}
+	// When targeting GLM models (e.g., glm-4.6) but no native zhipu executor/auth is present,
+	// allow fallback via 'claude' executor pointing to Anthropic-compatible endpoints.
+	if strings.HasPrefix(lower, "glm-") {
+		appendProvider("claude")
+	}
+
+	// If no dynamic providers were discovered, offer heuristic defaults.
+	if len(providers) == 0 {
+		// Fallback: for unknown glm-* models, propose zhipu as default provider.
+		if strings.HasPrefix(lower, "glm-") {
+			return []string{"zhipu"}
+		}
 	}
 
 	return providers

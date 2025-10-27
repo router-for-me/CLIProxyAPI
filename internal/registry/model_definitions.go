@@ -499,6 +499,22 @@ func GetZhipuModels() []*ModelInfo {
 	}
 }
 
+// GetMiniMaxModels returns the standard MiniMax model definitions
+func GetMiniMaxModels() []*ModelInfo {
+	created := time.Now().Unix()
+	return []*ModelInfo{
+		{
+			ID:          "MiniMax-M2",
+			Object:      "model",
+			Created:     created,
+			OwnedBy:     "minimax",
+			Type:        "minimax",
+			DisplayName: "MiniMax M2",
+			Description: "MiniMax M2 general model",
+		},
+	}
+}
+
 // GetIFlowModels returns supported models for iFlow OAuth accounts.
 
 func GetIFlowModels() []*ModelInfo {
