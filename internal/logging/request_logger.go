@@ -15,6 +15,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
+	log "github.com/sirupsen/logrus"
+
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
@@ -411,6 +415,10 @@ func (l *FileRequestLogger) decompressResponse(responseHeaders map[string][]stri
 		return l.decompressGzip(response)
 	case "deflate":
 		return l.decompressDeflate(response)
+	case "br":
+		return l.decompressBrotli(response)
+	case "zstd":
+		return l.decompressZstd(response)
 	default:
 		// No compression or unsupported compression
 		return response, nil
@@ -431,7 +439,9 @@ func (l *FileRequestLogger) decompressGzip(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 	}
 	defer func() {
-		_ = reader.Close()
+		if errClose := reader.Close(); errClose != nil {
+			log.WithError(errClose).Warn("failed to close gzip reader in request logger")
+		}
 	}()
 
 	decompressed, err := io.ReadAll(reader)
@@ -453,12 +463,56 @@ func (l *FileRequestLogger) decompressGzip(data []byte) ([]byte, error) {
 func (l *FileRequestLogger) decompressDeflate(data []byte) ([]byte, error) {
 	reader := flate.NewReader(bytes.NewReader(data))
 	defer func() {
-		_ = reader.Close()
+		if errClose := reader.Close(); errClose != nil {
+			log.WithError(errClose).Warn("failed to close deflate reader in request logger")
+		}
 	}()
 
 	decompressed, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress deflate data: %w", err)
+	}
+
+	return decompressed, nil
+}
+
+// decompressBrotli decompresses brotli-encoded data.
+//
+// Parameters:
+//   - data: The brotli-encoded data to decompress
+//
+// Returns:
+//   - []byte: The decompressed data
+//   - error: An error if decompression fails, nil otherwise
+func (l *FileRequestLogger) decompressBrotli(data []byte) ([]byte, error) {
+	reader := brotli.NewReader(bytes.NewReader(data))
+
+	decompressed, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress brotli data: %w", err)
+	}
+
+	return decompressed, nil
+}
+
+// decompressZstd decompresses zstd-encoded data.
+//
+// Parameters:
+//   - data: The zstd-encoded data to decompress
+//
+// Returns:
+//   - []byte: The decompressed data
+//   - error: An error if decompression fails, nil otherwise
+func (l *FileRequestLogger) decompressZstd(data []byte) ([]byte, error) {
+	decoder, err := zstd.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zstd reader: %w", err)
+	}
+	defer decoder.Close()
+
+	decompressed, err := io.ReadAll(decoder)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress zstd data: %w", err)
 	}
 
 	return decompressed, nil

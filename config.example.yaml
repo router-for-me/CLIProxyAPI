@@ -43,6 +43,9 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
 
+# When true, enable authentication for the WebSocket API (/v1/ws).
+ws-auth: false
+
 # API keys for official Generative Language API
 #generative-language-api-key:
 #  - "AIzaSy...01"
@@ -62,6 +65,9 @@ quota-exceeded:
 #  - api-key: "sk-atSM..."
 #    base-url: "https://www.example.com" # use the custom claude API endpoint
 #    proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#    models:
+#      - name: "claude-3-5-sonnet-20241022" # upstream model name
+#        alias: "claude-sonnet-latest" # client alias mapped to the upstream model
 
 # OpenAI compatibility providers
 #openai-compatibility:

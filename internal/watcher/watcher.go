@@ -423,6 +423,19 @@ func computeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 	return hex.EncodeToString(sum[:])
 }
 
+// computeClaudeModelsHash returns a stable hash for Claude model aliases.
+func computeClaudeModelsHash(models []config.ClaudeModel) string {
+	if len(models) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(models)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 // SetClients sets the file-based clients.
 // SetClients removed
 // SetAPIKeyClients removed
@@ -760,13 +773,17 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			if key == "" {
 				continue
 			}
-			id, token := idGen.next("claude:apikey", key, ck.BaseURL)
+			base := strings.TrimSpace(ck.BaseURL)
+			id, token := idGen.next("claude:apikey", key, base)
 			attrs := map[string]string{
 				"source":  fmt.Sprintf("config:claude[%s]", token),
 				"api_key": key,
 			}
-			if ck.BaseURL != "" {
-				attrs["base_url"] = ck.BaseURL
+			if base != "" {
+				attrs["base_url"] = base
+			}
+			if hash := computeClaudeModelsHash(ck.Models); hash != "" {
+				attrs["models_hash"] = hash
 			}
 			proxyURL := strings.TrimSpace(ck.ProxyURL)
 			a := &coreauth.Auth{
@@ -1203,6 +1220,9 @@ func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 	if oldCfg.ProxyURL != newCfg.ProxyURL {
 		changes = append(changes, fmt.Sprintf("proxy-url: %s -> %s", oldCfg.ProxyURL, newCfg.ProxyURL))
+	}
+	if oldCfg.WebsocketAuth != newCfg.WebsocketAuth {
+		changes = append(changes, fmt.Sprintf("ws-auth: %t -> %t", oldCfg.WebsocketAuth, newCfg.WebsocketAuth))
 	}
 
 	// Quota-exceeded behavior

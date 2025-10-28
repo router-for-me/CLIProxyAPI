@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -82,6 +83,9 @@ type Service struct {
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
+
+	// wsGateway manages websocket Gemini providers.
+	wsGateway *wsrelay.Manager
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -172,6 +176,72 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 	}
 }
 
+func (s *Service) ensureWebsocketGateway() {
+	if s == nil {
+		return
+	}
+	if s.wsGateway != nil {
+		return
+	}
+	opts := wsrelay.Options{
+		Path:           "/v1/ws",
+		OnConnected:    s.wsOnConnected,
+		OnDisconnected: s.wsOnDisconnected,
+		LogDebugf:      log.Debugf,
+		LogInfof:       log.Infof,
+		LogWarnf:       log.Warnf,
+	}
+	s.wsGateway = wsrelay.NewManager(opts)
+}
+
+func (s *Service) wsOnConnected(provider string) {
+	if s == nil || provider == "" {
+		return
+	}
+	if !strings.HasPrefix(strings.ToLower(provider), "aistudio-") {
+		return
+	}
+	if s.coreManager != nil {
+		if existing, ok := s.coreManager.GetByID(provider); ok && existing != nil {
+			if !existing.Disabled && existing.Status == coreauth.StatusActive {
+				return
+			}
+		}
+	}
+	now := time.Now().UTC()
+	auth := &coreauth.Auth{
+		ID:         provider,
+		Provider:   provider,
+		Label:      provider,
+		Status:     coreauth.StatusActive,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		Attributes: map[string]string{"ws_provider": "gemini"},
+	}
+	log.Infof("websocket provider connected: %s", provider)
+	s.applyCoreAuthAddOrUpdate(context.Background(), auth)
+}
+
+func (s *Service) wsOnDisconnected(provider string, reason error) {
+	if s == nil || provider == "" {
+		return
+	}
+	if reason != nil {
+		if strings.Contains(reason.Error(), "replaced by new connection") {
+			log.Infof("websocket provider replaced: %s", provider)
+			return
+		}
+		log.Warnf("websocket provider disconnected: %s (%v)", provider, reason)
+	} else {
+		log.Infof("websocket provider disconnected: %s", provider)
+	}
+	ctx := context.Background()
+	s.applyCoreAuthRemoval(ctx, provider)
+	if s.coreManager != nil {
+		s.coreManager.UnregisterExecutor(provider)
+	}
+}
+
 func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.Auth) {
 	if s == nil || auth == nil || auth.ID == "" {
 		return
@@ -245,6 +315,12 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 			compatProviderKey = "openai-compatibility"
 		}
 		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, s.cfg))
+		return
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a.Provider)), "aistudio-") {
+		if s.wsGateway != nil {
+			s.coreManager.RegisterExecutor(executor.NewAistudioExecutor(s.cfg, a.Provider, s.wsGateway))
+		}
 		return
 	}
 	switch strings.ToLower(a.Provider) {
@@ -342,6 +418,27 @@ func (s *Service) Run(ctx context.Context) error {
 		s.authManager = newDefaultAuthManager()
 	}
 
+	s.ensureWebsocketGateway()
+	if s.server != nil && s.wsGateway != nil {
+		s.server.AttachWebsocketRoute(s.wsGateway.Path(), s.wsGateway.Handler())
+		s.server.SetWebsocketAuthChangeHandler(func(oldEnabled, newEnabled bool) {
+			if oldEnabled == newEnabled {
+				return
+			}
+			if !oldEnabled && newEnabled {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if errStop := s.wsGateway.Stop(ctx); errStop != nil {
+					log.Warnf("failed to reset websocket connections after ws-auth change %t -> %t: %v", oldEnabled, newEnabled, errStop)
+					return
+				}
+				log.Debugf("ws-auth enabled; existing websocket sessions terminated to enforce authentication")
+				return
+			}
+			log.Debugf("ws-auth disabled; existing websocket sessions remain connected")
+		})
+	}
+
 	if s.hooks.OnBeforeStart != nil {
 		s.hooks.OnBeforeStart(s.cfg)
 	}
@@ -379,7 +476,6 @@ func (s *Service) Run(ctx context.Context) error {
 		s.cfg = newCfg
 		s.cfgMu.Unlock()
 		s.rebindExecutors()
-
 	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
@@ -449,6 +545,14 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				shutdownErr = err
 			}
 		}
+		if s.wsGateway != nil {
+			if err := s.wsGateway.Stop(ctx); err != nil {
+				log.Errorf("failed to stop websocket gateway: %v", err)
+				if shutdownErr == nil {
+					shutdownErr = err
+				}
+			}
+		}
 		if s.authQueueStop != nil {
 			s.authQueueStop()
 			s.authQueueStop = nil
@@ -505,6 +609,13 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
 	compatProviderKey, compatDisplayName, compatDetected := openAICompatInfoFromAuth(a)
+	if a.Attributes != nil {
+		if strings.EqualFold(a.Attributes["ws_provider"], "gemini") {
+			models := mergeGeminiModels()
+			GlobalModelRegistry().RegisterClient(a.ID, provider, models)
+			return
+		}
+	}
 	if compatDetected {
 		provider = "openai-compatibility"
 	}
@@ -516,6 +627,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = registry.GetGeminiCLIModels()
 	case "claude":
 		models = registry.GetClaudeModels()
+		if entry := s.resolveConfigClaudeKey(a); entry != nil && len(entry.Models) > 0 {
+			models = buildClaudeConfigModels(entry)
+		}
 	case "codex":
 		models = registry.GetOpenAIModels()
 	case "qwen":
@@ -610,4 +724,102 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		GlobalModelRegistry().RegisterClient(a.ID, key, models)
 	}
+}
+
+func mergeGeminiModels() []*ModelInfo {
+	models := make([]*ModelInfo, 0, 16)
+	seen := make(map[string]struct{})
+	appendModels := func(items []*ModelInfo) {
+		for i := range items {
+			m := items[i]
+			if m == nil || m.ID == "" {
+				continue
+			}
+			if _, ok := seen[m.ID]; ok {
+				continue
+			}
+			seen[m.ID] = struct{}{}
+			models = append(models, m)
+		}
+	}
+	appendModels(registry.GetGeminiModels())
+	appendModels(registry.GetGeminiCLIModels())
+	return models
+}
+
+func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.ClaudeKey {
+		entry := &s.cfg.ClaudeKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && attrBase != "" {
+			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if attrBase == "" || cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range s.cfg.ClaudeKey {
+			entry := &s.cfg.ClaudeKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
+func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
+	if entry == nil || len(entry.Models) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	out := make([]*ModelInfo, 0, len(entry.Models))
+	seen := make(map[string]struct{}, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		name := strings.TrimSpace(model.Name)
+		alias := strings.TrimSpace(model.Alias)
+		if alias == "" {
+			alias = name
+		}
+		if alias == "" {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		display := name
+		if display == "" {
+			display = alias
+		}
+		out = append(out, &ModelInfo{
+			ID:          alias,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "claude",
+			Type:        "claude",
+			DisplayName: display,
+		})
+	}
+	return out
 }

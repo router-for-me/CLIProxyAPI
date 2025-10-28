@@ -150,6 +150,9 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	for i := range arr {
+		normalizeClaudeKey(&arr[i])
+	}
 	h.cfg.ClaudeKey = arr
 	h.persist(c)
 }
@@ -163,6 +166,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
+	normalizeClaudeKey(body.Value)
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.ClaudeKey) {
 		h.cfg.ClaudeKey[*body.Index] = *body.Value
 		h.persist(c)
@@ -471,4 +475,27 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 		out[i] = copyEntry
 	}
 	return out
+}
+
+func normalizeClaudeKey(entry *config.ClaudeKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.ClaudeModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
 }

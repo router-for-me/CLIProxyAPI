@@ -4,6 +4,7 @@
 package util
 
 import (
+	"net/url"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -187,4 +188,57 @@ func MaskSensitiveHeaderValue(key, value string) string {
 	default:
 		return value
 	}
+}
+
+// MaskSensitiveQuery masks sensitive query parameters, e.g. auth_token, within the raw query string.
+func MaskSensitiveQuery(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	parts := strings.Split(raw, "&")
+	changed := false
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		keyPart := part
+		valuePart := ""
+		if idx := strings.Index(part, "="); idx >= 0 {
+			keyPart = part[:idx]
+			valuePart = part[idx+1:]
+		}
+		decodedKey, err := url.QueryUnescape(keyPart)
+		if err != nil {
+			decodedKey = keyPart
+		}
+		if !shouldMaskQueryParam(decodedKey) {
+			continue
+		}
+		decodedValue, err := url.QueryUnescape(valuePart)
+		if err != nil {
+			decodedValue = valuePart
+		}
+		masked := HideAPIKey(strings.TrimSpace(decodedValue))
+		parts[i] = keyPart + "=" + url.QueryEscape(masked)
+		changed = true
+	}
+	if !changed {
+		return raw
+	}
+	return strings.Join(parts, "&")
+}
+
+func shouldMaskQueryParam(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key == "" {
+		return false
+	}
+	key = strings.TrimSuffix(key, "[]")
+	if key == "key" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
+		return true
+	}
+	if strings.Contains(key, "token") || strings.Contains(key, "secret") {
+		return true
+	}
+	return false
 }

@@ -385,6 +385,19 @@ func GetQwenModels() []*ModelInfo {
 			MaxCompletionTokens: 2048,
 			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
 		},
+		{
+			ID:                  "vision-model",
+			Object:              "model",
+			Created:             time.Now().Unix(),
+			OwnedBy:             "qwen",
+			Type:                "qwen",
+			Version:             "3.0",
+			DisplayName:         "Qwen3 Vision Model",
+			Description:         "Vision model model",
+			ContextLength:       32768,
+			MaxCompletionTokens: 2048,
+			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
+		},
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -138,6 +139,12 @@ type Server struct {
 	// currentPath is the absolute path to the current working directory.
 	currentPath string
 
+	// wsRoutes tracks registered websocket upgrade paths.
+	wsRouteMu     sync.Mutex
+	wsRoutes      map[string]struct{}
+	wsAuthChanged func(bool, bool)
+	wsAuthEnabled atomic.Bool
+
 	// management handler
 	mgmt *managementHandlers.Handler
 
@@ -228,7 +235,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		configFilePath:      configFilePath,
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
+		wsRoutes:            make(map[string]struct{}),
 	}
+	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
@@ -369,6 +378,43 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
+}
+
+// AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
+// The handler is served as-is without additional middleware beyond the standard stack already configured.
+func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
+	if s == nil || s.engine == nil || handler == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		trimmed = "/v1/ws"
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		trimmed = "/" + trimmed
+	}
+	s.wsRouteMu.Lock()
+	if _, exists := s.wsRoutes[trimmed]; exists {
+		s.wsRouteMu.Unlock()
+		return
+	}
+	s.wsRoutes[trimmed] = struct{}{}
+	s.wsRouteMu.Unlock()
+
+	authMiddleware := AuthMiddleware(s.accessManager)
+	conditionalAuth := func(c *gin.Context) {
+		if !s.wsAuthEnabled.Load() {
+			c.Next()
+			return
+		}
+		authMiddleware(c)
+	}
+	finalHandler := func(c *gin.Context) {
+		handler.ServeHTTP(c.Writer, c.Request)
+		c.Abort()
+	}
+
+	s.engine.GET(trimmed, conditionalAuth, finalHandler)
 }
 
 func (s *Server) registerManagementRoutes() {
@@ -770,6 +816,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	s.applyAccessConfig(oldCfg, cfg)
 	s.cfg = cfg
+	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
+		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
+	}
 	managementasset.SetCurrentConfig(cfg)
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
@@ -808,6 +858,13 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		codexAPIKeyCount,
 		openAICompatCount,
 	)
+}
+
+func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
+	if s == nil {
+		return
+	}
+	s.wsAuthChanged = fn
 }
 
 // (management handlers moved to internal/api/handlers/management)

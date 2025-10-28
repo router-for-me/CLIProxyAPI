@@ -153,6 +153,17 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	m.executors[executor.Identifier()] = executor
 }
 
+// UnregisterExecutor removes the executor associated with the provider key.
+func (m *Manager) UnregisterExecutor(provider string) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.executors, provider)
+	m.mu.Unlock()
+}
+
 // Register inserts a new auth entry into the manager.
 func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil {

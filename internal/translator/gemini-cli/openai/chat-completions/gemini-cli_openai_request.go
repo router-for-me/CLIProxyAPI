@@ -66,15 +66,15 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 	}
 
 	// Map OpenAI modalities -> Gemini CLI request.generationConfig.responseModalities
-	// e.g. "modalities": ["image", "text"] -> ["Image", "Text"]
+	// e.g. "modalities": ["image", "text"] -> ["IMAGE", "TEXT"]
 	if mods := gjson.GetBytes(rawJSON, "modalities"); mods.Exists() && mods.IsArray() {
 		var responseMods []string
 		for _, m := range mods.Array() {
 			switch strings.ToLower(m.String()) {
 			case "text":
-				responseMods = append(responseMods, "Text")
+				responseMods = append(responseMods, "TEXT")
 			case "image":
-				responseMods = append(responseMods, "Image")
+				responseMods = append(responseMods, "IMAGE")
 			}
 		}
 		if len(responseMods) > 0 {

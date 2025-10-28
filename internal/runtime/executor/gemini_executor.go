@@ -494,7 +494,7 @@ func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
 					}
 
 					rawJSON, _ = sjson.SetRawBytes(rawJSON, "contents.0.parts", []byte(newPartsJson))
-					rawJSON, _ = sjson.SetRawBytes(rawJSON, "generationConfig.responseModalities", []byte(`["Image", "Text"]`))
+					rawJSON, _ = sjson.SetRawBytes(rawJSON, "generationConfig.responseModalities", []byte(`["IMAGE", "TEXT"]`))
 				}
 			}
 			rawJSON, _ = sjson.DeleteBytes(rawJSON, "generationConfig.imageConfig")

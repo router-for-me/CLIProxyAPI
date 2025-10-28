@@ -40,6 +40,9 @@ type Config struct {
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
+	// WebsocketAuth enables or disables authentication for the WebSocket API.
+	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
+
 	// GlAPIKey is the API key for the generative language API.
 	GlAPIKey []string `yaml:"generative-language-api-key" json:"generative-language-api-key"`
 
@@ -91,6 +94,18 @@ type ClaudeKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
+
+	// Models defines upstream model names and aliases for request routing.
+	Models []ClaudeModel `yaml:"models" json:"models"`
+}
+
+// ClaudeModel describes a mapping between an alias and the actual upstream model name.
+type ClaudeModel struct {
+	// Name is the upstream model identifier used when issuing requests.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the client-facing model name that maps to Name.
+	Alias string `yaml:"alias" json:"alias"`
 }
 
 // CodexKey represents the configuration for a Codex API key,

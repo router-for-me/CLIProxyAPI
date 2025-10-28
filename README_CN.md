@@ -331,6 +331,9 @@ console.log(await claudeResponse.json());
 | `claude-api-key.api-key`                              | string   | ""                 | Claude API密钥。                                                       |
 | `claude-api-key.base-url`                             | string   | ""                 | 自定义的Claude API端点，如果您使用第三方的API端点。                                    |
 | `claude-api-key.proxy-url`                            | string   | ""                 | 针对该API密钥的代理URL。会覆盖全局proxy-url设置。支持socks5/http/https协议。                 |
+| `claude-api-key.models`                               | object[] | []                 | Model alias entries for this key.                                      |
+| `claude-api-key.models.*.name`                        | string   | ""                 | Upstream Claude model name invoked against the API.                    |
+| `claude-api-key.models.*.alias`                       | string   | ""                 | Client-facing alias that maps to the upstream model name.              |
 | `openai-compatibility`                                | object[] | []                 | 上游OpenAI兼容提供商的配置（名称、基础URL、API密钥、模型）。                                |
 | `openai-compatibility.*.name`                         | string   | ""                 | 提供商的名称。它将被用于用户代理（User Agent）和其他地方。                                  |
 | `openai-compatibility.*.base-url`                     | string   | ""                 | 提供商的基础URL。                                                          |
@@ -338,9 +341,11 @@ console.log(await claudeResponse.json());
 | `openai-compatibility.*.api-key-entries`              | object[] | []                 | API密钥条目，支持可选的每密钥代理配置。优先于api-keys。                                   |
 | `openai-compatibility.*.api-key-entries.*.api-key`    | string   | ""                 | 该条目的API密钥。                                                          |
 | `openai-compatibility.*.api-key-entries.*.proxy-url`  | string   | ""                 | 针对该API密钥的代理URL。会覆盖全局proxy-url设置。支持socks5/http/https协议。                 |
-| `openai-compatibility.*.models`                       | object[] | []                 | 实际的模型名称。                                                            |
-| `openai-compatibility.*.models.*.name`                | string   | ""                 | 提供商支持的模型。                                                           |
-| `openai-compatibility.*.models.*.alias`               | string   | ""                 | 在API中使用的别名。                                                         |
+| `openai-compatibility.*.models`                       | object[] | []                 | Model alias definitions routing client aliases to upstream names.      |
+| `openai-compatibility.*.models.*.name`                | string   | ""                 | Upstream model name invoked against the provider.                      |
+| `openai-compatibility.*.models.*.alias`               | string   | ""                 | Client alias routed to the upstream model.                             |
+
+When `claude-api-key.models` is provided, only the listed aliases are registered for that credential, and the default Claude model catalog is skipped.
 
 ### 配置文件示例
 
