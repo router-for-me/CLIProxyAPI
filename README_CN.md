@@ -289,6 +289,7 @@ console.log(await claudeResponse.json());
 - claude-sonnet-4-5-20250929
 - claude-3-7-sonnet-20250219
 - claude-3-5-haiku-20241022
+- claude-haiku-4-5-20251001
 - qwen3-coder-plus
 - qwen3-coder-flash
 - qwen3-max
@@ -625,10 +626,10 @@ export ANTHROPIC_AUTH_TOKEN=sk-dummy
 # 2.x.x 版本
 export ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-1-20250805
 export ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-5-20250929
-export ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-3-5-haiku-20241022
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001
 # 1.x.x 版本
 export ANTHROPIC_MODEL=claude-sonnet-4-20250514
-export ANTHROPIC_SMALL_FAST_MODEL=claude-3-5-haiku-20241022
+export ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5-20251001
 ```
 
 使用 Qwen 模型：
