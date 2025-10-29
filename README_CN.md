@@ -89,6 +89,14 @@ brew install cliproxyapi
 brew services start cliproxyapi
 ```
 
+### 通过 CLIProxyAPI Linux Installer 安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brokechubb/cliproxyapi-installer/refs/heads/master/cliproxyapi-installer | bash
+```
+
+感谢 [brokechubb](https://github.com/brokechubb) 构建了 Linux installer！
+
 ## 使用方法
 
 ### 图形客户端与官方 WebUI
@@ -587,7 +595,7 @@ curl -X PATCH \
     # api-keys:
     #   - "sk-or-v1-...b780"
     #   - "sk-or-v1-...b781"
-    models: # 提供商支持的模型。
+    models: # 提供商支持的模型。或者你可以使用类似 openrouter://moonshotai/kimi-k2:free 这样的格式来请求未在这里定义的模型
       - name: "moonshotai/kimi-k2:free" # 实际的模型名称。
         alias: "kimi-k2" # 在API中使用的别名。
 ```

@@ -3,6 +3,8 @@ package executor
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -89,31 +92,31 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
-	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, string(b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
+		}
 		return resp, err
 	}
-	reader := io.Reader(httpResp.Body)
-	var decoder *zstd.Decoder
-	if hasZSTDEcoding(httpResp.Header.Get("Content-Encoding")) {
-		decoder, err = zstd.NewReader(httpResp.Body)
-		if err != nil {
-			recordAPIResponseError(ctx, e.cfg, err)
-			return resp, fmt.Errorf("failed to initialize zstd decoder: %w", err)
+	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
 		}
-		reader = decoder
-		defer decoder.Close()
+		return resp, err
 	}
-	data, err := io.ReadAll(reader)
+	defer func() {
+		if errClose := decodedBody.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
+		}
+	}()
+	data, err := io.ReadAll(decodedBody)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -192,19 +195,27 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
+	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
+		}
+		return nil, err
+	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	stream = out
 	go func() {
 		defer close(out)
 		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
+			if errClose := decodedBody.Close(); errClose != nil {
 				log.Errorf("response body close error: %v", errClose)
 			}
 		}()
 
 		// If from == to (Claude → Claude), directly forward the SSE stream without translation
 		if from == to {
-			scanner := bufio.NewScanner(httpResp.Body)
+			scanner := bufio.NewScanner(decodedBody)
 			buf := make([]byte, 20_971_520)
 			scanner.Buffer(buf, 20_971_520)
 			for scanner.Scan() {
@@ -228,7 +239,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 
 		// For other formats, use translation
-		scanner := bufio.NewScanner(httpResp.Body)
+		scanner := bufio.NewScanner(decodedBody)
 		buf := make([]byte, 20_971_520)
 		scanner.Buffer(buf, 20_971_520)
 		var param any
@@ -304,29 +315,29 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		recordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
-	}()
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
+		}
 		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
 	}
-	reader := io.Reader(resp.Body)
-	var decoder *zstd.Decoder
-	if hasZSTDEcoding(resp.Header.Get("Content-Encoding")) {
-		decoder, err = zstd.NewReader(resp.Body)
-		if err != nil {
-			recordAPIResponseError(ctx, e.cfg, err)
-			return cliproxyexecutor.Response{}, fmt.Errorf("failed to initialize zstd decoder: %w", err)
+	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
 		}
-		reader = decoder
-		defer decoder.Close()
+		return cliproxyexecutor.Response{}, err
 	}
-	data, err := io.ReadAll(reader)
+	defer func() {
+		if errClose := decodedBody.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
+		}
+	}()
+	data, err := io.ReadAll(decodedBody)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
@@ -419,7 +430,7 @@ func (e *ClaudeExecutor) resolveClaudeConfig(auth *cliproxyauth.Auth) *config.Cl
 			continue
 		}
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if attrBase == "" || cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
 				return entry
 			}
 		}
@@ -438,17 +449,84 @@ func (e *ClaudeExecutor) resolveClaudeConfig(auth *cliproxyauth.Auth) *config.Cl
 	return nil
 }
 
-func hasZSTDEcoding(contentEncoding string) bool {
-	if contentEncoding == "" {
-		return false
-	}
-	parts := strings.Split(contentEncoding, ",")
-	for i := range parts {
-		if strings.EqualFold(strings.TrimSpace(parts[i]), "zstd") {
-			return true
+type compositeReadCloser struct {
+	io.Reader
+	closers []func() error
+}
+
+func (c *compositeReadCloser) Close() error {
+	var firstErr error
+	for i := range c.closers {
+		if c.closers[i] == nil {
+			continue
+		}
+		if err := c.closers[i](); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return false
+	return firstErr
+}
+
+func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadCloser, error) {
+	if body == nil {
+		return nil, fmt.Errorf("response body is nil")
+	}
+	if contentEncoding == "" {
+		return body, nil
+	}
+	encodings := strings.Split(contentEncoding, ",")
+	for _, raw := range encodings {
+		encoding := strings.TrimSpace(strings.ToLower(raw))
+		switch encoding {
+		case "", "identity":
+			continue
+		case "gzip":
+			gzipReader, err := gzip.NewReader(body)
+			if err != nil {
+				_ = body.Close()
+				return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+			}
+			return &compositeReadCloser{
+				Reader: gzipReader,
+				closers: []func() error{
+					gzipReader.Close,
+					func() error { return body.Close() },
+				},
+			}, nil
+		case "deflate":
+			deflateReader := flate.NewReader(body)
+			return &compositeReadCloser{
+				Reader: deflateReader,
+				closers: []func() error{
+					deflateReader.Close,
+					func() error { return body.Close() },
+				},
+			}, nil
+		case "br":
+			return &compositeReadCloser{
+				Reader: brotli.NewReader(body),
+				closers: []func() error{
+					func() error { return body.Close() },
+				},
+			}, nil
+		case "zstd":
+			decoder, err := zstd.NewReader(body)
+			if err != nil {
+				_ = body.Close()
+				return nil, fmt.Errorf("failed to create zstd reader: %w", err)
+			}
+			return &compositeReadCloser{
+				Reader: decoder,
+				closers: []func() error{
+					func() error { decoder.Close(); return nil },
+					func() error { return body.Close() },
+				},
+			}, nil
+		default:
+			continue
+		}
+	}
+	return body, nil
 }
 
 func applyClaudeHeaders(r *http.Request, apiKey string, stream bool) {

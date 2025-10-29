@@ -209,15 +209,15 @@ func (s *Service) ensureWebsocketGateway() {
 	s.wsGateway = wsrelay.NewManager(opts)
 }
 
-func (s *Service) wsOnConnected(provider string) {
-	if s == nil || provider == "" {
+func (s *Service) wsOnConnected(channelID string) {
+	if s == nil || channelID == "" {
 		return
 	}
-	if !strings.HasPrefix(strings.ToLower(provider), "aistudio-") {
+	if !strings.HasPrefix(strings.ToLower(channelID), "aistudio-") {
 		return
 	}
 	if s.coreManager != nil {
-		if existing, ok := s.coreManager.GetByID(provider); ok && existing != nil {
+		if existing, ok := s.coreManager.GetByID(channelID); ok && existing != nil {
 			if !existing.Disabled && existing.Status == coreauth.StatusActive {
 				return
 			}
@@ -225,36 +225,33 @@ func (s *Service) wsOnConnected(provider string) {
 	}
 	now := time.Now().UTC()
 	auth := &coreauth.Auth{
-		ID:         provider,
-		Provider:   provider,
-		Label:      provider,
-		Status:     coreauth.StatusActive,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		Attributes: map[string]string{"ws_provider": "gemini"},
+		ID:        channelID,  // keep channel identifier as ID
+		Provider:  "aistudio", // logical provider for switch routing
+		Label:     channelID,  // display original channel id
+		Status:    coreauth.StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Metadata:  map[string]any{"email": channelID}, // inject email inline
 	}
-	log.Infof("websocket provider connected: %s", provider)
+	log.Infof("websocket provider connected: %s", channelID)
 	s.applyCoreAuthAddOrUpdate(context.Background(), auth)
 }
 
-func (s *Service) wsOnDisconnected(provider string, reason error) {
-	if s == nil || provider == "" {
+func (s *Service) wsOnDisconnected(channelID string, reason error) {
+	if s == nil || channelID == "" {
 		return
 	}
 	if reason != nil {
 		if strings.Contains(reason.Error(), "replaced by new connection") {
-			log.Infof("websocket provider replaced: %s", provider)
+			log.Infof("websocket provider replaced: %s", channelID)
 			return
 		}
-		log.Warnf("websocket provider disconnected: %s (%v)", provider, reason)
+		log.Warnf("websocket provider disconnected: %s (%v)", channelID, reason)
 	} else {
-		log.Infof("websocket provider disconnected: %s", provider)
+		log.Infof("websocket provider disconnected: %s", channelID)
 	}
 	ctx := context.Background()
-	s.applyCoreAuthRemoval(ctx, provider)
-	if s.coreManager != nil {
-		s.coreManager.UnregisterExecutor(provider)
-	}
+	s.applyCoreAuthRemoval(ctx, channelID)
 }
 
 func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.Auth) {
@@ -348,63 +345,16 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, s.cfg))
 		return
 	}
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a.Provider)), "aistudio-") {
-		if s.wsGateway != nil {
-			s.coreManager.RegisterExecutor(executor.NewAistudioExecutor(s.cfg, a.Provider, s.wsGateway))
-		}
-		return
-	}
-	// For Claude auths pointing to Anthropic-compatible endpoints, synthesize runtime auths
-	// under dedicated providers and ensure executors are registered accordingly.
-	if strings.EqualFold(strings.TrimSpace(a.Provider), "claude") && a.Attributes != nil {
-		base := strings.TrimSpace(a.Attributes["base_url"])
-		key := strings.TrimSpace(a.Attributes["api_key"])
-		if base != "" && key != "" {
-			if strings.EqualFold(base, "https://open.bigmodel.cn/api/anthropic") {
-				// Ensure zhipu anthropic executor (dedicated)
-				s.coreManager.RegisterExecutor(executor.NewGlmAnthropicExecutor(s.cfg))
-				// Synthesize runtime auth for provider=zhipu
-				now := time.Now()
-				runtimeAuth := &coreauth.Auth{
-					ID:         a.ID + ":zhipu",
-					Provider:   "zhipu",
-					Label:      a.Label,
-					Status:     coreauth.StatusActive,
-					ProxyURL:   a.ProxyURL,
-					Attributes: map[string]string{"api_key": key, "base_url": base, "source": "claude-compat:zhipu"},
-					CreatedAt:  now,
-					UpdatedAt:  now,
-				}
-				if _, ok := s.coreManager.GetByID(runtimeAuth.ID); !ok {
-					_, _ = s.coreManager.Register(context.Background(), runtimeAuth)
-				}
-			} else if strings.EqualFold(base, "https://api.minimaxi.com/anthropic") {
-				// Ensure minimax executor
-				s.coreManager.RegisterExecutor(executor.NewMiniMaxExecutor(s.cfg))
-				// Synthesize runtime auth for provider=minimax
-				now := time.Now()
-				runtimeAuth := &coreauth.Auth{
-					ID:         a.ID + ":minimax",
-					Provider:   "minimax",
-					Label:      a.Label,
-					Status:     coreauth.StatusActive,
-					ProxyURL:   a.ProxyURL,
-					Attributes: map[string]string{"api_key": key, "base_url": base, "source": "claude-compat:minimax"},
-					CreatedAt:  now,
-					UpdatedAt:  now,
-				}
-				if _, ok := s.coreManager.GetByID(runtimeAuth.ID); !ok {
-					_, _ = s.coreManager.Register(context.Background(), runtimeAuth)
-				}
-			}
-		}
-	}
-
 	switch strings.ToLower(a.Provider) {
 	case "gemini":
 		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
 	case "gemini-cli":
 		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
+	case "aistudio":
+		if s.wsGateway != nil {
+			s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, a.ID, s.wsGateway))
+		}
+		return
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "codex":
@@ -962,13 +912,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
 	compatProviderKey, compatDisplayName, compatDetected := openAICompatInfoFromAuth(a)
-	if a.Attributes != nil {
-		if strings.EqualFold(a.Attributes["ws_provider"], "gemini") {
-			models := mergeGeminiModels()
-			GlobalModelRegistry().RegisterClient(a.ID, provider, models)
-			return
-		}
-	}
 	if compatDetected {
 		provider = "openai-compatibility"
 	}
@@ -978,6 +921,8 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = registry.GetGeminiModels()
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
+	case "aistudio":
+		models = registry.GetAIStudioModels()
 	case "claude":
 		// 检测：当 claude 的 base_url 指向特定 Anthropic 兼容端点时，按后端仅注册对应模型，并将 provider 标记为对应专属执行器（zhipu/minimax）
 		if a.Attributes != nil {
@@ -1116,27 +1061,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		GlobalModelRegistry().RegisterClient(a.ID, key, models)
 	}
-}
-
-func mergeGeminiModels() []*ModelInfo {
-	models := make([]*ModelInfo, 0, 16)
-	seen := make(map[string]struct{})
-	appendModels := func(items []*ModelInfo) {
-		for i := range items {
-			m := items[i]
-			if m == nil || m.ID == "" {
-				continue
-			}
-			if _, ok := seen[m.ID]; ok {
-				continue
-			}
-			seen[m.ID] = struct{}{}
-			models = append(models, m)
-		}
-	}
-	appendModels(registry.GetGeminiModels())
-	appendModels(registry.GetGeminiCLIModels())
-	return models
 }
 
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
