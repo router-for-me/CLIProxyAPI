@@ -66,18 +66,24 @@ func noCORSMiddleware() gin.HandlerFunc {
 // These routes proxy through to the Amp control plane for OAuth, user management, etc.
 // If restrictToLocalhost is true, routes will only accept connections from 127.0.0.1/::1.
 func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, proxyHandler gin.HandlerFunc, restrictToLocalhost bool) {
-	ampAPI := engine.Group("/api")
-
-	// Always disable CORS for management routes to prevent browser-based attacks
-	ampAPI.Use(noCORSMiddleware())
-
-	// Apply localhost-only restriction if configured
+	// Create middleware chain for management routes
+	var middlewares []gin.HandlerFunc
+	middlewares = append(middlewares, noCORSMiddleware())
 	if restrictToLocalhost {
-		ampAPI.Use(localhostOnlyMiddleware())
+		middlewares = append(middlewares, localhostOnlyMiddleware())
 		log.Info("Amp management routes restricted to localhost only (CORS disabled)")
 	} else {
 		log.Warn("⚠️  Amp management routes are NOT restricted to localhost - this is insecure!")
 	}
+
+	// Register /auth routes without /api prefix (for Amp CLI authentication flow)
+	// These routes are used during initial login via `amp login`
+	ampAuth := engine.Group("/auth", middlewares...)
+	ampAuth.Any("", proxyHandler)
+	ampAuth.Any("/*path", proxyHandler)
+
+	// Register /api/* management routes (for Amp application/IDE usage)
+	ampAPI := engine.Group("/api", middlewares...)
 
 	// Management routes - these are proxied directly to Amp upstream
 	ampAPI.Any("/internal", proxyHandler)
@@ -120,10 +126,11 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	})
 
 	// Provider-specific routes under /api/provider/:provider
+	// Note: These routes do NOT use auth middleware because:
+	// 1. Amp CLI has its own authentication with the Amp upstream
+	// 2. Provider authentication uses OAuth tokens from auth files
+	// 3. Adding API key auth causes 401 errors for Amp CLI requests
 	ampProviders := engine.Group("/api/provider")
-	if auth != nil {
-		ampProviders.Use(auth)
-	}
 
 	provider := ampProviders.Group("/:provider")
 

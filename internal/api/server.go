@@ -217,6 +217,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	engine.Use(corsMiddleware())
+
+	// Add LiteLLM passthrough middleware (must be before route setup)
+	// When enabled, this routes ALL API traffic directly to LiteLLM
+	engine.Use(middleware.LiteLLMPassthrough(cfg))
+
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = configFilePath

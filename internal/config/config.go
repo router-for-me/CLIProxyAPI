@@ -33,6 +33,19 @@ type Config struct {
 	// browser attacks and remote access to management endpoints. Default: true (recommended).
 	AmpRestrictManagementToLocalhost bool `yaml:"amp-restrict-management-to-localhost" json:"amp-restrict-management-to-localhost"`
 
+	// LiteLLMPassthroughMode enables passthrough mode where ALL API traffic is routed directly
+	// to LiteLLM instead of using OAuth providers. When true, bypasses authentication checks
+	// and forwards all requests to the configured LiteLLM instance.
+	LiteLLMPassthroughMode bool `yaml:"litellm-passthrough-mode" json:"litellm-passthrough-mode"`
+
+	// LiteLLMBaseURL is the base URL of the LiteLLM proxy instance (e.g., http://localhost:4000).
+	// Required when LiteLLMPassthroughMode is enabled.
+	LiteLLMBaseURL string `yaml:"litellm-base-url" json:"litellm-base-url"`
+
+	// LiteLLMAPIKey is the optional API key for authenticating with the LiteLLM proxy.
+	// If empty, requests are forwarded without authentication.
+	LiteLLMAPIKey string `yaml:"litellm-api-key" json:"litellm-api-key"`
+
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
