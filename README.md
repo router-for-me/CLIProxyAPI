@@ -68,6 +68,14 @@ brew install cliproxyapi
 brew services start cliproxyapi
 ```
 
+### Installation via CLIProxyAPI Linux Installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brokechubb/cliproxyapi-installer/refs/heads/master/cliproxyapi-installer | bash
+```
+
+Thanks to [brokechubb](https://github.com/brokechubb) for building the Linux installer!
+
 ## Usage
 
 ### GUI Client & Official WebUI
@@ -486,7 +494,7 @@ openai-compatibility:
     # api-keys:
     #   - "sk-or-v1-...b780"
     #   - "sk-or-v1-...b781"
-    models: # The models supported by the provider.
+    models: # The models supported by the provider. Or you can use a format such as openrouter://moonshotai/kimi-k2:free to request undefined models
       - name: "moonshotai/kimi-k2:free" # The actual model name.
         alias: "kimi-k2" # The alias used in the API.
 ```
