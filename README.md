@@ -21,6 +21,7 @@ Chinese providers have now been added: [Qwen Code](https://github.com/QwenLM/qwe
 - Function calling/tools support
 - Multimodal input support (text and images)
 - Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Qwen and iFlow)
+- **Intelligent Model Routing** - Smart selection based on quota, usage patterns, and request complexity (see `docs/intelligent-routing.md`)
 - Simple CLI authentication flows (Gemini, OpenAI, Claude, Qwen and iFlow)
 - Generative Language API Key support
 - AI Studio Build multi-account load balancing

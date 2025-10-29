@@ -41,6 +41,7 @@
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
 - 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Qwen 与 iFlow）
+- **智能模型路由** - 基于配额、使用模式和请求复杂度的智能选择（参见 `docs/intelligent-routing_CN.md`）
 - 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Qwen 与 iFlow）
 - 支持 Gemini AIStudio API 密钥
 - 支持 AI Studio Build 多账户轮询

@@ -43,6 +43,12 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
 
+# Intelligent routing configuration
+intelligent-routing:
+  enabled: false # Enable intelligent model routing based on quota, usage patterns, and request complexity
+  stats-retention-hours: 24 # How long to keep usage statistics (in hours)
+  cleanup-interval-minutes: 60 # How often to clean up old statistics (in minutes)
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
