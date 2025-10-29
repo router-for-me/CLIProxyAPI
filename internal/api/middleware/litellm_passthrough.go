@@ -2,8 +2,8 @@
 package middleware
 
 import (
+	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -58,57 +58,70 @@ func LiteLLMPassthrough(cfg *config.Config) gin.HandlerFunc {
 		}
 	}
 
-	// Create reverse proxy to LiteLLM with custom transport for timeouts
+	// Create reverse proxy to LiteLLM
 	proxy := httputil.NewSingleHostReverseProxy(parsed)
-	
-	// Configure transport for streaming: timeouts only on connection establishment,
-	// NO timeouts on response reading to allow indefinite streaming
-	proxy.Transport = &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,  // Timeout for establishing connection
-			KeepAlive: 30 * time.Second,  // Keep TCP connection alive
-		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,  // Timeout for TLS handshake
-		ExpectContinueTimeout: 1 * time.Second,   // Timeout for 100-continue
-		IdleConnTimeout:       90 * time.Second,  // Close idle connections after 90s
-		// NO ResponseHeaderTimeout - allows streaming to take as long as needed
-		// NO Timeout on request/response - let client control disconnection
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-	}
-	
 	originalDirector := proxy.Director
+
+	// Configure custom transport with reasonable timeouts
+	proxy.Transport = &http.Transport{
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 0,                 // Disable 100-Continue (send body immediately)
+		ResponseHeaderTimeout: 120 * time.Second, // Wait up to 30s for response headers
+		DisableKeepAlives:     false,             // Enable keep-alive for better performance
+	}
+
+	// Enable streaming with immediate flushing for SSE responses
+	proxy.FlushInterval = -1 // Flush immediately for streaming responses
 
 	// Customize proxy director to inject API key and rewrite paths
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		req.Host = parsed.Host
 
-		// Rewrite path to strip /api/provider/:provider prefix
-		// This converts Amp CLI paths to LiteLLM-compatible paths
+		// Rewrite path to strip /api/provider/:provider prefix and handle Vertex AI paths
+		// This converts Amp CLI paths to LiteLLM-compatible paths with model name mapping
 		originalPath := req.URL.Path
-		req.URL.Path = rewritePathForLiteLLM(req.URL.Path)
+		req.URL.Path = rewritePathForLiteLLM(req.URL.Path, cfg)
+
+		// Extract provider name from original path for logging
+		provider := extractProvider(originalPath)
+
+		// Generate X-Request-ID for tracing if not present
+		requestID := req.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = fmt.Sprintf("litellm-%d", time.Now().UnixNano())
+			req.Header.Set("X-Request-ID", requestID)
+		}
 
 		// Inject LiteLLM API key if configured
 		if cfg.LiteLLMAPIKey != "" {
 			req.Header.Set("Authorization", "Bearer "+cfg.LiteLLMAPIKey)
 		}
 
-		// Preserve X-Request-ID for tracing
-		if req.Header.Get("X-Request-ID") == "" {
-			// Could generate one here if needed
-		}
+		// Log request details with full URL
+		fullURL := fmt.Sprintf("%s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
+		log.Debugf("[%s] LiteLLM passthrough: %s %s (provider=%s, rewritten from %s)",
+			requestID, req.Method, fullURL, provider, originalPath)
+		log.Debugf("[%s] Target URL: Scheme=%s, Host=%s, Path=%s, ContentLength=%d",
+			requestID, req.URL.Scheme, req.URL.Host, req.URL.Path, req.ContentLength)
 
-		log.Debugf("LiteLLM passthrough: %s %s -> %s%s (rewritten from %s)", req.Method, req.URL.Path, baseURL, req.URL.Path, originalPath)
+		// NOTE: Body reading removed - it breaks the reverse proxy's ability to forward requests
+		// The body restoration with io.NopCloser causes the proxy to fail silently
 	}
 
 	// Error handler for proxy failures
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		log.Errorf("LiteLLM passthrough proxy error for %s %s: %v", req.Method, req.URL.Path, err)
+		requestID := req.Header.Get("X-Request-ID")
+		log.Errorf("[%s] LiteLLM passthrough proxy error for %s %s: %v", requestID, req.Method, req.URL.Path, err)
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusBadGateway)
 		_, _ = rw.Write([]byte(`{"error":"litellm_passthrough_error","message":"Failed to reach LiteLLM proxy"}`))
 	}
+
+	// Response modifier disabled - logging response bodies was adding overhead
+	// proxy.ModifyResponse = nil
 
 	log.Infof("✨ LiteLLM passthrough mode ENABLED - ALL traffic routing to: %s", baseURL)
 
@@ -120,23 +133,24 @@ func LiteLLMPassthrough(cfg *config.Config) gin.HandlerFunc {
 		// and other special routes like /management.html
 		if shouldPassthrough(path) {
 			log.Debugf("LiteLLM passthrough: handling %s %s", c.Request.Method, path)
-			
-			// Catch ErrAbortHandler panic from reverse proxy (client disconnect)
+
+			handledAbort := false
 			defer func() {
-				if err := recover(); err != nil {
-					if err == http.ErrAbortHandler {
-						// Client disconnected - this is expected for cancelled requests
-						log.Debugf("LiteLLM passthrough: client disconnected for %s %s", c.Request.Method, path)
+				if rec := recover(); rec != nil {
+					if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+						handledAbort = true
+						log.Debugf("LiteLLM passthrough: client cancelled stream for %s %s", c.Request.Method, path)
 						c.Abort()
-					} else {
-						// Re-panic for other errors
-						panic(err)
+						return
 					}
+					panic(rec)
 				}
 			}()
-			
+
 			proxy.ServeHTTP(c.Writer, c.Request)
-			c.Abort() // Stop further processing
+			if !handledAbort {
+				c.Abort() // Stop further processing
+			}
 		} else {
 			log.Debugf("LiteLLM passthrough: skipping %s %s (management/special route)", c.Request.Method, path)
 			c.Next() // Continue to normal handlers (management routes, etc.)
@@ -166,22 +180,86 @@ func shouldPassthrough(path string) bool {
 }
 
 // rewritePathForLiteLLM strips the /api/provider/:provider prefix from paths
-// before forwarding to LiteLLM, since LiteLLM expects standard OpenAI-compatible paths.
+// and handles Vertex AI format paths, converting them to standard Gemini API format.
+// It also applies model name mappings from the configuration.
 //
 // Examples:
 //   - /api/provider/anthropic/v1/messages -> /v1/messages
 //   - /api/provider/openai/v1/chat/completions -> /v1/chat/completions
+//   - /api/provider/google/v1beta1/publishers/google/models/gemini-2.5-flash-preview-09-2025:generateContent
+//     -> /v1beta/models/gemini-flash:generateContent (with model mapping)
 //   - /v1/messages -> /v1/messages (unchanged)
-func rewritePathForLiteLLM(path string) string {
+func rewritePathForLiteLLM(path string, cfg *config.Config) string {
+	// Handle Vertex AI Gemini paths: /v1beta1/publishers/google/models/{model}:{action}
+	if strings.Contains(path, "/v1beta1/publishers/google/models/") {
+		// Extract model and action from Vertex AI path
+		// Example: /api/provider/google/v1beta1/publishers/google/models/gemini-2.5-flash-preview-09-2025:generateContent
+		parts := strings.Split(path, "/models/")
+		if len(parts) >= 2 {
+			modelAndAction := parts[1] // gemini-2.5-flash-preview-09-2025:generateContent
+			colonIndex := strings.Index(modelAndAction, ":")
+			if colonIndex >= 0 {
+				modelName := modelAndAction[:colonIndex] // gemini-2.5-flash-preview-09-2025
+				action := modelAndAction[colonIndex:]    // :generateContent
+
+				// Apply model name mapping if configured
+				if cfg.LiteLLMModelMappings != nil {
+					if mappedModel, found := cfg.LiteLLMModelMappings[modelName]; found {
+						// Validate that mapped model name is not empty
+						if strings.TrimSpace(mappedModel) == "" {
+							log.Warnf("LiteLLM path rewrite: mapped model for %s is empty, using original", modelName)
+						} else {
+							log.Debugf("LiteLLM path rewrite: mapped model %s -> %s", modelName, mappedModel)
+							modelName = mappedModel
+						}
+					}
+				}
+
+				// Validate final model name is not empty before constructing path
+				if strings.TrimSpace(modelName) == "" {
+					log.Warnf("LiteLLM path rewrite: model name is empty in Vertex AI path, returning original path")
+					return path
+				}
+
+				// Convert to standard Gemini API path
+				return "/v1beta/models/" + modelName + action
+			}
+		}
+	}
+
 	// Strip /api/provider/:provider prefix if present
 	if strings.HasPrefix(path, "/api/provider/") {
 		// Split: ["", "api", "provider", "anthropic", "v1/messages"]
 		parts := strings.SplitN(path, "/", 5)
 		if len(parts) >= 5 {
+			remainingPath := "/" + parts[4] // /v1/messages or /v1beta1/publishers/...
+
+			// If remaining path is Vertex AI format, recursively rewrite
+			if strings.Contains(remainingPath, "/v1beta1/publishers/google/models/") {
+				return rewritePathForLiteLLM(remainingPath, cfg)
+			}
+
 			// Return the last part with leading slash: /v1/messages
-			return "/" + parts[4]
+			return remainingPath
 		}
 	}
-	// Return path unchanged if it doesn't match the pattern
+
+	// Return path unchanged if it doesn't match any pattern
 	return path
+}
+
+// extractProvider extracts the provider name from the request path for logging purposes.
+// Examples:
+//   - /api/provider/anthropic/v1/messages -> "anthropic"
+//   - /api/provider/google/v1beta1/... -> "google"
+//   - /v1/messages -> "direct"
+func extractProvider(path string) string {
+	if strings.HasPrefix(path, "/api/provider/") {
+		// Split: ["", "api", "provider", "anthropic", ...]
+		parts := strings.SplitN(path, "/", 5)
+		if len(parts) >= 4 {
+			return parts[3] // Return provider name
+		}
+	}
+	return "direct" // Direct API call without provider prefix
 }

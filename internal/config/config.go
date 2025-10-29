@@ -46,6 +46,11 @@ type Config struct {
 	// If empty, requests are forwarded without authentication.
 	LiteLLMAPIKey string `yaml:"litellm-api-key" json:"litellm-api-key"`
 
+	// LiteLLMModelMappings maps incoming model names to LiteLLM model names.
+	// Useful for mapping Vertex AI or provider-specific model names to LiteLLM aliases.
+	// Example: {"gemini-2.5-flash-preview-09-2025": "gemini-flash"}
+	LiteLLMModelMappings map[string]string `yaml:"litellm-model-mappings" json:"litellm-model-mappings"`
+
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
