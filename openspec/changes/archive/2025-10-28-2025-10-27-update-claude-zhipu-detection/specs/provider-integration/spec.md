@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Provider Model Registration
 系统 SHALL 基于认证条目的实际后端特征注册可用模型列表，以保证 `/v1/models` 的可用性与准确性。

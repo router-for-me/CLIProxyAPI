@@ -8,6 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -205,6 +206,8 @@ func (b *Builder) Build() (*Service, error) {
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+	// Seed stateless executors required by heuristic provider inference (glm-*/MiniMax-* rely on Anthropic-compatible executors).
+	seedExecutors(coreManager, b.cfg)
 
 	service := &Service{
 		cfg:            b.cfg,
@@ -219,4 +222,14 @@ func (b *Builder) Build() (*Service, error) {
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	return service, nil
+}
+
+// seedExecutors pre-registers provider executors that may be required before any auth updates occur.
+// This avoids glm-*/MiniMax-* requests hitting executor_not_found when Anthropic-compatible routing kicks in ahead of auth registration.
+func seedExecutors(mgr *coreauth.Manager, cfg *config.Config) {
+	if mgr == nil {
+		return
+	}
+	mgr.RegisterExecutor(executor.NewGlmAnthropicExecutor(cfg))
+	mgr.RegisterExecutor(executor.NewMiniMaxExecutor(cfg))
 }
