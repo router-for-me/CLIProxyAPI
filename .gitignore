@@ -30,3 +30,11 @@ GEMINI.md
 .vscode/*
 .claude/*
 .serena/*
+.spec-workflow/config.example.toml
+.spec-workflow/templates/design-template.md
+.spec-workflow/templates/product-template.md
+.spec-workflow/templates/requirements-template.md
+.spec-workflow/templates/structure-template.md
+.spec-workflow/templates/tasks-template.md
+.spec-workflow/templates/tech-template.md
+.spec-workflow/user-templates/README.md
