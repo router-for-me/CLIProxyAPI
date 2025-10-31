@@ -872,6 +872,11 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if m.store == nil || auth == nil {
 		return nil
 	}
+	if auth.Attributes != nil {
+		if v := strings.ToLower(strings.TrimSpace(auth.Attributes["runtime_only"])); v == "true" {
+			return nil
+		}
+	}
 	// Skip persistence when metadata is absent (e.g., runtime-only auths).
 	if auth.Metadata == nil {
 		return nil

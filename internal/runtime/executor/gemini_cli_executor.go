@@ -63,9 +63,14 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	to := sdktranslator.FromString("gemini-cli")
 	budgetOverride, includeOverride, hasOverride := util.GeminiThinkingFromMetadata(req.Metadata)
 	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	if hasOverride {
+	if hasOverride && util.ModelSupportsThinking(req.Model) {
+		if budgetOverride != nil {
+			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+			budgetOverride = &norm
+		}
 		basePayload = util.ApplyGeminiCLIThinkingConfig(basePayload, budgetOverride, includeOverride)
 	}
+	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
 	basePayload = fixGeminiCLIImageAspectRatio(req.Model, basePayload)
 
 	action := "generateContent"
@@ -92,7 +97,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	var lastStatus int
 	var lastBody []byte
 
-	for _, attemptModel := range models {
+	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
 		if action == "countTokens" {
 			payload = deleteJSONField(payload, "project")
@@ -101,7 +106,6 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 			payload = setJSONField(payload, "project", projectID)
 			payload = setJSONField(payload, "model", attemptModel)
 		}
-		payload = disableGeminiThinkingConfig(payload, attemptModel)
 
 		tok, errTok := tokenSource.Token()
 		if errTok != nil {
@@ -166,7 +170,11 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		lastBody = append([]byte(nil), data...)
 		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, string(data))
 		if httpResp.StatusCode == 429 {
-			log.Debugf("gemini cli executor: rate limited, retrying with next model")
+			if idx+1 < len(models) {
+				log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
+			} else {
+				log.Debug("gemini cli executor: rate limited, no additional fallback model")
+			}
 			continue
 		}
 
@@ -196,9 +204,14 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	to := sdktranslator.FromString("gemini-cli")
 	budgetOverride, includeOverride, hasOverride := util.GeminiThinkingFromMetadata(req.Metadata)
 	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-	if hasOverride {
+	if hasOverride && util.ModelSupportsThinking(req.Model) {
+		if budgetOverride != nil {
+			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+			budgetOverride = &norm
+		}
 		basePayload = util.ApplyGeminiCLIThinkingConfig(basePayload, budgetOverride, includeOverride)
 	}
+	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
 	basePayload = fixGeminiCLIImageAspectRatio(req.Model, basePayload)
 
 	projectID := strings.TrimSpace(stringValue(auth.Metadata, "project_id"))
@@ -219,11 +232,10 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	var lastStatus int
 	var lastBody []byte
 
-	for _, attemptModel := range models {
+	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
 		payload = setJSONField(payload, "project", projectID)
 		payload = setJSONField(payload, "model", attemptModel)
-		payload = disableGeminiThinkingConfig(payload, attemptModel)
 
 		tok, errTok := tokenSource.Token()
 		if errTok != nil {
@@ -282,7 +294,11 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			lastBody = append([]byte(nil), data...)
 			log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, string(data))
 			if httpResp.StatusCode == 429 {
-				log.Debugf("gemini cli executor: rate limited, retrying with next model")
+				if idx+1 < len(models) {
+					log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
+				} else {
+					log.Debug("gemini cli executor: rate limited, no additional fallback model")
+				}
 				continue
 			}
 			err = statusErr{code: httpResp.StatusCode, msg: string(data)}
@@ -393,12 +409,16 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	budgetOverride, includeOverride, hasOverride := util.GeminiThinkingFromMetadata(req.Metadata)
 	for _, attemptModel := range models {
 		payload := sdktranslator.TranslateRequest(from, to, attemptModel, bytes.Clone(req.Payload), false)
-		if hasOverride {
+		if hasOverride && util.ModelSupportsThinking(req.Model) {
+			if budgetOverride != nil {
+				norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+				budgetOverride = &norm
+			}
 			payload = util.ApplyGeminiCLIThinkingConfig(payload, budgetOverride, includeOverride)
 		}
 		payload = deleteJSONField(payload, "project")
 		payload = deleteJSONField(payload, "model")
-		payload = disableGeminiThinkingConfig(payload, attemptModel)
+		payload = util.StripThinkingConfigIfUnsupported(req.Model, payload)
 		payload = fixGeminiCLIImageAspectRatio(attemptModel, payload)
 
 		tok, errTok := tokenSource.Token()
@@ -621,29 +641,6 @@ func cliPreviewFallbackOrder(model string) []string {
 	default:
 		return nil
 	}
-}
-
-func disableGeminiThinkingConfig(body []byte, model string) []byte {
-	if !geminiModelDisallowsThinking(model) {
-		return body
-	}
-
-	updated := deleteJSONField(body, "request.generationConfig.thinkingConfig")
-	updated = deleteJSONField(updated, "generationConfig.thinkingConfig")
-	return updated
-}
-
-func geminiModelDisallowsThinking(model string) bool {
-	if model == "" {
-		return false
-	}
-	lower := strings.ToLower(model)
-	for _, marker := range []string{"gemini-2.5-flash-image-preview", "gemini-2.5-flash-image"} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 // setJSONField sets a top-level JSON field on a byte slice payload via sjson.

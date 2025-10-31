@@ -26,32 +26,57 @@ import (
 //   - []byte: The transformed request data in Gemini CLI API format
 func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
-	// Base envelope
-	out := []byte(`{"project":"","request":{"contents":[],"generationConfig":{"thinkingConfig":{"include_thoughts":true}}},"model":"gemini-2.5-pro"}`)
+	// Base envelope (no default thinkingConfig)
+	out := []byte(`{"project":"","request":{"contents":[]},"model":"gemini-2.5-pro"}`)
 
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// Reasoning effort -> thinkingBudget/include_thoughts
+	// Note: OpenAI official fields take precedence over extra_body.google.thinking_config
 	re := gjson.GetBytes(rawJSON, "reasoning_effort")
-	if re.Exists() {
+	hasOfficialThinking := re.Exists()
+	if hasOfficialThinking && util.ModelSupportsThinking(modelName) {
 		switch re.String() {
 		case "none":
 			out, _ = sjson.DeleteBytes(out, "request.generationConfig.thinkingConfig.include_thoughts")
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", 0)
 		case "auto":
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		case "low":
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", 1024)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 1024))
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		case "medium":
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", 8192)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 8192))
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		case "high":
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", 24576)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 32768))
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		default:
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		}
-	} else {
-		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+	}
+
+	// Cherry Studio extension extra_body.google.thinking_config (effective only when official fields are absent)
+	if !hasOfficialThinking && util.ModelSupportsThinking(modelName) {
+		if tc := gjson.GetBytes(rawJSON, "extra_body.google.thinking_config"); tc.Exists() && tc.IsObject() {
+			var setBudget bool
+			var normalized int
+			if v := tc.Get("thinking_budget"); v.Exists() {
+				normalized = util.NormalizeThinkingBudget(modelName, int(v.Int()))
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", normalized)
+				setBudget = true
+			}
+			if v := tc.Get("include_thoughts"); v.Exists() {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", v.Bool())
+			} else if setBudget {
+				if normalized != 0 {
+					out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+				}
+			}
+		}
 	}
 
 	// Temperature/top_p/top_k
@@ -250,8 +275,34 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 			if t.Get("type").String() == "function" {
 				fn := t.Get("function")
 				if fn.Exists() && fn.IsObject() {
-					parametersJsonSchema, _ := util.RenameKey(fn.Raw, "parameters", "parametersJsonSchema")
-					out, _ = sjson.SetRawBytes(out, fdPath+".-1", []byte(parametersJsonSchema))
+					fnRaw := fn.Raw
+					if fn.Get("parameters").Exists() {
+						renamed, errRename := util.RenameKey(fnRaw, "parameters", "parametersJsonSchema")
+						if errRename != nil {
+							log.Warnf("Failed to rename parameters for tool '%s': %v", fn.Get("name").String(), errRename)
+						} else {
+							fnRaw = renamed
+						}
+					} else {
+						var errSet error
+						fnRaw, errSet = sjson.Set(fnRaw, "parametersJsonSchema.type", "object")
+						if errSet != nil {
+							log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
+							continue
+						}
+						fnRaw, errSet = sjson.Set(fnRaw, "parametersJsonSchema.properties", map[string]interface{}{})
+						if errSet != nil {
+							log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
+							continue
+						}
+					}
+					fnRaw, _ = sjson.Delete(fnRaw, "strict")
+					tmp, errSet := sjson.SetRawBytes(out, fdPath+".-1", []byte(fnRaw))
+					if errSet != nil {
+						log.Warnf("Failed to append tool declaration for '%s': %v", fn.Get("name").String(), errSet)
+						continue
+					}
+					out = tmp
 				}
 			}
 		}

@@ -68,8 +68,8 @@ func GetClaudeModels() []*ModelInfo {
 	}
 }
 
-// GetGeminiModels returns the standard Gemini model definitions
-func GetGeminiModels() []*ModelInfo {
+// GeminiModels returns the shared base Gemini model set used by multiple providers.
+func GeminiModels() []*ModelInfo {
 	return []*ModelInfo{
 		{
 			ID:                         "gemini-2.5-flash",
@@ -84,6 +84,7 @@ func GetGeminiModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                         "gemini-2.5-pro",
@@ -98,82 +99,7 @@ func GetGeminiModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-		},
-		{
-			ID:                         "gemini-2.5-flash-lite",
-			Object:                     "model",
-			Created:                    time.Now().Unix(),
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash-lite",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Flash Lite",
-			Description:                "Stable release (June 17th, 2025) of Gemini 2.5 Flash Lite",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-		},
-		{
-			ID:                         "gemini-2.5-flash-image-preview",
-			Object:                     "model",
-			Created:                    time.Now().Unix(),
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash-image-preview",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Flash Image Preview",
-			Description:                "State-of-the-art image generation and editing model.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           8192,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-		},
-		{
-			ID:                         "gemini-2.5-flash-image",
-			Object:                     "model",
-			Created:                    time.Now().Unix(),
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash-image",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Flash Image",
-			Description:                "State-of-the-art image generation and editing model.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           8192,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-		},
-	}
-}
-
-// GetGeminiCLIModels returns the standard Gemini model definitions
-func GetGeminiCLIModels() []*ModelInfo {
-	return []*ModelInfo{
-		{
-			ID:                         "gemini-2.5-flash",
-			Object:                     "model",
-			Created:                    time.Now().Unix(),
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash",
-			Version:                    "001",
-			DisplayName:                "Gemini 2.5 Flash",
-			Description:                "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-		},
-		{
-			ID:                         "gemini-2.5-pro",
-			Object:                     "model",
-			Created:                    time.Now().Unix(),
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-pro",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Pro",
-			Description:                "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
 			ID:                         "gemini-2.5-flash-lite",
@@ -188,6 +114,7 @@ func GetGeminiCLIModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 512, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                         "gemini-2.5-flash-image-preview",
@@ -202,6 +129,7 @@ func GetGeminiCLIModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           8192,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			// image models don't support thinkingConfig; leave Thinking nil
 		},
 		{
 			ID:                         "gemini-2.5-flash-image",
@@ -216,8 +144,67 @@ func GetGeminiCLIModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           8192,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			// image models don't support thinkingConfig; leave Thinking nil
 		},
 	}
+}
+
+// GetGeminiModels returns the standard Gemini model definitions
+func GetGeminiModels() []*ModelInfo { return GeminiModels() }
+
+// GetGeminiCLIModels returns the standard Gemini model definitions
+func GetGeminiCLIModels() []*ModelInfo { return GeminiModels() }
+
+// GetAIStudioModels returns the Gemini model definitions for AI Studio integrations
+func GetAIStudioModels() []*ModelInfo {
+	base := GeminiModels()
+	return append(base,
+		&ModelInfo{
+			ID:                         "gemini-pro-latest",
+			Object:                     "model",
+			Created:                    time.Now().Unix(),
+			OwnedBy:                    "google",
+			Type:                       "gemini",
+			Name:                       "models/gemini-pro-latest",
+			Version:                    "2.5",
+			DisplayName:                "Gemini Pro Latest",
+			Description:                "Latest release of Gemini Pro",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65536,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+		},
+		&ModelInfo{
+			ID:                         "gemini-flash-latest",
+			Object:                     "model",
+			Created:                    time.Now().Unix(),
+			OwnedBy:                    "google",
+			Type:                       "gemini",
+			Name:                       "models/gemini-flash-latest",
+			Version:                    "2.5",
+			DisplayName:                "Gemini Flash Latest",
+			Description:                "Latest release of Gemini Flash",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65536,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		&ModelInfo{
+			ID:                         "gemini-flash-lite-latest",
+			Object:                     "model",
+			Created:                    time.Now().Unix(),
+			OwnedBy:                    "google",
+			Type:                       "gemini",
+			Name:                       "models/gemini-flash-lite-latest",
+			Version:                    "2.5",
+			DisplayName:                "Gemini Flash-Lite Latest",
+			Description:                "Latest release of Gemini Flash-Lite",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65536,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 512, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+		},
+	)
 }
 
 // GetOpenAIModels returns the standard OpenAI model definitions
@@ -417,7 +404,6 @@ func GetIFlowModels() []*ModelInfo {
 		{ID: "qwen3-vl-plus", DisplayName: "Qwen3-VL-Plus", Description: "Qwen3 multimodal vision-language"},
 		{ID: "qwen3-max-preview", DisplayName: "Qwen3-Max-Preview", Description: "Qwen3 Max preview build"},
 		{ID: "kimi-k2-0905", DisplayName: "Kimi-K2-Instruct-0905", Description: "Moonshot Kimi K2 instruct 0905"},
-		{ID: "glm-4.5", DisplayName: "GLM-4.5", Description: "Zhipu GLM 4.5 general model"},
 		{ID: "glm-4.6", DisplayName: "GLM-4.6", Description: "Zhipu GLM 4.6 general model"},
 		{ID: "kimi-k2", DisplayName: "Kimi-K2", Description: "Moonshot Kimi K2 general model"},
 		{ID: "deepseek-v3.2", DisplayName: "DeepSeek-V3.2-Exp", Description: "DeepSeek V3.2 experimental"},
