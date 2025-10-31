@@ -43,6 +43,7 @@
 - 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Qwen 与 iFlow）
 - 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Qwen 与 iFlow）
 - 支持 Gemini AIStudio API 密钥
+- 支持 AI Studio Build 多账户轮询
 - 支持 Gemini CLI 多账户轮询
 - 支持 Claude Code 多账户轮询
 - 支持 Qwen Code 多账户轮询
@@ -81,6 +82,14 @@
 brew install cliproxyapi
 brew services start cliproxyapi
 ```
+
+### 通过 CLIProxyAPI Linux Installer 安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brokechubb/cliproxyapi-installer/refs/heads/master/cliproxyapi-installer | bash
+```
+
+感谢 [brokechubb](https://github.com/brokechubb) 构建了 Linux installer！
 
 ## 使用方法
 
@@ -273,12 +282,16 @@ console.log(await claudeResponse.json());
 - gemini-2.5-flash-lite
 - gemini-2.5-flash-image
 - gemini-2.5-flash-image-preview
+- gemini-pro-latest
+- gemini-flash-latest
+- gemini-flash-lite-latest
 - gpt-5
 - gpt-5-codex
 - claude-opus-4-1-20250805
 - claude-opus-4-20250514
 - claude-sonnet-4-20250514
 - claude-sonnet-4-5-20250929
+- claude-haiku-4-5-20251001
 - claude-3-7-sonnet-20250219
 - claude-3-5-haiku-20241022
 - qwen3-coder-plus
@@ -290,7 +303,6 @@ console.log(await claudeResponse.json());
 - deepseek-r1
 - deepseek-v3
 - kimi-k2
-- glm-4.5
 - glm-4.6
 - tstars2.0
 - 以及其他 iFlow 支持的模型
@@ -428,7 +440,7 @@ openai-compatibility:
     # api-keys:
     #   - "sk-or-v1-...b780"
     #   - "sk-or-v1-...b781"
-    models: # 提供商支持的模型。
+    models: # 提供商支持的模型。或者你可以使用类似 openrouter://moonshotai/kimi-k2:free 这样的格式来请求未在这里定义的模型
       - name: "moonshotai/kimi-k2:free" # 实际的模型名称。
         alias: "kimi-k2" # 在API中使用的别名。
 ```
@@ -523,23 +535,35 @@ openai-compatibility:
         alias: "kimi-k2"
 ```
 
-旧格式（仍支持）：
-
-```yaml
-openai-compatibility:
-  - name: "openrouter"
-    base-url: "https://openrouter.ai/api/v1"
-    api-keys:
-      - "sk-or-v1-...b780"
-      - "sk-or-v1-...b781"
-    models:
-      - name: "moonshotai/kimi-k2:free"
-        alias: "kimi-k2"
-```
-
 使用方式：在 `/v1/chat/completions` 中将 `model` 设为别名（如 `kimi-k2`），代理将自动路由到对应提供商与模型。
 
 并且，对于这些与OpenAI兼容的提供商模型，您始终可以通过将CODE_ASSIST_ENDPOINT设置为 http://127.0.0.1:8317 来使用Gemini CLI。
+
+### AI Studio 使用说明
+
+您可以将本服务 (CLIProxyAPI) 作为后端，配合 [这个 AI Studio 应用](https://aistudio.google.com/apps/drive/1CPW7FpWGsDZzkaYgYOyXQ_6FWgxieLmL) 使用。请遵循以下步骤进行配置：
+
+1.  **启动 CLIProxyAPI 服务**：确保您的 CLIProxyAPI 实例正在本地或远程运行。
+2.  **访问 AI Studio 应用**：在浏览器中登录您的 Google 账户，然后打开以下链接：
+    - [https://aistudio.google.com/apps/drive/1CPW7FpWGsDZzkaYgYOyXQ_6FWgxieLmL](https://aistudio.google.com/apps/drive/1CPW7FpWGsDZzkaYgYOyXQ_6FWgxieLmL)
+
+#### 连接配置
+
+默认情况下，AI Studio 应用会尝试连接到本地的 CLIProxyAPI (`ws://127.0.0.1:8317`)。
+
+-   **连接到远程服务**：
+    如果您需要连接到远程部署的 CLIProxyAPI，请修改 AI Studio 应用中的 `config.ts` 文件，更新 `WEBSOCKET_PROXY_URL` 的值。
+    -   如果您的远程服务启用了 SSL，请使用 `wss://` 协议。
+    -   如果未启用 SSL，请使用 `ws://` 协议。
+
+#### 认证配置
+
+默认情况下，CLIProxyAPI 的 WebSocket 连接不要求认证。
+
+-   **在 CLIProxyAPI 服务端启用认证**：
+    在您的 `config.yaml` 文件中，将 `ws_auth` 设置为 `true`。
+-   **在 AI Studio 客户端配置认证**：
+    在 AI Studio 应用的 `config.ts` 文件中，设置 `JWT_TOKEN` 的值为您的认证令牌。
 
 ### 身份验证目录
 

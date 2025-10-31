@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	client "github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -129,7 +130,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	}
 
 	// Build output Gemini CLI request JSON
-	out := `{"contents":[],"generationConfig":{"thinkingConfig":{"include_thoughts":true}}}`
+	out := `{"contents":[]}`
 	out, _ = sjson.Set(out, "model", modelName)
 	if systemInstruction != nil {
 		b, _ := json.Marshal(systemInstruction)
@@ -144,21 +145,16 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		out, _ = sjson.SetRaw(out, "tools", string(b))
 	}
 
-	// Map reasoning and sampling configs
-	reasoningEffortResult := gjson.GetBytes(rawJSON, "reasoning_effort")
-	if reasoningEffortResult.String() == "none" {
-		out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", false)
-		out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 0)
-	} else if reasoningEffortResult.String() == "auto" {
-		out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", -1)
-	} else if reasoningEffortResult.String() == "low" {
-		out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 1024)
-	} else if reasoningEffortResult.String() == "medium" {
-		out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 8192)
-	} else if reasoningEffortResult.String() == "high" {
-		out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 24576)
-	} else {
-		out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", -1)
+	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when enabled
+	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() && util.ModelSupportsThinking(modelName) {
+		if t.Get("type").String() == "enabled" {
+			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
+				budget := int(b.Int())
+				budget = util.NormalizeThinkingBudget(modelName, budget)
+				out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", budget)
+				out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
+			}
+		}
 	}
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {
 		out, _ = sjson.Set(out, "generationConfig.temperature", v.Num)

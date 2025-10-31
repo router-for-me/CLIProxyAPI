@@ -45,6 +45,23 @@ type ModelInfo struct {
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// SupportedParameters lists supported parameters
 	SupportedParameters []string `json:"supported_parameters,omitempty"`
+
+	// Thinking holds provider-specific reasoning/thinking budget capabilities.
+	// This is optional and currently used for Gemini thinking budget normalization.
+	Thinking *ThinkingSupport `json:"thinking,omitempty"`
+}
+
+// ThinkingSupport describes a model family's supported internal reasoning budget range.
+// Values are interpreted in provider-native token units.
+type ThinkingSupport struct {
+	// Min is the minimum allowed thinking budget (inclusive).
+	Min int `json:"min,omitempty"`
+	// Max is the maximum allowed thinking budget (inclusive).
+	Max int `json:"max,omitempty"`
+	// ZeroAllowed indicates whether 0 is a valid value (to disable thinking).
+	ZeroAllowed bool `json:"zero_allowed,omitempty"`
+	// DynamicAllowed indicates whether -1 is a valid value (dynamic thinking budget).
+	DynamicAllowed bool `json:"dynamic_allowed,omitempty"`
 }
 
 // ModelRegistration tracks a model's availability
@@ -650,6 +667,17 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 		result = append(result, item.name)
 	}
 	return result
+}
+
+// GetModelInfo returns the registered ModelInfo for the given model ID, if present.
+// Returns nil if the model is unknown to the registry.
+func (r *ModelRegistry) GetModelInfo(modelID string) *ModelInfo {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	if reg, ok := r.models[modelID]; ok && reg != nil {
+		return reg.Info
+	}
+	return nil
 }
 
 // convertModelToMap converts ModelInfo to the appropriate format for different handler types

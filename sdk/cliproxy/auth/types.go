@@ -157,15 +157,6 @@ func (a *Auth) AccountInfo() (string, string) {
 			return "oauth", v
 		}
 	}
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a.Provider)), "aistudio-") {
-		if label := strings.TrimSpace(a.Label); label != "" {
-			return "oauth", label
-		}
-		if id := strings.TrimSpace(a.ID); id != "" {
-			return "oauth", id
-		}
-		return "oauth", "aistudio"
-	}
 	if a.Attributes != nil {
 		if v := a.Attributes["api_key"]; v != "" {
 			return "api_key", v

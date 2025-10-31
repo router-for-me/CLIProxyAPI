@@ -4,6 +4,7 @@ package chat_completions
 
 import (
 	"bytes"
+	"github.com/tidwall/sjson"
 )
 
 // ConvertOpenAIRequestToOpenAI converts an OpenAI Chat Completions request (raw JSON)
@@ -17,5 +18,14 @@ import (
 // Returns:
 //   - []byte: The transformed request data in Gemini CLI API format
 func ConvertOpenAIRequestToOpenAI(modelName string, inputRawJSON []byte, _ bool) []byte {
-	return bytes.Clone(inputRawJSON)
+	// Update the "model" field in the JSON payload with the provided modelName
+	// The sjson.SetBytes function returns a new byte slice with the updated JSON.
+	updatedJSON, err := sjson.SetBytes(inputRawJSON, "model", modelName)
+	if err != nil {
+		// If there's an error, return the original JSON or handle the error appropriately.
+		// For now, we'll return the original, but in a real scenario, logging or a more robust error
+		// handling mechanism would be needed.
+		return bytes.Clone(inputRawJSON)
+	}
+	return updatedJSON
 }

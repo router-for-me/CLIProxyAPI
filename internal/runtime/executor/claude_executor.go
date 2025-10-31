@@ -551,8 +551,8 @@ func applyClaudeHeaders(r *http.Request, apiKey string, stream bool) {
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Arch", "arm64")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Os", "MacOS")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", "60")
+	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", "claude-cli/1.0.83 (external, cli)")
 	r.Header.Set("Connection", "keep-alive")
-	r.Header.Set("User-Agent", "claude-cli/1.0.83 (external, cli)")
 	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")

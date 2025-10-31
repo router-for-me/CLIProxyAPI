@@ -23,6 +23,7 @@ Chinese providers have now been added: [Qwen Code](https://github.com/QwenLM/qwe
 - Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Qwen and iFlow)
 - Simple CLI authentication flows (Gemini, OpenAI, Claude, Qwen and iFlow)
 - Generative Language API Key support
+- AI Studio Build multi-account load balancing
 - Gemini CLI multi-account load balancing
 - Claude Code multi-account load balancing
 - Qwen Code multi-account load balancing
@@ -67,6 +68,14 @@ Chinese providers have now been added: [Qwen Code](https://github.com/QwenLM/qwe
 brew install cliproxyapi
 brew services start cliproxyapi
 ```
+
+### Installation via CLIProxyAPI Linux Installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brokechubb/cliproxyapi-installer/refs/heads/master/cliproxyapi-installer | bash
+```
+
+Thanks to [brokechubb](https://github.com/brokechubb) for building the Linux installer!
 
 ## Usage
 
@@ -260,12 +269,16 @@ console.log(await claudeResponse.json());
 - gemini-2.5-flash-lite
 - gemini-2.5-flash-image
 - gemini-2.5-flash-image-preview
+- gemini-pro-latest
+- gemini-flash-latest
+- gemini-flash-lite-latest
 - gpt-5
 - gpt-5-codex
 - claude-opus-4-1-20250805
 - claude-opus-4-20250514
 - claude-sonnet-4-20250514
 - claude-sonnet-4-5-20250929
+- claude-haiku-4-5-20251001
 - claude-3-7-sonnet-20250219
 - claude-3-5-haiku-20241022
 - qwen3-coder-plus
@@ -277,7 +290,6 @@ console.log(await claudeResponse.json());
 - deepseek-r1
 - deepseek-v3
 - kimi-k2
-- glm-4.5
 - glm-4.6
 - tstars2.0
 - And other iFlow-supported models
@@ -415,7 +427,7 @@ openai-compatibility:
     # api-keys:
     #   - "sk-or-v1-...b780"
     #   - "sk-or-v1-...b781"
-    models: # The models supported by the provider.
+    models: # The models supported by the provider. Or you can use a format such as openrouter://moonshotai/kimi-k2:free to request undefined models
       - name: "moonshotai/kimi-k2:free" # The actual model name.
         alias: "kimi-k2" # The alias used in the API.
 ```
@@ -510,28 +522,37 @@ openai-compatibility:
         alias: "kimi-k2"
 ```
 
-Legacy format (still supported):
-
-```yaml
-openai-compatibility:
-  - name: "openrouter"
-    base-url: "https://openrouter.ai/api/v1"
-    api-keys:
-      - "sk-or-v1-...b780"
-      - "sk-or-v1-...b781"
-    models:
-      - name: "moonshotai/kimi-k2:free"
-        alias: "kimi-k2"
-```
-
 Usage: 
 
 Call OpenAI's endpoint `/v1/chat/completions` with `model` set to the alias (e.g., `kimi-k2`). The proxy routes to the configured provider/model automatically.
 
-Also, you may call Claude's endpoint `/v1/messages`, Gemini's `/v1beta/models/model-name:streamGenerateContent` or `/v1beta/models/model-name:generateContent`.
-
 And you can always use Gemini CLI with `CODE_ASSIST_ENDPOINT` set to `http://127.0.0.1:8317` for these OpenAI-compatible provider's models.
 
+### AI Studio Instructions
+
+You can use this service (CLIProxyAPI) as a backend for [this AI Studio App](https://aistudio.google.com/apps/drive/1CPW7FpWGsDZzkaYgYOyXQ_6FWgxieLmL). Follow the steps below to configure it:
+
+1.  **Start the CLIProxyAPI Service**: Ensure your CLIProxyAPI instance is running, either locally or remotely.
+2.  **Access the AI Studio App**: Log in to your Google account in your browser, then open the following link:
+    - [https://aistudio.google.com/apps/drive/1CPW7FpWGsDZzkaYgYOyXQ_6FWgxieLmL](https://aistudio.google.com/apps/drive/1CPW7FpWGsDZzkaYgYOyXQ_6FWgxieLmL)
+
+#### Connection Configuration
+
+By default, the AI Studio App attempts to connect to a local CLIProxyAPI instance at `ws://127.0.0.1:8317`.
+
+-   **Connecting to a Remote Service**:
+    If you need to connect to a remotely deployed CLIProxyAPI, modify the `config.ts` file in the AI Studio App to update the `WEBSOCKET_PROXY_URL` value.
+    -   Use the `wss://` protocol if your remote service has SSL enabled.
+    -   Use the `ws://` protocol if SSL is not enabled.
+
+#### Authentication Configuration
+
+By default, WebSocket connections to CLIProxyAPI do not require authentication.
+
+-   **Enable Authentication on the CLIProxyAPI Server**:
+    In your `config.yaml` file, set `ws_auth` to `true`.
+-   **Configure Authentication on the AI Studio Client**:
+    In the `config.ts` file of the AI Studio App, set the `JWT_TOKEN` value to your authentication token.
 
 ### Authentication Directory
 

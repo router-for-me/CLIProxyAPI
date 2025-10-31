@@ -179,3 +179,19 @@ func GeminiThinkingFromMetadata(metadata map[string]any) (*int, *bool, bool) {
 	}
 	return budgetPtr, includePtr, matched
 }
+
+// StripThinkingConfigIfUnsupported removes thinkingConfig from the request body
+// when the target model does not advertise Thinking capability. It cleans both
+// standard Gemini and Gemini CLI JSON envelopes. This acts as a final safety net
+// in case upstream injected thinking for an unsupported model.
+func StripThinkingConfigIfUnsupported(model string, body []byte) []byte {
+	if ModelSupportsThinking(model) || len(body) == 0 {
+		return body
+	}
+	updated := body
+	// Gemini CLI path
+	updated, _ = sjson.DeleteBytes(updated, "request.generationConfig.thinkingConfig")
+	// Standard Gemini path
+	updated, _ = sjson.DeleteBytes(updated, "generationConfig.thinkingConfig")
+	return updated
+}

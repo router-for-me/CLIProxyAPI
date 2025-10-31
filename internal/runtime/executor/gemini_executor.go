@@ -78,10 +78,14 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok {
+	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
+		if budgetOverride != nil {
+			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+			budgetOverride = &norm
+		}
 		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
 	}
-	body = disableGeminiThinkingConfig(body, req.Model)
+	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
 	body = fixGeminiImageAspectRatio(req.Model, body)
 
 	action := "generateContent"
@@ -166,10 +170,14 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok {
+	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
+		if budgetOverride != nil {
+			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+			budgetOverride = &norm
+		}
 		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
 	}
-	body = disableGeminiThinkingConfig(body, req.Model)
+	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
 	body = fixGeminiImageAspectRatio(req.Model, body)
 
 	url := fmt.Sprintf("%s/%s/models/%s:%s", glEndpoint, glAPIVersion, req.Model, "streamGenerateContent")
@@ -269,10 +277,14 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 	translatedReq := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok {
+	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
+		if budgetOverride != nil {
+			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+			budgetOverride = &norm
+		}
 		translatedReq = util.ApplyGeminiThinkingConfig(translatedReq, budgetOverride, includeOverride)
 	}
-	translatedReq = disableGeminiThinkingConfig(translatedReq, req.Model)
+	translatedReq = util.StripThinkingConfigIfUnsupported(req.Model, translatedReq)
 	translatedReq = fixGeminiImageAspectRatio(req.Model, translatedReq)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
