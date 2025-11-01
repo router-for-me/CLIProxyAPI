@@ -636,49 +636,50 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			"summary": []interface{}{map[string]interface{}{"type": "summary_text", "text": reasoningBuf.String()}},
 		})
 	}
-	if currentMsgID != "" || textBuf.Len() > 0 {
-		outputs = append(outputs, map[string]interface{}{
-			"id":     currentMsgID,
-			"type":   "message",
-			"status": "completed",
-			"content": []interface{}{map[string]interface{}{
-				"type":        "output_text",
-				"annotations": []interface{}{},
-				"logprobs":    []interface{}{},
-				"text":        textBuf.String(),
-			}},
-			"role": "assistant",
-		})
-	}
-	if len(toolCalls) > 0 {
-		// Preserve index order
-		idxs := make([]int, 0, len(toolCalls))
-		for i := range toolCalls {
-			idxs = append(idxs, i)
-		}
-		for i := 0; i < len(idxs); i++ {
-			for j := i + 1; j < len(idxs); j++ {
-				if idxs[j] < idxs[i] {
-					idxs[i], idxs[j] = idxs[j], idxs[i]
-				}
-			}
-		}
-		for _, i := range idxs {
-			st := toolCalls[i]
-			args := st.args.String()
-			if args == "" {
-				args = "{}"
-			}
-			outputs = append(outputs, map[string]interface{}{
-				"id":        fmt.Sprintf("fc_%s", st.id),
-				"type":      "function_call",
-				"status":    "completed",
-				"arguments": args,
-				"call_id":   st.id,
-				"name":      st.name,
-			})
-		}
-	}
+    // Enforce ordering: function_call items should precede the assistant message in the same turn.
+    if len(toolCalls) > 0 {
+        // Preserve index order
+        idxs := make([]int, 0, len(toolCalls))
+        for i := range toolCalls {
+            idxs = append(idxs, i)
+        }
+        for i := 0; i < len(idxs); i++ {
+            for j := i + 1; j < len(idxs); j++ {
+                if idxs[j] < idxs[i] {
+                    idxs[i], idxs[j] = idxs[j], idxs[i]
+                }
+            }
+        }
+        for _, i := range idxs {
+            st := toolCalls[i]
+            args := st.args.String()
+            if args == "" {
+                args = "{}"
+            }
+            outputs = append(outputs, map[string]interface{}{
+                "id":        fmt.Sprintf("fc_%s", st.id),
+                "type":      "function_call",
+                "status":    "completed",
+                "arguments": args,
+                "call_id":   st.id,
+                "name":      st.name,
+            })
+        }
+    }
+    if currentMsgID != "" || textBuf.Len() > 0 {
+        outputs = append(outputs, map[string]interface{}{
+            "id":     currentMsgID,
+            "type":   "message",
+            "status": "completed",
+            "content": []interface{}{map[string]interface{}{
+                "type":        "output_text",
+                "annotations": []interface{}{},
+                "logprobs":    []interface{}{},
+                "text":        textBuf.String(),
+            }},
+            "role": "assistant",
+        })
+    }
 	if len(outputs) > 0 {
 		out, _ = sjson.Set(out, "output", outputs)
 	}

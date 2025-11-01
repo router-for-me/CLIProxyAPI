@@ -6,11 +6,20 @@ package config
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
-	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
-	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
+    // ProxyURL is the URL of an optional proxy server to use for outbound requests.
+    ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
-	// RequestLog enables or disables detailed request logging functionality.
-	RequestLog bool `yaml:"request-log" json:"request-log"`
+    // RequestLog enables or disables detailed request logging functionality.
+    RequestLog bool `yaml:"request-log" json:"request-log"`
+
+    // EnableMultimodalSyntheticFallback gates the last-resort synthetic reply
+    // for multimodal requests after provider fallbacks fail. Default is false.
+    EnableMultimodalSyntheticFallback bool `yaml:"enable-multimodal-synthetic-fallback" json:"enable-multimodal-synthetic-fallback"`
+
+    // MultimodalPreferredModels sets the ordered list of models to try for
+    // requests that include images or multimodal content when the primary
+    // provider does not support it.
+    MultimodalPreferredModels []string `yaml:"multimodal-preferred-models" json:"multimodal-preferred-models"`
 
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`

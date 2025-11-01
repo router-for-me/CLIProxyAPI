@@ -7,11 +7,14 @@
 package openai
 
 import (
-	"bytes"
-	"context"
-	"fmt"
-	"net/http"
-	"time"
+    "bytes"
+    "context"
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "sync"
+    "strings"
+    "time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -19,12 +22,14 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // OpenAIResponsesAPIHandler contains the handlers for OpenAIResponses API endpoints.
 // It holds a pool of clients to interact with the backend service.
 type OpenAIResponsesAPIHandler struct {
-	*handlers.BaseAPIHandler
+    *handlers.BaseAPIHandler
+    prevOutputs sync.Map // key: response_id, value: string
 }
 
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
@@ -36,9 +41,7 @@ type OpenAIResponsesAPIHandler struct {
 // Returns:
 //   - *OpenAIResponsesAPIHandler: A new OpenAIResponses API handlers instance
 func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIResponsesAPIHandler {
-	return &OpenAIResponsesAPIHandler{
-		BaseAPIHandler: apiHandlers,
-	}
+    return &OpenAIResponsesAPIHandler{BaseAPIHandler: apiHandlers}
 }
 
 // HandlerType returns the identifier for this handler implementation.
@@ -104,15 +107,93 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	defer func() {
-		cliCancel()
-	}()
+	defer func() { cliCancel() }()
+
+    // Continuity: inject prior assistant message if previous_response_id is present and known.
+    // Use input_text (not output_text) so downstream translators treat it as a valid message part.
+    if prevID := gjson.GetBytes(rawJSON, "previous_response_id").String(); prevID != "" {
+        if v, ok := h.prevOutputs.Load(prevID); ok {
+            prevText, _ := v.(string)
+            if prevText != "" {
+                // Structured prepend of assistant message to input array
+                if arr := gjson.GetBytes(rawJSON, "input"); arr.Exists() && arr.IsArray() {
+                    assistantObj := map[string]any{
+                        "role": "assistant",
+                        "content": []any{map[string]any{
+                            "type": "output_text",
+                            "text": prevText,
+                        }},
+                    }
+                    newArr := make([]any, 0, len(arr.Array())+1)
+                    newArr = append(newArr, assistantObj)
+                    for _, it := range arr.Array() {
+                        newArr = append(newArr, it.Value())
+                    }
+                    if b, err := json.Marshal(newArr); err == nil {
+                        if updated, err2 := sjson.SetRawBytes(rawJSON, "input", b); err2 == nil {
+                            rawJSON = updated
+                        }
+                    }
+                }
+            }
+        }
+    }
 
 	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		return
 	}
+
+
+	// Post-process ordering: ensure any function_call outputs precede assistant message outputs in the same turn.
+	if out := gjson.GetBytes(resp, "output"); out.Exists() && out.IsArray() {
+		arr := out.Array()
+		if len(arr) > 1 {
+			var others []string
+			var funcs []string
+			var msgs []string
+			for _, it := range arr {
+				t := it.Get("type").String()
+				switch t {
+				case "function_call":
+					funcs = append(funcs, it.Raw)
+				case "message":
+					msgs = append(msgs, it.Raw)
+				default:
+					others = append(others, it.Raw)
+				}
+			}
+			rebuilt := make([]string, 0, len(arr))
+			rebuilt = append(rebuilt, others...)
+			rebuilt = append(rebuilt, funcs...)
+			rebuilt = append(rebuilt, msgs...)
+			newRaw := "[" + strings.Join(rebuilt, ",") + "]"
+			if updated, err := sjson.SetRawBytes(resp, "output", []byte(newRaw)); err == nil {
+				resp = updated
+			}
+		}
+	}
+
+	// Store first assistant message content for continuity keyed by response id
+	rid := gjson.GetBytes(resp, "id").String()
+	if rid == "" {
+		rid = fmt.Sprintf("resp_%d", time.Now().UnixNano())
+	}
+	var prevText string
+	if out := gjson.GetBytes(resp, "output"); out.Exists() && out.IsArray() {
+		for _, item := range out.Array() {
+			if item.Get("type").String() == "message" {
+				prevText = item.Get("content.0.text").String()
+				if prevText != "" {
+					break
+				}
+			}
+		}
+	}
+    if prevText != "" {
+        h.prevOutputs.Store(rid, prevText)
+    }
 	_, _ = c.Writer.Write(resp)
 	return
 

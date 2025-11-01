@@ -14,6 +14,7 @@ import (
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+    shared "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/shared"
 )
 
 var (
@@ -454,5 +455,10 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 		out, _ = sjson.Set(out, "usage.completion_tokens_details.reasoning_tokens", reasoningTokens)
 	}
 
+	// Honor OpenAI Chat Completions `n` parameter for non-streaming by replicating choices
+	if nVal := gjson.GetBytes(originalRequestRawJSON, "n"); nVal.Exists() {
+		n := int(nVal.Int())
+		out = shared.ReplicateChoices(out, n)
+	}
 	return out
 }

@@ -9,22 +9,24 @@ import "time"
 func GetClaudeModels() []*ModelInfo {
 	return []*ModelInfo{
 
-		{
-			ID:          "claude-haiku-4-5-20251001",
+        {
+            ID:          "claude-haiku-4-5-20251001",
 			Object:      "model",
 			Created:     1759276800, // 2025-10-01
 			OwnedBy:     "anthropic",
 			Type:        "claude",
-			DisplayName: "Claude 4.5 Haiku",
-		},
-		{
-			ID:          "claude-sonnet-4-5-20250929",
+            DisplayName: "Claude 4.5 Haiku",
+            ImageRecognitionSupport: true,
+        },
+        {
+            ID:          "claude-sonnet-4-5-20250929",
 			Object:      "model",
 			Created:     1759104000, // 2025-09-29
 			OwnedBy:     "anthropic",
 			Type:        "claude",
-			DisplayName: "Claude 4.5 Sonnet",
-		},
+            DisplayName: "Claude 4.5 Sonnet",
+            ImageRecognitionSupport: true,
+        },
 		{
 			ID:          "claude-opus-4-1-20250805",
 			Object:      "model",
@@ -49,30 +51,32 @@ func GetClaudeModels() []*ModelInfo {
 			Type:        "claude",
 			DisplayName: "Claude 4 Sonnet",
 		},
-		{
-			ID:          "claude-3-7-sonnet-20250219",
+        {
+            ID:          "claude-3-7-sonnet-20250219",
 			Object:      "model",
 			Created:     1708300800, // 2025-02-19
 			OwnedBy:     "anthropic",
 			Type:        "claude",
-			DisplayName: "Claude 3.7 Sonnet",
-		},
-		{
-			ID:          "claude-3-5-haiku-20241022",
+            DisplayName: "Claude 3.7 Sonnet",
+            ImageRecognitionSupport: true,
+        },
+        {
+            ID:          "claude-3-5-haiku-20241022",
 			Object:      "model",
 			Created:     1729555200, // 2024-10-22
 			OwnedBy:     "anthropic",
 			Type:        "claude",
-			DisplayName: "Claude 3.5 Haiku",
-		},
+            DisplayName: "Claude 3.5 Haiku",
+            ImageRecognitionSupport: true,
+        },
 	}
 }
 
 // GeminiModels returns the shared base Gemini model set used by multiple providers.
 func GeminiModels() []*ModelInfo {
 	return []*ModelInfo{
-		{
-			ID:                         "gemini-2.5-flash",
+        {
+            ID:                         "gemini-2.5-flash",
 			Object:                     "model",
 			Created:                    time.Now().Unix(),
 			OwnedBy:                    "google",
@@ -84,10 +88,11 @@ func GeminiModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-2.5-pro",
+            Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+            ImageRecognitionSupport:    true,
+        },
+        {
+            ID:                         "gemini-2.5-pro",
 			Object:                     "model",
 			Created:                    time.Now().Unix(),
 			OwnedBy:                    "google",
@@ -99,10 +104,11 @@ func GeminiModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-2.5-flash-lite",
+            Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+            ImageRecognitionSupport:    true,
+        },
+        {
+            ID:                         "gemini-2.5-flash-lite",
 			Object:                     "model",
 			Created:                    time.Now().Unix(),
 			OwnedBy:                    "google",
@@ -114,8 +120,9 @@ func GeminiModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 512, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
-		},
+            Thinking:                   &ThinkingSupport{Min: 512, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+            ImageRecognitionSupport:    true,
+        },
 		{
 			ID:                         "gemini-2.5-flash-image-preview",
 			Object:                     "model",

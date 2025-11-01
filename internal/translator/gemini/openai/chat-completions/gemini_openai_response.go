@@ -6,14 +6,15 @@
 package chat_completions
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"time"
+    "bytes"
+    "context"
+    "encoding/json"
+    "fmt"
+    "time"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+    "github.com/tidwall/gjson"
+    "github.com/tidwall/sjson"
+    shared "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/shared"
 )
 
 // convertGeminiResponseToOpenAIChatParams holds parameters for response conversion.
@@ -311,5 +312,10 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
 	}
 
+	// Honor OpenAI Chat Completions `n` parameter for non-streaming by replicating choices
+    if nVal := gjson.GetBytes(originalRequestRawJSON, "n"); nVal.Exists() {
+        n := int(nVal.Int())
+        template = shared.ReplicateChoices(template, n)
+    }
 	return template
 }

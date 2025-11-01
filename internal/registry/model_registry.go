@@ -43,8 +43,12 @@ type ModelInfo struct {
 	ContextLength int `json:"context_length,omitempty"`
 	// MaxCompletionTokens is the maximum completion tokens
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
-	// SupportedParameters lists supported parameters
-	SupportedParameters []string `json:"supported_parameters,omitempty"`
+    // SupportedParameters lists supported parameters
+    SupportedParameters []string `json:"supported_parameters,omitempty"`
+
+    // ImageRecognitionSupport indicates whether the model can consume image inputs
+    // (e.g., text+image_url parts) for multimodal chat/completions style requests.
+    ImageRecognitionSupport bool `json:"image_recognition_support,omitempty"`
 
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
@@ -717,6 +721,10 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			"id":       model.ID,
 			"object":   "model",
 			"owned_by": model.OwnedBy,
+		}
+		// Expose capability flags used by handlers (e.g., multimodal fallback derivation)
+		if model.ImageRecognitionSupport {
+			result["image_recognition_support"] = true
 		}
 		if model.Created > 0 {
 			result["created"] = model.Created
