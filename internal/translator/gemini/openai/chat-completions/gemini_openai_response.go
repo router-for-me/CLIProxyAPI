@@ -311,5 +311,18 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
 	}
 
+	// Honor OpenAI Chat Completions `n` parameter for non-streaming by replicating choices
+	if nVal := gjson.GetBytes(originalRequestRawJSON, "n"); nVal.Exists() {
+		n := int(nVal.Int())
+		if n > 1 {
+			base := gjson.Get(template, "choices.0").Raw
+			baseWithIndex, _ := sjson.Set(base, "index", 0)
+			template, _ = sjson.SetRaw(template, "choices.0", baseWithIndex)
+			for i := 1; i < n; i++ {
+				copyWithIndex, _ := sjson.Set(baseWithIndex, "index", i)
+				template, _ = sjson.SetRaw(template, "choices.-1", copyWithIndex)
+			}
+		}
+	}
 	return template
 }

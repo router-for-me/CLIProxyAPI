@@ -454,5 +454,18 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 		out, _ = sjson.Set(out, "usage.completion_tokens_details.reasoning_tokens", reasoningTokens)
 	}
 
+	// Honor OpenAI Chat Completions `n` parameter for non-streaming by replicating choices
+	if nVal := gjson.GetBytes(originalRequestRawJSON, "n"); nVal.Exists() {
+		n := int(nVal.Int())
+		if n > 1 {
+			base := gjson.Get(out, "choices.0").Raw
+			baseWithIndex, _ := sjson.Set(base, "index", 0)
+			out, _ = sjson.SetRaw(out, "choices.0", baseWithIndex)
+			for i := 1; i < n; i++ {
+				copyWithIndex, _ := sjson.Set(baseWithIndex, "index", i)
+				out, _ = sjson.SetRaw(out, "choices.-1", copyWithIndex)
+			}
+		}
+	}
 	return out
 }

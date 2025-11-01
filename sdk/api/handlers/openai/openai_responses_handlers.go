@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,12 +20,14 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // OpenAIResponsesAPIHandler contains the handlers for OpenAIResponses API endpoints.
 // It holds a pool of clients to interact with the backend service.
 type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
+	prevOutputs map[string]string
 }
 
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
@@ -38,6 +41,7 @@ type OpenAIResponsesAPIHandler struct {
 func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIResponsesAPIHandler {
 	return &OpenAIResponsesAPIHandler{
 		BaseAPIHandler: apiHandlers,
+		prevOutputs:    make(map[string]string),
 	}
 }
 
@@ -104,14 +108,89 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	defer func() {
-		cliCancel()
-	}()
+	defer func() { cliCancel() }()
+
+    // Continuity: inject prior assistant message if previous_response_id is present and known.
+    // Use input_text (not output_text) so downstream translators treat it as a valid message part.
+    if prevID := gjson.GetBytes(rawJSON, "previous_response_id").String(); prevID != "" {
+        if prevText, ok := h.prevOutputs[prevID]; ok && prevText != "" {
+            // Note: we intentionally omit a top-level "type" here; request translators
+            // only special-case function_call/function_call_output. Plain messages are
+            // recognized by role+content parts. For assistant replay, use output_text.
+            assistant := fmt.Sprintf(`{"role":"assistant","content":[{"type":"output_text","text":%q}]}`, prevText)
+            if arr := gjson.GetBytes(rawJSON, "input"); arr.Exists() && arr.IsArray() {
+                arrRaw := arr.Raw
+                content := ""
+                if len(arrRaw) >= 2 {
+                    content = string(arrRaw[1:len(arrRaw)-1])
+                }
+                var newInputRaw string
+                if strings.TrimSpace(content) == "" {
+                    newInputRaw = "[" + assistant + "]"
+                } else {
+                    newInputRaw = "[" + assistant + "," + content + "]"
+                }
+                if updated, err := sjson.SetRawBytes(rawJSON, "input", []byte(newInputRaw)); err == nil {
+                    rawJSON = updated
+                }
+            }
+        }
+    }
 
 	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		return
+	}
+
+
+	// Post-process ordering: ensure any function_call outputs precede assistant message outputs in the same turn.
+	if out := gjson.GetBytes(resp, "output"); out.Exists() && out.IsArray() {
+		arr := out.Array()
+		if len(arr) > 1 {
+			var others []string
+			var funcs []string
+			var msgs []string
+			for _, it := range arr {
+				t := it.Get("type").String()
+				switch t {
+				case "function_call":
+					funcs = append(funcs, it.Raw)
+				case "message":
+					msgs = append(msgs, it.Raw)
+				default:
+					others = append(others, it.Raw)
+				}
+			}
+			rebuilt := make([]string, 0, len(arr))
+			rebuilt = append(rebuilt, others...)
+			rebuilt = append(rebuilt, funcs...)
+			rebuilt = append(rebuilt, msgs...)
+			newRaw := "[" + strings.Join(rebuilt, ",") + "]"
+			if updated, err := sjson.SetRawBytes(resp, "output", []byte(newRaw)); err == nil {
+				resp = updated
+			}
+		}
+	}
+
+	// Store first assistant message content for continuity keyed by response id
+	rid := gjson.GetBytes(resp, "id").String()
+	if rid == "" {
+		rid = fmt.Sprintf("resp_%d", time.Now().UnixNano())
+	}
+	var prevText string
+	if out := gjson.GetBytes(resp, "output"); out.Exists() && out.IsArray() {
+		for _, item := range out.Array() {
+			if item.Get("type").String() == "message" {
+				prevText = item.Get("content.0.text").String()
+				if prevText != "" {
+					break
+				}
+			}
+		}
+	}
+	if prevText != "" {
+		h.prevOutputs[rid] = prevText
 	}
 	_, _ = c.Writer.Write(resp)
 	return
