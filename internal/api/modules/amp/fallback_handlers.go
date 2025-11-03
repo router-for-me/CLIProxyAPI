@@ -75,6 +75,17 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		}
 
 		// Providers available or no proxy for fallback, restore body and use normal handler
+		// Filter Anthropic-Beta header to remove features requiring special subscription
+		// This is needed when using local providers (bypassing the Amp proxy)
+		if betaHeader := c.Request.Header.Get("Anthropic-Beta"); betaHeader != "" {
+			filtered := filterBetaFeatures(betaHeader, "context-1m-2025-08-07")
+			if filtered != "" {
+				c.Request.Header.Set("Anthropic-Beta", filtered)
+			} else {
+				c.Request.Header.Del("Anthropic-Beta")
+			}
+		}
+
 		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		handler(c)
 	}

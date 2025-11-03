@@ -46,6 +46,10 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 			// Could generate one here if needed
 		}
 
+		// Note: We do NOT filter Anthropic-Beta headers in the proxy path
+		// Users going through ampcode.com proxy are paying for the service and should get all features
+		// including 1M context window (context-1m-2025-08-07)
+
 		// Inject API key from secret source (precedence: config > env > file)
 		if key, err := secretSource.Get(req.Context()); err == nil && key != "" {
 			req.Header.Set("X-Api-Key", key)
@@ -173,4 +177,19 @@ func proxyHandler(proxy *httputil.ReverseProxy) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		proxy.ServeHTTP(c.Writer, c.Request)
 	}
+}
+
+// filterBetaFeatures removes a specific beta feature from comma-separated list
+func filterBetaFeatures(header, featureToRemove string) string {
+	features := strings.Split(header, ",")
+	filtered := make([]string, 0, len(features))
+
+	for _, feature := range features {
+		trimmed := strings.TrimSpace(feature)
+		if trimmed != "" && trimmed != featureToRemove {
+			filtered = append(filtered, trimmed)
+		}
+	}
+
+	return strings.Join(filtered, ",")
 }
