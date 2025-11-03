@@ -81,18 +81,18 @@ func captureRequestInfo(c *gin.Context) (*RequestInfo, error) {
 	}
 
 	// Capture request body
-	var body []byte
-	if c.Request.Body != nil {
-		// Read the body
-		bodyBytes, err := io.ReadAll(c.Request.Body)
-		if err != nil {
-			return nil, err
-		}
+    var body []byte
+    if c.Request.Body != nil {
+        // Read the body using Gin's recommended method
+        bodyBytes, err := c.GetRawData()
+        if err != nil {
+            return nil, err
+        }
 
-		// Restore the body for the actual request processing
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-		body = bodyBytes
-	}
+        // Restore the body for subsequent handlers
+        c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+        body = bodyBytes
+    }
 
 	return &RequestInfo{
 		URL:     url,
