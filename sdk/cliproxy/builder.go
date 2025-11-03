@@ -197,7 +197,8 @@ func (b *Builder) Build() (*Service, error) {
 		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
 			dirSetter.SetBaseDir(b.cfg.AuthDir)
 		}
-		coreManager = coreauth.NewManager(tokenStore, nil, nil)
+		geminiExecutor := executor.NewGeminiContextAwareExecutor("gemini", b.cfg)
+		coreManager = coreauth.NewManager(tokenStore, []coreauth.ExecutionProvider{geminiExecutor}, nil)
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
