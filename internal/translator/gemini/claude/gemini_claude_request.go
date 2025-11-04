@@ -96,20 +96,40 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							var responseData interface{}
 							contentField := contentResult.Get("content")
 							if contentField.IsArray() {
-								// Extract text from content blocks
+							// Extract text and JSON from content blocks
 								var textParts []string
+								var jsonPayload interface{}
 								contentField.ForEach(func(_, block gjson.Result) bool {
-									if block.Get("type").String() == "text" {
+									blockType := block.Get("type").String()
+									switch blockType {
+									case "text":
 										textParts = append(textParts, block.Get("text").String())
+									case "output_json", "json":
+										// Prefer structured JSON payloads when present
+										if raw := block.Get("json").Raw; raw != "" {
+											var v interface{}
+											if err := json.Unmarshal([]byte(raw), &v); err == nil {
+												jsonPayload = v
+											}
+										}
 									}
 									return true
 								})
-								if len(textParts) == 1 {
-									responseData = textParts[0]
-								} else {
+								if jsonPayload != nil {
+									responseData = jsonPayload
+								} else if len(textParts) > 0 {
 									responseData = strings.Join(textParts, "\n")
+								} else {
+									// Fallback: try to pass through the raw array as JSON
+									var anyArr interface{}
+									if err := json.Unmarshal([]byte(contentField.Raw), &anyArr); err == nil {
+										responseData = anyArr
+									} else {
+										responseData = contentField.String()
+									}
 								}
 							} else {
+								// Non-array content -> treat as plain text to avoid unquoted tokens
 								responseData = contentField.String()
 							}
 							functionResponse := client.FunctionResponse{Name: funcName, Response: map[string]interface{}{"result": responseData}}
@@ -139,6 +159,8 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				inputSchema := inputSchemaResult.Raw
 				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
 				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
+				// Remove fields unsupported by Gemini function_declarations
+				tool, _ = sjson.Delete(tool, "strict")
 				var toolDeclaration any
 				if err := json.Unmarshal([]byte(tool), &toolDeclaration); err == nil {
 					tools[0].FunctionDeclarations = append(tools[0].FunctionDeclarations, toolDeclaration)
