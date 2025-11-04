@@ -92,7 +92,26 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							if len(toolCallIDs) > 1 {
 								funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
 							}
-							responseData := contentResult.Get("content").String()
+							// Handle both string and array content formats
+							var responseData interface{}
+							contentField := contentResult.Get("content")
+							if contentField.IsArray() {
+								// Extract text from content blocks
+								var textParts []string
+								contentField.ForEach(func(_, block gjson.Result) bool {
+									if block.Get("type").String() == "text" {
+										textParts = append(textParts, block.Get("text").String())
+									}
+									return true
+								})
+								if len(textParts) == 1 {
+									responseData = textParts[0]
+								} else {
+									responseData = strings.Join(textParts, "\n")
+								}
+							} else {
+								responseData = contentField.String()
+							}
 							functionResponse := client.FunctionResponse{Name: funcName, Response: map[string]interface{}{"result": responseData}}
 							clientContent.Parts = append(clientContent.Parts, client.Part{FunctionResponse: &functionResponse})
 						}
