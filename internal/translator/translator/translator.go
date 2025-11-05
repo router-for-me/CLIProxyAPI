@@ -40,18 +40,6 @@ func Request(from, to, modelName string, rawJSON []byte, stream bool) []byte {
 	return registry.TranslateRequest(sdktranslator.FromString(from), sdktranslator.FromString(to), modelName, rawJSON, stream)
 }
 
-// NeedConvert checks if a response translation is needed between two API formats.
-//
-// Parameters:
-//   - from: The source API format identifier
-//   - to: The target API format identifier
-//
-// Returns:
-//   - bool: True if response translation is needed, false otherwise
-func NeedConvert(from, to string) bool {
-	return registry.HasResponseTransformer(sdktranslator.FromString(from), sdktranslator.FromString(to))
-}
-
 // Response translates a streaming response from one API format to another.
 //
 // Parameters:
