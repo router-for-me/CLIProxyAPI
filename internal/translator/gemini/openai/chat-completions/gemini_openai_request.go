@@ -4,6 +4,7 @@ package chat_completions
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -151,9 +152,32 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				if toolCallID != "" {
 					c := m.Get("content")
 					if c.Type == gjson.String {
-						toolResponses[toolCallID] = c.String()
-					} else if c.IsObject() && c.Get("type").String() == "text" {
-						toolResponses[toolCallID] = c.Get("text").String()
+            } else if c.IsObject() && c.Get("type").String() == "text" {
+                toolResponses[toolCallID] = c.Get("text").String()
+            } else if c.IsObject() && (c.Get("type").String() == "output_json" || c.Get("type").String() == "json") {
+                if raw := c.Get("json").Raw; raw != "" {
+                    toolResponses[toolCallID] = raw
+                }
+            } else if c.IsArray() {
+                var jsonRaw string
+                var textParts []string
+                c.ForEach(func(_, block gjson.Result) bool {
+                    bt := block.Get("type").String()
+                    if bt == "output_json" || bt == "json" {
+                        if jr := block.Get("json").Raw; jr != "" && jsonRaw == "" {
+                            jsonRaw = jr
+                        }
+                    } else if bt == "text" {
+                        textParts = append(textParts, block.Get("text").String())
+                    }
+                    return true
+                })
+                if jsonRaw != "" {
+                    toolResponses[toolCallID] = jsonRaw
+                } else if len(textParts) > 0 {
+                    toolResponses[toolCallID] = strings.Join(textParts, "\n")
+                }
+            }
 					}
 				}
 			}
@@ -293,18 +317,23 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 	}
 
-	// tools -> tools[0].functionDeclarations
-	tools := gjson.GetBytes(rawJSON, "tools")
-	if tools.IsArray() && len(tools.Array()) > 0 {
-		out, _ = sjson.SetRawBytes(out, "tools", []byte(`[{"functionDeclarations":[]}]`))
-		fdPath := "tools.0.functionDeclarations"
-		for _, t := range tools.Array() {
-			if t.Get("type").String() == "function" {
-				fn := t.Get("function")
-				if fn.Exists() && fn.IsObject() {
-					parametersJsonSchema, _ := util.RenameKey(fn.Raw, "parameters", "parametersJsonSchema")
-					out, _ = sjson.SetRawBytes(out, fdPath+".-1", []byte(parametersJsonSchema))
-				}
+// quoteIfNeeded ensures a string is valid JSON value (quotes plain text), pass-through for valid JSON.
+func quoteIfNeeded(s string) string {
+    s = strings.TrimSpace(s)
+    if s == "" {
+        return "\"\""
+    }
+    if len(s) > 0 && (s[0] == '{' || s[0] == '[') {
+        var any interface{}
+        if err := json.Unmarshal([]byte(s), &any); err == nil {
+            return s
+        }
+    }
+    // escape quotes minimally and return as JSON string
+    s = strings.ReplaceAll(s, "\\", "\\\\")
+    s = strings.ReplaceAll(s, "\"", "\\\"")
+    return "\"" + s + "\""
+}
 			}
 		}
 	}
@@ -316,18 +345,21 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 
 // itoa converts int to string without strconv import for few usages.
 func itoa(i int) string { return fmt.Sprintf("%d", i) }
-
-// quoteIfNeeded ensures a string is valid JSON value (quotes plain text), pass-through for JSON objects/arrays.
+// quoteIfNeeded ensures a string is valid JSON value (quotes plain text), pass-through for valid JSON.
 func quoteIfNeeded(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "\"\""
-	}
-	if len(s) > 0 && (s[0] == '{' || s[0] == '[') {
-		return s
-	}
-	// escape quotes minimally
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "\"", "\\\"")
-	return "\"" + s + "\""
+    s = strings.TrimSpace(s)
+    if s == "" {
+        return "\"\""
+    }
+    if len(s) > 0 && (s[0] == '{' || s[0] == '[') {
+        var any interface{}
+        if err := json.Unmarshal([]byte(s), &any); err == nil {
+            return s
+        }
+    }
+    // escape quotes minimally and return as JSON string
+    s = strings.ReplaceAll(s, "\\", "\\\\")
+    s = strings.ReplaceAll(s, "\"", "\\\"")
+    return "\"" + s + "\""
+}
 }
