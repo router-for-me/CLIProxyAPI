@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
@@ -112,18 +113,30 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, proxyHandler gi
 //	/api/provider/openai/v1/chat/completions
 //	/api/provider/anthropic/v1/messages
 //	/api/provider/google/v1beta/models
-func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc, restrictToLocalhost bool) {
+func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc, restrictToLocalhost bool, cfg *config.Config) {
 	// Create handler instances for different providers
 	openaiHandlers := openai.NewOpenAIAPIHandler(baseHandler)
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(baseHandler)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(baseHandler)
 
-	// Create fallback handler wrapper that forwards to ampcode.com when provider not found
-	// Uses lazy evaluation to access proxy (which is created after routes are registered)
-	fallbackHandler := NewFallbackHandler(func() *httputil.ReverseProxy {
-		return m.proxy
-	})
+	// Create a dummy OAuth handler that just calls the base handlers
+	// This will be wrapped by the fallback handler for intelligent routing
+	oauthHandler := func(c *gin.Context) {
+		// The actual handler will be determined by the route
+		c.Next()
+	}
+
+	// Create fallback handler wrapper with hybrid routing support
+	// - Routes explicit models to LiteLLM (if configured)
+	// - Tries OAuth with fallback to LiteLLM on errors
+	// - Falls back to ampcode.com when no providers available
+	fallbackHandler := NewFallbackHandler(
+		cfg,
+		oauthHandler,
+		func() *httputil.ReverseProxy { return m.proxy },
+		m.liteLLMProxy,
+	)
 
 	// Provider-specific routes under /api/provider/:provider
 	// Note: These routes do NOT use auth middleware because:

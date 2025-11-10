@@ -193,3 +193,50 @@ func filterBetaFeatures(header, featureToRemove string) string {
 
 	return strings.Join(filtered, ",")
 }
+
+// createLiteLLMProxy creates a reverse proxy handler for LiteLLM
+func createLiteLLMProxy(baseURL, apiKey string) (*httputil.ReverseProxy, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid litellm base url: %w", err)
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(parsed)
+	originalDirector := proxy.Director
+
+	// Modify outgoing requests to inject API key and fix path
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.Host = parsed.Host
+
+		// Strip /api/provider/{provider} prefix from path
+		// Example: /api/provider/openai/v1/chat/completions → /v1/chat/completions
+		path := req.URL.Path
+		if strings.HasPrefix(path, "/api/provider/") {
+			// Remove /api/provider/{provider} prefix
+			parts := strings.SplitN(path, "/", 5) // ["", "api", "provider", "{provider}", "rest..."]
+			if len(parts) >= 5 {
+				req.URL.Path = "/" + parts[4] // Keep "/v1/..." part
+			} else if len(parts) == 4 {
+				req.URL.Path = "/" // Just root if no path after provider
+			}
+		}
+
+		// Inject LiteLLM API key if provided
+		if apiKey != "" {
+			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+		}
+
+		log.Debugf("litellm proxy: forwarding %s %s (original: %s)", req.Method, req.URL.Path, path)
+	}
+
+	// Error handler for proxy failures
+	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+		log.Errorf("litellm proxy error for %s %s: %v", req.Method, req.URL.Path, err)
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusBadGateway)
+		_, _ = rw.Write([]byte(`{"error":"litellm_proxy_error","message":"Failed to reach LiteLLM proxy"}`))
+	}
+
+	return proxy, nil
+}

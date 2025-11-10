@@ -56,6 +56,20 @@ type Config struct {
 	// Example: {"gemini-2.5-flash-preview-09-2025": "gemini-flash"}
 	LiteLLMModelMappings map[string]string `yaml:"litellm-model-mappings" json:"litellm-model-mappings"`
 
+	// LiteLLMHybridMode enables intelligent routing between OAuth subscriptions and LiteLLM.
+	// When true, models can be explicitly routed to LiteLLM via LiteLLMModels list, and
+	// OAuth failures can fallback to LiteLLM if LiteLLMFallbackEnabled is true.
+	LiteLLMHybridMode bool `yaml:"litellm-hybrid-mode" json:"litellm-hybrid-mode"`
+
+	// LiteLLMModels is a list of model names that should be explicitly routed to LiteLLM
+	// instead of OAuth providers. Only applicable when LiteLLMHybridMode is enabled.
+	// Example: ["gpt-5-codex", "deepseek-chat"]
+	LiteLLMModels []string `yaml:"litellm-models" json:"litellm-models"`
+
+	// LiteLLMFallbackEnabled enables automatic fallback to LiteLLM when OAuth requests fail
+	// due to quota, rate limiting, or authentication errors. Only applicable when LiteLLMHybridMode is enabled.
+	LiteLLMFallbackEnabled bool `yaml:"litellm-fallback-enabled" json:"litellm-fallback-enabled"`
+
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 

@@ -23,9 +23,11 @@ type Option func(*AmpModule)
 //   - Reverse proxy to Amp control plane for OAuth/management
 //   - Provider-specific route aliases (/api/provider/{provider}/...)
 //   - Automatic gzip decompression for misconfigured upstreams
+//   - Hybrid routing to LiteLLM for specific models
 type AmpModule struct {
 	secretSource    SecretSource
 	proxy           *httputil.ReverseProxy
+	liteLLMProxy    *httputil.ReverseProxy
 	accessManager   *sdkaccess.Manager
 	authMiddleware_ gin.HandlerFunc
 	enabled         bool
@@ -101,8 +103,19 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 	// Use registerOnce to ensure routes are only registered once
 	var regErr error
 	m.registerOnce.Do(func() {
+		// Initialize LiteLLM proxy if hybrid mode is configured
+		if ctx.Config.LiteLLMHybridMode && ctx.Config.LiteLLMBaseURL != "" {
+			liteLLMProxy, err := createLiteLLMProxy(ctx.Config.LiteLLMBaseURL, ctx.Config.LiteLLMAPIKey)
+			if err != nil {
+				log.Errorf("Failed to create LiteLLM proxy: %v", err)
+			} else {
+				m.liteLLMProxy = liteLLMProxy
+				log.Infof("LiteLLM hybrid routing enabled for: %s", ctx.Config.LiteLLMBaseURL)
+			}
+		}
+
 		// Always register provider aliases - these work without an upstream
-		m.registerProviderAliases(ctx.Engine, ctx.BaseHandler, auth, ctx.Config.AmpRestrictClientEndpointsToLocalhost)
+		m.registerProviderAliases(ctx.Engine, ctx.BaseHandler, auth, ctx.Config.AmpRestrictClientEndpointsToLocalhost, ctx.Config)
 
 		// If no upstream URL, skip proxy routes but provider aliases are still available
 		if upstreamURL == "" {

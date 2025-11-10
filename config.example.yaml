@@ -98,3 +98,35 @@ ws-auth: false
 #    models: # The models supported by the provider.
 #      - name: "moonshotai/kimi-k2:free" # The actual model name.
 #        alias: "kimi-k2" # The alias used in the API.
+
+# LiteLLM Hybrid Routing Configuration
+# This feature enables intelligent routing between OAuth subscriptions and LiteLLM
+# based on the requested model, with automatic fallback on OAuth errors.
+
+# Enable hybrid routing mode (routes specific models to LiteLLM while keeping OAuth for others)
+#litellm-hybrid-mode: false
+
+# Base URL of your LiteLLM proxy instance
+#litellm-base-url: "http://localhost:4000"
+
+# API key for authenticating with LiteLLM (optional)
+#litellm-api-key: "sk-xxx"
+
+# List of models that should be explicitly routed to LiteLLM instead of OAuth providers
+# Example: Route GPT-5 Codex and DeepSeek to LiteLLM, while Claude Sonnet uses OAuth subscription
+#litellm-models:
+#  - "gpt-5-codex"
+#  - "gpt-5-codex-mini"
+#  - "deepseek-chat"
+#  - "llama-3-70b"
+
+# Enable automatic fallback to LiteLLM when OAuth fails (quota, rate limit, auth errors)
+#litellm-fallback-enabled: true
+
+# Model name mappings for LiteLLM (maps incoming names to LiteLLM aliases)
+#litellm-model-mappings:
+#  gemini-2.5-flash-preview-09-2025: "gemini-flash"
+
+# Global passthrough mode (routes ALL traffic to LiteLLM, bypassing OAuth entirely)
+# Note: This is mutually exclusive with hybrid mode - use one or the other
+#litellm-passthrough-mode: false
