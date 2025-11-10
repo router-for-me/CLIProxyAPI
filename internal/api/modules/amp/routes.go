@@ -112,7 +112,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, proxyHandler gi
 //	/api/provider/openai/v1/chat/completions
 //	/api/provider/anthropic/v1/messages
 //	/api/provider/google/v1beta/models
-func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc) {
+func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc, restrictToLocalhost bool) {
 	// Create handler instances for different providers
 	openaiHandlers := openai.NewOpenAIAPIHandler(baseHandler)
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
@@ -130,7 +130,14 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	// 1. Amp CLI has its own authentication with the Amp upstream
 	// 2. Provider authentication uses OAuth tokens from auth files
 	// 3. Adding API key auth causes 401 errors for Amp CLI requests
-	ampProviders := engine.Group("/api/provider")
+	var ampProviders *gin.RouterGroup
+	if restrictToLocalhost {
+		ampProviders = engine.Group("/api/provider", localhostOnlyMiddleware())
+		log.Info("Amp client endpoints (/api/provider/*) restricted to localhost only")
+	} else {
+		ampProviders = engine.Group("/api/provider")
+		log.Debug("Amp client endpoints (/api/provider/*) accepting remote connections")
+	}
 
 	provider := ampProviders.Group("/:provider")
 

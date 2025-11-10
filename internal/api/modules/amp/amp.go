@@ -102,7 +102,7 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 	var regErr error
 	m.registerOnce.Do(func() {
 		// Always register provider aliases - these work without an upstream
-		m.registerProviderAliases(ctx.Engine, ctx.BaseHandler, auth)
+		m.registerProviderAliases(ctx.Engine, ctx.BaseHandler, auth, ctx.Config.AmpRestrictClientEndpointsToLocalhost)
 
 		// If no upstream URL, skip proxy routes but provider aliases are still available
 		if upstreamURL == "" {

@@ -33,6 +33,11 @@ type Config struct {
 	// browser attacks and remote access to management endpoints. Default: true (recommended).
 	AmpRestrictManagementToLocalhost bool `yaml:"amp-restrict-management-to-localhost" json:"amp-restrict-management-to-localhost"`
 
+	// AmpRestrictClientEndpointsToLocalhost restricts Amp client endpoints (/api/provider/*, /api/clients/*)
+	// to only accept connections from localhost (127.0.0.1, ::1). When true, prevents remote IDE/CLI access.
+	// Default: false (allows remote connections for IDE/CLI usage).
+	AmpRestrictClientEndpointsToLocalhost bool `yaml:"amp-restrict-client-endpoints-to-localhost" json:"amp-restrict-client-endpoints-to-localhost"`
+
 	// LiteLLMPassthroughMode enables passthrough mode where ALL API traffic is routed directly
 	// to LiteLLM instead of using OAuth providers. When true, bypasses authentication checks
 	// and forwards all requests to the configured LiteLLM instance.

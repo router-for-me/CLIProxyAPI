@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -39,6 +40,21 @@ import (
 )
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+
+// ClientPresence tracks heartbeat and metadata for a connected client
+type ClientPresence struct {
+	LastSeen  time.Time
+	IP        string
+	UserAgent string
+	Data      map[string]interface{}
+}
+
+// ClientActiveThreads tracks which conversation threads are active in a client
+type ClientActiveThreads struct {
+	UpdatedAt time.Time
+	Threads   []string
+	Raw       interface{}
+}
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -165,6 +181,12 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	// client tracking for presence and active threads
+	presenceMu          sync.RWMutex
+	clientPresence      map[string]ClientPresence
+	threadsMu           sync.RWMutex
+	clientActiveThreads map[string]ClientActiveThreads
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -191,6 +213,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create gin engine
 	engine := gin.New()
+	
+	// Disable trusted proxies to prevent localhost bypass via X-Forwarded-For
+	if err := engine.SetTrustedProxies(nil); err != nil {
+		log.WithError(err).Warn("Failed to disable trusted proxies")
+	}
+	
 	if optionState.engineConfigurator != nil {
 		optionState.engineConfigurator(engine)
 	}
@@ -247,6 +275,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
+		clientPresence:      make(map[string]ClientPresence),
+		clientActiveThreads: make(map[string]ClientActiveThreads),
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -350,6 +380,21 @@ func (s *Server) setupRoutes() {
 	})
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
 
+	// Client tracking endpoints for VSCode/CLI presence and active threads
+	// Apply localhost restriction if configured (to match /api/provider/* behavior)
+	var clients *gin.RouterGroup
+	if s.cfg.AmpRestrictClientEndpointsToLocalhost {
+		clients = s.engine.Group("/api/clients", s.localhostOnlyMiddleware(), s.noCORSMiddleware())
+		log.Info("Client tracking endpoints (/api/clients/*) restricted to localhost only")
+	} else {
+		clients = s.engine.Group("/api/clients")
+		log.Debug("Client tracking endpoints (/api/clients/*) accepting remote connections")
+	}
+	{
+		clients.POST("/:clientId/presence", s.handleClientPresence)
+		clients.POST("/:clientId/active-threads", s.handleClientActiveThreads)
+	}
+
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
@@ -403,6 +448,268 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
+}
+
+// localhostOnlyMiddleware restricts access to localhost (127.0.0.1, ::1) only.
+// Returns 403 Forbidden for non-localhost clients.
+func (s *Server) localhostOnlyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		clientIP := c.ClientIP()
+
+		// Parse the IP to handle both IPv4 and IPv6
+		ip := net.ParseIP(clientIP)
+		if ip == nil {
+			log.Warnf("Client endpoints: invalid client IP %s, denying access", clientIP)
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": "Access denied: client endpoints restricted to localhost",
+			})
+			return
+		}
+
+		// Check if IP is loopback (127.0.0.1 or ::1)
+		if !ip.IsLoopback() {
+			log.Warnf("Client endpoints: non-localhost IP %s attempted access, denying", clientIP)
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": "Access denied: client endpoints restricted to localhost",
+			})
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// noCORSMiddleware disables CORS for localhost-restricted endpoints to prevent browser-based attacks.
+func (s *Server) noCORSMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Remove CORS headers to prevent cross-origin access from browsers
+		c.Header("Access-Control-Allow-Origin", "")
+		c.Header("Access-Control-Allow-Methods", "")
+		c.Header("Access-Control-Allow-Headers", "")
+		c.Header("Access-Control-Allow-Credentials", "")
+
+		// For OPTIONS preflight, deny with 403
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// validateClientID validates the clientId parameter
+func validateClientID(clientID string) error {
+	if clientID == "" {
+		return fmt.Errorf("clientId cannot be empty")
+	}
+	if len(clientID) > 128 {
+		return fmt.Errorf("clientId must be <= 128 characters")
+	}
+	return nil
+}
+
+// handleClientPresence handles POST /api/clients/:clientId/presence
+// Records client heartbeat/presence with optional metadata
+func (s *Server) handleClientPresence(c *gin.Context) {
+	clientID := c.Param("clientId")
+	
+	// Validate clientId
+	if err := validateClientID(clientID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status": "error",
+			"error":  fmt.Sprintf("Invalid clientId: %v", err),
+		})
+		return
+	}
+	
+	// Limit request body size to prevent memory abuse (1MB max)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	
+	// Parse optional JSON body
+	var data map[string]interface{}
+	if err := c.ShouldBindJSON(&data); err != nil {
+		// Empty body or invalid JSON is okay for presence
+		data = make(map[string]interface{})
+	}
+	
+	// Record presence
+	s.presenceMu.Lock()
+	s.clientPresence[clientID] = ClientPresence{
+		LastSeen:  time.Now(),
+		IP:        c.ClientIP(),
+		UserAgent: c.GetHeader("User-Agent"),
+		Data:      data,
+	}
+	// Opportunistic cleanup on every 100th write (reduced frequency)
+	shouldCleanup := len(s.clientPresence)%100 == 0
+	s.presenceMu.Unlock()
+	
+	// Run cleanup inline (not in goroutine) to avoid resource churn
+	if shouldCleanup {
+		s.cleanupStaleClients()
+	}
+	
+	log.WithFields(log.Fields{
+		"client_id": clientID,
+		"ip":        c.ClientIP(),
+		"user_agent": c.GetHeader("User-Agent"),
+	}).Debug("Client presence updated")
+	
+	// Respond with success
+	c.JSON(http.StatusOK, gin.H{
+		"status":                "ok",
+		"clientId":              clientID,
+		"serverTime":            time.Now().Unix(),
+		"nextHeartbeatSeconds":  5,
+	})
+}
+
+// extractThreadIDs extracts thread IDs from various possible JSON formats
+func extractThreadIDs(raw map[string]interface{}) []string {
+	keys := []string{"threads", "threadIds", "activeThreads", "activeThreadIds"}
+	
+	for _, key := range keys {
+		list, ok := raw[key].([]interface{})
+		if !ok {
+			continue
+		}
+		
+		var threads []string
+		for _, t := range list {
+			switch v := t.(type) {
+			case string:
+				threads = append(threads, v)
+			case map[string]interface{}:
+				if id, ok := v["id"].(string); ok {
+					threads = append(threads, id)
+				}
+			}
+		}
+		
+		// Return first successful extraction
+		if len(threads) > 0 {
+			return threads
+		}
+	}
+	
+	return []string{}
+}
+
+// handleClientActiveThreads handles POST /api/clients/:clientId/active-threads
+// Records which conversation threads are currently active in the client
+func (s *Server) handleClientActiveThreads(c *gin.Context) {
+	clientID := c.Param("clientId")
+	
+	// Validate clientId
+	if err := validateClientID(clientID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status": "error",
+			"error":  fmt.Sprintf("Invalid clientId: %v", err),
+		})
+		return
+	}
+	
+	// Limit request body size to prevent memory abuse (1MB max)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	
+	// Parse JSON body
+	var raw map[string]interface{}
+	if err := c.ShouldBindJSON(&raw); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status": "error",
+			"error":  "Invalid JSON payload",
+		})
+		return
+	}
+	
+	// Extract thread IDs using helper function
+	threads := extractThreadIDs(raw)
+	
+	// Record active threads
+	s.threadsMu.Lock()
+	s.clientActiveThreads[clientID] = ClientActiveThreads{
+		UpdatedAt: time.Now(),
+		Threads:   threads,
+		Raw:       raw,
+	}
+	s.threadsMu.Unlock()
+	
+	log.WithFields(log.Fields{
+		"client_id":    clientID,
+		"thread_count": len(threads),
+		"threads":      threads,
+	}).Debug("Client active threads updated")
+	
+	// Respond with success
+	c.JSON(http.StatusOK, gin.H{
+		"status":      "ok",
+		"clientId":    clientID,
+		"threadCount": len(threads),
+		"serverTime":  time.Now().Unix(),
+	})
+}
+
+// cleanupStaleClients removes client entries that haven't been seen in the last 30 minutes
+// and enforces a soft cap of 1000 entries per map to prevent unbounded memory growth
+func (s *Server) cleanupStaleClients() {
+	const maxAge = 30 * time.Minute
+	const maxEntries = 1000
+	now := time.Now()
+	
+	// Cleanup presence map
+	s.presenceMu.Lock()
+	// Evict oldest entries until under cap
+	for len(s.clientPresence) > maxEntries {
+		oldestTime := now
+		var oldestID string
+		for id, presence := range s.clientPresence {
+			if presence.LastSeen.Before(oldestTime) {
+				oldestTime = presence.LastSeen
+				oldestID = id
+			}
+		}
+		if oldestID == "" {
+			break // No more entries to evict
+		}
+		delete(s.clientPresence, oldestID)
+		log.Debugf("Evicted client presence: %s (last seen: %v)", oldestID, oldestTime)
+	}
+	// Remove stale entries
+	for id, presence := range s.clientPresence {
+		if now.Sub(presence.LastSeen) > maxAge {
+			delete(s.clientPresence, id)
+			log.Debugf("Cleaned up stale client presence: %s (inactive for %v)", id, now.Sub(presence.LastSeen))
+		}
+	}
+	s.presenceMu.Unlock()
+	
+	// Cleanup active threads map
+	s.threadsMu.Lock()
+	// Evict oldest entries until under cap
+	for len(s.clientActiveThreads) > maxEntries {
+		oldestTime := now
+		var oldestID string
+		for id, threads := range s.clientActiveThreads {
+			if threads.UpdatedAt.Before(oldestTime) {
+				oldestTime = threads.UpdatedAt
+				oldestID = id
+			}
+		}
+		if oldestID == "" {
+			break // No more entries to evict
+		}
+		delete(s.clientActiveThreads, oldestID)
+		log.Debugf("Evicted client threads: %s (last updated: %v)", oldestID, oldestTime)
+	}
+	// Remove stale entries
+	for id, threads := range s.clientActiveThreads {
+		if now.Sub(threads.UpdatedAt) > maxAge {
+			delete(s.clientActiveThreads, id)
+			log.Debugf("Cleaned up stale client threads: %s (inactive for %v)", id, now.Sub(threads.UpdatedAt))
+		}
+	}
+	s.threadsMu.Unlock()
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
@@ -587,7 +894,8 @@ func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
 	s.keepAliveHeartbeat = make(chan struct{}, 1)
 	s.keepAliveStop = make(chan struct{}, 1)
 
-	s.engine.GET("/keep-alive", s.handleKeepAlive)
+	// Restrict keep-alive to localhost to prevent remote abuse
+	s.engine.GET("/keep-alive", s.localhostOnlyMiddleware(), s.handleKeepAlive)
 
 	go s.watchKeepAlive()
 }
