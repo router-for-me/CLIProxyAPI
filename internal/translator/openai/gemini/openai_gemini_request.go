@@ -85,6 +85,58 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	var openAIMessages []interface{}
 	var toolCallIDs []string // Track tool call IDs for matching with tool results
 
+	// System instruction -> OpenAI system message
+	// Gemini may provide `systemInstruction` or `system_instruction`; support both keys.
+	systemInstruction := root.Get("systemInstruction")
+	if !systemInstruction.Exists() {
+		systemInstruction = root.Get("system_instruction")
+	}
+	if systemInstruction.Exists() {
+		parts := systemInstruction.Get("parts")
+		msg := map[string]interface{}{
+			"role":    "system",
+			"content": []interface{}{},
+		}
+
+		var aggregatedParts []interface{}
+
+		if parts.Exists() && parts.IsArray() {
+			parts.ForEach(func(_, part gjson.Result) bool {
+				// Handle text parts
+				if text := part.Get("text"); text.Exists() {
+					formattedText := text.String()
+					aggregatedParts = append(aggregatedParts, map[string]interface{}{
+						"type": "text",
+						"text": formattedText,
+					})
+				}
+
+				// Handle inline data (e.g., images)
+				if inlineData := part.Get("inlineData"); inlineData.Exists() {
+					mimeType := inlineData.Get("mimeType").String()
+					if mimeType == "" {
+						mimeType = "application/octet-stream"
+					}
+					data := inlineData.Get("data").String()
+					imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
+
+					aggregatedParts = append(aggregatedParts, map[string]interface{}{
+						"type": "image_url",
+						"image_url": map[string]interface{}{
+							"url": imageURL,
+						},
+					})
+				}
+				return true
+			})
+		}
+
+		if len(aggregatedParts) > 0 {
+			msg["content"] = aggregatedParts
+			openAIMessages = append(openAIMessages, msg)
+		}
+	}
+
 	if contents := root.Get("contents"); contents.Exists() && contents.IsArray() {
 		contents.ForEach(func(_, content gjson.Result) bool {
 			role := content.Get("role").String()

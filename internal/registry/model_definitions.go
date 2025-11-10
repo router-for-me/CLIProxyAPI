@@ -123,7 +123,55 @@ func GeminiModels() []*ModelInfo {
 func GetGeminiModels() []*ModelInfo { return GeminiModels() }
 
 // GetGeminiCLIModels returns the standard Gemini model definitions
-func GetGeminiCLIModels() []*ModelInfo { return GeminiModels() }
+func GetGeminiCLIModels() []*ModelInfo {
+	return []*ModelInfo{
+		{
+			ID:                         "gemini-2.5-flash",
+			Object:                     "model",
+			Created:                    time.Now().Unix(),
+			OwnedBy:                    "google",
+			Type:                       "gemini",
+			Name:                       "models/gemini-2.5-flash",
+			Version:                    "001",
+			DisplayName:                "Gemini 2.5 Flash",
+			Description:                "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65536,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:                         "gemini-2.5-pro",
+			Object:                     "model",
+			Created:                    time.Now().Unix(),
+			OwnedBy:                    "google",
+			Type:                       "gemini",
+			Name:                       "models/gemini-2.5-pro",
+			Version:                    "2.5",
+			DisplayName:                "Gemini 2.5 Pro",
+			Description:                "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65536,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+		},
+		{
+			ID:                         "gemini-3-pro-preview-11-2025",
+			Object:                     "model",
+			Created:                    time.Now().Unix(),
+			OwnedBy:                    "google",
+			Type:                       "gemini",
+			Name:                       "models/gemini-3-pro-preview-11-2025",
+			Version:                    "3",
+			DisplayName:                "Gemini 3 Pro Preview 11-2025",
+			Description:                "Latest preview of Gemini Pro",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65536,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+		},
+	}
+}
 
 // GetAIStudioModels returns the Gemini model definitions for AI Studio integrations
 func GetAIStudioModels() []*ModelInfo {
@@ -331,17 +379,43 @@ func GetOpenAIModels() []*ModelInfo {
 			SupportedParameters: []string{"tools"},
 		},
 		{
-			ID:                  "codex-mini-latest",
+			ID:                  "gpt-5-codex-mini",
 			Object:              "model",
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
-			Version:             "1.0",
-			DisplayName:         "Codex Mini",
-			Description:         "Lightweight code generation model",
-			ContextLength:       4096,
-			MaxCompletionTokens: 2048,
-			SupportedParameters: []string{"temperature", "max_tokens", "stream", "stop"},
+			Version:             "gpt-5-2025-11-07",
+			DisplayName:         "GPT 5 Codex Mini",
+			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
+			ContextLength:       400000,
+			MaxCompletionTokens: 128000,
+			SupportedParameters: []string{"tools"},
+		},
+		{
+			ID:                  "gpt-5-codex-mini-medium",
+			Object:              "model",
+			Created:             time.Now().Unix(),
+			OwnedBy:             "openai",
+			Type:                "openai",
+			Version:             "gpt-5-2025-11-07",
+			DisplayName:         "GPT 5 Codex Mini Medium",
+			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
+			ContextLength:       400000,
+			MaxCompletionTokens: 128000,
+			SupportedParameters: []string{"tools"},
+		},
+		{
+			ID:                  "gpt-5-codex-mini-high",
+			Object:              "model",
+			Created:             time.Now().Unix(),
+			OwnedBy:             "openai",
+			Type:                "openai",
+			Version:             "gpt-5-2025-11-07",
+			DisplayName:         "GPT 5 Codex Mini High",
+			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
+			ContextLength:       400000,
+			MaxCompletionTokens: 128000,
+			SupportedParameters: []string{"tools"},
 		},
 	}
 }
@@ -417,6 +491,7 @@ func GetIFlowModels() []*ModelInfo {
 		{ID: "qwen3-235b-a22b-thinking-2507", DisplayName: "Qwen3-235B-A22B-Thinking", Description: "Qwen3 235B A22B Thinking (2507)"},
 		{ID: "qwen3-235b-a22b-instruct", DisplayName: "Qwen3-235B-A22B-Instruct", Description: "Qwen3 235B A22B Instruct"},
 		{ID: "qwen3-235b", DisplayName: "Qwen3-235B-A22B", Description: "Qwen3 235B A22B"},
+		{ID: "minimax-m2", DisplayName: "MiniMax-M2", Description: "MiniMax M2"},
 	}
 	models := make([]*ModelInfo, 0, len(entries))
 	for _, entry := range entries {

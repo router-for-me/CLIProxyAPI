@@ -84,6 +84,28 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	})
 }
 
+// ensurePublished guarantees that a usage record is emitted exactly once.
+// It is safe to call multiple times; only the first call wins due to once.Do.
+// This is used to ensure request counting even when upstream responses do not
+// include any usage fields (tokens), especially for streaming paths.
+func (r *usageReporter) ensurePublished(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		usage.PublishRecord(ctx, usage.Record{
+			Provider:    r.provider,
+			Model:       r.model,
+			Source:      r.source,
+			APIKey:      r.apiKey,
+			AuthID:      r.authID,
+			RequestedAt: r.requestedAt,
+			Failed:      false,
+			Detail:      usage.Detail{},
+		})
+	})
+}
+
 func apiKeyFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""

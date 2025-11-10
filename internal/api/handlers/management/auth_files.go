@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -229,8 +230,32 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 	return fmt.Sprintf("http://127.0.0.1:%d%s", h.cfg.Port, path), nil
 }
 
-// List auth files
 func (h *Handler) ListAuthFiles(c *gin.Context) {
+	if h == nil {
+		c.JSON(500, gin.H{"error": "handler not initialized"})
+		return
+	}
+	if h.authManager == nil {
+		h.listAuthFilesFromDisk(c)
+		return
+	}
+	auths := h.authManager.List()
+	files := make([]gin.H, 0, len(auths))
+	for _, auth := range auths {
+		if entry := h.buildAuthFileEntry(auth); entry != nil {
+			files = append(files, entry)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool {
+		nameI, _ := files[i]["name"].(string)
+		nameJ, _ := files[j]["name"].(string)
+		return strings.ToLower(nameI) < strings.ToLower(nameJ)
+	})
+	c.JSON(200, gin.H{"files": files})
+}
+
+// List auth files from disk when the auth manager is unavailable.
+func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 	entries, err := os.ReadDir(h.cfg.AuthDir)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
@@ -261,6 +286,106 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		}
 	}
 	c.JSON(200, gin.H{"files": files})
+}
+
+func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
+	if auth == nil {
+		return nil
+	}
+	runtimeOnly := isRuntimeOnlyAuth(auth)
+	if runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
+		return nil
+	}
+	path := strings.TrimSpace(authAttribute(auth, "path"))
+	if path == "" && !runtimeOnly {
+		return nil
+	}
+	name := strings.TrimSpace(auth.FileName)
+	if name == "" {
+		name = auth.ID
+	}
+	entry := gin.H{
+		"id":             auth.ID,
+		"name":           name,
+		"type":           strings.TrimSpace(auth.Provider),
+		"provider":       strings.TrimSpace(auth.Provider),
+		"label":          auth.Label,
+		"status":         auth.Status,
+		"status_message": auth.StatusMessage,
+		"disabled":       auth.Disabled,
+		"unavailable":    auth.Unavailable,
+		"runtime_only":   runtimeOnly,
+		"source":         "memory",
+		"size":           int64(0),
+	}
+	if email := authEmail(auth); email != "" {
+		entry["email"] = email
+	}
+	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
+		if accountType != "" {
+			entry["account_type"] = accountType
+		}
+		if account != "" {
+			entry["account"] = account
+		}
+	}
+	if !auth.CreatedAt.IsZero() {
+		entry["created_at"] = auth.CreatedAt
+	}
+	if !auth.UpdatedAt.IsZero() {
+		entry["modtime"] = auth.UpdatedAt
+		entry["updated_at"] = auth.UpdatedAt
+	}
+	if !auth.LastRefreshedAt.IsZero() {
+		entry["last_refresh"] = auth.LastRefreshedAt
+	}
+	if path != "" {
+		entry["path"] = path
+		entry["source"] = "file"
+		if info, err := os.Stat(path); err == nil {
+			entry["size"] = info.Size()
+			entry["modtime"] = info.ModTime()
+		} else if os.IsNotExist(err) {
+			entry["source"] = "memory"
+		} else {
+			log.WithError(err).Warnf("failed to stat auth file %s", path)
+		}
+	}
+	return entry
+}
+
+func authEmail(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["email"].(string); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["email"]); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(auth.Attributes["account_email"]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func authAttribute(auth *coreauth.Auth, key string) string {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return ""
+	}
+	return auth.Attributes[key]
+}
+
+func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true")
 }
 
 // Download single auth file by name

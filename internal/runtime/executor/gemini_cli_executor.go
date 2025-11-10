@@ -634,11 +634,19 @@ func geminiCLIClientMetadata() string {
 func cliPreviewFallbackOrder(model string) []string {
 	switch model {
 	case "gemini-2.5-pro":
-		return []string{"gemini-2.5-pro-preview-05-06", "gemini-2.5-pro-preview-06-05"}
+		return []string{
+			// "gemini-2.5-pro-preview-05-06",
+			"gemini-2.5-pro-preview-06-05",
+		}
 	case "gemini-2.5-flash":
-		return []string{"gemini-2.5-flash-preview-04-17", "gemini-2.5-flash-preview-05-20"}
+		return []string{
+			// "gemini-2.5-flash-preview-04-17",
+			// "gemini-2.5-flash-preview-05-20",
+		}
 	case "gemini-2.5-flash-lite":
-		return []string{"gemini-2.5-flash-lite-preview-06-17"}
+		return []string{
+			// "gemini-2.5-flash-lite-preview-06-17",
+		}
 	default:
 		return nil
 	}

@@ -75,6 +75,16 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		case "gpt-5-codex-high":
 			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
 		}
+	} else if util.InArray([]string{"gpt-5-codex-mini", "gpt-5-codex-mini-medium", "gpt-5-codex-mini-high"}, req.Model) {
+		body, _ = sjson.SetBytes(body, "model", "gpt-5-codex-mini")
+		switch req.Model {
+		case "gpt-5-codex-mini-medium":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		case "gpt-5-codex-mini-high":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
+		default:
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		}
 	}
 
 	body, _ = sjson.SetBytes(body, "stream", true)
@@ -186,6 +196,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		case "gpt-5-codex-medium":
 			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
 		case "gpt-5-codex-high":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
+		}
+	} else if util.InArray([]string{"gpt-5-codex-mini", "gpt-5-codex-mini-medium", "gpt-5-codex-mini-high"}, req.Model) {
+		body, _ = sjson.SetBytes(body, "model", "gpt-5-codex-mini")
+		switch req.Model {
+		case "gpt-5-codex-mini-medium":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		case "gpt-5-codex-mini-high":
 			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
 		}
 	}
@@ -311,6 +329,17 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
 		default:
 			body, _ = sjson.SetBytes(body, "reasoning.effort", "low")
+		}
+	} else if util.InArray([]string{"gpt-5-codex-mini", "gpt-5-codex-mini-medium", "gpt-5-codex-mini-high"}, req.Model) {
+		modelForCounting = "gpt-5"
+		body, _ = sjson.SetBytes(body, "model", "codex-mini-latest")
+		switch req.Model {
+		case "gpt-5-codex-mini-medium":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		case "gpt-5-codex-mini-high":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
+		default:
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
 		}
 	}
 
@@ -508,6 +537,11 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 				codexCacheMap[key] = cache
 			}
 		}
+	} else if from == "openai-response" {
+		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
+		if promptCacheKey.Exists() {
+			cache.ID = promptCacheKey.String()
+		}
 	}
 
 	rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
@@ -551,6 +585,11 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string) {
 			}
 		}
 	}
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(r, attrs)
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

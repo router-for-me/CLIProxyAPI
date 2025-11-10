@@ -17,6 +17,7 @@ import (
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -67,7 +68,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, apiKey, false)
+	applyClaudeHeaders(httpReq, auth, apiKey, false)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -159,7 +160,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, apiKey, true)
+	applyClaudeHeaders(httpReq, auth, apiKey, true)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -290,7 +291,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, apiKey, false)
+	applyClaudeHeaders(httpReq, auth, apiKey, false)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -529,7 +530,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, apiKey string, stream bool) {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool) {
 	r.Header.Set("Authorization", "Bearer "+apiKey)
 	r.Header.Set("Content-Type", "application/json")
 
@@ -564,9 +565,14 @@ func applyClaudeHeaders(r *http.Request, apiKey string, stream bool) {
 	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
-		return
+	} else {
+		r.Header.Set("Accept", "application/json")
 	}
-	r.Header.Set("Accept", "application/json")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(r, attrs)
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

@@ -65,17 +65,23 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 		if tc := gjson.GetBytes(rawJSON, "extra_body.google.thinking_config"); tc.Exists() && tc.IsObject() {
 			var setBudget bool
 			var normalized int
-			if v := tc.Get("thinking_budget"); v.Exists() {
+
+			if v := tc.Get("thinkingBudget"); v.Exists() {
+				normalized = util.NormalizeThinkingBudget(modelName, int(v.Int()))
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", normalized)
+				setBudget = true
+			} else if v := tc.Get("thinking_budget"); v.Exists() {
 				normalized = util.NormalizeThinkingBudget(modelName, int(v.Int()))
 				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", normalized)
 				setBudget = true
 			}
-			if v := tc.Get("include_thoughts"); v.Exists() {
+
+			if v := tc.Get("includeThoughts"); v.Exists() {
 				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", v.Bool())
-			} else if setBudget {
-				if normalized != 0 {
-					out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
-				}
+			} else if v := tc.Get("include_thoughts"); v.Exists() {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", v.Bool())
+			} else if setBudget && normalized != 0 {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 			}
 		}
 	}

@@ -2,6 +2,7 @@ package responses
 
 import (
 	"bytes"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -147,6 +148,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 			return true
 		})
+	} else if input.Type == gjson.String {
+		msg := "{}"
+		msg, _ = sjson.Set(msg, "role", "user")
+		msg, _ = sjson.Set(msg, "content", input.String())
+		out, _ = sjson.SetRaw(out, "messages.-1", msg)
 	}
 
 	// Convert tools from responses format to chat completions format

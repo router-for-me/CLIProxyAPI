@@ -133,27 +133,16 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					return true
 				})
 
-				// Create main message if there's text content or tool calls
-				if len(contentItems) > 0 || len(toolCalls) > 0 {
+				// Emit text/image content as one message
+				if len(contentItems) > 0 {
 					msgJSON := `{"role":"","content":""}`
 					msgJSON, _ = sjson.Set(msgJSON, "role", role)
 
-					// Set content
-					if len(contentItems) > 0 {
-						contentArrayJSON := "[]"
-						for _, contentItem := range contentItems {
-							contentArrayJSON, _ = sjson.SetRaw(contentArrayJSON, "-1", contentItem)
-						}
-						msgJSON, _ = sjson.SetRaw(msgJSON, "content", contentArrayJSON)
-					} else {
-						msgJSON, _ = sjson.Set(msgJSON, "content", "")
+					contentArrayJSON := "[]"
+					for _, contentItem := range contentItems {
+						contentArrayJSON, _ = sjson.SetRaw(contentArrayJSON, "-1", contentItem)
 					}
-
-					// Set tool calls for assistant messages
-					if role == "assistant" && len(toolCalls) > 0 {
-						toolCallsJSON, _ := json.Marshal(toolCalls)
-						msgJSON, _ = sjson.SetRaw(msgJSON, "tool_calls", string(toolCallsJSON))
-					}
+					msgJSON, _ = sjson.SetRaw(msgJSON, "content", contentArrayJSON)
 
 					contentValue := gjson.Get(msgJSON, "content")
 					hasContent := false
@@ -168,9 +157,17 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						hasContent = contentValue.Raw != "" && contentValue.Raw != "null"
 					}
 
-					if hasContent || len(toolCalls) != 0 {
+					if hasContent {
 						messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(msgJSON).Value())
 					}
+				}
+
+				// Emit tool calls in a separate assistant message
+				if role == "assistant" && len(toolCalls) > 0 {
+					toolCallMsgJSON := `{"role":"assistant","tool_calls":[]}`
+					toolCallsJSON, _ := json.Marshal(toolCalls)
+					toolCallMsgJSON, _ = sjson.SetRaw(toolCallMsgJSON, "tool_calls", string(toolCallsJSON))
+					messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(toolCallMsgJSON).Value())
 				}
 
 			} else if contentResult.Exists() && contentResult.Type == gjson.String {

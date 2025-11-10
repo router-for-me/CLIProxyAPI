@@ -148,7 +148,7 @@ func (h *Handler) applyLegacyKeys(keys []string) {
 	}
 	h.cfg.GeminiKey = newList
 	h.cfg.GlAPIKey = sanitized
-	h.cfg.SyncGeminiKeys()
+	h.cfg.SanitizeGeminiKeys()
 }
 
 // api-keys
@@ -206,7 +206,7 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 		arr = obj.Items
 	}
 	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
-	h.cfg.SyncGeminiKeys()
+	h.cfg.SanitizeGeminiKeys()
 	h.persist(c)
 }
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
@@ -227,7 +227,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		// Treat empty API key as delete.
 		if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.GeminiKey) {
 			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:*body.Index], h.cfg.GeminiKey[*body.Index+1:]...)
-			h.cfg.SyncGeminiKeys()
+			h.cfg.SanitizeGeminiKeys()
 			h.persist(c)
 			return
 		}
@@ -245,7 +245,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 				}
 				if removed {
 					h.cfg.GeminiKey = out
-					h.cfg.SyncGeminiKeys()
+					h.cfg.SanitizeGeminiKeys()
 					h.persist(c)
 					return
 				}
@@ -257,7 +257,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.GeminiKey) {
 		h.cfg.GeminiKey[*body.Index] = value
-		h.cfg.SyncGeminiKeys()
+		h.cfg.SanitizeGeminiKeys()
 		h.persist(c)
 		return
 	}
@@ -266,7 +266,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		for i := range h.cfg.GeminiKey {
 			if h.cfg.GeminiKey[i].APIKey == match {
 				h.cfg.GeminiKey[i] = value
-				h.cfg.SyncGeminiKeys()
+				h.cfg.SanitizeGeminiKeys()
 				h.persist(c)
 				return
 			}
@@ -284,7 +284,7 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 		}
 		if len(out) != len(h.cfg.GeminiKey) {
 			h.cfg.GeminiKey = out
-			h.cfg.SyncGeminiKeys()
+			h.cfg.SanitizeGeminiKeys()
 			h.persist(c)
 		} else {
 			c.JSON(404, gin.H{"error": "item not found"})
@@ -295,7 +295,7 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 		var idx int
 		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx >= 0 && idx < len(h.cfg.GeminiKey) {
 			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:idx], h.cfg.GeminiKey[idx+1:]...)
-			h.cfg.SyncGeminiKeys()
+			h.cfg.SanitizeGeminiKeys()
 			h.persist(c)
 			return
 		}
@@ -328,6 +328,7 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 		normalizeClaudeKey(&arr[i])
 	}
 	h.cfg.ClaudeKey = arr
+	h.cfg.SanitizeClaudeKeys()
 	h.persist(c)
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
@@ -340,16 +341,19 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	normalizeClaudeKey(body.Value)
+	value := *body.Value
+	normalizeClaudeKey(&value)
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.ClaudeKey) {
-		h.cfg.ClaudeKey[*body.Index] = *body.Value
+		h.cfg.ClaudeKey[*body.Index] = value
+		h.cfg.SanitizeClaudeKeys()
 		h.persist(c)
 		return
 	}
 	if body.Match != nil {
 		for i := range h.cfg.ClaudeKey {
 			if h.cfg.ClaudeKey[i].APIKey == *body.Match {
-				h.cfg.ClaudeKey[i] = *body.Value
+				h.cfg.ClaudeKey[i] = value
+				h.cfg.SanitizeClaudeKeys()
 				h.persist(c)
 				return
 			}
@@ -366,6 +370,7 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 			}
 		}
 		h.cfg.ClaudeKey = out
+		h.cfg.SanitizeClaudeKeys()
 		h.persist(c)
 		return
 	}
@@ -374,6 +379,7 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
 		if err == nil && idx >= 0 && idx < len(h.cfg.ClaudeKey) {
 			h.cfg.ClaudeKey = append(h.cfg.ClaudeKey[:idx], h.cfg.ClaudeKey[idx+1:]...)
+			h.cfg.SanitizeClaudeKeys()
 			h.persist(c)
 			return
 		}
@@ -413,6 +419,7 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 		}
 	}
 	h.cfg.OpenAICompatibility = filtered
+	h.cfg.SanitizeOpenAICompatibility()
 	h.persist(c)
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
@@ -430,6 +437,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	if strings.TrimSpace(body.Value.BaseURL) == "" {
 		if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.OpenAICompatibility) {
 			h.cfg.OpenAICompatibility = append(h.cfg.OpenAICompatibility[:*body.Index], h.cfg.OpenAICompatibility[*body.Index+1:]...)
+			h.cfg.SanitizeOpenAICompatibility()
 			h.persist(c)
 			return
 		}
@@ -445,6 +453,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 			}
 			if removed {
 				h.cfg.OpenAICompatibility = out
+				h.cfg.SanitizeOpenAICompatibility()
 				h.persist(c)
 				return
 			}
@@ -454,6 +463,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.OpenAICompatibility) {
 		h.cfg.OpenAICompatibility[*body.Index] = *body.Value
+		h.cfg.SanitizeOpenAICompatibility()
 		h.persist(c)
 		return
 	}
@@ -461,6 +471,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		for i := range h.cfg.OpenAICompatibility {
 			if h.cfg.OpenAICompatibility[i].Name == *body.Name {
 				h.cfg.OpenAICompatibility[i] = *body.Value
+				h.cfg.SanitizeOpenAICompatibility()
 				h.persist(c)
 				return
 			}
@@ -477,6 +488,7 @@ func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 			}
 		}
 		h.cfg.OpenAICompatibility = out
+		h.cfg.SanitizeOpenAICompatibility()
 		h.persist(c)
 		return
 	}
@@ -485,6 +497,7 @@ func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
 		if err == nil && idx >= 0 && idx < len(h.cfg.OpenAICompatibility) {
 			h.cfg.OpenAICompatibility = append(h.cfg.OpenAICompatibility[:idx], h.cfg.OpenAICompatibility[idx+1:]...)
+			h.cfg.SanitizeOpenAICompatibility()
 			h.persist(c)
 			return
 		}
@@ -517,13 +530,17 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	filtered := make([]config.CodexKey, 0, len(arr))
 	for i := range arr {
 		entry := arr[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = config.NormalizeHeaders(entry.Headers)
 		if entry.BaseURL == "" {
 			continue
 		}
 		filtered = append(filtered, entry)
 	}
 	h.cfg.CodexKey = filtered
+	h.cfg.SanitizeCodexKeys()
 	h.persist(c)
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
@@ -536,10 +553,16 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
+	value := *body.Value
+	value.APIKey = strings.TrimSpace(value.APIKey)
+	value.BaseURL = strings.TrimSpace(value.BaseURL)
+	value.ProxyURL = strings.TrimSpace(value.ProxyURL)
+	value.Headers = config.NormalizeHeaders(value.Headers)
 	// If base-url becomes empty, delete instead of update
-	if strings.TrimSpace(body.Value.BaseURL) == "" {
+	if value.BaseURL == "" {
 		if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodexKey) {
 			h.cfg.CodexKey = append(h.cfg.CodexKey[:*body.Index], h.cfg.CodexKey[*body.Index+1:]...)
+			h.cfg.SanitizeCodexKeys()
 			h.persist(c)
 			return
 		}
@@ -555,20 +578,23 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 			}
 			if removed {
 				h.cfg.CodexKey = out
+				h.cfg.SanitizeCodexKeys()
 				h.persist(c)
 				return
 			}
 		}
 	} else {
 		if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodexKey) {
-			h.cfg.CodexKey[*body.Index] = *body.Value
+			h.cfg.CodexKey[*body.Index] = value
+			h.cfg.SanitizeCodexKeys()
 			h.persist(c)
 			return
 		}
 		if body.Match != nil {
 			for i := range h.cfg.CodexKey {
 				if h.cfg.CodexKey[i].APIKey == *body.Match {
-					h.cfg.CodexKey[i] = *body.Value
+					h.cfg.CodexKey[i] = value
+					h.cfg.SanitizeCodexKeys()
 					h.persist(c)
 					return
 				}
@@ -586,6 +612,7 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 			}
 		}
 		h.cfg.CodexKey = out
+		h.cfg.SanitizeCodexKeys()
 		h.persist(c)
 		return
 	}
@@ -594,6 +621,7 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
 		if err == nil && idx >= 0 && idx < len(h.cfg.CodexKey) {
 			h.cfg.CodexKey = append(h.cfg.CodexKey[:idx], h.cfg.CodexKey[idx+1:]...)
+			h.cfg.SanitizeCodexKeys()
 			h.persist(c)
 			return
 		}
@@ -607,6 +635,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	}
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
 		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
@@ -658,6 +687,7 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	if len(entry.Models) == 0 {
 		return
 	}

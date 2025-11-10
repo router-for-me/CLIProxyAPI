@@ -305,6 +305,12 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 	if s == nil || a == nil {
 		return
 	}
+	// Skip disabled auth entries when (re)binding executors.
+	// Disabled auths can linger during config reloads (e.g., removed OpenAI-compat entries)
+	// and must not override active provider executors (such as iFlow OAuth accounts).
+	if a.Disabled {
+		return
+	}
 	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
 		if compatProviderKey == "" {
 			compatProviderKey = strings.ToLower(strings.TrimSpace(a.Provider))
@@ -738,7 +744,7 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 			continue
 		}
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if attrBase == "" || cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
 				return entry
 			}
 		}

@@ -49,10 +49,10 @@ ws-auth: false
 # Gemini API keys (preferred)
 #gemini-api-key:
 #  - api-key: "AIzaSy...01"
-#    # base-url: "https://generativelanguage.googleapis.com"
-#    # headers:
-#    #   X-Custom-Header: "custom-value"
-#    # proxy-url: "socks5://proxy.example.com:1080"
+#    base-url: "https://generativelanguage.googleapis.com"
+#    headers:
+#      X-Custom-Header: "custom-value"
+#    proxy-url: "socks5://proxy.example.com:1080"
 #  - api-key: "AIzaSy...02"
 
 # API keys for official Generative Language API (legacy compatibility)
@@ -64,6 +64,8 @@ ws-auth: false
 #codex-api-key:
 #  - api-key: "sk-atSM..."
 #    base-url: "https://www.example.com" # use the custom codex API endpoint
+#    headers:
+#      X-Custom-Header: "custom-value"
 #    proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 
 # Claude API keys
@@ -71,6 +73,8 @@ ws-auth: false
 #  - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #  - api-key: "sk-atSM..."
 #    base-url: "https://www.example.com" # use the custom claude API endpoint
+#    headers:
+#      X-Custom-Header: "custom-value"
 #    proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #    models:
 #      - name: "claude-3-5-sonnet-20241022" # upstream model name
@@ -80,6 +84,8 @@ ws-auth: false
 #openai-compatibility:
 #  - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #    base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#    headers:
+#      X-Custom-Header: "custom-value"
 #    # New format with per-key proxy support (recommended):
 #    api-key-entries:
 #      - api-key: "sk-or-v1-...b780"
