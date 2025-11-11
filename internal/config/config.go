@@ -5,6 +5,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -511,13 +512,19 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	enc := yaml.NewEncoder(f)
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
 	if err = enc.Encode(&original); err != nil {
 		_ = enc.Close()
 		return err
 	}
-	return enc.Close()
+	if err = enc.Close(); err != nil {
+		return err
+	}
+	data = NormalizeCommentIndentation(buf.Bytes())
+	_, err = f.Write(data)
+	return err
 }
 
 func sanitizeConfigForPersist(cfg *Config) *Config {
@@ -567,13 +574,40 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	enc := yaml.NewEncoder(f)
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
 	if err = enc.Encode(&root); err != nil {
 		_ = enc.Close()
 		return err
 	}
-	return enc.Close()
+	if err = enc.Close(); err != nil {
+		return err
+	}
+	data = NormalizeCommentIndentation(buf.Bytes())
+	_, err = f.Write(data)
+	return err
+}
+
+// NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.
+func NormalizeCommentIndentation(data []byte) []byte {
+	lines := bytes.Split(data, []byte("\n"))
+	changed := false
+	for i, line := range lines {
+		trimmed := bytes.TrimLeft(line, " \t")
+		if len(trimmed) == 0 || trimmed[0] != '#' {
+			continue
+		}
+		if len(trimmed) == len(line) {
+			continue
+		}
+		lines[i] = append([]byte(nil), trimmed...)
+		changed = true
+	}
+	if !changed {
+		return data
+	}
+	return bytes.Join(lines, []byte("\n"))
 }
 
 // getOrCreateMapValue finds the value node for a given key in a mapping node.
@@ -815,6 +849,7 @@ func matchSequenceElement(original []*yaml.Node, used []bool, target *yaml.Node)
 				}
 			}
 		}
+	default:
 	}
 	// Fallback to structural equality to preserve nodes lacking explicit identifiers.
 	for i := range original {

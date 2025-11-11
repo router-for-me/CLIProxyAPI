@@ -41,24 +41,26 @@ type authDirProvider interface {
 
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
-	configPath      string
-	authDir         string
-	config          *config.Config
-	clientsMutex    sync.RWMutex
-	reloadCallback  func(*config.Config)
-	watcher         *fsnotify.Watcher
-	lastAuthHashes  map[string]string
-	lastConfigHash  string
-	authQueue       chan<- AuthUpdate
-	currentAuths    map[string]*coreauth.Auth
-	dispatchMu      sync.Mutex
-	dispatchCond    *sync.Cond
-	pendingUpdates  map[string]AuthUpdate
-	pendingOrder    []string
-	dispatchCancel  context.CancelFunc
-	storePersister  storePersister
-	mirroredAuthDir string
-	oldConfigYaml   []byte
+	configPath        string
+	authDir           string
+	config            *config.Config
+	clientsMutex      sync.RWMutex
+	configReloadMu    sync.Mutex
+	configReloadTimer *time.Timer
+	reloadCallback    func(*config.Config)
+	watcher           *fsnotify.Watcher
+	lastAuthHashes    map[string]string
+	lastConfigHash    string
+	authQueue         chan<- AuthUpdate
+	currentAuths      map[string]*coreauth.Auth
+	dispatchMu        sync.Mutex
+	dispatchCond      *sync.Cond
+	pendingUpdates    map[string]AuthUpdate
+	pendingOrder      []string
+	dispatchCancel    context.CancelFunc
+	storePersister    storePersister
+	mirroredAuthDir   string
+	oldConfigYaml     []byte
 }
 
 type stableIDGenerator struct {
@@ -113,7 +115,8 @@ type AuthUpdate struct {
 const (
 	// replaceCheckDelay is a short delay to allow atomic replace (rename) to settle
 	// before deciding whether a Remove event indicates a real deletion.
-	replaceCheckDelay = 50 * time.Millisecond
+	replaceCheckDelay    = 50 * time.Millisecond
+	configReloadDebounce = 150 * time.Millisecond
 )
 
 // NewWatcher creates a new file watcher instance
@@ -172,7 +175,17 @@ func (w *Watcher) Start(ctx context.Context) error {
 // Stop stops the file watcher
 func (w *Watcher) Stop() error {
 	w.stopDispatch()
+	w.stopConfigReloadTimer()
 	return w.watcher.Close()
+}
+
+func (w *Watcher) stopConfigReloadTimer() {
+	w.configReloadMu.Lock()
+	if w.configReloadTimer != nil {
+		w.configReloadTimer.Stop()
+		w.configReloadTimer = nil
+	}
+	w.configReloadMu.Unlock()
 }
 
 // SetConfig updates the current configuration
@@ -476,40 +489,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Handle config file changes
 	if isConfigEvent {
 		log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
-		data, err := os.ReadFile(w.configPath)
-		if err != nil {
-			log.Errorf("failed to read config file for hash check: %v", err)
-			return
-		}
-		if len(data) == 0 {
-			log.Debugf("ignoring empty config file write event")
-			return
-		}
-		sum := sha256.Sum256(data)
-		newHash := hex.EncodeToString(sum[:])
-
-		w.clientsMutex.RLock()
-		currentHash := w.lastConfigHash
-		w.clientsMutex.RUnlock()
-
-		if currentHash != "" && currentHash == newHash {
-			log.Debugf("config file content unchanged (hash match), skipping reload")
-			return
-		}
-		fmt.Printf("config file changed, reloading: %s\n", w.configPath)
-		if w.reloadConfig() {
-			finalHash := newHash
-			if updatedData, errRead := os.ReadFile(w.configPath); errRead == nil && len(updatedData) > 0 {
-				sumUpdated := sha256.Sum256(updatedData)
-				finalHash = hex.EncodeToString(sumUpdated[:])
-			} else if errRead != nil {
-				log.WithError(errRead).Debug("failed to compute updated config hash after reload")
-			}
-			w.clientsMutex.Lock()
-			w.lastConfigHash = finalHash
-			w.clientsMutex.Unlock()
-			w.persistConfigAsync()
-		}
+		w.scheduleConfigReload()
 		return
 	}
 
@@ -527,6 +507,57 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			return
 		}
 		w.removeClient(event.Name)
+	}
+}
+
+func (w *Watcher) scheduleConfigReload() {
+	w.configReloadMu.Lock()
+	defer w.configReloadMu.Unlock()
+	if w.configReloadTimer != nil {
+		w.configReloadTimer.Stop()
+	}
+	w.configReloadTimer = time.AfterFunc(configReloadDebounce, func() {
+		w.configReloadMu.Lock()
+		w.configReloadTimer = nil
+		w.configReloadMu.Unlock()
+		w.reloadConfigIfChanged()
+	})
+}
+
+func (w *Watcher) reloadConfigIfChanged() {
+	data, err := os.ReadFile(w.configPath)
+	if err != nil {
+		log.Errorf("failed to read config file for hash check: %v", err)
+		return
+	}
+	if len(data) == 0 {
+		log.Debugf("ignoring empty config file write event")
+		return
+	}
+	sum := sha256.Sum256(data)
+	newHash := hex.EncodeToString(sum[:])
+
+	w.clientsMutex.RLock()
+	currentHash := w.lastConfigHash
+	w.clientsMutex.RUnlock()
+
+	if currentHash != "" && currentHash == newHash {
+		log.Debugf("config file content unchanged (hash match), skipping reload")
+		return
+	}
+	fmt.Printf("config file changed, reloading: %s\n", w.configPath)
+	if w.reloadConfig() {
+		finalHash := newHash
+		if updatedData, errRead := os.ReadFile(w.configPath); errRead == nil && len(updatedData) > 0 {
+			sumUpdated := sha256.Sum256(updatedData)
+			finalHash = hex.EncodeToString(sumUpdated[:])
+		} else if errRead != nil {
+			log.WithError(errRead).Debug("failed to compute updated config hash after reload")
+		}
+		w.clientsMutex.Lock()
+		w.lastConfigHash = finalHash
+		w.clientsMutex.Unlock()
+		w.persistConfigAsync()
 	}
 }
 

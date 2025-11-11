@@ -159,7 +159,6 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				}
 			}
 		}
-		fmt.Printf("11111")
 
 		for i := 0; i < len(arr); i++ {
 			m := arr[i]

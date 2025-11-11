@@ -28,7 +28,7 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 		return
 	}
 	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err != nil {
+	if err = yaml.Unmarshal(data, &node); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "parse_failed", "message": err.Error()})
 		return
 	}
@@ -41,17 +41,18 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 }
 
 func WriteConfig(path string, data []byte) error {
+	data = config.NormalizeCommentIndentation(data)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
+	if _, errWrite := f.Write(data); errWrite != nil {
+		_ = f.Close()
+		return errWrite
 	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
+	if errSync := f.Sync(); errSync != nil {
+		_ = f.Close()
+		return errSync
 	}
 	return f.Close()
 }
@@ -63,7 +64,7 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	var cfg config.Config
-	if err := yaml.Unmarshal(body, &cfg); err != nil {
+	if err = yaml.Unmarshal(body, &cfg); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
 		return
 	}
@@ -75,18 +76,20 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	tempFile := tmpFile.Name()
-	if _, err := tmpFile.Write(body); err != nil {
-		tmpFile.Close()
-		os.Remove(tempFile)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
+	if _, errWrite := tmpFile.Write(body); errWrite != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tempFile)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errWrite.Error()})
 		return
 	}
-	if err := tmpFile.Close(); err != nil {
-		os.Remove(tempFile)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
+	if errClose := tmpFile.Close(); errClose != nil {
+		_ = os.Remove(tempFile)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errClose.Error()})
 		return
 	}
-	defer os.Remove(tempFile)
+	defer func() {
+		_ = os.Remove(tempFile)
+	}()
 	_, err = config.LoadConfigOptional(tempFile, false)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
@@ -151,6 +154,14 @@ func (h *Handler) PutLoggingToFile(c *gin.Context) {
 func (h *Handler) GetRequestLog(c *gin.Context) { c.JSON(200, gin.H{"request-log": h.cfg.RequestLog}) }
 func (h *Handler) PutRequestLog(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.RequestLog = v })
+}
+
+// Websocket auth
+func (h *Handler) GetWebsocketAuth(c *gin.Context) {
+	c.JSON(200, gin.H{"ws-auth": h.cfg.WebsocketAuth})
+}
+func (h *Handler) PutWebsocketAuth(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.WebsocketAuth = v })
 }
 
 // Request retry
