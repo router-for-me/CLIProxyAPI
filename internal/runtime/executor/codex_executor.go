@@ -85,6 +85,28 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		default:
 			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
 		}
+	} else if util.InArray([]string{"gpt-5.1", "gpt-5.1-low", "gpt-5.1-medium", "gpt-5.1-high"}, req.Model) {
+		body, _ = sjson.SetBytes(body, "model", "gpt-5.1")
+		switch req.Model {
+		case "gpt-5.1-low":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "low")
+		case "gpt-5.1-medium":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		case "gpt-5.1-high":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
+		default:
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		}
+	} else if util.InArray([]string{"gpt-5.1-codex", "gpt-5.1-codex-low", "gpt-5.1-codex-medium", "gpt-5.1-codex-high"}, req.Model) {
+		body, _ = sjson.SetBytes(body, "model", "gpt-5.1-codex")
+		switch req.Model {
+		case "gpt-5.1-codex-low":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "low")
+		case "gpt-5.1-codex-medium":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		case "gpt-5.1-codex-high":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
+		}
 	}
 
 	body, _ = sjson.SetBytes(body, "stream", true)
@@ -204,6 +226,28 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		case "gpt-5-codex-mini-medium":
 			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
 		case "gpt-5-codex-mini-high":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
+		}
+	} else if util.InArray([]string{"gpt-5.1", "gpt-5.1-low", "gpt-5.1-medium", "gpt-5.1-high"}, req.Model) {
+		body, _ = sjson.SetBytes(body, "model", "gpt-5.1")
+		switch req.Model {
+		case "gpt-5.1-low":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "low")
+		case "gpt-5.1-medium":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		case "gpt-5.1-high":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
+		default:
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		}
+	} else if util.InArray([]string{"gpt-5.1-codex", "gpt-5.1-codex-low", "gpt-5.1-codex-medium", "gpt-5.1-codex-high"}, req.Model) {
+		body, _ = sjson.SetBytes(body, "model", "gpt-5.1-codex")
+		switch req.Model {
+		case "gpt-5.1-codex-low":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "low")
+		case "gpt-5.1-codex-medium":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		case "gpt-5.1-codex-high":
 			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
 		}
 	}
@@ -341,6 +385,30 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 		default:
 			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
 		}
+	} else if util.InArray([]string{"gpt-5.1", "gpt-5.1-low", "gpt-5.1-medium", "gpt-5.1-high"}, req.Model) {
+		modelForCounting = "gpt-5.1"
+		body, _ = sjson.SetBytes(body, "model", "gpt-5.1")
+		switch req.Model {
+		case "gpt-5.1-low":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "low")
+		case "gpt-5.1-medium":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		case "gpt-5.1-high":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
+		default:
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		}
+	} else if util.InArray([]string{"gpt-5.1-codex", "gpt-5.1-codex-low", "gpt-5.1-codex-medium", "gpt-5.1-codex-high"}, req.Model) {
+		modelForCounting = "gpt-5.1"
+		body, _ = sjson.SetBytes(body, "model", "gpt-5.1-codex")
+		switch req.Model {
+		case "gpt-5.1-codex-low":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "low")
+		case "gpt-5.1-codex-medium":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "medium")
+		case "gpt-5.1-codex-high":
+			body, _ = sjson.SetBytes(body, "reasoning.effort", "high")
+		}
 	}
 
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
@@ -366,6 +434,8 @@ func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {
 	switch {
 	case sanitized == "":
 		return tokenizer.Get(tokenizer.Cl100kBase)
+	case strings.HasPrefix(sanitized, "gpt-5.1"):
+		return tokenizer.ForModel(tokenizer.GPT5)
 	case strings.HasPrefix(sanitized, "gpt-5"):
 		return tokenizer.ForModel(tokenizer.GPT5)
 	case strings.HasPrefix(sanitized, "gpt-4.1"):
