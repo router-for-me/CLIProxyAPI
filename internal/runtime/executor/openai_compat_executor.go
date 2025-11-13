@@ -15,6 +15,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -53,6 +54,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), opts.Stream)
+	translated = e.applyDefaultParameters(req.Model, translated, auth)
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		translated = e.overrideModel(translated, modelOverride)
 	}
@@ -137,6 +139,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	translated = e.applyDefaultParameters(req.Model, translated, auth)
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		translated = e.overrideModel(translated, modelOverride)
 	}
@@ -237,6 +240,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	translated = e.applyDefaultParameters(req.Model, translated, auth)
 
 	modelForCounting := req.Model
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
@@ -336,6 +340,59 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model)
 	return payload
+}
+
+func (e *OpenAICompatExecutor) applyDefaultParameters(alias string, payload []byte, auth *cliproxyauth.Auth) []byte {
+	if alias == "" || len(payload) == 0 || e.cfg == nil {
+		return payload
+	}
+	defaults := e.lookupDefaultParameters(alias, auth)
+	if len(defaults) == 0 {
+		return payload
+	}
+	updated := payload
+	for rawKey, value := range defaults {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			continue
+		}
+		if gjson.GetBytes(updated, key).Exists() {
+			continue
+		}
+		next, err := sjson.SetBytes(updated, key, value)
+		if err != nil {
+			log.Warnf("openai compat executor: failed to set default param %s for model %s: %v", key, alias, err)
+			continue
+		}
+		updated = next
+	}
+	return updated
+}
+
+func (e *OpenAICompatExecutor) lookupDefaultParameters(alias string, auth *cliproxyauth.Auth) map[string]any {
+	if alias == "" || e.cfg == nil {
+		return nil
+	}
+	if compat := e.resolveCompatConfig(auth); compat != nil {
+		for i := range compat.Models {
+			model := compat.Models[i]
+			if e.isAliasMatch(alias, model) {
+				return model.DefaultParameters
+			}
+		}
+	}
+	_, model := util.GetOpenAICompatibilityConfig(alias, e.cfg)
+	if model != nil {
+		return model.DefaultParameters
+	}
+	return nil
+}
+
+func (e *OpenAICompatExecutor) isAliasMatch(alias string, model config.OpenAICompatibilityModel) bool {
+	if model.Alias != "" {
+		return strings.EqualFold(model.Alias, alias)
+	}
+	return strings.EqualFold(model.Name, alias)
 }
 
 type statusErr struct {

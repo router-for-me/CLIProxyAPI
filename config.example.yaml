@@ -98,3 +98,6 @@ ws-auth: false
 #    models: # The models supported by the provider.
 #      - name: "moonshotai/kimi-k2:free" # The actual model name.
 #        alias: "kimi-k2" # The alias used in the API.
+#        defaults: # Optional default parameters automatically appended when missing.
+#          temperature: 1
+#          reasoning_effort: "high"

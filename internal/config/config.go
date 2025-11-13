@@ -188,6 +188,11 @@ type OpenAICompatibilityModel struct {
 
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// DefaultParameters defines optional request parameters that will be injected
+	// when a client omits them (e.g., temperature, penalties, reasoning_effort).
+	// Keys follow JSON dot-path notation accepted by sjson/gjson.
+	DefaultParameters map[string]any `yaml:"defaults,omitempty" json:"defaults,omitempty"`
 }
 
 // LoadConfig reads a YAML configuration file from the given path,
