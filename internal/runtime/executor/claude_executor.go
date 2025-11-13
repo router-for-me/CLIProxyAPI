@@ -53,6 +53,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
+	body = e.applyDefaultParameters(req.Model, body, auth)
 	modelForUpstream := req.Model
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		body, _ = sjson.SetBytes(body, "model", modelOverride)
@@ -150,6 +151,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	body = e.applyDefaultParameters(req.Model, body, auth)
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		body, _ = sjson.SetBytes(body, "model", modelOverride)
 	}
@@ -276,6 +278,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
+	body = e.applyDefaultParameters(req.Model, body, auth)
 	modelForUpstream := req.Model
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		body, _ = sjson.SetBytes(body, "model", modelOverride)
@@ -448,6 +451,70 @@ func (e *ClaudeExecutor) resolveClaudeConfig(auth *cliproxyauth.Auth) *config.Cl
 		}
 	}
 	return nil
+}
+
+func (e *ClaudeExecutor) applyDefaultParameters(alias string, payload []byte, auth *cliproxyauth.Auth) []byte {
+	if alias == "" || len(payload) == 0 {
+		return payload
+	}
+	defaults := e.lookupDefaultParameters(alias, auth)
+	if len(defaults) == 0 {
+		return payload
+	}
+	updated := payload
+	for rawKey, value := range defaults {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			continue
+		}
+		if gjson.GetBytes(updated, key).Exists() {
+			continue
+		}
+		next, err := sjson.SetBytes(updated, key, value)
+		if err != nil {
+			log.Warnf("claude executor: failed to set default param %s for model %s: %v", key, alias, err)
+			continue
+		}
+		updated = next
+	}
+	return updated
+}
+
+func (e *ClaudeExecutor) lookupDefaultParameters(alias string, auth *cliproxyauth.Auth) map[string]any {
+	if alias == "" || e.cfg == nil {
+		return nil
+	}
+	if entry := e.resolveClaudeConfig(auth); entry != nil {
+		if defaults := matchClaudeModelDefaults(alias, entry.Models); len(defaults) > 0 {
+			return defaults
+		}
+	}
+	for i := range e.cfg.ClaudeKey {
+		if defaults := matchClaudeModelDefaults(alias, e.cfg.ClaudeKey[i].Models); len(defaults) > 0 {
+			return defaults
+		}
+	}
+	return nil
+}
+
+func matchClaudeModelDefaults(alias string, models []config.ClaudeModel) map[string]any {
+	for i := range models {
+		model := models[i]
+		if claudeModelMatches(alias, model) {
+			return model.DefaultParameters
+		}
+	}
+	return nil
+}
+
+func claudeModelMatches(alias string, model config.ClaudeModel) bool {
+	if model.Alias != "" && strings.EqualFold(strings.TrimSpace(model.Alias), alias) {
+		return true
+	}
+	if model.Name != "" && strings.EqualFold(strings.TrimSpace(model.Name), alias) {
+		return true
+	}
+	return false
 }
 
 type compositeReadCloser struct {

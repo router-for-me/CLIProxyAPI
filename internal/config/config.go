@@ -113,6 +113,10 @@ type ClaudeModel struct {
 
 	// Alias is the client-facing model name that maps to Name.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// DefaultParameters defines optional request parameters injected when missing.
+	// Keys use JSON path notation understood by gjson/sjson.
+	DefaultParameters map[string]any `yaml:"defaults,omitempty" json:"defaults,omitempty"`
 }
 
 // CodexKey represents the configuration for a Codex API key,

@@ -79,6 +79,10 @@ ws-auth: false
 #    models:
 #      - name: "claude-3-5-sonnet-20241022" # upstream model name
 #        alias: "claude-sonnet-latest" # client alias mapped to the upstream model
+#        defaults: # Optional Anthropic-specific defaults (e.g., thinking config)
+#          thinking:
+#            budget_tokens: 8192
+#            type: "enabled"
 
 # OpenAI compatibility providers
 #openai-compatibility:
