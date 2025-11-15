@@ -204,7 +204,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				}
 				tool, _ = sjson.Set(tool, "name", name)
 			}
-			tool, _ = sjson.SetRaw(tool, "parameters", toolResult.Get("input_schema").Raw)
+			tool, _ = sjson.SetRaw(tool, "parameters", normalizeToolParameters(toolResult.Get("input_schema").Raw))
 			tool, _ = sjson.Delete(tool, "input_schema")
 			tool, _ = sjson.Delete(tool, "parameters.$schema")
 			tool, _ = sjson.Set(tool, "strict", false)
@@ -333,4 +333,23 @@ func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string
 		m = buildShortNameMap(names)
 	}
 	return m
+}
+
+// normalizeToolParameters ensures object schemas contain at least an empty properties map.
+func normalizeToolParameters(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" || !gjson.Valid(raw) {
+		return `{"type":"object","properties":{}}`
+	}
+	schema := raw
+	result := gjson.Parse(raw)
+	schemaType := result.Get("type").String()
+	if schemaType == "" {
+		schema, _ = sjson.Set(schema, "type", "object")
+		schemaType = "object"
+	}
+	if schemaType == "object" && !result.Get("properties").Exists() {
+		schema, _ = sjson.SetRaw(schema, "properties", `{}`)
+	}
+	return schema
 }
