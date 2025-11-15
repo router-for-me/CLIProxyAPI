@@ -112,6 +112,9 @@ type Config struct {
 
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
+
+	// Payload defines default and override rules for provider payload parameters.
+	Payload PayloadConfig `yaml:"payload" json:"payload"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -132,6 +135,30 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+}
+
+// PayloadConfig defines default and override parameter rules applied to provider payloads.
+type PayloadConfig struct {
+	// Default defines rules that only set parameters when they are missing in the payload.
+	Default []PayloadRule `yaml:"default" json:"default"`
+	// Override defines rules that always set parameters, overwriting any existing values.
+	Override []PayloadRule `yaml:"override" json:"override"`
+}
+
+// PayloadRule describes a single rule targeting a list of models with parameter updates.
+type PayloadRule struct {
+	// Models lists model entries with name pattern and protocol constraint.
+	Models []PayloadModelRule `yaml:"models" json:"models"`
+	// Params maps JSON paths (gjson/sjson syntax) to values written into the payload.
+	Params map[string]any `yaml:"params" json:"params"`
+}
+
+// PayloadModelRule ties a model name pattern to a specific translator protocol.
+type PayloadModelRule struct {
+	// Name is the model name or wildcard pattern (e.g., "gpt-*", "*-5", "gemini-*-pro").
+	Name string `yaml:"name" json:"name"`
+	// Protocol restricts the rule to a specific translator format (e.g., "gemini", "responses").
+	Protocol string `yaml:"protocol" json:"protocol"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,

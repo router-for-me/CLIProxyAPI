@@ -16,6 +16,8 @@ func tokenizerForModel(model string) (tokenizer.Codec, error) {
 		return tokenizer.Get(tokenizer.Cl100kBase)
 	case strings.HasPrefix(sanitized, "gpt-5"):
 		return tokenizer.ForModel(tokenizer.GPT5)
+	case strings.HasPrefix(sanitized, "gpt-5.1"):
+		return tokenizer.ForModel(tokenizer.GPT5)
 	case strings.HasPrefix(sanitized, "gpt-4.1"):
 		return tokenizer.ForModel(tokenizer.GPT41)
 	case strings.HasPrefix(sanitized, "gpt-4o"):

@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	log "github.com/sirupsen/logrus"
 )
 
 // GetProviderName determines all AI service providers capable of serving a registered model.
@@ -57,6 +58,30 @@ func GetProviderName(modelName string) []string {
 	}
 
 	return providers
+}
+
+// ResolveAutoModel resolves the "auto" model name to an actual available model.
+// It uses an empty handler type to get any available model from the registry.
+//
+// Parameters:
+//   - modelName: The model name to check (should be "auto")
+//
+// Returns:
+//   - string: The resolved model name, or the original if not "auto" or resolution fails
+func ResolveAutoModel(modelName string) string {
+	if modelName != "auto" {
+		return modelName
+	}
+
+	// Use empty string as handler type to get any available model
+	firstModel, err := registry.GetGlobalRegistry().GetFirstAvailableModel("")
+	if err != nil {
+		log.Warnf("Failed to resolve 'auto' model: %v, falling back to original model name", err)
+		return modelName
+	}
+
+	log.Infof("Resolved 'auto' model to: %s", firstModel)
+	return firstModel
 }
 
 // IsOpenAICompatibilityAlias checks if the given model name is an alias

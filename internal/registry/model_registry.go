@@ -4,6 +4,7 @@
 package registry
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -800,6 +801,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.Type != "" {
 			result["type"] = model.Type
 		}
+		if model.Created != 0 {
+			result["created"] = model.Created
+		}
 		return result
 	}
 }
@@ -820,4 +824,48 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 			}
 		}
 	}
+}
+
+
+// GetFirstAvailableModel returns the first available model for the given handler type.
+// It prioritizes models by their creation timestamp (newest first) and checks if they have
+// available clients that are not suspended or over quota.
+//
+// Parameters:
+//   - handlerType: The API handler type (e.g., "openai", "claude", "gemini")
+//
+// Returns:
+//   - string: The model ID of the first available model, or empty string if none available
+//   - error: An error if no models are available
+func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, error) {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	// Get all available models for this handler type
+	models := r.GetAvailableModels(handlerType)
+	if len(models) == 0 {
+		return "", fmt.Errorf("no models available for handler type: %s", handlerType)
+	}
+
+	// Sort models by creation timestamp (newest first)
+	sort.Slice(models, func(i, j int) bool {
+		// Extract created timestamps from map
+		createdI, okI := models[i]["created"].(int64)
+		createdJ, okJ := models[j]["created"].(int64)
+		if !okI || !okJ {
+			return false
+		}
+		return createdI > createdJ
+	})
+
+	// Find the first model with available clients
+	for _, model := range models {
+		if modelID, ok := model["id"].(string); ok {
+			if count := r.GetModelCount(modelID); count > 0 {
+				return modelID, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
 }

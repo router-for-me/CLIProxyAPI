@@ -99,6 +99,7 @@ ws-auth: false
 #      - name: "moonshotai/kimi-k2:free" # The actual model name.
 #        alias: "kimi-k2" # The alias used in the API.
 
+<<<<<<< HEAD
 # LiteLLM Hybrid Routing Configuration
 # This feature enables intelligent routing between OAuth subscriptions and LiteLLM
 # based on the requested model, with automatic fallback on OAuth errors.
@@ -130,3 +131,18 @@ ws-auth: false
 # Global passthrough mode (routes ALL traffic to LiteLLM, bypassing OAuth entirely)
 # Note: This is mutually exclusive with hybrid mode - use one or the other
 #litellm-passthrough-mode: false
+=======
+#payload: # Optional payload configuration
+#  default: # Default rules only set parameters when they are missing in the payload.
+#    - models:
+#        - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
+#          protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
+#      params: # JSON path (gjson/sjson syntax) -> value
+#        "generationConfig.thinkingConfig.thinkingBudget": 32768
+#  override: # Override rules always set parameters, overwriting any existing values.
+#    - models:
+#        - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
+#          protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
+#      params: # JSON path (gjson/sjson syntax) -> value
+#        "reasoning.effort": "high"
+>>>>>>> 772fa6951539f903685ce974dad0abb2be0c703f

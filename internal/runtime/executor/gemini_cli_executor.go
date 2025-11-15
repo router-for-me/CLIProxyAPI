@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -72,6 +73,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
 	basePayload = fixGeminiCLIImageAspectRatio(req.Model, basePayload)
+	basePayload = applyPayloadConfigWithRoot(e.cfg, req.Model, "gemini", "request", basePayload)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -80,7 +82,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		}
 	}
 
-	projectID := strings.TrimSpace(stringValue(auth.Metadata, "project_id"))
+	projectID := resolveGeminiProjectID(auth)
 	models := cliPreviewFallbackOrder(req.Model)
 	if len(models) == 0 || models[0] != req.Model {
 		models = append([]string{req.Model}, models...)
@@ -213,8 +215,9 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	}
 	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
 	basePayload = fixGeminiCLIImageAspectRatio(req.Model, basePayload)
+	basePayload = applyPayloadConfigWithRoot(e.cfg, req.Model, "gemini", "request", basePayload)
 
-	projectID := strings.TrimSpace(stringValue(auth.Metadata, "project_id"))
+	projectID := resolveGeminiProjectID(auth)
 
 	models := cliPreviewFallbackOrder(req.Model)
 	if len(models) == 0 || models[0] != req.Model {
@@ -493,12 +496,13 @@ func (e *GeminiCLIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) (oauth2.TokenSource, map[string]any, error) {
-	if auth == nil || auth.Metadata == nil {
+	metadata := geminiOAuthMetadata(auth)
+	if auth == nil || metadata == nil {
 		return nil, nil, fmt.Errorf("gemini-cli auth metadata missing")
 	}
 
 	var base map[string]any
-	if tokenRaw, ok := auth.Metadata["token"].(map[string]any); ok && tokenRaw != nil {
+	if tokenRaw, ok := metadata["token"].(map[string]any); ok && tokenRaw != nil {
 		base = cloneMap(tokenRaw)
 	} else {
 		base = make(map[string]any)
@@ -512,16 +516,16 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 	}
 
 	if token.AccessToken == "" {
-		token.AccessToken = stringValue(auth.Metadata, "access_token")
+		token.AccessToken = stringValue(metadata, "access_token")
 	}
 	if token.RefreshToken == "" {
-		token.RefreshToken = stringValue(auth.Metadata, "refresh_token")
+		token.RefreshToken = stringValue(metadata, "refresh_token")
 	}
 	if token.TokenType == "" {
-		token.TokenType = stringValue(auth.Metadata, "token_type")
+		token.TokenType = stringValue(metadata, "token_type")
 	}
 	if token.Expiry.IsZero() {
-		if expiry := stringValue(auth.Metadata, "expiry"); expiry != "" {
+		if expiry := stringValue(metadata, "expiry"); expiry != "" {
 			if ts, err := time.Parse(time.RFC3339, expiry); err == nil {
 				token.Expiry = ts
 			}
@@ -550,22 +554,28 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 }
 
 func updateGeminiCLITokenMetadata(auth *cliproxyauth.Auth, base map[string]any, tok *oauth2.Token) {
-	if auth == nil || auth.Metadata == nil || tok == nil {
+	if auth == nil || tok == nil {
 		return
 	}
-	if tok.AccessToken != "" {
-		auth.Metadata["access_token"] = tok.AccessToken
+	merged := buildGeminiTokenMap(base, tok)
+	fields := buildGeminiTokenFields(tok, merged)
+	shared := geminicli.ResolveSharedCredential(auth.Runtime)
+	if shared != nil {
+		snapshot := shared.MergeMetadata(fields)
+		if !geminicli.IsVirtual(auth.Runtime) {
+			auth.Metadata = snapshot
+		}
+		return
 	}
-	if tok.TokenType != "" {
-		auth.Metadata["token_type"] = tok.TokenType
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
 	}
-	if tok.RefreshToken != "" {
-		auth.Metadata["refresh_token"] = tok.RefreshToken
+	for k, v := range fields {
+		auth.Metadata[k] = v
 	}
-	if !tok.Expiry.IsZero() {
-		auth.Metadata["expiry"] = tok.Expiry.Format(time.RFC3339)
-	}
+}
 
+func buildGeminiTokenMap(base map[string]any, tok *oauth2.Token) map[string]any {
 	merged := cloneMap(base)
 	if merged == nil {
 		merged = make(map[string]any)
@@ -578,8 +588,51 @@ func updateGeminiCLITokenMetadata(auth *cliproxyauth.Auth, base map[string]any, 
 			}
 		}
 	}
+	return merged
+}
 
-	auth.Metadata["token"] = merged
+func buildGeminiTokenFields(tok *oauth2.Token, merged map[string]any) map[string]any {
+	fields := make(map[string]any, 5)
+	if tok.AccessToken != "" {
+		fields["access_token"] = tok.AccessToken
+	}
+	if tok.TokenType != "" {
+		fields["token_type"] = tok.TokenType
+	}
+	if tok.RefreshToken != "" {
+		fields["refresh_token"] = tok.RefreshToken
+	}
+	if !tok.Expiry.IsZero() {
+		fields["expiry"] = tok.Expiry.Format(time.RFC3339)
+	}
+	if len(merged) > 0 {
+		fields["token"] = cloneMap(merged)
+	}
+	return fields
+}
+
+func resolveGeminiProjectID(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if runtime := auth.Runtime; runtime != nil {
+		if virtual, ok := runtime.(*geminicli.VirtualCredential); ok && virtual != nil {
+			return strings.TrimSpace(virtual.ProjectID)
+		}
+	}
+	return strings.TrimSpace(stringValue(auth.Metadata, "project_id"))
+}
+
+func geminiOAuthMetadata(auth *cliproxyauth.Auth) map[string]any {
+	if auth == nil {
+		return nil
+	}
+	if shared := geminicli.ResolveSharedCredential(auth.Runtime); shared != nil {
+		if snapshot := shared.MetadataSnapshot(); len(snapshot) > 0 {
+			return snapshot
+		}
+	}
+	return auth.Metadata
 }
 
 func newHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {

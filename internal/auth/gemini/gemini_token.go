@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	log "github.com/sirupsen/logrus"
@@ -66,4 +67,21 @@ func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to write token to file: %w", err)
 	}
 	return nil
+}
+
+// CredentialFileName returns the filename used to persist Gemini CLI credentials.
+// When projectID represents multiple projects (comma-separated or literal ALL),
+// the suffix is normalized to "all" and a "gemini-" prefix is enforced to keep
+// web and CLI generated files consistent.
+func CredentialFileName(email, projectID string, includeProviderPrefix bool) string {
+	email = strings.TrimSpace(email)
+	project := strings.TrimSpace(projectID)
+	if strings.EqualFold(project, "all") || strings.Contains(project, ",") {
+		return fmt.Sprintf("gemini-%s-all.json", email)
+	}
+	prefix := ""
+	if includeProviderPrefix {
+		prefix = "gemini-"
+	}
+	return fmt.Sprintf("%s%s-%s.json", prefix, email, project)
 }

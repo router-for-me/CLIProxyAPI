@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -32,7 +31,7 @@ func newUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		model:       model,
 		requestedAt: time.Now(),
 		apiKey:      apiKey,
-		source:      util.HideAPIKey(resolveUsageSource(auth, apiKey)),
+		source:      resolveUsageSource(auth, apiKey),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -129,6 +128,26 @@ func apiKeyFromContext(ctx context.Context) string {
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 	if auth != nil {
+		provider := strings.TrimSpace(auth.Provider)
+		if strings.EqualFold(provider, "gemini-cli") {
+			if id := strings.TrimSpace(auth.ID); id != "" {
+				return id
+			}
+		}
+		if strings.EqualFold(provider, "vertex") {
+			if auth.Metadata != nil {
+				if projectID, ok := auth.Metadata["project_id"].(string); ok {
+					if trimmed := strings.TrimSpace(projectID); trimmed != "" {
+						return trimmed
+					}
+				}
+				if project, ok := auth.Metadata["project"].(string); ok {
+					if trimmed := strings.TrimSpace(project); trimmed != "" {
+						return trimmed
+					}
+				}
+			}
+		}
 		if _, value := auth.AccountInfo(); value != "" {
 			return strings.TrimSpace(value)
 		}

@@ -21,6 +21,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"gopkg.in/yaml.v3"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -476,8 +477,10 @@ func (w *Watcher) processEvents(ctx context.Context) {
 // handleEvent processes individual file system events
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Filter only relevant events: config file or auth-dir JSON files.
-	isConfigEvent := event.Name == w.configPath && (event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create)
-	isAuthJSON := strings.HasPrefix(event.Name, w.authDir) && strings.HasSuffix(event.Name, ".json")
+	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
+	isConfigEvent := event.Name == w.configPath && event.Op&configOps != 0
+	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
+	isAuthJSON := strings.HasPrefix(event.Name, w.authDir) && strings.HasSuffix(event.Name, ".json") && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
@@ -495,18 +498,19 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 
 	// Handle auth directory changes incrementally (.json only)
 	fmt.Printf("auth file changed (%s): %s, processing incrementally\n", event.Op.String(), filepath.Base(event.Name))
-	if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
-		w.addOrUpdateClient(event.Name)
-	} else if event.Op&fsnotify.Remove == fsnotify.Remove {
-		// Atomic replace on some platforms may surface as Remove+Create for the target path.
-		// Wait briefly; if the file exists again, treat as update instead of removal.
+	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
+		// Wait briefly; if the path exists again, treat as an update instead of removal.
 		time.Sleep(replaceCheckDelay)
 		if _, statErr := os.Stat(event.Name); statErr == nil {
-			// File exists after a short delay; handle as an update.
 			w.addOrUpdateClient(event.Name)
 			return
 		}
 		w.removeClient(event.Name)
+		return
+	}
+	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+		w.addOrUpdateClient(event.Name)
 	}
 }
 
@@ -1026,9 +1030,117 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		if provider == "gemini-cli" {
+			if virtuals := synthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
+				out = append(out, a)
+				out = append(out, virtuals...)
+				continue
+			}
+		}
 		out = append(out, a)
 	}
 	return out
+}
+
+func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]any, now time.Time) []*coreauth.Auth {
+	if primary == nil || metadata == nil {
+		return nil
+	}
+	projects := splitGeminiProjectIDs(metadata)
+	if len(projects) <= 1 {
+		return nil
+	}
+	email, _ := metadata["email"].(string)
+	shared := geminicli.NewSharedCredential(primary.ID, email, metadata, projects)
+	primary.Disabled = true
+	primary.Status = coreauth.StatusDisabled
+	primary.Runtime = shared
+	if primary.Attributes == nil {
+		primary.Attributes = make(map[string]string)
+	}
+	primary.Attributes["gemini_virtual_primary"] = "true"
+	primary.Attributes["virtual_children"] = strings.Join(projects, ",")
+	source := primary.Attributes["source"]
+	authPath := primary.Attributes["path"]
+	originalProvider := primary.Provider
+	if originalProvider == "" {
+		originalProvider = "gemini-cli"
+	}
+	label := primary.Label
+	if label == "" {
+		label = originalProvider
+	}
+	virtuals := make([]*coreauth.Auth, 0, len(projects))
+	for _, projectID := range projects {
+		attrs := map[string]string{
+			"runtime_only":           "true",
+			"gemini_virtual_parent":  primary.ID,
+			"gemini_virtual_project": projectID,
+		}
+		if source != "" {
+			attrs["source"] = source
+		}
+		if authPath != "" {
+			attrs["path"] = authPath
+		}
+		metadataCopy := map[string]any{
+			"email":             email,
+			"project_id":        projectID,
+			"virtual":           true,
+			"virtual_parent_id": primary.ID,
+			"type":              metadata["type"],
+		}
+		proxy := strings.TrimSpace(primary.ProxyURL)
+		if proxy != "" {
+			metadataCopy["proxy_url"] = proxy
+		}
+		virtual := &coreauth.Auth{
+			ID:         buildGeminiVirtualID(primary.ID, projectID),
+			Provider:   originalProvider,
+			Label:      fmt.Sprintf("%s [%s]", label, projectID),
+			Status:     coreauth.StatusActive,
+			Attributes: attrs,
+			Metadata:   metadataCopy,
+			ProxyURL:   primary.ProxyURL,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+			Runtime:    geminicli.NewVirtualCredential(projectID, shared),
+		}
+		virtuals = append(virtuals, virtual)
+	}
+	return virtuals
+}
+
+func splitGeminiProjectIDs(metadata map[string]any) []string {
+	raw, _ := metadata["project_id"].(string)
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	parts := strings.Split(trimmed, ",")
+	result := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		id := strings.TrimSpace(part)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
+}
+
+func buildGeminiVirtualID(baseID, projectID string) string {
+	project := strings.TrimSpace(projectID)
+	if project == "" {
+		project = "project"
+	}
+	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_")
+	return fmt.Sprintf("%s::%s", baseID, replacer.Replace(project))
 }
 
 // buildCombinedClientMap merges file-based clients with API key clients from the cache.

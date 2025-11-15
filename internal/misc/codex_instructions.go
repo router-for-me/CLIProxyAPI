@@ -17,6 +17,7 @@ func CodexInstructionsForModel(modelName, systemInstructions string) (bool, stri
 
 	lastPrompt := ""
 	lastCodexPrompt := ""
+	last51Prompt := ""
 	// lastReviewPrompt := ""
 	for _, entry := range entries {
 		content, _ := codexInstructionsDir.ReadFile("codex_instructions/" + entry.Name())
@@ -27,6 +28,8 @@ func CodexInstructionsForModel(modelName, systemInstructions string) (bool, stri
 			lastCodexPrompt = string(content)
 		} else if strings.HasPrefix(entry.Name(), "prompt.md") {
 			lastPrompt = string(content)
+		} else if strings.HasPrefix(entry.Name(), "gpt_5_1_prompt.md") {
+			last51Prompt = string(content)
 		} else if strings.HasPrefix(entry.Name(), "review_prompt.md") {
 			// lastReviewPrompt = string(content)
 		}
@@ -34,6 +37,8 @@ func CodexInstructionsForModel(modelName, systemInstructions string) (bool, stri
 
 	if strings.Contains(modelName, "codex") {
 		return false, lastCodexPrompt
+	} else if strings.Contains(modelName, "5.1") {
+		return false, last51Prompt
 	} else {
 		return false, lastPrompt
 	}
