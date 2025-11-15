@@ -30,3 +30,6 @@ GEMINI.md
 .vscode/*
 .claude/*
 .serena/*
+
+/refs/*
+.DS_Store

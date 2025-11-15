@@ -662,7 +662,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 // Returns:
 //   - error: An error if the server fails to start
 func (s *Server) Start() error {
-	log.Debugf("Starting API server on %s", s.server.Addr)
+	log.Infof("Starting API server on %s", s.server.Addr)
 
 	// Start the HTTP server.
 	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
