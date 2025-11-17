@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
@@ -73,7 +74,7 @@ type ToolCallAccumulator struct {
 //
 // Returns:
 //   - []string: A slice of strings, each containing an Anthropic-compatible JSON response.
-func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+func ConvertOpenAIResponseToClaude(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
 	if *param == nil {
 		*param = &ConvertOpenAIResponseToAnthropicParams{
 			MessageID:                   "",
@@ -90,6 +91,38 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 			TextContentBlockIndex:       -1,
 			ThinkingContentBlockIndex:   -1,
 			NextContentBlockIndex:       0,
+		}
+	}
+
+	// Check if this is a web search response (non-streaming case)
+	// When handling streaming, the web search response should come as a single chunk
+	if isWebSearchResponse(rawJSON) || (bytes.HasPrefix(rawJSON, dataTag) && isWebSearchResponse(bytes.TrimSpace(rawJSON[5:]))) {
+		// For web search responses in streaming context, we need to generate SSE events
+		// If this is a data-tag prefixed response, process as a streaming chunk
+		if bytes.HasPrefix(rawJSON, dataTag) {
+			webSearchRaw := bytes.TrimSpace(rawJSON[5:])
+			// Also check the original request was streaming to determine format
+			streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
+			isStream := streamResult.Exists() && streamResult.Type != gjson.False
+			if isStream {
+				return convertWebSearchResponseToClaudeSSE(webSearchRaw, modelName, (*param).(*ConvertOpenAIResponseToAnthropicParams))
+			} else {
+				// Non-streaming context, return the complete Claude message
+				converted := convertWebSearchResponseToClaude(webSearchRaw, modelName)
+				return []string{converted}
+			}
+		} else {
+			// This is unprefixed web search response - check if original request was streaming
+			streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
+			isStream := streamResult.Exists() && streamResult.Type != gjson.False
+			if isStream {
+				// Original request was streaming, convert to SSE events
+				return convertWebSearchResponseToClaudeSSE(rawJSON, modelName, (*param).(*ConvertOpenAIResponseToAnthropicParams))
+			} else {
+				// Non-streaming context, return the complete Claude message
+				converted := convertWebSearchResponseToClaude(rawJSON, modelName)
+				return []string{converted}
+			}
 		}
 	}
 
@@ -862,4 +895,197 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 func ClaudeTokenCount(ctx context.Context, count int64) string {
 	return fmt.Sprintf(`{"input_tokens":%d}`, count)
+}
+
+// isWebSearchResponse checks if the response is a web search response by looking at its structure
+func isWebSearchResponse(rawJSON []byte) bool {
+	root := gjson.ParseBytes(rawJSON)
+
+	// Check for web search response structure (different from OpenAI format)
+	if root.Get("query").Exists() && root.Get("status").Exists() && root.Get("results").Exists() {
+		return true
+	}
+
+	// Check for data array field which contains the search results
+	if root.Get("data").Exists() && root.Get("data").IsArray() {
+		return true
+	}
+
+	// Check for result message field which contains the final answer
+	if root.Get("result_message").Exists() {
+		return true
+	}
+
+	return false
+}
+
+// extractWebSearchResult extracts the web search result as a JSON string
+func extractWebSearchResult(rawJSON []byte) string {
+	root := gjson.ParseBytes(rawJSON)
+
+	// Try to extract from the data array first (most common format)
+	if data := root.Get("data"); data.Exists() && data.IsArray() {
+		// Return the raw JSON string of the data array
+		return data.String()
+	}
+
+	// Fallback: try other formats
+	if resultMessage := root.Get("result_message"); resultMessage.Exists() {
+		return resultMessage.String()
+	}
+
+	// Last resort: check if there's a result string
+	if resultText := root.Get("result"); resultText.Exists() && resultText.Type == gjson.String {
+		return resultText.String()
+	}
+
+	// Return the raw JSON as a string if nothing else matches
+	return string(rawJSON)
+}
+
+// convertWebSearchResponseToClaude converts a web search response to Claude format
+func convertWebSearchResponseToClaude(rawJSON []byte, modelName string) string {
+	resultText := extractWebSearchResult(rawJSON)
+
+	// Build Claude response
+	response := map[string]interface{}{
+		"id":     generateMessageID(),
+		"type":   "message",
+		"role":   "assistant",
+		"model":  modelName,
+		"stop_reason": "end_turn",
+		"stop_sequence": nil,
+		"usage": map[string]interface{}{
+			"input_tokens":  0,
+			"output_tokens": 0,
+		},
+	}
+
+	// Create content blocks with the result
+	contentBlocks := []interface{}{
+		map[string]interface{}{
+			"type": "text",
+			"text": resultText,
+		},
+	}
+
+	response["content"] = contentBlocks
+
+	// Marshal to JSON
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return ""
+	}
+	return string(responseJSON)
+}
+
+// convertWebSearchResponseToClaudeSSE simulates SSE events for web search responses
+// This is necessary because /chat/retrieve returns complete JSON, but Claude Code expects SSE format
+func convertWebSearchResponseToClaudeSSE(rawJSON []byte, modelName string, param *ConvertOpenAIResponseToAnthropicParams) []string {
+	var results []string
+
+	// Generate message ID and model if not set
+	if param.MessageID == "" {
+		param.MessageID = generateMessageID()
+	}
+	if param.Model == "" {
+		param.Model = modelName
+	}
+
+	// Send message_start event
+	messageStart := map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id":            param.MessageID,
+			"type":          "message",
+			"role":          "assistant",
+			"model":         param.Model,
+			"content":       []interface{}{},
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]interface{}{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+		},
+	}
+	messageStartJSON, _ := json.Marshal(messageStart)
+	results = append(results, "event: message_start\ndata: "+string(messageStartJSON)+"\n\n")
+
+	// Extract the result from web search response
+	resultText := extractWebSearchResult(rawJSON)
+
+	// Split the result into chunks for streaming simulation
+	if resultText != "" {
+		// Start content block
+		param.TextContentBlockIndex = param.NextContentBlockIndex
+		param.NextContentBlockIndex++
+
+		contentBlockStart := map[string]interface{}{
+			"type":  "content_block_start",
+			"index": param.TextContentBlockIndex,
+			"content_block": map[string]interface{}{
+				"type": "text",
+				"text": "",
+			},
+		}
+		contentBlockStartJSON, _ := json.Marshal(contentBlockStart)
+		results = append(results, "event: content_block_start\ndata: "+string(contentBlockStartJSON)+"\n\n")
+
+		// Send the result text in chunks (simulate streaming)
+		chunkSize := 200 // Characters per chunk for simulation
+		for i := 0; i < len(resultText); i += chunkSize {
+			end := i + chunkSize
+			if end > len(resultText) {
+				end = len(resultText)
+			}
+			chunk := resultText[i:end]
+
+			contentDelta := map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": param.TextContentBlockIndex,
+				"delta": map[string]interface{}{
+					"type": "text_delta",
+					"text": chunk,
+				},
+			}
+			contentDeltaJSON, _ := json.Marshal(contentDelta)
+			results = append(results, "event: content_block_delta\ndata: "+string(contentDeltaJSON)+"\n\n")
+		}
+
+		// End content block
+		contentBlockStop := map[string]interface{}{
+			"type":  "content_block_stop",
+			"index": param.TextContentBlockIndex,
+		}
+		contentBlockStopJSON, _ := json.Marshal(contentBlockStop)
+		results = append(results, "event: content_block_stop\ndata: "+string(contentBlockStopJSON)+"\n\n")
+	}
+
+	// Send message_delta with stop reason
+	messageDelta := map[string]interface{}{
+		"type": "message_delta",
+		"delta": map[string]interface{}{
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+		},
+		"usage": map[string]interface{}{
+			"input_tokens":  0,
+			"output_tokens": 0,
+		},
+	}
+	messageDeltaJSON, _ := json.Marshal(messageDelta)
+	results = append(results, "event: message_delta\ndata: "+string(messageDeltaJSON)+"\n\n")
+
+	// Send message_stop
+	results = append(results, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+
+	return results
+}
+
+// generateMessageID generates a unique message ID
+func generateMessageID() string {
+	// Simple ID generation - using timestamp should be sufficient
+	// In production, you might want to use UUID or better ID generation
+	return fmt.Sprintf("msg_%d", time.Now().UnixNano())[:18]
 }

@@ -1,5 +1,5 @@
 # Binaries
-cli-proxy-api
+/cli-proxy-api*
 *.exe
 
 # Configuration
@@ -30,3 +30,6 @@ GEMINI.md
 .vscode/*
 .claude/*
 .serena/*
+
+refs/*
+.DS_Store
