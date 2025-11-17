@@ -8,6 +8,7 @@ package claude
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -18,10 +19,23 @@ import (
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
 func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
-	// Base OpenAI Chat Completions API template
-	out := `{"model":"","messages":[]}`
-
 	root := gjson.ParseBytes(rawJSON)
+
+	// Check if this is a web search request first
+	if isWebSearchRequest(root) {
+		// For web search requests, return the format needed for the /chat/retrieve endpoint
+		// Add a special indicator that executors can use to route this differently
+		webSearchRequest := createWebSearchRequestJSON(root)
+		// Add a metadata field to indicate this is a special web search request
+		result := make([]byte, len(webSearchRequest)+30)
+		copy(result, webSearchRequest[:len(webSearchRequest)-1]) // Copy everything except the closing brace
+		metadata := `,"_web_search_request":true}`
+		copy(result[len(webSearchRequest)-1:], metadata)
+		return result
+	}
+
+	// Base OpenAI Chat Completions API template for non-web-search requests
+	out := `{"model":"","messages":[]}`
 
 	// Model mapping
 	out, _ = sjson.Set(out, "model", modelName)
@@ -285,4 +299,151 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// isWebSearchRequest checks if the Claude request is for a web search by checking for web search tools.
+func isWebSearchRequest(root gjson.Result) bool {
+	tools := root.Get("tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return false
+	}
+
+	found := false
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if tool.Get("type").String() == "web_search_20250305" {
+			// Found a web search tool
+			found = true
+			return false // stop iteration
+		}
+		return true
+	})
+
+	return found
+}
+
+// createWebSearchRequestJSON creates the JSON for /chat/retrieve endpoint
+func createWebSearchRequestJSON(root gjson.Result) []byte {
+	query := extractWebSearchQuery(root)
+	if query == "" {
+		// Default query if extraction fails
+		query = "web search"
+	}
+
+	// Create the JSON structure for the chat/retrieve endpoint  (enableIntention and enableQueryRewrite should be false)
+	webSearchJSON := `{"phase":"UNIFY","query":"","enableIntention":false,"appCode":"COMPLEX_CHATBOT","enableQueryRewrite":false}`
+	webSearchJSON, _ = sjson.Set(webSearchJSON, "query", query)
+
+	return []byte(webSearchJSON)
+}
+
+// extractWebSearchQuery extracts the search query from Claude messages
+func extractWebSearchQuery(root gjson.Result) string {
+	messages := root.Get("messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return ""
+	}
+
+	query := ""
+	messages.ForEach(func(_, message gjson.Result) bool {
+		// Only look for the first user message that might contain the query
+		role := message.Get("role").String()
+		if role != "user" {
+			return true // continue to next message
+		}
+
+		content := message.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" {
+				text := part.Get("text").String()
+				// Extract query from message like "Perform a web search for the query: <actual query>"
+				if strings.Contains(text, "web search for the query:") {
+					parts := strings.SplitN(text, "web search for the query:", 2)
+					if len(parts) > 1 {
+						query = strings.TrimSpace(parts[1])
+						return false // stop iteration
+					}
+				}
+				// Alternative extraction: if the entire text looks like a search query, use it
+				if query == "" {
+					// Try to find text after common search phrases
+					searchPhrases := []string{
+						"perform a web search for the query:",
+						"perform a web search for:",
+						"web search for the query:",
+						"web search for:",
+						"search for the query:",
+						"search for:",
+						"query:",
+						"search query:",
+					}
+					for _, phrase := range searchPhrases {
+						phraseLower := strings.ToLower(phrase)
+						if idx := strings.Index(strings.ToLower(text), phraseLower); idx >= 0 {
+							query = strings.TrimSpace(text[idx+len(phrase):])
+							// Remove any trailing punctuation that might be part of the instruction
+							query = strings.TrimRight(query, ".!?")
+							if query != "" {
+								return false // stop iteration
+							}
+						}
+					}
+
+					// If still no query found, check if the entire text is a search-like query
+					if query == "" && (strings.Contains(strings.ToLower(text), "search") ||
+						strings.Contains(strings.ToLower(text), "find") ||
+						strings.Contains(strings.ToLower(text), "what") ||
+						strings.Contains(strings.ToLower(text), "how") ||
+						strings.Contains(strings.ToLower(text), "why") ||
+						strings.Contains(strings.ToLower(text), "when") ||
+						strings.Contains(strings.ToLower(text), "where")) {
+						trimmed := strings.TrimSpace(text)
+						if len(trimmed) > 5 { // Basic sanity check
+							query = trimmed
+							return false // stop iteration
+						}
+					}
+				}
+			}
+			return true
+		})
+
+		// Stop after processing user message if a query was found
+		return query == ""
+	})
+
+	// Fallback: if no query found but this is marked as a web search,
+	// try to use any user message content as the query
+	if query == "" {
+		messages.ForEach(func(_, message gjson.Result) bool {
+			role := message.Get("role").String()
+			if role != "user" {
+				return true
+			}
+
+			content := message.Get("content")
+			if content.Exists() && content.IsArray() {
+				content.ForEach(func(_, part gjson.Result) bool {
+					if part.Get("type").String() == "text" && query == "" {
+						text := part.Get("text").String()
+						if text != "" {
+							query = strings.TrimSpace(text)
+							// Limit query length to be reasonable
+							if len(query) > 200 {
+								query = query[:200]
+							}
+							return false // stop iteration
+						}
+					}
+					return true
+				})
+			}
+			return query == ""
+		})
+	}
+
+	return query
 }
