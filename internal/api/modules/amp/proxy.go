@@ -3,6 +3,8 @@ package amp
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -24,6 +27,69 @@ type readCloser struct {
 
 func (rc *readCloser) Read(p []byte) (int, error) { return rc.r.Read(p) }
 func (rc *readCloser) Close() error               { return rc.c.Close() }
+
+// classifyProxyError determines the category of proxy error for appropriate logging
+func classifyProxyError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+
+	// Check for context cancellation (client disconnect)
+	if errors.Is(err, context.Canceled) {
+		return "client_disconnect"
+	}
+
+	// Check for timeout errors
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+
+	// Check for URL errors (network issues, DNS, etc.)
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if urlErr.Timeout() {
+			return "network_timeout"
+		}
+		return "network_error"
+	}
+
+	return "proxy_error"
+}
+
+// getRequestContext extracts useful debugging context from HTTP request
+func getRequestContext(req *http.Request) map[string]interface{} {
+	ctx := make(map[string]interface{})
+
+	// Request ID for correlation
+	if requestID := req.Header.Get("X-Request-ID"); requestID != "" {
+		ctx["request_id"] = requestID
+	}
+
+	// Client information
+	if clientIP := req.RemoteAddr; clientIP != "" {
+		ctx["client_ip"] = clientIP
+	}
+
+	if userAgent := req.Header.Get("User-Agent"); userAgent != "" {
+		ctx["user_agent"] = userAgent
+	}
+
+	// Content type for debugging
+	if contentType := req.Header.Get("Content-Type"); contentType != "" {
+		ctx["content_type"] = contentType
+	}
+
+	return ctx
+}
+
+// getOrGenerateRequestID gets existing request ID or generates a new one
+func getOrGenerateRequestID(req *http.Request) string {
+	if id := req.Header.Get("X-Request-ID"); id != "" {
+		return id
+	}
+	// Simple timestamp-based ID (not UUID for performance)
+	return fmt.Sprintf("req-%d", time.Now().UnixNano())
+}
 
 // createReverseProxy creates a reverse proxy handler for Amp upstream
 // with automatic gzip decompression via ModifyResponse
@@ -41,10 +107,9 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		originalDirector(req)
 		req.Host = parsed.Host
 
-		// Preserve correlation headers for debugging
-		if req.Header.Get("X-Request-ID") == "" {
-			// Could generate one here if needed
-		}
+		// Preserve or generate correlation headers for distributed tracing
+		requestID := getOrGenerateRequestID(req)
+		req.Header.Set("X-Request-ID", requestID)
 
 		// Note: We do NOT filter Anthropic-Beta headers in the proxy path
 		// Users going through ampcode.com proxy are paying for the service and should get all features
@@ -148,7 +213,27 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 
 	// Error handler for proxy failures
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		log.Errorf("amp upstream proxy error for %s %s: %v", req.Method, req.URL.Path, err)
+		errorType := classifyProxyError(err)
+		requestCtx := getRequestContext(req)
+
+		// Use WARN for expected client-side issues, ERROR for upstream failures
+		if errorType == "client_disconnect" {
+			log.WithFields(log.Fields{
+				"error_type": errorType,
+				"method":     req.Method,
+				"path":       req.URL.Path,
+				"context":    requestCtx,
+			}).Warnf("amp upstream: client disconnected during %s %s", req.Method, req.URL.Path)
+		} else {
+			log.WithFields(log.Fields{
+				"error_type": errorType,
+				"method":     req.Method,
+				"path":       req.URL.Path,
+				"context":    requestCtx,
+				"error":      err.Error(),
+			}).Errorf("amp upstream proxy error for %s %s: %v", req.Method, req.URL.Path, err)
+		}
+
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusBadGateway)
 		_, _ = rw.Write([]byte(`{"error":"amp_upstream_proxy_error","message":"Failed to reach Amp upstream"}`))
@@ -209,6 +294,10 @@ func createLiteLLMProxy(baseURL, apiKey string) (*httputil.ReverseProxy, error) 
 		originalDirector(req)
 		req.Host = parsed.Host
 
+		// Preserve or generate correlation headers for distributed tracing
+		requestID := getOrGenerateRequestID(req)
+		req.Header.Set("X-Request-ID", requestID)
+
 		// Strip /api/provider/{provider} prefix from path
 		// Example: /api/provider/openai/v1/chat/completions → /v1/chat/completions
 		path := req.URL.Path
@@ -232,7 +321,27 @@ func createLiteLLMProxy(baseURL, apiKey string) (*httputil.ReverseProxy, error) 
 
 	// Error handler for proxy failures
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		log.Errorf("litellm proxy error for %s %s: %v", req.Method, req.URL.Path, err)
+		errorType := classifyProxyError(err)
+		requestCtx := getRequestContext(req)
+
+		// Use WARN for expected client-side issues, ERROR for upstream failures
+		if errorType == "client_disconnect" {
+			log.WithFields(log.Fields{
+				"error_type": errorType,
+				"method":     req.Method,
+				"path":       req.URL.Path,
+				"context":    requestCtx,
+			}).Warnf("litellm proxy: client disconnected during %s %s", req.Method, req.URL.Path)
+		} else {
+			log.WithFields(log.Fields{
+				"error_type": errorType,
+				"method":     req.Method,
+				"path":       req.URL.Path,
+				"context":    requestCtx,
+				"error":      err.Error(),
+			}).Errorf("litellm proxy error for %s %s: %v", req.Method, req.URL.Path, err)
+		}
+
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusBadGateway)
 		_, _ = rw.Write([]byte(`{"error":"litellm_proxy_error","message":"Failed to reach LiteLLM proxy"}`))
