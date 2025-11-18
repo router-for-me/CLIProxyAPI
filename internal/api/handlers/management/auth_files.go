@@ -346,6 +346,10 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			entry["size"] = info.Size()
 			entry["modtime"] = info.ModTime()
 		} else if os.IsNotExist(err) {
+			// Hide credentials removed from disk but still lingering in memory.
+			if !runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")) {
+				return nil
+			}
 			entry["source"] = "memory"
 		} else {
 			log.WithError(err).Warnf("failed to stat auth file %s", path)

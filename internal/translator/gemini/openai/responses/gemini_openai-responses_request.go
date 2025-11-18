@@ -156,6 +156,11 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 			return true
 		})
+	} else if input.Exists() && input.Type == gjson.String {
+		// Simple string input conversion to user message
+		userContent := `{"role":"user","parts":[{"text":""}]}`
+		userContent, _ = sjson.Set(userContent, "parts.0.text", input.String())
+		out, _ = sjson.SetRaw(out, "contents.-1", userContent)
 	}
 
 	// Convert tools to Gemini functionDeclarations format

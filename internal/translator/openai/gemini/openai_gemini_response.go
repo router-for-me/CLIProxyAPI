@@ -89,6 +89,9 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					"candidatesTokenCount": usage.Get("completion_tokens").Int(),
 					"totalTokenCount":      usage.Get("total_tokens").Int(),
 				}
+				if reasoningTokens := reasoningTokensFromUsage(usage); reasoningTokens > 0 {
+					usageObj["thoughtsTokenCount"] = reasoningTokens
+				}
 				template, _ = sjson.Set(template, "usageMetadata", usageObj)
 				return []string{template}
 			}
@@ -108,6 +111,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 			_ = int(choice.Get("index").Int()) // choiceIdx not used in streaming
 			delta := choice.Get("delta")
+			baseTemplate := template
 
 			// Handle role (only in first chunk)
 			if role := delta.Get("role"); role.Exists() && (*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk {
@@ -118,6 +122,26 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 				(*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk = false
 				results = append(results, template)
 				return true
+			}
+
+			var chunkOutputs []string
+
+			// Handle reasoning/thinking delta
+			if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
+				for _, reasoningText := range extractReasoningTexts(reasoning) {
+					if reasoningText == "" {
+						continue
+					}
+					reasoningTemplate := baseTemplate
+					parts := []interface{}{
+						map[string]interface{}{
+							"thought": true,
+							"text":    reasoningText,
+						},
+					}
+					reasoningTemplate, _ = sjson.Set(reasoningTemplate, "candidates.0.content.parts", parts)
+					chunkOutputs = append(chunkOutputs, reasoningTemplate)
+				}
 			}
 
 			// Handle content delta
@@ -131,8 +155,13 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 						"text": contentText,
 					},
 				}
-				template, _ = sjson.Set(template, "candidates.0.content.parts", parts)
-				results = append(results, template)
+				contentTemplate := baseTemplate
+				contentTemplate, _ = sjson.Set(contentTemplate, "candidates.0.content.parts", parts)
+				chunkOutputs = append(chunkOutputs, contentTemplate)
+			}
+
+			if len(chunkOutputs) > 0 {
+				results = append(results, chunkOutputs...)
 				return true
 			}
 
@@ -230,6 +259,9 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					"promptTokenCount":     usage.Get("prompt_tokens").Int(),
 					"candidatesTokenCount": usage.Get("completion_tokens").Int(),
 					"totalTokenCount":      usage.Get("total_tokens").Int(),
+				}
+				if reasoningTokens := reasoningTokensFromUsage(usage); reasoningTokens > 0 {
+					usageObj["thoughtsTokenCount"] = reasoningTokens
 				}
 				template, _ = sjson.Set(template, "usageMetadata", usageObj)
 				results = append(results, template)
@@ -549,6 +581,19 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 
 			var parts []interface{}
 
+			// Handle reasoning content before visible text
+			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
+				for _, reasoningText := range extractReasoningTexts(reasoning) {
+					if reasoningText == "" {
+						continue
+					}
+					parts = append(parts, map[string]interface{}{
+						"thought": true,
+						"text":    reasoningText,
+					})
+				}
+			}
+
 			// Handle content first
 			if content := message.Get("content"); content.Exists() && content.String() != "" {
 				parts = append(parts, map[string]interface{}{
@@ -605,6 +650,9 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 			"candidatesTokenCount": usage.Get("completion_tokens").Int(),
 			"totalTokenCount":      usage.Get("total_tokens").Int(),
 		}
+		if reasoningTokens := reasoningTokensFromUsage(usage); reasoningTokens > 0 {
+			usageObj["thoughtsTokenCount"] = reasoningTokens
+		}
 		out, _ = sjson.Set(out, "usageMetadata", usageObj)
 	}
 
@@ -613,4 +661,44 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 
 func GeminiTokenCount(ctx context.Context, count int64) string {
 	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
+}
+
+func reasoningTokensFromUsage(usage gjson.Result) int64 {
+	if usage.Exists() {
+		if v := usage.Get("completion_tokens_details.reasoning_tokens"); v.Exists() {
+			return v.Int()
+		}
+		if v := usage.Get("output_tokens_details.reasoning_tokens"); v.Exists() {
+			return v.Int()
+		}
+	}
+	return 0
+}
+
+func extractReasoningTexts(node gjson.Result) []string {
+	var texts []string
+	if !node.Exists() {
+		return texts
+	}
+
+	if node.IsArray() {
+		node.ForEach(func(_, value gjson.Result) bool {
+			texts = append(texts, extractReasoningTexts(value)...)
+			return true
+		})
+		return texts
+	}
+
+	switch node.Type {
+	case gjson.String:
+		texts = append(texts, node.String())
+	case gjson.JSON:
+		if text := node.Get("text"); text.Exists() {
+			texts = append(texts, text.String())
+		} else if raw := strings.TrimSpace(node.Raw); raw != "" && !strings.HasPrefix(raw, "{") && !strings.HasPrefix(raw, "[") {
+			texts = append(texts, raw)
+		}
+	}
+
+	return texts
 }

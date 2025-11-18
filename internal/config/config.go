@@ -528,6 +528,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	// Remove deprecated auth block before merging to avoid persisting it again.
 	removeMapKey(original.Content[0], "auth")
+	removeLegacyOpenAICompatAPIKeys(original.Content[0])
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
@@ -980,6 +981,25 @@ func removeMapKey(mapNode *yaml.Node, key string) {
 		if mapNode.Content[i] != nil && mapNode.Content[i].Value == key {
 			mapNode.Content = append(mapNode.Content[:i], mapNode.Content[i+2:]...)
 			return
+		}
+	}
+}
+
+func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return
+	}
+	idx := findMapKeyIndex(root, "openai-compatibility")
+	if idx < 0 || idx+1 >= len(root.Content) {
+		return
+	}
+	seq := root.Content[idx+1]
+	if seq == nil || seq.Kind != yaml.SequenceNode {
+		return
+	}
+	for i := range seq.Content {
+		if seq.Content[i] != nil && seq.Content[i].Kind == yaml.MappingNode {
+			removeMapKey(seq.Content[i], "api-keys")
 		}
 	}
 }

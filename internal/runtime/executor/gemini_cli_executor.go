@@ -319,8 +319,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			}()
 			if opts.Alt == "" {
 				scanner := bufio.NewScanner(resp.Body)
-				buf := make([]byte, 20_971_520)
-				scanner.Buffer(buf, 20_971_520)
+				scanner.Buffer(nil, 20_971_520)
 				var param any
 				for scanner.Scan() {
 					line := scanner.Bytes()

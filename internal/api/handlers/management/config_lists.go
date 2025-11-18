@@ -408,9 +408,7 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	for i := range arr {
-		normalizeOpenAICompatibilityEntry(&arr[i])
-	}
+	arr = migrateLegacyOpenAICompatibilityKeys(arr)
 	// Filter out providers with empty base-url -> remove provider entirely
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
@@ -418,7 +416,7 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 			filtered = append(filtered, arr[i])
 		}
 	}
-	h.cfg.OpenAICompatibility = filtered
+	h.cfg.OpenAICompatibility = migrateLegacyOpenAICompatibilityKeys(filtered)
 	h.cfg.SanitizeOpenAICompatibility()
 	h.persist(c)
 }
@@ -432,6 +430,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
+	h.cfg.OpenAICompatibility = migrateLegacyOpenAICompatibilityKeys(h.cfg.OpenAICompatibility)
 	normalizeOpenAICompatibilityEntry(body.Value)
 	// If base-url becomes empty, delete the provider instead of updating
 	if strings.TrimSpace(body.Value.BaseURL) == "" {
@@ -659,6 +658,13 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 		existing[trimmed] = struct{}{}
 	}
 	entry.APIKeys = nil
+}
+
+func migrateLegacyOpenAICompatibilityKeys(entries []config.OpenAICompatibility) []config.OpenAICompatibility {
+	for i := range entries {
+		normalizeOpenAICompatibilityEntry(&entries[i])
+	}
+	return entries
 }
 
 func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) []config.OpenAICompatibility {
