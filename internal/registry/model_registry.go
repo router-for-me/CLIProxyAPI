@@ -50,6 +50,8 @@ type ModelInfo struct {
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
 	Thinking *ThinkingSupport `json:"thinking,omitempty"`
+	// ImageSupport indicates whether the model supports image input/output.
+	ImageSupport bool `json:"image_support,omitempty"`
 }
 
 // ThinkingSupport describes a model family's supported internal reasoning budget range.
