@@ -119,7 +119,7 @@ func GeminiModels() []*ModelInfo {
 		{
 			ID:                         "gemini-3-pro-preview",
 			Object:                     "model",
-			Created:                    time.Now().Unix(),
+			Created:                    1732060800, // 2025-11-20 (Approx release/preview date)
 			OwnedBy:                    "google",
 			Type:                       "gemini",
 			Name:                       "models/gemini-3-pro-preview",
