@@ -745,6 +745,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = model.SupportedParameters
 		}
+		if model.ImageSupport {
+			result["image_support"] = true
+		}
 		return result
 
 	case "claude":
@@ -761,6 +764,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if model.DisplayName != "" {
 			result["display_name"] = model.DisplayName
+		}
+		if model.ImageSupport {
+			result["image_support"] = true
 		}
 		return result
 
@@ -789,6 +795,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if len(model.SupportedGenerationMethods) > 0 {
 			result["supportedGenerationMethods"] = model.SupportedGenerationMethods
 		}
+		if model.ImageSupport {
+			result["image_support"] = true
+		}
 		return result
 
 	default:
@@ -805,6 +814,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if model.Created != 0 {
 			result["created"] = model.Created
+		}
+		if model.ImageSupport {
+			result["image_support"] = true
 		}
 		return result
 	}
