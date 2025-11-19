@@ -15,6 +15,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:     1759276800, // 2025-10-01
 			OwnedBy:     "anthropic",
 			Type:        "claude",
+			ImageSupport: true,
 			DisplayName: "Claude 4.5 Haiku",
 		},
 		{
@@ -23,6 +24,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:     1759104000, // 2025-09-29
 			OwnedBy:     "anthropic",
 			Type:        "claude",
+			ImageSupport: true,
 			DisplayName: "Claude 4.5 Sonnet",
 		},
 		{
@@ -31,6 +33,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:     1722945600, // 2025-08-05
 			OwnedBy:     "anthropic",
 			Type:        "claude",
+			ImageSupport: true,
 			DisplayName: "Claude 4.1 Opus",
 		},
 		{
@@ -39,6 +42,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:     1715644800, // 2025-05-14
 			OwnedBy:     "anthropic",
 			Type:        "claude",
+			ImageSupport: true,
 			DisplayName: "Claude 4 Opus",
 		},
 		{
@@ -47,6 +51,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:     1715644800, // 2025-05-14
 			OwnedBy:     "anthropic",
 			Type:        "claude",
+			ImageSupport: true,
 			DisplayName: "Claude 4 Sonnet",
 		},
 		{
@@ -55,6 +60,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:     1708300800, // 2025-02-19
 			OwnedBy:     "anthropic",
 			Type:        "claude",
+			ImageSupport: true,
 			DisplayName: "Claude 3.7 Sonnet",
 		},
 		{
@@ -63,6 +69,7 @@ func GetClaudeModels() []*ModelInfo {
 			Created:     1729555200, // 2024-10-22
 			OwnedBy:     "anthropic",
 			Type:        "claude",
+			ImageSupport: true,
 			DisplayName: "Claude 3.5 Haiku",
 		},
 	}
@@ -85,6 +92,7 @@ func GeminiModels() []*ModelInfo {
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
 			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+			ImageSupport:               true,
 		},
 		{
 			ID:                         "gemini-2.5-pro",
@@ -100,6 +108,7 @@ func GeminiModels() []*ModelInfo {
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
 			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+			ImageSupport:               true,
 		},
 		{
 			ID:                         "gemini-2.5-flash-lite",
@@ -115,6 +124,7 @@ func GeminiModels() []*ModelInfo {
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
 			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+			ImageSupport:               true,
 		},
 		{
 			ID:                         "gemini-3-pro-preview",
@@ -163,6 +173,7 @@ func GetAIStudioModels() []*ModelInfo {
 				OutputTokenLimit:           65536,
 				SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
 				Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+			ImageSupport:               true,
 			},
 			{
 				ID:                         "gemini-flash-latest",
@@ -178,6 +189,7 @@ func GetAIStudioModels() []*ModelInfo {
 				OutputTokenLimit:           65536,
 				SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
 				Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+			ImageSupport:               true,
 			},
 			{
 				ID:                         "gemini-flash-lite-latest",
@@ -193,6 +205,7 @@ func GetAIStudioModels() []*ModelInfo {
 				OutputTokenLimit:           65536,
 				SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
 				Thinking:                   &ThinkingSupport{Min: 512, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+			ImageSupport:               true,
 			},
 			{
 				ID:                         "gemini-2.5-flash-image-preview",
@@ -207,6 +220,7 @@ func GetAIStudioModels() []*ModelInfo {
 				InputTokenLimit:            1048576,
 				OutputTokenLimit:           8192,
 				SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+				ImageSupport:               true,
 				// image models don't support thinkingConfig; leave Thinking nil
 			},
 			{
@@ -222,6 +236,7 @@ func GetAIStudioModels() []*ModelInfo {
 				InputTokenLimit:            1048576,
 				OutputTokenLimit:           8192,
 				SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+				ImageSupport:               true,
 				// image models don't support thinkingConfig; leave Thinking nil
 			},
 		}...,
@@ -237,6 +252,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-08-07",
 			DisplayName:         "GPT 5",
 			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
@@ -250,6 +266,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-08-07",
 			DisplayName:         "GPT 5 Minimal",
 			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
@@ -263,6 +280,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-08-07",
 			DisplayName:         "GPT 5 Low",
 			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
@@ -276,6 +294,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-08-07",
 			DisplayName:         "GPT 5 Medium",
 			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
@@ -289,6 +308,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-08-07",
 			DisplayName:         "GPT 5 High",
 			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
@@ -302,6 +322,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-09-15",
 			DisplayName:         "GPT 5 Codex",
 			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
@@ -315,6 +336,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-09-15",
 			DisplayName:         "GPT 5 Codex Low",
 			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
@@ -328,6 +350,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-09-15",
 			DisplayName:         "GPT 5 Codex Medium",
 			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
@@ -341,6 +364,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-09-15",
 			DisplayName:         "GPT 5 Codex High",
 			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
@@ -354,6 +378,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-11-07",
 			DisplayName:         "GPT 5 Codex Mini",
 			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
@@ -367,6 +392,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-11-07",
 			DisplayName:         "GPT 5 Codex Mini Medium",
 			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
@@ -380,6 +406,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5-2025-11-07",
 			DisplayName:         "GPT 5 Codex Mini High",
 			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
@@ -393,6 +420,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5",
 			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
@@ -406,6 +434,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 Low",
 			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
@@ -419,6 +448,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 Low",
 			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
@@ -432,6 +462,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 Medium",
 			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
@@ -445,6 +476,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 High",
 			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
@@ -458,6 +490,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 Codex",
 			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
@@ -471,6 +504,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 Codex Low",
 			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
@@ -484,6 +518,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 Codex Medium",
 			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
@@ -497,6 +532,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 Codex High",
 			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
@@ -510,6 +546,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 Codex Mini",
 			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
@@ -523,6 +560,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 Codex Mini Medium",
 			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
@@ -536,6 +574,7 @@ func GetOpenAIModels() []*ModelInfo {
 			Created:             time.Now().Unix(),
 			OwnedBy:             "openai",
 			Type:                "openai",
+			ImageSupport:        true,
 			Version:             "gpt-5.1-2025-11-12",
 			DisplayName:         "GPT 5 Codex Mini High",
 			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
@@ -577,6 +616,7 @@ func GetQwenModels() []*ModelInfo {
 		},
 		{
 			ID:                  "vision-model",
+			ImageSupport:        true,
 			Object:              "model",
 			Created:             time.Now().Unix(),
 			OwnedBy:             "qwen",
