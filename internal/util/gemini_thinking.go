@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/tidwall/sjson"
 )
 
@@ -26,8 +27,9 @@ func ParseGeminiThinkingSuffix(model string) (string, *int, *bool, bool) {
 	if strings.HasSuffix(lower, "-nothinking") {
 		base := model[:len(model)-len("-nothinking")]
 		budgetValue := 0
-		if strings.HasPrefix(lower, "gemini-2.5-pro") {
-			budgetValue = 128
+		// Lookup model in registry to see if it requires a minimum budget (ZeroAllowed == false)
+		if modelInfo := registry.GetGlobalRegistry().GetModelInfo(strings.ToLower(base)); modelInfo != nil && modelInfo.Thinking != nil && !modelInfo.Thinking.ZeroAllowed {
+			budgetValue = modelInfo.Thinking.Min
 		}
 		include := false
 		return base, &budgetValue, &include, true
