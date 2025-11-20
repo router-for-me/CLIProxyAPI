@@ -19,6 +19,7 @@ type IFlowTokenStorage struct {
 	Email        string `json:"email"`
 	TokenType    string `json:"token_type"`
 	Scope        string `json:"scope"`
+	Cookie       string `json:"cookie"`
 	Type         string `json:"type"`
 }
 

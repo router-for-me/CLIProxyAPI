@@ -14,6 +14,7 @@ type Record struct {
 	Model       string
 	APIKey      string
 	AuthID      string
+	AuthIndex   uint64
 	Source      string
 	RequestedAt time.Time
 	Failed      bool

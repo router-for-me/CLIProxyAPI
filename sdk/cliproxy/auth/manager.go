@@ -169,6 +169,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil {
 		return nil, nil
 	}
+	auth.EnsureIndex()
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
@@ -185,6 +186,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	auth.EnsureIndex()
 	m.mu.Lock()
 	m.auths[auth.ID] = auth.Clone()
 	m.mu.Unlock()
@@ -209,6 +211,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		if auth == nil || auth.ID == "" {
 			continue
 		}
+		auth.EnsureIndex()
 		m.auths[auth.ID] = auth.Clone()
 	}
 	return nil

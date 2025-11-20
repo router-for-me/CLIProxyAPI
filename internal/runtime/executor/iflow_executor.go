@@ -112,6 +112,8 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.publish(ctx, parseOpenAIUsage(data))
+	// Ensure usage is recorded even if upstream omits usage metadata.
+	reporter.ensurePublished(ctx)
 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
@@ -217,6 +219,8 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
+		// Guarantee a usage record exists even if the stream never emitted usage data.
+		reporter.ensurePublished(ctx)
 	}()
 
 	return stream, nil
@@ -242,13 +246,87 @@ func (e *IFlowExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
 }
 
-// Refresh refreshes OAuth tokens and updates the stored API key.
+// Refresh refreshes OAuth tokens or cookie-based API keys and updates the stored API key.
 func (e *IFlowExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("iflow executor: refresh called")
 	if auth == nil {
 		return nil, fmt.Errorf("iflow executor: auth is nil")
 	}
 
+	// Check if this is cookie-based authentication
+	var cookie string
+	var email string
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["cookie"].(string); ok {
+			cookie = strings.TrimSpace(v)
+		}
+		if v, ok := auth.Metadata["email"].(string); ok {
+			email = strings.TrimSpace(v)
+		}
+	}
+
+	// If cookie is present, use cookie-based refresh
+	if cookie != "" && email != "" {
+		return e.refreshCookieBased(ctx, auth, cookie, email)
+	}
+
+	// Otherwise, use OAuth-based refresh
+	return e.refreshOAuthBased(ctx, auth)
+}
+
+// refreshCookieBased refreshes API key using browser cookie
+func (e *IFlowExecutor) refreshCookieBased(ctx context.Context, auth *cliproxyauth.Auth, cookie, email string) (*cliproxyauth.Auth, error) {
+	log.Debugf("iflow executor: checking refresh need for cookie-based API key for user: %s", email)
+
+	// Get current expiry time from metadata
+	var currentExpire string
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["expired"].(string); ok {
+			currentExpire = strings.TrimSpace(v)
+		}
+	}
+
+	// Check if refresh is needed
+	needsRefresh, _, err := iflowauth.ShouldRefreshAPIKey(currentExpire)
+	if err != nil {
+		log.Warnf("iflow executor: failed to check refresh need: %v", err)
+		// If we can't check, continue with refresh anyway as a safety measure
+	} else if !needsRefresh {
+		log.Debugf("iflow executor: no refresh needed for user: %s", email)
+		return auth, nil
+	}
+
+	log.Infof("iflow executor: refreshing cookie-based API key for user: %s", email)
+
+	svc := iflowauth.NewIFlowAuth(e.cfg)
+	keyData, err := svc.RefreshAPIKey(ctx, cookie, email)
+	if err != nil {
+		log.Errorf("iflow executor: cookie-based API key refresh failed: %v", err)
+		return nil, err
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["api_key"] = keyData.APIKey
+	auth.Metadata["expired"] = keyData.ExpireTime
+	auth.Metadata["type"] = "iflow"
+	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+	auth.Metadata["cookie"] = cookie
+	auth.Metadata["email"] = email
+
+	log.Infof("iflow executor: cookie-based API key refreshed successfully, new expiry: %s", keyData.ExpireTime)
+
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["api_key"] = keyData.APIKey
+
+	return auth, nil
+}
+
+// refreshOAuthBased refreshes tokens using OAuth refresh token
+func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	refreshToken := ""
 	oldAccessToken := ""
 	if auth.Metadata != nil {

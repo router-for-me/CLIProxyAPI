@@ -292,6 +292,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if auth == nil {
 		return nil
 	}
+	auth.EnsureIndex()
 	runtimeOnly := isRuntimeOnlyAuth(auth)
 	if runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
 		return nil
@@ -306,6 +307,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	entry := gin.H{
 		"id":             auth.ID,
+		"auth_index":     auth.Index,
 		"name":           name,
 		"type":           strings.TrimSpace(auth.Provider),
 		"provider":       strings.TrimSpace(auth.Provider),

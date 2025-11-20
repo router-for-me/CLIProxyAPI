@@ -62,6 +62,9 @@ type Part struct {
 	// InlineData contains base64-encoded data with its MIME type (e.g., images).
 	InlineData *InlineData `json:"inlineData,omitempty"`
 
+	// ThoughtSignature is a provider-required signature that accompanies certain parts.
+	ThoughtSignature string `json:"thoughtSignature,omitempty"`
+
 	// FunctionCall represents a tool call requested by the model.
 	FunctionCall *FunctionCall `json:"functionCall,omitempty"`
 

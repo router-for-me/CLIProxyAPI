@@ -90,6 +90,7 @@ type modelStats struct {
 type RequestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
 	Source    string     `json:"source"`
+	AuthIndex uint64     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
 }
@@ -197,6 +198,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.updateAPIStats(stats, modelName, RequestDetail{
 		Timestamp: timestamp,
 		Source:    record.Source,
+		AuthIndex: record.AuthIndex,
 		Tokens:    detail,
 		Failed:    failed,
 	})

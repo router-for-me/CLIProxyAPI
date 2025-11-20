@@ -323,7 +323,14 @@ func formatAuthInfo(info upstreamRequestLog) string {
 }
 
 func summarizeErrorBody(contentType string, body []byte) string {
-	if strings.Contains(strings.ToLower(contentType), "text/html") {
+	isHTML := strings.Contains(strings.ToLower(contentType), "text/html")
+	if !isHTML {
+		trimmed := bytes.TrimSpace(bytes.ToLower(body))
+		if bytes.HasPrefix(trimmed, []byte("<!doctype html")) || bytes.HasPrefix(trimmed, []byte("<html")) {
+			isHTML = true
+		}
+	}
+	if isHTML {
 		if title := extractHTMLTitle(body); title != "" {
 			return title
 		}

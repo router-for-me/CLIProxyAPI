@@ -310,7 +310,7 @@ func buildShortNameMap(names []string) map[string]string {
 		}
 		base := cand
 		for i := 1; ; i++ {
-			suffix := "~" + strconv.Itoa(i)
+			suffix := "_" + strconv.Itoa(i)
 			allowed := limit - len(suffix)
 			if allowed < 0 {
 				allowed = 0

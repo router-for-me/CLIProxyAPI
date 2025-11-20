@@ -322,6 +322,18 @@ func (e *CodexExecutor) setReasoningEffortByAlias(modelName string, payload []by
 		case "gpt-5.1-codex-mini-high":
 			payload, _ = sjson.SetBytes(payload, "reasoning.effort", "high")
 		}
+	} else if util.InArray([]string{"gpt-5.1-codex-max", "gpt-5.1-codex-max-low", "gpt-5.1-codex-max-medium", "gpt-5.1-codex-max-high", "gpt-5.1-codex-max-xhigh"}, modelName) {
+		payload, _ = sjson.SetBytes(payload, "model", "gpt-5.1-codex-max")
+		switch modelName {
+		case "gpt-5.1-codex-max-low":
+			payload, _ = sjson.SetBytes(payload, "reasoning.effort", "low")
+		case "gpt-5.1-codex-max-medium":
+			payload, _ = sjson.SetBytes(payload, "reasoning.effort", "medium")
+		case "gpt-5.1-codex-max-high":
+			payload, _ = sjson.SetBytes(payload, "reasoning.effort", "high")
+		case "gpt-5.1-codex-max-xhigh":
+			payload, _ = sjson.SetBytes(payload, "reasoning.effort", "xhigh")
+		}
 	}
 	return payload
 }

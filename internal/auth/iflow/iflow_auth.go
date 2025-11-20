@@ -1,6 +1,7 @@
 package iflow
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -22,6 +23,9 @@ const (
 	iFlowOAuthAuthorizeEndpoint = "https://iflow.cn/oauth"
 	iFlowUserInfoEndpoint       = "https://iflow.cn/api/oauth/getUserInfo"
 	iFlowSuccessRedirectURL     = "https://iflow.cn/oauth/success"
+
+	// Cookie authentication endpoints
+	iFlowAPIKeyEndpoint = "https://platform.iflow.cn/api/openapi/apikey"
 
 	// Client credentials provided by iFlow for the Code Assist integration.
 	iFlowOAuthClientID     = "10009311001"
@@ -261,6 +265,7 @@ type IFlowTokenData struct {
 	Expire       string
 	APIKey       string
 	Email        string
+	Cookie       string
 }
 
 // userInfoResponse represents the structure returned by the user info endpoint.
@@ -273,4 +278,233 @@ type userInfoData struct {
 	APIKey string `json:"apiKey"`
 	Email  string `json:"email"`
 	Phone  string `json:"phone"`
+}
+
+// iFlowAPIKeyResponse represents the response from the API key endpoint
+type iFlowAPIKeyResponse struct {
+	Success bool         `json:"success"`
+	Code    string       `json:"code"`
+	Message string       `json:"message"`
+	Data    iFlowKeyData `json:"data"`
+	Extra   interface{}  `json:"extra"`
+}
+
+// iFlowKeyData contains the API key information
+type iFlowKeyData struct {
+	HasExpired bool   `json:"hasExpired"`
+	ExpireTime string `json:"expireTime"`
+	Name       string `json:"name"`
+	APIKey     string `json:"apiKey"`
+	APIKeyMask string `json:"apiKeyMask"`
+}
+
+// iFlowRefreshRequest represents the request body for refreshing API key
+type iFlowRefreshRequest struct {
+	Name string `json:"name"`
+}
+
+// AuthenticateWithCookie performs authentication using browser cookies
+func (ia *IFlowAuth) AuthenticateWithCookie(ctx context.Context, cookie string) (*IFlowTokenData, error) {
+	if strings.TrimSpace(cookie) == "" {
+		return nil, fmt.Errorf("iflow cookie authentication: cookie is empty")
+	}
+
+	// First, get initial API key information using GET request
+	keyInfo, err := ia.fetchAPIKeyInfo(ctx, cookie)
+	if err != nil {
+		return nil, fmt.Errorf("iflow cookie authentication: fetch initial API key info failed: %w", err)
+	}
+
+	// Convert to token data format
+	data := &IFlowTokenData{
+		APIKey: keyInfo.APIKey,
+		Expire: keyInfo.ExpireTime,
+		Email:  keyInfo.Name,
+		Cookie: cookie,
+	}
+
+	return data, nil
+}
+
+// fetchAPIKeyInfo retrieves API key information using GET request with cookie
+func (ia *IFlowAuth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*iFlowKeyData, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, iFlowAPIKeyEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("iflow cookie: create GET request failed: %w", err)
+	}
+
+	// Set cookie and other headers to mimic browser
+	req.Header.Set("Cookie", cookie)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+
+	resp, err := ia.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("iflow cookie: GET request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Handle gzip compression
+	var reader io.Reader = resp.Body
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gzipReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("iflow cookie: create gzip reader failed: %w", err)
+		}
+		defer func() { _ = gzipReader.Close() }()
+		reader = gzipReader
+	}
+
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("iflow cookie: read GET response failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Debugf("iflow cookie GET request failed: status=%d body=%s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("iflow cookie: GET request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var keyResp iFlowAPIKeyResponse
+	if err = json.Unmarshal(body, &keyResp); err != nil {
+		return nil, fmt.Errorf("iflow cookie: decode GET response failed: %w", err)
+	}
+
+	if !keyResp.Success {
+		return nil, fmt.Errorf("iflow cookie: GET request not successful: %s", keyResp.Message)
+	}
+
+	// Handle initial response where apiKey field might be apiKeyMask
+	if keyResp.Data.APIKey == "" && keyResp.Data.APIKeyMask != "" {
+		keyResp.Data.APIKey = keyResp.Data.APIKeyMask
+	}
+
+	return &keyResp.Data, nil
+}
+
+// RefreshAPIKey refreshes the API key using POST request
+func (ia *IFlowAuth) RefreshAPIKey(ctx context.Context, cookie, name string) (*iFlowKeyData, error) {
+	if strings.TrimSpace(cookie) == "" {
+		return nil, fmt.Errorf("iflow cookie refresh: cookie is empty")
+	}
+	if strings.TrimSpace(name) == "" {
+		return nil, fmt.Errorf("iflow cookie refresh: name is empty")
+	}
+
+	// Prepare request body
+	refreshReq := iFlowRefreshRequest{
+		Name: name,
+	}
+
+	bodyBytes, err := json.Marshal(refreshReq)
+	if err != nil {
+		return nil, fmt.Errorf("iflow cookie refresh: marshal request failed: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, iFlowAPIKeyEndpoint, strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("iflow cookie refresh: create POST request failed: %w", err)
+	}
+
+	// Set cookie and other headers to mimic browser
+	req.Header.Set("Cookie", cookie)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Origin", "https://platform.iflow.cn")
+	req.Header.Set("Referer", "https://platform.iflow.cn/")
+
+	resp, err := ia.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("iflow cookie refresh: POST request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Handle gzip compression
+	var reader io.Reader = resp.Body
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gzipReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("iflow cookie refresh: create gzip reader failed: %w", err)
+		}
+		defer func() { _ = gzipReader.Close() }()
+		reader = gzipReader
+	}
+
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("iflow cookie refresh: read POST response failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Debugf("iflow cookie POST request failed: status=%d body=%s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("iflow cookie refresh: POST request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var keyResp iFlowAPIKeyResponse
+	if err = json.Unmarshal(body, &keyResp); err != nil {
+		return nil, fmt.Errorf("iflow cookie refresh: decode POST response failed: %w", err)
+	}
+
+	if !keyResp.Success {
+		return nil, fmt.Errorf("iflow cookie refresh: POST request not successful: %s", keyResp.Message)
+	}
+
+	return &keyResp.Data, nil
+}
+
+// ShouldRefreshAPIKey checks if the API key needs to be refreshed (within 2 days of expiry)
+func ShouldRefreshAPIKey(expireTime string) (bool, time.Duration, error) {
+	if strings.TrimSpace(expireTime) == "" {
+		return false, 0, fmt.Errorf("iflow cookie: expire time is empty")
+	}
+
+	expire, err := time.Parse("2006-01-02 15:04", expireTime)
+	if err != nil {
+		return false, 0, fmt.Errorf("iflow cookie: parse expire time failed: %w", err)
+	}
+
+	now := time.Now()
+	twoDaysFromNow := now.Add(48 * time.Hour)
+
+	needsRefresh := expire.Before(twoDaysFromNow)
+	timeUntilExpiry := expire.Sub(now)
+
+	return needsRefresh, timeUntilExpiry, nil
+}
+
+// CreateCookieTokenStorage converts cookie-based token data into persistence storage
+func (ia *IFlowAuth) CreateCookieTokenStorage(data *IFlowTokenData) *IFlowTokenStorage {
+	if data == nil {
+		return nil
+	}
+
+	return &IFlowTokenStorage{
+		APIKey:      data.APIKey,
+		Email:       data.Email,
+		Expire:      data.Expire,
+		Cookie:      data.Cookie,
+		LastRefresh: time.Now().Format(time.RFC3339),
+		Type:        "iflow",
+	}
+}
+
+// UpdateCookieTokenStorage updates the persisted token storage with refreshed API key data
+func (ia *IFlowAuth) UpdateCookieTokenStorage(storage *IFlowTokenStorage, keyData *iFlowKeyData) {
+	if storage == nil || keyData == nil {
+		return
+	}
+
+	storage.APIKey = keyData.APIKey
+	storage.Expire = keyData.ExpireTime
+	storage.LastRefresh = time.Now().Format(time.RFC3339)
 }

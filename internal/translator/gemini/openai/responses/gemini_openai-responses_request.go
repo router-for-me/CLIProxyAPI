@@ -10,6 +10,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const geminiResponsesThoughtSignature = "skip_thought_signature_validator"
+
 func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
 
@@ -108,6 +110,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				modelContent := `{"role":"model","parts":[]}`
 				functionCall := `{"functionCall":{"name":"","args":{}}}`
 				functionCall, _ = sjson.Set(functionCall, "functionCall.name", name)
+				functionCall, _ = sjson.Set(functionCall, "thoughtSignature", geminiResponsesThoughtSignature)
 
 				// Parse arguments JSON string and set as args object
 				if arguments != "" {
