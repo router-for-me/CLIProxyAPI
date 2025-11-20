@@ -104,7 +104,9 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, proxyHandler gi
 	ampAPI.Any("/otel/*path", proxyHandler)
 
 	// Google v1beta1 passthrough (Gemini native API)
-	ampAPI.Any("/provider/google/v1beta1/*path", proxyHandler)
+	// NOTE: Commented out to allow hybrid routing via registerProviderAliases v1beta1 routes
+	// The new v1beta1 route group with FallbackHandler provides proper LiteLLM hybrid routing
+	// ampAPI.Any("/provider/google/v1beta1/*path", proxyHandler)
 }
 
 // registerProviderAliases registers /api/provider/{provider}/... routes
@@ -198,5 +200,17 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 		v1betaAmp.GET("/models", geminiHandlers.GeminiModels)
 		v1betaAmp.POST("/models/:action", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
 		v1betaAmp.GET("/models/:action", geminiHandlers.GeminiGetHandler)
+	}
+
+	// /v1beta1 routes (Vertex AI native format with full publisher path)
+	// Pattern: /v1beta1/publishers/google/models/{model}:{action}
+	// This route group enables hybrid routing for v1beta1 requests by using FallbackHandler
+	// Note: Must be registered here (before registerManagementRoutes passthrough) for route precedence
+	v1beta1Amp := provider.Group("/v1beta1/publishers/google/models")
+	{
+		// Vertex AI format captures: "gemini-3-pro-preview:streamGenerateContent"
+		// FallbackHandler extracts model from URL path and checks litellm-models config
+		v1beta1Amp.POST("/*modelAction", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
+		v1beta1Amp.GET("/*modelAction", geminiHandlers.GeminiGetHandler)
 	}
 }

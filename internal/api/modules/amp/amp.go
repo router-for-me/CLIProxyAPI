@@ -105,7 +105,7 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 	m.registerOnce.Do(func() {
 		// Initialize LiteLLM proxy if hybrid mode is configured
 		if ctx.Config.LiteLLMHybridMode && ctx.Config.LiteLLMBaseURL != "" {
-			liteLLMProxy, err := createLiteLLMProxy(ctx.Config.LiteLLMBaseURL, ctx.Config.LiteLLMAPIKey)
+			liteLLMProxy, err := createLiteLLMProxy(ctx.Config.LiteLLMBaseURL, ctx.Config.LiteLLMAPIKey, ctx.Config)
 			if err != nil {
 				log.Errorf("Failed to create LiteLLM proxy: %v", err)
 			} else {

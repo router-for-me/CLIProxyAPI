@@ -71,7 +71,9 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		if fh.shouldRouteLiteLLM(normalizedModel) {
 			log.Infof("amp routing: model %s → LiteLLM (explicit config)", normalizedModel)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			handleProxyAbort(c, func() {
 			fh.liteLLMProxy.ServeHTTP(c.Writer, c.Request)
+		})
 			return
 		}
 
@@ -115,7 +117,9 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			if fh.shouldFallbackToLiteLLM(recorder) {
 				log.Warnf("amp routing: OAuth failed for %s (status %d), falling back to LiteLLM", normalizedModel, recorder.Code)
 				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				fh.liteLLMProxy.ServeHTTP(c.Writer, c.Request)
+				handleProxyAbort(c, func() {
+			fh.liteLLMProxy.ServeHTTP(c.Writer, c.Request)
+		})
 				return
 			}
 
@@ -128,7 +132,9 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		if fh.config.LiteLLMFallbackEnabled && fh.liteLLMProxy != nil {
 			log.Infof("amp routing: model %s has no OAuth provider, trying LiteLLM", normalizedModel)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			handleProxyAbort(c, func() {
 			fh.liteLLMProxy.ServeHTTP(c.Writer, c.Request)
+		})
 			return
 		}
 
@@ -137,7 +143,9 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		if proxy != nil {
 			log.Infof("amp routing: model %s → Amp upstream (no OAuth, no LiteLLM)", normalizedModel)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			handleProxyAbort(c, func() {
 			proxy.ServeHTTP(c.Writer, c.Request)
+		})
 			return
 		}
 
@@ -216,13 +224,37 @@ func extractModelFromRequest(body []byte, c *gin.Context) string {
 		}
 	}
 
-	// For Gemini requests, model is in the URL path: /models/{model}:generateContent
+	// For Gemini v1beta requests, model is in the URL path: /models/{model}:generateContent
 	// Extract from :action parameter (e.g., "gemini-pro:generateContent")
 	if action := c.Param("action"); action != "" {
 		// Split by colon to get model name (e.g., "gemini-pro:generateContent" -> "gemini-pro")
 		parts := strings.Split(action, ":")
 		if len(parts) > 0 && parts[0] != "" {
 			return parts[0]
+		}
+	}
+
+	// For Gemini v1beta1 requests (Vertex AI format), model is in the URL path
+	// Pattern: /v1beta1/publishers/google/models/{model}:{action}
+	// Example: /api/provider/google/v1beta1/publishers/google/models/gemini-3-pro-preview:streamGenerateContent
+	path := c.Request.URL.Path
+	if strings.Contains(path, "/publishers/google/models/") {
+		parts := strings.Split(path, "/models/")
+		if len(parts) >= 2 {
+			modelAction := parts[1]
+			// Remove action suffix (e.g., ":streamGenerateContent" or query params)
+			if idx := strings.Index(modelAction, ":"); idx > 0 {
+				return modelAction[:idx]
+			}
+			// If no colon, might have query params or be malformed - try to extract up to first special char
+			for i, ch := range modelAction {
+				if ch == '?' || ch == '/' {
+					if i > 0 {
+						return modelAction[:i]
+					}
+					break
+				}
+			}
 		}
 	}
 

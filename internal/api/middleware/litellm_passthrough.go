@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -83,7 +84,7 @@ func LiteLLMPassthrough(cfg *config.Config) gin.HandlerFunc {
 		// Rewrite path to strip /api/provider/:provider prefix and handle Vertex AI paths
 		// This converts Amp CLI paths to LiteLLM-compatible paths with model name mapping
 		originalPath := req.URL.Path
-		req.URL.Path = rewritePathForLiteLLM(req.URL.Path, cfg)
+		req.URL.Path = util.RewritePathForLiteLLM(req.URL.Path, cfg)
 
 		// Extract provider name from original path for logging
 		provider := extractProvider(originalPath)
@@ -179,74 +180,6 @@ func shouldPassthrough(path string) bool {
 	return false
 }
 
-// rewritePathForLiteLLM strips the /api/provider/:provider prefix from paths
-// and handles Vertex AI format paths, converting them to standard Gemini API format.
-// It also applies model name mappings from the configuration.
-//
-// Examples:
-//   - /api/provider/anthropic/v1/messages -> /v1/messages
-//   - /api/provider/openai/v1/chat/completions -> /v1/chat/completions
-//   - /api/provider/google/v1beta1/publishers/google/models/gemini-2.5-flash-preview-09-2025:generateContent
-//     -> /v1beta/models/gemini-flash:generateContent (with model mapping)
-//   - /v1/messages -> /v1/messages (unchanged)
-func rewritePathForLiteLLM(path string, cfg *config.Config) string {
-	// Handle Vertex AI Gemini paths: /v1beta1/publishers/google/models/{model}:{action}
-	if strings.Contains(path, "/v1beta1/publishers/google/models/") {
-		// Extract model and action from Vertex AI path
-		// Example: /api/provider/google/v1beta1/publishers/google/models/gemini-2.5-flash-preview-09-2025:generateContent
-		parts := strings.Split(path, "/models/")
-		if len(parts) >= 2 {
-			modelAndAction := parts[1] // gemini-2.5-flash-preview-09-2025:generateContent
-			colonIndex := strings.Index(modelAndAction, ":")
-			if colonIndex >= 0 {
-				modelName := modelAndAction[:colonIndex] // gemini-2.5-flash-preview-09-2025
-				action := modelAndAction[colonIndex:]    // :generateContent
-
-				// Apply model name mapping if configured
-				if cfg.LiteLLMModelMappings != nil {
-					if mappedModel, found := cfg.LiteLLMModelMappings[modelName]; found {
-						// Validate that mapped model name is not empty
-						if strings.TrimSpace(mappedModel) == "" {
-							log.Warnf("LiteLLM path rewrite: mapped model for %s is empty, using original", modelName)
-						} else {
-							log.Debugf("LiteLLM path rewrite: mapped model %s -> %s", modelName, mappedModel)
-							modelName = mappedModel
-						}
-					}
-				}
-
-				// Validate final model name is not empty before constructing path
-				if strings.TrimSpace(modelName) == "" {
-					log.Warnf("LiteLLM path rewrite: model name is empty in Vertex AI path, returning original path")
-					return path
-				}
-
-				// Convert to standard Gemini API path
-				return "/v1beta/models/" + modelName + action
-			}
-		}
-	}
-
-	// Strip /api/provider/:provider prefix if present
-	if strings.HasPrefix(path, "/api/provider/") {
-		// Split: ["", "api", "provider", "anthropic", "v1/messages"]
-		parts := strings.SplitN(path, "/", 5)
-		if len(parts) >= 5 {
-			remainingPath := "/" + parts[4] // /v1/messages or /v1beta1/publishers/...
-
-			// If remaining path is Vertex AI format, recursively rewrite
-			if strings.Contains(remainingPath, "/v1beta1/publishers/google/models/") {
-				return rewritePathForLiteLLM(remainingPath, cfg)
-			}
-
-			// Return the last part with leading slash: /v1/messages
-			return remainingPath
-		}
-	}
-
-	// Return path unchanged if it doesn't match any pattern
-	return path
-}
 
 // extractProvider extracts the provider name from the request path for logging purposes.
 // Examples:

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -257,10 +259,31 @@ func isStreamingResponse(resp *http.Response) bool {
 	return false
 }
 
+// handleProxyAbort safely wraps reverse proxy ServeHTTP calls to handle
+// client disconnects gracefully. http.ErrAbortHandler is expected when
+// clients cancel streaming requests.
+func handleProxyAbort(c *gin.Context, proxyFn func()) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				log.Debugf("client disconnected during streaming: %s %s",
+					c.Request.Method, c.Request.URL.Path)
+				c.Abort()  // Stop further handler processing
+				return
+			}
+			// Re-panic real errors so Gin's Recovery handles them
+			panic(rec)
+		}
+	}()
+	proxyFn()
+}
+
 // proxyHandler converts httputil.ReverseProxy to gin.HandlerFunc
 func proxyHandler(proxy *httputil.ReverseProxy) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		proxy.ServeHTTP(c.Writer, c.Request)
+		handleProxyAbort(c, func() {
+			proxy.ServeHTTP(c.Writer, c.Request)
+		})
 	}
 }
 
@@ -280,7 +303,7 @@ func filterBetaFeatures(header, featureToRemove string) string {
 }
 
 // createLiteLLMProxy creates a reverse proxy handler for LiteLLM
-func createLiteLLMProxy(baseURL, apiKey string) (*httputil.ReverseProxy, error) {
+func createLiteLLMProxy(baseURL, apiKey string, cfg *config.Config) (*httputil.ReverseProxy, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid litellm base url: %w", err)
@@ -298,25 +321,30 @@ func createLiteLLMProxy(baseURL, apiKey string) (*httputil.ReverseProxy, error) 
 		requestID := getOrGenerateRequestID(req)
 		req.Header.Set("X-Request-ID", requestID)
 
-		// Strip /api/provider/{provider} prefix from path
-		// Example: /api/provider/openai/v1/chat/completions → /v1/chat/completions
+		// Strip /api/provider/{provider} prefix and normalize path for LiteLLM
+		// Handles Vertex AI Gemini format transformation and model name mappings
+		originalPath := req.URL.Path
 		path := req.URL.Path
+
+		// First strip the /api/provider/{provider} prefix if present
 		if strings.HasPrefix(path, "/api/provider/") {
-			// Remove /api/provider/{provider} prefix
 			parts := strings.SplitN(path, "/", 5) // ["", "api", "provider", "{provider}", "rest..."]
 			if len(parts) >= 5 {
-				req.URL.Path = "/" + parts[4] // Keep "/v1/..." part
+				path = "/" + parts[4] // Stripped path
 			} else if len(parts) == 4 {
-				req.URL.Path = "/" // Just root if no path after provider
+				path = "/" // Just root if no path after provider
 			}
 		}
+
+		// Apply LiteLLM-specific path transformations (Vertex AI -> standard Gemini format)
+		req.URL.Path = util.RewritePathForLiteLLM(path, cfg)
 
 		// Inject LiteLLM API key if provided
 		if apiKey != "" {
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
 		}
 
-		log.Debugf("litellm proxy: forwarding %s %s (original: %s)", req.Method, req.URL.Path, path)
+		log.Debugf("litellm proxy: forwarding %s %s (original: %s)", req.Method, req.URL.Path, originalPath)
 	}
 
 	// Error handler for proxy failures
