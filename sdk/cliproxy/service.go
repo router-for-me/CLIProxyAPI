@@ -341,6 +341,8 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "iflow":
 		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
+	case "antigravity":
+		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {

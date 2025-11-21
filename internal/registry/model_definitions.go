@@ -760,3 +760,145 @@ func GetIFlowModels() []*ModelInfo {
 	}
 	return models
 }
+
+// GetAntigravityModels returns supported models for Google Antigravity OAuth accounts.
+func GetAntigravityModels() []*ModelInfo {
+	created := time.Now().Unix()
+
+	// Recommended models from `/v1internal:fetchAvailableModels`
+	entries := []struct {
+		ID                         string
+		DisplayName                string
+		Description                string
+		MaxTokens                  int
+		MaxOutputTokens            int
+		InputTokenLimit            int
+		OutputTokenLimit           int
+		SupportedGenerationMethods []string
+		Thinking                   *ThinkingSupport
+		SupportsImages             bool
+		SupportsThinking           bool
+		SupportsVideo              bool
+	}{
+		{
+			ID:                         "gemini-2.5-flash",
+			DisplayName:                "Gemini 2.5 Flash",
+			Description:                "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65535,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 0, Max: 1024, ZeroAllowed: true, DynamicAllowed: true},
+			SupportsImages:             true,
+			SupportsThinking:           true,
+		},
+		{
+			ID:                         "gemini-3-pro-low",
+			DisplayName:                "Gemini 3 Pro (Low)",
+			Description:                "Gemini 3 Pro model with low configuration",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65535,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: 128, ZeroAllowed: false, DynamicAllowed: true},
+			SupportsImages:             true,
+			SupportsThinking:           true,
+			SupportsVideo:              true,
+		},
+		{
+			ID:                         "gemini-3-pro-high",
+			DisplayName:                "Gemini 3 Pro (High)",
+			Description:                "Gemini 3 Pro model with high configuration",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65535,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: -1, ZeroAllowed: false, DynamicAllowed: true},
+			SupportsImages:             true,
+			SupportsThinking:           true,
+			SupportsVideo:              true,
+		},
+		{
+			ID:                         "claude-sonnet-4-5",
+			DisplayName:                "Claude Sonnet 4.5",
+			Description:                "Anthropic's Claude 4.5 Sonnet model",
+			InputTokenLimit:            200000,
+			OutputTokenLimit:           64000,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			SupportsImages:             true,
+		},
+		{
+			ID:                         "claude-sonnet-4-5-thinking",
+			DisplayName:                "Claude Sonnet 4.5 (Thinking)",
+			Description:                "Anthropic's Claude 4.5 Sonnet model with thinking capabilities",
+			InputTokenLimit:            200000,
+			OutputTokenLimit:           64000,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 0, Max: 1024, ZeroAllowed: true, DynamicAllowed: true},
+			SupportsImages:             true,
+			SupportsThinking:           true,
+		},
+		{
+			ID:                         "gemini-2.5-flash-thinking",
+			DisplayName:                "Gemini 2.5 Flash (Thinking)",
+			Description:                "Gemini 2.5 Flash model with thinking capabilities",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65535,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 0, Max: 1024, ZeroAllowed: true, DynamicAllowed: true},
+			SupportsImages:             true,
+			SupportsThinking:           true,
+		},
+		{
+			ID:                         "gemini-2.5-pro",
+			DisplayName:                "Gemini 2.5 Pro",
+			Description:                "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65535,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: 1024, ZeroAllowed: false, DynamicAllowed: true},
+			SupportsImages:             true,
+			SupportsThinking:           true,
+		},
+		{
+			ID:                         "gpt-oss-120b-medium",
+			DisplayName:                "GPT-OSS 120B (Medium)",
+			Description:                "Open source GPT model with 120B parameters, medium configuration",
+			InputTokenLimit:            131072,
+			OutputTokenLimit:           32768,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 0, Max: 8192, ZeroAllowed: true, DynamicAllowed: true},
+			SupportsThinking:           true,
+		},
+	}
+
+	models := make([]*ModelInfo, 0, len(entries))
+	for _, e := range entries {
+		model := &ModelInfo{
+			ID:                         e.ID,
+			Object:                     "model",
+			Created:                    created,
+			OwnedBy:                    "google",
+			Type:                       "antigravity",
+			DisplayName:                e.DisplayName,
+			Description:                e.Description,
+			InputTokenLimit:            e.InputTokenLimit,
+			OutputTokenLimit:           e.OutputTokenLimit,
+			SupportedGenerationMethods: e.SupportedGenerationMethods,
+			Thinking:                   e.Thinking,
+		}
+
+		// Set context length and max completion tokens for compatibility
+		if e.InputTokenLimit > 0 {
+			model.ContextLength = e.InputTokenLimit
+		} else if e.MaxTokens > 0 {
+			model.ContextLength = e.MaxTokens
+		}
+
+		if e.OutputTokenLimit > 0 {
+			model.MaxCompletionTokens = e.OutputTokenLimit
+		} else if e.MaxOutputTokens > 0 {
+			model.MaxCompletionTokens = e.MaxOutputTokens
+		}
+
+		models = append(models, model)
+	}
+	return models
+}
