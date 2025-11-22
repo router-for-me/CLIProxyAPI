@@ -1,5 +1,7 @@
 builds:
   - id: "cli-proxy-api"
+    env:
+      - CGO_ENABLED=0
     goos:
       - linux
       - windows

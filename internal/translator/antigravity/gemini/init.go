@@ -9,11 +9,11 @@ import (
 func init() {
 	translator.Register(
 		Gemini,
-		GeminiCLI,
-		ConvertGeminiRequestToGeminiCLI,
+		Antigravity,
+		ConvertGeminiRequestToAntigravity,
 		interfaces.TranslateResponse{
-			Stream:     ConvertGeminiCliResponseToGemini,
-			NonStream:  ConvertGeminiCliResponseToGeminiNonStream,
+			Stream:     ConvertAntigravityResponseToGemini,
+			NonStream:  ConvertAntigravityResponseToGeminiNonStream,
 			TokenCount: GeminiTokenCount,
 		},
 	)

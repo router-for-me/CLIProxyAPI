@@ -23,7 +23,7 @@ type convertCliResponseToOpenAIChatParams struct {
 	FunctionIndex int
 }
 
-// ConvertCliResponseToOpenAI translates a single chunk of a streaming response from the
+// ConvertAntigravityResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini CLI API format to the OpenAI Chat Completions streaming format.
 // It processes various Gemini CLI event types and transforms them into OpenAI-compatible JSON responses.
 // The function handles text content, tool calls, reasoning content, and usage metadata, outputting
@@ -37,7 +37,7 @@ type convertCliResponseToOpenAIChatParams struct {
 //
 // Returns:
 //   - []string: A slice of strings, each containing an OpenAI-compatible JSON response
-func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
 	if *param == nil {
 		*param = &convertCliResponseToOpenAIChatParams{
 			UnixTimestamp: 0,
@@ -188,7 +188,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 	return []string{template}
 }
 
-// ConvertCliResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
+// ConvertAntigravityResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
 // This function processes the complete Gemini CLI response and transforms it into a single OpenAI-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the OpenAI API format.
@@ -201,7 +201,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 //
 // Returns:
 //   - string: An OpenAI-compatible JSON response containing all message content and metadata
-func ConvertCliResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
+func ConvertAntigravityResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		return ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, []byte(responseResult.Raw), param)

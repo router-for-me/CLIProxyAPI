@@ -1,5 +1,5 @@
-// Package openai provides request translation functionality for OpenAI to Gemini API compatibility.
-// It converts OpenAI Chat Completions requests into Gemini compatible JSON using gjson/sjson only.
+// Package openai provides request translation functionality for OpenAI to Gemini CLI API compatibility.
+// It converts OpenAI Chat Completions requests into Gemini CLI compatible JSON using gjson/sjson only.
 package chat_completions
 
 import (
@@ -15,10 +15,10 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const geminiFunctionThoughtSignature = "skip_thought_signature_validator"
+const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
 
-// ConvertOpenAIRequestToGemini converts an OpenAI Chat Completions request (raw JSON)
-// into a complete Gemini request JSON. All JSON construction uses sjson and lookups use gjson.
+// ConvertOpenAIRequestToAntigravity converts an OpenAI Chat Completions request (raw JSON)
+// into a complete Gemini CLI request JSON. All JSON construction uses sjson and lookups use gjson.
 //
 // Parameters:
 //   - modelName: The name of the model to use for the request
@@ -26,11 +26,11 @@ const geminiFunctionThoughtSignature = "skip_thought_signature_validator"
 //   - stream: A boolean indicating if the request is for a streaming response (unused in current implementation)
 //
 // Returns:
-//   - []byte: The transformed request data in Gemini API format
-func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
+//   - []byte: The transformed request data in Gemini CLI API format
+func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
 	// Base envelope (no default thinkingConfig)
-	out := []byte(`{"contents":[]}`)
+	out := []byte(`{"project":"","request":{"contents":[]},"model":"gemini-2.5-pro"}`)
 
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -42,23 +42,23 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	if hasOfficialThinking && util.ModelSupportsThinking(modelName) {
 		switch re.String() {
 		case "none":
-			out, _ = sjson.DeleteBytes(out, "generationConfig.thinkingConfig.include_thoughts")
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", 0)
+			out, _ = sjson.DeleteBytes(out, "request.generationConfig.thinkingConfig.include_thoughts")
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", 0)
 		case "auto":
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", -1)
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.include_thoughts", true)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		case "low":
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 1024))
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.include_thoughts", true)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 1024))
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		case "medium":
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 8192))
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.include_thoughts", true)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 8192))
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		case "high":
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 32768))
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.include_thoughts", true)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 32768))
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		default:
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", -1)
-			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.include_thoughts", true)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		}
 	}
 
@@ -70,36 +70,45 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 
 			if v := tc.Get("thinkingBudget"); v.Exists() {
 				normalized = util.NormalizeThinkingBudget(modelName, int(v.Int()))
-				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", normalized)
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", normalized)
 				setBudget = true
 			} else if v := tc.Get("thinking_budget"); v.Exists() {
 				normalized = util.NormalizeThinkingBudget(modelName, int(v.Int()))
-				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", normalized)
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", normalized)
 				setBudget = true
 			}
 
 			if v := tc.Get("includeThoughts"); v.Exists() {
-				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.include_thoughts", v.Bool())
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", v.Bool())
 			} else if v := tc.Get("include_thoughts"); v.Exists() {
-				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.include_thoughts", v.Bool())
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", v.Bool())
 			} else if setBudget && normalized != 0 {
-				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.include_thoughts", true)
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 			}
 		}
 	}
 
-	// Temperature/top_p/top_k
-	if tr := gjson.GetBytes(rawJSON, "temperature"); tr.Exists() && tr.Type == gjson.Number {
-		out, _ = sjson.SetBytes(out, "generationConfig.temperature", tr.Num)
-	}
-	if tpr := gjson.GetBytes(rawJSON, "top_p"); tpr.Exists() && tpr.Type == gjson.Number {
-		out, _ = sjson.SetBytes(out, "generationConfig.topP", tpr.Num)
-	}
-	if tkr := gjson.GetBytes(rawJSON, "top_k"); tkr.Exists() && tkr.Type == gjson.Number {
-		out, _ = sjson.SetBytes(out, "generationConfig.topK", tkr.Num)
+	// For gemini-3-pro-preview, always send default thinkingConfig when none specified.
+	// This matches the official Gemini CLI behavior which always sends:
+	// { thinkingBudget: -1, includeThoughts: true }
+	// See: ai-gemini-cli/packages/core/src/config/defaultModelConfigs.ts
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() && modelName == "gemini-3-pro-preview" {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 	}
 
-	// Map OpenAI modalities -> Gemini generationConfig.responseModalities
+	// Temperature/top_p/top_k
+	if tr := gjson.GetBytes(rawJSON, "temperature"); tr.Exists() && tr.Type == gjson.Number {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.temperature", tr.Num)
+	}
+	if tpr := gjson.GetBytes(rawJSON, "top_p"); tpr.Exists() && tpr.Type == gjson.Number {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.topP", tpr.Num)
+	}
+	if tkr := gjson.GetBytes(rawJSON, "top_k"); tkr.Exists() && tkr.Type == gjson.Number {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.topK", tkr.Num)
+	}
+
+	// Map OpenAI modalities -> Gemini CLI request.generationConfig.responseModalities
 	// e.g. "modalities": ["image", "text"] -> ["IMAGE", "TEXT"]
 	if mods := gjson.GetBytes(rawJSON, "modalities"); mods.Exists() && mods.IsArray() {
 		var responseMods []string
@@ -112,18 +121,18 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			}
 		}
 		if len(responseMods) > 0 {
-			out, _ = sjson.SetBytes(out, "generationConfig.responseModalities", responseMods)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.responseModalities", responseMods)
 		}
 	}
 
 	// OpenRouter-style image_config support
-	// If the input uses top-level image_config.aspect_ratio, map it into generationConfig.imageConfig.aspectRatio.
+	// If the input uses top-level image_config.aspect_ratio, map it into request.generationConfig.imageConfig.aspectRatio.
 	if imgCfg := gjson.GetBytes(rawJSON, "image_config"); imgCfg.Exists() && imgCfg.IsObject() {
 		if ar := imgCfg.Get("aspect_ratio"); ar.Exists() && ar.Type == gjson.String {
-			out, _ = sjson.SetBytes(out, "generationConfig.imageConfig.aspectRatio", ar.Str)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.imageConfig.aspectRatio", ar.Str)
 		}
 		if size := imgCfg.Get("image_size"); size.Exists() && size.Type == gjson.String {
-			out, _ = sjson.SetBytes(out, "generationConfig.imageConfig.imageSize", size.Str)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.imageConfig.imageSize", size.Str)
 		}
 	}
 
@@ -171,13 +180,13 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			content := m.Get("content")
 
 			if role == "system" && len(arr) > 1 {
-				// system -> system_instruction as a user message style
+				// system -> request.systemInstruction as a user message style
 				if content.Type == gjson.String {
-					out, _ = sjson.SetBytes(out, "system_instruction.role", "user")
-					out, _ = sjson.SetBytes(out, "system_instruction.parts.0.text", content.String())
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.0.text", content.String())
 				} else if content.IsObject() && content.Get("type").String() == "text" {
-					out, _ = sjson.SetBytes(out, "system_instruction.role", "user")
-					out, _ = sjson.SetBytes(out, "system_instruction.parts.0.text", content.Get("text").String())
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.0.text", content.Get("text").String())
 				}
 			} else if role == "user" || (role == "system" && len(arr) == 1) {
 				// Build single user content node to avoid splitting into multiple contents
@@ -221,38 +230,13 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						}
 					}
 				}
-				out, _ = sjson.SetRawBytes(out, "contents.-1", node)
+				out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 			} else if role == "assistant" {
 				if content.Type == gjson.String {
 					// Assistant text -> single model content
 					node := []byte(`{"role":"model","parts":[{"text":""}]}`)
 					node, _ = sjson.SetBytes(node, "parts.0.text", content.String())
-					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
-				} else if content.IsArray() {
-					// Assistant multimodal content (e.g. text + image) -> single model content with parts
-					node := []byte(`{"role":"model","parts":[]}`)
-					p := 0
-					for _, item := range content.Array() {
-						switch item.Get("type").String() {
-						case "text":
-							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", item.Get("text").String())
-							p++
-						case "image_url":
-							// If the assistant returned an inline data URL, preserve it for history fidelity.
-							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 { // expect data:...
-								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									mime := pieces[0]
-									data := pieces[1][7:]
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
-									p++
-								}
-							}
-						}
-					}
-					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
+					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 				} else if !content.Exists() || content.Type == gjson.Null {
 					// Tool calls -> single model content with functionCall parts
 					tcs := m.Get("tool_calls")
@@ -269,13 +253,13 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							fargs := tc.Get("function.arguments").String()
 							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", fname)
 							node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(fargs))
-							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature)
+							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
 							p++
 							if fid != "" {
 								fIDs = append(fIDs, fid)
 							}
 						}
-						out, _ = sjson.SetRawBytes(out, "contents.-1", node)
+						out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 
 						// Append a single tool content combining name + response per function
 						toolNode := []byte(`{"role":"tool","parts":[]}`)
@@ -292,7 +276,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							}
 						}
 						if pp > 0 {
-							out, _ = sjson.SetRawBytes(out, "contents.-1", toolNode)
+							out, _ = sjson.SetRawBytes(out, "request.contents.-1", toolNode)
 						}
 					}
 				}
@@ -300,7 +284,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 	}
 
-	// tools -> tools[0].functionDeclarations + tools[0].googleSearch passthrough
+	// tools -> request.tools[0].functionDeclarations + request.tools[0].googleSearch passthrough
 	tools := gjson.GetBytes(rawJSON, "tools")
 	if tools.IsArray() && len(tools.Array()) > 0 {
 		toolNode := []byte(`{}`)
@@ -367,14 +351,12 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			}
 		}
 		if hasTool {
-			out, _ = sjson.SetRawBytes(out, "tools", []byte("[]"))
-			out, _ = sjson.SetRawBytes(out, "tools.0", toolNode)
+			out, _ = sjson.SetRawBytes(out, "request.tools", []byte("[]"))
+			out, _ = sjson.SetRawBytes(out, "request.tools.0", toolNode)
 		}
 	}
 
-	out = common.AttachDefaultSafetySettings(out, "safetySettings")
-
-	return out
+	return common.AttachDefaultSafetySettings(out, "request.safetySettings")
 }
 
 // itoa converts int to string without strconv import for few usages.

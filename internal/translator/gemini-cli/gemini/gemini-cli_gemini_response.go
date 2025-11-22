@@ -6,6 +6,7 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -13,7 +14,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ConvertGeminiCliRequestToGemini parses and transforms a Gemini CLI API request into Gemini API format.
+// ConvertGeminiCliResponseToGemini parses and transforms a Gemini CLI API request into Gemini API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini API.
 // The function performs the following transformations:
@@ -29,7 +30,11 @@ import (
 //
 // Returns:
 //   - []string: The transformed request data in Gemini API format
-func ConvertGeminiCliRequestToGemini(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []string {
+func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []string {
+	if bytes.HasPrefix(rawJSON, []byte("data:")) {
+		rawJSON = bytes.TrimSpace(rawJSON[5:])
+	}
+
 	if alt, ok := ctx.Value("alt").(string); ok {
 		var chunk []byte
 		if alt == "" {
@@ -56,7 +61,7 @@ func ConvertGeminiCliRequestToGemini(ctx context.Context, _ string, originalRequ
 	return []string{}
 }
 
-// ConvertGeminiCliRequestToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
+// ConvertGeminiCliResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
 // This function processes the complete Gemini CLI request and transforms it into a single Gemini-compatible
 // JSON response. It extracts the response data from the request and returns it in the expected format.
 //
@@ -68,7 +73,7 @@ func ConvertGeminiCliRequestToGemini(ctx context.Context, _ string, originalRequ
 //
 // Returns:
 //   - string: A Gemini-compatible JSON response containing the response data
-func ConvertGeminiCliRequestToGeminiNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+func ConvertGeminiCliResponseToGeminiNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		return responseResult.Raw

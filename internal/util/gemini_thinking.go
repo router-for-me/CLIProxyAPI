@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -210,5 +211,51 @@ func StripThinkingConfigIfUnsupported(model string, body []byte) []byte {
 	updated, _ = sjson.DeleteBytes(updated, "request.generationConfig.thinkingConfig")
 	// Standard Gemini path
 	updated, _ = sjson.DeleteBytes(updated, "generationConfig.thinkingConfig")
+	return updated
+}
+
+// ConvertThinkingLevelToBudget checks for "generationConfig.thinkingConfig.thinkingLevel"
+// and converts it to "thinkingBudget".
+// "high" -> 32768
+// "low" -> 128
+// It removes "thinkingLevel" after conversion.
+func ConvertThinkingLevelToBudget(body []byte) []byte {
+	levelPath := "generationConfig.thinkingConfig.thinkingLevel"
+	res := gjson.GetBytes(body, levelPath)
+	if !res.Exists() {
+		return body
+	}
+
+	level := strings.ToLower(res.String())
+	var budget int
+	switch level {
+	case "high":
+		budget = 32768
+	case "low":
+		budget = 128
+	default:
+		// If unknown level, we might just leave it or default.
+		// User only specified high and low. We'll assume we shouldn't touch it if it's something else,
+		// or maybe we should just remove the invalid level?
+		// For safety adhering to strict instructions: "If high... if low...".
+		// If it's something else, the upstream might fail anyway if we leave it,
+		// but let's just delete the level if we processed it.
+		// Actually, let's check if we need to do anything for other values.
+		// For now, only handle high/low.
+		return body
+	}
+
+	// Set budget
+	budgetPath := "generationConfig.thinkingConfig.thinkingBudget"
+	updated, err := sjson.SetBytes(body, budgetPath, budget)
+	if err != nil {
+		return body
+	}
+
+	// Remove level
+	updated, err = sjson.DeleteBytes(updated, levelPath)
+	if err != nil {
+		return body
+	}
 	return updated
 }

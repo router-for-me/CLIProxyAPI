@@ -19,6 +19,7 @@ services:
       - "8085:8085"
       - "1455:1455"
       - "54545:54545"
+      - "51121:51121"
       - "11451:11451"
     volumes:
       - ./config.yaml:/CLIProxyAPI/config.yaml

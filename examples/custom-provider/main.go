@@ -137,6 +137,12 @@ func (MyExecutor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Re
 	return clipexec.Response{Payload: body}, nil
 }
 
+<<<<<<< HEAD
+=======
+func (MyExecutor) CountTokens(context.Context, *coreauth.Auth, clipexec.Request, clipexec.Options) (clipexec.Response, error) {
+	return clipexec.Response{}, errors.New("count tokens not implemented")
+}
+>>>>>>> upstream/main
 
 func (MyExecutor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (<-chan clipexec.StreamChunk, error) {
 	ch := make(chan clipexec.StreamChunk, 1)
@@ -147,8 +153,8 @@ func (MyExecutor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipe
 	return ch, nil
 }
 
-func (MyExecutor) CountTokens(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (clipexec.Response, error) {
-	return clipexec.Response{}, errors.New("not implemented")
+func (MyExecutor) CountTokens(context.Context, *coreauth.Auth, clipexec.Request, clipexec.Options) (clipexec.Response, error) {
+	return clipexec.Response{}, errors.New("count tokens not implemented")
 }
 
 func (MyExecutor) Refresh(ctx context.Context, a *coreauth.Auth) (*coreauth.Auth, error) {

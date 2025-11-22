@@ -220,6 +220,14 @@ func stopForwarderInstance(port int, forwarder *callbackForwarder) {
 	log.Infof("callback forwarder on port %d stopped", port)
 }
 
+func sanitizeAntigravityFileName(email string) string {
+	if strings.TrimSpace(email) == "" {
+		return "antigravity.json"
+	}
+	replacer := strings.NewReplacer("@", "_", ".", "_")
+	return fmt.Sprintf("antigravity-%s.json", replacer.Replace(email))
+}
+
 func (h *Handler) managementCallbackURL(path string) (string, error) {
 	if h == nil || h.cfg == nil || h.cfg.Port <= 0 {
 		return "", fmt.Errorf("server port is not configured")
@@ -1284,6 +1292,222 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
+func (h *Handler) RequestAntigravityToken(c *gin.Context) {
+	const (
+		antigravityCallbackPort = 51121
+		antigravityClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+		antigravityClientSecret = "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"
+	)
+	var antigravityScopes = []string{
+		"https://www.googleapis.com/auth/cloud-platform",
+		"https://www.googleapis.com/auth/userinfo.email",
+		"https://www.googleapis.com/auth/userinfo.profile",
+		"https://www.googleapis.com/auth/cclog",
+		"https://www.googleapis.com/auth/experimentsandconfigs",
+	}
+
+	ctx := context.Background()
+
+	fmt.Println("Initializing Antigravity authentication...")
+
+	state, errState := misc.GenerateRandomState()
+	if errState != nil {
+		log.Fatalf("Failed to generate state parameter: %v", errState)
+		return
+	}
+
+	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravityCallbackPort)
+
+	params := url.Values{}
+	params.Set("access_type", "offline")
+	params.Set("client_id", antigravityClientID)
+	params.Set("prompt", "consent")
+	params.Set("redirect_uri", redirectURI)
+	params.Set("response_type", "code")
+	params.Set("scope", strings.Join(antigravityScopes, " "))
+	params.Set("state", state)
+	authURL := "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
+
+	isWebUI := isWebUIRequest(c)
+	if isWebUI {
+		targetURL, errTarget := h.managementCallbackURL("/antigravity/callback")
+		if errTarget != nil {
+			log.WithError(errTarget).Error("failed to compute antigravity callback target")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+			return
+		}
+		if _, errStart := startCallbackForwarder(antigravityCallbackPort, "antigravity", targetURL); errStart != nil {
+			log.WithError(errStart).Error("failed to start antigravity callback forwarder")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+			return
+		}
+	}
+
+	go func() {
+		if isWebUI {
+			defer stopCallbackForwarder(antigravityCallbackPort)
+		}
+
+		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
+		deadline := time.Now().Add(5 * time.Minute)
+		var authCode string
+		for {
+			if time.Now().After(deadline) {
+				log.Error("oauth flow timed out")
+				oauthStatus[state] = "OAuth flow timed out"
+				return
+			}
+			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
+				var payload map[string]string
+				_ = json.Unmarshal(data, &payload)
+				_ = os.Remove(waitFile)
+				if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
+					log.Errorf("Authentication failed: %s", errStr)
+					oauthStatus[state] = "Authentication failed"
+					return
+				}
+				if payloadState := strings.TrimSpace(payload["state"]); payloadState != "" && payloadState != state {
+					log.Errorf("Authentication failed: state mismatch")
+					oauthStatus[state] = "Authentication failed: state mismatch"
+					return
+				}
+				authCode = strings.TrimSpace(payload["code"])
+				if authCode == "" {
+					log.Error("Authentication failed: code not found")
+					oauthStatus[state] = "Authentication failed: code not found"
+					return
+				}
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		httpClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
+		form := url.Values{}
+		form.Set("code", authCode)
+		form.Set("client_id", antigravityClientID)
+		form.Set("client_secret", antigravityClientSecret)
+		form.Set("redirect_uri", redirectURI)
+		form.Set("grant_type", "authorization_code")
+
+		req, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
+		if errNewRequest != nil {
+			log.Errorf("Failed to build token request: %v", errNewRequest)
+			oauthStatus[state] = "Failed to build token request"
+			return
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		resp, errDo := httpClient.Do(req)
+		if errDo != nil {
+			log.Errorf("Failed to execute token request: %v", errDo)
+			oauthStatus[state] = "Failed to exchange token"
+			return
+		}
+		defer func() {
+			if errClose := resp.Body.Close(); errClose != nil {
+				log.Errorf("antigravity token exchange close error: %v", errClose)
+			}
+		}()
+
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			log.Errorf("Antigravity token exchange failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+			oauthStatus[state] = fmt.Sprintf("Token exchange failed: %d", resp.StatusCode)
+			return
+		}
+
+		var tokenResp struct {
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+			ExpiresIn    int64  `json:"expires_in"`
+			TokenType    string `json:"token_type"`
+		}
+		if errDecode := json.NewDecoder(resp.Body).Decode(&tokenResp); errDecode != nil {
+			log.Errorf("Failed to parse token response: %v", errDecode)
+			oauthStatus[state] = "Failed to parse token response"
+			return
+		}
+
+		email := ""
+		if strings.TrimSpace(tokenResp.AccessToken) != "" {
+			infoReq, errInfoReq := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.googleapis.com/oauth2/v1/userinfo?alt=json", nil)
+			if errInfoReq != nil {
+				log.Errorf("Failed to build user info request: %v", errInfoReq)
+				oauthStatus[state] = "Failed to build user info request"
+				return
+			}
+			infoReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
+
+			infoResp, errInfo := httpClient.Do(infoReq)
+			if errInfo != nil {
+				log.Errorf("Failed to execute user info request: %v", errInfo)
+				oauthStatus[state] = "Failed to execute user info request"
+				return
+			}
+			defer func() {
+				if errClose := infoResp.Body.Close(); errClose != nil {
+					log.Errorf("antigravity user info close error: %v", errClose)
+				}
+			}()
+
+			if infoResp.StatusCode >= http.StatusOK && infoResp.StatusCode < http.StatusMultipleChoices {
+				var infoPayload struct {
+					Email string `json:"email"`
+				}
+				if errDecodeInfo := json.NewDecoder(infoResp.Body).Decode(&infoPayload); errDecodeInfo == nil {
+					email = strings.TrimSpace(infoPayload.Email)
+				}
+			} else {
+				bodyBytes, _ := io.ReadAll(infoResp.Body)
+				log.Errorf("User info request failed with status %d: %s", infoResp.StatusCode, string(bodyBytes))
+				oauthStatus[state] = fmt.Sprintf("User info request failed: %d", infoResp.StatusCode)
+				return
+			}
+		}
+
+		now := time.Now()
+		metadata := map[string]any{
+			"type":          "antigravity",
+			"access_token":  tokenResp.AccessToken,
+			"refresh_token": tokenResp.RefreshToken,
+			"expires_in":    tokenResp.ExpiresIn,
+			"timestamp":     now.UnixMilli(),
+			"expired":       now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+		}
+		if email != "" {
+			metadata["email"] = email
+		}
+
+		fileName := sanitizeAntigravityFileName(email)
+		label := strings.TrimSpace(email)
+		if label == "" {
+			label = "antigravity"
+		}
+
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "antigravity",
+			FileName: fileName,
+			Label:    label,
+			Metadata: metadata,
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Fatalf("Failed to save token to file: %v", errSave)
+			oauthStatus[state] = "Failed to save token to file"
+			return
+		}
+
+		delete(oauthStatus, state)
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Antigravity services through this CLI")
+	}()
+
+	oauthStatus[state] = ""
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
 func (h *Handler) RequestQwenToken(c *gin.Context) {
 	ctx := context.Background()
 
@@ -1441,6 +1665,87 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 
 	oauthStatus[state] = ""
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
+func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
+	ctx := context.Background()
+
+	var payload struct {
+		Cookie string `json:"cookie"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "cookie is required"})
+		return
+	}
+
+	cookieValue := strings.TrimSpace(payload.Cookie)
+
+	if cookieValue == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "cookie is required"})
+		return
+	}
+
+	cookieValue, errNormalize := iflowauth.NormalizeCookie(cookieValue)
+	if errNormalize != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": errNormalize.Error()})
+		return
+	}
+
+	authSvc := iflowauth.NewIFlowAuth(h.cfg)
+	tokenData, errAuth := authSvc.AuthenticateWithCookie(ctx, cookieValue)
+	if errAuth != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": errAuth.Error()})
+		return
+	}
+
+	tokenData.Cookie = cookieValue
+
+	tokenStorage := authSvc.CreateCookieTokenStorage(tokenData)
+	email := strings.TrimSpace(tokenStorage.Email)
+	if email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "failed to extract email from token"})
+		return
+	}
+
+	fileName := iflowauth.SanitizeIFlowFileName(email)
+	if fileName == "" {
+		fileName = fmt.Sprintf("iflow-%d", time.Now().UnixMilli())
+	}
+
+	tokenStorage.Email = email
+
+	record := &coreauth.Auth{
+		ID:       fmt.Sprintf("iflow-%s.json", fileName),
+		Provider: "iflow",
+		FileName: fmt.Sprintf("iflow-%s.json", fileName),
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"email":        email,
+			"api_key":      tokenStorage.APIKey,
+			"expired":      tokenStorage.Expire,
+			"cookie":       tokenStorage.Cookie,
+			"type":         tokenStorage.Type,
+			"last_refresh": tokenStorage.LastRefresh,
+		},
+		Attributes: map[string]string{
+			"api_key": tokenStorage.APIKey,
+		},
+	}
+
+	savedPath, errSave := h.saveTokenRecord(ctx, record)
+	if errSave != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to save authentication tokens"})
+		return
+	}
+
+	fmt.Printf("iFlow cookie authentication successful. Token saved to %s\n", savedPath)
+	c.JSON(http.StatusOK, gin.H{
+		"status":     "ok",
+		"saved_path": savedPath,
+		"email":      email,
+		"expired":    tokenStorage.Expire,
+		"type":       tokenStorage.Type,
+	})
 }
 
 type projectSelectionRequiredError struct{}

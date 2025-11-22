@@ -474,6 +474,33 @@ func (w *Watcher) processEvents(ctx context.Context) {
 	}
 }
 
+func (w *Watcher) authFileUnchanged(path string) (bool, error) {
+	data, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return false, errRead
+	}
+	if len(data) == 0 {
+		return false, nil
+	}
+	sum := sha256.Sum256(data)
+	curHash := hex.EncodeToString(sum[:])
+
+	w.clientsMutex.RLock()
+	prevHash, ok := w.lastAuthHashes[path]
+	w.clientsMutex.RUnlock()
+	if ok && prevHash == curHash {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (w *Watcher) isKnownAuthFile(path string) bool {
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	_, ok := w.lastAuthHashes[path]
+	return ok
+}
+
 // handleEvent processes individual file system events
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Filter only relevant events: config file or auth-dir JSON files.
@@ -497,19 +524,33 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	}
 
 	// Handle auth directory changes incrementally (.json only)
-	fmt.Printf("auth file changed (%s): %s, processing incrementally\n", event.Op.String(), filepath.Base(event.Name))
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
 		// Wait briefly; if the path exists again, treat as an update instead of removal.
 		time.Sleep(replaceCheckDelay)
 		if _, statErr := os.Stat(event.Name); statErr == nil {
+			if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
+				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
+				return
+			}
+			fmt.Printf("auth file changed (%s): %s, processing incrementally\n", event.Op.String(), filepath.Base(event.Name))
 			w.addOrUpdateClient(event.Name)
 			return
 		}
+		if !w.isKnownAuthFile(event.Name) {
+			log.Debugf("ignoring remove for unknown auth file: %s", filepath.Base(event.Name))
+			return
+		}
+		fmt.Printf("auth file changed (%s): %s, processing incrementally\n", event.Op.String(), filepath.Base(event.Name))
 		w.removeClient(event.Name)
 		return
 	}
 	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+		if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
+			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
+			return
+		}
+		fmt.Printf("auth file changed (%s): %s, processing incrementally\n", event.Op.String(), filepath.Base(event.Name))
 		w.addOrUpdateClient(event.Name)
 	}
 }

@@ -48,6 +48,17 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
 
+## Amp CLI 支持
+
+CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支持，可让你使用自己的 Google/ChatGPT/Claude OAuth 订阅来配合 Amp 编码工具：
+
+- 提供商路由别名，兼容 Amp 的 API 路径模式（`/api/provider/{provider}/v1...`）
+- 管理代理，处理 OAuth 认证和账号功能
+- 智能模型回退与自动路由
+- 以安全为先的设计，管理端点仅限 localhost
+
+**→ [Amp CLI 完整集成指南](docs/amp-cli-integration_CN.md)**
+
 ## SDK 文档
 
 - 使用文档：[docs/sdk-usage_CN.md](docs/sdk-usage_CN.md)

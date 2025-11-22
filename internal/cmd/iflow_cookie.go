@@ -71,22 +71,9 @@ func promptForCookie(promptFn func(string) (string, error)) (string, error) {
 		return "", fmt.Errorf("failed to read cookie: %w", err)
 	}
 
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return "", fmt.Errorf("cookie cannot be empty")
-	}
-
-	// Clean up any extra whitespace and join multiple spaces
-	cookie := strings.Join(strings.Fields(line), " ")
-
-	// Ensure it ends properly
-	if !strings.HasSuffix(cookie, ";") {
-		cookie = cookie + ";"
-	}
-
-	// Ensure BXAuth is present in the cookie
-	if !strings.Contains(cookie, "BXAuth=") {
-		return "", fmt.Errorf("BXAuth field not found in cookie")
+	cookie, err := iflow.NormalizeCookie(line)
+	if err != nil {
+		return "", err
 	}
 
 	return cookie, nil
@@ -94,17 +81,6 @@ func promptForCookie(promptFn func(string) (string, error)) (string, error) {
 
 // getAuthFilePath returns the auth file path for the given provider and email
 func getAuthFilePath(cfg *config.Config, provider, email string) string {
-	// Clean email to make it filename-safe
-	cleanEmail := strings.ReplaceAll(email, "*", "x")
-
-	// Remove any unsafe characters, but allow standard email chars (@, ., -)
-	var result strings.Builder
-	for _, r := range cleanEmail {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
-			r == '_' || r == '@' || r == '.' || r == '-' {
-			result.WriteRune(r)
-		}
-	}
-
-	return fmt.Sprintf("%s/%s-%s.json", cfg.AuthDir, provider, result.String())
+	fileName := iflow.SanitizeIFlowFileName(email)
+	return fmt.Sprintf("%s/%s-%s.json", cfg.AuthDir, provider, fileName)
 }

@@ -111,13 +111,23 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			if !inlineDataResult.Exists() {
 				inlineDataResult = partResult.Get("inline_data")
 			}
+			thoughtSignatureResult := partResult.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = partResult.Get("thought_signature")
+			}
+
+			// Skip thoughtSignature parts (encrypted reasoning not exposed downstream).
+			if thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != "" {
+				continue
+			}
 
 			if partTextResult.Exists() {
+				text := partTextResult.String()
 				// Handle text content, distinguishing between regular content and reasoning/thoughts.
 				if partResult.Get("thought").Bool() {
-					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", partTextResult.String())
+					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", text)
 				} else {
-					template, _ = sjson.Set(template, "choices.0.delta.content", partTextResult.String())
+					template, _ = sjson.Set(template, "choices.0.delta.content", text)
 				}
 				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {

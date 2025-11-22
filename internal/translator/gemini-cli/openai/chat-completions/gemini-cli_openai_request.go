@@ -88,6 +88,15 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 		}
 	}
 
+	// For gemini-3-pro-preview, always send default thinkingConfig when none specified.
+	// This matches the official Gemini CLI behavior which always sends:
+	// { thinkingBudget: -1, includeThoughts: true }
+	// See: ai-gemini-cli/packages/core/src/config/defaultModelConfigs.ts
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() && modelName == "gemini-3-pro-preview" {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+	}
+
 	// Temperature/top_p/top_k
 	if tr := gjson.GetBytes(rawJSON, "temperature"); tr.Exists() && tr.Type == gjson.Number {
 		out, _ = sjson.SetBytes(out, "request.generationConfig.temperature", tr.Num)
@@ -121,6 +130,9 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 	if imgCfg := gjson.GetBytes(rawJSON, "image_config"); imgCfg.Exists() && imgCfg.IsObject() {
 		if ar := imgCfg.Get("aspect_ratio"); ar.Exists() && ar.Type == gjson.String {
 			out, _ = sjson.SetBytes(out, "request.generationConfig.imageConfig.aspectRatio", ar.Str)
+		}
+		if size := imgCfg.Get("image_size"); size.Exists() && size.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.imageConfig.imageSize", size.Str)
 		}
 	}
 
@@ -272,11 +284,12 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 		}
 	}
 
-	// tools -> request.tools[0].functionDeclarations
+	// tools -> request.tools[0].functionDeclarations + request.tools[0].googleSearch passthrough
 	tools := gjson.GetBytes(rawJSON, "tools")
 	if tools.IsArray() && len(tools.Array()) > 0 {
-		out, _ = sjson.SetRawBytes(out, "request.tools", []byte(`[{"functionDeclarations":[]}]`))
-		fdPath := "request.tools.0.functionDeclarations"
+		toolNode := []byte(`{}`)
+		hasTool := false
+		hasFunction := false
 		for _, t := range tools.Array() {
 			if t.Get("type").String() == "function" {
 				fn := t.Get("function")
@@ -314,14 +327,32 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 						}
 					}
 					fnRaw, _ = sjson.Delete(fnRaw, "strict")
-					tmp, errSet := sjson.SetRawBytes(out, fdPath+".-1", []byte(fnRaw))
+					if !hasFunction {
+						toolNode, _ = sjson.SetRawBytes(toolNode, "functionDeclarations", []byte("[]"))
+					}
+					tmp, errSet := sjson.SetRawBytes(toolNode, "functionDeclarations.-1", []byte(fnRaw))
 					if errSet != nil {
 						log.Warnf("Failed to append tool declaration for '%s': %v", fn.Get("name").String(), errSet)
 						continue
 					}
-					out = tmp
+					toolNode = tmp
+					hasFunction = true
+					hasTool = true
 				}
 			}
+			if gs := t.Get("google_search"); gs.Exists() {
+				var errSet error
+				toolNode, errSet = sjson.SetRawBytes(toolNode, "googleSearch", []byte(gs.Raw))
+				if errSet != nil {
+					log.Warnf("Failed to set googleSearch tool: %v", errSet)
+					continue
+				}
+				hasTool = true
+			}
+		}
+		if hasTool {
+			out, _ = sjson.SetRawBytes(out, "request.tools", []byte("[]"))
+			out, _ = sjson.SetRawBytes(out, "request.tools.0", toolNode)
 		}
 	}
 

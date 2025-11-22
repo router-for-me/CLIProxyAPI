@@ -180,7 +180,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 			continue
 		}
 
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		err = newGeminiStatusErr(httpResp.StatusCode, data)
 		return resp, err
 	}
 
@@ -190,7 +190,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if lastStatus == 0 {
 		lastStatus = 429
 	}
-	err = statusErr{code: lastStatus, msg: string(lastBody)}
+	err = newGeminiStatusErr(lastStatus, lastBody)
 	return resp, err
 }
 
@@ -304,7 +304,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				}
 				continue
 			}
-			err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+			err = newGeminiStatusErr(httpResp.StatusCode, data)
 			return nil, err
 		}
 
@@ -377,7 +377,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if lastStatus == 0 {
 		lastStatus = 429
 	}
-	err = statusErr{code: lastStatus, msg: string(lastBody)}
+	err = newGeminiStatusErr(lastStatus, lastBody)
 	return nil, err
 }
 
@@ -485,7 +485,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	if lastStatus == 0 {
 		lastStatus = 429
 	}
-	return cliproxyexecutor.Response{}, statusErr{code: lastStatus, msg: string(lastBody)}
+	return cliproxyexecutor.Response{}, newGeminiStatusErr(lastStatus, lastBody)
 }
 
 func (e *GeminiCLIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -768,4 +768,43 @@ func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 		}
 	}
 	return rawJSON
+}
+
+func newGeminiStatusErr(statusCode int, body []byte) statusErr {
+	err := statusErr{code: statusCode, msg: string(body)}
+	if statusCode == http.StatusTooManyRequests {
+		if retryAfter, parseErr := parseRetryDelay(body); parseErr == nil && retryAfter != nil {
+			err.retryAfter = retryAfter
+		}
+	}
+	return err
+}
+
+// parseRetryDelay extracts the retry delay from a Google API 429 error response.
+// The error response contains a RetryInfo.retryDelay field in the format "0.847655010s".
+// Returns the parsed duration or an error if it cannot be determined.
+func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
+	// Try to parse the retryDelay from the error response
+	// Format: error.details[].retryDelay where @type == "type.googleapis.com/google.rpc.RetryInfo"
+	details := gjson.GetBytes(errorBody, "error.details")
+	if !details.Exists() || !details.IsArray() {
+		return nil, fmt.Errorf("no error.details found")
+	}
+
+	for _, detail := range details.Array() {
+		typeVal := detail.Get("@type").String()
+		if typeVal == "type.googleapis.com/google.rpc.RetryInfo" {
+			retryDelay := detail.Get("retryDelay").String()
+			if retryDelay != "" {
+				// Parse duration string like "0.847655010s"
+				duration, err := time.ParseDuration(retryDelay)
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse duration")
+				}
+				return &duration, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("no RetryInfo found")
 }

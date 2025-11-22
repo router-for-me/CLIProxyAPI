@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
@@ -16,14 +17,28 @@ import (
 
 // localhostOnlyMiddleware restricts access to localhost (127.0.0.1, ::1) only.
 // Returns 403 Forbidden for non-localhost clients.
+//
+// Security: Uses RemoteAddr (actual TCP connection) instead of ClientIP() to prevent
+// header spoofing attacks via X-Forwarded-For or similar headers. This means the
+// middleware will not work correctly behind reverse proxies - users deploying behind
+// nginx/Cloudflare should disable this feature and use firewall rules instead.
 func localhostOnlyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		clientIP := c.ClientIP()
+		// Use actual TCP connection address (RemoteAddr) to prevent header spoofing
+		// This cannot be forged by X-Forwarded-For or other client-controlled headers
+		remoteAddr := c.Request.RemoteAddr
+
+		// RemoteAddr format is "IP:port" or "[IPv6]:port", extract just the IP
+		host, _, err := net.SplitHostPort(remoteAddr)
+		if err != nil {
+			// Try parsing as raw IP (shouldn't happen with standard HTTP, but be defensive)
+			host = remoteAddr
+		}
 
 		// Parse the IP to handle both IPv4 and IPv6
-		ip := net.ParseIP(clientIP)
+		ip := net.ParseIP(host)
 		if ip == nil {
-			log.Warnf("Amp management: invalid client IP %s, denying access", clientIP)
+			log.Warnf("Amp management: invalid RemoteAddr %s, denying access", remoteAddr)
 			c.AbortWithStatusJSON(403, gin.H{
 				"error": "Access denied: management routes restricted to localhost",
 			})
@@ -32,7 +47,7 @@ func localhostOnlyMiddleware() gin.HandlerFunc {
 
 		// Check if IP is loopback (127.0.0.1 or ::1)
 		if !ip.IsLoopback() {
-			log.Warnf("Amp management: non-localhost IP %s attempted access, denying", clientIP)
+			log.Warnf("Amp management: non-localhost connection from %s attempted access, denying", remoteAddr)
 			c.AbortWithStatusJSON(403, gin.H{
 				"error": "Access denied: management routes restricted to localhost",
 			})
@@ -66,25 +81,19 @@ func noCORSMiddleware() gin.HandlerFunc {
 // registerManagementRoutes registers Amp management proxy routes
 // These routes proxy through to the Amp control plane for OAuth, user management, etc.
 // If restrictToLocalhost is true, routes will only accept connections from 127.0.0.1/::1.
-func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, proxyHandler gin.HandlerFunc, restrictToLocalhost bool) {
-	// Create middleware chain for management routes
-	var middlewares []gin.HandlerFunc
-	middlewares = append(middlewares, noCORSMiddleware())
+func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, proxyHandler gin.HandlerFunc, restrictToLocalhost bool, cfg *config.Config) {
+	ampAPI := engine.Group("/api")
+
+	// Always disable CORS for management routes to prevent browser-based attacks
+	ampAPI.Use(noCORSMiddleware())
+
+	// Apply localhost-only restriction if configured
 	if restrictToLocalhost {
-		middlewares = append(middlewares, localhostOnlyMiddleware())
+		ampAPI.Use(localhostOnlyMiddleware())
 		log.Info("Amp management routes restricted to localhost only (CORS disabled)")
 	} else {
 		log.Warn("⚠️  Amp management routes are NOT restricted to localhost - this is insecure!")
 	}
-
-	// Register /auth routes without /api prefix (for Amp CLI authentication flow)
-	// These routes are used during initial login via `amp login`
-	ampAuth := engine.Group("/auth", middlewares...)
-	ampAuth.Any("", proxyHandler)
-	ampAuth.Any("/*path", proxyHandler)
-
-	// Register /api/* management routes (for Amp application/IDE usage)
-	ampAPI := engine.Group("/api", middlewares...)
 
 	// Management routes - these are proxied directly to Amp upstream
 	ampAPI.Any("/internal", proxyHandler)
@@ -103,10 +112,43 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, proxyHandler gi
 	ampAPI.Any("/otel", proxyHandler)
 	ampAPI.Any("/otel/*path", proxyHandler)
 
-	// Google v1beta1 passthrough (Gemini native API)
-	// NOTE: Commented out to allow hybrid routing via registerProviderAliases v1beta1 routes
-	// The new v1beta1 route group with FallbackHandler provides proper LiteLLM hybrid routing
-	// ampAPI.Any("/provider/google/v1beta1/*path", proxyHandler)
+	// Google v1beta1 passthrough with OAuth fallback
+	// AMP CLI uses non-standard paths like /publishers/google/models/...
+	// We bridge these to our standard Gemini handler to enable local OAuth.
+	// If no local OAuth is available, falls back to ampcode.com proxy.
+	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
+	geminiBridge := createGeminiBridgeHandler(geminiHandlers)
+	geminiV1Beta1Fallback := NewFallbackHandler(
+		cfg,
+		func(c *gin.Context) { /* dummy oauth handler */ },
+		func() *httputil.ReverseProxy { return m.proxy },
+		m.liteLLMProxy,
+	)
+	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
+
+	// Route POST model calls through Gemini bridge when a local provider exists, otherwise proxy.
+	// All other methods (e.g., GET model listing) always proxy to upstream to preserve Amp CLI behavior.
+	ampAPI.Any("/provider/google/v1beta1/*path", func(c *gin.Context) {
+		if c.Request.Method == "POST" {
+			// Attempt to extract the model name from the AMP-style path
+			if path := c.Param("path"); strings.Contains(path, "/models/") {
+				modelPart := path[strings.Index(path, "/models/")+len("/models/"):]
+				if colonIdx := strings.Index(modelPart, ":"); colonIdx > 0 {
+					modelPart = modelPart[:colonIdx]
+				}
+				if modelPart != "" {
+					normalized, _ := util.NormalizeGeminiThinkingModel(modelPart)
+					// Only handle locally when we have a provider; otherwise fall back to proxy
+					if providers := util.GetProviderName(normalized); len(providers) > 0 {
+						geminiV1Beta1Handler(c)
+						return
+					}
+				}
+			}
+		}
+		// Non-POST or no local provider available -> proxy upstream
+		proxyHandler(c)
+	})
 }
 
 // registerProviderAliases registers /api/provider/{provider}/... routes

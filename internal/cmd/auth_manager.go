@@ -18,6 +18,7 @@ func newAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewQwenAuthenticator(),
 		sdkAuth.NewIFlowAuthenticator(),
+		sdkAuth.NewAntigravityAuthenticator(),
 	)
 	return manager
 }

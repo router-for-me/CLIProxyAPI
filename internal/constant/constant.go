@@ -21,4 +21,7 @@ const (
 
 	// OpenaiResponse represents the OpenAI response format identifier.
 	OpenaiResponse = "openai-response"
+
+	// Antigravity represents the Antigravity response format identifier.
+	Antigravity = "antigravity"
 )

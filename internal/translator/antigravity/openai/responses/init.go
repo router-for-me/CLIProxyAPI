@@ -1,4 +1,4 @@
-package gemini
+package responses
 
 import (
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -8,13 +8,12 @@ import (
 
 func init() {
 	translator.Register(
-		Gemini,
-		GeminiCLI,
-		ConvertGeminiRequestToGeminiCLI,
+		OpenaiResponse,
+		Antigravity,
+		ConvertOpenAIResponsesRequestToAntigravity,
 		interfaces.TranslateResponse{
-			Stream:     ConvertGeminiCliResponseToGemini,
-			NonStream:  ConvertGeminiCliResponseToGeminiNonStream,
-			TokenCount: GeminiTokenCount,
+			Stream:    ConvertAntigravityResponseToOpenAIResponses,
+			NonStream: ConvertAntigravityResponseToOpenAIResponsesNonStream,
 		},
 	)
 }

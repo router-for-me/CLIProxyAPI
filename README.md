@@ -57,6 +57,7 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - Claude Code support via OAuth login
 - Qwen Code support via OAuth login
 - iFlow support via OAuth login
+- Amp CLI and IDE extensions support with provider routing
 - Streaming and non-streaming responses
 - Function calling/tools support
 - Multimodal input support (text and images)
@@ -88,6 +89,17 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
+
+## Amp CLI Support
+
+CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
+
+- Provider route aliases for Amp's API patterns (`/api/provider/{provider}/v1...`)
+- Management proxy for OAuth authentication and account features
+- Smart model fallback with automatic routing
+- Security-first design with localhost-only management endpoints
+
+**→ [Complete Amp CLI Integration Guide](docs/amp-cli-integration.md)**
 
 ## SDK Docs
 

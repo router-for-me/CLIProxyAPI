@@ -150,7 +150,7 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		// Peek at first 2 bytes to detect gzip magic bytes
 		header := make([]byte, 2)
 		n, _ := io.ReadFull(originalBody, header)
-		
+
 		// Check for gzip magic bytes (0x1f 0x8b)
 		// If n < 2, we didn't get enough bytes, so it's not gzip
 		if n >= 2 && header[0] == 0x1f && header[1] == 0x8b {
@@ -164,7 +164,7 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 				}
 				return nil
 			}
-			
+
 			// Reconstruct complete gzipped data
 			gzippedData := append(header[:n], rest...)
 

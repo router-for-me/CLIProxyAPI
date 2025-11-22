@@ -12,6 +12,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type usageReporter struct {
@@ -362,6 +363,204 @@ func parseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
 	}
 	return detail, true
+}
+
+func parseAntigravityUsage(data []byte) usage.Detail {
+	usageNode := gjson.ParseBytes(data)
+	node := usageNode.Get("response.usageMetadata")
+	if !node.Exists() {
+		node = usageNode.Get("usageMetadata")
+	}
+	if !node.Exists() {
+		node = usageNode.Get("usage_metadata")
+	}
+	if !node.Exists() {
+		return usage.Detail{}
+	}
+	detail := usage.Detail{
+		InputTokens:     node.Get("promptTokenCount").Int(),
+		OutputTokens:    node.Get("candidatesTokenCount").Int(),
+		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
+		TotalTokens:     node.Get("totalTokenCount").Int(),
+	}
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+	}
+	return detail
+}
+
+func parseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return usage.Detail{}, false
+	}
+	node := gjson.GetBytes(payload, "response.usageMetadata")
+	if !node.Exists() {
+		node = gjson.GetBytes(payload, "usageMetadata")
+	}
+	if !node.Exists() {
+		node = gjson.GetBytes(payload, "usage_metadata")
+	}
+	if !node.Exists() {
+		return usage.Detail{}, false
+	}
+	detail := usage.Detail{
+		InputTokens:     node.Get("promptTokenCount").Int(),
+		OutputTokens:    node.Get("candidatesTokenCount").Int(),
+		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
+		TotalTokens:     node.Get("totalTokenCount").Int(),
+	}
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+	}
+	return detail, true
+}
+
+var stopChunkWithoutUsage sync.Map
+
+func rememberStopWithoutUsage(traceID string) {
+	stopChunkWithoutUsage.Store(traceID, struct{}{})
+	time.AfterFunc(10*time.Minute, func() { stopChunkWithoutUsage.Delete(traceID) })
+}
+
+// FilterSSEUsageMetadata removes usageMetadata from SSE events that are not
+// terminal (finishReason != "stop"). Stop chunks are left untouched. This
+// function is shared between aistudio and antigravity executors.
+func FilterSSEUsageMetadata(payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+
+	lines := bytes.Split(payload, []byte("\n"))
+	modified := false
+	foundData := false
+	for idx, line := range lines {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 || !bytes.HasPrefix(trimmed, []byte("data:")) {
+			continue
+		}
+		foundData = true
+		dataIdx := bytes.Index(line, []byte("data:"))
+		if dataIdx < 0 {
+			continue
+		}
+		rawJSON := bytes.TrimSpace(line[dataIdx+5:])
+		traceID := gjson.GetBytes(rawJSON, "traceId").String()
+		if isStopChunkWithoutUsage(rawJSON) && traceID != "" {
+			rememberStopWithoutUsage(traceID)
+			continue
+		}
+		if traceID != "" {
+			if _, ok := stopChunkWithoutUsage.Load(traceID); ok && hasUsageMetadata(rawJSON) {
+				stopChunkWithoutUsage.Delete(traceID)
+				continue
+			}
+		}
+
+		cleaned, changed := StripUsageMetadataFromJSON(rawJSON)
+		if !changed {
+			continue
+		}
+		var rebuilt []byte
+		rebuilt = append(rebuilt, line[:dataIdx]...)
+		rebuilt = append(rebuilt, []byte("data:")...)
+		if len(cleaned) > 0 {
+			rebuilt = append(rebuilt, ' ')
+			rebuilt = append(rebuilt, cleaned...)
+		}
+		lines[idx] = rebuilt
+		modified = true
+	}
+	if !modified {
+		if !foundData {
+			// Handle payloads that are raw JSON without SSE data: prefix.
+			trimmed := bytes.TrimSpace(payload)
+			cleaned, changed := StripUsageMetadataFromJSON(trimmed)
+			if !changed {
+				return payload
+			}
+			return cleaned
+		}
+		return payload
+	}
+	return bytes.Join(lines, []byte("\n"))
+}
+
+// StripUsageMetadataFromJSON drops usageMetadata unless finishReason is present (terminal).
+// It handles both formats:
+// - Aistudio: candidates.0.finishReason
+// - Antigravity: response.candidates.0.finishReason
+func StripUsageMetadataFromJSON(rawJSON []byte) ([]byte, bool) {
+	jsonBytes := bytes.TrimSpace(rawJSON)
+	if len(jsonBytes) == 0 || !gjson.ValidBytes(jsonBytes) {
+		return rawJSON, false
+	}
+
+	// Check for finishReason in both aistudio and antigravity formats
+	finishReason := gjson.GetBytes(jsonBytes, "candidates.0.finishReason")
+	if !finishReason.Exists() {
+		finishReason = gjson.GetBytes(jsonBytes, "response.candidates.0.finishReason")
+	}
+	terminalReason := finishReason.Exists() && strings.TrimSpace(finishReason.String()) != ""
+
+	usageMetadata := gjson.GetBytes(jsonBytes, "usageMetadata")
+	if !usageMetadata.Exists() {
+		usageMetadata = gjson.GetBytes(jsonBytes, "response.usageMetadata")
+	}
+
+	// Terminal chunk: keep as-is.
+	if terminalReason {
+		return rawJSON, false
+	}
+
+	// Nothing to strip
+	if !usageMetadata.Exists() {
+		return rawJSON, false
+	}
+
+	// Remove usageMetadata from both possible locations
+	cleaned := jsonBytes
+	var changed bool
+
+	if gjson.GetBytes(cleaned, "usageMetadata").Exists() {
+		cleaned, _ = sjson.DeleteBytes(cleaned, "usageMetadata")
+		changed = true
+	}
+
+	if gjson.GetBytes(cleaned, "response.usageMetadata").Exists() {
+		cleaned, _ = sjson.DeleteBytes(cleaned, "response.usageMetadata")
+		changed = true
+	}
+
+	return cleaned, changed
+}
+
+func hasUsageMetadata(jsonBytes []byte) bool {
+	if len(jsonBytes) == 0 || !gjson.ValidBytes(jsonBytes) {
+		return false
+	}
+	if gjson.GetBytes(jsonBytes, "usageMetadata").Exists() {
+		return true
+	}
+	if gjson.GetBytes(jsonBytes, "response.usageMetadata").Exists() {
+		return true
+	}
+	return false
+}
+
+func isStopChunkWithoutUsage(jsonBytes []byte) bool {
+	if len(jsonBytes) == 0 || !gjson.ValidBytes(jsonBytes) {
+		return false
+	}
+	finishReason := gjson.GetBytes(jsonBytes, "candidates.0.finishReason")
+	if !finishReason.Exists() {
+		finishReason = gjson.GetBytes(jsonBytes, "response.candidates.0.finishReason")
+	}
+	trimmed := strings.TrimSpace(finishReason.String())
+	if !finishReason.Exists() || trimmed == "" {
+		return false
+	}
+	return !hasUsageMetadata(jsonBytes)
 }
 
 func jsonPayload(line []byte) []byte {

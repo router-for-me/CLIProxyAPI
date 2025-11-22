@@ -19,13 +19,13 @@ import (
 // logger, the middleware has minimal overhead.
 func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		path := c.Request.URL.Path
-		shouldLog := false
-		if strings.HasPrefix(path, "/v1") {
-			shouldLog = true
+		if logger == nil {
+			c.Next()
+			return
 		}
 
-		if !shouldLog {
+		path := c.Request.URL.Path
+		if !shouldLogRequest(path) {
 			c.Next()
 			return
 		}
@@ -100,4 +100,14 @@ func captureRequestInfo(c *gin.Context) (*RequestInfo, error) {
 		Headers: headers,
 		Body:    body,
 	}, nil
+}
+
+// shouldLogRequest determines whether the request should be logged.
+// It skips management endpoints to avoid leaking secrets but allows
+// all other routes, including module-provided ones, to honor request-log.
+func shouldLogRequest(path string) bool {
+	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management") {
+		return false
+	}
+	return true
 }
