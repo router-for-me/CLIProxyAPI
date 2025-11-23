@@ -15,6 +15,60 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// parseGeminiModelFromPath extracts the Gemini model name from v1beta1 paths.
+// Handles both AMP CLI format (/publishers/google/models/{model}:{action})
+// and standard format (/models/{model}:{action}).
+// Returns the model name and true if successfully parsed.
+func parseGeminiModelFromPath(path string) (model string, ok bool) {
+	path = strings.TrimPrefix(path, "/")
+
+	// Try AMP CLI format: .../publishers/google/models/{model}:{action}
+	if idx := strings.Index(path, "/publishers/google/models/"); idx >= 0 {
+		modelAction := path[idx+len("/publishers/google/models/"):]
+		if colonIdx := strings.Index(modelAction, ":"); colonIdx > 0 {
+			return modelAction[:colonIdx], true
+		}
+		// No colon, take everything after models/
+		if modelAction != "" {
+			return modelAction, true
+		}
+	}
+
+	// Try standard format: .../models/{model}:{action}
+	if idx := strings.Index(path, "/models/"); idx >= 0 {
+		modelAction := path[idx+len("/models/"):]
+		if colonIdx := strings.Index(modelAction, ":"); colonIdx > 0 {
+			return modelAction[:colonIdx], true
+		}
+		// No colon, take everything after models/
+		if modelAction != "" {
+			return modelAction, true
+		}
+	}
+
+	return "", false
+}
+
+// shouldRouteToLiteLLM checks if a model should be routed to LiteLLM
+// based on the hybrid mode configuration.
+func shouldRouteToLiteLLM(cfg *config.Config, model string) bool {
+	if cfg == nil || !cfg.LiteLLMHybridMode {
+		return false
+	}
+
+	// Normalize model name for comparison
+	normalizedModel, _ := util.NormalizeGeminiThinkingModel(model)
+
+	// Check if model is in the litellm-models list
+	for _, litellmModel := range cfg.LiteLLMModels {
+		if strings.EqualFold(normalizedModel, litellmModel) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // localhostOnlyMiddleware restricts access to localhost (127.0.0.1, ::1) only.
 // Returns 403 Forbidden for non-localhost clients.
 //
@@ -112,41 +166,46 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	ampAPI.Any("/otel", proxyHandler)
 	ampAPI.Any("/otel/*path", proxyHandler)
 
-	// Google v1beta1 passthrough with OAuth fallback
+	// Google v1beta1 passthrough with hybrid routing support
 	// AMP CLI uses non-standard paths like /publishers/google/models/...
-	// We bridge these to our standard Gemini handler to enable local OAuth.
-	// If no local OAuth is available, falls back to ampcode.com proxy.
+	// PRECEDENCE ORDER (per Zen architecture):
+	// 1. LiteLLM (if hybrid mode enabled + model in config)
+	// 2. OAuth (if local providers exist)
+	// 3. Upstream proxy (ampcode.com)
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
 	geminiBridge := createGeminiBridgeHandler(geminiHandlers)
+
+	// Create shared FallbackHandler with proper OAuth support
+	// This is the same handler logic used by provider aliases for consistency
 	geminiV1Beta1Fallback := NewFallbackHandler(
 		cfg,
-		func(c *gin.Context) { /* dummy oauth handler */ },
+		geminiBridge,
 		func() *httputil.ReverseProxy { return m.proxy },
 		m.liteLLMProxy,
 	)
-	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
 
-	// Route POST model calls through Gemini bridge when a local provider exists, otherwise proxy.
-	// All other methods (e.g., GET model listing) always proxy to upstream to preserve Amp CLI behavior.
+	// Route v1beta1 requests with intelligent hybrid routing
 	ampAPI.Any("/provider/google/v1beta1/*path", func(c *gin.Context) {
 		if c.Request.Method == "POST" {
-			// Attempt to extract the model name from the AMP-style path
-			if path := c.Param("path"); strings.Contains(path, "/models/") {
-				modelPart := path[strings.Index(path, "/models/")+len("/models/"):]
-				if colonIdx := strings.Index(modelPart, ":"); colonIdx > 0 {
-					modelPart = modelPart[:colonIdx]
+			// STEP 1: Check LiteLLM hybrid routing (highest priority)
+			if model, ok := parseGeminiModelFromPath(c.Param("path")); ok {
+				if shouldRouteToLiteLLM(cfg, model) {
+					log.Debugf("Management route: routing %s to LiteLLM via hybrid mode", model)
+					geminiV1Beta1Fallback.WrapHandler(geminiBridge)(c)
+					return
 				}
-				if modelPart != "" {
-					normalized, _ := util.NormalizeGeminiThinkingModel(modelPart)
-					// Only handle locally when we have a provider; otherwise fall back to proxy
-					if providers := util.GetProviderName(normalized); len(providers) > 0 {
-						geminiV1Beta1Handler(c)
-						return
-					}
+
+				// STEP 2: Check for OAuth providers
+				normalized, _ := util.NormalizeGeminiThinkingModel(model)
+				if providers := util.GetProviderName(normalized); len(providers) > 0 {
+					log.Debugf("Management route: routing %s to OAuth provider", model)
+					geminiV1Beta1Fallback.WrapHandler(geminiBridge)(c)
+					return
 				}
 			}
 		}
-		// Non-POST or no local provider available -> proxy upstream
+
+		// STEP 3: Fallback to upstream proxy for non-model routes or GET requests
 		proxyHandler(c)
 	})
 }
