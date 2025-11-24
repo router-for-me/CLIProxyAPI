@@ -1,19 +1,13 @@
+version: "3.9"
+
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
-    pull_policy: always
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        VERSION: ${VERSION:-dev}
-        COMMIT: ${COMMIT:-none}
-        BUILD_DATE: ${BUILD_DATE:-unknown}
+    image: cli-proxy-api:local
     container_name: cli-proxy-api
-    # env_file:
-    #   - .env
-    environment:
-      DEPLOY: ${DEPLOY:-}
+    pull_policy: never
+    working_dir: /CLIProxyAPI
+    restart: unless-stopped
+
     ports:
       - "8317:8317"
       - "8085:8085"
@@ -21,8 +15,48 @@ services:
       - "54545:54545"
       - "51121:51121"
       - "11451:11451"
+
+    # Only mount auth directory - binary stays from image
     volumes:
-      - ./config.yaml:/CLIProxyAPI/config.yaml
-      - ./auths:/root/.cli-proxy-api
-      - ./logs:/CLIProxyAPI/logs
-    restart: unless-stopped
+      - cli-proxy-auth:/CLIProxyAPI/auth
+
+    environment:
+      - TZ=Asia/Shanghai
+
+    entrypoint: |
+      sh -c '
+        set -e
+        mkdir -p /CLIProxyAPI /CLIProxyAPI/auth
+
+        printf "%s\n" \
+          "port: 8317" \
+          "debug: true" \
+          "logging-to-file: false" \
+          "auth-dir: /CLIProxyAPI/auth" \
+          "api-keys: []" \
+          "usage-statistics-enabled: true" \
+          "proxy-url: \"\"" \
+          "request-retry: 3" \
+          "ws-auth: false" \
+          "remote-management:" \
+          "  allow-remote: true" \
+          "  secret-key: idrisrupt" \
+          "  disable-control-panel: false" \
+          "quota-exceeded:" \
+          "  switch-project: true" \
+          "  switch-preview-model: false" \
+          "payload:" \
+          "  override:" \
+          "    - models:" \
+          "        - name: \"gpt-5.1-codex-*\"" \
+          "          protocol: codex" \
+          "      params:" \
+          "        reasoning.effort: low" \
+          "  default: []" \
+          > /CLIProxyAPI/config.yaml
+
+        exec /CLIProxyAPI/CLIProxyAPI -config /CLIProxyAPI/config.yaml
+      '
+
+volumes:
+  cli-proxy-auth:

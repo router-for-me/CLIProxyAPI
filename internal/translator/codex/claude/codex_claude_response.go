@@ -17,6 +17,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const codexClaudeThoughtSignature = "skip_thought_signature_validator"
+
 var (
 	dataTag = []byte("data:")
 )
@@ -62,15 +64,17 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = "event: message_start\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
 	} else if typeStr == "response.reasoning_summary_part.added" {
-		template = `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
+		template = `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`
 		template, _ = sjson.Set(template, "index", rootResult.Get("output_index").Int())
+		template, _ = sjson.Set(template, "content_block.signature", codexClaudeThoughtSignature)
 
 		output = "event: content_block_start\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
 	} else if typeStr == "response.reasoning_summary_text.delta" {
-		template = `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`
+		template = `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","signature":""}}`
 		template, _ = sjson.Set(template, "index", rootResult.Get("output_index").Int())
 		template, _ = sjson.Set(template, "delta.thinking", rootResult.Get("delta").String())
+		template, _ = sjson.Set(template, "delta.signature", codexClaudeThoughtSignature)
 
 		output = "event: content_block_delta\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
@@ -245,8 +249,9 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 				}
 				if thinkingBuilder.Len() > 0 {
 					contentBlocks = append(contentBlocks, map[string]interface{}{
-						"type":     "thinking",
-						"thinking": thinkingBuilder.String(),
+						"type":      "thinking",
+						"thinking":  thinkingBuilder.String(),
+						"signature": codexClaudeThoughtSignature,
 					})
 				}
 			case "message":

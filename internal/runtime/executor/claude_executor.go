@@ -40,6 +40,53 @@ func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
 func (e *ClaudeExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
 
+// stripInvalidThinking removes any thinking blocks that don't carry a valid Anthropic signature.
+// Codex/Gemini emit placeholders or no signature; Anthropic rejects those. Dropping the block
+// preserves the rest of the conversation while keeping requests valid.
+func stripInvalidThinking(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body
+	}
+
+	isValidSig := func(sig string) bool {
+		s := strings.TrimSpace(sig)
+		// Real signatures are long and opaque. Placeholder/short strings are invalid.
+		if len(s) < 60 {
+			return false
+		}
+		if strings.HasPrefix(s, "skip_") {
+			return false
+		}
+		return true
+	}
+
+	for i, msg := range messages.Array() {
+		contents := msg.Get("content")
+		if !contents.IsArray() {
+			continue
+		}
+		kept := make([]string, 0, len(contents.Array()))
+		for j, c := range contents.Array() {
+			if c.Get("type").String() == "thinking" {
+				sig := c.Get("signature").String()
+				if sig == "" {
+					sig = c.Get("thinking.signature").String()
+				}
+				if !isValidSig(sig) {
+					log.Debugf("stripInvalidThinking: dropping invalid thinking at messages.%d.content.%d (sig=%q)", i, j, sig)
+					continue
+				}
+			}
+			kept = append(kept, c.Raw)
+		}
+		joined := "[" + strings.Join(kept, ",") + "]"
+		body, _ = sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", i), []byte(joined))
+	}
+
+	return body
+}
+
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	apiKey, baseURL := claudeCreds(auth)
 
@@ -63,6 +110,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		body, _ = sjson.SetRawBytes(body, "system", []byte(misc.ClaudeCodeInstructions))
 	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = stripInvalidThinking(body)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -156,6 +204,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	body, _ = sjson.SetRawBytes(body, "system", []byte(misc.ClaudeCodeInstructions))
 	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = stripInvalidThinking(body)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
