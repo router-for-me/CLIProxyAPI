@@ -6,7 +6,15 @@ package registry
 // GetClaudeModels returns the standard Claude model definitions
 func GetClaudeModels() []*ModelInfo {
 	return []*ModelInfo{
-
+		
+		{
+			ID:          "claude-opus-4-5-20251101",
+			Object:      "model",
+			Created:     1761955200, // 2025-11-01
+			OwnedBy:     "anthropic",
+			Type:        "claude",
+			DisplayName: "Claude 4.5 Opus",
+		},
 		{
 			ID:          "claude-haiku-4-5-20251001",
 			Object:      "model",
@@ -22,14 +30,6 @@ func GetClaudeModels() []*ModelInfo {
 			OwnedBy:     "anthropic",
 			Type:        "claude",
 			DisplayName: "Claude 4.5 Sonnet",
-		},
-		{
-			ID:          "claude-opus-4-5-20251101",
-			Object:      "model",
-			Created:     1761955200, // 2025-11-01
-			OwnedBy:     "anthropic",
-			Type:        "claude",
-			DisplayName: "Claude 4.5 Opus",
 		},
 		{
 			ID:          "claude-opus-4-1-20250805",
