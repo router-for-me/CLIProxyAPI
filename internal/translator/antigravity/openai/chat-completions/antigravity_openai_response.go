@@ -1,8 +1,3 @@
-// Package openai provides response translation functionality for Gemini CLI to OpenAI API compatibility.
-// This package handles the conversion of Gemini CLI API responses into OpenAI Chat Completions-compatible
-// JSON format, transforming streaming events and non-streaming responses into the format
-// expected by OpenAI API clients. It supports both streaming and non-streaming modes,
-// handling text content, tool calls, reasoning content, and usage metadata appropriately.
 package chat_completions
 
 import (
@@ -20,14 +15,15 @@ import (
 // convertCliResponseToOpenAIChatParams holds parameters for response conversion.
 type convertCliResponseToOpenAIChatParams struct {
 	UnixTimestamp int64
-	FunctionIndex int
+	FunctionIndex map[int]int
 }
 
 // ConvertAntigravityResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini CLI API format to the OpenAI Chat Completions streaming format.
 // It processes various Gemini CLI event types and transforms them into OpenAI-compatible JSON responses.
 // The function handles text content, tool calls, reasoning content, and usage metadata, outputting
-// responses that match the OpenAI API format. It supports incremental updates for streaming responses.
+// responses that match the OpenAI API format. It supports incremental updates for streaming responses
+// and handles multiple candidates updates if present (although Antigravity/Gemini CLI usually stream single candidates).
 //
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
@@ -41,8 +37,14 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	if *param == nil {
 		*param = &convertCliResponseToOpenAIChatParams{
 			UnixTimestamp: 0,
-			FunctionIndex: 0,
+			FunctionIndex: make(map[int]int),
 		}
+	}
+
+	// Safety check for param state structure updates
+	p := (*param).(*convertCliResponseToOpenAIChatParams)
+	if p.FunctionIndex == nil {
+		p.FunctionIndex = make(map[int]int)
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
@@ -61,11 +63,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	if createTimeResult := gjson.GetBytes(rawJSON, "response.createTime"); createTimeResult.Exists() {
 		t, err := time.Parse(time.RFC3339Nano, createTimeResult.String())
 		if err == nil {
-			(*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp = t.Unix()
+			p.UnixTimestamp = t.Unix()
 		}
-		template, _ = sjson.Set(template, "created", (*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp)
+		template, _ = sjson.Set(template, "created", p.UnixTimestamp)
 	} else {
-		template, _ = sjson.Set(template, "created", (*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp)
+		template, _ = sjson.Set(template, "created", p.UnixTimestamp)
 	}
 
 	// Extract and set the response ID.
@@ -73,119 +75,142 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		template, _ = sjson.Set(template, "id", responseIDResult.String())
 	}
 
-	// Extract and set the finish reason.
-	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReasonResult.String())
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReasonResult.String())
+	var results []string
+
+	// Process candidates
+	candidates := gjson.GetBytes(rawJSON, "response.candidates")
+	if candidates.IsArray() {
+		candidates.ForEach(func(_, candidate gjson.Result) bool {
+			idx := int(candidate.Get("index").Int())
+			choiceTemplate := template
+			choiceTemplate, _ = sjson.Set(choiceTemplate, "choices.0.index", idx)
+
+			// Extract and set the finish reason.
+			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
+				choiceTemplate, _ = sjson.Set(choiceTemplate, "choices.0.finish_reason", finishReasonResult.String())
+				choiceTemplate, _ = sjson.Set(choiceTemplate, "choices.0.native_finish_reason", finishReasonResult.String())
+			}
+
+			// Process the content parts of this candidate
+			partsResult := candidate.Get("content.parts")
+			hasFunctionCall := false
+
+			if partsResult.IsArray() {
+				partResults := partsResult.Array()
+				for i := 0; i < len(partResults); i++ {
+					partResult := partResults[i]
+					partTextResult := partResult.Get("text")
+					functionCallResult := partResult.Get("functionCall")
+					thoughtSignatureResult := partResult.Get("thoughtSignature")
+					inlineDataResult := partResult.Get("inlineData")
+					if !inlineDataResult.Exists() {
+						inlineDataResult = partResult.Get("inline_data")
+					}
+
+					// Handle thoughtSignature - this is encrypted reasoning content that should not be exposed to the client
+					if thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != "" {
+						// Skip thoughtSignature processing - it's internal encrypted data
+						continue
+					}
+
+					if partTextResult.Exists() {
+						textContent := partTextResult.String()
+
+						// Handle text content, distinguishing between regular content and reasoning/thoughts.
+						if partResult.Get("thought").Bool() {
+							choiceTemplate, _ = sjson.Set(choiceTemplate, "choices.0.delta.reasoning_content", textContent)
+						} else {
+							choiceTemplate, _ = sjson.Set(choiceTemplate, "choices.0.delta.content", textContent)
+						}
+						choiceTemplate, _ = sjson.Set(choiceTemplate, "choices.0.delta.role", "assistant")
+					} else if functionCallResult.Exists() {
+						// Handle function call content.
+						hasFunctionCall = true
+						toolCallsResult := gjson.Get(choiceTemplate, "choices.0.delta.tool_calls")
+
+						functionIndex := p.FunctionIndex[idx]
+						p.FunctionIndex[idx]++
+
+						if toolCallsResult.Exists() && toolCallsResult.IsArray() {
+							functionIndex = len(toolCallsResult.Array())
+						} else {
+							choiceTemplate, _ = sjson.SetRaw(choiceTemplate, "choices.0.delta.tool_calls", `[]`)
+						}
+
+						functionCallItemTemplate := `{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`
+						fcName := functionCallResult.Get("name").String()
+						functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "id", fmt.Sprintf("%s-%d", fcName, time.Now().UnixNano()))
+						functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "index", functionIndex)
+						functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.name", fcName)
+						if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
+							functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.arguments", fcArgsResult.Raw)
+						}
+						choiceTemplate, _ = sjson.Set(choiceTemplate, "choices.0.delta.role", "assistant")
+						choiceTemplate, _ = sjson.SetRaw(choiceTemplate, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
+					} else if inlineDataResult.Exists() {
+						data := inlineDataResult.Get("data").String()
+						if data == "" {
+							continue
+						}
+						mimeType := inlineDataResult.Get("mimeType").String()
+						if mimeType == "" {
+							mimeType = inlineDataResult.Get("mime_type").String()
+						}
+						if mimeType == "" {
+							mimeType = "image/png"
+						}
+						imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
+						imagePayload, err := json.Marshal(map[string]any{
+							"type": "image_url",
+							"image_url": map[string]string{
+								"url": imageURL,
+							},
+						})
+						if err != nil {
+							continue
+						}
+						imagesResult := gjson.Get(choiceTemplate, "choices.0.delta.images")
+						if !imagesResult.Exists() || !imagesResult.IsArray() {
+							choiceTemplate, _ = sjson.SetRaw(choiceTemplate, "choices.0.delta.images", `[]`)
+						}
+						choiceTemplate, _ = sjson.Set(choiceTemplate, "choices.0.delta.role", "assistant")
+						choiceTemplate, _ = sjson.SetRaw(choiceTemplate, "choices.0.delta.images.-1", string(imagePayload))
+					}
+				}
+			}
+
+			if hasFunctionCall {
+				choiceTemplate, _ = sjson.Set(choiceTemplate, "choices.0.finish_reason", "tool_calls")
+				choiceTemplate, _ = sjson.Set(choiceTemplate, "choices.0.native_finish_reason", "tool_calls")
+			}
+
+			results = append(results, choiceTemplate)
+			return true
+		})
 	}
 
 	// Extract and set usage metadata (token counts).
 	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
+		usageTemplate := template
+		// Ensure choices is empty for the usage chunk
+		usageTemplate, _ = sjson.Set(usageTemplate, "choices", []interface{}{})
+
 		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			template, _ = sjson.Set(template, "usage.completion_tokens", candidatesTokenCountResult.Int())
+			usageTemplate, _ = sjson.Set(usageTemplate, "usage.completion_tokens", candidatesTokenCountResult.Int())
 		}
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
-			template, _ = sjson.Set(template, "usage.total_tokens", totalTokenCountResult.Int())
+			usageTemplate, _ = sjson.Set(usageTemplate, "usage.total_tokens", totalTokenCountResult.Int())
 		}
 		promptTokenCount := usageResult.Get("promptTokenCount").Int()
 		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-		template, _ = sjson.Set(template, "usage.prompt_tokens", promptTokenCount+thoughtsTokenCount)
+		usageTemplate, _ = sjson.Set(usageTemplate, "usage.prompt_tokens", promptTokenCount+thoughtsTokenCount)
 		if thoughtsTokenCount > 0 {
-			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
+			usageTemplate, _ = sjson.Set(usageTemplate, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
 		}
+		results = append(results, usageTemplate)
 	}
 
-	// Process the main content part of the response.
-	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
-	hasFunctionCall := false
-	if partsResult.IsArray() {
-		partResults := partsResult.Array()
-		for i := 0; i < len(partResults); i++ {
-			partResult := partResults[i]
-			partTextResult := partResult.Get("text")
-			functionCallResult := partResult.Get("functionCall")
-			thoughtSignatureResult := partResult.Get("thoughtSignature")
-			inlineDataResult := partResult.Get("inlineData")
-			if !inlineDataResult.Exists() {
-				inlineDataResult = partResult.Get("inline_data")
-			}
-
-			// Handle thoughtSignature - this is encrypted reasoning content that should not be exposed to the client
-			if thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != "" {
-				// Skip thoughtSignature processing - it's internal encrypted data
-				continue
-			}
-
-			if partTextResult.Exists() {
-				textContent := partTextResult.String()
-
-				// Handle text content, distinguishing between regular content and reasoning/thoughts.
-				if partResult.Get("thought").Bool() {
-					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", textContent)
-				} else {
-					template, _ = sjson.Set(template, "choices.0.delta.content", textContent)
-				}
-				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
-			} else if functionCallResult.Exists() {
-				// Handle function call content.
-				hasFunctionCall = true
-				toolCallsResult := gjson.Get(template, "choices.0.delta.tool_calls")
-				functionCallIndex := (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex
-				(*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex++
-				if toolCallsResult.Exists() && toolCallsResult.IsArray() {
-					functionCallIndex = len(toolCallsResult.Array())
-				} else {
-					template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls", `[]`)
-				}
-
-				functionCallTemplate := `{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`
-				fcName := functionCallResult.Get("name").String()
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", fmt.Sprintf("%s-%d", fcName, time.Now().UnixNano()))
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "index", functionCallIndex)
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", fcName)
-				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.arguments", fcArgsResult.Raw)
-				}
-				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
-				template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
-			} else if inlineDataResult.Exists() {
-				data := inlineDataResult.Get("data").String()
-				if data == "" {
-					continue
-				}
-				mimeType := inlineDataResult.Get("mimeType").String()
-				if mimeType == "" {
-					mimeType = inlineDataResult.Get("mime_type").String()
-				}
-				if mimeType == "" {
-					mimeType = "image/png"
-				}
-				imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
-				imagePayload, err := json.Marshal(map[string]any{
-					"type": "image_url",
-					"image_url": map[string]string{
-						"url": imageURL,
-					},
-				})
-				if err != nil {
-					continue
-				}
-				imagesResult := gjson.Get(template, "choices.0.delta.images")
-				if !imagesResult.Exists() || !imagesResult.IsArray() {
-					template, _ = sjson.SetRaw(template, "choices.0.delta.images", `[]`)
-				}
-				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
-				template, _ = sjson.SetRaw(template, "choices.0.delta.images.-1", string(imagePayload))
-			}
-		}
-	}
-
-	if hasFunctionCall {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
-	}
-
-	return []string{template}
+	return results
 }
 
 // ConvertAntigravityResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
