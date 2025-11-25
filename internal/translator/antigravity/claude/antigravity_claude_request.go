@@ -119,30 +119,17 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	// tools
+	// NOTE:
+	// For Antigravity + Claude Code, upstream currently expects a different
+	// custom tool schema than the Claude messages API provides. Forwarding
+	// tools as-is can cause hard 400 errors like:
+	//   tools.0.custom.input_schema: Field required
+	// To keep Sonnet 4.5 thinking stable, we intentionally drop tool
+	// declarations in this translator and rely on Claude Code's local tools.
+	// This preserves core chat / reasoning functionality while avoiding
+	// provider_request_error failures.
 	var tools []client.ToolDeclaration
-	toolsResult := gjson.GetBytes(rawJSON, "tools")
-	if toolsResult.IsArray() {
-		tools = make([]client.ToolDeclaration, 1)
-		tools[0].FunctionDeclarations = make([]any, 0)
-		toolsResults := toolsResult.Array()
-		for i := 0; i < len(toolsResults); i++ {
-			toolResult := toolsResults[i]
-			inputSchemaResult := toolResult.Get("input_schema")
-			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
-				inputSchema := inputSchemaResult.Raw
-				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
-				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
-				tool, _ = sjson.Delete(tool, "strict")
-				tool, _ = sjson.Delete(tool, "input_examples")
-				var toolDeclaration any
-				if err := json.Unmarshal([]byte(tool), &toolDeclaration); err == nil {
-					tools[0].FunctionDeclarations = append(tools[0].FunctionDeclarations, toolDeclaration)
-				}
-			}
-		}
-	} else {
-		tools = make([]client.ToolDeclaration, 0)
-	}
+	tools = make([]client.ToolDeclaration, 0)
 
 	// Build output Gemini CLI request JSON
 	out := `{"model":"","request":{"contents":[]}}`
