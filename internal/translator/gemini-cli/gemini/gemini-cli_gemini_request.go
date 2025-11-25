@@ -98,6 +98,20 @@ func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) []by
 		}
 	}
 
+	gjson.GetBytes(rawJSON, "request.contents").ForEach(func(key, content gjson.Result) bool {
+		if content.Get("role").String() == "model" {
+			content.Get("parts").ForEach(func(partKey, part gjson.Result) bool {
+				if part.Get("functionCall").Exists() {
+					rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()), "skip_thought_signature_validator")
+				} else if part.Get("thoughtSignature").Exists() {
+					rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()), "skip_thought_signature_validator")
+				}
+				return true
+			})
+		}
+		return true
+	})
+
 	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
 }
 

@@ -4,6 +4,7 @@
 package handlers
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"strings"
@@ -120,11 +121,11 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 				data := params[0]
 				switch data.(type) {
 				case []byte:
-					c.Set("API_RESPONSE", data.([]byte))
+					appendAPIResponse(c, data.([]byte))
 				case error:
-					c.Set("API_RESPONSE", []byte(data.(error).Error()))
+					appendAPIResponse(c, []byte(data.(error).Error()))
 				case string:
-					c.Set("API_RESPONSE", []byte(data.(string)))
+					appendAPIResponse(c, []byte(data.(string)))
 				case bool:
 				case nil:
 				}
@@ -133,6 +134,28 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 
 		cancel()
 	}
+}
+
+// appendAPIResponse preserves any previously captured API response and appends new data.
+func appendAPIResponse(c *gin.Context, data []byte) {
+	if c == nil || len(data) == 0 {
+		return
+	}
+
+	if existing, exists := c.Get("API_RESPONSE"); exists {
+		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
+			combined := make([]byte, 0, len(existingBytes)+len(data)+1)
+			combined = append(combined, existingBytes...)
+			if existingBytes[len(existingBytes)-1] != '\n' {
+				combined = append(combined, '\n')
+			}
+			combined = append(combined, data...)
+			c.Set("API_RESPONSE", combined)
+			return
+		}
+	}
+
+	c.Set("API_RESPONSE", bytes.Clone(data))
 }
 
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
@@ -297,7 +320,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, metadata map[string]any, err *interfaces.ErrorMessage) {
 	// Resolve "auto" model to an actual available model first
 	resolvedModelName := util.ResolveAutoModel(modelName)
-	
+
 	providerName, extractedModelName, isDynamic := h.parseDynamicModel(resolvedModelName)
 
 	// First, normalize the model name to handle suffixes like "-thinking-128"

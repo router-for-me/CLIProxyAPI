@@ -172,6 +172,14 @@ func (h *Handler) PutRequestRetry(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.RequestRetry = v })
 }
 
+// Max retry interval
+func (h *Handler) GetMaxRetryInterval(c *gin.Context) {
+	c.JSON(200, gin.H{"max-retry-interval": h.cfg.MaxRetryInterval})
+}
+func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
+	h.updateIntField(c, func(v int) { h.cfg.MaxRetryInterval = v })
+}
+
 // Proxy URL
 func (h *Handler) GetProxyURL(c *gin.Context) { c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL}) }
 func (h *Handler) PutProxyURL(c *gin.Context) {

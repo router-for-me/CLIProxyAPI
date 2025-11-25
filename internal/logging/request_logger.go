@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -156,17 +157,30 @@ func (l *FileRequestLogger) SetEnabled(enabled bool) {
 // Returns:
 //   - error: An error if logging fails, nil otherwise
 func (l *FileRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage) error {
-	if !l.enabled {
+	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, apiRequest, apiResponse, apiResponseErrors, false)
+}
+
+// LogRequestWithOptions logs a request with optional forced logging behavior.
+// The force flag allows writing error logs even when regular request logging is disabled.
+func (l *FileRequestLogger) LogRequestWithOptions(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool) error {
+	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, apiRequest, apiResponse, apiResponseErrors, force)
+}
+
+func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool) error {
+	if !l.enabled && !force {
 		return nil
 	}
 
 	// Ensure logs directory exists
-	if err := l.ensureLogsDir(); err != nil {
-		return fmt.Errorf("failed to create logs directory: %w", err)
+	if errEnsure := l.ensureLogsDir(); errEnsure != nil {
+		return fmt.Errorf("failed to create logs directory: %w", errEnsure)
 	}
 
 	// Generate filename
 	filename := l.generateFilename(url)
+	if force && !l.enabled {
+		filename = l.generateErrorFilename(url)
+	}
 	filePath := filepath.Join(l.logsDir, filename)
 
 	// Decompress response if needed
@@ -182,6 +196,12 @@ func (l *FileRequestLogger) LogRequest(url, method string, requestHeaders map[st
 	// Write to file
 	if err = os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write log file: %w", err)
+	}
+
+	if force && !l.enabled {
+		if errCleanup := l.cleanupOldErrorLogs(); errCleanup != nil {
+			log.WithError(errCleanup).Warn("failed to clean up old error logs")
+		}
 	}
 
 	return nil
@@ -237,6 +257,11 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 	go writer.asyncWriter()
 
 	return writer, nil
+}
+
+// generateErrorFilename creates a filename with an error prefix to differentiate forced error logs.
+func (l *FileRequestLogger) generateErrorFilename(url string) string {
+	return fmt.Sprintf("error-%s", l.generateFilename(url))
 }
 
 // ensureLogsDir creates the logs directory if it doesn't exist.
@@ -310,6 +335,52 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 	}
 
 	return sanitized
+}
+
+// cleanupOldErrorLogs keeps only the newest 10 forced error log files.
+func (l *FileRequestLogger) cleanupOldErrorLogs() error {
+	entries, errRead := os.ReadDir(l.logsDir)
+	if errRead != nil {
+		return errRead
+	}
+
+	type logFile struct {
+		name    string
+		modTime time.Time
+	}
+
+	var files []logFile
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "error-") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		info, errInfo := entry.Info()
+		if errInfo != nil {
+			log.WithError(errInfo).Warn("failed to read error log info")
+			continue
+		}
+		files = append(files, logFile{name: name, modTime: info.ModTime()})
+	}
+
+	if len(files) <= 10 {
+		return nil
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.After(files[j].modTime)
+	})
+
+	for _, file := range files[10:] {
+		if errRemove := os.Remove(filepath.Join(l.logsDir, file.name)); errRemove != nil {
+			log.WithError(errRemove).Warnf("failed to remove old error log: %s", file.name)
+		}
+	}
+
+	return nil
 }
 
 // formatLogContent creates the complete log content for non-streaming requests.

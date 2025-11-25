@@ -433,12 +433,18 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			// output tokens
 			if v := um.Get("candidatesTokenCount"); v.Exists() {
 				completed, _ = sjson.Set(completed, "response.usage.output_tokens", v.Int())
+			} else {
+				completed, _ = sjson.Set(completed, "response.usage.output_tokens", 0)
 			}
 			if v := um.Get("thoughtsTokenCount"); v.Exists() {
 				completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", v.Int())
+			} else {
+				completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", 0)
 			}
 			if v := um.Get("totalTokenCount"); v.Exists() {
 				completed, _ = sjson.Set(completed, "response.usage.total_tokens", v.Int())
+			} else {
+				completed, _ = sjson.Set(completed, "response.usage.total_tokens", 0)
 			}
 		}
 

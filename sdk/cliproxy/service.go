@@ -281,6 +281,14 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	}
 }
 
+func (s *Service) applyRetryConfig(cfg *config.Config) {
+	if s == nil || s.coreManager == nil || cfg == nil {
+		return
+	}
+	maxInterval := time.Duration(cfg.MaxRetryInterval) * time.Second
+	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval)
+}
+
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
 	if a == nil {
 		return "", "", false
@@ -394,6 +402,8 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 
+	s.applyRetryConfig(s.cfg)
+
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
@@ -476,6 +486,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if newCfg == nil {
 			return
 		}
+		s.applyRetryConfig(newCfg)
 		if s.server != nil {
 			s.server.UpdateClients(newCfg)
 		}

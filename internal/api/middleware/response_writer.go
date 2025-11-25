@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -24,15 +25,16 @@ type RequestInfo struct {
 // It is designed to handle both standard and streaming responses, ensuring that logging operations do not block the client response.
 type ResponseWriterWrapper struct {
 	gin.ResponseWriter
-	body         *bytes.Buffer              // body is a buffer to store the response body for non-streaming responses.
-	isStreaming  bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
-	streamWriter logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
-	chunkChannel chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
-	streamDone   chan struct{}              // streamDone signals when the streaming goroutine completes.
-	logger       logging.RequestLogger      // logger is the instance of the request logger service.
-	requestInfo  *RequestInfo               // requestInfo holds the details of the original request.
-	statusCode   int                        // statusCode stores the HTTP status code of the response.
-	headers      map[string][]string        // headers stores the response headers.
+	body           *bytes.Buffer              // body is a buffer to store the response body for non-streaming responses.
+	isStreaming    bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
+	streamWriter   logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
+	chunkChannel   chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
+	streamDone     chan struct{}              // streamDone signals when the streaming goroutine completes.
+	logger         logging.RequestLogger      // logger is the instance of the request logger service.
+	requestInfo    *RequestInfo               // requestInfo holds the details of the original request.
+	statusCode     int                        // statusCode stores the HTTP status code of the response.
+	headers        map[string][]string        // headers stores the response headers.
+	logOnErrorOnly bool                       // logOnErrorOnly enables logging only when an error response is detected.
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -192,12 +194,34 @@ func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
 // For non-streaming responses, it logs the complete request and response details,
 // including any API-specific request/response data stored in the Gin context.
 func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
-	if !w.logger.IsEnabled() {
+	if w.logger == nil {
+		return nil
+	}
+
+	finalStatusCode := w.statusCode
+	if finalStatusCode == 0 {
+		if statusWriter, ok := w.ResponseWriter.(interface{ Status() int }); ok {
+			finalStatusCode = statusWriter.Status()
+		} else {
+			finalStatusCode = 200
+		}
+	}
+
+	var slicesAPIResponseError []*interfaces.ErrorMessage
+	apiResponseError, isExist := c.Get("API_RESPONSE_ERROR")
+	if isExist {
+		if apiErrors, ok := apiResponseError.([]*interfaces.ErrorMessage); ok {
+			slicesAPIResponseError = apiErrors
+		}
+	}
+
+	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
+	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
+	if !w.logger.IsEnabled() && !forceLog {
 		return nil
 	}
 
 	if w.isStreaming {
-		// Close streaming channel and writer
 		if w.chunkChannel != nil {
 			close(w.chunkChannel)
 			w.chunkChannel = nil
@@ -209,80 +233,98 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		}
 
 		if w.streamWriter != nil {
-			err := w.streamWriter.Close()
+			if err := w.streamWriter.Close(); err != nil {
+				w.streamWriter = nil
+				return err
+			}
 			w.streamWriter = nil
-			return err
 		}
-	} else {
-		// Capture final status code and headers if not already captured
-		finalStatusCode := w.statusCode
-		if finalStatusCode == 0 {
-			// Get status from underlying ResponseWriter if available
-			if statusWriter, ok := w.ResponseWriter.(interface{ Status() int }); ok {
-				finalStatusCode = statusWriter.Status()
-			} else {
-				finalStatusCode = 200 // Default
-			}
+		if forceLog {
+			return w.logRequest(finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), slicesAPIResponseError, forceLog)
 		}
+		return nil
+	}
 
-		// Ensure we have the latest headers before finalizing
-		w.ensureHeadersCaptured()
+	return w.logRequest(finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), slicesAPIResponseError, forceLog)
+}
 
-		// Use the captured headers as the final headers
-		finalHeaders := make(map[string][]string)
-		for key, values := range w.headers {
-			// Make a copy of the values slice to avoid reference issues
-			headerValues := make([]string, len(values))
-			copy(headerValues, values)
-			finalHeaders[key] = headerValues
-		}
+func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
+	w.ensureHeadersCaptured()
 
-		var apiRequestBody []byte
-		apiRequest, isExist := c.Get("API_REQUEST")
-		if isExist {
-			var ok bool
-			apiRequestBody, ok = apiRequest.([]byte)
-			if !ok {
-				apiRequestBody = nil
-			}
-		}
+	finalHeaders := make(map[string][]string, len(w.headers))
+	for key, values := range w.headers {
+		headerValues := make([]string, len(values))
+		copy(headerValues, values)
+		finalHeaders[key] = headerValues
+	}
 
-		var apiResponseBody []byte
-		apiResponse, isExist := c.Get("API_RESPONSE")
-		if isExist {
-			var ok bool
-			apiResponseBody, ok = apiResponse.([]byte)
-			if !ok {
-				apiResponseBody = nil
-			}
-		}
+	return finalHeaders
+}
 
-		var slicesAPIResponseError []*interfaces.ErrorMessage
-		apiResponseError, isExist := c.Get("API_RESPONSE_ERROR")
-		if isExist {
-			var ok bool
-			slicesAPIResponseError, ok = apiResponseError.([]*interfaces.ErrorMessage)
-			if !ok {
-				slicesAPIResponseError = nil
-			}
-		}
+func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
+	apiRequest, isExist := c.Get("API_REQUEST")
+	if !isExist {
+		return nil
+	}
+	data, ok := apiRequest.([]byte)
+	if !ok || len(data) == 0 {
+		return nil
+	}
+	return data
+}
 
-		// Log complete non-streaming response
-		return w.logger.LogRequest(
+func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
+	apiResponse, isExist := c.Get("API_RESPONSE")
+	if !isExist {
+		return nil
+	}
+	data, ok := apiResponse.([]byte)
+	if !ok || len(data) == 0 {
+		return nil
+	}
+	return data
+}
+
+func (w *ResponseWriterWrapper) logRequest(statusCode int, headers map[string][]string, body []byte, apiRequestBody, apiResponseBody []byte, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
+	if w.requestInfo == nil {
+		return nil
+	}
+
+	var requestBody []byte
+	if len(w.requestInfo.Body) > 0 {
+		requestBody = w.requestInfo.Body
+	}
+
+	if loggerWithOptions, ok := w.logger.(interface {
+		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool) error
+	}); ok {
+		return loggerWithOptions.LogRequestWithOptions(
 			w.requestInfo.URL,
 			w.requestInfo.Method,
 			w.requestInfo.Headers,
-			w.requestInfo.Body,
-			finalStatusCode,
-			finalHeaders,
-			w.body.Bytes(),
+			requestBody,
+			statusCode,
+			headers,
+			body,
 			apiRequestBody,
 			apiResponseBody,
-			slicesAPIResponseError,
+			apiResponseErrors,
+			forceLog,
 		)
 	}
 
-	return nil
+	return w.logger.LogRequest(
+		w.requestInfo.URL,
+		w.requestInfo.Method,
+		w.requestInfo.Headers,
+		requestBody,
+		statusCode,
+		headers,
+		body,
+		apiRequestBody,
+		apiResponseBody,
+		apiResponseErrors,
+	)
 }
 
 // Status returns the HTTP response status code captured by the wrapper.

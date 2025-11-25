@@ -58,8 +58,14 @@ func (h *Handler) GetLogs(c *gin.Context) {
 		return
 	}
 
+	limit, errLimit := parseLimit(c.Query("limit"))
+	if errLimit != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid limit: %v", errLimit)})
+		return
+	}
+
 	cutoff := parseCutoff(c.Query("after"))
-	acc := newLogAccumulator(cutoff)
+	acc := newLogAccumulator(cutoff, limit)
 	for i := range files {
 		if errProcess := acc.consumeFile(files[i]); errProcess != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)})
@@ -139,6 +145,126 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 	})
 }
 
+// GetRequestErrorLogs lists error request log files when RequestLog is disabled.
+// It returns an empty list when RequestLog is enabled.
+func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+	if h.cfg.RequestLog {
+		c.JSON(http.StatusOK, gin.H{"files": []any{}})
+		return
+	}
+
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusOK, gin.H{"files": []any{}})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list request error logs: %v", err)})
+		return
+	}
+
+	type errorLog struct {
+		Name     string `json:"name"`
+		Size     int64  `json:"size"`
+		Modified int64  `json:"modified"`
+	}
+
+	files := make([]errorLog, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "error-") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		info, errInfo := entry.Info()
+		if errInfo != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log info for %s: %v", name, errInfo)})
+			return
+		}
+		files = append(files, errorLog{
+			Name:     name,
+			Size:     info.Size(),
+			Modified: info.ModTime().Unix(),
+		})
+	}
+
+	sort.Slice(files, func(i, j int) bool { return files[i].Modified > files[j].Modified })
+
+	c.JSON(http.StatusOK, gin.H{"files": files})
+}
+
+// DownloadRequestErrorLog downloads a specific error request log file by name.
+func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return
+	}
+
+	name := strings.TrimSpace(c.Param("name"))
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file name"})
+		return
+	}
+	if !strings.HasPrefix(name, "error-") || !strings.HasSuffix(name, ".log") {
+		c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
+		return
+	}
+
+	dirAbs, errAbs := filepath.Abs(dir)
+	if errAbs != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)})
+		return
+	}
+	fullPath := filepath.Clean(filepath.Join(dirAbs, name))
+	prefix := dirAbs + string(os.PathSeparator)
+	if !strings.HasPrefix(fullPath, prefix) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
+		return
+	}
+
+	info, errStat := os.Stat(fullPath)
+	if errStat != nil {
+		if os.IsNotExist(errStat) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errStat)})
+		return
+	}
+	if info.IsDir() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
+		return
+	}
+
+	c.FileAttachment(fullPath, name)
+}
+
 func (h *Handler) logDirectory() string {
 	if h == nil {
 		return ""
@@ -194,16 +320,22 @@ func (h *Handler) collectLogFiles(dir string) ([]string, error) {
 
 type logAccumulator struct {
 	cutoff  int64
+	limit   int
 	lines   []string
 	total   int
 	latest  int64
 	include bool
 }
 
-func newLogAccumulator(cutoff int64) *logAccumulator {
+func newLogAccumulator(cutoff int64, limit int) *logAccumulator {
+	capacity := 256
+	if limit > 0 && limit < capacity {
+		capacity = limit
+	}
 	return &logAccumulator{
 		cutoff: cutoff,
-		lines:  make([]string, 0, 256),
+		limit:  limit,
+		lines:  make([]string, 0, capacity),
 	}
 }
 
@@ -215,7 +347,9 @@ func (acc *logAccumulator) consumeFile(path string) error {
 		}
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	scanner := bufio.NewScanner(file)
 	buf := make([]byte, 0, logScannerInitialBuffer)
@@ -239,12 +373,19 @@ func (acc *logAccumulator) addLine(raw string) {
 	if ts > 0 {
 		acc.include = acc.cutoff == 0 || ts > acc.cutoff
 		if acc.cutoff == 0 || acc.include {
-			acc.lines = append(acc.lines, line)
+			acc.append(line)
 		}
 		return
 	}
 	if acc.cutoff == 0 || acc.include {
-		acc.lines = append(acc.lines, line)
+		acc.append(line)
+	}
+}
+
+func (acc *logAccumulator) append(line string) {
+	acc.lines = append(acc.lines, line)
+	if acc.limit > 0 && len(acc.lines) > acc.limit {
+		acc.lines = acc.lines[len(acc.lines)-acc.limit:]
 	}
 }
 
@@ -265,6 +406,21 @@ func parseCutoff(raw string) int64 {
 		return 0
 	}
 	return ts
+}
+
+func parseLimit(raw string) (int, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, nil
+	}
+	limit, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("must be a positive integer")
+	}
+	if limit <= 0 {
+		return 0, fmt.Errorf("must be greater than zero")
+	}
+	return limit, nil
 }
 
 func parseTimestamp(line string) int64 {

@@ -6,6 +6,7 @@ package middleware
 import (
 	"bytes"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -15,8 +16,8 @@ import (
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
-// and uses the provided RequestLogger to record this data. If logging is disabled in the
-// logger, the middleware has minimal overhead.
+// and uses the provided RequestLogger to record this data. When logging is disabled in the
+// logger, it still captures data so that upstream errors can be persisted.
 func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if logger == nil {
@@ -24,14 +25,13 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
-		path := c.Request.URL.Path
-		if !shouldLogRequest(path) {
+		if c.Request.Method == http.MethodGet {
 			c.Next()
 			return
 		}
 
-		// Early return if logging is disabled (zero overhead)
-		if !logger.IsEnabled() {
+		path := c.Request.URL.Path
+		if !shouldLogRequest(path) {
 			c.Next()
 			return
 		}
@@ -47,6 +47,9 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
+		if !logger.IsEnabled() {
+			wrapper.logOnErrorOnly = true
+		}
 		c.Writer = wrapper
 
 		// Process the request

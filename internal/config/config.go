@@ -23,6 +23,9 @@ type Config struct {
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
 
+	// TLS config controls HTTPS server settings.
+	TLS TLSConfig `yaml:"tls" json:"tls"`
+
 	// AmpUpstreamURL defines the upstream Amp control plane used for non-provider calls.
 	AmpUpstreamURL string `yaml:"amp-upstream-url" json:"amp-upstream-url"`
 
@@ -100,6 +103,8 @@ type Config struct {
 
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
+	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
+	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
@@ -115,6 +120,16 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+}
+
+// TLSConfig holds HTTPS server settings.
+type TLSConfig struct {
+	// Enable toggles HTTPS server mode.
+	Enable bool `yaml:"enable" json:"enable"`
+	// Cert is the path to the TLS certificate file.
+	Cert string `yaml:"cert" json:"cert"`
+	// Key is the path to the TLS private key file.
+	Key string `yaml:"key" json:"key"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.

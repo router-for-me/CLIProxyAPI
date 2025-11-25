@@ -1,6 +1,12 @@
 # Server port
 port: 8317
 
+# TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
+tls:
+  enable: false
+  cert: ""
+  key: ""
+
 # Management API settings
 remote-management:
   # Whether to allow remote (non-localhost) management access.
@@ -37,6 +43,9 @@ proxy-url: ""
 
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
+
+# Maximum wait time in seconds for a cooled-down credential before triggering a retry.
+max-retry-interval: 30
 
 # Quota exceeded behavior
 quota-exceeded:
