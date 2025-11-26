@@ -683,7 +683,7 @@ func geminiToAntigravity(modelName string, payload []byte) []byte {
 		}
 	}
 
-	if strings.HasPrefix(modelName, "claude-sonnet-") {
+	if strings.HasPrefix(modelName, "claude-sonnet-") || modelName == "claude-sonnet-4-5-thinking" {
 		gjson.Get(template, "request.tools").ForEach(func(key, tool gjson.Result) bool {
 			tool.Get("functionDeclarations").ForEach(func(funKey, funcDecl gjson.Result) bool {
 				if funcDecl.Get("parametersJsonSchema").Exists() {
