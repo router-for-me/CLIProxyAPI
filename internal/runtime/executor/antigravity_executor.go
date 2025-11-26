@@ -683,6 +683,16 @@ func geminiToAntigravity(modelName string, payload []byte) []byte {
 		}
 	}
 
+	if strings.Contains(modelName, "claude") && strings.HasSuffix(modelName, "-thinking") {
+		thinkingBudget := int(gjson.Get(template, "request.generationConfig.thinkingConfig.thinkingBudget").Int())
+		if thinkingBudget <= 0 {
+			thinkingBudget = 8192
+			template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", thinkingBudget)
+			template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.include_thoughts", true)
+		}
+		template, _ = sjson.Set(template, "request.generationConfig.maxOutputTokens", thinkingBudget+16000)
+	}
+
 	if strings.HasPrefix(modelName, "claude-sonnet-") {
 		gjson.Get(template, "request.tools").ForEach(func(key, tool gjson.Result) bool {
 			tool.Get("functionDeclarations").ForEach(func(funKey, funcDecl gjson.Result) bool {
