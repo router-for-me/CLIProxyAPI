@@ -88,6 +88,9 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 	}
 
+		if n := gjson.GetBytes(rawJSON, "n"); n.Exists() && n.Type == gjson.Number && n.Int() > 0 {
+		out, _ = sjson.SetBytes(out, "generationConfig.candidateCount", n.Int())
+	}
 	// Temperature/top_p/top_k
 	if tr := gjson.GetBytes(rawJSON, "temperature"); tr.Exists() && tr.Type == gjson.Number {
 		out, _ = sjson.SetBytes(out, "generationConfig.temperature", tr.Num)

@@ -88,6 +88,9 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 		}
 	}
 
+	if n := gjson.GetBytes(rawJSON, "n"); n.Exists() && n.Type == gjson.Number && n.Int() > 0 {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.candidateCount", n.Int())
+	}
 	// For gemini-3-pro-preview, always send default thinkingConfig when none specified.
 	// This matches the official Gemini CLI behavior which always sends:
 	// { thinkingBudget: -1, includeThoughts: true }
