@@ -1168,6 +1168,10 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 						attrs["models_hash"] = hash
 					}
 					addConfigHeadersToAttrs(compat.Headers, attrs)
+					addConfigQueryParamsToAttrs(compat.QueryParams, attrs)
+					if wireAPI := strings.TrimSpace(compat.WireAPI); wireAPI != "" {
+						attrs["wire_api"] = wireAPI
+					}
 					a := &coreauth.Auth{
 						ID:         id,
 						Provider:   providerName,
@@ -1201,6 +1205,10 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 						attrs["models_hash"] = hash
 					}
 					addConfigHeadersToAttrs(compat.Headers, attrs)
+					addConfigQueryParamsToAttrs(compat.QueryParams, attrs)
+					if wireAPI := strings.TrimSpace(compat.WireAPI); wireAPI != "" {
+						attrs["wire_api"] = wireAPI
+					}
 					a := &coreauth.Auth{
 						ID:         id,
 						Provider:   providerName,
@@ -1227,6 +1235,10 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 					attrs["models_hash"] = hash
 				}
 				addConfigHeadersToAttrs(compat.Headers, attrs)
+				addConfigQueryParamsToAttrs(compat.QueryParams, attrs)
+				if wireAPI := strings.TrimSpace(compat.WireAPI); wireAPI != "" {
+					attrs["wire_api"] = wireAPI
+				}
 				a := &coreauth.Auth{
 					ID:         id,
 					Provider:   providerName,
@@ -1808,6 +1820,17 @@ func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string)
 			continue
 		}
 		attrs["header:"+key] = val
+	}
+}
+
+func addConfigQueryParamsToAttrs(queryParams map[string]string, attrs map[string]string) {
+	for qk, qv := range queryParams {
+		key := strings.TrimSpace(qk)
+		val := strings.TrimSpace(qv)
+		if key == "" || val == "" {
+			continue
+		}
+		attrs["query:"+key] = val
 	}
 }
 
