@@ -108,6 +108,9 @@ ws-auth: false
 #openai-compatibility:
 #  - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #    base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#    wire-api: "chat" # Optional: "chat" (default) uses /chat/completions, "responses" uses /responses endpoint
+#    query-params: # Optional: query parameters appended to all requests
+#      api-version: "2024-02-01"
 #    headers:
 #      X-Custom-Header: "custom-value"
 #    # New format with per-key proxy support (recommended):
@@ -122,6 +125,15 @@ ws-auth: false
 #    models: # The models supported by the provider.
 #      - name: "moonshotai/kimi-k2:free" # The actual model name.
 #        alias: "kimi-k2" # The alias used in the API.
+#
+#  # Example: Azure OpenAI configuration
+#  - name: "azure-openai"
+#    base-url: "https://myresource.openai.azure.com/openai/deployments/gpt-4"
+#    wire-api: "chat"
+#    query-params:
+#      api-version: "2024-02-01"
+#    api-key-entries:
+#      - api-key: "your-azure-api-key"
 
 #payload: # Optional payload configuration
 #  default: # Default rules only set parameters when they are missing in the payload.
