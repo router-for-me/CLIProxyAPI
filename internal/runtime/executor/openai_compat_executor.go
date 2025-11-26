@@ -50,16 +50,22 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return
 	}
 
-	// Translate inbound request to OpenAI format
+	// Determine target format based on wire API
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
+	wireAPI := e.resolveWireAPI(auth)
+	var to sdktranslator.Format
+	if wireAPI == "responses" {
+		to = sdktranslator.FromString("openai-response")
+	} else {
+		to = sdktranslator.FromString("openai")
+	}
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), opts.Stream)
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		translated = e.overrideModel(translated, modelOverride)
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := e.buildRequestURL(baseURL, auth)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return resp, err
@@ -137,14 +143,20 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
+	wireAPI := e.resolveWireAPI(auth)
+	var to sdktranslator.Format
+	if wireAPI == "responses" {
+		to = sdktranslator.FromString("openai-response")
+	} else {
+		to = sdktranslator.FromString("openai")
+	}
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		translated = e.overrideModel(translated, modelOverride)
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := e.buildRequestURL(baseURL, auth)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -277,6 +289,38 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
 	return
+}
+
+func (e *OpenAICompatExecutor) resolveWireAPI(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Attributes == nil {
+		return "chat"
+	}
+	wireAPI := strings.TrimSpace(auth.Attributes["wire_api"])
+	if wireAPI == "responses" {
+		return "responses"
+	}
+	return "chat"
+}
+
+func (e *OpenAICompatExecutor) buildRequestURL(baseURL string, auth *cliproxyauth.Auth) string {
+	wireAPI := e.resolveWireAPI(auth)
+
+	// Determine endpoint path based on wire API
+	var endpoint string
+	if wireAPI == "responses" {
+		endpoint = "/responses"
+	} else {
+		endpoint = "/chat/completions"
+	}
+
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
+
+	// Apply query params from auth attributes
+	if auth != nil {
+		url = util.ApplyCustomQueryParamsFromAttrs(url, auth.Attributes)
+	}
+
+	return url
 }
 
 func (e *OpenAICompatExecutor) resolveUpstreamModel(alias string, auth *cliproxyauth.Auth) string {
