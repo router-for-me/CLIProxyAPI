@@ -304,16 +304,22 @@ func (e *OpenAICompatExecutor) resolveWireAPI(auth *cliproxyauth.Auth) string {
 
 func (e *OpenAICompatExecutor) buildRequestURL(baseURL string, auth *cliproxyauth.Auth) string {
 	wireAPI := e.resolveWireAPI(auth)
+	normalizedBase := strings.TrimSuffix(baseURL, "/")
 
 	// Determine endpoint path based on wire API
 	var endpoint string
 	if wireAPI == "responses" {
-		endpoint = "/responses"
+		// For responses API, ensure /v1/responses path unless base already ends with /v1
+		if strings.HasSuffix(normalizedBase, "/v1") {
+			endpoint = "/responses"
+		} else {
+			endpoint = "/v1/responses"
+		}
 	} else {
 		endpoint = "/chat/completions"
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + endpoint
+	url := normalizedBase + endpoint
 
 	// Apply query params from auth attributes
 	if auth != nil {

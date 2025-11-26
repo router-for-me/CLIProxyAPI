@@ -126,9 +126,19 @@ ws-auth: false
 #      - name: "moonshotai/kimi-k2:free" # The actual model name.
 #        alias: "kimi-k2" # The alias used in the API.
 #
-#  # Example: Azure OpenAI configuration
-#  - name: "azure-openai"
-#    base-url: "https://myresource.openai.azure.com/openai/deployments/gpt-4"
+#  # Example: Azure OpenAI Responses API
+#  # Note: base-url should include everything up to (but not including) /chat/completions or /responses
+#  - name: "azure-openai-responses"
+#    base-url: "https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1"
+#    wire-api: "responses"
+#    query-params:
+#      api-version: "preview"
+#    api-key-entries:
+#      - api-key: "your-azure-api-key"
+#
+#  # Example: Azure OpenAI Chat Completions API (deployment-specific)
+#  - name: "azure-openai-chat"
+#    base-url: "https://YOUR-RESOURCE-NAME.openai.azure.com/openai/deployments/gpt-4"
 #    wire-api: "chat"
 #    query-params:
 #      api-version: "2024-02-01"
