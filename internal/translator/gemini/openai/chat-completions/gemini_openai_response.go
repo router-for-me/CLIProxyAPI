@@ -116,8 +116,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 				thoughtSignatureResult = partResult.Get("thought_signature")
 			}
 
-			// Skip thoughtSignature parts (encrypted reasoning not exposed downstream).
-			if thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != "" {
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+
+			// Skip pure thoughtSignature parts but keep any actual payload in the same part.
+			if hasThoughtSignature && !hasContentPayload {
 				continue
 			}
 

@@ -181,5 +181,3 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 	log.Debug("Amp config updated (restart required for URL changes)")
 	return nil
 }
-
-

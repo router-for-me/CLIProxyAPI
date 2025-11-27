@@ -71,7 +71,7 @@ func (h *GeminiAPIHandler) GeminiGetHandler(c *gin.Context) {
 	switch request.Action {
 	case "gemini-3-pro-preview":
 		c.JSON(http.StatusOK, gin.H{
-			"name":             "gemini-3-pro-preview",
+			"name":             "models/gemini-3-pro-preview",
 			"version":          "3",
 			"displayName":      "Gemini 3 Pro Preview",
 			"description":      "Gemini 3 Pro Preview",
