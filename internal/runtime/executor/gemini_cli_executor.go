@@ -60,10 +60,13 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
+	// Inject reasoning_effort for Gemini 3 model variants
+	payload := injectGemini3ReasoningEffort(req.Model, req.Payload, req.Metadata)
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 	budgetOverride, includeOverride, hasOverride := util.GeminiThinkingFromMetadata(req.Metadata)
-	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(payload), false)
 	if hasOverride && util.ModelSupportsThinking(req.Model) {
 		if budgetOverride != nil {
 			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
@@ -202,10 +205,13 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
+	// Inject reasoning_effort for Gemini 3 model variants
+	payload := injectGemini3ReasoningEffort(req.Model, req.Payload, req.Metadata)
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 	budgetOverride, includeOverride, hasOverride := util.GeminiThinkingFromMetadata(req.Metadata)
-	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(payload), true)
 	if hasOverride && util.ModelSupportsThinking(req.Model) {
 		if budgetOverride != nil {
 			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
@@ -778,6 +784,27 @@ func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 		}
 	}
 	return err
+}
+
+// injectGemini3ReasoningEffort injects reasoning_effort for Gemini 3 model variants.
+// Checks metadata first (from normalized model), then falls back to model name suffix.
+func injectGemini3ReasoningEffort(modelName string, body []byte, metadata map[string]any) []byte {
+	if gjson.GetBytes(body, "reasoning_effort").Exists() {
+		return body
+	}
+	// First check metadata (set during model normalization)
+	if effort, ok := util.Gemini3ReasoningEffortFromMetadata(metadata); ok {
+		body, _ = sjson.SetBytes(body, "reasoning_effort", effort)
+		return body
+	}
+	// Fall back to model name suffix check
+	switch {
+	case strings.HasSuffix(modelName, "-low"):
+		body, _ = sjson.SetBytes(body, "reasoning_effort", "low")
+	case strings.HasSuffix(modelName, "-high"):
+		body, _ = sjson.SetBytes(body, "reasoning_effort", "high")
+	}
+	return body
 }
 
 // parseRetryDelay extracts the retry delay from a Google API 429 error response.
