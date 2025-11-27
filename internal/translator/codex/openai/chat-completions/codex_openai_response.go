@@ -20,10 +20,11 @@ var (
 
 // ConvertCliToOpenAIParams holds parameters for response conversion.
 type ConvertCliToOpenAIParams struct {
-	ResponseID        string
-	CreatedAt         int64
-	Model             string
-	FunctionCallIndex int
+	ResponseID              string
+	CreatedAt               int64
+	Model                   string
+	FunctionCallIndex       int
+	AccumulatedReasoningLen int // Track reasoning content length for token estimation
 }
 
 // ConvertCodexResponseToOpenAI translates a single chunk of a streaming response from the
@@ -90,8 +91,17 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		if inputTokensResult := usageResult.Get("input_tokens"); inputTokensResult.Exists() {
 			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokensResult.Int())
 		}
-		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
+		// Extract reasoning tokens from upstream, or estimate from accumulated content
+		reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens")
+		if reasoningTokensResult.Exists() && reasoningTokensResult.Int() > 0 {
 			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int())
+		} else if (*param).(*ConvertCliToOpenAIParams).AccumulatedReasoningLen > 0 {
+			// Estimate reasoning tokens from accumulated content (approx 4 chars per token)
+			estimatedTokens := int64((*param).(*ConvertCliToOpenAIParams).AccumulatedReasoningLen / 4)
+			if estimatedTokens == 0 {
+				estimatedTokens = 1
+			}
+			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", estimatedTokens)
 		}
 	}
 
@@ -99,6 +109,8 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
 			template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", deltaResult.String())
+			// Accumulate reasoning content length for token estimation
+			(*param).(*ConvertCliToOpenAIParams).AccumulatedReasoningLen += len(deltaResult.String())
 		}
 	} else if dataType == "response.reasoning_summary_text.done" {
 		template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
@@ -194,6 +206,9 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		template, _ = sjson.Set(template, "id", idResult.String())
 	}
 
+	// Track upstream reasoning tokens for later estimation
+	var upstreamReasoningTokens int64
+
 	// Extract and set usage metadata (token counts).
 	if usageResult := responseResult.Get("usage"); usageResult.Exists() {
 		if outputTokensResult := usageResult.Get("output_tokens"); outputTokensResult.Exists() {
@@ -206,7 +221,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokensResult.Int())
 		}
 		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int())
+			upstreamReasoningTokens = reasoningTokensResult.Int()
 		}
 	}
 
@@ -275,9 +290,24 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 			template, _ = sjson.Set(template, "choices.0.message.role", "assistant")
 		}
 
+		// Calculate reasoning tokens
+		var reasoningTokens int64
+		if upstreamReasoningTokens > 0 {
+			reasoningTokens = upstreamReasoningTokens
+		} else if reasoningText != "" {
+			// Estimate from reasoning content (approx 4 chars per token)
+			reasoningTokens = int64(len(reasoningText) / 4)
+			if reasoningTokens == 0 {
+				reasoningTokens = 1
+			}
+		}
+
 		if reasoningText != "" {
 			template, _ = sjson.Set(template, "choices.0.message.reasoning_content", reasoningText)
 			template, _ = sjson.Set(template, "choices.0.message.role", "assistant")
+		}
+		if reasoningTokens > 0 {
+			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokens)
 		}
 
 		// Add tool calls if any
