@@ -140,10 +140,8 @@ func IsOAuthError(err error) bool {
 
 // GetUserFriendlyMessage returns a user-friendly error message based on the error type.
 func GetUserFriendlyMessage(err error) string {
-	switch {
-	case IsAuthenticationError(err):
-		var authErr *AuthenticationError
-		errors.As(err, &authErr)
+	var authErr *AuthenticationError
+	if errors.As(err, &authErr) {
 		switch authErr.Type {
 		case "device_code_failed":
 			return "Failed to start GitHub authentication. Please check your network connection and try again."
@@ -164,9 +162,10 @@ func GetUserFriendlyMessage(err error) string {
 		default:
 			return "Authentication failed. Please try again."
 		}
-	case IsOAuthError(err):
-		var oauthErr *OAuthError
-		errors.As(err, &oauthErr)
+	}
+
+	var oauthErr *OAuthError
+	if errors.As(err, &oauthErr) {
 		switch oauthErr.Code {
 		case "access_denied":
 			return "Authentication was cancelled or denied."
@@ -177,7 +176,7 @@ func GetUserFriendlyMessage(err error) string {
 		default:
 			return fmt.Sprintf("Authentication failed: %s", oauthErr.Description)
 		}
-	default:
-		return "An unexpected error occurred. Please try again."
 	}
+
+	return "An unexpected error occurred. Please try again."
 }

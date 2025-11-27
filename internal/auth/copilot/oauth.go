@@ -3,6 +3,7 @@ package copilot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -118,12 +119,7 @@ func (c *DeviceFlowClient) PollForToken(ctx context.Context, deviceCode *DeviceC
 			token, err := c.exchangeDeviceCode(ctx, deviceCode.DeviceCode)
 			if err != nil {
 				var authErr *AuthenticationError
-				if IsAuthenticationError(err) {
-					if ok := (err.(*AuthenticationError)); ok != nil {
-						authErr = ok
-					}
-				}
-				if authErr != nil {
+				if errors.As(err, &authErr) {
 					switch authErr.Type {
 					case ErrAuthorizationPending.Type:
 						// Continue polling
