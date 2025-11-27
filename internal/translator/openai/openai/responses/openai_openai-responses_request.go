@@ -202,6 +202,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			out, _ = sjson.Set(out, "reasoning_effort", "medium")
 		case "high":
 			out, _ = sjson.Set(out, "reasoning_effort", "high")
+		case "xhigh":
+			out, _ = sjson.Set(out, "reasoning_effort", "xhigh")
 		default:
 			out, _ = sjson.Set(out, "reasoning_effort", "auto")
 		}
