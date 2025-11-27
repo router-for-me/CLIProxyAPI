@@ -73,13 +73,29 @@ func ParseGeminiThinkingSuffix(model string) (string, *int, *bool, bool) {
 }
 
 func NormalizeGeminiThinkingModel(modelName string) (string, map[string]any) {
-	baseModel, budget, include, matched := ParseGeminiThinkingSuffix(modelName)
+	// First try Gemini 3 reasoning effort normalization (-low/-high suffix)
+	workingModel := modelName
+	var metadata map[string]any
+
+	if base, effort, matched := ParseGemini3ReasoningEffortSuffix(modelName); matched {
+		workingModel = base
+		metadata = map[string]any{
+			Gemini3OriginalModelMetadataKey:   modelName,
+			Gemini3ReasoningEffortMetadataKey: effort,
+		}
+	}
+
+	// Then try thinking suffix normalization on the (possibly already normalized) model
+	baseModel, budget, include, matched := ParseGeminiThinkingSuffix(workingModel)
 	if !matched {
-		return baseModel, nil
+		return workingModel, metadata
 	}
-	metadata := map[string]any{
-		GeminiOriginalModelMetadataKey: modelName,
+
+	// Merge thinking metadata
+	if metadata == nil {
+		metadata = map[string]any{}
 	}
+	metadata[GeminiOriginalModelMetadataKey] = modelName
 	if budget != nil {
 		metadata[GeminiThinkingBudgetMetadataKey] = *budget
 	}
@@ -267,4 +283,56 @@ func ConvertThinkingLevelToBudget(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+const (
+	Gemini3ReasoningEffortMetadataKey = "gemini3_reasoning_effort"
+	Gemini3OriginalModelMetadataKey   = "gemini3_original_model"
+)
+
+// ParseGemini3ReasoningEffortSuffix parses -low or -high suffix from Gemini 3 model names.
+// Returns the base model, reasoning effort ("low" or "high"), and whether a match was found.
+func ParseGemini3ReasoningEffortSuffix(model string) (baseModel string, reasoningEffort string, matched bool) {
+	if model == "" {
+		return model, "", false
+	}
+	lower := strings.ToLower(model)
+	if !strings.HasPrefix(lower, "gemini-3-") {
+		return model, "", false
+	}
+
+	if strings.HasSuffix(lower, "-low") {
+		return model[:len(model)-len("-low")], "low", true
+	}
+	if strings.HasSuffix(lower, "-high") {
+		return model[:len(model)-len("-high")], "high", true
+	}
+	return model, "", false
+}
+
+// NormalizeGemini3ReasoningEffortModel normalizes a Gemini 3 model with -low/-high suffix.
+// Returns the base model name and metadata containing the reasoning effort.
+func NormalizeGemini3ReasoningEffortModel(modelName string) (string, map[string]any) {
+	baseModel, effort, matched := ParseGemini3ReasoningEffortSuffix(modelName)
+	if !matched {
+		return modelName, nil
+	}
+	metadata := map[string]any{
+		Gemini3OriginalModelMetadataKey:   modelName,
+		Gemini3ReasoningEffortMetadataKey: effort,
+	}
+	return baseModel, metadata
+}
+
+// Gemini3ReasoningEffortFromMetadata extracts reasoning effort from metadata.
+func Gemini3ReasoningEffortFromMetadata(metadata map[string]any) (string, bool) {
+	if len(metadata) == 0 {
+		return "", false
+	}
+	if effort, ok := metadata[Gemini3ReasoningEffortMetadataKey]; ok {
+		if s, ok := effort.(string); ok && s != "" {
+			return s, true
+		}
+	}
+	return "", false
 }
