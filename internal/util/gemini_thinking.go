@@ -259,3 +259,9 @@ func ConvertThinkingLevelToBudget(body []byte) []byte {
 	}
 	return updated
 }
+
+// IsGemini3Model returns true if the model is a Gemini 3 model (uses thinkingLevel instead of thinkingBudget).
+func IsGemini3Model(model string) bool {
+	lower := strings.ToLower(model)
+	return strings.HasPrefix(lower, "gemini-3-")
+}
