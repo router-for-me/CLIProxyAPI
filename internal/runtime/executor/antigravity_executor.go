@@ -26,18 +26,20 @@ import (
 )
 
 const (
-	antigravityBaseURLDaily        = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLAutopush     = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLProd         = "https://cloudcode-pa.googleapis.com"
-	antigravityStreamPath          = "/v1internal:streamGenerateContent"
-	antigravityGeneratePath        = "/v1internal:generateContent"
-	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
-	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret        = "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"
-	defaultAntigravityAgent        = "antigravity/1.11.5 windows/amd64"
-	antigravityAuthType            = "antigravity"
-	refreshSkew                    = 3000 * time.Second
-	streamScannerBuffer        int = 20_971_520
+	antigravityBaseURLDaily          = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	antigravityBaseURLAutopush       = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
+	antigravityBaseURLProd           = "https://cloudcode-pa.googleapis.com"
+	antigravityStreamPath            = "/v1internal:streamGenerateContent"
+	antigravityGeneratePath          = "/v1internal:generateContent"
+	antigravityModelsPath            = "/v1internal:fetchAvailableModels"
+	antigravityClientID              = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	antigravityClientSecret          = "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"
+	defaultAntigravityAgent          = "antigravity/1.11.5 windows/amd64"
+	antigravityAuthType              = "antigravity"
+	refreshSkew                      = 3000 * time.Second
+	streamScannerBuffer          int = 20_971_520
+	defaultClaudeThinkingBudget      = 8192
+	claudeMaxOutputTokensPadding     = 16000
 )
 
 var randSource = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -683,14 +685,26 @@ func geminiToAntigravity(modelName string, payload []byte) []byte {
 		}
 	}
 
-	if strings.Contains(modelName, "claude") && strings.HasSuffix(modelName, "-thinking") {
+	if strings.Contains(modelName, "claude") && strings.Contains(modelName, "-thinking") {
 		thinkingBudget := int(gjson.Get(template, "request.generationConfig.thinkingConfig.thinkingBudget").Int())
 		if thinkingBudget <= 0 {
-			thinkingBudget = 8192
-			template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", thinkingBudget)
-			template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.include_thoughts", true)
+			thinkingBudget = defaultClaudeThinkingBudget
+			if result, err := sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", thinkingBudget); err != nil {
+				log.Warnf("antigravity executor: failed to set thinkingBudget: %v", err)
+			} else {
+				template = result
+			}
+			if result, err := sjson.Set(template, "request.generationConfig.thinkingConfig.include_thoughts", true); err != nil {
+				log.Warnf("antigravity executor: failed to set include_thoughts: %v", err)
+			} else {
+				template = result
+			}
 		}
-		template, _ = sjson.Set(template, "request.generationConfig.maxOutputTokens", thinkingBudget+16000)
+		if result, err := sjson.Set(template, "request.generationConfig.maxOutputTokens", thinkingBudget+claudeMaxOutputTokensPadding); err != nil {
+			log.Warnf("antigravity executor: failed to set maxOutputTokens: %v", err)
+		} else {
+			template = result
+		}
 	}
 
 	if strings.HasPrefix(modelName, "claude-sonnet-") {
