@@ -17,6 +17,7 @@ import (
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -58,18 +59,27 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		body, _ = sjson.SetBytes(body, "model", modelOverride)
 		modelForUpstream = modelOverride
 	}
+	// Inject thinking config based on model suffix for thinking variants
+	body = e.injectThinkingConfig(req.Model, body)
 
 	if !strings.HasPrefix(modelForUpstream, "claude-3-5-haiku") {
-		body, _ = sjson.SetRawBytes(body, "system", []byte(misc.ClaudeCodeInstructions))
+		body = checkSystemInstructions(body)
 	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
+
+	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
+	body = ensureMaxTokensForThinking(req.Model, body)
+
+	// Extract betas from body and convert to header
+	var extraBetas []string
+	extraBetas, body = extractAndRemoveBetas(body)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -154,15 +164,24 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
 		body, _ = sjson.SetBytes(body, "model", modelOverride)
 	}
-	body, _ = sjson.SetRawBytes(body, "system", []byte(misc.ClaudeCodeInstructions))
+	// Inject thinking config based on model suffix for thinking variants
+	body = e.injectThinkingConfig(req.Model, body)
+	body = checkSystemInstructions(body)
 	body = applyPayloadConfig(e.cfg, req.Model, body)
+
+	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
+	body = ensureMaxTokensForThinking(req.Model, body)
+
+	// Extract betas from body and convert to header
+	var extraBetas []string
+	extraBetas, body = extractAndRemoveBetas(body)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true)
+	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -283,15 +302,19 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	if !strings.HasPrefix(modelForUpstream, "claude-3-5-haiku") {
-		body, _ = sjson.SetRawBytes(body, "system", []byte(misc.ClaudeCodeInstructions))
+		body = checkSystemInstructions(body)
 	}
+
+	// Extract betas from body and convert to header (for count_tokens too)
+	var extraBetas []string
+	extraBetas, body = extractAndRemoveBetas(body)
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -383,9 +406,100 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	return auth, nil
 }
 
+// extractAndRemoveBetas extracts the "betas" array from the body and removes it.
+// Returns the extracted betas as a string slice and the modified body.
+func extractAndRemoveBetas(body []byte) ([]string, []byte) {
+	betasResult := gjson.GetBytes(body, "betas")
+	if !betasResult.Exists() {
+		return nil, body
+	}
+	var betas []string
+	if betasResult.IsArray() {
+		for _, item := range betasResult.Array() {
+			if s := strings.TrimSpace(item.String()); s != "" {
+				betas = append(betas, s)
+			}
+		}
+	} else if s := strings.TrimSpace(betasResult.String()); s != "" {
+		betas = append(betas, s)
+	}
+	body, _ = sjson.DeleteBytes(body, "betas")
+	return betas, body
+}
+
+// injectThinkingConfig adds thinking configuration based on model name suffix
+func (e *ClaudeExecutor) injectThinkingConfig(modelName string, body []byte) []byte {
+	// Only inject if thinking config is not already present
+	if gjson.GetBytes(body, "thinking").Exists() {
+		return body
+	}
+
+	var budgetTokens int
+	switch {
+	case strings.HasSuffix(modelName, "-thinking-low"):
+		budgetTokens = 1024
+	case strings.HasSuffix(modelName, "-thinking-medium"):
+		budgetTokens = 8192
+	case strings.HasSuffix(modelName, "-thinking-high"):
+		budgetTokens = 24576
+	case strings.HasSuffix(modelName, "-thinking"):
+		// Default thinking without suffix uses medium budget
+		budgetTokens = 8192
+	default:
+		return body
+	}
+
+	body, _ = sjson.SetBytes(body, "thinking.type", "enabled")
+	body, _ = sjson.SetBytes(body, "thinking.budget_tokens", budgetTokens)
+	return body
+}
+
+// ensureMaxTokensForThinking ensures max_tokens > thinking.budget_tokens when thinking is enabled.
+// Anthropic API requires this constraint; violating it returns a 400 error.
+// This function should be called after all thinking configuration is finalized.
+// It looks up the model's MaxCompletionTokens from the registry to use as the cap.
+func ensureMaxTokensForThinking(modelName string, body []byte) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "enabled" {
+		return body
+	}
+
+	budgetTokens := gjson.GetBytes(body, "thinking.budget_tokens").Int()
+	if budgetTokens <= 0 {
+		return body
+	}
+
+	maxTokens := gjson.GetBytes(body, "max_tokens").Int()
+
+	// Look up the model's max completion tokens from the registry
+	maxCompletionTokens := 0
+	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(modelName); modelInfo != nil {
+		maxCompletionTokens = modelInfo.MaxCompletionTokens
+	}
+
+	// Fall back to budget + buffer if registry lookup fails or returns 0
+	const fallbackBuffer = 4000
+	requiredMaxTokens := budgetTokens + fallbackBuffer
+	if maxCompletionTokens > 0 {
+		requiredMaxTokens = int64(maxCompletionTokens)
+	}
+
+	if maxTokens < requiredMaxTokens {
+		body, _ = sjson.SetBytes(body, "max_tokens", requiredMaxTokens)
+	}
+	return body
+}
+
 func (e *ClaudeExecutor) resolveUpstreamModel(alias string, auth *cliproxyauth.Auth) string {
 	if alias == "" {
 		return ""
+	}
+	// Hardcoded mappings for thinking models to actual Claude model names
+	switch alias {
+	case "claude-opus-4-5-thinking", "claude-opus-4-5-thinking-low", "claude-opus-4-5-thinking-medium", "claude-opus-4-5-thinking-high":
+		return "claude-opus-4-5-20251101"
+	case "claude-sonnet-4-5-thinking":
+		return "claude-sonnet-4-5-20250929"
 	}
 	entry := e.resolveClaudeConfig(auth)
 	if entry == nil {
@@ -530,7 +644,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool) {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string) {
 	r.Header.Set("Authorization", "Bearer "+apiKey)
 	r.Header.Set("Content-Type", "application/json")
 
@@ -539,14 +653,29 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		ginHeaders = ginCtx.Request.Header
 	}
 
+	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
+		baseBetas = val
 		if !strings.Contains(val, "oauth") {
-			val += ",oauth-2025-04-20"
+			baseBetas += ",oauth-2025-04-20"
 		}
-		r.Header.Set("Anthropic-Beta", val)
-	} else {
-		r.Header.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
 	}
+
+	// Merge extra betas from request body
+	if len(extraBetas) > 0 {
+		existingSet := make(map[string]bool)
+		for _, b := range strings.Split(baseBetas, ",") {
+			existingSet[strings.TrimSpace(b)] = true
+		}
+		for _, beta := range extraBetas {
+			beta = strings.TrimSpace(beta)
+			if beta != "" && !existingSet[beta] {
+				baseBetas += "," + beta
+				existingSet[beta] = true
+			}
+		}
+	}
+	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
@@ -589,4 +718,23 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+func checkSystemInstructions(payload []byte) []byte {
+	system := gjson.GetBytes(payload, "system")
+	claudeCodeInstructions := `[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}]`
+	if system.IsArray() {
+		if gjson.GetBytes(payload, "system.0.text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
+			system.ForEach(func(_, part gjson.Result) bool {
+				if part.Get("type").String() == "text" {
+					claudeCodeInstructions, _ = sjson.SetRaw(claudeCodeInstructions, "-1", part.Raw)
+				}
+				return true
+			})
+			payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
+		}
+	} else {
+		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
+	}
+	return payload
 }

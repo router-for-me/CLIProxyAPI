@@ -365,7 +365,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		for id := range result.Map() {
 			id = modelName2Alias(id)
 			if id != "" {
-				models = append(models, &registry.ModelInfo{
+				modelInfo := &registry.ModelInfo{
 					ID:          id,
 					Name:        id,
 					Description: id,
@@ -375,7 +375,17 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 					Created:     now,
 					OwnedBy:     antigravityAuthType,
 					Type:        antigravityAuthType,
-				})
+				}
+				// Add Thinking support for thinking models
+				if strings.HasSuffix(id, "-thinking") || strings.Contains(id, "-thinking-") {
+					modelInfo.Thinking = &registry.ThinkingSupport{
+						Min:            1024,
+						Max:            100000,
+						ZeroAllowed:    false,
+						DynamicAllowed: true,
+					}
+				}
+				models = append(models, modelInfo)
 			}
 		}
 		return models

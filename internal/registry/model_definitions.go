@@ -8,20 +8,79 @@ func GetClaudeModels() []*ModelInfo {
 	return []*ModelInfo{
 
 		{
-			ID:          "claude-haiku-4-5-20251001",
-			Object:      "model",
-			Created:     1759276800, // 2025-10-01
-			OwnedBy:     "anthropic",
-			Type:        "claude",
-			DisplayName: "Claude 4.5 Haiku",
+			ID:                  "claude-haiku-4-5-20251001",
+			Object:              "model",
+			Created:             1759276800, // 2025-10-01
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.5 Haiku",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
 		},
 		{
-			ID:          "claude-sonnet-4-5-20250929",
-			Object:      "model",
-			Created:     1759104000, // 2025-09-29
-			OwnedBy:     "anthropic",
-			Type:        "claude",
-			DisplayName: "Claude 4.5 Sonnet",
+			ID:                  "claude-sonnet-4-5-20250929",
+			Object:              "model",
+			Created:             1759104000, // 2025-09-29
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.5 Sonnet",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "claude-sonnet-4-5-thinking",
+			Object:              "model",
+			Created:             1759104000, // 2025-09-29
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.5 Sonnet Thinking",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
+		},
+		{
+			ID:                  "claude-opus-4-5-thinking",
+			Object:              "model",
+			Created:             1761955200, // 2025-11-01
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.5 Opus Thinking",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
+		},
+		{
+			ID:                  "claude-opus-4-5-thinking-low",
+			Object:              "model",
+			Created:             1761955200, // 2025-11-01
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.5 Opus Thinking Low",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
+		},
+		{
+			ID:                  "claude-opus-4-5-thinking-medium",
+			Object:              "model",
+			Created:             1761955200, // 2025-11-01
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.5 Opus Thinking Medium",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
+		},
+		{
+			ID:                  "claude-opus-4-5-thinking-high",
+			Object:              "model",
+			Created:             1761955200, // 2025-11-01
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.5 Opus Thinking High",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
 			ID:                  "claude-opus-4-5-20251101",
@@ -35,44 +94,54 @@ func GetClaudeModels() []*ModelInfo {
 			MaxCompletionTokens: 64000,
 		},
 		{
-			ID:          "claude-opus-4-1-20250805",
-			Object:      "model",
-			Created:     1722945600, // 2025-08-05
-			OwnedBy:     "anthropic",
-			Type:        "claude",
-			DisplayName: "Claude 4.1 Opus",
+			ID:                  "claude-opus-4-1-20250805",
+			Object:              "model",
+			Created:             1722945600, // 2025-08-05
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.1 Opus",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32000,
 		},
 		{
-			ID:          "claude-opus-4-20250514",
-			Object:      "model",
-			Created:     1715644800, // 2025-05-14
-			OwnedBy:     "anthropic",
-			Type:        "claude",
-			DisplayName: "Claude 4 Opus",
+			ID:                  "claude-opus-4-20250514",
+			Object:              "model",
+			Created:             1715644800, // 2025-05-14
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4 Opus",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32000,
 		},
 		{
-			ID:          "claude-sonnet-4-20250514",
-			Object:      "model",
-			Created:     1715644800, // 2025-05-14
-			OwnedBy:     "anthropic",
-			Type:        "claude",
-			DisplayName: "Claude 4 Sonnet",
+			ID:                  "claude-sonnet-4-20250514",
+			Object:              "model",
+			Created:             1715644800, // 2025-05-14
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4 Sonnet",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
 		},
 		{
-			ID:          "claude-3-7-sonnet-20250219",
-			Object:      "model",
-			Created:     1708300800, // 2025-02-19
-			OwnedBy:     "anthropic",
-			Type:        "claude",
-			DisplayName: "Claude 3.7 Sonnet",
+			ID:                  "claude-3-7-sonnet-20250219",
+			Object:              "model",
+			Created:             1708300800, // 2025-02-19
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 3.7 Sonnet",
+			ContextLength:       128000,
+			MaxCompletionTokens: 8192,
 		},
 		{
-			ID:          "claude-3-5-haiku-20241022",
-			Object:      "model",
-			Created:     1729555200, // 2024-10-22
-			OwnedBy:     "anthropic",
-			Type:        "claude",
-			DisplayName: "Claude 3.5 Haiku",
+			ID:                  "claude-3-5-haiku-20241022",
+			Object:              "model",
+			Created:             1729555200, // 2024-10-22
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 3.5 Haiku",
+			ContextLength:       128000,
+			MaxCompletionTokens: 8192,
 		},
 	}
 }
@@ -139,6 +208,20 @@ func GetGeminiModels() []*ModelInfo {
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
 			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+		},
+		{
+			ID:                         "gemini-3-pro-image-preview",
+			Object:                     "model",
+			Created:                    1737158400,
+			OwnedBy:                    "google",
+			Type:                       "gemini",
+			Name:                       "models/gemini-3-pro-image-preview",
+			Version:                    "3.0",
+			DisplayName:                "Gemini 3 Pro Image Preview",
+			Description:                "Gemini 3 Pro Image Preview",
+			InputTokenLimit:            1048576,
+			OutputTokenLimit:           65536,
+			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
 		},
 	}
 }

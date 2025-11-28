@@ -826,7 +826,6 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 	}
 }
 
-
 // GetFirstAvailableModel returns the first available model for the given handler type.
 // It prioritizes models by their creation timestamp (newest first) and checks if they have
 // available clients that are not suspended or over quota.

@@ -33,7 +33,83 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Convert input messages to Gemini contents format
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
+		items := input.Array()
+
+		// Normalize consecutive function calls and outputs so each call is immediately followed by its response
+		normalized := make([]gjson.Result, 0, len(items))
+		for i := 0; i < len(items); {
+			item := items[i]
+			itemType := item.Get("type").String()
+			itemRole := item.Get("role").String()
+			if itemType == "" && itemRole != "" {
+				itemType = "message"
+			}
+
+			if itemType == "function_call" {
+				var calls []gjson.Result
+				var outputs []gjson.Result
+
+				for i < len(items) {
+					next := items[i]
+					nextType := next.Get("type").String()
+					nextRole := next.Get("role").String()
+					if nextType == "" && nextRole != "" {
+						nextType = "message"
+					}
+					if nextType != "function_call" {
+						break
+					}
+					calls = append(calls, next)
+					i++
+				}
+
+				for i < len(items) {
+					next := items[i]
+					nextType := next.Get("type").String()
+					nextRole := next.Get("role").String()
+					if nextType == "" && nextRole != "" {
+						nextType = "message"
+					}
+					if nextType != "function_call_output" {
+						break
+					}
+					outputs = append(outputs, next)
+					i++
+				}
+
+				if len(calls) > 0 {
+					outputMap := make(map[string]gjson.Result, len(outputs))
+					for _, out := range outputs {
+						outputMap[out.Get("call_id").String()] = out
+					}
+					for _, call := range calls {
+						normalized = append(normalized, call)
+						callID := call.Get("call_id").String()
+						if resp, ok := outputMap[callID]; ok {
+							normalized = append(normalized, resp)
+							delete(outputMap, callID)
+						}
+					}
+					for _, out := range outputs {
+						if _, ok := outputMap[out.Get("call_id").String()]; ok {
+							normalized = append(normalized, out)
+						}
+					}
+					continue
+				}
+			}
+
+			if itemType == "function_call_output" {
+				normalized = append(normalized, item)
+				i++
+				continue
+			}
+
+			normalized = append(normalized, item)
+			i++
+		}
+
+		for _, item := range normalized {
 			itemType := item.Get("type").String()
 			itemRole := item.Get("role").String()
 			if itemType == "" && itemRole != "" {
@@ -59,7 +135,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 							out, _ = sjson.SetRaw(out, "system_instruction", systemInstr)
 						}
 					}
-					return true
+					continue
 				}
 
 				// Handle regular messages
@@ -186,7 +262,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			case "function_call_output":
 				// Handle function call outputs - convert to function message with functionResponse
 				callID := item.Get("call_id").String()
-				output := item.Get("output").String()
+				// Use .Raw to preserve the JSON encoding (includes quotes for strings)
+				outputRaw := item.Get("output").Str
 
 				functionContent := `{"role":"function","parts":[]}`
 				functionResponse := `{"functionResponse":{"name":"","response":{}}}`
@@ -209,18 +286,19 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.name", functionName)
 
-				// Parse output JSON string and set as response content
-				if output != "" {
-					outputResult := gjson.Parse(output)
-					functionResponse, _ = sjson.Set(functionResponse, "functionResponse.response.result", outputResult.Raw)
+				// Set the raw JSON output directly (preserves string encoding)
+				if outputRaw != "" && outputRaw != "null" {
+					output := gjson.Parse(outputRaw)
+					if output.Type == gjson.JSON {
+						functionResponse, _ = sjson.SetRaw(functionResponse, "functionResponse.response.result", output.Raw)
+					} else {
+						functionResponse, _ = sjson.Set(functionResponse, "functionResponse.response.result", outputRaw)
+					}
 				}
-
 				functionContent, _ = sjson.SetRaw(functionContent, "parts.-1", functionResponse)
 				out, _ = sjson.SetRaw(out, "contents.-1", functionContent)
 			}
-
-			return true
-		})
+		}
 	} else if input.Exists() && input.Type == gjson.String {
 		// Simple string input conversion to user message
 		userContent := `{"role":"user","parts":[{"text":""}]}`

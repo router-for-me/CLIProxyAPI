@@ -196,8 +196,8 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 			resp.ContentLength = int64(len(decompressed))
 
 			// Update headers to reflect decompressed state
-			resp.Header.Del("Content-Encoding")                                      // No longer compressed
-			resp.Header.Del("Content-Length")                                        // Remove stale compressed length
+			resp.Header.Del("Content-Encoding")                                          // No longer compressed
+			resp.Header.Del("Content-Length")                                            // Remove stale compressed length
 			resp.Header.Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10)) // Set decompressed length
 
 			log.Debugf("amp proxy: decompressed gzip response (%d -> %d bytes)", len(gzippedData), len(decompressed))

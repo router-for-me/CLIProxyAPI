@@ -271,7 +271,15 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								if resp == "" {
 									resp = "{}"
 								}
-								toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", []byte(resp))
+								// Handle non-JSON output gracefully (matches dev branch approach)
+								if resp != "null" {
+									parsed := gjson.Parse(resp)
+									if parsed.Type == gjson.JSON {
+										toolNode, _ = sjson.SetRawBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", []byte(parsed.Raw))
+									} else {
+										toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", resp)
+									}
+								}
 								pp++
 							}
 						}

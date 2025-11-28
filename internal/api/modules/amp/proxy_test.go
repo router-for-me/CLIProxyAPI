@@ -440,52 +440,52 @@ func TestIsStreamingResponse(t *testing.T) {
 
 func TestFilterBetaFeatures(t *testing.T) {
 	tests := []struct {
-		name           string
-		header         string
+		name            string
+		header          string
 		featureToRemove string
-		expected       string
+		expected        string
 	}{
 		{
-			name:           "Remove context-1m from middle",
-			header:         "fine-grained-tool-streaming-2025-05-14,context-1m-2025-08-07,oauth-2025-04-20",
+			name:            "Remove context-1m from middle",
+			header:          "fine-grained-tool-streaming-2025-05-14,context-1m-2025-08-07,oauth-2025-04-20",
 			featureToRemove: "context-1m-2025-08-07",
-			expected:       "fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20",
+			expected:        "fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20",
 		},
 		{
-			name:           "Remove context-1m from start",
-			header:         "context-1m-2025-08-07,fine-grained-tool-streaming-2025-05-14",
+			name:            "Remove context-1m from start",
+			header:          "context-1m-2025-08-07,fine-grained-tool-streaming-2025-05-14",
 			featureToRemove: "context-1m-2025-08-07",
-			expected:       "fine-grained-tool-streaming-2025-05-14",
+			expected:        "fine-grained-tool-streaming-2025-05-14",
 		},
 		{
-			name:           "Remove context-1m from end",
-			header:         "fine-grained-tool-streaming-2025-05-14,context-1m-2025-08-07",
+			name:            "Remove context-1m from end",
+			header:          "fine-grained-tool-streaming-2025-05-14,context-1m-2025-08-07",
 			featureToRemove: "context-1m-2025-08-07",
-			expected:       "fine-grained-tool-streaming-2025-05-14",
+			expected:        "fine-grained-tool-streaming-2025-05-14",
 		},
 		{
-			name:           "Feature not present",
-			header:         "fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20",
+			name:            "Feature not present",
+			header:          "fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20",
 			featureToRemove: "context-1m-2025-08-07",
-			expected:       "fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20",
+			expected:        "fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20",
 		},
 		{
-			name:           "Only feature to remove",
-			header:         "context-1m-2025-08-07",
+			name:            "Only feature to remove",
+			header:          "context-1m-2025-08-07",
 			featureToRemove: "context-1m-2025-08-07",
-			expected:       "",
+			expected:        "",
 		},
 		{
-			name:           "Empty header",
-			header:         "",
+			name:            "Empty header",
+			header:          "",
 			featureToRemove: "context-1m-2025-08-07",
-			expected:       "",
+			expected:        "",
 		},
 		{
-			name:           "Header with spaces",
-			header:         "fine-grained-tool-streaming-2025-05-14, context-1m-2025-08-07 , oauth-2025-04-20",
+			name:            "Header with spaces",
+			header:          "fine-grained-tool-streaming-2025-05-14, context-1m-2025-08-07 , oauth-2025-04-20",
 			featureToRemove: "context-1m-2025-08-07",
-			expected:       "fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20",
+			expected:        "fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20",
 		},
 	}
 

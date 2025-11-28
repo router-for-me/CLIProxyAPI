@@ -105,14 +105,19 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 			partTextResult := partResult.Get("text")
 			functionCallResult := partResult.Get("functionCall")
 			thoughtSignatureResult := partResult.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = partResult.Get("thought_signature")
+			}
 			inlineDataResult := partResult.Get("inlineData")
 			if !inlineDataResult.Exists() {
 				inlineDataResult = partResult.Get("inline_data")
 			}
 
-			// Handle thoughtSignature - this is encrypted reasoning content that should not be exposed to the client
-			if thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != "" {
-				// Skip thoughtSignature processing - it's internal encrypted data
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+
+			// Ignore encrypted thoughtSignature but keep any actual content in the same part.
+			if hasThoughtSignature && !hasContentPayload {
 				continue
 			}
 
