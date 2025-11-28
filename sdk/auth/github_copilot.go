@@ -36,9 +36,6 @@ func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Confi
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
@@ -85,7 +82,7 @@ func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Confi
 	// Create the token storage
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)
 
-	// Build metadata
+	// Build metadata with token information for the executor
 	metadata := map[string]any{
 		"type":         "github-copilot",
 		"username":     authBundle.Username,
@@ -93,7 +90,6 @@ func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Confi
 		"token_type":   authBundle.TokenData.TokenType,
 		"scope":        authBundle.TokenData.Scope,
 		"timestamp":    time.Now().UnixMilli(),
-		"api_endpoint": copilot.BuildChatCompletionURL(),
 	}
 
 	if apiToken.ExpiresAt > 0 {

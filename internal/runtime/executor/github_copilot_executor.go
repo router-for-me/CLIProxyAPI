@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,16 +25,38 @@ const (
 	githubCopilotChatPath      = "/chat/completions"
 	githubCopilotAuthType      = "github-copilot"
 	githubCopilotTokenCacheTTL = 25 * time.Minute
+	// tokenExpiryBuffer is the time before expiry when we should refresh the token.
+	tokenExpiryBuffer = 5 * time.Minute
+	// maxScannerBufferSize is the maximum buffer size for SSE scanning (20MB).
+	maxScannerBufferSize = 20_971_520
+
+	// Copilot API header values.
+	copilotUserAgent     = "GithubCopilot/1.0"
+	copilotEditorVersion = "vscode/1.100.0"
+	copilotPluginVersion = "copilot/1.300.0"
+	copilotIntegrationID = "vscode-chat"
+	copilotOpenAIIntent  = "conversation-panel"
 )
 
 // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
 type GitHubCopilotExecutor struct {
-	cfg *config.Config
+	cfg   *config.Config
+	mu    sync.RWMutex
+	cache map[string]*cachedAPIToken
+}
+
+// cachedAPIToken stores a cached Copilot API token with its expiry.
+type cachedAPIToken struct {
+	token     string
+	expiresAt time.Time
 }
 
 // NewGitHubCopilotExecutor constructs a new executor instance.
 func NewGitHubCopilotExecutor(cfg *config.Config) *GitHubCopilotExecutor {
-	return &GitHubCopilotExecutor{cfg: cfg}
+	return &GitHubCopilotExecutor{
+		cfg:   cfg,
+		cache: make(map[string]*cachedAPIToken),
+	}
 }
 
 // Identifier implements ProviderExecutor.
@@ -100,7 +123,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
-	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+	if !isHTTPSuccess(httpResp.StatusCode) {
 		data, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, data)
 		log.Debugf("github-copilot executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
@@ -180,7 +203,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
-	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+	if !isHTTPSuccess(httpResp.StatusCode) {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("github-copilot executor: close response body error: %v", errClose)
@@ -207,7 +230,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		}()
 
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 20_971_520)
+		scanner.Buffer(nil, maxScannerBufferSize)
 		var param any
 
 		for scanner.Scan() {
@@ -277,18 +300,19 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
 		return "", statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
 	}
 
-	// Check for cached API token
-	if cachedToken := metaStringValue(auth.Metadata, "copilot_api_token"); cachedToken != "" {
-		if expiresAt := tokenExpiry(auth.Metadata); expiresAt.After(time.Now().Add(5 * time.Minute)) {
-			return cachedToken, nil
-		}
-	}
-
 	// Get the GitHub access token
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	if accessToken == "" {
 		return "", statusErr{code: http.StatusUnauthorized, msg: "missing github access token"}
 	}
+
+	// Check for cached API token using thread-safe access
+	e.mu.RLock()
+	if cached, ok := e.cache[accessToken]; ok && cached.expiresAt.After(time.Now().Add(tokenExpiryBuffer)) {
+		e.mu.RUnlock()
+		return cached.token, nil
+	}
+	e.mu.RUnlock()
 
 	// Get a new Copilot API token
 	copilotAuth := copilotauth.NewCopilotAuth(e.cfg)
@@ -297,16 +321,17 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
 		return "", statusErr{code: http.StatusUnauthorized, msg: fmt.Sprintf("failed to get copilot api token: %v", err)}
 	}
 
-	// Cache the token in metadata (will be persisted on next save)
-	if auth.Metadata == nil {
-		auth.Metadata = make(map[string]any)
-	}
-	auth.Metadata["copilot_api_token"] = apiToken.Token
+	// Cache the token with thread-safe access
+	expiresAt := time.Now().Add(githubCopilotTokenCacheTTL)
 	if apiToken.ExpiresAt > 0 {
-		auth.Metadata["expired"] = time.Unix(apiToken.ExpiresAt, 0).Format(time.RFC3339)
-	} else {
-		auth.Metadata["expired"] = time.Now().Add(githubCopilotTokenCacheTTL).Format(time.RFC3339)
+		expiresAt = time.Unix(apiToken.ExpiresAt, 0)
 	}
+	e.mu.Lock()
+	e.cache[accessToken] = &cachedAPIToken{
+		token:     apiToken.Token,
+		expiresAt: expiresAt,
+	}
+	e.mu.Unlock()
 
 	return apiToken.Token, nil
 }
@@ -316,39 +341,21 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+apiToken)
 	r.Header.Set("Accept", "application/json")
-	r.Header.Set("User-Agent", "GithubCopilot/1.0")
-	r.Header.Set("Editor-Version", "vscode/1.100.0")
-	r.Header.Set("Editor-Plugin-Version", "copilot/1.300.0")
-	r.Header.Set("Openai-Intent", "conversation-panel")
-	r.Header.Set("Copilot-Integration-Id", "vscode-chat")
+	r.Header.Set("User-Agent", copilotUserAgent)
+	r.Header.Set("Editor-Version", copilotEditorVersion)
+	r.Header.Set("Editor-Plugin-Version", copilotPluginVersion)
+	r.Header.Set("Openai-Intent", copilotOpenAIIntent)
+	r.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
 	r.Header.Set("X-Request-Id", uuid.NewString())
 }
 
-// normalizeModel ensures the model name is correct for the API.
-func (e *GitHubCopilotExecutor) normalizeModel(requestedModel string, body []byte) []byte {
-	// Map friendly names to API model names
-	modelMap := map[string]string{
-		"gpt-4.1":            "gpt-4.1",
-		"gpt-5":              "gpt-5",
-		"gpt-5-mini":         "gpt-5-mini",
-		"gpt-5-codex":        "gpt-5-codex",
-		"gpt-5.1":            "gpt-5.1",
-		"gpt-5.1-codex":      "gpt-5.1-codex",
-		"gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
-		"claude-haiku-4.5":   "claude-haiku-4.5",
-		"claude-opus-4.1":    "claude-opus-4.1",
-		"claude-opus-4.5":    "claude-opus-4.5",
-		"claude-sonnet-4":    "claude-sonnet-4",
-		"claude-sonnet-4.5":  "claude-sonnet-4.5",
-		"gemini-2.5-pro":     "gemini-2.5-pro",
-		"gemini-3-pro":       "gemini-3-pro",
-		"grok-code-fast-1":   "grok-code-fast-1",
-		"raptor-mini":        "raptor-mini",
-	}
-
-	if mapped, ok := modelMap[requestedModel]; ok {
-		body, _ = sjson.SetBytes(body, "model", mapped)
-	}
-
+// normalizeModel is a no-op as GitHub Copilot accepts model names directly.
+// Model mapping should be done at the registry level if needed.
+func (e *GitHubCopilotExecutor) normalizeModel(_ string, body []byte) []byte {
 	return body
+}
+
+// isHTTPSuccess checks if the status code indicates success (2xx).
+func isHTTPSuccess(statusCode int) bool {
+	return statusCode >= 200 && statusCode < 300
 }
