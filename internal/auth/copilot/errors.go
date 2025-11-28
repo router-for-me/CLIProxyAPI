@@ -55,6 +55,11 @@ func (e *AuthenticationError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Type, e.Message)
 }
 
+// Unwrap returns the underlying cause of the error.
+func (e *AuthenticationError) Unwrap() error {
+	return e.Cause
+}
+
 // Common authentication error types for GitHub Copilot device flow.
 var (
 	// ErrDeviceCodeFailed represents an error when requesting the device code fails.

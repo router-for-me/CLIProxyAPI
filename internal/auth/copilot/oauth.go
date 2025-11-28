@@ -72,7 +72,7 @@ func (c *DeviceFlowClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeRe
 		}
 	}()
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+	if !isHTTPSuccess(resp.StatusCode) {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return nil, NewAuthenticationError(ErrDeviceCodeFailed, fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)))
 	}
@@ -235,7 +235,7 @@ func (c *DeviceFlowClient) FetchUserInfo(ctx context.Context, accessToken string
 		}
 	}()
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+	if !isHTTPSuccess(resp.StatusCode) {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return "", NewAuthenticationError(ErrUserInfoFailed, fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)))
 	}

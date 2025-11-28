@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -21,6 +20,13 @@ const (
 	copilotAPITokenURL = "https://api.github.com/copilot_internal/v2/token"
 	// copilotAPIEndpoint is the base URL for making API requests.
 	copilotAPIEndpoint = "https://api.githubcopilot.com"
+
+	// Common HTTP header values for Copilot API requests.
+	copilotUserAgent       = "GithubCopilot/1.0"
+	copilotEditorVersion   = "vscode/1.100.0"
+	copilotPluginVersion   = "copilot/1.300.0"
+	copilotIntegrationID   = "vscode-chat"
+	copilotOpenAIIntent    = "conversation-panel"
 )
 
 // CopilotAPIToken represents the Copilot API token response.
@@ -102,9 +108,9 @@ func (c *CopilotAuth) GetCopilotAPIToken(ctx context.Context, githubAccessToken 
 
 	req.Header.Set("Authorization", "token "+githubAccessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "GithubCopilot/1.0")
-	req.Header.Set("Editor-Version", "vscode/1.100.0")
-	req.Header.Set("Editor-Plugin-Version", "copilot/1.300.0")
+	req.Header.Set("User-Agent", copilotUserAgent)
+	req.Header.Set("Editor-Version", copilotEditorVersion)
+	req.Header.Set("Editor-Plugin-Version", copilotPluginVersion)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -121,7 +127,7 @@ func (c *CopilotAuth) GetCopilotAPIToken(ctx context.Context, githubAccessToken 
 		return nil, NewAuthenticationError(ErrTokenExchangeFailed, err)
 	}
 
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+	if !isHTTPSuccess(resp.StatusCode) {
 		return nil, NewAuthenticationError(ErrTokenExchangeFailed,
 			fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)))
 	}
@@ -199,32 +205,21 @@ func (c *CopilotAuth) MakeAuthenticatedRequest(ctx context.Context, method, url 
 	req.Header.Set("Authorization", "Bearer "+apiToken.Token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "GithubCopilot/1.0")
-	req.Header.Set("Editor-Version", "vscode/1.100.0")
-	req.Header.Set("Editor-Plugin-Version", "copilot/1.300.0")
-	req.Header.Set("Openai-Intent", "conversation-panel")
-	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
+	req.Header.Set("User-Agent", copilotUserAgent)
+	req.Header.Set("Editor-Version", copilotEditorVersion)
+	req.Header.Set("Editor-Plugin-Version", copilotPluginVersion)
+	req.Header.Set("Openai-Intent", copilotOpenAIIntent)
+	req.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
 
 	return req, nil
 }
 
-// BuildChatCompletionURL builds the URL for chat completions API.
-func BuildChatCompletionURL() string {
+// buildChatCompletionURL builds the URL for chat completions API.
+func buildChatCompletionURL() string {
 	return copilotAPIEndpoint + "/chat/completions"
 }
 
-// BuildModelsURL builds the URL for listing available models.
-func BuildModelsURL() string {
-	return copilotAPIEndpoint + "/models"
-}
-
-// ExtractBearerToken extracts the bearer token from an Authorization header.
-func ExtractBearerToken(authHeader string) string {
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		return strings.TrimPrefix(authHeader, "Bearer ")
-	}
-	if strings.HasPrefix(authHeader, "token ") {
-		return strings.TrimPrefix(authHeader, "token ")
-	}
-	return authHeader
+// isHTTPSuccess checks if the status code indicates success (2xx).
+func isHTTPSuccess(statusCode int) bool {
+	return statusCode >= 200 && statusCode < 300
 }
