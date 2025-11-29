@@ -111,6 +111,14 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	ampAPI.Any("/otel", proxyHandler)
 	ampAPI.Any("/otel/*path", proxyHandler)
 
+	// Root-level routes that AMP CLI expects without /api prefix
+	// These need the same security middleware as the /api/* routes
+	rootMiddleware := []gin.HandlerFunc{noCORSMiddleware()}
+	if restrictToLocalhost {
+		rootMiddleware = append(rootMiddleware, localhostOnlyMiddleware())
+	}
+	engine.GET("/threads.rss", append(rootMiddleware, proxyHandler)...)
+
 	// Google v1beta1 passthrough with OAuth fallback
 	// AMP CLI uses non-standard paths like /publishers/google/models/...
 	// We bridge these to our standard Gemini handler to enable local OAuth.
