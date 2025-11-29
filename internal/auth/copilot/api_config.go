@@ -104,7 +104,9 @@ func CopilotHeaders(copilotToken, vsCodeVersion string, enableVision bool) map[s
 
 func generateRequestID() string {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("failed to generate random bytes for request ID: %v", err))
+	}
 	return fmt.Sprintf("%s-%s-%s-%s-%s",
 		hex.EncodeToString(b[0:4]),
 		hex.EncodeToString(b[4:6]),

@@ -276,6 +276,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 
 	// Evict copilot model cache to prevent stale entries
 	executor.EvictCopilotModelCache(id)
+	executor.EvictCopilotGeminiReasoningCache(id)
 
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
 		existing.Disabled = true

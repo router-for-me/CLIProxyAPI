@@ -290,7 +290,11 @@ func (e *CopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 
 		isGemini := strings.HasPrefix(strings.ToLower(apiModel), "gemini")
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 20_971_520)
+		bufSize := e.cfg.ScannerBufferSize
+		if bufSize <= 0 {
+			bufSize = 20_971_520
+		}
+		scanner.Buffer(nil, bufSize)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()

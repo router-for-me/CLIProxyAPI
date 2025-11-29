@@ -77,7 +77,11 @@ func (a *CopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, op
 	accountType := a.AccountType
 	if opts.Metadata != nil {
 		if at, ok := opts.Metadata["account_type"]; ok && at != "" {
-			accountType, _ = copilot.ParseAccountType(at)
+			parsed, valid := copilot.ParseAccountType(at)
+			if !valid {
+				log.Warnf("Invalid account_type '%s' provided in login options, defaulting to '%s'", at, copilot.DefaultAccountType)
+			}
+			accountType = parsed
 	}
 }
 

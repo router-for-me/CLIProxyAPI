@@ -67,6 +67,9 @@ type Config struct {
 
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
+	// ScannerBufferSize defines the buffer size for reading response streams (in bytes).
+	// If 0, a default of 20MB is used.
+	ScannerBufferSize int `yaml:"scanner-buffer-size" json:"scanner-buffer-size"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 

@@ -184,7 +184,7 @@ func (a *CopilotAuth) tryGetAccessToken(ctx context.Context, deviceCode string) 
 		// Try parsing as URL-encoded form (GitHub sometimes returns this format)
 		values, parseErr := url.ParseQuery(string(body))
 		if parseErr != nil {
-			return "", err
+			return "", fmt.Errorf("failed to parse token response as JSON (%v) or form-urlencoded (%w)", err, parseErr)
 		}
 		tokenResp.AccessToken = values.Get("access_token")
 		tokenResp.Error = values.Get("error")
