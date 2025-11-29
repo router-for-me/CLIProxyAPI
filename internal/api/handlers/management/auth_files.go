@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
@@ -2087,6 +2088,121 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 		return false, fmt.Errorf("project activation required: %s", errMessage)
 	}
 	return true, nil
+}
+
+// validateCopilotAccountType validates the account_type query parameter.
+// If invalid, it writes a 400 error to the context and returns false.
+func validateCopilotAccountType(c *gin.Context) (copilot.AccountType, bool) {
+	accountTypeStr := c.DefaultQuery("account_type", "individual")
+	validation := copilot.ValidateAccountType(accountTypeStr)
+	if !validation.Valid {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":        validation.ErrorMessage,
+			"valid_values": validation.ValidValues,
+			"default":      validation.DefaultValue,
+		})
+		return "", false
+	}
+	return validation.AccountType, true
+}
+
+// startCopilotAuthFlow starts the background polling for Copilot authentication.
+func (h *Handler) startCopilotAuthFlow(ctx context.Context, state string, deviceCode *copilot.DeviceCodeResponse, accountType copilot.AccountType) {
+	go func() {
+		// Use a timeout based on the device code expiration
+		pollCtx, cancel := context.WithTimeout(ctx, time.Duration(deviceCode.ExpiresIn)*time.Second)
+		defer cancel()
+
+		copilotAuth := copilot.NewCopilotAuth(h.cfg)
+		result, authErr := copilotAuth.CompleteAuthWithDeviceCode(pollCtx, deviceCode, accountType)
+		if authErr != nil {
+			oauthStatus[state] = fmt.Sprintf("Authentication failed: %v", authErr)
+			return
+		}
+
+		if result == nil || result.Storage == nil {
+			oauthStatus[state] = "Authentication failed: no result returned"
+			return
+		}
+
+		principal := result.Storage.Username
+		if principal == "" {
+			principal = result.Storage.Email
+		}
+
+		// Ensure auth directory exists before saving
+		authDir, ensureErr := util.EnsureAuthDir(h.cfg.AuthDir)
+		if ensureErr != nil {
+			oauthStatus[state] = fmt.Sprintf("Failed to prepare auth directory: %v", ensureErr)
+			return
+		}
+
+		// Save token using the filename from the shared helper
+		tokenPath := filepath.Join(authDir, result.SuggestedFilename)
+		if saveErr := result.Storage.SaveTokenToFile(tokenPath); saveErr != nil {
+			oauthStatus[state] = fmt.Sprintf("Failed to save token: %v", saveErr)
+			return
+		}
+
+		log.Infof("copilot_auth_success: state=%s principal=%s", state, principal)
+		delete(oauthStatus, state)
+	}()
+}
+
+// RequestCopilotToken initiates GitHub Copilot device code authentication flow.
+// Poll GetAuthStatus with the returned state to check progress. GetAuthStatus returns:
+// - status="wait": authentication in progress
+// - status="ok": authentication completed successfully
+// - status="error": authentication failed (see error)
+func (h *Handler) RequestCopilotToken(c *gin.Context) {
+	ctx := context.Background()
+
+	// Validate auth directory before starting auth flow
+	if h.cfg.AuthDir == "" {
+		log.Error("Copilot auth failed: auth directory not configured")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "auth directory not configured"})
+		return
+	}
+
+	// Get account type from query param and validate
+	accountType, ok := validateCopilotAccountType(c)
+	if !ok {
+		return
+	}
+
+	state, err := misc.GenerateRandomState()
+	if err != nil {
+		log.Errorf("Failed to generate state parameter: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state"})
+		return
+	}
+
+	// Initialize Copilot auth service
+	copilotAuth := copilot.NewCopilotAuth(h.cfg)
+
+	// Get device code first to return to user immediately
+	deviceCode, err := copilotAuth.GetDeviceCode(ctx)
+	if err != nil {
+		log.Errorf("Failed to get device code: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get device code"})
+		return
+	}
+
+	// Track this auth flow
+	oauthStatus[state] = ""
+
+	// Start background goroutine to complete auth flow using shared helper
+	h.startCopilotAuthFlow(ctx, state, deviceCode, accountType)
+
+	// Return device code info to user
+	c.JSON(http.StatusOK, gin.H{
+		"status":           "ok",
+		"state":            state,
+		"user_code":        deviceCode.UserCode,
+		"verification_uri": deviceCode.VerificationURI,
+		"expires_in":       deviceCode.ExpiresIn,
+		"interval":         deviceCode.Interval,
+	})
 }
 
 func (h *Handler) GetAuthStatus(c *gin.Context) {

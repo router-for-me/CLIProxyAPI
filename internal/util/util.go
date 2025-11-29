@@ -85,6 +85,35 @@ func CountAuthFiles(authDir string) int {
 	return count
 }
 
+// EnsureAuthDir ensures the auth directory exists and is a directory.
+// If it doesn't exist, it creates it with permissions 0755 (main-branch default).
+// Returns the resolved path and any error encountered.
+func EnsureAuthDir(authDir string) (string, error) {
+	dir, err := ResolveAuthDir(authDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve auth directory: %w", err)
+	}
+	if dir == "" {
+		return "", fmt.Errorf("auth directory not configured")
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+				return "", fmt.Errorf("failed to create auth directory %s: %w", dir, mkErr)
+			}
+			log.Infof("created auth directory: %s", dir)
+			return dir, nil
+		}
+		return "", fmt.Errorf("failed to access auth directory %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("auth path exists but is not a directory: %s", dir)
+	}
+	return dir, nil
+}
+
 // WritablePath returns the cleaned WRITABLE_PATH environment variable when it is set.
 // It accepts both uppercase and lowercase variants for compatibility with existing conventions.
 func WritablePath() string {
