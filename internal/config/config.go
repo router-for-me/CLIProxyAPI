@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	copilotshared "github.com/router-for-me/CLIProxyAPI/v6/internal/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -74,6 +75,9 @@ type Config struct {
 
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
+
+	// CopilotKey defines GitHub Copilot API configurations.
+	CopilotKey []CopilotKey `yaml:"copilot-api-key" json:"copilot-api-key"`
 
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
@@ -183,6 +187,21 @@ type CodexKey struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+}
+
+// CopilotKey represents the configuration for GitHub Copilot API access.
+// Authentication is handled via device code OAuth flow, not API keys.
+type CopilotKey struct {
+	// AccountType is the Copilot subscription type (individual, business, enterprise).
+	// Defaults to "individual" if not specified.
+	AccountType string `yaml:"account-type" json:"account-type"`
+
+	// ProxyURL overrides the global proxy setting for Copilot requests if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// AgentInitiatorPersist, when true, forces subsequent Copilot requests sharing the
+	// same prompt_cache_key to send X-Initiator=agent after the first call. Default false.
+	AgentInitiatorPersist bool `yaml:"agent-initiator-persist" json:"agent-initiator-persist"`
 }
 
 // GeminiKey represents the configuration for a Gemini API key,
@@ -316,6 +335,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
 
+	// Sanitize Copilot keys: normalize account type
+	cfg.SanitizeCopilotKeys()
+
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
 
@@ -365,6 +387,25 @@ func (cfg *Config) SanitizeCodexKeys() {
 		out = append(out, e)
 	}
 	cfg.CodexKey = out
+}
+
+// SanitizeCopilotKeys normalizes Copilot configurations.
+// It sets default account type and trims whitespace.
+func (cfg *Config) SanitizeCopilotKeys() {
+	if cfg == nil || len(cfg.CopilotKey) == 0 {
+		return
+	}
+	for i := range cfg.CopilotKey {
+		entry := &cfg.CopilotKey[i]
+		entry.AccountType = strings.TrimSpace(strings.ToLower(entry.AccountType))
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		validation := copilotshared.ValidateAccountType(entry.AccountType)
+		if validation.Valid {
+			entry.AccountType = string(validation.AccountType)
+		} else {
+			entry.AccountType = string(copilotshared.DefaultAccountType)
+		}
+	}
 }
 
 // SanitizeClaudeKeys normalizes headers for Claude credentials.

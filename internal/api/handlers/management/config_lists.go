@@ -709,3 +709,108 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 	}
 	entry.Models = normalized
 }
+
+// GetCopilotKeys returns the current Copilot API key configuration.
+func (h *Handler) GetCopilotKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"copilot-api-key": h.cfg.CopilotKey})
+}
+
+// PutCopilotKeys replaces the Copilot API key configuration.
+func (h *Handler) PutCopilotKeys(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.CopilotKey
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.CopilotKey `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	// Normalize entries
+	filtered := make([]config.CopilotKey, 0, len(arr))
+	for i := range arr {
+		entry := arr[i]
+		entry.AccountType = strings.TrimSpace(entry.AccountType)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		filtered = append(filtered, entry)
+	}
+	h.cfg.CopilotKey = filtered
+	h.cfg.SanitizeCopilotKeys()
+	h.persist(c)
+}
+
+// PatchCopilotKey updates a single Copilot API key entry by index or match.
+func (h *Handler) PatchCopilotKey(c *gin.Context) {
+	var body struct {
+		Index *int               `json:"index"`
+		Match *string            `json:"match"` // Match by account_type
+		Value *config.CopilotKey `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	value := *body.Value
+	value.AccountType = strings.TrimSpace(value.AccountType)
+	value.ProxyURL = strings.TrimSpace(value.ProxyURL)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Update by index
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CopilotKey) {
+		h.cfg.CopilotKey[*body.Index] = value
+		h.cfg.SanitizeCopilotKeys()
+		h.persist(c)
+		return
+	}
+	// Update by matching account_type
+	if body.Match != nil {
+		for i := range h.cfg.CopilotKey {
+			if h.cfg.CopilotKey[i].AccountType == *body.Match {
+				h.cfg.CopilotKey[i] = value
+				h.cfg.SanitizeCopilotKeys()
+				h.persist(c)
+				return
+			}
+		}
+	}
+	c.JSON(404, gin.H{"error": "item not found"})
+}
+
+// DeleteCopilotKey removes a Copilot API key entry by index or account_type.
+func (h *Handler) DeleteCopilotKey(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if val := c.Query("account-type"); val != "" {
+		out := make([]config.CopilotKey, 0, len(h.cfg.CopilotKey))
+		for _, v := range h.cfg.CopilotKey {
+			if v.AccountType != val {
+				out = append(out, v)
+			}
+		}
+		h.cfg.CopilotKey = out
+		h.cfg.SanitizeCopilotKeys()
+		h.persist(c)
+		return
+	}
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.CopilotKey) {
+			h.cfg.CopilotKey = append(h.cfg.CopilotKey[:idx], h.cfg.CopilotKey[idx+1:]...)
+			h.cfg.SanitizeCopilotKeys()
+			h.persist(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing or invalid account-type or index query param"})
+}

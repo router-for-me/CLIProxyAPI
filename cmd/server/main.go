@@ -56,6 +56,7 @@ func main() {
 	// Command-line flags to control the application's behavior.
 	var login bool
 	var codexLogin bool
+	var copilotLogin bool
 	var claudeLogin bool
 	var qwenLogin bool
 	var iflowLogin bool
@@ -70,6 +71,7 @@ func main() {
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
+	flag.BoolVar(&copilotLogin, "copilot-login", false, "Login to GitHub Copilot using device code flow")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
@@ -439,6 +441,9 @@ func main() {
 	} else if codexLogin {
 		// Handle Codex login
 		cmd.DoCodexLogin(cfg, options)
+	} else if copilotLogin {
+		// Handle GitHub Copilot login
+		cmd.DoCopilotLogin(cfg, options)
 	} else if claudeLogin {
 		// Handle Claude login
 		cmd.DoClaudeLogin(cfg, options)

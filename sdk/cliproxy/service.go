@@ -105,6 +105,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewQwenAuthenticator(),
+		sdkAuth.NewCopilotAuthenticator(),
 	)
 }
 
@@ -272,6 +273,10 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		return
 	}
 	GlobalModelRegistry().UnregisterClient(id)
+
+	// Evict copilot model cache to prevent stale entries
+	executor.EvictCopilotModelCache(id)
+
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
 		existing.Disabled = true
 		existing.Status = coreauth.StatusDisabled
@@ -347,6 +352,8 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "codex":
 		s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg))
+	case "copilot":
+		s.coreManager.RegisterExecutor(executor.NewCopilotExecutor(s.cfg))
 	case "qwen":
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "iflow":
@@ -658,6 +665,14 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 	case "codex":
 		models = registry.GetOpenAIModels()
+	case "copilot":
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		models = executor.NewCopilotExecutor(s.cfg).FetchModels(ctx, a, s.cfg)
+		cancel()
+		if len(models) == 0 {
+			log.Warnf("copilot: using static fallback models for auth %s", a.ID)
+			models = registry.GetCopilotModels()
+		}
 	case "qwen":
 		models = registry.GetQwenModels()
 	case "iflow":

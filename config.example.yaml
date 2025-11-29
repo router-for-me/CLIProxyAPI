@@ -77,6 +77,26 @@ ws-auth: false
 #      X-Custom-Header: "custom-value"
 #    proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 
+# GitHub Copilot account configuration
+# Note: Copilot uses OAuth device code authentication, NOT API keys or tokens.
+# Do NOT paste your GitHub access token or Copilot bearer token here.
+# Tokens are stored only in auth-dir JSON files, never in config.yaml.
+#
+# To authenticate:
+#   - CLI: run with -copilot-login flag
+#   - Web: use the /copilot-auth-url management endpoint
+#
+# After OAuth login, tokens are managed automatically and stored in auth-dir.
+# The entries below only configure account type and optional proxy settings.
+#copilot-api-key:
+#  - account-type: "individual" # Options: individual, business, enterprise
+#    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy for Copilot requests
+
+#    # When set to true, this flag forces subsequent requests in a session (sharing the same prompt_cache_key)
+#    # to send the header "X-Initiator: agent" instead of "vscode". This mirrors VS Code's behavior for
+#    # long-running agent interactions and helps prevent hitting standard rate limits.
+#    agent-initiator-persist: true
+
 # Claude API keys
 #claude-api-key:
 #  - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
