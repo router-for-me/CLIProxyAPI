@@ -324,7 +324,7 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 	if len(a.Attributes) > 0 {
 		providerKey = strings.TrimSpace(a.Attributes["provider_key"])
 		compatName = strings.TrimSpace(a.Attributes["compat_name"])
-		if providerKey != "" || compatName != "" {
+		if compatName != "" {
 			if providerKey == "" {
 				providerKey = compatName
 			}
