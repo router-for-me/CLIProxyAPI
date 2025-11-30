@@ -1087,34 +1087,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			applyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 			out = append(out, a)
 		}
-		// Vertex-compatible API keys -> synthesize auths
-		for i := range cfg.VertexCompatAPIKey {
-			entry := cfg.VertexCompatAPIKey[i]
-			key := strings.TrimSpace(entry.APIKey)
-			base := strings.TrimSpace(entry.BaseURL)
-			if key == "" || base == "" {
-				continue
-			}
-			proxyURL := strings.TrimSpace(entry.ProxyURL)
-			id, token := idGen.next("vertex-compat:apikey", key, base)
-			attrs := map[string]string{
-				"source":   fmt.Sprintf("config:vertex-compat[%s]", token),
-				"api_key":  key,
-				"base_url": base,
-			}
-			addConfigHeadersToAttrs(entry.Headers, attrs)
-			a := &coreauth.Auth{
-				ID:         id,
-				Provider:   "vertex-compat",
-				Label:      fmt.Sprintf("vertex-compat-%s", token),
-				Status:     coreauth.StatusActive,
-				ProxyURL:   proxyURL,
-				Attributes: attrs,
-				CreatedAt:  now,
-				UpdatedAt:  now,
-			}
-			out = append(out, a)
-		}
+
 		// Claude API keys -> synthesize auths
 		for i := range cfg.ClaudeKey {
 			ck := cfg.ClaudeKey[i]
