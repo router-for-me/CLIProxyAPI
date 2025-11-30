@@ -362,6 +362,8 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
 	case "vertex":
 		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
+	case "vertex-compat":
+		s.coreManager.RegisterExecutor(executor.NewVertexCompatExecutor(s.cfg))
 	case "gemini-cli":
 		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
 	case "aistudio":
@@ -680,6 +682,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()
 		models = applyExcludedModels(models, excluded)
+	case "vertex-compat":
+		// Vertex-compatible providers support the same model identifiers as Gemini.
+		models = registry.GetGeminiModels()
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
 		models = applyExcludedModels(models, excluded)
