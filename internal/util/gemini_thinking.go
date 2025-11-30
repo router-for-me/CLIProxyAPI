@@ -34,6 +34,15 @@ func ParseGeminiThinkingSuffix(model string) (string, *int, *bool, bool) {
 		return base, &budgetValue, &include, true
 	}
 
+	// Handle "-reasoning" suffix: enables thinking with dynamic budget (-1)
+	// Maps: gemini-2.5-flash-reasoning -> gemini-2.5-flash with thinkingBudget=-1
+	if strings.HasSuffix(lower, "-reasoning") {
+		base := model[:len(model)-len("-reasoning")]
+		budgetValue := -1 // Dynamic budget
+		include := true
+		return base, &budgetValue, &include, true
+	}
+
 	idx := strings.LastIndex(lower, "-thinking-")
 	if idx == -1 {
 		return model, nil, nil, false
