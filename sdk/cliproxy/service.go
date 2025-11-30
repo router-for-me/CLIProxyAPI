@@ -683,8 +683,34 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = registry.GetGeminiVertexModels()
 		models = applyExcludedModels(models, excluded)
 	case "vertex-compat":
-		// Vertex-compatible providers support the same model identifiers as Gemini.
-		models = registry.GetGeminiModels()
+		// Handle Vertex AI compatibility providers with custom model definitions
+		if s.cfg != nil && len(s.cfg.VertexCompatAPIKey) > 0 {
+			// Create models for all Vertex compatibility providers
+			allModels := make([]*ModelInfo, 0)
+			for i := range s.cfg.VertexCompatAPIKey {
+				compat := &s.cfg.VertexCompatAPIKey[i]
+				for j := range compat.Models {
+					m := compat.Models[j]
+					// Use alias as model ID, fallback to name if alias is empty
+					modelID := m.Alias
+					if modelID == "" {
+						modelID = m.Name
+					}
+					if modelID != "" {
+						allModels = append(allModels, &ModelInfo{
+							ID:          modelID,
+							Object:      "model",
+							Created:     time.Now().Unix(),
+							OwnedBy:     "vertex-compat",
+							Type:        "vertex-compat",
+							DisplayName: m.Name,
+						})
+					}
+				}
+			}
+			models = allModels
+		}
+
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
 		models = applyExcludedModels(models, excluded)

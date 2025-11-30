@@ -24,6 +24,19 @@ type VertexCompatKey struct {
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	// Commonly used for cookies, user-agent, and other authentication headers.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// Models defines the model configurations including aliases for routing.
+	Models []VertexCompatModel `yaml:"models,omitempty" json:"models,omitempty"`
+}
+
+// VertexCompatModel represents a model configuration for Vertex compatibility,
+// including the actual model name and its alias for API routing.
+type VertexCompatModel struct {
+	// Name is the actual model name used by the external provider.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the model name alias that clients will use to reference this model.
+	Alias string `yaml:"alias" json:"alias"`
 }
 
 // SanitizeVertexCompatKeys deduplicates and normalizes Vertex-compatible API key credentials.
@@ -47,6 +60,17 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 		}
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
+
+		// Sanitize models: remove entries without valid alias
+		sanitizedModels := make([]VertexCompatModel, 0, len(entry.Models))
+		for _, model := range entry.Models {
+			model.Alias = strings.TrimSpace(model.Alias)
+			model.Name = strings.TrimSpace(model.Name)
+			if model.Alias != "" && model.Name != "" {
+				sanitizedModels = append(sanitizedModels, model)
+			}
+		}
+		entry.Models = sanitizedModels
 
 		// Use API key + base URL as uniqueness key
 		uniqueKey := entry.APIKey + "|" + entry.BaseURL
