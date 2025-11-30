@@ -543,6 +543,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
 		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
 
+		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
+		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)
+		mgmt.PATCH("/oauth-excluded-models", s.mgmt.PatchOAuthExcludedModels)
+		mgmt.DELETE("/oauth-excluded-models", s.mgmt.DeleteOAuthExcludedModels)
+
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)

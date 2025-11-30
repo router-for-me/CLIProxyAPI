@@ -83,6 +83,9 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
+	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -157,6 +160,9 @@ type ClaudeKey struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
@@ -183,6 +189,9 @@ type CodexKey struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
 // GeminiKey represents the configuration for a Gemini API key,
@@ -199,6 +208,9 @@ type GeminiKey struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
@@ -322,6 +334,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
+	// Normalize OAuth provider model exclusion map.
+	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
+
 	// Return the populated configuration struct.
 	return &cfg, nil
 }
@@ -359,6 +374,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e := cfg.CodexKey[i]
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
 			continue
 		}
@@ -375,6 +391,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
 }
 
@@ -395,6 +412,7 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		if _, exists := seen[entry.APIKey]; exists {
 			continue
 		}
@@ -455,6 +473,55 @@ func NormalizeHeaders(headers map[string]string) map[string]string {
 		return nil
 	}
 	return clean
+}
+
+// NormalizeExcludedModels trims, lowercases, and deduplicates model exclusion patterns.
+// It preserves the order of first occurrences and drops empty entries.
+func NormalizeExcludedModels(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	out := make([]string, 0, len(models))
+	for _, raw := range models {
+		trimmed := strings.ToLower(strings.TrimSpace(raw))
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NormalizeOAuthExcludedModels cleans provider -> excluded models mappings by normalizing provider keys
+// and applying model exclusion normalization to each entry.
+func NormalizeOAuthExcludedModels(entries map[string][]string) map[string][]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(entries))
+	for provider, models := range entries {
+		key := strings.ToLower(strings.TrimSpace(provider))
+		if key == "" {
+			continue
+		}
+		normalized := NormalizeExcludedModels(models)
+		if len(normalized) == 0 {
+			continue
+		}
+		out[key] = normalized
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // hashSecret hashes the given secret using bcrypt.

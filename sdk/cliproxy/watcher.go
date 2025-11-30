@@ -28,5 +28,8 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		setUpdateQueue: func(queue chan<- watcher.AuthUpdate) {
 			w.SetAuthUpdateQueue(queue)
 		},
+		dispatchRuntimeUpdate: func(update watcher.AuthUpdate) bool {
+			return w.DispatchRuntimeAuthUpdate(update)
+		},
 	}, nil
 }

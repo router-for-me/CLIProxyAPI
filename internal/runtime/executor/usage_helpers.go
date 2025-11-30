@@ -37,7 +37,7 @@ func newUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
-		reporter.authIndex = auth.Index
+		reporter.authIndex = auth.EnsureIndex()
 	}
 	return reporter
 }
