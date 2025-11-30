@@ -146,6 +146,27 @@ func (s *Service) consumeAuthUpdates(ctx context.Context) {
 	}
 }
 
+func (s *Service) emitAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
+	if s == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.watcher != nil && s.watcher.DispatchRuntimeAuthUpdate(update) {
+		return
+	}
+	if s.authUpdates != nil {
+		select {
+		case s.authUpdates <- update:
+			return
+		default:
+			log.Debugf("auth update queue saturated, applying inline action=%v id=%s", update.Action, update.ID)
+		}
+	}
+	s.handleAuthUpdate(ctx, update)
+}
+
 func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdate) {
 	if s == nil {
 		return
@@ -220,7 +241,11 @@ func (s *Service) wsOnConnected(channelID string) {
 		Metadata:   map[string]any{"email": channelID}, // metadata drives logging and usage tracking
 	}
 	log.Infof("websocket provider connected: %s", channelID)
-	s.applyCoreAuthAddOrUpdate(context.Background(), auth)
+	s.emitAuthUpdate(context.Background(), watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionAdd,
+		ID:     auth.ID,
+		Auth:   auth,
+	})
 }
 
 func (s *Service) wsOnDisconnected(channelID string, reason error) {
@@ -237,7 +262,10 @@ func (s *Service) wsOnDisconnected(channelID string, reason error) {
 		log.Infof("websocket provider disconnected: %s", channelID)
 	}
 	ctx := context.Background()
-	s.applyCoreAuthRemoval(ctx, channelID)
+	s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionDelete,
+		ID:     channelID,
+	})
 }
 
 func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.Auth) {
@@ -617,6 +645,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if a == nil || a.ID == "" {
 		return
 	}
+	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
 	if a.Attributes != nil {
 		if v := strings.TrimSpace(a.Attributes["gemini_virtual_primary"]); strings.EqualFold(v, "true") {
 			GlobalModelRegistry().UnregisterClient(a.ID)
@@ -636,32 +665,57 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if compatDetected {
 		provider = "openai-compatibility"
 	}
+	excluded := s.oauthExcludedModels(provider, authKind)
 	var models []*ModelInfo
 	switch provider {
 	case "gemini":
 		models = registry.GetGeminiModels()
+		if entry := s.resolveConfigGeminiKey(a); entry != nil {
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()
+		models = applyExcludedModels(models, excluded)
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
+		models = applyExcludedModels(models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()
+		models = applyExcludedModels(models, excluded)
 	case "antigravity":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		models = executor.FetchAntigravityModels(ctx, a, s.cfg)
 		cancel()
+		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
-		if entry := s.resolveConfigClaudeKey(a); entry != nil && len(entry.Models) > 0 {
-			models = buildClaudeConfigModels(entry)
+		if entry := s.resolveConfigClaudeKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildClaudeConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
 		}
+		models = applyExcludedModels(models, excluded)
 	case "codex":
 		models = registry.GetOpenAIModels()
+		if entry := s.resolveConfigCodexKey(a); entry != nil {
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	case "qwen":
 		models = registry.GetQwenModels()
+		models = applyExcludedModels(models, excluded)
 	case "iflow":
 		models = registry.GetIFlowModels()
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -749,7 +803,10 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			key = strings.ToLower(strings.TrimSpace(a.Provider))
 		}
 		GlobalModelRegistry().RegisterClient(a.ID, key, models)
+		return
 	}
+
+	GlobalModelRegistry().UnregisterClient(a.ID)
 }
 
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
@@ -789,6 +846,150 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 		}
 	}
 	return nil
+}
+
+func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.GeminiKey {
+		entry := &s.cfg.GeminiKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.CodexKey {
+		entry := &s.cfg.CodexKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func (s *Service) oauthExcludedModels(provider, authKind string) []string {
+	cfg := s.cfg
+	if cfg == nil {
+		return nil
+	}
+	authKindKey := strings.ToLower(strings.TrimSpace(authKind))
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	if authKindKey == "apikey" {
+		return nil
+	}
+	return cfg.OAuthExcludedModels[providerKey]
+}
+
+func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
+	if len(models) == 0 || len(excluded) == 0 {
+		return models
+	}
+
+	patterns := make([]string, 0, len(excluded))
+	for _, item := range excluded {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			patterns = append(patterns, strings.ToLower(trimmed))
+		}
+	}
+	if len(patterns) == 0 {
+		return models
+	}
+
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		modelID := strings.ToLower(strings.TrimSpace(model.ID))
+		blocked := false
+		for _, pattern := range patterns {
+			if matchWildcard(pattern, modelID) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
+// matchWildcard performs case-insensitive wildcard matching where '*' matches any substring.
+func matchWildcard(pattern, value string) bool {
+	if pattern == "" {
+		return false
+	}
+
+	// Fast path for exact match (no wildcard present).
+	if !strings.Contains(pattern, "*") {
+		return pattern == value
+	}
+
+	parts := strings.Split(pattern, "*")
+	// Handle prefix.
+	if prefix := parts[0]; prefix != "" {
+		if !strings.HasPrefix(value, prefix) {
+			return false
+		}
+		value = value[len(prefix):]
+	}
+
+	// Handle suffix.
+	if suffix := parts[len(parts)-1]; suffix != "" {
+		if !strings.HasSuffix(value, suffix) {
+			return false
+		}
+		value = value[:len(value)-len(suffix)]
+	}
+
+	// Handle middle segments in order.
+	for i := 1; i < len(parts)-1; i++ {
+		segment := parts[i]
+		if segment == "" {
+			continue
+		}
+		idx := strings.Index(value, segment)
+		if idx < 0 {
+			return false
+		}
+		value = value[idx+len(segment):]
+	}
+
+	return true
 }
 
 func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
