@@ -86,6 +86,14 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		return resp, statusErr{code: wsResp.Status, msg: string(wsResp.Body)}
 	}
 	reporter.publish(ctx, parseGeminiUsage(wsResp.Body))
+
+	// Try new translator first if enabled
+	if translatedResp, errTranslate := TranslateGeminiResponseNonStream(e.cfg, opts.SourceFormat, wsResp.Body, req.Model); errTranslate == nil && translatedResp != nil {
+		resp = cliproxyexecutor.Response{Payload: ensureColonSpacedJSON(translatedResp)}
+		return resp, nil
+	}
+
+	// Fallback to old translator
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), bytes.Clone(translatedReq), bytes.Clone(wsResp.Body), &param)
 	resp = cliproxyexecutor.Response{Payload: ensureColonSpacedJSON([]byte(out))}
@@ -177,6 +185,15 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		defer close(out)
 		var param any
 		metadataLogged := false
+
+		// State for new translator (tracks reasoning tokens)
+		var streamState *GeminiCLIStreamState
+		useNewTranslator := e.cfg != nil && e.cfg.UseCanonicalTranslator
+		if useNewTranslator {
+			streamState = &GeminiCLIStreamState{}
+		}
+		messageID := "chatcmpl-" + req.Model
+
 		processEvent := func(event wsrelay.StreamEvent) bool {
 			if event.Err != nil {
 				recordAPIResponseError(ctx, e.cfg, event.Err)
@@ -197,6 +214,19 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					if detail, ok := parseGeminiStreamUsage(filtered); ok {
 						reporter.publish(ctx, detail)
 					}
+
+					// Try new translator first if enabled
+					if useNewTranslator {
+						translatedChunks, errTranslate := TranslateGeminiResponseStream(e.cfg, opts.SourceFormat, bytes.Clone(filtered), req.Model, messageID, streamState)
+						if errTranslate == nil && translatedChunks != nil {
+							for _, chunk := range translatedChunks {
+								out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(chunk)}
+							}
+							break
+						}
+					}
+
+					// Fallback to old translator
 					lines := sdktranslator.TranslateStream(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), translatedReq, bytes.Clone(filtered), &param)
 					for i := range lines {
 						out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON([]byte(lines[i]))}
@@ -213,6 +243,20 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				if len(event.Payload) > 0 {
 					appendAPIResponseChunk(ctx, e.cfg, bytes.Clone(event.Payload))
 				}
+
+				// Try new translator first if enabled
+				if useNewTranslator {
+					translatedChunks, errTranslate := TranslateGeminiResponseStream(e.cfg, opts.SourceFormat, bytes.Clone(event.Payload), req.Model, messageID, streamState)
+					if errTranslate == nil && translatedChunks != nil {
+						for _, chunk := range translatedChunks {
+							out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(chunk)}
+						}
+						reporter.publish(ctx, parseGeminiUsage(event.Payload))
+						return false
+					}
+				}
+
+				// Fallback to old translator
 				lines := sdktranslator.TranslateStream(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), translatedReq, bytes.Clone(event.Payload), &param)
 				for i := range lines {
 					out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON([]byte(lines[i]))}

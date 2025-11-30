@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -31,6 +32,11 @@ const (
 	codeAssistVersion       = "v1internal"
 	geminiOauthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
 	geminiOauthClientSecret = "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"
+
+	// Rate limit retry settings: 5 retries with exponential backoff up to ~60 seconds total
+	rateLimitMaxRetries = 5
+	rateLimitBaseDelay  = 1 * time.Second  // 1s, 2s, 4s, 8s, 16s = ~31s total with exponential backoff
+	rateLimitMaxDelay   = 20 * time.Second // Cap individual delay at 20s
 )
 
 var geminiOauthScopes = []string{
@@ -62,18 +68,12 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
-	budgetOverride, includeOverride, hasOverride := util.GeminiThinkingFromMetadata(req.Metadata)
-	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	if hasOverride && util.ModelSupportsThinking(req.Model) {
-		if budgetOverride != nil {
-			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
-			budgetOverride = &norm
-		}
-		basePayload = util.ApplyGeminiCLIThinkingConfig(basePayload, budgetOverride, includeOverride)
+
+	// Translate request through canonical IR (handles all transformations internally)
+	basePayload, err := TranslateToGeminiCLI(e.cfg, from, req.Model, bytes.Clone(req.Payload), false, req.Metadata)
+	if err != nil {
+		return resp, fmt.Errorf("failed to translate request: %w", err)
 	}
-	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
-	basePayload = fixGeminiCLIImageAspectRatio(req.Model, basePayload)
-	basePayload = applyPayloadConfigWithRoot(e.cfg, req.Model, "gemini", "request", basePayload)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -98,8 +98,10 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	var lastStatus int
 	var lastBody []byte
+	retrier := &rateLimitRetrier{}
 
-	for idx, attemptModel := range models {
+	for idx := 0; idx < len(models); idx++ {
+		attemptModel := models[idx]
 		payload := append([]byte(nil), basePayload...)
 		if action == "countTokens" {
 			payload = deleteJSONField(payload, "project")
@@ -162,6 +164,14 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		appendAPIResponseChunk(ctx, e.cfg, data)
 		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 			reporter.publish(ctx, parseGeminiCLIUsage(data))
+
+			// Try new translator first if enabled
+			if translatedResp, err := TranslateGeminiCLIResponseNonStream(e.cfg, from, data, attemptModel); err == nil && translatedResp != nil {
+				resp = cliproxyexecutor.Response{Payload: translatedResp}
+				return resp, nil
+			}
+
+			// Fallback to old translator
 			var param any
 			out := sdktranslator.TranslateNonStream(respCtx, to, from, attemptModel, bytes.Clone(opts.OriginalRequest), payload, data, &param)
 			resp = cliproxyexecutor.Response{Payload: []byte(out)}
@@ -172,12 +182,23 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		lastBody = append([]byte(nil), data...)
 		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		if httpResp.StatusCode == 429 {
-			if idx+1 < len(models) {
+			hasNextModel := idx+1 < len(models)
+			if hasNextModel {
 				log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
-			} else {
-				log.Debug("gemini cli executor: rate limited, no additional fallback model")
 			}
-			continue
+			action, ctxErr := retrier.handleRateLimit(ctx, hasNextModel, data)
+			if ctxErr != nil {
+				err = ctxErr
+				return resp, err
+			}
+			switch action {
+			case rateLimitActionContinue:
+				continue
+			case rateLimitActionRetry:
+				idx--
+				continue
+			}
+			// rateLimitActionMaxExceeded - fall through to error
 		}
 
 		err = newGeminiStatusErr(httpResp.StatusCode, data)
@@ -204,18 +225,12 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
-	budgetOverride, includeOverride, hasOverride := util.GeminiThinkingFromMetadata(req.Metadata)
-	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-	if hasOverride && util.ModelSupportsThinking(req.Model) {
-		if budgetOverride != nil {
-			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
-			budgetOverride = &norm
-		}
-		basePayload = util.ApplyGeminiCLIThinkingConfig(basePayload, budgetOverride, includeOverride)
+
+	// Translate request through canonical IR (handles all transformations internally)
+	basePayload, err := TranslateToGeminiCLI(e.cfg, from, req.Model, bytes.Clone(req.Payload), true, req.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to translate request: %w", err)
 	}
-	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
-	basePayload = fixGeminiCLIImageAspectRatio(req.Model, basePayload)
-	basePayload = applyPayloadConfigWithRoot(e.cfg, req.Model, "gemini", "request", basePayload)
 
 	projectID := resolveGeminiProjectID(auth)
 
@@ -234,6 +249,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 	var lastStatus int
 	var lastBody []byte
+	retrier := &rateLimitRetrier{}
 
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
@@ -297,12 +313,23 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			lastBody = append([]byte(nil), data...)
 			log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 			if httpResp.StatusCode == 429 {
-				if idx+1 < len(models) {
+				hasNextModel := idx+1 < len(models)
+				if hasNextModel {
 					log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
-				} else {
-					log.Debug("gemini cli executor: rate limited, no additional fallback model")
 				}
-				continue
+				action, ctxErr := retrier.handleRateLimit(ctx, hasNextModel, data)
+				if ctxErr != nil {
+					err = ctxErr
+					return nil, err
+				}
+				switch action {
+				case rateLimitActionContinue:
+					continue
+				case rateLimitActionRetry:
+					idx--
+					continue
+				}
+				// rateLimitActionMaxExceeded - fall through to error
 			}
 			err = newGeminiStatusErr(httpResp.StatusCode, data)
 			return nil, err
@@ -321,6 +348,10 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, 20_971_520)
 				var param any
+				streamState := &GeminiCLIStreamState{
+					ClaudeState: from_ir.NewClaudeStreamState(),
+				}
+
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					appendAPIResponseChunk(ctx, e.cfg, line)
@@ -328,6 +359,17 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 						reporter.publish(ctx, detail)
 					}
 					if bytes.HasPrefix(line, dataTag) {
+						// Try new translator first if enabled
+						messageID := "chatcmpl-" + attempt
+						translatedChunks, err := TranslateGeminiCLIResponseStream(e.cfg, from, bytes.Clone(line), attempt, messageID, streamState)
+						if err == nil && translatedChunks != nil {
+							for _, chunk := range translatedChunks {
+								out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+							}
+							continue
+						}
+
+						// Fallback to old translator
 						segments := sdktranslator.TranslateStream(respCtx, to, from, attempt, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone(line), &param)
 						for i := range segments {
 							out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
@@ -335,6 +377,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 					}
 				}
 
+				// Send [DONE] marker through old translator (new translator handles finish internally)
 				segments := sdktranslator.TranslateStream(respCtx, to, from, attempt, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone([]byte("[DONE]")), &param)
 				for i := range segments {
 					out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
@@ -407,22 +450,19 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 
 	var lastStatus int
 	var lastBody []byte
+	retrier := &rateLimitRetrier{}
 
-	budgetOverride, includeOverride, hasOverride := util.GeminiThinkingFromMetadata(req.Metadata)
-	for _, attemptModel := range models {
-		payload := sdktranslator.TranslateRequest(from, to, attemptModel, bytes.Clone(req.Payload), false)
-		if hasOverride && util.ModelSupportsThinking(req.Model) {
-			if budgetOverride != nil {
-				norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
-				budgetOverride = &norm
-			}
-			payload = util.ApplyGeminiCLIThinkingConfig(payload, budgetOverride, includeOverride)
+	for idx, attemptModel := range models {
+		// Translate request through canonical IR
+		payload, errTranslate := TranslateToGeminiCLI(e.cfg, from, attemptModel, bytes.Clone(req.Payload), false, req.Metadata)
+		if errTranslate != nil {
+			return cliproxyexecutor.Response{}, fmt.Errorf("failed to translate request: %w", errTranslate)
 		}
+
+		// Remove fields not needed for countTokens
 		payload = deleteJSONField(payload, "project")
 		payload = deleteJSONField(payload, "model")
 		payload = deleteJSONField(payload, "request.safetySettings")
-		payload = util.StripThinkingConfigIfUnsupported(req.Model, payload)
-		payload = fixGeminiCLIImageAspectRatio(attemptModel, payload)
 
 		tok, errTok := tokenSource.Token()
 		if errTok != nil {
@@ -476,8 +516,22 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		lastStatus = resp.StatusCode
 		lastBody = append([]byte(nil), data...)
 		if resp.StatusCode == 429 {
-			log.Debugf("gemini cli executor: rate limited, retrying with next model")
-			continue
+			hasNextModel := idx+1 < len(models)
+			if hasNextModel {
+				log.Debugf("gemini cli executor: rate limited, retrying with next model")
+			}
+			action, ctxErr := retrier.handleRateLimit(ctx, hasNextModel, data)
+			if ctxErr != nil {
+				return cliproxyexecutor.Response{}, ctxErr
+			}
+			switch action {
+			case rateLimitActionContinue:
+				continue
+			case rateLimitActionRetry:
+				idx--
+				continue
+			}
+			// rateLimitActionMaxExceeded - fall through to break
 		}
 		break
 	}
@@ -778,6 +832,71 @@ func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 		}
 	}
 	return err
+}
+
+// rateLimitRetrier handles rate limit (429) errors with exponential backoff retry logic.
+type rateLimitRetrier struct {
+	retryCount int
+}
+
+// rateLimitAction represents the action to take after handling a rate limit error.
+type rateLimitAction int
+
+const (
+	rateLimitActionContinue    rateLimitAction = iota // Continue to next model
+	rateLimitActionRetry                              // Retry same model after delay
+	rateLimitActionMaxExceeded                        // Max retries exceeded, stop
+)
+
+// handleRateLimit processes a 429 rate limit error and returns the appropriate action.
+// It handles model fallback first, then applies exponential backoff with retries.
+// Returns the action to take and waits if necessary (respecting context cancellation).
+func (r *rateLimitRetrier) handleRateLimit(ctx context.Context, hasNextModel bool, errorBody []byte) (rateLimitAction, error) {
+	// Try next model first if available
+	if hasNextModel {
+		return rateLimitActionContinue, nil
+	}
+
+	// No more models - apply exponential backoff with retries
+	if r.retryCount >= rateLimitMaxRetries {
+		log.Debug("gemini cli executor: rate limited, max retries exceeded")
+		return rateLimitActionMaxExceeded, nil
+	}
+
+	delay := r.calculateDelay(errorBody)
+	r.retryCount++
+	log.Debugf("gemini cli executor: rate limited, waiting %v before retry %d/%d", delay, r.retryCount, rateLimitMaxRetries)
+
+	select {
+	case <-ctx.Done():
+		return rateLimitActionMaxExceeded, ctx.Err()
+	case <-time.After(delay):
+	}
+
+	return rateLimitActionRetry, nil
+}
+
+// calculateDelay calculates the delay for rate limit retry with exponential backoff.
+// It first tries to use the server-provided retry delay from the error response,
+// then falls back to exponential backoff: 1s, 2s, 4s, 8s, 16s (capped at 20s).
+func (r *rateLimitRetrier) calculateDelay(errorBody []byte) time.Duration {
+	// First, try to use server-provided retry delay
+	if serverDelay, err := parseRetryDelay(errorBody); err == nil && serverDelay != nil {
+		delay := *serverDelay
+		// Add a small buffer to the server-provided delay
+		delay += 500 * time.Millisecond
+		if delay > rateLimitMaxDelay {
+			delay = rateLimitMaxDelay
+		}
+		return delay
+	}
+
+	// Fall back to exponential backoff: baseDelay * 2^retryCount
+	delay := rateLimitBaseDelay * time.Duration(1<<r.retryCount)
+	if delay > rateLimitMaxDelay {
+		delay = rateLimitMaxDelay
+	}
+	return delay
 }
 
 // parseRetryDelay extracts the retry delay from a Google API 429 error response.

@@ -70,7 +70,10 @@ func (e *GeminiVertexExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
 	}
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
-	body = fixGeminiImageAspectRatio(req.Model, body)
+	// Only apply fixGeminiImageAspectRatio if new translator is disabled (new translator handles it internally)
+	if e.cfg == nil || !e.cfg.UseCanonicalTranslator {
+		body = fixGeminiImageAspectRatio(req.Model, body)
+	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
 
 	action := "generateContent"
@@ -170,7 +173,10 @@ func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
 	}
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
-	body = fixGeminiImageAspectRatio(req.Model, body)
+	// Only apply fixGeminiImageAspectRatio if new translator is disabled (new translator handles it internally)
+	if e.cfg == nil || !e.cfg.UseCanonicalTranslator {
+		body = fixGeminiImageAspectRatio(req.Model, body)
+	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
 
 	baseURL := vertexBaseURL(location)
