@@ -26,7 +26,11 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
-          echo VERSION=`git describe --tags --always --dirty` >> $GITHUB_ENV
+          VERSION=$(git describe --tags --always --dirty)
+          if [[ "$VERSION" != *"-plus" ]]; then
+            VERSION="${VERSION}-plus"
+          fi
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
       - name: Build and push
@@ -42,5 +46,4 @@ jobs:
             COMMIT=${{ env.COMMIT }}
             BUILD_DATE=${{ env.BUILD_DATE }}
           tags: |
-            ${{ env.DOCKERHUB_REPO }}:latest
             ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}
