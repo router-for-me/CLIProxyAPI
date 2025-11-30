@@ -498,7 +498,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	fmt.Println("API server started successfully")
+	fmt.Printf("API server started successfully on: %d\n", s.cfg.Port)
 
 	if s.hooks.OnAfterStart != nil {
 		s.hooks.OnAfterStart(s)
