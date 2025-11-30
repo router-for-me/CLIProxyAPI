@@ -1118,6 +1118,14 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	authCopy := selected.Clone()
 	m.mu.RUnlock()
+	if !selected.indexAssigned {
+		m.mu.Lock()
+		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+			current.EnsureIndex()
+			authCopy = current.Clone()
+		}
+		m.mu.Unlock()
+	}
 	return authCopy, executor, nil
 }
 

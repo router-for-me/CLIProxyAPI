@@ -83,9 +83,10 @@ type WatcherWrapper struct {
 	start func(ctx context.Context) error
 	stop  func() error
 
-	setConfig      func(cfg *config.Config)
-	snapshotAuths  func() []*coreauth.Auth
-	setUpdateQueue func(queue chan<- watcher.AuthUpdate)
+	setConfig             func(cfg *config.Config)
+	snapshotAuths         func() []*coreauth.Auth
+	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
+	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -110,6 +111,16 @@ func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 		return
 	}
 	w.setConfig(cfg)
+}
+
+// DispatchRuntimeAuthUpdate forwards runtime auth updates (e.g., websocket providers)
+// into the watcher-managed auth update queue when available.
+// Returns true if the update was enqueued successfully.
+func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bool {
+	if w == nil || w.dispatchRuntimeUpdate == nil {
+		return false
+	}
+	return w.dispatchRuntimeUpdate(update)
 }
 
 // SetClients updates the watcher file-backed clients registry.

@@ -1,5 +1,7 @@
 # CLI Proxy API
 
+> 🆕 **[Fork Changes: UnifiedTranslator](./README_Fork.md)** — Canonical IR translator (-62% code), new providers (Kiro, Cline, Ollama)
+
 English | [中文](README_CN.md)
 
 A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
@@ -25,18 +27,20 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - Claude Code support via OAuth login
 - Qwen Code support via OAuth login
 - iFlow support via OAuth login
+- Cline support via refresh token authentication
 - Amp CLI and IDE extensions support with provider routing
 - Streaming and non-streaming responses
 - Function calling/tools support
 - Multimodal input support (text and images)
-- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Qwen and iFlow)
-- Simple CLI authentication flows (Gemini, OpenAI, Claude, Qwen and iFlow)
+- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Qwen, iFlow and Cline)
+- Simple CLI authentication flows (Gemini, OpenAI, Claude, Qwen, iFlow and Cline)
 - Generative Language API Key support
 - AI Studio Build multi-account load balancing
 - Gemini CLI multi-account load balancing
 - Claude Code multi-account load balancing
 - Qwen Code multi-account load balancing
 - iFlow multi-account load balancing
+- Cline multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)

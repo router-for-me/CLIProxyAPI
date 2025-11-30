@@ -222,6 +222,7 @@ func GetGeminiModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
 		},
 	}
 }
@@ -301,6 +302,7 @@ func GetGeminiVertexModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
 		},
 	}
 }
@@ -978,6 +980,70 @@ func GetIFlowModels() []*ModelInfo {
 			Created:     entry.Created,
 			OwnedBy:     "iflow",
 			Type:        "iflow",
+			DisplayName: entry.DisplayName,
+			Description: entry.Description,
+		})
+	}
+	return models
+}
+
+// GetClineModels returns the standard Cline model definitions
+func GetClineModels() []*ModelInfo {
+	entries := []struct {
+		ID          string
+		DisplayName string
+		Description string
+		Created     int64
+	}{
+		{ID: "minimax/minimax-m2", DisplayName: "MiniMax M2", Description: "MiniMax M2 via Cline", Created: 1758672000},
+		{ID: "x-ai/grok-code-fast-1", DisplayName: "Grok Code Fast 1", Description: "X.AI Grok Code Fast 1 via Cline", Created: 1735689600},
+	}
+	models := make([]*ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, &ModelInfo{
+			ID:          entry.ID,
+			Object:      "model",
+			Created:     entry.Created,
+			OwnedBy:     "cline",
+			Type:        "cline",
+			DisplayName: entry.DisplayName,
+			Description: entry.Description,
+		})
+	}
+	return models
+}
+
+// GetKiroModels returns the standard Kiro (Amazon Q / CodeWhisperer) model definitions
+func GetKiroModels() []*ModelInfo {
+	entries := []struct {
+		ID          string
+		DisplayName string
+		Description string
+		Created     int64
+	}{
+		// Primary models from Kiro MODEL_MAPPING
+		{ID: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5", Description: "Claude Sonnet 4.5 via Kiro/Amazon Q", Created: 1758672000},
+		{ID: "claude-sonnet-4-5-20250929", DisplayName: "Claude Sonnet 4.5 (20250929)", Description: "Claude Sonnet 4.5 via Kiro/Amazon Q", Created: 1758672000},
+		{ID: "claude-sonnet-4-20250514", DisplayName: "Claude Sonnet 4 (20250514)", Description: "Claude Sonnet 4 via Kiro/Amazon Q", Created: 1747267200},
+		{ID: "claude-3-7-sonnet-20250219", DisplayName: "Claude 3.7 Sonnet", Description: "Claude 3.7 Sonnet via Kiro/Amazon Q", Created: 1739923200},
+		// Amazon Q prefixed aliases
+		{ID: "amazonq-claude-sonnet-4-20250514", DisplayName: "Amazon Q Claude Sonnet 4", Description: "Claude Sonnet 4 via Amazon Q", Created: 1747267200},
+		{ID: "amazonq-claude-3-7-sonnet-20250219", DisplayName: "Amazon Q Claude 3.7 Sonnet", Description: "Claude 3.7 Sonnet via Amazon Q", Created: 1739923200},
+		// Additional Claude models available via Kiro
+		{ID: "claude-4-sonnet", DisplayName: "Claude 4 Sonnet", Description: "Claude 4 Sonnet via Kiro/Amazon Q", Created: 1747267200},
+		{ID: "claude-opus-4-20250514", DisplayName: "Claude 4 Opus", Description: "Claude 4 Opus via Kiro/Amazon Q", Created: 1747267200},
+		{ID: "claude-opus-4-5-20251101", DisplayName: "Claude 4.5 Opus", Description: "Claude 4.5 Opus via Kiro/Amazon Q", Created: 1761955200},
+		{ID: "claude-3-5-sonnet-20241022", DisplayName: "Claude 3.5 Sonnet", Description: "Claude 3.5 Sonnet via Kiro/Amazon Q", Created: 1729555200},
+		{ID: "claude-3-5-haiku-20241022", DisplayName: "Claude 3.5 Haiku", Description: "Claude 3.5 Haiku via Kiro/Amazon Q", Created: 1729555200},
+	}
+	models := make([]*ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, &ModelInfo{
+			ID:          entry.ID,
+			Object:      "model",
+			Created:     entry.Created,
+			OwnedBy:     "kiro",
+			Type:        "kiro",
 			DisplayName: entry.DisplayName,
 			Description: entry.Description,
 		})

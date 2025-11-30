@@ -24,4 +24,10 @@ const (
 
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
+
+	// Ollama represents the Ollama API format identifier.
+	Ollama = "ollama"
+
+	// Kiro represents the Kiro (Amazon Q) provider identifier.
+	Kiro = "kiro"
 )

@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"net/http"
@@ -77,7 +78,7 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	writeHeaders(builder, info.Headers)
 	builder.WriteString("\nBody:\n")
 	if len(info.Body) > 0 {
-		builder.WriteString(string(bytes.Clone(info.Body)))
+		builder.WriteString(string(formatJSONBodyForLog(info.Body)))
 	} else {
 		builder.WriteString("<empty>")
 	}
@@ -361,4 +362,83 @@ func extractHTMLTitle(body []byte) string {
 		return ""
 	}
 	return strings.Join(strings.Fields(title), " ")
+}
+
+// Constants for log formatting
+const (
+	// logTruncateHeadLength is the number of characters to show at the start of truncated strings
+	logTruncateHeadLength = 50
+	// logTruncateTailLength is the number of characters to show at the end of truncated strings
+	logTruncateTailLength = 50
+)
+
+// formatJSONBodyForLog formats JSON body for logging with pretty-printing
+// and truncation of long string values.
+func formatJSONBodyForLog(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	// Check if body looks like JSON (starts with { or [)
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return body
+	}
+
+	// Try to parse and re-marshal with indentation
+	var jsonData interface{}
+	if err := json.Unmarshal(body, &jsonData); err != nil {
+		// If parsing fails, just return original
+		return body
+	}
+
+	// Truncate long strings in the JSON data
+	truncatedData := truncateLongStringsInJSON(jsonData)
+
+	// Marshal with indentation for readability
+	formatted, err := json.MarshalIndent(truncatedData, "", "  ")
+	if err != nil {
+		return body
+	}
+
+	return formatted
+}
+
+// truncateLongStringsInJSON recursively traverses JSON data and truncates string values
+// that exceed the combined head and tail length.
+func truncateLongStringsInJSON(data interface{}) interface{} {
+	switch v := data.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{})
+		for key, value := range v {
+			result[key] = truncateLongStringsInJSON(value)
+		}
+		return result
+	case []interface{}:
+		result := make([]interface{}, len(v))
+		for i, value := range v {
+			result[i] = truncateLongStringsInJSON(value)
+		}
+		return result
+	case string:
+		return truncateLogString(v)
+	default:
+		return data
+	}
+}
+
+// truncateLogString truncates a string if it exceeds the combined head and tail length.
+func truncateLogString(s string) string {
+	// Use rune count for proper Unicode handling
+	runes := []rune(s)
+	minLengthToTruncate := logTruncateHeadLength + logTruncateTailLength
+	if len(runes) <= minLengthToTruncate {
+		return s
+	}
+
+	truncatedCount := len(runes) - logTruncateHeadLength - logTruncateTailLength
+	head := string(runes[:logTruncateHeadLength])
+	tail := string(runes[len(runes)-logTruncateTailLength:])
+
+	return fmt.Sprintf("%s...[%d chars truncated]...%s", head, truncatedCount, tail)
 }

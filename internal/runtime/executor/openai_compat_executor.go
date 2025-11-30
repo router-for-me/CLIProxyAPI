@@ -120,7 +120,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.publish(ctx, parseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
-	// Translate response back to source format when needed
+
+	// Try new translator first if enabled
+	if translatedResp, errTranslate := TranslateOpenAIResponseNonStream(e.cfg, from, body, req.Model); errTranslate == nil && translatedResp != nil {
+		resp = cliproxyexecutor.Response{Payload: translatedResp}
+		return resp, nil
+	}
+
+	// Translate response back to source format when needed (fallback to old translator)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: []byte(out)}
@@ -208,6 +215,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 20_971_520)
 		var param any
+		// State for new translator (tracks reasoning tokens)
+		var streamState *OpenAIStreamState
+		useNewTranslator := e.cfg != nil && e.cfg.UseCanonicalTranslator
+		if useNewTranslator {
+			streamState = &OpenAIStreamState{}
+		}
+		messageID := "chatcmpl-" + req.Model
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
@@ -216,6 +230,17 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 			if len(line) == 0 {
 				continue
+			}
+			// Try new translator first if enabled
+			if useNewTranslator {
+				translatedChunks, errTranslate := TranslateOpenAIResponseStream(e.cfg, from, bytes.Clone(line), req.Model, messageID, streamState)
+				if errTranslate == nil && translatedChunks != nil {
+					for _, chunk := range translatedChunks {
+						out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+					}
+					continue
+				}
+				// Fall through to old translator on error
 			}
 			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 			// Pass through translator; it yields one or more chunks for the target schema.

@@ -60,8 +60,10 @@ func main() {
 	var qwenLogin bool
 	var iflowLogin bool
 	var iflowCookie bool
+	var clineLogin bool
 	var noBrowser bool
 	var antigravityLogin bool
+	var kiroLogin bool
 	var projectID string
 	var vertexImport string
 	var configPath string
@@ -74,8 +76,10 @@ func main() {
 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
 	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
+	flag.BoolVar(&clineLogin, "cline-login", false, "Login to Cline using refresh token")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
+	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro (Amazon Q) using refresh token")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -448,6 +452,10 @@ func main() {
 		cmd.DoIFlowLogin(cfg, options)
 	} else if iflowCookie {
 		cmd.DoIFlowCookieAuth(cfg, options)
+	} else if clineLogin {
+		cmd.DoClineLogin(cfg, options)
+	} else if kiroLogin {
+		cmd.DoKiroLogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

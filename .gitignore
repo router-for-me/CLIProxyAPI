@@ -22,6 +22,7 @@ auths/*
 
 # Documentation
 docs/*
+!docs/cline-integration.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md
@@ -30,3 +31,5 @@ GEMINI.md
 .vscode/*
 .claude/*
 .serena/*
+/auth/
+_wgun/

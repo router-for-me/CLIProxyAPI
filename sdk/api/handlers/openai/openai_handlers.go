@@ -546,7 +546,15 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 				cancel(nil)
 				return
 			}
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			// Check if chunk is already in SSE format:
+			// - Claude format starts with "event:"
+			// - OpenAI format starts with "data: "
+			// If so, write it directly without wrapping
+			if len(chunk) > 6 && (string(chunk[:6]) == "event:" || string(chunk[:6]) == "data: ") {
+				_, _ = c.Writer.Write(chunk)
+			} else {
+				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			}
 			flusher.Flush()
 		case errMsg, ok := <-errs:
 			if !ok {

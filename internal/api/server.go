@@ -26,12 +26,14 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/ollama"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -252,6 +254,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+
+	// Initialize provider prefix display setting in model registry
+	registry.GetGlobalRegistry().SetShowProviderPrefixes(cfg.ShowProviderPrefixes)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if optionState.localPassword != "" {
@@ -313,10 +318,11 @@ func (s *Server) setupRoutes() {
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
+	ollamaHandlers := ollama.NewOllamaAPIHandler(s.handlers)
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(s.conditionalAuthMiddleware())
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -328,7 +334,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(s.conditionalAuthMiddleware())
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/:action", geminiHandlers.GeminiHandler)
@@ -347,6 +353,29 @@ func (s *Server) setupRoutes() {
 		})
 	})
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
+
+	// Ollama compatible API routes (no authentication required, like in the example)
+	// Handle /api/version without auth (before auth check)
+	s.engine.GET("/api/version", ollamaHandlers.Version)
+	s.engine.GET("/ollama/api/version", ollamaHandlers.Version)
+
+	// Handle other Ollama endpoints (with optional auth - can work without API key)
+	apiGroup := s.engine.Group("/api")
+	{
+		apiGroup.GET("/tags", ollamaHandlers.Tags)
+		apiGroup.POST("/chat", ollamaHandlers.Chat)
+		apiGroup.POST("/generate", ollamaHandlers.Generate)
+		apiGroup.POST("/show", ollamaHandlers.Show)
+	}
+
+	// Also support /ollama/api/* paths
+	ollamaGroup := s.engine.Group("/ollama/api")
+	{
+		ollamaGroup.GET("/tags", ollamaHandlers.Tags)
+		ollamaGroup.POST("/chat", ollamaHandlers.Chat)
+		ollamaGroup.POST("/generate", ollamaHandlers.Generate)
+		ollamaGroup.POST("/show", ollamaHandlers.Show)
+	}
 
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
@@ -542,6 +571,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
 		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
+
+		mgmt.GET("/oauth-excluded-models", s.mgmt.GetOAuthExcludedModels)
+		mgmt.PUT("/oauth-excluded-models", s.mgmt.PutOAuthExcludedModels)
+		mgmt.PATCH("/oauth-excluded-models", s.mgmt.PatchOAuthExcludedModels)
+		mgmt.DELETE("/oauth-excluded-models", s.mgmt.DeleteOAuthExcludedModels)
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
@@ -891,6 +925,17 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}
 	managementasset.SetCurrentConfig(cfg)
+
+	// Update provider prefix display setting in model registry
+	if oldCfg == nil || oldCfg.ShowProviderPrefixes != cfg.ShowProviderPrefixes {
+		registry.GetGlobalRegistry().SetShowProviderPrefixes(cfg.ShowProviderPrefixes)
+		if oldCfg != nil {
+			log.Debugf("show_provider_prefixes updated from %t to %t", oldCfg.ShowProviderPrefixes, cfg.ShowProviderPrefixes)
+		} else {
+			log.Debugf("show_provider_prefixes toggled to %t", cfg.ShowProviderPrefixes)
+		}
+	}
+
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 
@@ -946,6 +991,19 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 
 // (management handlers moved to internal/api/handlers/management)
 
+// conditionalAuthMiddleware returns middleware that checks disable-auth config flag.
+// If disable-auth is true, all requests are allowed without authentication.
+// Otherwise, standard authentication is applied.
+func (s *Server) conditionalAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s.cfg != nil && s.cfg.DisableAuth {
+			c.Next()
+			return
+		}
+		AuthMiddleware(s.accessManager)(c)
+	}
+}
+
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
 // using the configured authentication providers. When no providers are available,
 // it allows all requests (legacy behaviour).
@@ -969,9 +1027,13 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 			return
 		}
 
+		// Allow requests without credentials (Ollama compatibility)
+		if errors.Is(err, sdkaccess.ErrNoCredentials) {
+			c.Next()
+			return
+		}
+
 		switch {
-		case errors.Is(err, sdkaccess.ErrNoCredentials):
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Missing API key"})
 		case errors.Is(err, sdkaccess.ErrInvalidCredential):
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
 		default:
@@ -980,3 +1042,7 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 	}
 }
+
+
+
+

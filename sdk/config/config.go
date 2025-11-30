@@ -17,6 +17,10 @@ type SDKConfig struct {
 
 	// Access holds request authentication provider configuration.
 	Access AccessConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
+
+	// ShowProviderPrefixes enables visual provider prefixes in model IDs (e.g., "[Gemini CLI] gemini-2.5-pro").
+	// This is purely cosmetic and does not affect actual model routing to providers.
+	ShowProviderPrefixes bool `yaml:"show-provider-prefixes" json:"show-provider-prefixes"`
 }
 
 // AccessConfig groups request authentication providers.

@@ -321,29 +321,34 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// Resolve "auto" model to an actual available model first
 	resolvedModelName := util.ResolveAutoModel(modelName)
 
-	providerName, extractedModelName, isDynamic := h.parseDynamicModel(resolvedModelName)
+	// Check if user specified a specific provider via prefix (e.g., "[Gemini CLI] model-name")
+	specifiedProvider := util.ExtractProviderFromPrefixedModelID(resolvedModelName)
 
-	// First, normalize the model name to handle suffixes like "-thinking-128"
+	// Normalize model ID - this is the single point of model ID normalization for all requests
+	cleanModelName := util.NormalizeIncomingModelID(resolvedModelName)
+
+	providerName, extractedModelName, isDynamic := h.parseDynamicModel(cleanModelName)
+
+	// Normalize the model name to handle suffixes like "-thinking-128"
 	// This needs to happen before determining the provider for non-dynamic models.
-	normalizedModel, metadata = normalizeModelMetadata(resolvedModelName)
+	normalizedModel, metadata = normalizeModelMetadata(cleanModelName)
 
 	if isDynamic {
 		providers = []string{providerName}
 		// For dynamic models, the extractedModelName is already normalized by parseDynamicModel
 		// so we use it as the final normalizedModel.
 		normalizedModel = extractedModelName
+	} else if specifiedProvider != "" {
+		// User specified a specific provider via prefix - use ONLY that provider
+		providers = []string{specifiedProvider}
 	} else {
-		// For non-dynamic models, use the normalizedModel to get the provider name.
+		// No specific provider requested - get all available providers for this model
 		providers = util.GetProviderName(normalizedModel)
 	}
 
 	if len(providers) == 0 {
 		return nil, "", nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
-
-	// If it's a dynamic model, the normalizedModel was already set to extractedModelName.
-	// If it's a non-dynamic model, normalizedModel was set by normalizeModelMetadata.
-	// So, normalizedModel is already correctly set at this point.
 
 	return providers, normalizedModel, metadata, nil
 }

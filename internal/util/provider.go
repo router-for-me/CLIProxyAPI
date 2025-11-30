@@ -32,32 +32,52 @@ import (
 //   - []string: All provider identifiers capable of serving the model, ordered by preference.
 func GetProviderName(modelName string) []string {
 	if modelName == "" {
+		log.Debugf("GetProviderName: empty modelName")
 		return nil
 	}
 
-	providers := make([]string, 0, 4)
-	seen := make(map[string]struct{})
+	// Normalize model ID using centralized normalizer
+	normalizer := registry.NewModelIDNormalizer()
+	cleanModelName := normalizer.NormalizeModelID(modelName)
+	log.Debugf("GetProviderName: modelName=%s, cleanModelName=%s", modelName, cleanModelName)
 
-	appendProvider := func(name string) {
-		if name == "" {
-			return
-		}
-		if _, exists := seen[name]; exists {
-			return
-		}
-		seen[name] = struct{}{}
-		providers = append(providers, name)
+	modelProviders := registry.GetGlobalRegistry().GetModelProviders(cleanModelName)
+	log.Debugf("GetProviderName: modelProviders=%v", modelProviders)
+	
+	// Return only the first (highest priority) provider for the model
+	// This ensures each model is tied to a specific provider, not load-balanced across multiple
+	if len(modelProviders) > 0 {
+		return []string{modelProviders[0]}
 	}
 
-	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelName) {
-		appendProvider(provider)
-	}
+	return nil
+}
 
-	if len(providers) > 0 {
-		return providers
-	}
+// NormalizeIncomingModelID is the main entry point for normalizing model IDs from client requests.
+// This should be called once at the beginning of request processing to ensure consistent
+// model ID handling throughout the system.
+//
+// Examples:
+//   - "[Gemini CLI] gemini-2.5-flash" -> "gemini-2.5-flash"
+//   - "[Antigravity] claude-3-sonnet" -> "claude-3-sonnet"
+//   - "[Gemini] gemini-2.5-flash" -> "gemini-2.5-flash"
+//   - "gemini-2.5-flash" -> "gemini-2.5-flash"
+func NormalizeIncomingModelID(modelID string) string {
+	normalizer := registry.NewModelIDNormalizer()
+	return normalizer.NormalizeModelID(modelID)
+}
 
-	return providers
+// ExtractProviderFromPrefixedModelID extracts the provider type from a prefixed model ID.
+// Returns empty string if no prefix is present.
+//
+// Examples:
+//   - "[Gemini CLI] gemini-2.5-flash" -> "gemini-cli"
+//   - "[Antigravity] model" -> "antigravity"
+//   - "[Gemini] gemini-2.5-flash" -> "gemini"
+//   - "gemini-2.5-flash" -> ""
+func ExtractProviderFromPrefixedModelID(modelID string) string {
+	normalizer := registry.NewModelIDNormalizer()
+	return normalizer.ExtractProviderFromPrefixedID(modelID)
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
