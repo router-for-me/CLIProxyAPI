@@ -24,9 +24,6 @@ jobs:
       - name: Generate Build Metadata
         run: |
           VERSION=$(git describe --tags --always --dirty)
-          if [[ "$VERSION" != *"-plus" ]]; then
-            VERSION="${VERSION}-plus"
-          fi
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
