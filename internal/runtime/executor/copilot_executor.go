@@ -40,6 +40,19 @@ type cachedToken struct {
 	expiresAt time.Time
 }
 
+// modelCacheEntry stores cached models.
+// Shared model cache across executor instances (survives executor recreation).
+var (
+	sharedModelCacheMu sync.Mutex
+	sharedModelCache   = make(map[string]*sharedModelCacheEntry)
+)
+
+type sharedModelCacheEntry struct {
+	models    []*registry.ModelInfo
+	fetchedAt time.Time
+}
+
+const sharedModelCacheTTL = 30 * time.Minute
 // NewCopilotExecutor creates a new CopilotExecutor instance.
 
 func NewCopilotExecutor(cfg *config.Config) *CopilotExecutor {
@@ -53,6 +66,15 @@ func NewCopilotExecutor(cfg *config.Config) *CopilotExecutor {
 func (e *CopilotExecutor) Identifier() string { return "copilot" }
 
 func (e *CopilotExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
+
+// reasoningCache returns the shared Gemini reasoning cache for a given auth, or a fresh
+// cache when auth is nil/unknown. This keeps Gemini reasoning warm across reauths.
+func (e *CopilotExecutor) reasoningCache(auth *cliproxyauth.Auth) *geminiReasoningCache {
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return newGeminiReasoningCache()
+	}
+	return getSharedGeminiReasoningCache(strings.TrimSpace(auth.ID))
+}
 
 // stripCopilotPrefix removes the "copilot-" prefix from model names if present.
 // This allows users to explicitly route to Copilot using "copilot-gpt-5" while
@@ -89,6 +111,9 @@ func (e *CopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 	apiModel := stripCopilotPrefix(req.Model)
 
 	translatorModel := req.Model
+	if !strings.HasPrefix(strings.ToLower(req.Model), "copilot-") && strings.HasPrefix(strings.ToLower(apiModel), "gemini") {
+		translatorModel = "copilot-" + apiModel
+	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), apiModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -100,6 +125,11 @@ func (e *CopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 	body = applyPayloadConfig(e.cfg, apiModel, body)
 	body = sanitizeCopilotPayload(body, apiModel)
 	body, _ = sjson.SetBytes(body, "stream", false)
+
+	// Inject cached Gemini reasoning for models that require it
+	if strings.HasPrefix(strings.ToLower(apiModel), "gemini") {
+		body = e.reasoningCache(auth).InjectReasoning(body)
+	}
 
 	baseURL := copilotauth.CopilotBaseURL(accountType)
 	url := baseURL + "/chat/completions"
@@ -176,6 +206,9 @@ func (e *CopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 	apiModel := stripCopilotPrefix(req.Model)
 
 	translatorModel := req.Model
+	if !strings.HasPrefix(strings.ToLower(req.Model), "copilot-") && strings.HasPrefix(strings.ToLower(apiModel), "gemini") {
+		translatorModel = "copilot-" + apiModel
+	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), apiModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -187,6 +220,11 @@ func (e *CopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 	body = applyPayloadConfig(e.cfg, apiModel, body)
 	body = sanitizeCopilotPayload(body, apiModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
+
+	// Inject cached Gemini reasoning for models that require it
+	if strings.HasPrefix(strings.ToLower(apiModel), "gemini") {
+		body = e.reasoningCache(auth).InjectReasoning(body)
+	}
 
 	baseURL := copilotauth.CopilotBaseURL(accountType)
 	url := baseURL + "/chat/completions"
@@ -250,6 +288,7 @@ func (e *CopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 			}
 		}()
 
+		isGemini := strings.HasPrefix(strings.ToLower(apiModel), "gemini")
 		scanner := bufio.NewScanner(httpResp.Body)
 		bufSize := e.cfg.ScannerBufferSize
 		if bufSize <= 0 {
@@ -266,6 +305,11 @@ func (e *CopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 				data := bytes.TrimSpace(line[5:])
 				if gjson.GetBytes(data, "usage").Exists() {
 					reporter.publish(ctx, parseOpenAIUsage(data))
+				}
+
+				// Cache Gemini reasoning data for subsequent requests
+				if isGemini {
+					e.reasoningCache(auth).CacheReasoning(data)
 				}
 			}
 
@@ -438,7 +482,7 @@ func (e *CopilotExecutor) setCachedToken(githubToken, token string, expiresAt ti
 //
 // This method uses the Codex/OpenAI tokenizer (via tokenizerForCodexModel) as an
 // approximation for Copilot models. Since Copilot routes requests to various
-// underlying models, the token counts are best-effort
+// underlying models (GPT, Claude, Gemini), the token counts are best-effort
 // estimates rather than exact billing equivalents.
 //
 // If a Copilot-specific tokenizer becomes available in the future, it can be
@@ -485,18 +529,124 @@ func (e *CopilotExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Au
 	usageJSON := fmt.Sprintf(`{"usage":{"input_tokens":%d,"output_tokens":0}}`, count)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, from, int64(count), []byte(usageJSON))
 	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
-
 }
+
+func getCachedCopilotModels(authID string) []*registry.ModelInfo {
+	sharedModelCacheMu.Lock()
+	defer sharedModelCacheMu.Unlock()
+	if entry, ok := sharedModelCache[authID]; ok {
+		if time.Since(entry.fetchedAt) < sharedModelCacheTTL {
+			return entry.models
+		}
+	}
+	return nil
+}
+
+func setCachedCopilotModels(authID string, models []*registry.ModelInfo) {
+	sharedModelCacheMu.Lock()
+	defer sharedModelCacheMu.Unlock()
+	sharedModelCache[authID] = &sharedModelCacheEntry{
+		fetchedAt: time.Now(),
+		models:    models,
+	}
+}
+
+// EvictCopilotModelCache removes cached models for an auth ID when the auth is removed.
+func EvictCopilotModelCache(authID string) {
+	if authID == "" {
+		return
+	}
+	sharedModelCacheMu.Lock()
+	delete(sharedModelCache, authID)
+	sharedModelCacheMu.Unlock()
+}
+
+func (e *CopilotExecutor) FetchModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	// 1. Check Cache
+	if models := getCachedCopilotModels(auth.ID); models != nil {
+		return models
+	}
+
+	// 2. Resolve Tokens
+	copilotauth.EnsureMetadataHydrated(auth)
+	copilotToken, _, _ := copilotauth.ResolveCopilotToken(auth)
+
+	// 3. Fetch (auto-refresh if 401)
+	authSvc := copilotauth.NewCopilotAuth(cfg)
+	var modelsResp *copilotauth.CopilotModelsResponse
+	var err error
+
+	if copilotToken != "" {
+		modelsResp, err = authSvc.GetModels(ctx, copilotToken, copilotauth.ResolveAccountType(auth))
+	}
+
+	if (copilotToken == "" || err != nil) && copilotauth.ResolveGitHubToken(auth) != "" {
+		// Attempt refresh
+		if _, refreshErr := e.Refresh(ctx, auth); refreshErr == nil {
+			copilotToken, _, _ = copilotauth.ResolveCopilotToken(auth)
+			modelsResp, err = authSvc.GetModels(ctx, copilotToken, copilotauth.ResolveAccountType(auth))
+		}
+	}
+
+	if err != nil || modelsResp == nil {
+		log.Warnf("copilot executor: failed to fetch models for auth %s: %v", auth.ID, err)
+		return nil
+	}
+
+	// 4. Process and Cache
+	now := time.Now().Unix()
+	models := make([]*registry.ModelInfo, 0, len(modelsResp.Data))
+
+	for _, m := range modelsResp.Data {
+		if !m.ModelPickerEnabled {
+			continue
+		}
+		modelInfo := &registry.ModelInfo{
+			ID:          m.ID,
+			Name:        m.Name,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "copilot",
+			Type:        "copilot",
+			DisplayName: m.Name,
+			Version:     m.Version,
+		}
+		if m.Capabilities.Limits.MaxContextWindowTokens > 0 {
+			modelInfo.ContextLength = m.Capabilities.Limits.MaxContextWindowTokens
+		}
+		if m.Capabilities.Limits.MaxOutputTokens > 0 {
+			modelInfo.MaxCompletionTokens = m.Capabilities.Limits.MaxOutputTokens
+		}
+		params := []string{"temperature", "top_p", "max_tokens", "stream"}
+		if m.Capabilities.Supports.ToolCalls {
+			params = append(params, "tools")
+		}
+		modelInfo.SupportedParameters = params
+		desc := fmt.Sprintf("%s model via GitHub Copilot", m.Vendor)
+		if m.Preview {
+			desc += " (Preview)"
+		}
+		modelInfo.Description = desc
+		models = append(models, modelInfo)
+	}
+
+	models = registry.GenerateCopilotAliases(models)
+	setCachedCopilotModels(auth.ID, models)
+	return models
+}
+
+// FetchCopilotModels retrieves available models from the Copilot API using the supplied auth.
+// Uses shared cache that persists across executor instances.
+func FetchCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	// Use shared cache - check before creating executor
+	if models := getCachedCopilotModels(auth.ID); models != nil {
+		return models
+	}
+	e := NewCopilotExecutor(cfg)
+	return e.FetchModels(ctx, auth, cfg)
+}
+
 // copilotStatusErr creates a statusErr with appropriate retry timing for Copilot.
-
-// EvictCopilotModelCache clears cached model data for a given auth ID.
-func EvictCopilotModelCache(_ string) {}
-
-// FetchModels returns the static Copilot model list.
-func (e *CopilotExecutor) FetchModels(_ context.Context, _ *cliproxyauth.Auth, _ *config.Config) []*registry.ModelInfo {
-	return registry.GetCopilotModels()
-}
-
 // For 429 errors, it sets a longer retry delay (30 seconds) since Copilot quota
 // limits typically require more time to recover than standard rate limits.
 func copilotStatusErr(code int, msg string) statusErr {
