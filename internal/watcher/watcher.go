@@ -496,6 +496,18 @@ func computeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 	return hex.EncodeToString(sum[:])
 }
 
+func computeVertexCompatModelsHash(models []config.VertexCompatModel) string {
+	if len(models) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(models)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 // computeClaudeModelsHash returns a stable hash for Claude model aliases.
 func computeClaudeModelsHash(models []config.ClaudeModel) string {
 	if len(models) == 0 {
@@ -1269,6 +1281,42 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			}
 		}
 	}
+
+	// Process Vertex compatibility providers
+	for i := range cfg.VertexCompatAPIKey {
+		compat := &cfg.VertexCompatAPIKey[i]
+		providerName := "vertex-compat"
+		base := strings.TrimSpace(compat.BaseURL)
+
+		key := strings.TrimSpace(compat.APIKey)
+		proxyURL := strings.TrimSpace(compat.ProxyURL)
+		idKind := fmt.Sprintf("vertex-compatibility:%s", base)
+		id, token := idGen.next(idKind, key, base, proxyURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:vertex-compatibility[%s]", token),
+			"base_url":     base,
+			"provider_key": providerName,
+		}
+		if key != "" {
+			attrs["api_key"] = key
+		}
+		if hash := computeVertexCompatModelsHash(compat.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(compat.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   providerName,
+			Label:      "Vertex Compatibility",
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		out = append(out, a)
+	}
+
 	// Also synthesize auth entries directly from auth files (for OAuth/file-backed providers)
 	entries, _ := os.ReadDir(w.authDir)
 	for _, e := range entries {
