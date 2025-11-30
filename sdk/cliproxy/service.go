@@ -363,7 +363,7 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 	case "vertex":
 		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
 	case "vertex-compat":
-		s.coreManager.RegisterExecutor(executor.NewVertexCompatExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewGeminiVertexCompatExecutor(s.cfg))
 	case "gemini-cli":
 		s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
 	case "aistudio":
