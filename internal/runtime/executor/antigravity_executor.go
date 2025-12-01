@@ -17,7 +17,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -59,20 +58,6 @@ func (e *AntigravityExecutor) Identifier() string { return antigravityAuthType }
 // PrepareRequest implements ProviderExecutor.
 func (e *AntigravityExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
 
-// applyThinkingMetadata applies thinking config from model suffix metadata (e.g., -reasoning, -thinking-N).
-// It trusts user intent when suffix is used, even if registry doesn't have Thinking metadata.
-func applyThinkingMetadata(translated []byte, metadata map[string]any, model string) []byte {
-	budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(metadata)
-	if !ok {
-		return translated
-	}
-	if budgetOverride != nil && util.ModelSupportsThinking(model) {
-		norm := util.NormalizeThinkingBudget(model, *budgetOverride)
-		budgetOverride = &norm
-	}
-	return util.ApplyGeminiCLIThinkingConfig(translated, budgetOverride, includeOverride)
-}
-
 // Execute handles non-streaming requests via the antigravity generate endpoint.
 func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
@@ -90,7 +75,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	to := sdktranslator.FromString("antigravity")
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 
-	translated = applyThinkingMetadata(translated, req.Metadata, req.Model)
+	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -183,7 +168,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	to := sdktranslator.FromString("antigravity")
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
-	translated = applyThinkingMetadata(translated, req.Metadata, req.Model)
+	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)

@@ -308,13 +308,7 @@ func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts c
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 	payload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
-	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
-		if budgetOverride != nil {
-			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
-			budgetOverride = &norm
-		}
-		payload = util.ApplyGeminiThinkingConfig(payload, budgetOverride, includeOverride)
-	}
+	payload = applyThinkingMetadata(payload, req.Metadata, req.Model)
 	payload = util.ConvertThinkingLevelToBudget(payload)
 	payload = util.StripThinkingConfigIfUnsupported(req.Model, payload)
 	payload = fixGeminiImageAspectRatio(req.Model, payload)
