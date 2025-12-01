@@ -105,9 +105,21 @@ internal/translator/
 
 ### Ollama as Output Format
 
-Ollama is supported **natively via IR** — without intermediate conversion to OpenAI. The proxy acts as an Ollama-compatible server with full API implementation. **Server is recommended to run on standard port 11434** to avoid client compatibility issues.
+The proxy acts as an **Ollama-compatible server** with full API implementation. Incoming Ollama requests are parsed directly into IR format (no intermediate OpenAI conversion on input). The request is then converted to the target provider's format for execution, and the response is converted back through IR to Ollama format.
 
-**Flow:** Ollama client → IR → OpenAI → Provider → IR → Ollama response
+**Server is recommended to run on standard port 11434** to avoid client compatibility issues.
+
+```
+Ollama client (/api/chat)
+    ↓ parse directly to IR
+Canonical IR
+    ↓ convert to provider format
+Provider (Gemini/Claude/OpenAI/etc.)
+    ↓ response
+Canonical IR
+    ↓ convert to Ollama format
+Ollama response
+```
 
 **Use case:** IDEs with Ollama support but without OpenAI-compatible API (e.g., Copilot Chat).
 
