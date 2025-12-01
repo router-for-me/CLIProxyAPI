@@ -93,6 +93,8 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
+	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
+
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
@@ -212,6 +214,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	} else {
 		translated = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	}
+
+	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
