@@ -126,36 +126,6 @@ func CleanJsonSchema(schema map[string]interface{}) map[string]interface{} {
 	return schema
 }
 
-// CleanJsonSchemaForClaude prepares JSON Schema for Claude API compatibility.
-func CleanJsonSchemaForClaude(schema map[string]interface{}) map[string]interface{} {
-	if schema == nil {
-		return nil
-	}
-	schema = CleanJsonSchema(schema)
-	schema["additionalProperties"] = false
-	schema["$schema"] = "http://json-schema.org/draft-07/schema#"
-	lowercaseTypeFields(schema)
-	return schema
-}
-
-func lowercaseTypeFields(obj map[string]interface{}) {
-	for key, value := range obj {
-		if key == "type" {
-			if strVal, ok := value.(string); ok {
-				obj[key] = strings.ToLower(strVal)
-			}
-		} else if nested, ok := value.(map[string]interface{}); ok {
-			lowercaseTypeFields(nested)
-		} else if arr, ok := value.([]interface{}); ok {
-			for _, item := range arr {
-				if nestedMap, ok := item.(map[string]interface{}); ok {
-					lowercaseTypeFields(nestedMap)
-				}
-			}
-		}
-	}
-}
-
 // GenToolCallID generates a unique tool call ID.
 func GenToolCallID() string { return GenToolCallIDWithName("call") }
 
@@ -344,4 +314,138 @@ func HasThoughtSignatureOnly(thoughtSig, thoughtSigSnake, text, functionCall, in
 	}
 
 	return !(exists(text) || exists(functionCall) || exists(inlineData) || exists(inlineDataSnake))
+}
+
+// =============================================================================
+// Claude JSON Schema Cleaning
+// =============================================================================
+
+// CleanJsonSchemaForClaude prepares JSON Schema for Claude API compatibility.
+// This is a wrapper that calls cleanSchemaForClaudeRecursive and adds required fields.
+func CleanJsonSchemaForClaude(schema map[string]interface{}) map[string]interface{} {
+	if schema == nil {
+		return nil
+	}
+	schema = CleanJsonSchema(schema)
+	cleanSchemaForClaudeRecursive(schema)
+	schema["additionalProperties"] = false
+	schema["$schema"] = "http://json-schema.org/draft-07/schema#"
+	return schema
+}
+
+// cleanSchemaForClaudeRecursive recursively removes JSON Schema fields that Claude API doesn't support.
+// Claude uses JSON Schema draft 2020-12 but doesn't support all features.
+// See: https://docs.anthropic.com/en/docs/build-with-claude/tool-use
+func cleanSchemaForClaudeRecursive(schema map[string]interface{}) {
+	if schema == nil {
+		return
+	}
+
+	// CRITICAL: Convert "const" to "enum" before deletion
+	// Claude doesn't support "const" but supports "enum" with single value
+	// This preserves discriminator semantics (e.g., Pydantic Literal types)
+	if constVal, ok := schema["const"]; ok {
+		schema["enum"] = []interface{}{constVal}
+		delete(schema, "const")
+	}
+
+	// Lowercase type fields for consistency
+	if typeVal, ok := schema["type"].(string); ok {
+		schema["type"] = strings.ToLower(typeVal)
+	}
+
+	// Fields that Claude doesn't support in JSON Schema
+	// Based on JSON Schema draft 2020-12 compatibility
+	unsupportedFields := []string{
+		// Composition keywords that Claude doesn't support
+		"anyOf", "oneOf", "allOf", "not",
+		// Snake_case variants
+		"any_of", "one_of", "all_of",
+		// Reference keywords
+		"$ref", "$defs", "definitions", "$id", "$anchor", "$dynamicRef", "$dynamicAnchor",
+		// Schema metadata
+		"$schema", "$vocabulary", "$comment",
+		// Conditional keywords
+		"if", "then", "else", "dependentSchemas", "dependentRequired",
+		// Unevaluated keywords
+		"unevaluatedItems", "unevaluatedProperties",
+		// Content keywords
+		"contentEncoding", "contentMediaType", "contentSchema",
+		// Deprecated keywords
+		"dependencies",
+		// Array validation keywords that may not be supported
+		"minItems", "maxItems", "uniqueItems", "minContains", "maxContains",
+		// String validation keywords that may cause issues
+		"minLength", "maxLength", "pattern", "format",
+		// Number validation keywords
+		"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+		// Object validation keywords that may cause issues
+		"minProperties", "maxProperties",
+		// Default values - Claude officially doesn't support in input_schema
+		"default",
+	}
+
+	for _, field := range unsupportedFields {
+		delete(schema, field)
+	}
+
+	// Recursively clean nested objects in properties
+	if properties, ok := schema["properties"].(map[string]interface{}); ok {
+		for key, prop := range properties {
+			if propMap, ok := prop.(map[string]interface{}); ok {
+				cleanSchemaForClaudeRecursive(propMap)
+				properties[key] = propMap
+			}
+		}
+	}
+
+	// Clean items - can be object or array
+	if items := schema["items"]; items != nil {
+		switch v := items.(type) {
+		case map[string]interface{}:
+			cleanSchemaForClaudeRecursive(v)
+		case []interface{}:
+			for i, item := range v {
+				if itemMap, ok := item.(map[string]interface{}); ok {
+					cleanSchemaForClaudeRecursive(itemMap)
+					v[i] = itemMap
+				}
+			}
+		}
+	}
+
+	// Handle prefixItems (tuple validation)
+	if prefixItems, ok := schema["prefixItems"].([]interface{}); ok {
+		for i, item := range prefixItems {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				cleanSchemaForClaudeRecursive(itemMap)
+				prefixItems[i] = itemMap
+			}
+		}
+	}
+
+	// Handle additionalProperties if it's an object
+	if addProps, ok := schema["additionalProperties"].(map[string]interface{}); ok {
+		cleanSchemaForClaudeRecursive(addProps)
+	}
+
+	// Handle patternProperties
+	if patternProps, ok := schema["patternProperties"].(map[string]interface{}); ok {
+		for key, prop := range patternProps {
+			if propMap, ok := prop.(map[string]interface{}); ok {
+				cleanSchemaForClaudeRecursive(propMap)
+				patternProps[key] = propMap
+			}
+		}
+	}
+
+	// Handle propertyNames
+	if propNames, ok := schema["propertyNames"].(map[string]interface{}); ok {
+		cleanSchemaForClaudeRecursive(propNames)
+	}
+
+	// Handle contains
+	if contains, ok := schema["contains"].(map[string]interface{}); ok {
+		cleanSchemaForClaudeRecursive(contains)
+	}
 }

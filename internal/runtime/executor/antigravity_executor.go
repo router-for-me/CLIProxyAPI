@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -63,20 +63,6 @@ func (e *AntigravityExecutor) Identifier() string { return antigravityAuthType }
 // PrepareRequest implements ProviderExecutor.
 func (e *AntigravityExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
 
-// applyThinkingMetadata applies thinking config from model suffix metadata (e.g., -reasoning, -thinking-N).
-// It trusts user intent when suffix is used, even if registry doesn't have Thinking metadata.
-func applyThinkingMetadata(translated []byte, metadata map[string]any, model string) []byte {
-	budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(metadata)
-	if !ok {
-		return translated
-	}
-	if budgetOverride != nil && util.ModelSupportsThinking(model) {
-		norm := util.NormalizeThinkingBudget(model, *budgetOverride)
-		budgetOverride = &norm
-	}
-	return util.ApplyGeminiCLIThinkingConfig(translated, budgetOverride, includeOverride)
-}
-
 // Execute handles non-streaming requests via the antigravity generate endpoint.
 func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
@@ -105,9 +91,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		translated = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 	}
 
-	translated = applyThinkingMetadata(translated, req.Metadata, req.Model)
-
-	translated = applyThinkingMetadata(translated, req.Metadata, req.Model)
+	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -229,9 +213,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		translated = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	}
 
-	translated = applyThinkingMetadata(translated, req.Metadata, req.Model)
-
-	translated = applyThinkingMetadata(translated, req.Metadata, req.Model)
+	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -834,7 +816,7 @@ func geminiToAntigravity(modelName string, payload []byte) []byte {
 								}
 								if schema != nil {
 									delete(schema, "$schema")
-									cleanSchemaForClaude(schema)
+									ir.CleanJsonSchemaForClaude(schema)
 									fdm["parameters"] = schema
 									delete(fdm, "parametersJsonSchema")
 								}
@@ -850,114 +832,6 @@ func geminiToAntigravity(modelName string, payload []byte) []byte {
 		return result
 	}
 	return payload
-}
-
-// cleanSchemaForClaude recursively removes JSON Schema fields that Claude API doesn't support.
-// Claude uses JSON Schema draft 2020-12 but doesn't support all features.
-// See: https://docs.anthropic.com/en/docs/build-with-claude/tool-use
-func cleanSchemaForClaude(schema map[string]interface{}) {
-	// CRITICAL: Convert "const" to "enum" before deletion
-	// Claude doesn't support "const" but supports "enum" with single value
-	// This preserves discriminator semantics (e.g., Pydantic Literal types)
-	if constVal, ok := schema["const"]; ok {
-		schema["enum"] = []interface{}{constVal}
-		delete(schema, "const")
-	}
-
-	// Fields that Claude doesn't support in JSON Schema
-	// Based on JSON Schema draft 2020-12 compatibility
-	unsupportedFields := []string{
-		// Composition keywords that Claude doesn't support
-		"anyOf", "oneOf", "allOf", "not",
-		// Snake_case variants
-		"any_of", "one_of", "all_of",
-		// Reference keywords
-		"$ref", "$defs", "definitions", "$id", "$anchor", "$dynamicRef", "$dynamicAnchor",
-		// Schema metadata
-		"$schema", "$vocabulary", "$comment",
-		// Conditional keywords
-		"if", "then", "else", "dependentSchemas", "dependentRequired",
-		// Unevaluated keywords
-		"unevaluatedItems", "unevaluatedProperties",
-		// Content keywords
-		"contentEncoding", "contentMediaType", "contentSchema",
-		// Deprecated keywords
-		"dependencies",
-		// Array validation keywords that may not be supported
-		"minItems", "maxItems", "uniqueItems", "minContains", "maxContains",
-		// String validation keywords that may cause issues
-		"minLength", "maxLength", "pattern", "format",
-		// Number validation keywords
-		"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
-		// Object validation keywords that may cause issues
-		"minProperties", "maxProperties",
-		// Default values - Claude officially doesn't support in input_schema
-		"default",
-	}
-
-	for _, field := range unsupportedFields {
-		delete(schema, field)
-	}
-
-	// Recursively clean nested objects in properties
-	if properties, ok := schema["properties"].(map[string]interface{}); ok {
-		for key, prop := range properties {
-			if propMap, ok := prop.(map[string]interface{}); ok {
-				cleanSchemaForClaude(propMap)
-				properties[key] = propMap
-			}
-		}
-	}
-
-	// Clean items - can be object or array
-	if items := schema["items"]; items != nil {
-		switch v := items.(type) {
-		case map[string]interface{}:
-			cleanSchemaForClaude(v)
-		case []interface{}:
-			for i, item := range v {
-				if itemMap, ok := item.(map[string]interface{}); ok {
-					cleanSchemaForClaude(itemMap)
-					v[i] = itemMap
-				}
-			}
-		}
-	}
-
-	// Handle prefixItems (tuple validation)
-	if prefixItems, ok := schema["prefixItems"].([]interface{}); ok {
-		for i, item := range prefixItems {
-			if itemMap, ok := item.(map[string]interface{}); ok {
-				cleanSchemaForClaude(itemMap)
-				prefixItems[i] = itemMap
-			}
-		}
-	}
-
-	// Handle additionalProperties if it's an object
-	if addProps, ok := schema["additionalProperties"].(map[string]interface{}); ok {
-		cleanSchemaForClaude(addProps)
-	}
-
-	// Handle patternProperties
-	if patternProps, ok := schema["patternProperties"].(map[string]interface{}); ok {
-		for key, prop := range patternProps {
-			if propMap, ok := prop.(map[string]interface{}); ok {
-				cleanSchemaForClaude(propMap)
-				patternProps[key] = propMap
-			}
-		}
-	}
-
-	// Handle propertyNames
-	if propNames, ok := schema["propertyNames"].(map[string]interface{}); ok {
-		cleanSchemaForClaude(propNames)
-	}
-
-	// Handle contains
-	if contains, ok := schema["contains"].(map[string]interface{}); ok {
-		cleanSchemaForClaude(contains)
-	}
 }
 
 func generateRequestID() string {
