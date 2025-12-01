@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
@@ -76,8 +75,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 
 	// Extract and set the finish reason.
 	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
-		finishReason := strings.ToLower(finishReasonResult.String())
-		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
+		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReasonResult.String())
 		template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReasonResult.String())
 	}
 

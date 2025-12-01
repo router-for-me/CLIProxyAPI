@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -79,8 +78,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 	// Extract and set the finish reason.
 	if finishReasonResult := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finishReasonResult.Exists() {
-		finishReason := strings.ToLower(finishReasonResult.String())
-		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
+		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReasonResult.String())
 		template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReasonResult.String())
 	}
 
@@ -232,8 +230,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 	}
 
 	if finishReasonResult := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finishReasonResult.Exists() {
-		finishReason := strings.ToLower(finishReasonResult.String())
-		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
+		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReasonResult.String())
 		template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReasonResult.String())
 	}
 
