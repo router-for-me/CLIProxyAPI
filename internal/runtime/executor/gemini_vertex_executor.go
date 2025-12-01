@@ -44,6 +44,22 @@ func NewGeminiVertexExecutor(cfg *config.Config) *GeminiVertexExecutor {
 // Identifier returns provider key for manager routing.
 func (e *GeminiVertexExecutor) Identifier() string { return "vertex" }
 
+// GeminiVertexCompatExecutor is a thin wrapper around GeminiVertexExecutor
+// that provides the correct identifier for vertex-compat routing.
+type GeminiVertexCompatExecutor struct {
+	*GeminiVertexExecutor
+}
+
+// NewGeminiVertexCompatExecutor constructs the Vertex-compatible executor.
+func NewGeminiVertexCompatExecutor(cfg *config.Config) *GeminiVertexCompatExecutor {
+	return &GeminiVertexCompatExecutor{
+		GeminiVertexExecutor: NewGeminiVertexExecutor(cfg),
+	}
+}
+
+// Identifier returns provider key for manager routing.
+func (e *GeminiVertexCompatExecutor) Identifier() string { return "vertex-compat" }
+
 // PrepareRequest is a no-op for Vertex.
 func (e *GeminiVertexExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error {
 	return nil
@@ -51,11 +67,238 @@ func (e *GeminiVertexExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.A
 
 // Execute handles non-streaming requests.
 func (e *GeminiVertexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	projectID, location, saJSON, errCreds := vertexCreds(auth)
-	if errCreds != nil {
-		return resp, errCreds
+	// Try API key authentication first
+	apiKey, baseURL := vertexAPICreds(auth)
+
+	// If no API key found, fall back to service account authentication
+	if apiKey == "" {
+		projectID, location, saJSON, errCreds := vertexCreds(auth)
+		if errCreds != nil {
+			return resp, errCreds
+		}
+		return e.executeWithServiceAccount(ctx, auth, req, opts, projectID, location, saJSON)
 	}
 
+	// Use API key authentication
+	return e.executeWithAPIKey(ctx, auth, req, opts, apiKey, baseURL)
+}
+
+// ExecuteStream handles SSE streaming for Vertex.
+func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	// Try API key authentication first
+	apiKey, baseURL := vertexAPICreds(auth)
+
+	// If no API key found, fall back to service account authentication
+	if apiKey == "" {
+		projectID, location, saJSON, errCreds := vertexCreds(auth)
+		if errCreds != nil {
+			return nil, errCreds
+		}
+		return e.executeStreamWithServiceAccount(ctx, auth, req, opts, projectID, location, saJSON)
+	}
+
+	// Use API key authentication
+	return e.executeStreamWithAPIKey(ctx, auth, req, opts, apiKey, baseURL)
+}
+
+// CountTokens calls Vertex countTokens endpoint.
+func (e *GeminiVertexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	// Try API key authentication first
+	apiKey, baseURL := vertexAPICreds(auth)
+
+	// If no API key found, fall back to service account authentication
+	if apiKey == "" {
+		projectID, location, saJSON, errCreds := vertexCreds(auth)
+		if errCreds != nil {
+			return cliproxyexecutor.Response{}, errCreds
+		}
+		return e.countTokensWithServiceAccount(ctx, auth, req, opts, projectID, location, saJSON)
+	}
+
+	// Use API key authentication
+	return e.countTokensWithAPIKey(ctx, auth, req, opts, apiKey, baseURL)
+}
+
+// countTokensWithServiceAccount handles token counting using service account credentials.
+func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (cliproxyexecutor.Response, error) {
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("gemini")
+	translatedReq := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
+		if budgetOverride != nil {
+			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+			budgetOverride = &norm
+		}
+		translatedReq = util.ApplyGeminiThinkingConfig(translatedReq, budgetOverride, includeOverride)
+	}
+	translatedReq = util.StripThinkingConfigIfUnsupported(req.Model, translatedReq)
+	translatedReq = fixGeminiImageAspectRatio(req.Model, translatedReq)
+	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
+	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
+	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
+
+	baseURL := vertexBaseURL(location)
+	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, req.Model, "countTokens")
+
+	httpReq, errNewReq := http.NewRequestWithContext(respCtx, http.MethodPost, url, bytes.NewReader(translatedReq))
+	if errNewReq != nil {
+		return cliproxyexecutor.Response{}, errNewReq
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+	} else if errTok != nil {
+		log.Errorf("vertex executor: access token error: %v", errTok)
+		return cliproxyexecutor.Response{}, statusErr{code: 500, msg: "internal server error"}
+	}
+	applyGeminiHeaders(httpReq, auth)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      translatedReq,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		recordAPIResponseError(ctx, e.cfg, errDo)
+		return cliproxyexecutor.Response{}, errDo
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("vertex executor: close response body error: %v", errClose)
+		}
+	}()
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
+	}
+	data, errRead := io.ReadAll(httpResp.Body)
+	if errRead != nil {
+		recordAPIResponseError(ctx, e.cfg, errRead)
+		return cliproxyexecutor.Response{}, errRead
+	}
+	appendAPIResponseChunk(ctx, e.cfg, data)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(data)}
+	}
+	count := gjson.GetBytes(data, "totalTokens").Int()
+	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
+	return cliproxyexecutor.Response{Payload: []byte(out)}, nil
+}
+
+// countTokensWithAPIKey handles token counting using API key credentials.
+func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, apiKey, baseURL string) (cliproxyexecutor.Response, error) {
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("gemini")
+	translatedReq := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
+		if budgetOverride != nil {
+			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+			budgetOverride = &norm
+		}
+		translatedReq = util.ApplyGeminiThinkingConfig(translatedReq, budgetOverride, includeOverride)
+	}
+	translatedReq = util.StripThinkingConfigIfUnsupported(req.Model, translatedReq)
+	translatedReq = fixGeminiImageAspectRatio(req.Model, translatedReq)
+	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
+	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
+	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
+
+	// For API key auth, use simpler URL format without project/location
+	if baseURL == "" {
+		baseURL = "https://generativelanguage.googleapis.com"
+	}
+	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, req.Model, "countTokens")
+
+	httpReq, errNewReq := http.NewRequestWithContext(respCtx, http.MethodPost, url, bytes.NewReader(translatedReq))
+	if errNewReq != nil {
+		return cliproxyexecutor.Response{}, errNewReq
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("x-goog-api-key", apiKey)
+	}
+	applyGeminiHeaders(httpReq, auth)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      translatedReq,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		recordAPIResponseError(ctx, e.cfg, errDo)
+		return cliproxyexecutor.Response{}, errDo
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("vertex executor: close response body error: %v", errClose)
+		}
+	}()
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
+	}
+	data, errRead := io.ReadAll(httpResp.Body)
+	if errRead != nil {
+		recordAPIResponseError(ctx, e.cfg, errRead)
+		return cliproxyexecutor.Response{}, errRead
+	}
+	appendAPIResponseChunk(ctx, e.cfg, data)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(data)}
+	}
+	count := gjson.GetBytes(data, "totalTokens").Int()
+	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
+	return cliproxyexecutor.Response{Payload: []byte(out)}, nil
+}
+
+// Refresh is a no-op for service account based credentials.
+func (e *GeminiVertexExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	return auth, nil
+}
+
+// executeWithServiceAccount handles authentication using service account credentials.
+// This method contains the original service account authentication logic.
+func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (resp cliproxyexecutor.Response, err error) {
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
@@ -149,13 +392,105 @@ func (e *GeminiVertexExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	return resp, nil
 }
 
-// ExecuteStream handles SSE streaming for Vertex.
-func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
-	projectID, location, saJSON, errCreds := vertexCreds(auth)
-	if errCreds != nil {
-		return nil, errCreds
+// executeWithAPIKey handles authentication using API key credentials.
+// This method follows the vertex-compat pattern for API key authentication.
+func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, apiKey, baseURL string) (resp cliproxyexecutor.Response, err error) {
+	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	defer reporter.trackFailure(ctx, &err)
+
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("gemini")
+	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
+		if budgetOverride != nil {
+			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+			budgetOverride = &norm
+		}
+		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
+	}
+	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
+	body = fixGeminiImageAspectRatio(req.Model, body)
+	body = applyPayloadConfig(e.cfg, req.Model, body)
+
+	action := "generateContent"
+	if req.Metadata != nil {
+		if a, _ := req.Metadata["action"].(string); a == "countTokens" {
+			action = "countTokens"
+		}
 	}
 
+	// For API key auth, use simpler URL format without project/location
+	if baseURL == "" {
+		baseURL = "https://generativelanguage.googleapis.com"
+	}
+	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, req.Model, action)
+	if opts.Alt != "" && action != "countTokens" {
+		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
+	}
+	body, _ = sjson.DeleteBytes(body, "session_id")
+
+	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if errNewReq != nil {
+		return resp, errNewReq
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("x-goog-api-key", apiKey)
+	}
+	applyGeminiHeaders(httpReq, auth)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		recordAPIResponseError(ctx, e.cfg, errDo)
+		return resp, errDo
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("vertex executor: close response body error: %v", errClose)
+		}
+	}()
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return resp, err
+	}
+	data, errRead := io.ReadAll(httpResp.Body)
+	if errRead != nil {
+		recordAPIResponseError(ctx, e.cfg, errRead)
+		return resp, errRead
+	}
+	appendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.publish(ctx, parseGeminiUsage(data))
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
+	resp = cliproxyexecutor.Response{Payload: []byte(out)}
+	return resp, nil
+}
+
+// executeStreamWithServiceAccount handles streaming authentication using service account credentials.
+func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, projectID, location string, saJSON []byte) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
@@ -266,42 +601,44 @@ func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	return stream, nil
 }
 
-// CountTokens calls Vertex countTokens endpoint.
-func (e *GeminiVertexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	projectID, location, saJSON, errCreds := vertexCreds(auth)
-	if errCreds != nil {
-		return cliproxyexecutor.Response{}, errCreds
-	}
+// executeStreamWithAPIKey handles streaming authentication using API key credentials.
+func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, apiKey, baseURL string) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	defer reporter.trackFailure(ctx, &err)
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	translatedReq := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
 		if budgetOverride != nil {
 			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
 			budgetOverride = &norm
 		}
-		translatedReq = util.ApplyGeminiThinkingConfig(translatedReq, budgetOverride, includeOverride)
+		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
 	}
-	translatedReq = util.StripThinkingConfigIfUnsupported(req.Model, translatedReq)
-	translatedReq = fixGeminiImageAspectRatio(req.Model, translatedReq)
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
+	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
+	body = fixGeminiImageAspectRatio(req.Model, body)
+	body = applyPayloadConfig(e.cfg, req.Model, body)
 
-	baseURL := vertexBaseURL(location)
-	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, req.Model, "countTokens")
+	// For API key auth, use simpler URL format without project/location
+	if baseURL == "" {
+		baseURL = "https://generativelanguage.googleapis.com"
+	}
+	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, req.Model, "streamGenerateContent")
+	if opts.Alt == "" {
+		url = url + "?alt=sse"
+	} else {
+		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
+	}
+	body, _ = sjson.DeleteBytes(body, "session_id")
 
-	httpReq, errNewReq := http.NewRequestWithContext(respCtx, http.MethodPost, url, bytes.NewReader(translatedReq))
+	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
-		return cliproxyexecutor.Response{}, errNewReq
+		return nil, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+token)
-	} else if errTok != nil {
-		log.Errorf("vertex executor: access token error: %v", errTok)
-		return cliproxyexecutor.Response{}, statusErr{code: 500, msg: "internal server error"}
+	if apiKey != "" {
+		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth)
 
@@ -315,7 +652,7 @@ func (e *GeminiVertexExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      translatedReq,
+		Body:      body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -327,38 +664,53 @@ func (e *GeminiVertexExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		recordAPIResponseError(ctx, e.cfg, errDo)
-		return cliproxyexecutor.Response{}, errDo
+		return nil, errDo
 	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("vertex executor: close response body error: %v", errClose)
-		}
-	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("vertex executor: close response body error: %v", errClose)
+		}
+		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
 	}
-	data, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil {
-		recordAPIResponseError(ctx, e.cfg, errRead)
-		return cliproxyexecutor.Response{}, errRead
-	}
-	appendAPIResponseChunk(ctx, e.cfg, data)
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(data)}
-	}
-	count := gjson.GetBytes(data, "totalTokens").Int()
-	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
-	return cliproxyexecutor.Response{Payload: []byte(out)}, nil
-}
 
-// Refresh is a no-op for service account based credentials.
-func (e *GeminiVertexExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	return auth, nil
+	out := make(chan cliproxyexecutor.StreamChunk)
+	stream = out
+	go func() {
+		defer close(out)
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("vertex executor: close response body error: %v", errClose)
+			}
+		}()
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(nil, 20_971_520)
+		var param any
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			appendAPIResponseChunk(ctx, e.cfg, line)
+			if detail, ok := parseGeminiStreamUsage(line); ok {
+				reporter.publish(ctx, detail)
+			}
+			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(line), &param)
+			for i := range lines {
+				out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+			}
+		}
+		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, []byte("[DONE]"), &param)
+		for i := range lines {
+			out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			recordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.publishFailure(ctx)
+			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+		}
+	}()
+	return stream, nil
 }
 
 // vertexCreds extracts project, location and raw service account JSON from auth metadata.
@@ -399,6 +751,23 @@ func vertexCreds(a *cliproxyauth.Auth) (projectID, location string, serviceAccou
 		return "", "", nil, fmt.Errorf("vertex executor: marshal service_account failed: %w", errMarshal)
 	}
 	return projectID, location, saJSON, nil
+}
+
+// vertexAPICreds extracts API key and base URL from auth attributes following the claudeCreds pattern.
+func vertexAPICreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
+	if a == nil {
+		return "", ""
+	}
+	if a.Attributes != nil {
+		apiKey = a.Attributes["api_key"]
+		baseURL = a.Attributes["base_url"]
+	}
+	if apiKey == "" && a.Metadata != nil {
+		if v, ok := a.Metadata["access_token"].(string); ok {
+			apiKey = v
+		}
+	}
+	return
 }
 
 func vertexBaseURL(location string) string {

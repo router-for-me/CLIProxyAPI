@@ -496,6 +496,18 @@ func computeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 	return hex.EncodeToString(sum[:])
 }
 
+func computeVertexCompatModelsHash(models []config.VertexCompatModel) string {
+	if len(models) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(models)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 // computeClaudeModelsHash returns a stable hash for Claude model aliases.
 func computeClaudeModelsHash(models []config.ClaudeModel) string {
 	if len(models) == 0 {
@@ -902,8 +914,8 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	// no legacy clients to unregister
 
 	// Create new API key clients based on the new config
-	geminiAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
-	totalAPIKeyClients := geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
+	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
+	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
 
 	var authFileCount int
@@ -946,7 +958,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Unlock()
 	}
 
-	totalNewClients := authFileCount + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
+	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 
 	// Ensure consumers observe the new configuration before auth updates dispatch.
 	if w.reloadCallback != nil {
@@ -956,10 +968,11 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	w.refreshAuthState()
 
-	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
+	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex-compat keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
 		totalNewClients,
 		authFileCount,
 		geminiAPIKeyCount,
+		vertexCompatAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
 		openAICompatCount,
@@ -1074,6 +1087,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			applyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 			out = append(out, a)
 		}
+
 		// Claude API keys -> synthesize auths
 		for i := range cfg.ClaudeKey {
 			ck := cfg.ClaudeKey[i]
@@ -1240,6 +1254,42 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			}
 		}
 	}
+
+	// Process Vertex compatibility providers
+	for i := range cfg.VertexCompatAPIKey {
+		compat := &cfg.VertexCompatAPIKey[i]
+		providerName := "vertex-compat"
+		base := strings.TrimSpace(compat.BaseURL)
+
+		key := strings.TrimSpace(compat.APIKey)
+		proxyURL := strings.TrimSpace(compat.ProxyURL)
+		idKind := fmt.Sprintf("vertex-compatibility:%s", base)
+		id, token := idGen.next(idKind, key, base, proxyURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:vertex-compatibility[%s]", token),
+			"base_url":     base,
+			"provider_key": providerName,
+		}
+		if key != "" {
+			attrs["api_key"] = key
+		}
+		if hash := computeVertexCompatModelsHash(compat.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(compat.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   providerName,
+			Label:      "Vertex Compatibility",
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		out = append(out, a)
+	}
+
 	// Also synthesize auth entries directly from auth files (for OAuth/file-backed providers)
 	entries, _ := os.ReadDir(w.authDir)
 	for _, e := range entries {
@@ -1456,8 +1506,9 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 	return authFileCount
 }
 
-func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int) {
+func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	geminiAPIKeyCount := 0
+	vertexCompatAPIKeyCount := 0
 	claudeAPIKeyCount := 0
 	codexAPIKeyCount := 0
 	openAICompatCount := 0
@@ -1465,6 +1516,9 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int) {
 	if len(cfg.GeminiKey) > 0 {
 		// Stateless executor handles Gemini API keys; avoid constructing legacy clients.
 		geminiAPIKeyCount += len(cfg.GeminiKey)
+	}
+	if len(cfg.VertexCompatAPIKey) > 0 {
+		vertexCompatAPIKeyCount += len(cfg.VertexCompatAPIKey)
 	}
 	if len(cfg.ClaudeKey) > 0 {
 		claudeAPIKeyCount += len(cfg.ClaudeKey)
@@ -1483,7 +1537,7 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int) {
 			}
 		}
 	}
-	return geminiAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount
+	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount
 }
 
 func diffOpenAICompatibility(oldList, newList []config.OpenAICompatibility) []string {

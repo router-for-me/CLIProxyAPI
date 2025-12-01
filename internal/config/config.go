@@ -64,6 +64,10 @@ type Config struct {
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
+	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
+	// Used for services that use Vertex AI-style paths but with simple API key authentication.
+	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
@@ -324,6 +328,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
+
+	// Sanitize Vertex-compatible API keys: drop entries without base-url
+	cfg.SanitizeVertexCompatKeys()
 
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
@@ -813,6 +820,7 @@ func shouldSkipEmptyCollectionOnPersist(key string, node *yaml.Node) bool {
 	switch key {
 	case "generative-language-api-key",
 		"gemini-api-key",
+		"vertex-api-key",
 		"claude-api-key",
 		"codex-api-key",
 		"openai-compatibility":
