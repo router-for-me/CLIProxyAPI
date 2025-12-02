@@ -37,6 +37,12 @@ type Config struct {
 	// browser attacks and remote access to management endpoints. Default: true (recommended).
 	AmpRestrictManagementToLocalhost bool `yaml:"amp-restrict-management-to-localhost" json:"amp-restrict-management-to-localhost"`
 
+	// AmpModelMappings defines model name mappings for Amp CLI requests.
+	// When Amp requests a model that isn't available locally, these mappings
+	// allow routing to an alternative model that IS available.
+	// Example: Map "claude-opus-4.5" -> "claude-sonnet-4" when opus isn't available.
+	AmpModelMappings []AmpModelMapping `yaml:"amp-model-mappings" json:"amp-model-mappings"`
+
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
@@ -63,6 +69,10 @@ type Config struct {
 
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
+
+	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
+	// Used for services that use Vertex AI-style paths but with simple API key authentication.
+	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
@@ -116,6 +126,18 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+}
+
+// AmpModelMapping defines a model name mapping for Amp CLI requests.
+// When Amp requests a model that isn't available locally, this mapping
+// allows routing to an alternative model that IS available.
+type AmpModelMapping struct {
+	// From is the model name that Amp CLI requests (e.g., "claude-opus-4.5").
+	From string `yaml:"from" json:"from"`
+
+	// To is the target model name to route to (e.g., "claude-sonnet-4").
+	// The target model must have available providers in the registry.
+	To string `yaml:"to" json:"to"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -324,6 +346,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
+
+	// Sanitize Vertex-compatible API keys: drop entries without base-url
+	cfg.SanitizeVertexCompatKeys()
 
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
@@ -813,6 +838,7 @@ func shouldSkipEmptyCollectionOnPersist(key string, node *yaml.Node) bool {
 	switch key {
 	case "generative-language-api-key",
 		"gemini-api-key",
+		"vertex-api-key",
 		"claude-api-key",
 		"codex-api-key",
 		"openai-compatibility":

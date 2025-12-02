@@ -170,9 +170,10 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 
 	// Create fallback handler wrapper that forwards to ampcode.com when provider not found
 	// Uses lazy evaluation to access proxy (which is created after routes are registered)
-	fallbackHandler := NewFallbackHandler(func() *httputil.ReverseProxy {
+	// Also includes model mapping support for routing unavailable models to alternatives
+	fallbackHandler := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
 		return m.proxy
-	})
+	}, m.modelMapper)
 
 	// Provider-specific routes under /api/provider/:provider
 	ampProviders := engine.Group("/api/provider")

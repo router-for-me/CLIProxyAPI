@@ -55,6 +55,28 @@ quota-exceeded:
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
+# Amp CLI Integration
+# Configure upstream URL for Amp CLI OAuth and management features
+#amp-upstream-url: "https://ampcode.com"
+
+# Optional: Override API key for Amp upstream (otherwise uses env or file)
+#amp-upstream-api-key: ""
+
+# Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (recommended)
+#amp-restrict-management-to-localhost: true
+
+# Amp Model Mappings
+# Route unavailable Amp models to alternative models available in your local proxy.
+# Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
+# but you have a similar model available (e.g., Claude Sonnet 4).
+#amp-model-mappings:
+#  - from: "claude-opus-4.5"       # Model requested by Amp CLI
+#    to: "claude-sonnet-4"         # Route to this available model instead
+#  - from: "gpt-5"
+#    to: "gemini-2.5-pro"
+#  - from: "claude-3-opus-20240229"
+#    to: "claude-3-5-sonnet-20241022"
+
 # Gemini API keys (preferred)
 #gemini-api-key:
 #  - api-key: "AIzaSy...01"
@@ -122,6 +144,19 @@ ws-auth: false
 #    models: # The models supported by the provider.
 #      - name: "moonshotai/kimi-k2:free" # The actual model name.
 #        alias: "kimi-k2" # The alias used in the API.
+
+# Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
+#vertex-api-key:
+#  - api-key: "vk-123..."                        # x-goog-api-key header
+#    base-url: "https://example.com/api"         # e.g. https://zenmux.ai/api
+#    proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
+#    headers:
+#      X-Custom-Header: "custom-value"
+#    models:                                     # optional: map aliases to upstream model names
+#      - name: "gemini-2.0-flash"                # upstream model name
+#        alias: "vertex-flash"                   # client-visible alias
+#      - name: "gemini-1.5-pro"
+#        alias: "vertex-pro"
 
 #payload: # Optional payload configuration
 #  default: # Default rules only set parameters when they are missing in the payload.

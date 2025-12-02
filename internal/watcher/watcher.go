@@ -162,12 +162,14 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 
 // Start begins watching the configuration file and authentication directory
 func (w *Watcher) Start(ctx context.Context) error {
-	// Watch the config file
-	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
-		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
+	// Watch the config file's parent directory instead of the file itself.
+	// This handles editors that use atomic save (write to temp, then rename).
+	configDir := filepath.Dir(w.configPath)
+	if errAddConfig := w.watcher.Add(configDir); errAddConfig != nil {
+		log.Errorf("failed to watch config directory %s: %v", configDir, errAddConfig)
 		return errAddConfig
 	}
-	log.Debugf("watching config file: %s", w.configPath)
+	log.Debugf("watching config directory: %s (for file: %s)", configDir, filepath.Base(w.configPath))
 
 	// Watch the auth directory
 	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
@@ -496,6 +498,18 @@ func computeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 	return hex.EncodeToString(sum[:])
 }
 
+func computeVertexCompatModelsHash(models []config.VertexCompatModel) string {
+	if len(models) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(models)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 // computeClaudeModelsHash returns a stable hash for Claude model aliases.
 func computeClaudeModelsHash(models []config.ClaudeModel) string {
 	if len(models) == 0 {
@@ -700,7 +714,23 @@ func (w *Watcher) isKnownAuthFile(path string) bool {
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Filter only relevant events: config file or auth-dir JSON files.
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
-	isConfigEvent := event.Name == w.configPath && event.Op&configOps != 0
+	// Check if this event is for our config file (handle both exact match and basename match for directory watching)
+	isConfigEvent := false
+	if event.Op&configOps != 0 {
+		// Exact path match
+		if event.Name == w.configPath {
+			isConfigEvent = true
+		} else {
+			// Check if basename matches and it's in the config directory (for atomic save detection)
+			configDir := filepath.Dir(w.configPath)
+			configBase := filepath.Base(w.configPath)
+			eventDir := filepath.Dir(event.Name)
+			eventBase := filepath.Base(event.Name)
+			if eventDir == configDir && eventBase == configBase {
+				isConfigEvent = true
+			}
+		}
+	}
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := strings.HasPrefix(event.Name, w.authDir) && strings.HasSuffix(event.Name, ".json") && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
@@ -902,8 +932,8 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	// no legacy clients to unregister
 
 	// Create new API key clients based on the new config
-	geminiAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
-	totalAPIKeyClients := geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
+	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
+	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
 
 	var authFileCount int
@@ -946,7 +976,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Unlock()
 	}
 
-	totalNewClients := authFileCount + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
+	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 
 	// Ensure consumers observe the new configuration before auth updates dispatch.
 	if w.reloadCallback != nil {
@@ -956,10 +986,11 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	w.refreshAuthState()
 
-	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
+	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
 		totalNewClients,
 		authFileCount,
 		geminiAPIKeyCount,
+		vertexCompatAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
 		openAICompatCount,
@@ -1074,6 +1105,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			applyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 			out = append(out, a)
 		}
+
 		// Claude API keys -> synthesize auths
 		for i := range cfg.ClaudeKey {
 			ck := cfg.ClaudeKey[i]
@@ -1240,6 +1272,43 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			}
 		}
 	}
+
+	// Process Vertex API key providers (Vertex-compatible endpoints)
+	for i := range cfg.VertexCompatAPIKey {
+		compat := &cfg.VertexCompatAPIKey[i]
+		providerName := "vertex"
+		base := strings.TrimSpace(compat.BaseURL)
+
+		key := strings.TrimSpace(compat.APIKey)
+		proxyURL := strings.TrimSpace(compat.ProxyURL)
+		idKind := fmt.Sprintf("vertex:apikey:%s", base)
+		id, token := idGen.next(idKind, key, base, proxyURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:vertex-apikey[%s]", token),
+			"base_url":     base,
+			"provider_key": providerName,
+		}
+		if key != "" {
+			attrs["api_key"] = key
+		}
+		if hash := computeVertexCompatModelsHash(compat.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(compat.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   providerName,
+			Label:      "vertex-apikey",
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		applyAuthExcludedModelsMeta(a, cfg, nil, "apikey")
+		out = append(out, a)
+	}
+
 	// Also synthesize auth entries directly from auth files (for OAuth/file-backed providers)
 	entries, _ := os.ReadDir(w.authDir)
 	for _, e := range entries {
@@ -1456,8 +1525,9 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 	return authFileCount
 }
 
-func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int) {
+func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	geminiAPIKeyCount := 0
+	vertexCompatAPIKeyCount := 0
 	claudeAPIKeyCount := 0
 	codexAPIKeyCount := 0
 	openAICompatCount := 0
@@ -1465,6 +1535,9 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int) {
 	if len(cfg.GeminiKey) > 0 {
 		// Stateless executor handles Gemini API keys; avoid constructing legacy clients.
 		geminiAPIKeyCount += len(cfg.GeminiKey)
+	}
+	if len(cfg.VertexCompatAPIKey) > 0 {
+		vertexCompatAPIKeyCount += len(cfg.VertexCompatAPIKey)
 	}
 	if len(cfg.ClaudeKey) > 0 {
 		claudeAPIKeyCount += len(cfg.ClaudeKey)
@@ -1483,7 +1556,7 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int) {
 			}
 		}
 	}
-	return geminiAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount
+	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount
 }
 
 func diffOpenAICompatibility(oldList, newList []config.OpenAICompatibility) []string {

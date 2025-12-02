@@ -8,6 +8,7 @@ This guide explains how to use CLIProxyAPI with Amp CLI and Amp IDE extensions, 
   - [Which Providers Should You Authenticate?](#which-providers-should-you-authenticate)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
+  - [Model Mapping Configuration](#model-mapping-configuration)
 - [Setup](#setup)
 - [Usage](#usage)
 - [Troubleshooting](#troubleshooting)
@@ -21,6 +22,7 @@ The Amp CLI integration adds specialized routing to support Amp's API patterns w
 - **Provider route aliases**: Maps Amp's `/api/provider/{provider}/v1...` patterns to CLIProxyAPI handlers
 - **Management proxy**: Forwards OAuth and account management requests to Amp's control plane
 - **Smart fallback**: Automatically routes unconfigured models to ampcode.com
+- **Model mapping**: Route unavailable models to alternatives you have access to (e.g., `claude-opus-4.5` → `claude-sonnet-4`)
 - **Secret management**: Configurable precedence (config > env > file) with 5-minute caching
 - **Security-first**: Management routes restricted to localhost by default
 - **Automatic gzip handling**: Decompresses responses from Amp upstream
@@ -75,7 +77,10 @@ Amp CLI/IDE
   │   ↓
   │   ├─ Model configured locally?
   │   │   YES → Use local OAuth tokens (OpenAI/Claude/Gemini handlers)
-  │   │   NO  → Forward to ampcode.com (reverse proxy)
+  │   │   NO  ↓
+  │   │       ├─ Model mapping configured?
+  │   │       │   YES → Rewrite model → Use local handler (free)
+  │   │       │   NO  → Forward to ampcode.com (uses Amp credits)
   │   ↓
   │   Response
   │
@@ -113,6 +118,49 @@ amp-upstream-url: "https://ampcode.com"
 
 # Security: restrict management routes to localhost (recommended)
 amp-restrict-management-to-localhost: true
+```
+
+### Model Mapping Configuration
+
+When Amp CLI requests a model that you don't have access to, you can configure mappings to route those requests to alternative models that you DO have available. This avoids consuming Amp credits for models you could handle locally.
+
+```yaml
+# Route unavailable models to alternatives
+amp-model-mappings:
+  # Example: Route Claude Opus 4.5 requests to Claude Sonnet 4
+  - from: "claude-opus-4.5"
+    to: "claude-sonnet-4"
+  
+  # Example: Route GPT-5 requests to Gemini 2.5 Pro
+  - from: "gpt-5"
+    to: "gemini-2.5-pro"
+  
+  # Example: Map older model names to newer versions
+  - from: "claude-3-opus-20240229"
+    to: "claude-3-5-sonnet-20241022"
+```
+
+**How it works:**
+
+1. Amp CLI requests a model (e.g., `claude-opus-4.5`)
+2. CLIProxyAPI checks if a local provider is available for that model
+3. If not available, it checks the model mappings
+4. If a mapping exists, the request is rewritten to use the target model
+5. The request is then handled locally (free, using your OAuth subscription)
+
+**Benefits:**
+- **Save Amp credits**: Use your local subscriptions instead of forwarding to ampcode.com
+- **Hot-reload**: Mappings can be updated without restarting the proxy
+- **Structured logging**: Clear logs show when mappings are applied
+
+**Routing Decision Logs:**
+
+The proxy logs each routing decision with structured fields:
+
+```
+[AMP] Using local provider for model: gemini-2.5-pro          # Local provider (free)
+[AMP] Model mapped: claude-opus-4.5 -> claude-sonnet-4        # Mapping applied (free)
+[AMP] Forwarding to ampcode.com (uses Amp credits) - model_id: gpt-5  # Fallback (costs credits)
 ```
 
 ### Secret Resolution Precedence
@@ -301,11 +349,14 @@ When Amp requests a model:
 
 1. **Check local configuration**: Does CLIProxyAPI have OAuth tokens for this model's provider?
 2. **If YES**: Route to local handler (use your OAuth subscription)
-3. **If NO**: Forward to ampcode.com (use Amp's default routing)
+3. **If NO**: Check if a model mapping exists
+4. **If mapping exists**: Rewrite request to mapped model → Route to local handler (free)
+5. **If no mapping**: Forward to ampcode.com (uses Amp credits)
 
 This enables seamless mixed usage:
 - Models you've configured (Gemini, ChatGPT, Claude) → Your OAuth subscriptions
-- Models you haven't configured → Amp's default providers
+- Models with mappings configured → Routed to alternative local models (free)
+- Models you haven't configured and have no mapping → Amp's default providers (uses credits)
 
 ### Example API Calls
 

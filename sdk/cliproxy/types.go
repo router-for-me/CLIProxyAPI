@@ -49,19 +49,21 @@ type APIKeyClientProvider interface {
 	Load(ctx context.Context, cfg *config.Config) (*APIKeyClientResult, error)
 }
 
-// APIKeyClientResult contains API key based clients along with type counts.
-// It provides metadata about the number of clients loaded for each provider type.
+// APIKeyClientResult is returned by APIKeyClientProvider.Load()
 type APIKeyClientResult struct {
-	// GeminiKeyCount is the number of Gemini API key clients loaded.
+	// GeminiKeyCount is the number of Gemini API keys loaded
 	GeminiKeyCount int
 
-	// ClaudeKeyCount is the number of Claude API key clients loaded.
+	// VertexCompatKeyCount is the number of Vertex-compatible API keys loaded
+	VertexCompatKeyCount int
+
+	// ClaudeKeyCount is the number of Claude API keys loaded
 	ClaudeKeyCount int
 
-	// CodexKeyCount is the number of Codex API key clients loaded.
+	// CodexKeyCount is the number of Codex API keys loaded
 	CodexKeyCount int
 
-	// OpenAICompatCount is the number of OpenAI-compatible API key clients loaded.
+	// OpenAICompatCount is the number of OpenAI compatibility API keys loaded
 	OpenAICompatCount int
 }
 

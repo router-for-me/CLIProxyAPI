@@ -324,7 +324,7 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 	if len(a.Attributes) > 0 {
 		providerKey = strings.TrimSpace(a.Attributes["provider_key"])
 		compatName = strings.TrimSpace(a.Attributes["compat_name"])
-		if providerKey != "" || compatName != "" {
+		if compatName != "" {
 			if providerKey == "" {
 				providerKey = compatName
 			}
@@ -500,7 +500,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	fmt.Println("API server started successfully")
+	fmt.Printf("API server started successfully on: %d\n", s.cfg.Port)
 
 	if s.hooks.OnAfterStart != nil {
 		s.hooks.OnAfterStart(s)
@@ -681,6 +681,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()
+		if authKind == "apikey" {
+			if entry := s.resolveConfigVertexCompatKey(a); entry != nil && len(entry.Models) > 0 {
+				models = buildVertexCompatConfigModels(entry)
+			}
+		}
 		models = applyExcludedModels(models, excluded)
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
@@ -878,6 +883,40 @@ func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey 
 	return nil
 }
 
+func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.VertexCompatKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.VertexCompatAPIKey {
+		entry := &s.cfg.VertexCompatAPIKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range s.cfg.VertexCompatAPIKey {
+			entry := &s.cfg.VertexCompatAPIKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 	if auth == nil || s.cfg == nil {
 		return nil
@@ -994,6 +1033,44 @@ func matchWildcard(pattern, value string) bool {
 	}
 
 	return true
+}
+
+func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
+	if entry == nil || len(entry.Models) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	out := make([]*ModelInfo, 0, len(entry.Models))
+	seen := make(map[string]struct{}, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		name := strings.TrimSpace(model.Name)
+		alias := strings.TrimSpace(model.Alias)
+		if alias == "" {
+			alias = name
+		}
+		if alias == "" {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		display := name
+		if display == "" {
+			display = alias
+		}
+		out = append(out, &ModelInfo{
+			ID:          alias,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "vertex",
+			Type:        "vertex",
+			DisplayName: display,
+		})
+	}
+	return out
 }
 
 func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
