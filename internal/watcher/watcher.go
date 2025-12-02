@@ -162,14 +162,12 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 
 // Start begins watching the configuration file and authentication directory
 func (w *Watcher) Start(ctx context.Context) error {
-	// Watch the config file's parent directory instead of the file itself.
-	// This handles editors that use atomic save (write to temp, then rename).
-	configDir := filepath.Dir(w.configPath)
-	if errAddConfig := w.watcher.Add(configDir); errAddConfig != nil {
-		log.Errorf("failed to watch config directory %s: %v", configDir, errAddConfig)
+	// Watch the config file
+	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
+		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
 		return errAddConfig
 	}
-	log.Debugf("watching config directory: %s (for file: %s)", configDir, filepath.Base(w.configPath))
+	log.Debugf("watching config file: %s", w.configPath)
 
 	// Watch the auth directory
 	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
@@ -714,23 +712,7 @@ func (w *Watcher) isKnownAuthFile(path string) bool {
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Filter only relevant events: config file or auth-dir JSON files.
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
-	// Check if this event is for our config file (handle both exact match and basename match for directory watching)
-	isConfigEvent := false
-	if event.Op&configOps != 0 {
-		// Exact path match
-		if event.Name == w.configPath {
-			isConfigEvent = true
-		} else {
-			// Check if basename matches and it's in the config directory (for atomic save detection)
-			configDir := filepath.Dir(w.configPath)
-			configBase := filepath.Base(w.configPath)
-			eventDir := filepath.Dir(event.Name)
-			eventBase := filepath.Base(event.Name)
-			if eventDir == configDir && eventBase == configBase {
-				isConfigEvent = true
-			}
-		}
-	}
+	isConfigEvent := event.Name == w.configPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := strings.HasPrefix(event.Name, w.authDir) && strings.HasSuffix(event.Name, ".json") && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {

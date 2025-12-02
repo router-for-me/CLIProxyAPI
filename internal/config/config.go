@@ -599,6 +599,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	// Remove deprecated auth block before merging to avoid persisting it again.
 	removeMapKey(original.Content[0], "auth")
 	removeLegacyOpenAICompatAPIKeys(original.Content[0])
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
@@ -797,6 +798,10 @@ func mergeNodePreserve(dst, src *yaml.Node) {
 				continue
 			}
 			mergeNodePreserve(dst.Content[i], src.Content[i])
+			if dst.Content[i] != nil && src.Content[i] != nil &&
+				dst.Content[i].Kind == yaml.MappingNode && src.Content[i].Kind == yaml.MappingNode {
+				pruneMissingMapKeys(dst.Content[i], src.Content[i])
+			}
 		}
 		// Append any extra items from src
 		for i := len(dst.Content); i < len(src.Content); i++ {
@@ -1072,6 +1077,73 @@ func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {
 		if seq.Content[i] != nil && seq.Content[i].Kind == yaml.MappingNode {
 			removeMapKey(seq.Content[i], "api-keys")
 		}
+	}
+}
+
+func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
+	if key == "" || dstRoot == nil || srcRoot == nil {
+		return
+	}
+	if dstRoot.Kind != yaml.MappingNode || srcRoot.Kind != yaml.MappingNode {
+		return
+	}
+	dstIdx := findMapKeyIndex(dstRoot, key)
+	if dstIdx < 0 || dstIdx+1 >= len(dstRoot.Content) {
+		return
+	}
+	srcIdx := findMapKeyIndex(srcRoot, key)
+	if srcIdx < 0 {
+		removeMapKey(dstRoot, key)
+		return
+	}
+	if srcIdx+1 >= len(srcRoot.Content) {
+		return
+	}
+	srcVal := srcRoot.Content[srcIdx+1]
+	dstVal := dstRoot.Content[dstIdx+1]
+	if srcVal == nil {
+		dstRoot.Content[dstIdx+1] = nil
+		return
+	}
+	if srcVal.Kind != yaml.MappingNode {
+		dstRoot.Content[dstIdx+1] = deepCopyNode(srcVal)
+		return
+	}
+	if dstVal == nil || dstVal.Kind != yaml.MappingNode {
+		dstRoot.Content[dstIdx+1] = deepCopyNode(srcVal)
+		return
+	}
+	pruneMissingMapKeys(dstVal, srcVal)
+}
+
+func pruneMissingMapKeys(dstMap, srcMap *yaml.Node) {
+	if dstMap == nil || srcMap == nil || dstMap.Kind != yaml.MappingNode || srcMap.Kind != yaml.MappingNode {
+		return
+	}
+	keep := make(map[string]struct{}, len(srcMap.Content)/2)
+	for i := 0; i+1 < len(srcMap.Content); i += 2 {
+		keyNode := srcMap.Content[i]
+		if keyNode == nil {
+			continue
+		}
+		key := strings.TrimSpace(keyNode.Value)
+		if key == "" {
+			continue
+		}
+		keep[key] = struct{}{}
+	}
+	for i := 0; i+1 < len(dstMap.Content); {
+		keyNode := dstMap.Content[i]
+		if keyNode == nil {
+			i += 2
+			continue
+		}
+		key := strings.TrimSpace(keyNode.Value)
+		if _, ok := keep[key]; !ok {
+			dstMap.Content = append(dstMap.Content[:i], dstMap.Content[i+2:]...)
+			continue
+		}
+		i += 2
 	}
 }
 
