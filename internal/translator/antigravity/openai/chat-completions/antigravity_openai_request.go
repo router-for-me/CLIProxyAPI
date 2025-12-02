@@ -361,6 +361,11 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		if hasTool {
 			out, _ = sjson.SetRawBytes(out, "request.tools", []byte("[]"))
 			out, _ = sjson.SetRawBytes(out, "request.tools.0", toolNode)
+
+			// Set functionCallingConfig.mode to ANY to force proper JSON function calls
+			// This helps prevent MALFORMED_FUNCTION_CALL errors where the model generates
+			// text-based function calls like "call:default_api:func{...}" instead of JSON
+			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
 		}
 	}
 

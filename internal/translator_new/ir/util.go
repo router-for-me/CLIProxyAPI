@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/tailscale/hujson"
 	"github.com/tidwall/gjson"
 )
 
@@ -123,6 +124,8 @@ func CleanJsonSchema(schema map[string]interface{}) map[string]interface{} {
 	}
 	delete(schema, "strict")
 	delete(schema, "input_examples")
+	delete(schema, "$schema")
+	delete(schema, "additionalProperties")
 	return schema
 }
 
@@ -196,9 +199,175 @@ func MapGeminiFinishReason(geminiReason string) FinishReason {
 		return FinishReasonLength
 	case "SAFETY", "RECITATION":
 		return FinishReasonContentFilter
+	case "MALFORMED_FUNCTION_CALL":
+		// Treat as tool_calls - we'll parse the malformed call separately
+		return FinishReasonToolCalls
 	default:
 		return FinishReasonUnknown
 	}
+}
+
+// ParseMalformedFunctionCall extracts function name and arguments from Gemini's
+// MALFORMED_FUNCTION_CALL finishMessage. This is a workaround for a known Gemini bug
+// where the model generates text-based function calls like:
+// "call:default_api:list_dir{path:\"src/server\"}" instead of proper JSON.
+// Returns (funcName, argsJSON, ok).
+func ParseMalformedFunctionCall(finishMessage string) (string, string, bool) {
+	// Format: "Malformed function call: call:default_api:func_name{key:\"value\",key2:123}"
+	// or just: "call:default_api:func_name{...}"
+
+	// Find the call pattern - look for ": call:" to find the actual function call
+	// (avoids matching "function call:" which appears earlier in the message)
+	idx := strings.Index(finishMessage, ": call:")
+	if idx != -1 {
+		idx += 2 // skip ": ", point to 'c' in "call:"
+	} else {
+		// Try at the beginning of string
+		if strings.HasPrefix(finishMessage, "call:") {
+			idx = 0
+		} else {
+			// Last resort: find last occurrence of "call:"
+			idx = strings.LastIndex(finishMessage, "call:")
+			if idx == -1 {
+				return "", "", false
+			}
+		}
+	}
+
+	// Extract from "call:" onwards
+	callPart := finishMessage[idx:]
+
+	// Find function name - format is "call:default_api:func_name{...}"
+	// Skip "call:" prefix
+	rest := callPart[5:] // skip "call:"
+
+	// Skip the API namespace (e.g., "default_api:")
+	colonIdx := strings.Index(rest, ":")
+	if colonIdx == -1 {
+		return "", "", false
+	}
+	rest = rest[colonIdx+1:] // skip "default_api:"
+
+	// Find the opening brace
+	braceIdx := strings.Index(rest, "{")
+	if braceIdx == -1 {
+		return "", "", false
+	}
+
+	funcName := rest[:braceIdx]
+	argsRaw := rest[braceIdx:]
+
+	// Find matching closing brace
+	depth := 0
+	endIdx := -1
+	for i, c := range argsRaw {
+		if c == '{' {
+			depth++
+		} else if c == '}' {
+			depth--
+			if depth == 0 {
+				endIdx = i + 1
+				break
+			}
+		}
+	}
+	if endIdx == -1 {
+		return "", "", false
+	}
+	argsRaw = argsRaw[:endIdx]
+
+	// Convert the pseudo-JSON to valid JSON
+	// The format uses unquoted keys: {path:"value"} -> {"path":"value"}
+	argsJSON := convertMalformedArgsToJSON(argsRaw)
+
+	return funcName, argsJSON, true
+}
+
+// convertMalformedArgsToJSON converts Gemini's malformed args format to valid JSON.
+// Uses hujson library to handle "human JSON" (unquoted keys, trailing commas, etc.)
+// Input: {path:"src/server",count:123,flag:true}
+// Output: {"path":"src/server","count":123,"flag":true}
+func convertMalformedArgsToJSON(argsRaw string) string {
+	if argsRaw == "{}" || argsRaw == "" {
+		return "{}"
+	}
+
+	// Use hujson to standardize the malformed JSON
+	// hujson handles: unquoted keys, trailing commas, comments, etc.
+	standardized, err := hujson.Standardize([]byte(argsRaw))
+	if err != nil {
+		// If hujson fails, fall back to manual repair
+		return convertMalformedArgsToJSONFallback(argsRaw)
+	}
+
+	return string(standardized)
+}
+
+// convertMalformedArgsToJSONFallback is a fallback parser when hujson fails.
+// Uses a simple state machine to add quotes around unquoted keys.
+func convertMalformedArgsToJSONFallback(argsRaw string) string {
+	var result strings.Builder
+	result.Grow(len(argsRaw) + 20)
+
+	inString := false
+	escaped := false
+
+	for i := 0; i < len(argsRaw); i++ {
+		c := argsRaw[i]
+
+		if escaped {
+			result.WriteByte(c)
+			escaped = false
+			continue
+		}
+
+		if c == '\\' && inString {
+			result.WriteByte(c)
+			escaped = true
+			continue
+		}
+
+		if c == '"' {
+			inString = !inString
+			result.WriteByte(c)
+			continue
+		}
+
+		if inString {
+			result.WriteByte(c)
+			continue
+		}
+
+		// Outside string - look for unquoted keys
+		if c == '{' || c == ',' {
+			result.WriteByte(c)
+			// Skip whitespace
+			for i+1 < len(argsRaw) && (argsRaw[i+1] == ' ' || argsRaw[i+1] == '\t' || argsRaw[i+1] == '\n') {
+				i++
+			}
+			// Check if next is a key (not a quote, not closing brace)
+			if i+1 < len(argsRaw) && argsRaw[i+1] != '"' && argsRaw[i+1] != '}' {
+				// Find the colon to get the key
+				keyStart := i + 1
+				keyEnd := keyStart
+				for keyEnd < len(argsRaw) && argsRaw[keyEnd] != ':' && argsRaw[keyEnd] != ' ' {
+					keyEnd++
+				}
+				if keyEnd < len(argsRaw) && keyStart < keyEnd {
+					key := argsRaw[keyStart:keyEnd]
+					result.WriteByte('"')
+					result.WriteString(key)
+					result.WriteByte('"')
+					i = keyEnd - 1 // -1 because loop will increment
+				}
+			}
+			continue
+		}
+
+		result.WriteByte(c)
+	}
+
+	return result.String()
 }
 
 // MapClaudeFinishReason converts Claude stop_reason to FinishReason.

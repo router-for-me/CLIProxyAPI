@@ -402,7 +402,7 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 					"properties": map[string]interface{}{},
 				}
 			} else {
-				funcDecl["parametersJsonSchema"] = t.Parameters
+				funcDecl["parametersJsonSchema"] = ir.CleanJsonSchema(copyMap(t.Parameters))
 			}
 			funcs[i] = funcDecl
 		}
@@ -414,6 +414,30 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 	}
 
 	root["tools"] = []interface{}{toolNode}
+
+	// Set toolConfig.functionCallingConfig.mode based on ToolChoice from request.
+	// - "none" -> NONE (don't call functions)
+	// - "required" or "any" -> ANY (must call a function)
+	// - "auto" or empty -> AUTO (model decides)
+	// Note: We default to AUTO, not ANY, because ANY forces the model to always
+	// call a function even when inappropriate (e.g., user says "hello").
+	if len(req.Tools) > 0 {
+		mode := "AUTO" // Default: let model decide
+		switch req.ToolChoice {
+		case "none":
+			mode = "NONE"
+		case "required", "any":
+			mode = "ANY"
+		case "auto", "":
+			mode = "AUTO"
+		}
+		root["toolConfig"] = map[string]interface{}{
+			"functionCallingConfig": map[string]interface{}{
+				"mode": mode,
+			},
+		}
+	}
+
 	return nil
 }
 

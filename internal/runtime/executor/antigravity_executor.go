@@ -819,8 +819,8 @@ func geminiToAntigravity(modelName string, payload []byte) []byte {
 									schema = s
 								}
 								if schema != nil {
-									delete(schema, "$schema")
 									ir.CleanJsonSchemaForClaude(schema)
+									delete(schema, "$schema") // Must be after CleanJsonSchemaForClaude which adds $schema
 									fdm["parameters"] = schema
 									delete(fdm, "parametersJsonSchema")
 								}

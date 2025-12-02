@@ -186,7 +186,28 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 
 		// Check for finish reason
 		if fr := candidate.Get("finishReason"); fr.Exists() {
-			finishReason = ir.MapGeminiFinishReason(fr.String())
+			frStr := fr.String()
+			finishReason = ir.MapGeminiFinishReason(frStr)
+
+			// Handle MALFORMED_FUNCTION_CALL - extract tool call from finishMessage
+			if frStr == "MALFORMED_FUNCTION_CALL" {
+				if fm := candidate.Get("finishMessage"); fm.Exists() {
+					if funcName, argsJSON, ok := ir.ParseMalformedFunctionCall(fm.String()); ok {
+						// Normalize args if schema context available
+						if schemaCtx != nil {
+							argsJSON = schemaCtx.NormalizeToolCallArgs(funcName, argsJSON)
+						}
+						events = append(events, ir.UnifiedEvent{
+							Type: ir.EventTypeToolCall,
+							ToolCall: &ir.ToolCall{
+								ID:   ir.GenToolCallIDWithName(funcName),
+								Name: funcName,
+								Args: argsJSON,
+							},
+						})
+					}
+				}
+			}
 		}
 	}
 

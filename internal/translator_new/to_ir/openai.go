@@ -84,7 +84,15 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 	}
 
 	if v := root.Get("tool_choice"); v.Exists() {
-		req.ToolChoice = v.String()
+		// tool_choice can be:
+		// - string: "auto", "none", "required"
+		// - object: {"type": "function", "function": {"name": "..."}} -> treat as "required"
+		if v.IsObject() {
+			// Object form means a specific function is required
+			req.ToolChoice = "required"
+		} else {
+			req.ToolChoice = v.String()
+		}
 	}
 	if v := root.Get("parallel_tool_calls"); v.Exists() {
 		b := v.Bool()

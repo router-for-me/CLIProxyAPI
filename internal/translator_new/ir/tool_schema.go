@@ -73,34 +73,81 @@ import (
 // ToolSchemaContext holds the "expectation map" - what the client expects to receive.
 // Uses gjson.Result for efficient parsing without full unmarshaling.
 type ToolSchemaContext struct {
-	// Tools maps ToolName -> Set of expected ParameterNames
-	Tools map[string]map[string]bool
+	// Tools maps ToolName -> ParameterName -> ParameterType ("string", "array", "object", "boolean", "number", "integer")
+	Tools map[string]map[string]string
 }
 
 // NewToolSchemaContextFromGJSON creates a context from gjson tools array (fast, no full unmarshal).
 // toolsJSON is the array from gjson.GetBytes(body, "tools").Array()
+// Supports multiple formats:
+// - OpenAI format: tools[].type="function", tools[].function.name, tools[].function.parameters.properties
+// - Gemini format: tools[].functionDeclarations[].name, tools[].functionDeclarations[].parametersJsonSchema.properties
+// - Direct Gemini: tools[].name, tools[].parametersJsonSchema.properties
 func NewToolSchemaContextFromGJSON(toolsJSON []gjson.Result) *ToolSchemaContext {
 	if len(toolsJSON) == 0 {
 		return nil
 	}
 	ctx := &ToolSchemaContext{
-		Tools: make(map[string]map[string]bool),
+		Tools: make(map[string]map[string]string),
 	}
 
 	for _, t := range toolsJSON {
+		// Try OpenAI format first: tools[].function.name
 		name := t.Get("function.name").String()
-		if name == "" {
-			continue
+		var propsPath string
+		if name != "" {
+			propsPath = "function.parameters.properties"
+		} else {
+			// Try direct Gemini format: tools[].name (single function declaration)
+			name = t.Get("name").String()
+			if name != "" {
+				// Gemini uses parametersJsonSchema instead of parameters
+				propsPath = "parametersJsonSchema.properties"
+				if !t.Get(propsPath).Exists() {
+					propsPath = "parameters.properties"
+				}
+			}
 		}
 
-		params := make(map[string]bool)
-		// Collect keys from properties
-		t.Get("function.parameters.properties").ForEach(func(key, _ gjson.Result) bool {
-			params[key.String()] = true
-			return true
-		})
+		if name != "" {
+			params := make(map[string]string)
+			t.Get(propsPath).ForEach(func(key, value gjson.Result) bool {
+				// Extract type from property schema
+				paramType := value.Get("type").String()
+				if paramType == "" {
+					paramType = "string" // Default to string if not specified
+				}
+				params[key.String()] = paramType
+				return true
+			})
+			ctx.Tools[name] = params
+		}
 
-		ctx.Tools[name] = params
+		// Also check for Gemini nested format: tools[].functionDeclarations[]
+		funcDecls := t.Get("functionDeclarations")
+		if funcDecls.IsArray() {
+			for _, fd := range funcDecls.Array() {
+				fdName := fd.Get("name").String()
+				if fdName == "" {
+					continue
+				}
+				params := make(map[string]string)
+				// Try parametersJsonSchema first, then parameters
+				fdPropsPath := "parametersJsonSchema.properties"
+				if !fd.Get(fdPropsPath).Exists() {
+					fdPropsPath = "parameters.properties"
+				}
+				fd.Get(fdPropsPath).ForEach(func(key, value gjson.Result) bool {
+					paramType := value.Get("type").String()
+					if paramType == "" {
+						paramType = "string"
+					}
+					params[key.String()] = paramType
+					return true
+				})
+				ctx.Tools[fdName] = params
+			}
+		}
 	}
 	return ctx
 }
@@ -115,13 +162,15 @@ func NewToolSchemaContextFromGJSON(toolsJSON []gjson.Result) *ToolSchemaContext 
 //     - Semantic synonyms (path -> target_file, etc.)
 //  3. If no match found - keep original (let client handle the error)
 //  4. Recursively normalize nested objects
+//  5. Handle array-to-string conversion based on schema type
+//  6. Add default values for commonly missing required parameters
 func (ctx *ToolSchemaContext) NormalizeToolCallArgs(toolName, argsJSON string) string {
 	// 1. Fast checks
 	if ctx == nil || argsJSON == "" || argsJSON == "{}" {
 		return argsJSON
 	}
-	expectedParams, ok := ctx.Tools[toolName]
-	if !ok || len(expectedParams) == 0 {
+	paramTypes, ok := ctx.Tools[toolName]
+	if !ok || len(paramTypes) == 0 {
 		return argsJSON
 	}
 
@@ -131,8 +180,12 @@ func (ctx *ToolSchemaContext) NormalizeToolCallArgs(toolName, argsJSON string) s
 		return argsJSON // If not valid JSON, return as-is (let it fail downstream)
 	}
 
-	// 3. Normalize recursively
-	normalizedArgs, changed := normalizeMapRecursive(actualArgs, expectedParams)
+	// 3. Normalize recursively (includes array-to-string conversion based on schema types)
+	normalizedArgs, changed := normalizeMapRecursive(actualArgs, paramTypes)
+
+	// 4. Add default values for commonly missing required parameters
+	defaultsChanged := addMissingDefaults(toolName, normalizedArgs, paramTypes)
+	changed = changed || defaultsChanged
 
 	if !changed {
 		return argsJSON
@@ -145,9 +198,32 @@ func (ctx *ToolSchemaContext) NormalizeToolCallArgs(toolName, argsJSON string) s
 	return string(out)
 }
 
+// addMissingDefaults adds default values for commonly missing required parameters.
+// Returns true if any defaults were added.
+// Uses ToolDefaults from normalization_config.go instead of hardcoded values.
+func addMissingDefaults(toolName string, args map[string]interface{}, paramTypes map[string]string) bool {
+	changed := false
+
+	// Use configurable defaults from normalization_config.go
+	if toolDefaults, ok := ToolDefaults[toolName]; ok {
+		for param, defaultValue := range toolDefaults {
+			// Only add if parameter is expected in schema and not already present
+			if _, inSchema := paramTypes[param]; inSchema {
+				if _, exists := args[param]; !exists {
+					args[param] = defaultValue
+					changed = true
+				}
+			}
+		}
+	}
+
+	return changed
+}
+
 // normalizeMapRecursive normalizes a map and all nested maps recursively.
+// paramTypes maps parameter names to their expected types from schema.
 // Returns the normalized map and whether any changes were made.
-func normalizeMapRecursive(args map[string]interface{}, expectedKeys map[string]bool) (map[string]interface{}, bool) {
+func normalizeMapRecursive(args map[string]interface{}, paramTypes map[string]string) (map[string]interface{}, bool) {
 	changed := false
 	normalized := make(map[string]interface{}, len(args))
 
@@ -155,29 +231,51 @@ func normalizeMapRecursive(args map[string]interface{}, expectedKeys map[string]
 		newKey := key
 		newValue := value
 
-		// Check if key needs normalization
-		if !expectedKeys[key] {
-			if match := findBestMatch(key, expectedKeys); match != "" {
+		// Check if key needs normalization (key not in schema)
+		if _, inSchema := paramTypes[key]; !inSchema {
+			if match := findBestMatch(key, paramTypes); match != "" {
 				newKey = match
 				changed = true
 			}
 		}
 
-		// Recursively normalize nested objects
+		// Get expected type for the (possibly renamed) key
+		expectedType := paramTypes[newKey]
+
+		// Recursively normalize nested objects and handle type mismatches
 		switch v := value.(type) {
 		case map[string]interface{}:
 			// Nested object - normalize recursively
-			normalizedNested, nestedChanged := normalizeMapRecursive(v, expectedKeys)
+			normalizedNested, nestedChanged := normalizeMapRecursive(v, paramTypes)
 			if nestedChanged {
 				newValue = normalizedNested
 				changed = true
 			}
 		case []interface{}:
-			// Array - check each element for nested objects
-			normalizedArray, arrayChanged := normalizeArrayRecursive(v, expectedKeys)
-			if arrayChanged {
-				newValue = normalizedArray
-				changed = true
+			// Array handling:
+			// If schema expects string but model sent array, extract first element
+			if len(v) > 0 {
+				// Schema expects scalar but got array - extract first element
+				first := v[0]
+				switch expectedType {
+				case "string":
+					if str, ok := first.(string); ok {
+						newValue = str
+						changed = true
+					}
+				case "integer", "number":
+					// Keep numeric value as-is
+					newValue = first
+					changed = true
+				}
+			}
+			if !changed {
+				// Schema expects array or unknown - normalize array recursively
+				normalizedArray, arrayChanged := normalizeArrayRecursive(v, paramTypes)
+				if arrayChanged {
+					newValue = normalizedArray
+					changed = true
+				}
 			}
 		}
 
@@ -188,14 +286,14 @@ func normalizeMapRecursive(args map[string]interface{}, expectedKeys map[string]
 }
 
 // normalizeArrayRecursive normalizes all objects within an array recursively.
-func normalizeArrayRecursive(arr []interface{}, expectedKeys map[string]bool) ([]interface{}, bool) {
+func normalizeArrayRecursive(arr []interface{}, paramTypes map[string]string) ([]interface{}, bool) {
 	changed := false
 	normalized := make([]interface{}, len(arr))
 
 	for i, item := range arr {
 		switch v := item.(type) {
 		case map[string]interface{}:
-			normalizedItem, itemChanged := normalizeMapRecursive(v, expectedKeys)
+			normalizedItem, itemChanged := normalizeMapRecursive(v, paramTypes)
 			if itemChanged {
 				normalized[i] = normalizedItem
 				changed = true
@@ -203,7 +301,7 @@ func normalizeArrayRecursive(arr []interface{}, expectedKeys map[string]bool) ([
 				normalized[i] = item
 			}
 		case []interface{}:
-			normalizedItem, itemChanged := normalizeArrayRecursive(v, expectedKeys)
+			normalizedItem, itemChanged := normalizeArrayRecursive(v, paramTypes)
 			if itemChanged {
 				normalized[i] = normalizedItem
 				changed = true
@@ -219,39 +317,42 @@ func normalizeArrayRecursive(arr []interface{}, expectedKeys map[string]bool) ([
 }
 
 // findBestMatch finds a suitable key in the schema for the model's key.
-func findBestMatch(actualKey string, expectedKeys map[string]bool) string {
+// paramTypes maps parameter names to their expected types.
+// Uses ParameterSynonyms from normalization_config.go for semantic matching.
+func findBestMatch(actualKey string, paramTypes map[string]string) string {
+	// Helper to check if key exists in schema
+	inSchema := func(key string) bool {
+		_, ok := paramTypes[key]
+		return ok
+	}
+
 	// 1. Check camelCase <-> snake_case conversions
 	// model: "filePath" -> schema: "file_path"
 	snake := camelToSnake(actualKey)
-	if expectedKeys[snake] {
+	if inSchema(snake) {
 		return snake
 	}
 	// model: "file_path" -> schema: "filePath"
 	camel := snakeToCamel(actualKey)
-	if expectedKeys[camel] {
+	if inSchema(camel) {
 		return camel
 	}
 
-	// 2. Check semantic synonyms (minimal dictionary of Gemini's most common mistakes)
-	// This is MUCH smaller and safer - we only remap if the target exists in schema.
+	// 2. Check semantic synonyms from configurable ParameterSynonyms map
+	// This is safer than hardcoding - we only remap if the target exists in schema.
 	// If schema doesn't have target_file, we won't rename path.
-	synonyms := map[string][]string{
-		"path":       {"target_file", "file_path", "filename", "target_directory"},
-		"content":    {"contents", "code", "text"},
-		"code":       {"content", "contents"},
-		"background": {"is_background"},
-	}
-
-	if candidates, ok := synonyms[strings.ToLower(actualKey)]; ok {
+	// NOTE: Mappings work bidirectionally - if model sends "target_file" but schema expects "file_path",
+	// we check if "file_path" is in the candidates list for "target_file".
+	if candidates, ok := ParameterSynonyms[strings.ToLower(actualKey)]; ok {
 		for _, candidate := range candidates {
-			if expectedKeys[candidate] {
+			if inSchema(candidate) {
 				return candidate
 			}
 			// Also try case conversions
-			if cc := snakeToCamel(candidate); expectedKeys[cc] {
+			if cc := snakeToCamel(candidate); inSchema(cc) {
 				return cc
 			}
-			if sc := camelToSnake(candidate); expectedKeys[sc] {
+			if sc := camelToSnake(candidate); inSchema(sc) {
 				return sc
 			}
 		}
