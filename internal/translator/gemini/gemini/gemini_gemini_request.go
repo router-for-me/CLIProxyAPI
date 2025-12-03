@@ -91,6 +91,11 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 		return true
 	})
 
+	if gjson.GetBytes(rawJSON, "generationConfig.responseSchema").Exists() {
+		strJson, _ := util.RenameKey(string(out), "generationConfig.responseSchema", "generationConfig.responseJsonSchema")
+		out = []byte(strJson)
+	}
+
 	out = common.AttachDefaultSafetySettings(out, "safetySettings")
 	return out
 }

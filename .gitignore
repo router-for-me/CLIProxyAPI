@@ -15,6 +15,7 @@ pgstore/*
 gitstore/*
 objectstore/*
 static/*
+refs/*
 
 # Authentication data
 auths/*
@@ -31,5 +32,11 @@ GEMINI.md
 .vscode/*
 .claude/*
 .serena/*
+
+# Local data (fork-specific)
 /auth/
 _wgun/
+
+# macOS
+.DS_Store
+._*

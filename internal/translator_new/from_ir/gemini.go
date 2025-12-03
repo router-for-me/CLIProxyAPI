@@ -125,9 +125,10 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req 
 	}
 
 	// Response Schema (Structured Output)
+	// Note: Gemini API renamed responseSchema to responseJsonSchema
 	if req.ResponseSchema != nil {
 		genConfig["responseMimeType"] = "application/json"
-		genConfig["responseSchema"] = req.ResponseSchema
+		genConfig["responseJsonSchema"] = req.ResponseSchema
 	}
 
 	// Function Calling Config

@@ -147,7 +147,6 @@ func (h *Handler) applyLegacyKeys(keys []string) {
 		}
 	}
 	h.cfg.GeminiKey = newList
-	h.cfg.GlAPIKey = sanitized
 	h.cfg.SanitizeGeminiKeys()
 }
 
@@ -409,15 +408,14 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	arr = migrateLegacyOpenAICompatibilityKeys(arr)
-	// Filter out providers with empty base-url -> remove provider entirely
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
+		normalizeOpenAICompatibilityEntry(&arr[i])
 		if strings.TrimSpace(arr[i].BaseURL) != "" {
 			filtered = append(filtered, arr[i])
 		}
 	}
-	h.cfg.OpenAICompatibility = migrateLegacyOpenAICompatibilityKeys(filtered)
+	h.cfg.OpenAICompatibility = filtered
 	h.cfg.SanitizeOpenAICompatibility()
 	h.persist(c)
 }
@@ -431,7 +429,6 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	h.cfg.OpenAICompatibility = migrateLegacyOpenAICompatibilityKeys(h.cfg.OpenAICompatibility)
 	normalizeOpenAICompatibilityEntry(body.Value)
 	// If base-url becomes empty, delete the provider instead of updating
 	if strings.TrimSpace(body.Value.BaseURL) == "" {
@@ -731,28 +728,6 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 			existing[trimmed] = struct{}{}
 		}
 	}
-	if len(entry.APIKeys) == 0 {
-		return
-	}
-	for _, legacyKey := range entry.APIKeys {
-		trimmed := strings.TrimSpace(legacyKey)
-		if trimmed == "" {
-			continue
-		}
-		if _, ok := existing[trimmed]; ok {
-			continue
-		}
-		entry.APIKeyEntries = append(entry.APIKeyEntries, config.OpenAICompatibilityAPIKey{APIKey: trimmed})
-		existing[trimmed] = struct{}{}
-	}
-	entry.APIKeys = nil
-}
-
-func migrateLegacyOpenAICompatibilityKeys(entries []config.OpenAICompatibility) []config.OpenAICompatibility {
-	for i := range entries {
-		normalizeOpenAICompatibilityEntry(&entries[i])
-	}
-	return entries
 }
 
 func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) []config.OpenAICompatibility {
@@ -764,9 +739,6 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 		copyEntry := entries[i]
 		if len(copyEntry.APIKeyEntries) > 0 {
 			copyEntry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), copyEntry.APIKeyEntries...)
-		}
-		if len(copyEntry.APIKeys) > 0 {
-			copyEntry.APIKeys = append([]string(nil), copyEntry.APIKeys...)
 		}
 		normalizeOpenAICompatibilityEntry(&copyEntry)
 		out[i] = copyEntry

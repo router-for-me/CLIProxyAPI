@@ -257,6 +257,7 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 - Provider route aliases for Amp's API patterns (`/api/provider/{provider}/v1...`)
 - Management proxy for OAuth authentication and account features
 - Smart model fallback with automatic routing
+- **Model mapping** to route unavailable models to alternatives (e.g., `claude-opus-4.5` → `claude-sonnet-4`)
 - Security-first design with localhost-only management endpoints
 
 **→ [Complete Amp CLI Integration Guide](docs/amp-cli-integration.md)**
