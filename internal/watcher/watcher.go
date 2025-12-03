@@ -1162,71 +1162,37 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 
 			// Handle new APIKeyEntries format (preferred)
 			createdEntries := 0
-			if len(compat.APIKeyEntries) > 0 {
-				for j := range compat.APIKeyEntries {
-					entry := &compat.APIKeyEntries[j]
-					key := strings.TrimSpace(entry.APIKey)
-					proxyURL := strings.TrimSpace(entry.ProxyURL)
-					idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-					id, token := idGen.next(idKind, key, base, proxyURL)
-					attrs := map[string]string{
-						"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-						"base_url":     base,
-						"compat_name":  compat.Name,
-						"provider_key": providerName,
-					}
-					if key != "" {
-						attrs["api_key"] = key
-					}
-					if hash := computeOpenAICompatModelsHash(compat.Models); hash != "" {
-						attrs["models_hash"] = hash
-					}
-					addConfigHeadersToAttrs(compat.Headers, attrs)
-					a := &coreauth.Auth{
-						ID:         id,
-						Provider:   providerName,
-						Label:      compat.Name,
-						Status:     coreauth.StatusActive,
-						ProxyURL:   proxyURL,
-						Attributes: attrs,
-						CreatedAt:  now,
-						UpdatedAt:  now,
-					}
-					out = append(out, a)
-					createdEntries++
+			for j := range compat.APIKeyEntries {
+				entry := &compat.APIKeyEntries[j]
+				key := strings.TrimSpace(entry.APIKey)
+				proxyURL := strings.TrimSpace(entry.ProxyURL)
+				idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
+				id, token := idGen.next(idKind, key, base, proxyURL)
+				attrs := map[string]string{
+					"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+					"base_url":     base,
+					"compat_name":  compat.Name,
+					"provider_key": providerName,
 				}
-			} else {
-				// Handle legacy APIKeys format for backward compatibility
-				for j := range compat.APIKeys {
-					key := strings.TrimSpace(compat.APIKeys[j])
-					if key == "" {
-						continue
-					}
-					idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-					id, token := idGen.next(idKind, key, base)
-					attrs := map[string]string{
-						"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-						"base_url":     base,
-						"compat_name":  compat.Name,
-						"provider_key": providerName,
-					}
+				if key != "" {
 					attrs["api_key"] = key
-					if hash := computeOpenAICompatModelsHash(compat.Models); hash != "" {
-						attrs["models_hash"] = hash
-					}
-					addConfigHeadersToAttrs(compat.Headers, attrs)
-					a := &coreauth.Auth{
-						ID:         id,
-						Provider:   providerName,
-						Label:      compat.Name,
-						Status:     coreauth.StatusActive,
-						Attributes: attrs,
-						CreatedAt:  now,
-						UpdatedAt:  now,
-					}
-					out = append(out, a)
-					createdEntries++
 				}
+				if hash := computeOpenAICompatModelsHash(compat.Models); hash != "" {
+					attrs["models_hash"] = hash
+				}
+				addConfigHeadersToAttrs(compat.Headers, attrs)
+				a := &coreauth.Auth{
+					ID:         id,
+					Provider:   providerName,
+					Label:      compat.Name,
+					Status:     coreauth.StatusActive,
+					ProxyURL:   proxyURL,
+					Attributes: attrs,
+					CreatedAt:  now,
+					UpdatedAt:  now,
+				}
+				out = append(out, a)
+				createdEntries++
 			}
 			if createdEntries == 0 {
 				idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
@@ -1530,12 +1496,7 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	if len(cfg.OpenAICompatibility) > 0 {
 		// Do not construct legacy clients for OpenAI-compat providers; these are handled by the stateless executor.
 		for _, compatConfig := range cfg.OpenAICompatibility {
-			// Count from new APIKeyEntries format if present, otherwise fall back to legacy APIKeys
-			if len(compatConfig.APIKeyEntries) > 0 {
-				openAICompatCount += len(compatConfig.APIKeyEntries)
-			} else {
-				openAICompatCount += len(compatConfig.APIKeys)
-			}
+			openAICompatCount += len(compatConfig.APIKeyEntries)
 		}
 	}
 	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount
@@ -1612,24 +1573,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 }
 
 func countAPIKeys(entry config.OpenAICompatibility) int {
-	// Prefer new APIKeyEntries format
-	if len(entry.APIKeyEntries) > 0 {
-		count := 0
-		for _, keyEntry := range entry.APIKeyEntries {
-			if strings.TrimSpace(keyEntry.APIKey) != "" {
-				count++
-			}
-		}
-		return count
-	}
-	// Fall back to legacy APIKeys format
-	return countNonEmptyStrings(entry.APIKeys)
-}
-
-func countNonEmptyStrings(values []string) int {
 	count := 0
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
+	for _, keyEntry := range entry.APIKeyEntries {
+		if strings.TrimSpace(keyEntry.APIKey) != "" {
 			count++
 		}
 	}
@@ -1753,9 +1699,6 @@ func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if oldExcluded.hash != newExcluded.hash {
 				changes = append(changes, fmt.Sprintf("gemini[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
 			}
-		}
-		if !reflect.DeepEqual(trimStrings(oldCfg.GlAPIKey), trimStrings(newCfg.GlAPIKey)) {
-			changes = append(changes, "generative-language-api-key: values updated (legacy view, redacted)")
 		}
 	}
 

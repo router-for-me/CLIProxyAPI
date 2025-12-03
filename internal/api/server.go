@@ -938,11 +938,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {
 		entry := cfg.OpenAICompatibility[i]
-		if len(entry.APIKeyEntries) > 0 {
-			openAICompatCount += len(entry.APIKeyEntries)
-			continue
-		}
-		openAICompatCount += len(entry.APIKeys)
+		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
 	total := authFiles + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount

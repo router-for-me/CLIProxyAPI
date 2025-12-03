@@ -56,8 +56,10 @@ func TestAmpModule_Register_WithUpstream(t *testing.T) {
 	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
 
 	cfg := &config.Config{
-		AmpUpstreamURL:    upstream.URL,
-		AmpUpstreamAPIKey: "test-key",
+		AmpCode: config.AmpCode{
+			UpstreamURL:    upstream.URL,
+			UpstreamAPIKey: "test-key",
+		},
 	}
 
 	ctx := modules.Context{Engine: r, BaseHandler: base, Config: cfg, AuthMiddleware: func(c *gin.Context) { c.Next() }}
@@ -86,7 +88,9 @@ func TestAmpModule_Register_WithoutUpstream(t *testing.T) {
 	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
 
 	cfg := &config.Config{
-		AmpUpstreamURL: "", // No upstream
+		AmpCode: config.AmpCode{
+			UpstreamURL: "", // No upstream
+		},
 	}
 
 	ctx := modules.Context{Engine: r, BaseHandler: base, Config: cfg, AuthMiddleware: func(c *gin.Context) { c.Next() }}
@@ -121,7 +125,9 @@ func TestAmpModule_Register_InvalidUpstream(t *testing.T) {
 	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
 
 	cfg := &config.Config{
-		AmpUpstreamURL: "://invalid-url",
+		AmpCode: config.AmpCode{
+			UpstreamURL: "://invalid-url",
+		},
 	}
 
 	ctx := modules.Context{Engine: r, BaseHandler: base, Config: cfg, AuthMiddleware: func(c *gin.Context) { c.Next() }}
@@ -151,7 +157,7 @@ func TestAmpModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
 	}
 
 	// Update config - should invalidate cache
-	if err := m.OnConfigUpdated(&config.Config{AmpUpstreamURL: "http://x"}); err != nil {
+	if err := m.OnConfigUpdated(&config.Config{AmpCode: config.AmpCode{UpstreamURL: "http://x"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,7 +181,7 @@ func TestAmpModule_OnConfigUpdated_URLRemoved(t *testing.T) {
 	m.secretSource = ms
 
 	// Config update with empty URL - should log warning but not error
-	cfg := &config.Config{AmpUpstreamURL: ""}
+	cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: ""}}
 
 	if err := m.OnConfigUpdated(cfg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -187,7 +193,7 @@ func TestAmpModule_OnConfigUpdated_NonMultiSourceSecret(t *testing.T) {
 	m := &AmpModule{enabled: true}
 	m.secretSource = NewStaticSecretSource("static-key")
 
-	cfg := &config.Config{AmpUpstreamURL: "http://example.com"}
+	cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: "http://example.com"}}
 
 	// Should not error or panic
 	if err := m.OnConfigUpdated(cfg); err != nil {
@@ -240,8 +246,10 @@ func TestAmpModule_SecretSource_FromConfig(t *testing.T) {
 
 	// Config with explicit API key
 	cfg := &config.Config{
-		AmpUpstreamURL:    upstream.URL,
-		AmpUpstreamAPIKey: "config-key",
+		AmpCode: config.AmpCode{
+			UpstreamURL:    upstream.URL,
+			UpstreamAPIKey: "config-key",
+		},
 	}
 
 	ctx := modules.Context{Engine: r, BaseHandler: base, Config: cfg, AuthMiddleware: func(c *gin.Context) { c.Next() }}
@@ -283,7 +291,7 @@ func TestAmpModule_ProviderAliasesAlwaysRegistered(t *testing.T) {
 
 			m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
 
-			cfg := &config.Config{AmpUpstreamURL: scenario.configURL}
+			cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: scenario.configURL}}
 
 			ctx := modules.Context{Engine: r, BaseHandler: base, Config: cfg, AuthMiddleware: func(c *gin.Context) { c.Next() }}
 			if err := m.Register(ctx); err != nil && scenario.configURL != "" {

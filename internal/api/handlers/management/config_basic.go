@@ -17,7 +17,6 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		return
 	}
 	cfgCopy := *h.cfg
-	cfgCopy.GlAPIKey = geminiKeyStringsFromConfig(h.cfg)
 	c.JSON(200, &cfgCopy)
 }
 
