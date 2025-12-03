@@ -30,6 +30,16 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+func matchProvider(provider string, targets []string) (string, bool) {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	for _, t := range targets {
+		if strings.EqualFold(p, strings.TrimSpace(t)) {
+			return p, true
+		}
+	}
+	return p, false
+}
+
 // storePersister captures persistence-capable token store methods used by the watcher.
 type storePersister interface {
 	PersistConfig(ctx context.Context) error
@@ -54,6 +64,7 @@ type Watcher struct {
 	lastConfigHash    string
 	authQueue         chan<- AuthUpdate
 	currentAuths      map[string]*coreauth.Auth
+	runtimeAuths      map[string]*coreauth.Auth
 	dispatchMu        sync.Mutex
 	dispatchCond      *sync.Cond
 	pendingUpdates    map[string]AuthUpdate
@@ -169,7 +180,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 	go w.processEvents(ctx)
 
 	// Perform an initial full reload based on current config and auth dir
-	w.reloadClients(true)
+	w.reloadClients(true, nil)
 	return nil
 }
 
@@ -221,9 +232,57 @@ func (w *Watcher) SetAuthUpdateQueue(queue chan<- AuthUpdate) {
 	}
 }
 
+// DispatchRuntimeAuthUpdate allows external runtime providers (e.g., websocket-driven auths)
+// to push auth updates through the same queue used by file/config watchers.
+// Returns true if the update was enqueued; false if no queue is configured.
+func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
+	if w == nil {
+		return false
+	}
+	w.clientsMutex.Lock()
+	if w.runtimeAuths == nil {
+		w.runtimeAuths = make(map[string]*coreauth.Auth)
+	}
+	switch update.Action {
+	case AuthUpdateActionAdd, AuthUpdateActionModify:
+		if update.Auth != nil && update.Auth.ID != "" {
+			clone := update.Auth.Clone()
+			w.runtimeAuths[clone.ID] = clone
+			if w.currentAuths == nil {
+				w.currentAuths = make(map[string]*coreauth.Auth)
+			}
+			w.currentAuths[clone.ID] = clone.Clone()
+		}
+	case AuthUpdateActionDelete:
+		id := update.ID
+		if id == "" && update.Auth != nil {
+			id = update.Auth.ID
+		}
+		if id != "" {
+			delete(w.runtimeAuths, id)
+			if w.currentAuths != nil {
+				delete(w.currentAuths, id)
+			}
+		}
+	}
+	w.clientsMutex.Unlock()
+	if w.getAuthQueue() == nil {
+		return false
+	}
+	w.dispatchAuthUpdates([]AuthUpdate{update})
+	return true
+}
+
 func (w *Watcher) refreshAuthState() {
 	auths := w.SnapshotCoreAuths()
 	w.clientsMutex.Lock()
+	if len(w.runtimeAuths) > 0 {
+		for _, a := range w.runtimeAuths {
+			if a != nil {
+				auths = append(auths, a.Clone())
+			}
+		}
+	}
 	updates := w.prepareAuthUpdatesLocked(auths)
 	w.clientsMutex.Unlock()
 	w.dispatchAuthUpdates(updates)
@@ -437,6 +496,18 @@ func computeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 	return hex.EncodeToString(sum[:])
 }
 
+func computeVertexCompatModelsHash(models []config.VertexCompatModel) string {
+	if len(models) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(models)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 // computeClaudeModelsHash returns a stable hash for Claude model aliases.
 func computeClaudeModelsHash(models []config.ClaudeModel) string {
 	if len(models) == 0 {
@@ -448,6 +519,142 @@ func computeClaudeModelsHash(models []config.ClaudeModel) string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func computeExcludedModelsHash(excluded []string) string {
+	if len(excluded) == 0 {
+		return ""
+	}
+	normalized := make([]string, 0, len(excluded))
+	for _, entry := range excluded {
+		if trimmed := strings.TrimSpace(entry); trimmed != "" {
+			normalized = append(normalized, strings.ToLower(trimmed))
+		}
+	}
+	if len(normalized) == 0 {
+		return ""
+	}
+	sort.Strings(normalized)
+	data, err := json.Marshal(normalized)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+type excludedModelsSummary struct {
+	hash  string
+	count int
+}
+
+func summarizeExcludedModels(list []string) excludedModelsSummary {
+	if len(list) == 0 {
+		return excludedModelsSummary{}
+	}
+	seen := make(map[string]struct{}, len(list))
+	normalized := make([]string, 0, len(list))
+	for _, entry := range list {
+		if trimmed := strings.ToLower(strings.TrimSpace(entry)); trimmed != "" {
+			if _, exists := seen[trimmed]; exists {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			normalized = append(normalized, trimmed)
+		}
+	}
+	sort.Strings(normalized)
+	return excludedModelsSummary{
+		hash:  computeExcludedModelsHash(normalized),
+		count: len(normalized),
+	}
+}
+
+func summarizeOAuthExcludedModels(entries map[string][]string) map[string]excludedModelsSummary {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string]excludedModelsSummary, len(entries))
+	for k, v := range entries {
+		key := strings.ToLower(strings.TrimSpace(k))
+		if key == "" {
+			continue
+		}
+		out[key] = summarizeExcludedModels(v)
+	}
+	return out
+}
+
+func diffOAuthExcludedModelChanges(oldMap, newMap map[string][]string) ([]string, []string) {
+	oldSummary := summarizeOAuthExcludedModels(oldMap)
+	newSummary := summarizeOAuthExcludedModels(newMap)
+	keys := make(map[string]struct{}, len(oldSummary)+len(newSummary))
+	for k := range oldSummary {
+		keys[k] = struct{}{}
+	}
+	for k := range newSummary {
+		keys[k] = struct{}{}
+	}
+	changes := make([]string, 0, len(keys))
+	affected := make([]string, 0, len(keys))
+	for key := range keys {
+		oldInfo, okOld := oldSummary[key]
+		newInfo, okNew := newSummary[key]
+		switch {
+		case okOld && !okNew:
+			changes = append(changes, fmt.Sprintf("oauth-excluded-models[%s]: removed", key))
+			affected = append(affected, key)
+		case !okOld && okNew:
+			changes = append(changes, fmt.Sprintf("oauth-excluded-models[%s]: added (%d entries)", key, newInfo.count))
+			affected = append(affected, key)
+		case okOld && okNew && oldInfo.hash != newInfo.hash:
+			changes = append(changes, fmt.Sprintf("oauth-excluded-models[%s]: updated (%d -> %d entries)", key, oldInfo.count, newInfo.count))
+			affected = append(affected, key)
+		}
+	}
+	sort.Strings(changes)
+	sort.Strings(affected)
+	return changes, affected
+}
+
+func applyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey []string, authKind string) {
+	if auth == nil || cfg == nil {
+		return
+	}
+	authKindKey := strings.ToLower(strings.TrimSpace(authKind))
+	seen := make(map[string]struct{})
+	add := func(list []string) {
+		for _, entry := range list {
+			if trimmed := strings.TrimSpace(entry); trimmed != "" {
+				key := strings.ToLower(trimmed)
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+			}
+		}
+	}
+	if authKindKey == "apikey" {
+		add(perKey)
+	} else if cfg.OAuthExcludedModels != nil {
+		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+		add(cfg.OAuthExcludedModels[providerKey])
+	}
+	combined := make([]string, 0, len(seen))
+	for k := range seen {
+		combined = append(combined, k)
+	}
+	sort.Strings(combined)
+	hash := computeExcludedModelsHash(combined)
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	if hash != "" {
+		auth.Attributes["excluded_models_hash"] = hash
+	}
+	if authKind != "" {
+		auth.Attributes["auth_kind"] = authKind
+	}
 }
 
 // SetClients sets the file-based clients.
@@ -634,6 +841,11 @@ func (w *Watcher) reloadConfig() bool {
 	w.config = newConfig
 	w.clientsMutex.Unlock()
 
+	var affectedOAuthProviders []string
+	if oldConfig != nil {
+		_, affectedOAuthProviders = diffOAuthExcludedModelChanges(oldConfig.OAuthExcludedModels, newConfig.OAuthExcludedModels)
+	}
+
 	// Always apply the current log level based on the latest config.
 	// This ensures logrus reflects the desired level even if change detection misses.
 	util.SetLogLevel(newConfig)
@@ -659,12 +871,12 @@ func (w *Watcher) reloadConfig() bool {
 
 	log.Infof("config successfully reloaded, triggering client reload")
 	// Reload clients with new config
-	w.reloadClients(authDirChanged)
+	w.reloadClients(authDirChanged, affectedOAuthProviders)
 	return true
 }
 
 // reloadClients performs a full scan and reload of all clients.
-func (w *Watcher) reloadClients(rescanAuth bool) {
+func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string) {
 	log.Debugf("starting full client load process")
 
 	w.clientsMutex.RLock()
@@ -676,12 +888,34 @@ func (w *Watcher) reloadClients(rescanAuth bool) {
 		return
 	}
 
+	if len(affectedOAuthProviders) > 0 {
+		w.clientsMutex.Lock()
+		if w.currentAuths != nil {
+			filtered := make(map[string]*coreauth.Auth, len(w.currentAuths))
+			for id, auth := range w.currentAuths {
+				if auth == nil {
+					continue
+				}
+				provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+				if _, match := matchProvider(provider, affectedOAuthProviders); match {
+					continue
+				}
+				filtered[id] = auth
+			}
+			w.currentAuths = filtered
+			log.Debugf("applying oauth-excluded-models to providers %v", affectedOAuthProviders)
+		} else {
+			w.currentAuths = nil
+		}
+		w.clientsMutex.Unlock()
+	}
+
 	// Unregister all old API key clients before creating new ones
 	// no legacy clients to unregister
 
 	// Create new API key clients based on the new config
-	geminiAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
-	totalAPIKeyClients := geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
+	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
+	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
 
 	var authFileCount int
@@ -724,7 +958,7 @@ func (w *Watcher) reloadClients(rescanAuth bool) {
 		w.clientsMutex.Unlock()
 	}
 
-	totalNewClients := authFileCount + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
+	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 
 	// Ensure consumers observe the new configuration before auth updates dispatch.
 	if w.reloadCallback != nil {
@@ -734,10 +968,11 @@ func (w *Watcher) reloadClients(rescanAuth bool) {
 
 	w.refreshAuthState()
 
-	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
+	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
 		totalNewClients,
 		authFileCount,
 		geminiAPIKeyCount,
+		vertexCompatAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
 		openAICompatCount,
@@ -849,8 +1084,10 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				CreatedAt:  now,
 				UpdatedAt:  now,
 			}
+			applyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 			out = append(out, a)
 		}
+
 		// Claude API keys -> synthesize auths
 		for i := range cfg.ClaudeKey {
 			ck := cfg.ClaudeKey[i]
@@ -882,6 +1119,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				CreatedAt:  now,
 				UpdatedAt:  now,
 			}
+			applyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
 			out = append(out, a)
 		}
 		// Codex API keys -> synthesize auths
@@ -911,6 +1149,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				CreatedAt:  now,
 				UpdatedAt:  now,
 			}
+			applyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
 			out = append(out, a)
 		}
 		for i := range cfg.OpenAICompatibility {
@@ -923,71 +1162,37 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 
 			// Handle new APIKeyEntries format (preferred)
 			createdEntries := 0
-			if len(compat.APIKeyEntries) > 0 {
-				for j := range compat.APIKeyEntries {
-					entry := &compat.APIKeyEntries[j]
-					key := strings.TrimSpace(entry.APIKey)
-					proxyURL := strings.TrimSpace(entry.ProxyURL)
-					idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-					id, token := idGen.next(idKind, key, base, proxyURL)
-					attrs := map[string]string{
-						"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-						"base_url":     base,
-						"compat_name":  compat.Name,
-						"provider_key": providerName,
-					}
-					if key != "" {
-						attrs["api_key"] = key
-					}
-					if hash := computeOpenAICompatModelsHash(compat.Models); hash != "" {
-						attrs["models_hash"] = hash
-					}
-					addConfigHeadersToAttrs(compat.Headers, attrs)
-					a := &coreauth.Auth{
-						ID:         id,
-						Provider:   providerName,
-						Label:      compat.Name,
-						Status:     coreauth.StatusActive,
-						ProxyURL:   proxyURL,
-						Attributes: attrs,
-						CreatedAt:  now,
-						UpdatedAt:  now,
-					}
-					out = append(out, a)
-					createdEntries++
+			for j := range compat.APIKeyEntries {
+				entry := &compat.APIKeyEntries[j]
+				key := strings.TrimSpace(entry.APIKey)
+				proxyURL := strings.TrimSpace(entry.ProxyURL)
+				idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
+				id, token := idGen.next(idKind, key, base, proxyURL)
+				attrs := map[string]string{
+					"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+					"base_url":     base,
+					"compat_name":  compat.Name,
+					"provider_key": providerName,
 				}
-			} else {
-				// Handle legacy APIKeys format for backward compatibility
-				for j := range compat.APIKeys {
-					key := strings.TrimSpace(compat.APIKeys[j])
-					if key == "" {
-						continue
-					}
-					idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-					id, token := idGen.next(idKind, key, base)
-					attrs := map[string]string{
-						"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-						"base_url":     base,
-						"compat_name":  compat.Name,
-						"provider_key": providerName,
-					}
+				if key != "" {
 					attrs["api_key"] = key
-					if hash := computeOpenAICompatModelsHash(compat.Models); hash != "" {
-						attrs["models_hash"] = hash
-					}
-					addConfigHeadersToAttrs(compat.Headers, attrs)
-					a := &coreauth.Auth{
-						ID:         id,
-						Provider:   providerName,
-						Label:      compat.Name,
-						Status:     coreauth.StatusActive,
-						Attributes: attrs,
-						CreatedAt:  now,
-						UpdatedAt:  now,
-					}
-					out = append(out, a)
-					createdEntries++
 				}
+				if hash := computeOpenAICompatModelsHash(compat.Models); hash != "" {
+					attrs["models_hash"] = hash
+				}
+				addConfigHeadersToAttrs(compat.Headers, attrs)
+				a := &coreauth.Auth{
+					ID:         id,
+					Provider:   providerName,
+					Label:      compat.Name,
+					Status:     coreauth.StatusActive,
+					ProxyURL:   proxyURL,
+					Attributes: attrs,
+					CreatedAt:  now,
+					UpdatedAt:  now,
+				}
+				out = append(out, a)
+				createdEntries++
 			}
 			if createdEntries == 0 {
 				idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
@@ -1015,6 +1220,43 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			}
 		}
 	}
+
+	// Process Vertex API key providers (Vertex-compatible endpoints)
+	for i := range cfg.VertexCompatAPIKey {
+		compat := &cfg.VertexCompatAPIKey[i]
+		providerName := "vertex"
+		base := strings.TrimSpace(compat.BaseURL)
+
+		key := strings.TrimSpace(compat.APIKey)
+		proxyURL := strings.TrimSpace(compat.ProxyURL)
+		idKind := fmt.Sprintf("vertex:apikey:%s", base)
+		id, token := idGen.next(idKind, key, base, proxyURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:vertex-apikey[%s]", token),
+			"base_url":     base,
+			"provider_key": providerName,
+		}
+		if key != "" {
+			attrs["api_key"] = key
+		}
+		if hash := computeVertexCompatModelsHash(compat.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(compat.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   providerName,
+			Label:      "vertex-apikey",
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		applyAuthExcludedModelsMeta(a, cfg, nil, "apikey")
+		out = append(out, a)
+	}
+
 	// Also synthesize auth entries directly from auth files (for OAuth/file-backed providers)
 	entries, _ := os.ReadDir(w.authDir)
 	for _, e := range entries {
@@ -1071,8 +1313,12 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		applyAuthExcludedModelsMeta(a, cfg, nil, "oauth")
 		if provider == "gemini-cli" {
 			if virtuals := synthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
+				for _, v := range virtuals {
+					applyAuthExcludedModelsMeta(v, cfg, nil, "oauth")
+				}
 				out = append(out, a)
 				out = append(out, virtuals...)
 				continue
@@ -1227,8 +1473,9 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 	return authFileCount
 }
 
-func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int) {
+func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	geminiAPIKeyCount := 0
+	vertexCompatAPIKeyCount := 0
 	claudeAPIKeyCount := 0
 	codexAPIKeyCount := 0
 	openAICompatCount := 0
@@ -1236,6 +1483,9 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int) {
 	if len(cfg.GeminiKey) > 0 {
 		// Stateless executor handles Gemini API keys; avoid constructing legacy clients.
 		geminiAPIKeyCount += len(cfg.GeminiKey)
+	}
+	if len(cfg.VertexCompatAPIKey) > 0 {
+		vertexCompatAPIKeyCount += len(cfg.VertexCompatAPIKey)
 	}
 	if len(cfg.ClaudeKey) > 0 {
 		claudeAPIKeyCount += len(cfg.ClaudeKey)
@@ -1246,15 +1496,10 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int) {
 	if len(cfg.OpenAICompatibility) > 0 {
 		// Do not construct legacy clients for OpenAI-compat providers; these are handled by the stateless executor.
 		for _, compatConfig := range cfg.OpenAICompatibility {
-			// Count from new APIKeyEntries format if present, otherwise fall back to legacy APIKeys
-			if len(compatConfig.APIKeyEntries) > 0 {
-				openAICompatCount += len(compatConfig.APIKeyEntries)
-			} else {
-				openAICompatCount += len(compatConfig.APIKeys)
-			}
+			openAICompatCount += len(compatConfig.APIKeyEntries)
 		}
 	}
-	return geminiAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount
+	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount
 }
 
 func diffOpenAICompatibility(oldList, newList []config.OpenAICompatibility) []string {
@@ -1328,24 +1573,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 }
 
 func countAPIKeys(entry config.OpenAICompatibility) int {
-	// Prefer new APIKeyEntries format
-	if len(entry.APIKeyEntries) > 0 {
-		count := 0
-		for _, keyEntry := range entry.APIKeyEntries {
-			if strings.TrimSpace(keyEntry.APIKey) != "" {
-				count++
-			}
-		}
-		return count
-	}
-	// Fall back to legacy APIKeys format
-	return countNonEmptyStrings(entry.APIKeys)
-}
-
-func countNonEmptyStrings(values []string) int {
 	count := 0
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
+	for _, keyEntry := range entry.APIKeyEntries {
+		if strings.TrimSpace(keyEntry.APIKey) != "" {
 			count++
 		}
 	}
@@ -1464,9 +1694,11 @@ func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if !equalStringMap(o.Headers, n.Headers) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].headers: updated", i))
 			}
-		}
-		if !reflect.DeepEqual(trimStrings(oldCfg.GlAPIKey), trimStrings(newCfg.GlAPIKey)) {
-			changes = append(changes, "generative-language-api-key: values updated (legacy view, redacted)")
+			oldExcluded := summarizeExcludedModels(o.ExcludedModels)
+			newExcluded := summarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(changes, fmt.Sprintf("gemini[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
+			}
 		}
 	}
 
@@ -1491,6 +1723,11 @@ func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if !equalStringMap(o.Headers, n.Headers) {
 				changes = append(changes, fmt.Sprintf("claude[%d].headers: updated", i))
+			}
+			oldExcluded := summarizeExcludedModels(o.ExcludedModels)
+			newExcluded := summarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(changes, fmt.Sprintf("claude[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
 			}
 		}
 	}
@@ -1517,7 +1754,16 @@ func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if !equalStringMap(o.Headers, n.Headers) {
 				changes = append(changes, fmt.Sprintf("codex[%d].headers: updated", i))
 			}
+			oldExcluded := summarizeExcludedModels(o.ExcludedModels)
+			newExcluded := summarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(changes, fmt.Sprintf("codex[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
+			}
 		}
+	}
+
+	if entries, _ := diffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
+		changes = append(changes, entries...)
 	}
 
 	// Remote management (never print the key)

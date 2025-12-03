@@ -49,19 +49,21 @@ type APIKeyClientProvider interface {
 	Load(ctx context.Context, cfg *config.Config) (*APIKeyClientResult, error)
 }
 
-// APIKeyClientResult contains API key based clients along with type counts.
-// It provides metadata about the number of clients loaded for each provider type.
+// APIKeyClientResult is returned by APIKeyClientProvider.Load()
 type APIKeyClientResult struct {
-	// GeminiKeyCount is the number of Gemini API key clients loaded.
+	// GeminiKeyCount is the number of Gemini API keys loaded
 	GeminiKeyCount int
 
-	// ClaudeKeyCount is the number of Claude API key clients loaded.
+	// VertexCompatKeyCount is the number of Vertex-compatible API keys loaded
+	VertexCompatKeyCount int
+
+	// ClaudeKeyCount is the number of Claude API keys loaded
 	ClaudeKeyCount int
 
-	// CodexKeyCount is the number of Codex API key clients loaded.
+	// CodexKeyCount is the number of Codex API keys loaded
 	CodexKeyCount int
 
-	// OpenAICompatCount is the number of OpenAI-compatible API key clients loaded.
+	// OpenAICompatCount is the number of OpenAI compatibility API keys loaded
 	OpenAICompatCount int
 }
 
@@ -83,9 +85,10 @@ type WatcherWrapper struct {
 	start func(ctx context.Context) error
 	stop  func() error
 
-	setConfig      func(cfg *config.Config)
-	snapshotAuths  func() []*coreauth.Auth
-	setUpdateQueue func(queue chan<- watcher.AuthUpdate)
+	setConfig             func(cfg *config.Config)
+	snapshotAuths         func() []*coreauth.Auth
+	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
+	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -110,6 +113,16 @@ func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 		return
 	}
 	w.setConfig(cfg)
+}
+
+// DispatchRuntimeAuthUpdate forwards runtime auth updates (e.g., websocket providers)
+// into the watcher-managed auth update queue when available.
+// Returns true if the update was enqueued successfully.
+func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bool {
+	if w == nil || w.dispatchRuntimeUpdate == nil {
+		return false
+	}
+	return w.dispatchRuntimeUpdate(update)
 }
 
 // SetClients updates the watcher file-backed clients registry.

@@ -15,6 +15,7 @@ pgstore/*
 gitstore/*
 objectstore/*
 static/*
+refs/*
 
 # Authentication data
 auths/*
@@ -31,3 +32,7 @@ GEMINI.md
 .claude/*
 .serena/*
 /cmd/server/server
+
+# macOS
+.DS_Store
+._*

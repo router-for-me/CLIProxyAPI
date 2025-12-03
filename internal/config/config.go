@@ -26,16 +26,8 @@ type Config struct {
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
-	// AmpUpstreamURL defines the upstream Amp control plane used for non-provider calls.
-	AmpUpstreamURL string `yaml:"amp-upstream-url" json:"amp-upstream-url"`
-
-	// AmpUpstreamAPIKey optionally overrides the Authorization header when proxying Amp upstream calls.
-	AmpUpstreamAPIKey string `yaml:"amp-upstream-api-key" json:"amp-upstream-api-key"`
-
-	// AmpRestrictManagementToLocalhost restricts Amp management routes (/api/user, /api/threads, etc.)
-	// to only accept connections from localhost (127.0.0.1, ::1). When true, prevents drive-by
-	// browser attacks and remote access to management endpoints. Default: true (recommended).
-	AmpRestrictManagementToLocalhost bool `yaml:"amp-restrict-management-to-localhost" json:"amp-restrict-management-to-localhost"`
+	// RemoteManagement nests management-related options under 'remote-management'.
+	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 
 	// AmpRestrictClientEndpointsToLocalhost restricts Amp client endpoints (/api/provider/*, /api/clients/*)
 	// to only accept connections from localhost (127.0.0.1, ::1). When true, prevents remote IDE/CLI access.
@@ -89,37 +81,43 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// RequestRetry defines the retry times when the request failed.
+	RequestRetry int `yaml:"request-retry" json:"request-retry"`
+	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
+	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
-	// GlAPIKey exposes the legacy generative language API key list for backward compatibility.
-	GlAPIKey []string `yaml:"generative-language-api-key" json:"generative-language-api-key"`
-
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
-
-	// RequestRetry defines the retry times when the request failed.
-	RequestRetry int `yaml:"request-retry" json:"request-retry"`
-	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
-	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
-
-	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
-	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
+	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
-	// RemoteManagement nests management-related options under 'remote-management'.
-	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
+	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
+	// Used for services that use Vertex AI-style paths but with simple API key authentication.
+	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
+
+	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
+	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
+
+	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
+	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -150,6 +148,38 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+}
+
+// AmpModelMapping defines a model name mapping for Amp CLI requests.
+// When Amp requests a model that isn't available locally, this mapping
+// allows routing to an alternative model that IS available.
+type AmpModelMapping struct {
+	// From is the model name that Amp CLI requests (e.g., "claude-opus-4.5").
+	From string `yaml:"from" json:"from"`
+
+	// To is the target model name to route to (e.g., "claude-sonnet-4").
+	// The target model must have available providers in the registry.
+	To string `yaml:"to" json:"to"`
+}
+
+// AmpCode groups Amp CLI integration settings including upstream routing,
+// optional overrides, management route restrictions, and model fallback mappings.
+type AmpCode struct {
+	// UpstreamURL defines the upstream Amp control plane used for non-provider calls.
+	UpstreamURL string `yaml:"upstream-url" json:"upstream-url"`
+
+	// UpstreamAPIKey optionally overrides the Authorization header when proxying Amp upstream calls.
+	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
+
+	// RestrictManagementToLocalhost restricts Amp management routes (/api/user, /api/threads, etc.)
+	// to only accept connections from localhost (127.0.0.1, ::1). When true, prevents drive-by
+	// browser attacks and remote access to management endpoints. Default: true (recommended).
+	RestrictManagementToLocalhost bool `yaml:"restrict-management-to-localhost" json:"restrict-management-to-localhost"`
+
+	// ModelMappings defines model name mappings for Amp CLI requests.
+	// When Amp requests a model that isn't available locally, these mappings
+	// allow routing to an alternative model that IS available.
+	ModelMappings []AmpModelMapping `yaml:"model-mappings" json:"model-mappings"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -194,6 +224,9 @@ type ClaudeKey struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
 // ClaudeModel describes a mapping between an alias and the actual upstream model name.
@@ -220,6 +253,9 @@ type CodexKey struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
 // GeminiKey represents the configuration for a Gemini API key,
@@ -236,6 +272,9 @@ type GeminiKey struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
@@ -246,10 +285,6 @@ type OpenAICompatibility struct {
 
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
-
-	// APIKeys are the authentication keys for accessing the external API services.
-	// Deprecated: Use APIKeyEntries instead to support per-key proxy configuration.
-	APIKeys []string `yaml:"api-keys,omitempty" json:"api-keys,omitempty"`
 
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
@@ -321,13 +356,26 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
-	cfg.AmpRestrictManagementToLocalhost = true // Default to secure: only localhost access
+	cfg.AmpCode.RestrictManagementToLocalhost = true // Default to secure: only localhost access
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
 			return &Config{}, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	var legacy legacyConfigData
+	if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
+		if cfg.migrateLegacyGeminiKeys(legacy.LegacyGeminiKeys) {
+			cfg.legacyMigrationPending = true
+		}
+		if cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat) {
+			cfg.legacyMigrationPending = true
+		}
+		if cfg.migrateLegacyAmpConfig(&legacy) {
+			cfg.legacyMigrationPending = true
+		}
 	}
 
 	// Hash remote management key if plaintext is detected (nested)
@@ -350,6 +398,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
+	// Sanitize Vertex-compatible API keys: drop entries without base-url
+	cfg.SanitizeVertexCompatKeys()
+
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
 
@@ -358,6 +409,21 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
+
+	// Normalize OAuth provider model exclusion map.
+	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
+
+	if cfg.legacyMigrationPending {
+		fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
+		if !optional && configFile != "" {
+			if err := SaveConfigPreserveComments(configFile, &cfg); err != nil {
+				return nil, fmt.Errorf("failed to persist migrated legacy config: %w", err)
+			}
+			fmt.Println("Legacy configuration normalized and persisted.")
+		} else {
+			fmt.Println("Legacy configuration normalized in memory; persistence skipped.")
+		}
+	}
 
 	// Return the populated configuration struct.
 	return &cfg, nil
@@ -396,6 +462,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e := cfg.CodexKey[i]
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
 			continue
 		}
@@ -412,6 +479,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
 }
 
@@ -432,6 +500,7 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		if _, exists := seen[entry.APIKey]; exists {
 			continue
 		}
@@ -439,22 +508,6 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		out = append(out, entry)
 	}
 	cfg.GeminiKey = out
-
-	if len(cfg.GlAPIKey) > 0 {
-		for _, raw := range cfg.GlAPIKey {
-			key := strings.TrimSpace(raw)
-			if key == "" {
-				continue
-			}
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			cfg.GeminiKey = append(cfg.GeminiKey, GeminiKey{APIKey: key})
-			seen[key] = struct{}{}
-		}
-	}
-
-	cfg.GlAPIKey = nil
 }
 
 func syncInlineAccessProvider(cfg *Config) {
@@ -492,6 +545,55 @@ func NormalizeHeaders(headers map[string]string) map[string]string {
 		return nil
 	}
 	return clean
+}
+
+// NormalizeExcludedModels trims, lowercases, and deduplicates model exclusion patterns.
+// It preserves the order of first occurrences and drops empty entries.
+func NormalizeExcludedModels(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	out := make([]string, 0, len(models))
+	for _, raw := range models {
+		trimmed := strings.ToLower(strings.TrimSpace(raw))
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NormalizeOAuthExcludedModels cleans provider -> excluded models mappings by normalizing provider keys
+// and applying model exclusion normalization to each entry.
+func NormalizeOAuthExcludedModels(entries map[string][]string) map[string][]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(entries))
+	for provider, models := range entries {
+		key := strings.ToLower(strings.TrimSpace(provider))
+		if key == "" {
+			continue
+		}
+		normalized := NormalizeExcludedModels(models)
+		if len(normalized) == 0 {
+			continue
+		}
+		out[key] = normalized
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // hashSecret hashes the given secret using bcrypt.
@@ -541,9 +643,13 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 		return fmt.Errorf("expected generated root mapping node")
 	}
 
-	// Remove deprecated auth block before merging to avoid persisting it again.
-	removeMapKey(original.Content[0], "auth")
+	// Remove deprecated sections before merging back the sanitized config.
+	removeLegacyAuthBlock(original.Content[0])
 	removeLegacyOpenAICompatAPIKeys(original.Content[0])
+	removeLegacyAmpKeys(original.Content[0])
+	removeLegacyGenerativeLanguageKeys(original.Content[0])
+
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
@@ -742,6 +848,10 @@ func mergeNodePreserve(dst, src *yaml.Node) {
 				continue
 			}
 			mergeNodePreserve(dst.Content[i], src.Content[i])
+			if dst.Content[i] != nil && src.Content[i] != nil &&
+				dst.Content[i].Kind == yaml.MappingNode && src.Content[i].Kind == yaml.MappingNode {
+				pruneMissingMapKeys(dst.Content[i], src.Content[i])
+			}
 		}
 		// Append any extra items from src
 		for i := len(dst.Content); i < len(src.Content); i++ {
@@ -783,6 +893,7 @@ func shouldSkipEmptyCollectionOnPersist(key string, node *yaml.Node) bool {
 	switch key {
 	case "generative-language-api-key",
 		"gemini-api-key",
+		"vertex-api-key",
 		"claude-api-key",
 		"codex-api-key",
 		"openai-compatibility":
@@ -1000,22 +1111,70 @@ func removeMapKey(mapNode *yaml.Node, key string) {
 	}
 }
 
-func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {
-	if root == nil || root.Kind != yaml.MappingNode {
+func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
+	if key == "" || dstRoot == nil || srcRoot == nil {
 		return
 	}
-	idx := findMapKeyIndex(root, "openai-compatibility")
-	if idx < 0 || idx+1 >= len(root.Content) {
+	if dstRoot.Kind != yaml.MappingNode || srcRoot.Kind != yaml.MappingNode {
 		return
 	}
-	seq := root.Content[idx+1]
-	if seq == nil || seq.Kind != yaml.SequenceNode {
+	dstIdx := findMapKeyIndex(dstRoot, key)
+	if dstIdx < 0 || dstIdx+1 >= len(dstRoot.Content) {
 		return
 	}
-	for i := range seq.Content {
-		if seq.Content[i] != nil && seq.Content[i].Kind == yaml.MappingNode {
-			removeMapKey(seq.Content[i], "api-keys")
+	srcIdx := findMapKeyIndex(srcRoot, key)
+	if srcIdx < 0 {
+		removeMapKey(dstRoot, key)
+		return
+	}
+	if srcIdx+1 >= len(srcRoot.Content) {
+		return
+	}
+	srcVal := srcRoot.Content[srcIdx+1]
+	dstVal := dstRoot.Content[dstIdx+1]
+	if srcVal == nil {
+		dstRoot.Content[dstIdx+1] = nil
+		return
+	}
+	if srcVal.Kind != yaml.MappingNode {
+		dstRoot.Content[dstIdx+1] = deepCopyNode(srcVal)
+		return
+	}
+	if dstVal == nil || dstVal.Kind != yaml.MappingNode {
+		dstRoot.Content[dstIdx+1] = deepCopyNode(srcVal)
+		return
+	}
+	pruneMissingMapKeys(dstVal, srcVal)
+}
+
+func pruneMissingMapKeys(dstMap, srcMap *yaml.Node) {
+	if dstMap == nil || srcMap == nil || dstMap.Kind != yaml.MappingNode || srcMap.Kind != yaml.MappingNode {
+		return
+	}
+	keep := make(map[string]struct{}, len(srcMap.Content)/2)
+	for i := 0; i+1 < len(srcMap.Content); i += 2 {
+		keyNode := srcMap.Content[i]
+		if keyNode == nil {
+			continue
 		}
+		key := strings.TrimSpace(keyNode.Value)
+		if key == "" {
+			continue
+		}
+		keep[key] = struct{}{}
+	}
+	for i := 0; i+1 < len(dstMap.Content); {
+		keyNode := dstMap.Content[i]
+		if keyNode == nil {
+			i += 2
+			continue
+		}
+		key := strings.TrimSpace(keyNode.Value)
+		if _, ok := keep[key]; !ok {
+			dstMap.Content = append(dstMap.Content[:i], dstMap.Content[i+2:]...)
+			continue
+		}
+		i += 2
 	}
 }
 
@@ -1044,4 +1203,195 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 	default:
 		// Scalars keep their existing style to preserve quoting
 	}
+}
+
+// Legacy migration helpers (move deprecated config keys into structured fields).
+type legacyConfigData struct {
+	LegacyGeminiKeys      []string                    `yaml:"generative-language-api-key"`
+	OpenAICompat          []legacyOpenAICompatibility `yaml:"openai-compatibility"`
+	AmpUpstreamURL        string                      `yaml:"amp-upstream-url"`
+	AmpUpstreamAPIKey     string                      `yaml:"amp-upstream-api-key"`
+	AmpRestrictManagement *bool                       `yaml:"amp-restrict-management-to-localhost"`
+	AmpModelMappings      []AmpModelMapping           `yaml:"amp-model-mappings"`
+}
+
+type legacyOpenAICompatibility struct {
+	Name    string   `yaml:"name"`
+	BaseURL string   `yaml:"base-url"`
+	APIKeys []string `yaml:"api-keys"`
+}
+
+func (cfg *Config) migrateLegacyGeminiKeys(legacy []string) bool {
+	if cfg == nil || len(legacy) == 0 {
+		return false
+	}
+	changed := false
+	seen := make(map[string]struct{}, len(cfg.GeminiKey))
+	for i := range cfg.GeminiKey {
+		key := strings.TrimSpace(cfg.GeminiKey[i].APIKey)
+		if key == "" {
+			continue
+		}
+		seen[key] = struct{}{}
+	}
+	for _, raw := range legacy {
+		key := strings.TrimSpace(raw)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		cfg.GeminiKey = append(cfg.GeminiKey, GeminiKey{APIKey: key})
+		seen[key] = struct{}{}
+		changed = true
+	}
+	return changed
+}
+
+func (cfg *Config) migrateLegacyOpenAICompatibilityKeys(legacy []legacyOpenAICompatibility) bool {
+	if cfg == nil || len(cfg.OpenAICompatibility) == 0 || len(legacy) == 0 {
+		return false
+	}
+	changed := false
+	for _, legacyEntry := range legacy {
+		if len(legacyEntry.APIKeys) == 0 {
+			continue
+		}
+		target := findOpenAICompatTarget(cfg.OpenAICompatibility, legacyEntry.Name, legacyEntry.BaseURL)
+		if target == nil {
+			continue
+		}
+		if mergeLegacyOpenAICompatAPIKeys(target, legacyEntry.APIKeys) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func mergeLegacyOpenAICompatAPIKeys(entry *OpenAICompatibility, keys []string) bool {
+	if entry == nil || len(keys) == 0 {
+		return false
+	}
+	changed := false
+	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
+	for i := range entry.APIKeyEntries {
+		key := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
+		if key == "" {
+			continue
+		}
+		existing[key] = struct{}{}
+	}
+	for _, raw := range keys {
+		key := strings.TrimSpace(raw)
+		if key == "" {
+			continue
+		}
+		if _, ok := existing[key]; ok {
+			continue
+		}
+		entry.APIKeyEntries = append(entry.APIKeyEntries, OpenAICompatibilityAPIKey{APIKey: key})
+		existing[key] = struct{}{}
+		changed = true
+	}
+	return changed
+}
+
+func findOpenAICompatTarget(entries []OpenAICompatibility, legacyName, legacyBase string) *OpenAICompatibility {
+	nameKey := strings.ToLower(strings.TrimSpace(legacyName))
+	baseKey := strings.ToLower(strings.TrimSpace(legacyBase))
+	if nameKey != "" && baseKey != "" {
+		for i := range entries {
+			if strings.ToLower(strings.TrimSpace(entries[i].Name)) == nameKey &&
+				strings.ToLower(strings.TrimSpace(entries[i].BaseURL)) == baseKey {
+				return &entries[i]
+			}
+		}
+	}
+	if baseKey != "" {
+		for i := range entries {
+			if strings.ToLower(strings.TrimSpace(entries[i].BaseURL)) == baseKey {
+				return &entries[i]
+			}
+		}
+	}
+	if nameKey != "" {
+		for i := range entries {
+			if strings.ToLower(strings.TrimSpace(entries[i].Name)) == nameKey {
+				return &entries[i]
+			}
+		}
+	}
+	return nil
+}
+
+func (cfg *Config) migrateLegacyAmpConfig(legacy *legacyConfigData) bool {
+	if cfg == nil || legacy == nil {
+		return false
+	}
+	changed := false
+	if cfg.AmpCode.UpstreamURL == "" {
+		if val := strings.TrimSpace(legacy.AmpUpstreamURL); val != "" {
+			cfg.AmpCode.UpstreamURL = val
+			changed = true
+		}
+	}
+	if cfg.AmpCode.UpstreamAPIKey == "" {
+		if val := strings.TrimSpace(legacy.AmpUpstreamAPIKey); val != "" {
+			cfg.AmpCode.UpstreamAPIKey = val
+			changed = true
+		}
+	}
+	if legacy.AmpRestrictManagement != nil {
+		cfg.AmpCode.RestrictManagementToLocalhost = *legacy.AmpRestrictManagement
+		changed = true
+	}
+	if len(cfg.AmpCode.ModelMappings) == 0 && len(legacy.AmpModelMappings) > 0 {
+		cfg.AmpCode.ModelMappings = append([]AmpModelMapping(nil), legacy.AmpModelMappings...)
+		changed = true
+	}
+	return changed
+}
+
+func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return
+	}
+	idx := findMapKeyIndex(root, "openai-compatibility")
+	if idx < 0 || idx+1 >= len(root.Content) {
+		return
+	}
+	seq := root.Content[idx+1]
+	if seq == nil || seq.Kind != yaml.SequenceNode {
+		return
+	}
+	for i := range seq.Content {
+		if seq.Content[i] != nil && seq.Content[i].Kind == yaml.MappingNode {
+			removeMapKey(seq.Content[i], "api-keys")
+		}
+	}
+}
+
+func removeLegacyAmpKeys(root *yaml.Node) {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return
+	}
+	removeMapKey(root, "amp-upstream-url")
+	removeMapKey(root, "amp-upstream-api-key")
+	removeMapKey(root, "amp-restrict-management-to-localhost")
+	removeMapKey(root, "amp-model-mappings")
+}
+
+func removeLegacyGenerativeLanguageKeys(root *yaml.Node) {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return
+	}
+	removeMapKey(root, "generative-language-api-key")
+}
+
+func removeLegacyAuthBlock(root *yaml.Node) {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return
+	}
+	removeMapKey(root, "auth")
 }

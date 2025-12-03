@@ -147,7 +147,6 @@ func (h *Handler) applyLegacyKeys(keys []string) {
 		}
 	}
 	h.cfg.GeminiKey = newList
-	h.cfg.GlAPIKey = sanitized
 	h.cfg.SanitizeGeminiKeys()
 }
 
@@ -223,6 +222,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	value.APIKey = strings.TrimSpace(value.APIKey)
 	value.BaseURL = strings.TrimSpace(value.BaseURL)
 	value.ProxyURL = strings.TrimSpace(value.ProxyURL)
+	value.ExcludedModels = config.NormalizeExcludedModels(value.ExcludedModels)
 	if value.APIKey == "" {
 		// Treat empty API key as delete.
 		if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.GeminiKey) {
@@ -408,15 +408,14 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	arr = migrateLegacyOpenAICompatibilityKeys(arr)
-	// Filter out providers with empty base-url -> remove provider entirely
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
+		normalizeOpenAICompatibilityEntry(&arr[i])
 		if strings.TrimSpace(arr[i].BaseURL) != "" {
 			filtered = append(filtered, arr[i])
 		}
 	}
-	h.cfg.OpenAICompatibility = migrateLegacyOpenAICompatibilityKeys(filtered)
+	h.cfg.OpenAICompatibility = filtered
 	h.cfg.SanitizeOpenAICompatibility()
 	h.persist(c)
 }
@@ -430,7 +429,6 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	h.cfg.OpenAICompatibility = migrateLegacyOpenAICompatibilityKeys(h.cfg.OpenAICompatibility)
 	normalizeOpenAICompatibilityEntry(body.Value)
 	// If base-url becomes empty, delete the provider instead of updating
 	if strings.TrimSpace(body.Value.BaseURL) == "" {
@@ -504,6 +502,91 @@ func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing name or index"})
 }
 
+// oauth-excluded-models: map[string][]string
+func (h *Handler) GetOAuthExcludedModels(c *gin.Context) {
+	c.JSON(200, gin.H{"oauth-excluded-models": config.NormalizeOAuthExcludedModels(h.cfg.OAuthExcludedModels)})
+}
+
+func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var entries map[string][]string
+	if err = json.Unmarshal(data, &entries); err != nil {
+		var wrapper struct {
+			Items map[string][]string `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &wrapper); err2 != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		entries = wrapper.Items
+	}
+	h.cfg.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
+	h.persist(c)
+}
+
+func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
+	var body struct {
+		Provider *string  `json:"provider"`
+		Models   []string `json:"models"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Provider == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(*body.Provider))
+	if provider == "" {
+		c.JSON(400, gin.H{"error": "invalid provider"})
+		return
+	}
+	normalized := config.NormalizeExcludedModels(body.Models)
+	if len(normalized) == 0 {
+		if h.cfg.OAuthExcludedModels == nil {
+			c.JSON(404, gin.H{"error": "provider not found"})
+			return
+		}
+		if _, ok := h.cfg.OAuthExcludedModels[provider]; !ok {
+			c.JSON(404, gin.H{"error": "provider not found"})
+			return
+		}
+		delete(h.cfg.OAuthExcludedModels, provider)
+		if len(h.cfg.OAuthExcludedModels) == 0 {
+			h.cfg.OAuthExcludedModels = nil
+		}
+		h.persist(c)
+		return
+	}
+	if h.cfg.OAuthExcludedModels == nil {
+		h.cfg.OAuthExcludedModels = make(map[string][]string)
+	}
+	h.cfg.OAuthExcludedModels[provider] = normalized
+	h.persist(c)
+}
+
+func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
+	provider := strings.ToLower(strings.TrimSpace(c.Query("provider")))
+	if provider == "" {
+		c.JSON(400, gin.H{"error": "missing provider"})
+		return
+	}
+	if h.cfg.OAuthExcludedModels == nil {
+		c.JSON(404, gin.H{"error": "provider not found"})
+		return
+	}
+	if _, ok := h.cfg.OAuthExcludedModels[provider]; !ok {
+		c.JSON(404, gin.H{"error": "provider not found"})
+		return
+	}
+	delete(h.cfg.OAuthExcludedModels, provider)
+	if len(h.cfg.OAuthExcludedModels) == 0 {
+		h.cfg.OAuthExcludedModels = nil
+	}
+	h.persist(c)
+}
+
 // codex-api-key: []CodexKey
 func (h *Handler) GetCodexKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"codex-api-key": h.cfg.CodexKey})
@@ -533,6 +616,7 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = config.NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
 		if entry.BaseURL == "" {
 			continue
 		}
@@ -557,6 +641,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	value.BaseURL = strings.TrimSpace(value.BaseURL)
 	value.ProxyURL = strings.TrimSpace(value.ProxyURL)
 	value.Headers = config.NormalizeHeaders(value.Headers)
+	value.ExcludedModels = config.NormalizeExcludedModels(value.ExcludedModels)
 	// If base-url becomes empty, delete instead of update
 	if value.BaseURL == "" {
 		if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodexKey) {
@@ -643,28 +728,6 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 			existing[trimmed] = struct{}{}
 		}
 	}
-	if len(entry.APIKeys) == 0 {
-		return
-	}
-	for _, legacyKey := range entry.APIKeys {
-		trimmed := strings.TrimSpace(legacyKey)
-		if trimmed == "" {
-			continue
-		}
-		if _, ok := existing[trimmed]; ok {
-			continue
-		}
-		entry.APIKeyEntries = append(entry.APIKeyEntries, config.OpenAICompatibilityAPIKey{APIKey: trimmed})
-		existing[trimmed] = struct{}{}
-	}
-	entry.APIKeys = nil
-}
-
-func migrateLegacyOpenAICompatibilityKeys(entries []config.OpenAICompatibility) []config.OpenAICompatibility {
-	for i := range entries {
-		normalizeOpenAICompatibilityEntry(&entries[i])
-	}
-	return entries
 }
 
 func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) []config.OpenAICompatibility {
@@ -676,9 +739,6 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 		copyEntry := entries[i]
 		if len(copyEntry.APIKeyEntries) > 0 {
 			copyEntry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), copyEntry.APIKeyEntries...)
-		}
-		if len(copyEntry.APIKeys) > 0 {
-			copyEntry.APIKeys = append([]string(nil), copyEntry.APIKeys...)
 		}
 		normalizeOpenAICompatibilityEntry(&copyEntry)
 		out[i] = copyEntry
@@ -694,6 +754,7 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
 	if len(entry.Models) == 0 {
 		return
 	}
