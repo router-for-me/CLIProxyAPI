@@ -297,7 +297,8 @@ func (e *KiroExecutor) processStream(resp *http.Response, model string, out chan
 	if chunk, _ := from_ir.ToOpenAIChunk(finish, model, messageID, idx); len(chunk) > 0 {
 		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
 	}
-	out <- cliproxyexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+	// Note: [DONE] is sent by the handler (openai_handlers.go) when channel closes
+	// Do NOT send it here to avoid duplicate [DONE] markers
 }
 
 func (e *KiroExecutor) CountTokens(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
