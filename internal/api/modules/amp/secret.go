@@ -139,6 +139,17 @@ func (s *MultiSourceSecret) InvalidateCache() {
 	s.cache = nil
 }
 
+// UpdateExplicitKey refreshes the config-provided key and clears cache.
+func (s *MultiSourceSecret) UpdateExplicitKey(key string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.explicitKey = strings.TrimSpace(key)
+	s.cache = nil
+	s.mu.Unlock()
+}
+
 // StaticSecretSource returns a fixed API key (for testing)
 type StaticSecretSource struct {
 	key string

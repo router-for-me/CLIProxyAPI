@@ -13,16 +13,26 @@ func TestRegisterManagementRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
-	// Spy to track if proxy handler was called
-	proxyCalled := false
-	proxyHandler := func(c *gin.Context) {
-		proxyCalled = true
-		c.String(200, "proxied")
+	// Create module with proxy for testing
+	m := &AmpModule{
+		restrictToLocalhost: false, // disable localhost restriction for tests
 	}
 
-	m := &AmpModule{}
+	// Create a mock proxy that tracks calls
+	proxyCalled := false
+	mockProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyCalled = true
+		w.WriteHeader(200)
+		w.Write([]byte("proxied"))
+	}))
+	defer mockProxy.Close()
+
+	// Create real proxy to mock server
+	proxy, _ := createReverseProxy(mockProxy.URL, NewStaticSecretSource(""))
+	m.setProxy(proxy)
+
 	base := &handlers.BaseAPIHandler{}
-	m.registerManagementRoutes(r, base, proxyHandler, false) // false = don't restrict to localhost in tests
+	m.registerManagementRoutes(r, base)
 
 	managementPaths := []struct {
 		path   string
@@ -41,9 +51,9 @@ func TestRegisterManagementRoutes(t *testing.T) {
 		{"/api/otel", http.MethodGet},
 		{"/api/tab", http.MethodGet},
 		{"/api/tab/some/path", http.MethodGet},
-		{"/auth", http.MethodGet},              // Root-level auth route
-		{"/auth/cli-login", http.MethodGet},    // CLI login flow
-		{"/auth/callback", http.MethodGet},     // OAuth callback
+		{"/auth", http.MethodGet},           // Root-level auth route
+		{"/auth/cli-login", http.MethodGet}, // CLI login flow
+		{"/auth/callback", http.MethodGet},  // OAuth callback
 		// Google v1beta1 bridge should still proxy non-model requests (GET) and allow POST
 		{"/api/provider/google/v1beta1/models", http.MethodGet},
 		{"/api/provider/google/v1beta1/models", http.MethodPost},
@@ -231,8 +241,13 @@ func TestLocalhostOnlyMiddleware_PreventsSpoofing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
-	// Apply localhost-only middleware
-	r.Use(localhostOnlyMiddleware())
+	// Create module with localhost restriction enabled
+	m := &AmpModule{
+		restrictToLocalhost: true,
+	}
+
+	// Apply dynamic localhost-only middleware
+	r.Use(m.localhostOnlyMiddleware())
 	r.GET("/test", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
@@ -303,5 +318,55 @@ func TestLocalhostOnlyMiddleware_PreventsSpoofing(t *testing.T) {
 				t.Errorf("%s: expected status %d, got %d", tt.description, tt.expectedStatus, w.Code)
 			}
 		})
+	}
+}
+
+func TestLocalhostOnlyMiddleware_HotReload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	// Create module with localhost restriction initially enabled
+	m := &AmpModule{
+		restrictToLocalhost: true,
+	}
+
+	// Apply dynamic localhost-only middleware
+	r.Use(m.localhostOnlyMiddleware())
+	r.GET("/test", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	// Test 1: Remote IP should be blocked when restriction is enabled
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.100:12345"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 when restriction enabled, got %d", w.Code)
+	}
+
+	// Test 2: Hot-reload - disable restriction
+	m.setRestrictToLocalhost(false)
+
+	req = httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.100:12345"
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected 200 after disabling restriction, got %d", w.Code)
+	}
+
+	// Test 3: Hot-reload - re-enable restriction
+	m.setRestrictToLocalhost(true)
+
+	req = httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.100:12345"
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 after re-enabling restriction, got %d", w.Code)
 	}
 }

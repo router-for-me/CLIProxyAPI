@@ -14,15 +14,16 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// localhostOnlyMiddleware restricts access to localhost (127.0.0.1, ::1) only.
-// Returns 403 Forbidden for non-localhost clients.
-//
-// Security: Uses RemoteAddr (actual TCP connection) instead of ClientIP() to prevent
-// header spoofing attacks via X-Forwarded-For or similar headers. This means the
-// middleware will not work correctly behind reverse proxies - users deploying behind
-// nginx/Cloudflare should disable this feature and use firewall rules instead.
-func localhostOnlyMiddleware() gin.HandlerFunc {
+// localhostOnlyMiddleware returns a middleware that dynamically checks the module's
+// localhost restriction setting. This allows hot-reload of the restriction without restarting.
+func (m *AmpModule) localhostOnlyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Check current setting (hot-reloadable)
+		if !m.IsRestrictedToLocalhost() {
+			c.Next()
+			return
+		}
+
 		// Use actual TCP connection address (RemoteAddr) to prevent header spoofing
 		// This cannot be forged by X-Forwarded-For or other client-controlled headers
 		remoteAddr := c.Request.RemoteAddr
@@ -79,19 +80,30 @@ func noCORSMiddleware() gin.HandlerFunc {
 
 // registerManagementRoutes registers Amp management proxy routes
 // These routes proxy through to the Amp control plane for OAuth, user management, etc.
-// If restrictToLocalhost is true, routes will only accept connections from 127.0.0.1/::1.
-func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, proxyHandler gin.HandlerFunc, restrictToLocalhost bool) {
+// Uses dynamic middleware and proxy getter for hot-reload support.
+func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler) {
 	ampAPI := engine.Group("/api")
 
 	// Always disable CORS for management routes to prevent browser-based attacks
 	ampAPI.Use(noCORSMiddleware())
 
-	// Apply localhost-only restriction if configured
-	if restrictToLocalhost {
-		ampAPI.Use(localhostOnlyMiddleware())
+	// Apply dynamic localhost-only restriction (hot-reloadable via m.IsRestrictedToLocalhost())
+	ampAPI.Use(m.localhostOnlyMiddleware())
+
+	if m.IsRestrictedToLocalhost() {
 		log.Info("amp management routes restricted to localhost only (CORS disabled)")
 	} else {
 		log.Warn("amp management routes are NOT restricted to localhost - this is insecure!")
+	}
+
+	// Dynamic proxy handler that uses m.getProxy() for hot-reload support
+	proxyHandler := func(c *gin.Context) {
+		proxy := m.getProxy()
+		if proxy == nil {
+			c.JSON(503, gin.H{"error": "amp upstream proxy not available"})
+			return
+		}
+		proxy.ServeHTTP(c.Writer, c.Request)
 	}
 
 	// Management routes - these are proxied directly to Amp upstream
@@ -114,11 +126,8 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	ampAPI.Any("/tab/*path", proxyHandler)
 
 	// Root-level routes that AMP CLI expects without /api prefix
-	// These need the same security middleware as the /api/* routes
-	rootMiddleware := []gin.HandlerFunc{noCORSMiddleware()}
-	if restrictToLocalhost {
-		rootMiddleware = append(rootMiddleware, localhostOnlyMiddleware())
-	}
+	// These need the same security middleware as the /api/* routes (dynamic for hot-reload)
+	rootMiddleware := []gin.HandlerFunc{noCORSMiddleware(), m.localhostOnlyMiddleware()}
 	engine.GET("/threads.rss", append(rootMiddleware, proxyHandler)...)
 
 	// Root-level auth routes for CLI login flow
@@ -134,7 +143,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
 	geminiBridge := createGeminiBridgeHandler(geminiHandlers)
 	geminiV1Beta1Fallback := NewFallbackHandler(func() *httputil.ReverseProxy {
-		return m.proxy
+		return m.getProxy()
 	})
 	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
 
@@ -177,10 +186,10 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(baseHandler)
 
 	// Create fallback handler wrapper that forwards to ampcode.com when provider not found
-	// Uses lazy evaluation to access proxy (which is created after routes are registered)
+	// Uses m.getProxy() for hot-reload support (proxy can be updated at runtime)
 	// Also includes model mapping support for routing unavailable models to alternatives
 	fallbackHandler := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
-		return m.proxy
+		return m.getProxy()
 	}, m.modelMapper)
 
 	// Provider-specific routes under /api/provider/:provider
