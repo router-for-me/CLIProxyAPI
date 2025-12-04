@@ -110,6 +110,8 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	ampAPI.Any("/threads/*path", proxyHandler)
 	ampAPI.Any("/otel", proxyHandler)
 	ampAPI.Any("/otel/*path", proxyHandler)
+	ampAPI.Any("/tab", proxyHandler)
+	ampAPI.Any("/tab/*path", proxyHandler)
 
 	// Root-level routes that AMP CLI expects without /api prefix
 	// These need the same security middleware as the /api/* routes
@@ -118,6 +120,12 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 		rootMiddleware = append(rootMiddleware, localhostOnlyMiddleware())
 	}
 	engine.GET("/threads.rss", append(rootMiddleware, proxyHandler)...)
+
+	// Root-level auth routes for CLI login flow
+	// Amp uses multiple auth routes: /auth/cli-login, /auth/callback, /auth/sign-in, /auth/logout
+	// We proxy all /auth/* to support the complete OAuth flow
+	engine.Any("/auth", append(rootMiddleware, proxyHandler)...)
+	engine.Any("/auth/*path", append(rootMiddleware, proxyHandler)...)
 
 	// Google v1beta1 passthrough with OAuth fallback
 	// AMP CLI uses non-standard paths like /publishers/google/models/...

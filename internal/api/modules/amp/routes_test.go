@@ -39,6 +39,11 @@ func TestRegisterManagementRoutes(t *testing.T) {
 		{"/api/threads", http.MethodGet},
 		{"/threads.rss", http.MethodGet}, // Root-level route (no /api prefix)
 		{"/api/otel", http.MethodGet},
+		{"/api/tab", http.MethodGet},
+		{"/api/tab/some/path", http.MethodGet},
+		{"/auth", http.MethodGet},              // Root-level auth route
+		{"/auth/cli-login", http.MethodGet},    // CLI login flow
+		{"/auth/callback", http.MethodGet},     // OAuth callback
 		// Google v1beta1 bridge should still proxy non-model requests (GET) and allow POST
 		{"/api/provider/google/v1beta1/models", http.MethodGet},
 		{"/api/provider/google/v1beta1/models", http.MethodPost},
