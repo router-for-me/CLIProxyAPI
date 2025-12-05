@@ -312,20 +312,23 @@ func (fh *FallbackHandler) shouldFallbackToLiteLLM(recorder *httptest.ResponseRe
 		}
 	}
 
-	// Check response body for quota-related keywords
-	body := recorder.Body.String()
-	quotaKeywords := []string{
-		"quota",
-		"rate limit",
-		"insufficient_quota",
-		"credit",
-		"billing",
-	}
+	// Only check response body for quota-related keywords on error status codes
+	// (don't trigger fallback on successful 2xx responses that happen to contain these words)
+	if statusCode >= 400 {
+		body := recorder.Body.String()
+		quotaKeywords := []string{
+			"quota",
+			"rate limit",
+			"insufficient_quota",
+			"credit",
+			"billing",
+		}
 
-	bodyLower := strings.ToLower(body)
-	for _, keyword := range quotaKeywords {
-		if strings.Contains(bodyLower, keyword) {
-			return true
+		bodyLower := strings.ToLower(body)
+		for _, keyword := range quotaKeywords {
+			if strings.Contains(bodyLower, keyword) {
+				return true
+			}
 		}
 	}
 
