@@ -2,10 +2,12 @@ package amp
 
 import (
 	"net"
+	"net/http"
 	"net/http/httputil"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
@@ -78,6 +80,21 @@ func noCORSMiddleware() gin.HandlerFunc {
 	}
 }
 
+// managementAvailabilityMiddleware short-circuits management routes when the upstream
+// proxy is disabled, preventing noisy localhost warnings and accidental exposure.
+func (m *AmpModule) managementAvailabilityMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if m.getProxy() == nil {
+			logging.SkipGinRequestLogging(c)
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+				"error": "amp upstream proxy not available",
+			})
+			return
+		}
+		c.Next()
+	}
+}
+
 // registerManagementRoutes registers Amp management proxy routes
 // These routes proxy through to the Amp control plane for OAuth, user management, etc.
 // Uses dynamic middleware and proxy getter for hot-reload support.
@@ -85,14 +102,12 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	ampAPI := engine.Group("/api")
 
 	// Always disable CORS for management routes to prevent browser-based attacks
-	ampAPI.Use(noCORSMiddleware())
+	ampAPI.Use(m.managementAvailabilityMiddleware(), noCORSMiddleware())
 
 	// Apply dynamic localhost-only restriction (hot-reloadable via m.IsRestrictedToLocalhost())
 	ampAPI.Use(m.localhostOnlyMiddleware())
 
-	if m.IsRestrictedToLocalhost() {
-		log.Info("amp management routes restricted to localhost only (CORS disabled)")
-	} else {
+	if !m.IsRestrictedToLocalhost() {
 		log.Warn("amp management routes are NOT restricted to localhost - this is insecure!")
 	}
 
@@ -127,7 +142,8 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 
 	// Root-level routes that AMP CLI expects without /api prefix
 	// These need the same security middleware as the /api/* routes (dynamic for hot-reload)
-	rootMiddleware := []gin.HandlerFunc{noCORSMiddleware(), m.localhostOnlyMiddleware()}
+	rootMiddleware := []gin.HandlerFunc{m.managementAvailabilityMiddleware(), noCORSMiddleware(), m.localhostOnlyMiddleware()}
+	engine.GET("/threads/*path", append(rootMiddleware, proxyHandler)...)
 	engine.GET("/threads.rss", append(rootMiddleware, proxyHandler)...)
 
 	// Root-level auth routes for CLI login flow

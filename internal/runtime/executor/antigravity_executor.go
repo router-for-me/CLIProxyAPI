@@ -525,6 +525,19 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		strJSON = util.DeleteKey(strJSON, "minItems")
 		strJSON = util.DeleteKey(strJSON, "minLength")
 		strJSON = util.DeleteKey(strJSON, "maxLength")
+		strJSON = util.DeleteKey(strJSON, "exclusiveMinimum")
+
+		paths = make([]string, 0)
+		util.Walk(gjson.Parse(strJSON), "", "anyOf", &paths)
+		for _, p := range paths {
+			anyOf := gjson.Get(strJSON, p)
+			if anyOf.IsArray() {
+				anyOfItems := anyOf.Array()
+				if len(anyOfItems) > 0 {
+					strJSON, _ = sjson.SetRaw(strJSON, p[:len(p)-len(".anyOf")], anyOfItems[0].Raw)
+				}
+			}
+		}
 
 		payload = []byte(strJSON)
 	}
@@ -665,7 +678,7 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	return []string{
 		antigravityBaseURLDaily,
 		antigravityBaseURLAutopush,
-		antigravityBaseURLProd,
+		// antigravityBaseURLProd,
 	}
 }
 

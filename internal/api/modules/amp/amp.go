@@ -126,6 +126,9 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 		// Always register provider aliases - these work without an upstream
 		m.registerProviderAliases(ctx.Engine, ctx.BaseHandler, auth)
 
+		// Register management proxy routes once; middleware will gate access when upstream is unavailable.
+		m.registerManagementRoutes(ctx.Engine, ctx.BaseHandler)
+
 		// If no upstream URL, skip proxy routes but provider aliases are still available
 		if upstreamURL == "" {
 			log.Debug("amp upstream proxy disabled (no upstream URL configured)")
@@ -134,27 +137,11 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 			return
 		}
 
-		// Create secret source with precedence: config > env > file
-		// Cache secrets for 5 minutes to reduce file I/O
-		if m.secretSource == nil {
-			m.secretSource = NewMultiSourceSecret(settings.UpstreamAPIKey, 0 /* default 5min */)
-		}
-
-		// Create reverse proxy with gzip handling via ModifyResponse
-		proxy, err := createReverseProxy(upstreamURL, m.secretSource)
-		if err != nil {
+		if err := m.enableUpstreamProxy(upstreamURL, &settings); err != nil {
 			regErr = fmt.Errorf("failed to create amp proxy: %w", err)
 			return
 		}
 
-		m.setProxy(proxy)
-		m.enabled = true
-
-		// Register management proxy routes (requires upstream)
-		// Uses dynamic middleware that checks m.IsRestrictedToLocalhost() for hot-reload support
-		m.registerManagementRoutes(ctx.Engine, ctx.BaseHandler)
-
-		log.Infof("amp upstream proxy enabled for: %s", upstreamURL)
 		log.Debug("amp provider alias routes registered")
 	})
 
@@ -188,18 +175,30 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 	oldSettings := m.lastConfig
 	m.configMu.RUnlock()
 
-	// Track what changed for logging
-	var changes []string
+	if oldSettings != nil && oldSettings.RestrictManagementToLocalhost != newSettings.RestrictManagementToLocalhost {
+		m.setRestrictToLocalhost(newSettings.RestrictManagementToLocalhost)
+		if !newSettings.RestrictManagementToLocalhost {
+			log.Warnf("amp management routes now accessible from any IP - this is insecure!")
+		}
+	}
+
+	newUpstreamURL := strings.TrimSpace(newSettings.UpstreamURL)
+	oldUpstreamURL := ""
+	if oldSettings != nil {
+		oldUpstreamURL = strings.TrimSpace(oldSettings.UpstreamURL)
+	}
+
+	if !m.enabled && newUpstreamURL != "" {
+		if err := m.enableUpstreamProxy(newUpstreamURL, &newSettings); err != nil {
+			log.Errorf("amp config: failed to enable upstream proxy for %s: %v", newUpstreamURL, err)
+		}
+	}
 
 	// Check model mappings change
 	modelMappingsChanged := m.hasModelMappingsChanged(oldSettings, &newSettings)
 	if modelMappingsChanged {
 		if m.modelMapper != nil {
 			m.modelMapper.UpdateMappings(newSettings.ModelMappings)
-			changes = append(changes, "model-mappings")
-			if m.enabled {
-				log.Infof("amp config partial reload: model mappings updated (%d entries)", len(newSettings.ModelMappings))
-			}
 		} else if m.enabled {
 			log.Warnf("amp model mapper not initialized, skipping model mapping update")
 		}
@@ -207,25 +206,16 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 
 	if m.enabled {
 		// Check upstream URL change - now supports hot-reload
-		newUpstreamURL := strings.TrimSpace(newSettings.UpstreamURL)
-		oldUpstreamURL := ""
-		if oldSettings != nil {
-			oldUpstreamURL = strings.TrimSpace(oldSettings.UpstreamURL)
-		}
-
 		if newUpstreamURL == "" && oldUpstreamURL != "" {
-			log.Warn("amp upstream URL removed from config, proxy has been disabled")
 			m.setProxy(nil)
-			changes = append(changes, "upstream-url(disabled)")
-		} else if newUpstreamURL != oldUpstreamURL && newUpstreamURL != "" {
+			m.enabled = false
+		} else if oldUpstreamURL != "" && newUpstreamURL != oldUpstreamURL && newUpstreamURL != "" {
 			// Recreate proxy with new URL
 			proxy, err := createReverseProxy(newUpstreamURL, m.secretSource)
 			if err != nil {
 				log.Errorf("amp config: failed to create proxy for new upstream URL %s: %v", newUpstreamURL, err)
 			} else {
 				m.setProxy(proxy)
-				changes = append(changes, "upstream-url")
-				log.Infof("amp config partial reload: upstream URL updated (%s -> %s)", oldUpstreamURL, newUpstreamURL)
 			}
 		}
 
@@ -236,22 +226,10 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 				if ms, ok := m.secretSource.(*MultiSourceSecret); ok {
 					ms.UpdateExplicitKey(newSettings.UpstreamAPIKey)
 					ms.InvalidateCache()
-					changes = append(changes, "upstream-api-key")
-					log.Debug("amp config partial reload: secret cache invalidated")
 				}
 			}
 		}
 
-		// Check restrict-management-to-localhost change - now supports hot-reload
-		if oldSettings != nil && oldSettings.RestrictManagementToLocalhost != newSettings.RestrictManagementToLocalhost {
-			m.setRestrictToLocalhost(newSettings.RestrictManagementToLocalhost)
-			changes = append(changes, "restrict-management-to-localhost")
-			if newSettings.RestrictManagementToLocalhost {
-				log.Infof("amp config partial reload: management routes now restricted to localhost")
-			} else {
-				log.Warnf("amp config partial reload: management routes now accessible from any IP - this is insecure!")
-			}
-		}
 	}
 
 	// Store current config for next comparison
@@ -260,13 +238,26 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 	m.lastConfig = &settingsCopy
 	m.configMu.Unlock()
 
-	// Log summary if any changes detected
-	if len(changes) > 0 {
-		log.Debugf("amp config partial reload completed: %v", changes)
-	} else {
-		log.Debug("amp config checked: no changes detected")
+	return nil
+}
+
+func (m *AmpModule) enableUpstreamProxy(upstreamURL string, settings *config.AmpCode) error {
+	if m.secretSource == nil {
+		m.secretSource = NewMultiSourceSecret(settings.UpstreamAPIKey, 0 /* default 5min */)
+	} else if ms, ok := m.secretSource.(*MultiSourceSecret); ok {
+		ms.UpdateExplicitKey(settings.UpstreamAPIKey)
+		ms.InvalidateCache()
 	}
 
+	proxy, err := createReverseProxy(upstreamURL, m.secretSource)
+	if err != nil {
+		return err
+	}
+
+	m.setProxy(proxy)
+	m.enabled = true
+
+	log.Infof("amp upstream proxy enabled for: %s", upstreamURL)
 	return nil
 }
 

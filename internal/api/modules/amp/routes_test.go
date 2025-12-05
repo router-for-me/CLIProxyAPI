@@ -47,6 +47,7 @@ func TestRegisterManagementRoutes(t *testing.T) {
 		{"/api/meta", http.MethodGet},
 		{"/api/telemetry", http.MethodGet},
 		{"/api/threads", http.MethodGet},
+		{"/threads/", http.MethodGet},
 		{"/threads.rss", http.MethodGet}, // Root-level route (no /api prefix)
 		{"/api/otel", http.MethodGet},
 		{"/api/tab", http.MethodGet},

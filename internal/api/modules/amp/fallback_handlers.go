@@ -48,25 +48,25 @@ func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provid
 	case RouteTypeLocalProvider:
 		fields["cost"] = "free"
 		fields["source"] = "local_oauth"
-		log.WithFields(fields).Infof("[amp] using local provider for model: %s", requestedModel)
+		log.WithFields(fields).Debugf("amp using local provider for model: %s", requestedModel)
 
 	case RouteTypeModelMapping:
 		fields["cost"] = "free"
 		fields["source"] = "local_oauth"
 		fields["mapping"] = requestedModel + " -> " + resolvedModel
-		log.WithFields(fields).Infof("[amp] model mapped: %s -> %s", requestedModel, resolvedModel)
+		// model mapping already logged in mapper; avoid duplicate here
 
 	case RouteTypeAmpCredits:
 		fields["cost"] = "amp_credits"
 		fields["source"] = "ampcode.com"
 		fields["model_id"] = requestedModel // Explicit model_id for easy config reference
-		log.WithFields(fields).Warnf("[amp] forwarding to ampcode.com (uses amp credits) - model_id: %s | To use local proxy, add to config: amp-model-mappings: [{from: \"%s\", to: \"<your-local-model>\"}]", requestedModel, requestedModel)
+		log.WithFields(fields).Warnf("forwarding to ampcode.com (uses amp credits) - model_id: %s | To use local proxy, add to config: amp-model-mappings: [{from: \"%s\", to: \"<your-local-model>\"}]", requestedModel, requestedModel)
 
 	case RouteTypeNoProvider:
 		fields["cost"] = "none"
 		fields["source"] = "error"
 		fields["model_id"] = requestedModel // Explicit model_id for easy config reference
-		log.WithFields(fields).Warnf("[amp] no provider available for model_id: %s", requestedModel)
+		log.WithFields(fields).Warnf("no provider available for model_id: %s", requestedModel)
 	}
 }
 
