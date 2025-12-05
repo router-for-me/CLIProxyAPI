@@ -141,35 +141,38 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 						params.ResponseType = 2 // Set state to thinking
 					}
 				} else {
-					// Process regular text content (user-visible output)
-					// Continue existing text block if already in content state
-					if params.ResponseType == 1 {
-						output = output + "event: content_block_delta\n"
-						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", partTextResult.String())
-						output = output + fmt.Sprintf("data: %s\n\n\n", data)
-					} else {
-						// Transition from another state to text content
-						// First, close any existing content block
-						if params.ResponseType != 0 {
-							if params.ResponseType == 2 {
-								// output = output + "event: content_block_delta\n"
-								// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
-								// output = output + "\n\n\n"
+					finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason")
+					if partTextResult.String() != "" || !finishReasonResult.Exists() {
+						// Process regular text content (user-visible output)
+						// Continue existing text block if already in content state
+						if params.ResponseType == 1 {
+							output = output + "event: content_block_delta\n"
+							data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", partTextResult.String())
+							output = output + fmt.Sprintf("data: %s\n\n\n", data)
+						} else {
+							// Transition from another state to text content
+							// First, close any existing content block
+							if params.ResponseType != 0 {
+								if params.ResponseType == 2 {
+									// output = output + "event: content_block_delta\n"
+									// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
+									// output = output + "\n\n\n"
+								}
+								output = output + "event: content_block_stop\n"
+								output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+								output = output + "\n\n\n"
+								params.ResponseIndex++
 							}
-							output = output + "event: content_block_stop\n"
-							output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
-							output = output + "\n\n\n"
-							params.ResponseIndex++
-						}
 
-						// Start a new text content block
-						output = output + "event: content_block_start\n"
-						output = output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex)
-						output = output + "\n\n\n"
-						output = output + "event: content_block_delta\n"
-						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", partTextResult.String())
-						output = output + fmt.Sprintf("data: %s\n\n\n", data)
-						params.ResponseType = 1 // Set state to content
+							// Start a new text content block
+							output = output + "event: content_block_start\n"
+							output = output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex)
+							output = output + "\n\n\n"
+							output = output + "event: content_block_delta\n"
+							data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", partTextResult.String())
+							output = output + fmt.Sprintf("data: %s\n\n\n", data)
+							params.ResponseType = 1 // Set state to content
+						}
 					}
 				}
 			} else if functionCallResult.Exists() {

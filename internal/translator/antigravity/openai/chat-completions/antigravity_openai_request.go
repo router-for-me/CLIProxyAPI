@@ -251,6 +251,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							fid := tc.Get("id").String()
 							fname := tc.Get("function.name").String()
 							fargs := tc.Get("function.arguments").String()
+							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.id", fid)
 							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", fname)
 							node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(fargs))
 							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
@@ -266,6 +267,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						pp := 0
 						for _, fid := range fIDs {
 							if name, ok := tcID2Name[fid]; ok {
+								toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.id", fid)
 								toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.name", name)
 								resp := toolResponses[fid]
 								if resp == "" {

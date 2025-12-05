@@ -89,10 +89,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_use" {
 						functionName := contentResult.Get("name").String()
 						functionArgs := contentResult.Get("input").String()
+						functionID := contentResult.Get("id").String()
 						var args map[string]any
 						if err := json.Unmarshal([]byte(functionArgs), &args); err == nil {
 							clientContent.Parts = append(clientContent.Parts, client.Part{
-								FunctionCall:     &client.FunctionCall{Name: functionName, Args: args},
+								FunctionCall:     &client.FunctionCall{ID: functionID, Name: functionName, Args: args},
 								ThoughtSignature: geminiCLIClaudeThoughtSignature,
 							})
 						}
@@ -105,7 +106,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
 							}
 							responseData := contentResult.Get("content").Raw
-							functionResponse := client.FunctionResponse{Name: funcName, Response: map[string]interface{}{"result": responseData}}
+							functionResponse := client.FunctionResponse{ID: toolCallID, Name: funcName, Response: map[string]interface{}{"result": responseData}}
 							clientContent.Parts = append(clientContent.Parts, client.Part{FunctionResponse: &functionResponse})
 						}
 					}

@@ -327,7 +327,7 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 func mustMarshalJSON(v interface{}) string {
 	data, err := json.Marshal(v)
 	if err != nil {
-		panic(err)
+		return ""
 	}
 	return string(data)
 }
