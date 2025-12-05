@@ -38,7 +38,13 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 
 	timestamp := entry.Time.Format("2006-01-02 15:04:05")
 	message := strings.TrimRight(entry.Message, "\r\n")
-	formatted := fmt.Sprintf("[%s] [%s] [%s:%d] %s\n", timestamp, entry.Level, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
+
+	var formatted string
+	if entry.Caller != nil {
+		formatted = fmt.Sprintf("[%s] [%s] [%s:%d] %s\n", timestamp, entry.Level, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
+	} else {
+		formatted = fmt.Sprintf("[%s] [%s] %s\n", timestamp, entry.Level, message)
+	}
 	buffer.WriteString(formatted)
 
 	return buffer.Bytes(), nil

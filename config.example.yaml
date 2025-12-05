@@ -86,6 +86,7 @@ use-canonical-translator: false
 #       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   - api-key: "AIzaSy...02"
 
+
 # API keys for official Generative Language API (legacy compatibility)
 # generative-language-api-key:
 #   - "AIzaSy...01"

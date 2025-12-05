@@ -152,9 +152,9 @@ func TestModelMapper_UpdateMappings_SkipsInvalid(t *testing.T) {
 	mapper := NewModelMapper(nil)
 
 	mapper.UpdateMappings([]config.AmpModelMapping{
-		{From: "", To: "model-b"},      // Invalid: empty from
-		{From: "model-a", To: ""},      // Invalid: empty to
-		{From: "  ", To: "model-b"},    // Invalid: whitespace from
+		{From: "", To: "model-b"},        // Invalid: empty from
+		{From: "model-a", To: ""},        // Invalid: empty to
+		{From: "  ", To: "model-b"},      // Invalid: whitespace from
 		{From: "model-c", To: "model-d"}, // Valid
 	})
 
