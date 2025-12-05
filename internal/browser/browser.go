@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 
 	pkgbrowser "github.com/pkg/browser"
@@ -208,22 +209,7 @@ func tryDefaultBrowserMacOS(url string) *exec.Cmd {
 
 // containsBrowserID checks if the LaunchServices output contains a browser ID.
 func containsBrowserID(output, bundleID string) bool {
-	return stringContains(output, bundleID)
-}
-
-// stringContains is a simple string contains check.
-func stringContains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		(len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)))
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(output, bundleID)
 }
 
 // createMacOSIncognitoCmd creates the appropriate incognito command for macOS browsers.
@@ -287,13 +273,13 @@ func tryDefaultBrowserWindows(url string) *exec.Cmd {
 	var browserName string
 
 	// Map ProgId to browser name
-	if stringContains(output, "ChromeHTML") {
+	if strings.Contains(output, "ChromeHTML") {
 		browserName = "chrome"
-	} else if stringContains(output, "FirefoxURL") {
+	} else if strings.Contains(output, "FirefoxURL") {
 		browserName = "firefox"
-	} else if stringContains(output, "MSEdgeHTM") {
+	} else if strings.Contains(output, "MSEdgeHTM") {
 		browserName = "edge"
-	} else if stringContains(output, "BraveHTML") {
+	} else if strings.Contains(output, "BraveHTML") {
 		browserName = "brave"
 	}
 
@@ -354,15 +340,15 @@ func tryDefaultBrowserLinux(url string) *exec.Cmd {
 	var browserName string
 
 	// Map .desktop file to browser name
-	if stringContains(desktop, "google-chrome") || stringContains(desktop, "chrome") {
+	if strings.Contains(desktop, "google-chrome") || strings.Contains(desktop, "chrome") {
 		browserName = "chrome"
-	} else if stringContains(desktop, "firefox") {
+	} else if strings.Contains(desktop, "firefox") {
 		browserName = "firefox"
-	} else if stringContains(desktop, "chromium") {
+	} else if strings.Contains(desktop, "chromium") {
 		browserName = "chromium"
-	} else if stringContains(desktop, "brave") {
+	} else if strings.Contains(desktop, "brave") {
 		browserName = "brave"
-	} else if stringContains(desktop, "microsoft-edge") || stringContains(desktop, "msedge") {
+	} else if strings.Contains(desktop, "microsoft-edge") || strings.Contains(desktop, "msedge") {
 		browserName = "edge"
 	}
 
