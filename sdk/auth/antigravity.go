@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -127,6 +128,18 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		}
 	}
 
+	// Fetch project ID via loadCodeAssist (same approach as Gemini CLI)
+	projectID := ""
+	if tokenResp.AccessToken != "" {
+		fetchedProjectID, errProject := fetchAntigravityProjectID(ctx, tokenResp.AccessToken, httpClient)
+		if errProject != nil {
+			log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
+		} else {
+			projectID = fetchedProjectID
+			log.Infof("antigravity: obtained project ID %s", projectID)
+		}
+	}
+
 	now := time.Now()
 	metadata := map[string]any{
 		"type":          "antigravity",
@@ -139,6 +152,9 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	if email != "" {
 		metadata["email"] = email
 	}
+	if projectID != "" {
+		metadata["project_id"] = projectID
+	}
 
 	fileName := sanitizeAntigravityFileName(email)
 	label := email
@@ -147,6 +163,9 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	}
 
 	fmt.Println("Antigravity authentication successful")
+	if projectID != "" {
+		fmt.Printf("Using GCP project: %s\n", projectID)
+	}
 	return &coreauth.Auth{
 		ID:       fileName,
 		Provider: "antigravity",
@@ -290,4 +309,85 @@ func sanitizeAntigravityFileName(email string) string {
 	}
 	replacer := strings.NewReplacer("@", "_", ".", "_")
 	return fmt.Sprintf("antigravity-%s.json", replacer.Replace(email))
+}
+
+// Antigravity API constants for project discovery
+const (
+	antigravityAPIEndpoint    = "https://cloudcode-pa.googleapis.com"
+	antigravityAPIVersion     = "v1internal"
+	antigravityAPIUserAgent   = "google-api-nodejs-client/9.15.1"
+	antigravityAPIClient      = "google-cloud-sdk vscode_cloudshelleditor/0.1"
+	antigravityClientMetadata = `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
+)
+
+// fetchAntigravityProjectID retrieves the project ID for the authenticated user via loadCodeAssist.
+// This uses the same approach as Gemini CLI to get the cloudaicompanionProject.
+func fetchAntigravityProjectID(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
+	// Call loadCodeAssist to get the project
+	loadReqBody := map[string]any{
+		"metadata": map[string]string{
+			"ideType":    "IDE_UNSPECIFIED",
+			"platform":   "PLATFORM_UNSPECIFIED",
+			"pluginType": "GEMINI",
+		},
+	}
+
+	rawBody, errMarshal := json.Marshal(loadReqBody)
+	if errMarshal != nil {
+		return "", fmt.Errorf("marshal request body: %w", errMarshal)
+	}
+
+	endpointURL := fmt.Sprintf("%s/%s:loadCodeAssist", antigravityAPIEndpoint, antigravityAPIVersion)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", antigravityAPIUserAgent)
+	req.Header.Set("X-Goog-Api-Client", antigravityAPIClient)
+	req.Header.Set("Client-Metadata", antigravityClientMetadata)
+
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		return "", fmt.Errorf("execute request: %w", errDo)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity loadCodeAssist: close body error: %v", errClose)
+		}
+	}()
+
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return "", fmt.Errorf("read response: %w", errRead)
+	}
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+	}
+
+	var loadResp map[string]any
+	if errDecode := json.Unmarshal(bodyBytes, &loadResp); errDecode != nil {
+		return "", fmt.Errorf("decode response: %w", errDecode)
+	}
+
+	// Extract projectID from response
+	projectID := ""
+	if id, ok := loadResp["cloudaicompanionProject"].(string); ok {
+		projectID = strings.TrimSpace(id)
+	}
+	if projectID == "" {
+		if projectMap, ok := loadResp["cloudaicompanionProject"].(map[string]any); ok {
+			if id, okID := projectMap["id"].(string); okID {
+				projectID = strings.TrimSpace(id)
+			}
+		}
+	}
+
+	if projectID == "" {
+		return "", fmt.Errorf("no cloudaicompanionProject in response")
+	}
+
+	return projectID, nil
 }

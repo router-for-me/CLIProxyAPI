@@ -601,7 +601,14 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		requestURL.WriteString(url.QueryEscape(alt))
 	}
 
-	payload = geminiToAntigravity(modelName, payload)
+	// Extract project_id from auth metadata if available
+	projectID := ""
+	if auth != nil && auth.Metadata != nil {
+		if pid, ok := auth.Metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+	}
+	payload = geminiToAntigravity(modelName, payload, projectID)
 	payload, _ = sjson.SetBytes(payload, "model", alias2ModelName(modelName))
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
@@ -737,10 +744,12 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
 		return []string{base}
 	}
+	// Production endpoint first for better compatibility with standard GCP projects
+	// Staging/sandbox endpoints require special API enablement
 	return []string{
+		antigravityBaseURLProd,
 		antigravityBaseURLDaily,
 		antigravityBaseURLAutopush,
-		antigravityBaseURLProd,
 	}
 }
 
@@ -766,7 +775,9 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 
 // geminiToAntigravity converts Gemini CLI format to Antigravity format.
 // Optimized: single json.Unmarshal → in-memory modifications → single json.Marshal
-func geminiToAntigravity(modelName string, payload []byte) []byte {
+// The projectID parameter should be the real GCP project ID from auth metadata.
+// If empty, a random project ID will be generated (legacy fallback).
+func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
 	var root map[string]interface{}
 	if err := json.Unmarshal(payload, &root); err != nil {
 		return payload
@@ -774,7 +785,12 @@ func geminiToAntigravity(modelName string, payload []byte) []byte {
 
 	root["model"] = modelName
 	root["userAgent"] = "antigravity"
-	root["project"] = generateProjectID()
+	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
+	if projectID != "" {
+		root["project"] = projectID
+	} else {
+		root["project"] = generateProjectID()
+	}
 	root["requestId"] = generateRequestID()
 
 	request, _ := root["request"].(map[string]interface{})
