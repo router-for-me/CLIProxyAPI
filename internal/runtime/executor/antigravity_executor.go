@@ -683,9 +683,9 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 		return []string{base}
 	}
 	return []string{
-		antigravityBaseURLProd,
 		antigravityBaseURLDaily,
 		antigravityBaseURLAutopush,
+		antigravityBaseURLProd,
 	}
 }
 
