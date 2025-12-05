@@ -509,7 +509,14 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		requestURL.WriteString(url.QueryEscape(alt))
 	}
 
-	payload = geminiToAntigravity(modelName, payload)
+	// Extract project_id from auth metadata if available
+	projectID := ""
+	if auth != nil && auth.Metadata != nil {
+		if pid, ok := auth.Metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+	}
+	payload = geminiToAntigravity(modelName, payload, projectID)
 	payload, _ = sjson.SetBytes(payload, "model", alias2ModelName(modelName))
 
 	if strings.Contains(modelName, "claude") {
@@ -676,9 +683,9 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 		return []string{base}
 	}
 	return []string{
+		antigravityBaseURLProd,
 		antigravityBaseURLDaily,
 		antigravityBaseURLAutopush,
-		// antigravityBaseURLProd,
 	}
 }
 
@@ -702,10 +709,16 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-func geminiToAntigravity(modelName string, payload []byte) []byte {
+func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
 	template, _ := sjson.Set(string(payload), "model", modelName)
 	template, _ = sjson.Set(template, "userAgent", "antigravity")
-	template, _ = sjson.Set(template, "project", generateProjectID())
+
+	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
+	if projectID != "" {
+		template, _ = sjson.Set(template, "project", projectID)
+	} else {
+		template, _ = sjson.Set(template, "project", generateProjectID())
+	}
 	template, _ = sjson.Set(template, "requestId", generateRequestID())
 	template, _ = sjson.Set(template, "request.sessionId", generateSessionID())
 
