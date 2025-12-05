@@ -1,0 +1,357 @@
+package auth
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+)
+
+// extractKiroIdentifier extracts a meaningful identifier for file naming.
+// Returns account name if provided, otherwise profile ARN ID.
+// All extracted values are sanitized to prevent path injection attacks.
+func extractKiroIdentifier(accountName, profileArn string) string {
+	// Priority 1: Use account name if provided
+	if accountName != "" {
+		return kiroauth.SanitizeEmailForFilename(accountName)
+	}
+
+	// Priority 2: Use profile ARN ID part (sanitized to prevent path injection)
+	if profileArn != "" {
+		parts := strings.Split(profileArn, "/")
+		if len(parts) >= 2 {
+			// Sanitize the ARN component to prevent path traversal
+			return kiroauth.SanitizeEmailForFilename(parts[len(parts)-1])
+		}
+	}
+
+	// Fallback: timestamp
+	return fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+}
+
+// KiroAuthenticator implements OAuth authentication for Kiro with Google login.
+type KiroAuthenticator struct{}
+
+// NewKiroAuthenticator constructs a Kiro authenticator.
+func NewKiroAuthenticator() *KiroAuthenticator {
+	return &KiroAuthenticator{}
+}
+
+// Provider returns the provider key for the authenticator.
+func (a *KiroAuthenticator) Provider() string {
+	return "kiro"
+}
+
+// RefreshLead indicates how soon before expiry a refresh should be attempted.
+func (a *KiroAuthenticator) RefreshLead() *time.Duration {
+	d := 30 * time.Minute
+	return &d
+}
+
+// Login performs OAuth login for Kiro with AWS Builder ID.
+func (a *KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("kiro auth: configuration is required")
+	}
+
+	oauth := kiroauth.NewKiroOAuth(cfg)
+
+	// Use AWS Builder ID device code flow
+	tokenData, err := oauth.LoginWithBuilderID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("login failed: %w", err)
+	}
+
+	// Parse expires_at
+	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
+	if err != nil {
+		expiresAt = time.Now().Add(1 * time.Hour)
+	}
+
+	// Extract identifier for file naming
+	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
+
+	now := time.Now()
+	fileName := fmt.Sprintf("kiro-aws-%s.json", idPart)
+
+	record := &coreauth.Auth{
+		ID:        fileName,
+		Provider:  "kiro",
+		FileName:  fileName,
+		Label:     "kiro-aws",
+		Status:    coreauth.StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Metadata: map[string]any{
+			"type":          "kiro",
+			"access_token":  tokenData.AccessToken,
+			"refresh_token": tokenData.RefreshToken,
+			"profile_arn":   tokenData.ProfileArn,
+			"expires_at":    tokenData.ExpiresAt,
+			"auth_method":   tokenData.AuthMethod,
+			"provider":      tokenData.Provider,
+			"client_id":     tokenData.ClientID,
+			"client_secret": tokenData.ClientSecret,
+			"email":         tokenData.Email,
+		},
+		Attributes: map[string]string{
+			"profile_arn": tokenData.ProfileArn,
+			"source":      "aws-builder-id",
+			"email":       tokenData.Email,
+		},
+		NextRefreshAfter: expiresAt.Add(-30 * time.Minute),
+	}
+
+	if tokenData.Email != "" {
+		fmt.Printf("\n✓ Kiro authentication completed successfully! (Account: %s)\n", tokenData.Email)
+	} else {
+		fmt.Println("\n✓ Kiro authentication completed successfully!")
+	}
+
+	return record, nil
+}
+
+// LoginWithGoogle performs OAuth login for Kiro with Google.
+// This uses a custom protocol handler (kiro://) to receive the callback.
+func (a *KiroAuthenticator) LoginWithGoogle(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("kiro auth: configuration is required")
+	}
+
+	oauth := kiroauth.NewKiroOAuth(cfg)
+
+	// Use Google OAuth flow with protocol handler
+	tokenData, err := oauth.LoginWithGoogle(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("google login failed: %w", err)
+	}
+
+	// Parse expires_at
+	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
+	if err != nil {
+		expiresAt = time.Now().Add(1 * time.Hour)
+	}
+
+	// Extract identifier for file naming
+	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
+
+	now := time.Now()
+	fileName := fmt.Sprintf("kiro-google-%s.json", idPart)
+
+	record := &coreauth.Auth{
+		ID:        fileName,
+		Provider:  "kiro",
+		FileName:  fileName,
+		Label:     "kiro-google",
+		Status:    coreauth.StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Metadata: map[string]any{
+			"type":          "kiro",
+			"access_token":  tokenData.AccessToken,
+			"refresh_token": tokenData.RefreshToken,
+			"profile_arn":   tokenData.ProfileArn,
+			"expires_at":    tokenData.ExpiresAt,
+			"auth_method":   tokenData.AuthMethod,
+			"provider":      tokenData.Provider,
+			"email":         tokenData.Email,
+		},
+		Attributes: map[string]string{
+			"profile_arn": tokenData.ProfileArn,
+			"source":      "google-oauth",
+			"email":       tokenData.Email,
+		},
+		NextRefreshAfter: expiresAt.Add(-30 * time.Minute),
+	}
+
+	if tokenData.Email != "" {
+		fmt.Printf("\n✓ Kiro Google authentication completed successfully! (Account: %s)\n", tokenData.Email)
+	} else {
+		fmt.Println("\n✓ Kiro Google authentication completed successfully!")
+	}
+
+	return record, nil
+}
+
+// LoginWithGitHub performs OAuth login for Kiro with GitHub.
+// This uses a custom protocol handler (kiro://) to receive the callback.
+func (a *KiroAuthenticator) LoginWithGitHub(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("kiro auth: configuration is required")
+	}
+
+	oauth := kiroauth.NewKiroOAuth(cfg)
+
+	// Use GitHub OAuth flow with protocol handler
+	tokenData, err := oauth.LoginWithGitHub(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("github login failed: %w", err)
+	}
+
+	// Parse expires_at
+	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
+	if err != nil {
+		expiresAt = time.Now().Add(1 * time.Hour)
+	}
+
+	// Extract identifier for file naming
+	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
+
+	now := time.Now()
+	fileName := fmt.Sprintf("kiro-github-%s.json", idPart)
+
+	record := &coreauth.Auth{
+		ID:        fileName,
+		Provider:  "kiro",
+		FileName:  fileName,
+		Label:     "kiro-github",
+		Status:    coreauth.StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Metadata: map[string]any{
+			"type":          "kiro",
+			"access_token":  tokenData.AccessToken,
+			"refresh_token": tokenData.RefreshToken,
+			"profile_arn":   tokenData.ProfileArn,
+			"expires_at":    tokenData.ExpiresAt,
+			"auth_method":   tokenData.AuthMethod,
+			"provider":      tokenData.Provider,
+			"email":         tokenData.Email,
+		},
+		Attributes: map[string]string{
+			"profile_arn": tokenData.ProfileArn,
+			"source":      "github-oauth",
+			"email":       tokenData.Email,
+		},
+		NextRefreshAfter: expiresAt.Add(-30 * time.Minute),
+	}
+
+	if tokenData.Email != "" {
+		fmt.Printf("\n✓ Kiro GitHub authentication completed successfully! (Account: %s)\n", tokenData.Email)
+	} else {
+		fmt.Println("\n✓ Kiro GitHub authentication completed successfully!")
+	}
+
+	return record, nil
+}
+
+// ImportFromKiroIDE imports token from Kiro IDE's token file.
+func (a *KiroAuthenticator) ImportFromKiroIDE(ctx context.Context, cfg *config.Config) (*coreauth.Auth, error) {
+	tokenData, err := kiroauth.LoadKiroIDEToken()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load Kiro IDE token: %w", err)
+	}
+
+	// Parse expires_at
+	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
+	if err != nil {
+		expiresAt = time.Now().Add(1 * time.Hour)
+	}
+
+	// Extract email from JWT if not already set (for imported tokens)
+	if tokenData.Email == "" {
+		tokenData.Email = kiroauth.ExtractEmailFromJWT(tokenData.AccessToken)
+	}
+
+	// Extract identifier for file naming
+	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
+	// Sanitize provider to prevent path traversal (defense-in-depth)
+	provider := kiroauth.SanitizeEmailForFilename(strings.ToLower(strings.TrimSpace(tokenData.Provider)))
+	if provider == "" {
+		provider = "imported" // Fallback for legacy tokens without provider
+	}
+
+	now := time.Now()
+	fileName := fmt.Sprintf("kiro-%s-%s.json", provider, idPart)
+
+	record := &coreauth.Auth{
+		ID:        fileName,
+		Provider:  "kiro",
+		FileName:  fileName,
+		Label:     fmt.Sprintf("kiro-%s", provider),
+		Status:    coreauth.StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Metadata: map[string]any{
+			"type":          "kiro",
+			"access_token":  tokenData.AccessToken,
+			"refresh_token": tokenData.RefreshToken,
+			"profile_arn":   tokenData.ProfileArn,
+			"expires_at":    tokenData.ExpiresAt,
+			"auth_method":   tokenData.AuthMethod,
+			"provider":      tokenData.Provider,
+			"email":         tokenData.Email,
+		},
+		Attributes: map[string]string{
+			"profile_arn": tokenData.ProfileArn,
+			"source":      "kiro-ide-import",
+			"email":       tokenData.Email,
+		},
+		NextRefreshAfter: expiresAt.Add(-30 * time.Minute),
+	}
+
+	// Display the email if extracted
+	if tokenData.Email != "" {
+		fmt.Printf("\n✓ Imported Kiro token from IDE (Provider: %s, Account: %s)\n", tokenData.Provider, tokenData.Email)
+	} else {
+		fmt.Printf("\n✓ Imported Kiro token from IDE (Provider: %s)\n", tokenData.Provider)
+	}
+
+	return record, nil
+}
+
+// Refresh refreshes an expired Kiro token using AWS SSO OIDC.
+func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	if auth == nil || auth.Metadata == nil {
+		return nil, fmt.Errorf("invalid auth record")
+	}
+
+	refreshToken, ok := auth.Metadata["refresh_token"].(string)
+	if !ok || refreshToken == "" {
+		return nil, fmt.Errorf("refresh token not found")
+	}
+
+	clientID, _ := auth.Metadata["client_id"].(string)
+	clientSecret, _ := auth.Metadata["client_secret"].(string)
+	authMethod, _ := auth.Metadata["auth_method"].(string)
+
+	var tokenData *kiroauth.KiroTokenData
+	var err error
+
+	// Use SSO OIDC refresh for AWS Builder ID, otherwise use Kiro's OAuth refresh endpoint
+	if clientID != "" && clientSecret != "" && authMethod == "builder-id" {
+		ssoClient := kiroauth.NewSSOOIDCClient(cfg)
+		tokenData, err = ssoClient.RefreshToken(ctx, clientID, clientSecret, refreshToken)
+	} else {
+		// Fallback to Kiro's refresh endpoint (for social auth: Google/GitHub)
+		oauth := kiroauth.NewKiroOAuth(cfg)
+		tokenData, err = oauth.RefreshToken(ctx, refreshToken)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("token refresh failed: %w", err)
+	}
+
+	// Parse expires_at
+	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
+	if err != nil {
+		expiresAt = time.Now().Add(1 * time.Hour)
+	}
+
+	// Clone auth to avoid mutating the input parameter
+	updated := auth.Clone()
+	now := time.Now()
+	updated.UpdatedAt = now
+	updated.LastRefreshedAt = now
+	updated.Metadata["access_token"] = tokenData.AccessToken
+	updated.Metadata["refresh_token"] = tokenData.RefreshToken
+	updated.Metadata["expires_at"] = tokenData.ExpiresAt
+	updated.Metadata["last_refresh"] = now.Format(time.RFC3339) // For double-check optimization
+	updated.NextRefreshAfter = expiresAt.Add(-30 * time.Minute)
+
+	return updated, nil
+}
