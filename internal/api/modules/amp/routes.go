@@ -1,6 +1,7 @@
 package amp
 
 import (
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -113,6 +114,17 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 
 	// Dynamic proxy handler that uses m.getProxy() for hot-reload support
 	proxyHandler := func(c *gin.Context) {
+		// Swallow ErrAbortHandler panics from ReverseProxy copyResponse to avoid noisy stack traces
+		defer func() {
+			if rec := recover(); rec != nil {
+				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					// Upstream already wrote the status (often 404) before the client/stream ended.
+					return
+				}
+				panic(rec)
+			}
+		}()
+
 		proxy := m.getProxy()
 		if proxy == nil {
 			c.JSON(503, gin.H{"error": "amp upstream proxy not available"})
