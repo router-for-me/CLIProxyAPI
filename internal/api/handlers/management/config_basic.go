@@ -1,14 +1,26 @@
 package management
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	latestReleaseURL       = "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest"
+	latestReleaseUserAgent = "CLIProxyAPI"
 )
 
 func (h *Handler) GetConfig(c *gin.Context) {
@@ -18,6 +30,66 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	}
 	cfgCopy := *h.cfg
 	c.JSON(200, &cfgCopy)
+}
+
+type releaseInfo struct {
+	TagName string `json:"tag_name"`
+	Name    string `json:"name"`
+}
+
+// GetLatestVersion returns the latest release version from GitHub without downloading assets.
+func (h *Handler) GetLatestVersion(c *gin.Context) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	proxyURL := ""
+	if h != nil && h.cfg != nil {
+		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
+	}
+	if proxyURL != "" {
+		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
+		util.SetProxy(sdkCfg, client)
+	}
+
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, latestReleaseURL, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "request_create_failed", "message": err.Error()})
+		return
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", latestReleaseUserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "request_failed", "message": err.Error()})
+		return
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithError(errClose).Debug("failed to close latest version response body")
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		c.JSON(http.StatusBadGateway, gin.H{"error": "unexpected_status", "message": fmt.Sprintf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))})
+		return
+	}
+
+	var info releaseInfo
+	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "decode_failed", "message": errDecode.Error()})
+		return
+	}
+
+	version := strings.TrimSpace(info.TagName)
+	if version == "" {
+		version = strings.TrimSpace(info.Name)
+	}
+	if version == "" {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid_response", "message": "missing release version"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"latest-version": version})
 }
 
 func WriteConfig(path string, data []byte) error {

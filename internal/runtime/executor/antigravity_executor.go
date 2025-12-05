@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -510,6 +511,24 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	payload = geminiToAntigravity(modelName, payload)
 	payload, _ = sjson.SetBytes(payload, "model", alias2ModelName(modelName))
+
+	if strings.Contains(modelName, "claude") {
+		strJSON := string(payload)
+		paths := make([]string, 0)
+		util.Walk(gjson.ParseBytes(payload), "", "parametersJsonSchema", &paths)
+		for _, p := range paths {
+			strJSON, _ = util.RenameKey(strJSON, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
+		}
+
+		strJSON = util.DeleteKey(strJSON, "$schema")
+		strJSON = util.DeleteKey(strJSON, "maxItems")
+		strJSON = util.DeleteKey(strJSON, "minItems")
+		strJSON = util.DeleteKey(strJSON, "minLength")
+		strJSON = util.DeleteKey(strJSON, "maxLength")
+
+		payload = []byte(strJSON)
+	}
+
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
 	if errReq != nil {
 		return nil, errReq
