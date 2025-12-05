@@ -1015,38 +1015,147 @@ func GetClineModels() []*ModelInfo {
 
 // GetKiroModels returns the standard Kiro (Amazon Q / CodeWhisperer) model definitions
 func GetKiroModels() []*ModelInfo {
-	entries := []struct {
-		ID          string
-		DisplayName string
-		Description string
-		Created     int64
-	}{
-		// Primary models from Kiro MODEL_MAPPING
-		{ID: "claude-sonnet-4-5", DisplayName: "Claude Sonnet 4.5", Description: "Claude Sonnet 4.5 via Kiro/Amazon Q", Created: 1758672000},
-		{ID: "claude-sonnet-4-5-20250929", DisplayName: "Claude Sonnet 4.5 (20250929)", Description: "Claude Sonnet 4.5 via Kiro/Amazon Q", Created: 1758672000},
-		{ID: "claude-sonnet-4-20250514", DisplayName: "Claude Sonnet 4 (20250514)", Description: "Claude Sonnet 4 via Kiro/Amazon Q", Created: 1747267200},
-		{ID: "claude-3-7-sonnet-20250219", DisplayName: "Claude 3.7 Sonnet", Description: "Claude 3.7 Sonnet via Kiro/Amazon Q", Created: 1739923200},
+	return []*ModelInfo{
+		// Claude 4.5 Sonnet models
+		{
+			ID:                  "claude-sonnet-4-5",
+			Object:              "model",
+			Created:             1758672000, // 2025-09-29
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Claude Sonnet 4.5",
+			Description:         "Claude Sonnet 4.5 via Kiro/Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "claude-sonnet-4-5-20250929",
+			Object:              "model",
+			Created:             1758672000, // 2025-09-29
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Claude Sonnet 4.5 (20250929)",
+			Description:         "Claude Sonnet 4.5 via Kiro/Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		// Claude 4 Sonnet models
+		{
+			ID:                  "claude-sonnet-4-20250514",
+			Object:              "model",
+			Created:             1747267200, // 2025-05-14
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Claude Sonnet 4 (20250514)",
+			Description:         "Claude Sonnet 4 via Kiro/Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "claude-4-sonnet",
+			Object:              "model",
+			Created:             1747267200, // 2025-05-14
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Claude 4 Sonnet",
+			Description:         "Claude 4 Sonnet via Kiro/Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		// Claude 4.5 Opus models
+		{
+			ID:                  "claude-opus-4-5-20251101",
+			Object:              "model",
+			Created:             1761955200, // 2025-11-01
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Claude 4.5 Opus",
+			Description:         "Claude 4.5 Opus via Kiro/Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		// Claude 4 Opus models
+		{
+			ID:                  "claude-opus-4-20250514",
+			Object:              "model",
+			Created:             1747267200, // 2025-05-14
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Claude 4 Opus",
+			Description:         "Claude 4 Opus via Kiro/Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32000,
+		},
+		// Claude 4.5 Haiku
+		{
+			ID:                  "claude-haiku-4-5",
+			Object:              "model",
+			Created:             1759276800, // 2025-10-01
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Claude Haiku 4.5",
+			Description:         "Claude Haiku 4.5 via Kiro/Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		// Claude 3.7 Sonnet
+		{
+			ID:                  "claude-3-7-sonnet-20250219",
+			Object:              "model",
+			Created:             1739923200, // 2025-02-19
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Claude 3.7 Sonnet",
+			Description:         "Claude 3.7 Sonnet via Kiro/Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		// Claude 3.5 Sonnet
+		{
+			ID:                  "claude-3-5-sonnet-20241022",
+			Object:              "model",
+			Created:             1729555200, // 2024-10-22
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Claude 3.5 Sonnet",
+			Description:         "Claude 3.5 Sonnet via Kiro/Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 8192,
+		},
+		// Claude 3.5 Haiku
+		{
+			ID:                  "claude-3-5-haiku-20241022",
+			Object:              "model",
+			Created:             1729555200, // 2024-10-22
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Claude 3.5 Haiku",
+			Description:         "Claude 3.5 Haiku via Kiro/Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 8192,
+		},
 		// Amazon Q prefixed aliases
-		{ID: "amazonq-claude-sonnet-4-20250514", DisplayName: "Amazon Q Claude Sonnet 4", Description: "Claude Sonnet 4 via Amazon Q", Created: 1747267200},
-		{ID: "amazonq-claude-3-7-sonnet-20250219", DisplayName: "Amazon Q Claude 3.7 Sonnet", Description: "Claude 3.7 Sonnet via Amazon Q", Created: 1739923200},
-		// Additional Claude models available via Kiro
-		{ID: "claude-4-sonnet", DisplayName: "Claude 4 Sonnet", Description: "Claude 4 Sonnet via Kiro/Amazon Q", Created: 1747267200},
-		{ID: "claude-opus-4-20250514", DisplayName: "Claude 4 Opus", Description: "Claude 4 Opus via Kiro/Amazon Q", Created: 1747267200},
-		{ID: "claude-opus-4-5-20251101", DisplayName: "Claude 4.5 Opus", Description: "Claude 4.5 Opus via Kiro/Amazon Q", Created: 1761955200},
-		{ID: "claude-3-5-sonnet-20241022", DisplayName: "Claude 3.5 Sonnet", Description: "Claude 3.5 Sonnet via Kiro/Amazon Q", Created: 1729555200},
-		{ID: "claude-3-5-haiku-20241022", DisplayName: "Claude 3.5 Haiku", Description: "Claude 3.5 Haiku via Kiro/Amazon Q", Created: 1729555200},
+		{
+			ID:                  "amazonq-claude-sonnet-4-20250514",
+			Object:              "model",
+			Created:             1747267200, // 2025-05-14
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Amazon Q Claude Sonnet 4",
+			Description:         "Claude Sonnet 4 via Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "amazonq-claude-3-7-sonnet-20250219",
+			Object:              "model",
+			Created:             1739923200, // 2025-02-19
+			OwnedBy:             "kiro",
+			Type:                "kiro",
+			DisplayName:         "Amazon Q Claude 3.7 Sonnet",
+			Description:         "Claude 3.7 Sonnet via Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
 	}
-	models := make([]*ModelInfo, 0, len(entries))
-	for _, entry := range entries {
-		models = append(models, &ModelInfo{
-			ID:          entry.ID,
-			Object:      "model",
-			Created:     entry.Created,
-			OwnedBy:     "kiro",
-			Type:        "kiro",
-			DisplayName: entry.DisplayName,
-			Description: entry.Description,
-		})
-	}
-	return models
 }
