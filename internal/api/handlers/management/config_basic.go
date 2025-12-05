@@ -20,25 +20,6 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	c.JSON(200, &cfgCopy)
 }
 
-func (h *Handler) GetConfigYAML(c *gin.Context) {
-	data, err := os.ReadFile(h.configFilePath)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed", "message": err.Error()})
-		return
-	}
-	var node yaml.Node
-	if err = yaml.Unmarshal(data, &node); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "parse_failed", "message": err.Error()})
-		return
-	}
-	c.Header("Content-Type", "application/yaml; charset=utf-8")
-	c.Header("Vary", "format, Accept")
-	enc := yaml.NewEncoder(c.Writer)
-	enc.SetIndent(2)
-	_ = enc.Encode(&node)
-	_ = enc.Close()
-}
-
 func WriteConfig(path string, data []byte) error {
 	data = config.NormalizeCommentIndentation(data)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
@@ -110,9 +91,9 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
-// GetConfigFile returns the raw config.yaml file bytes without re-encoding.
+// GetConfigYAML returns the raw config.yaml file bytes without re-encoding.
 // It preserves comments and original formatting/styles.
-func (h *Handler) GetConfigFile(c *gin.Context) {
+func (h *Handler) GetConfigYAML(c *gin.Context) {
 	data, err := os.ReadFile(h.configFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
@@ -15,69 +14,16 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// parseGeminiModelFromPath extracts the Gemini model name from v1beta1 paths.
-// Handles both AMP CLI format (/publishers/google/models/{model}:{action})
-// and standard format (/models/{model}:{action}).
-// Returns the model name and true if successfully parsed.
-func parseGeminiModelFromPath(path string) (model string, ok bool) {
-	path = strings.TrimPrefix(path, "/")
-
-	// Try AMP CLI format: .../publishers/google/models/{model}:{action}
-	if idx := strings.Index(path, "/publishers/google/models/"); idx >= 0 {
-		modelAction := path[idx+len("/publishers/google/models/"):]
-		if colonIdx := strings.Index(modelAction, ":"); colonIdx > 0 {
-			return modelAction[:colonIdx], true
-		}
-		// No colon, take everything after models/
-		if modelAction != "" {
-			return modelAction, true
-		}
-	}
-
-	// Try standard format: .../models/{model}:{action}
-	if idx := strings.Index(path, "/models/"); idx >= 0 {
-		modelAction := path[idx+len("/models/"):]
-		if colonIdx := strings.Index(modelAction, ":"); colonIdx > 0 {
-			return modelAction[:colonIdx], true
-		}
-		// No colon, take everything after models/
-		if modelAction != "" {
-			return modelAction, true
-		}
-	}
-
-	return "", false
-}
-
-// shouldRouteToLiteLLM checks if a model should be routed to LiteLLM
-// based on the hybrid mode configuration.
-func shouldRouteToLiteLLM(cfg *config.Config, model string) bool {
-	if cfg == nil || !cfg.LiteLLMHybridMode {
-		return false
-	}
-
-	// Normalize model name for comparison
-	normalizedModel, _ := util.NormalizeGeminiThinkingModel(model)
-
-	// Check if model is in the litellm-models list
-	for _, litellmModel := range cfg.LiteLLMModels {
-		if strings.EqualFold(normalizedModel, litellmModel) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// localhostOnlyMiddleware restricts access to localhost (127.0.0.1, ::1) only.
-// Returns 403 Forbidden for non-localhost clients.
-//
-// Security: Uses RemoteAddr (actual TCP connection) instead of ClientIP() to prevent
-// header spoofing attacks via X-Forwarded-For or similar headers. This means the
-// middleware will not work correctly behind reverse proxies - users deploying behind
-// nginx/Cloudflare should disable this feature and use firewall rules instead.
-func localhostOnlyMiddleware() gin.HandlerFunc {
+// localhostOnlyMiddleware returns a middleware that dynamically checks the module's
+// localhost restriction setting. This allows hot-reload of the restriction without restarting.
+func (m *AmpModule) localhostOnlyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Check current setting (hot-reloadable)
+		if !m.IsRestrictedToLocalhost() {
+			c.Next()
+			return
+		}
+
 		// Use actual TCP connection address (RemoteAddr) to prevent header spoofing
 		// This cannot be forged by X-Forwarded-For or other client-controlled headers
 		remoteAddr := c.Request.RemoteAddr
@@ -134,19 +80,30 @@ func noCORSMiddleware() gin.HandlerFunc {
 
 // registerManagementRoutes registers Amp management proxy routes
 // These routes proxy through to the Amp control plane for OAuth, user management, etc.
-// If restrictToLocalhost is true, routes will only accept connections from 127.0.0.1/::1.
-func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, proxyHandler gin.HandlerFunc, restrictToLocalhost bool, cfg *config.Config) {
+// Uses dynamic middleware and proxy getter for hot-reload support.
+func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler) {
 	ampAPI := engine.Group("/api")
 
 	// Always disable CORS for management routes to prevent browser-based attacks
 	ampAPI.Use(noCORSMiddleware())
 
-	// Apply localhost-only restriction if configured
-	if restrictToLocalhost {
-		ampAPI.Use(localhostOnlyMiddleware())
+	// Apply dynamic localhost-only restriction (hot-reloadable via m.IsRestrictedToLocalhost())
+	ampAPI.Use(m.localhostOnlyMiddleware())
+
+	if m.IsRestrictedToLocalhost() {
 		log.Info("amp management routes restricted to localhost only (CORS disabled)")
 	} else {
 		log.Warn("amp management routes are NOT restricted to localhost - this is insecure!")
+	}
+
+	// Dynamic proxy handler that uses m.getProxy() for hot-reload support
+	proxyHandler := func(c *gin.Context) {
+		proxy := m.getProxy()
+		if proxy == nil {
+			c.JSON(503, gin.H{"error": "amp upstream proxy not available"})
+			return
+		}
+		proxy.ServeHTTP(c.Writer, c.Request)
 	}
 
 	// Management routes - these are proxied directly to Amp upstream
@@ -165,55 +122,52 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	ampAPI.Any("/threads/*path", proxyHandler)
 	ampAPI.Any("/otel", proxyHandler)
 	ampAPI.Any("/otel/*path", proxyHandler)
+	ampAPI.Any("/tab", proxyHandler)
+	ampAPI.Any("/tab/*path", proxyHandler)
 
 	// Root-level routes that AMP CLI expects without /api prefix
-	// These need the same security middleware as the /api/* routes
-	rootMiddleware := []gin.HandlerFunc{noCORSMiddleware()}
-	if restrictToLocalhost {
-		rootMiddleware = append(rootMiddleware, localhostOnlyMiddleware())
-	}
+	// These need the same security middleware as the /api/* routes (dynamic for hot-reload)
+	rootMiddleware := []gin.HandlerFunc{noCORSMiddleware(), m.localhostOnlyMiddleware()}
 	engine.GET("/threads.rss", append(rootMiddleware, proxyHandler)...)
 
-	// Google v1beta1 passthrough with hybrid routing support
+	// Root-level auth routes for CLI login flow
+	// Amp uses multiple auth routes: /auth/cli-login, /auth/callback, /auth/sign-in, /auth/logout
+	// We proxy all /auth/* to support the complete OAuth flow
+	engine.Any("/auth", append(rootMiddleware, proxyHandler)...)
+	engine.Any("/auth/*path", append(rootMiddleware, proxyHandler)...)
+
+	// Google v1beta1 passthrough with OAuth fallback
 	// AMP CLI uses non-standard paths like /publishers/google/models/...
-	// PRECEDENCE ORDER (per Zen architecture):
-	// 1. LiteLLM (if hybrid mode enabled + model in config)
-	// 2. OAuth (if local providers exist)
-	// 3. Upstream proxy (ampcode.com)
+	// We bridge these to our standard Gemini handler to enable local OAuth.
+	// If no local OAuth is available, falls back to ampcode.com proxy.
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
 	geminiBridge := createGeminiBridgeHandler(geminiHandlers)
+	geminiV1Beta1Fallback := NewFallbackHandler(func() *httputil.ReverseProxy {
+		return m.getProxy()
+	})
+	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
 
-	// Create shared FallbackHandler with proper OAuth support
-	// This is the same handler logic used by provider aliases for consistency
-	geminiV1Beta1Fallback := NewFallbackHandler(
-		cfg,
-		geminiBridge,
-		func() *httputil.ReverseProxy { return m.proxy },
-		m.liteLLMProxy,
-	)
-
-	// Route v1beta1 requests with intelligent hybrid routing
+	// Route POST model calls through Gemini bridge when a local provider exists, otherwise proxy.
+	// All other methods (e.g., GET model listing) always proxy to upstream to preserve Amp CLI behavior.
 	ampAPI.Any("/provider/google/v1beta1/*path", func(c *gin.Context) {
 		if c.Request.Method == "POST" {
-			// STEP 1: Check LiteLLM hybrid routing (highest priority)
-			if model, ok := parseGeminiModelFromPath(c.Param("path")); ok {
-				if shouldRouteToLiteLLM(cfg, model) {
-					log.Debugf("Management route: routing %s to LiteLLM via hybrid mode", model)
-					geminiV1Beta1Fallback.WrapHandler(geminiBridge)(c)
-					return
+			// Attempt to extract the model name from the AMP-style path
+			if path := c.Param("path"); strings.Contains(path, "/models/") {
+				modelPart := path[strings.Index(path, "/models/")+len("/models/"):]
+				if colonIdx := strings.Index(modelPart, ":"); colonIdx > 0 {
+					modelPart = modelPart[:colonIdx]
 				}
-
-				// STEP 2: Check for OAuth providers
-				normalized, _ := util.NormalizeGeminiThinkingModel(model)
-				if providers := util.GetProviderName(normalized); len(providers) > 0 {
-					log.Debugf("Management route: routing %s to OAuth provider", model)
-					geminiV1Beta1Fallback.WrapHandler(geminiBridge)(c)
-					return
+				if modelPart != "" {
+					normalized, _ := util.NormalizeGeminiThinkingModel(modelPart)
+					// Only handle locally when we have a provider; otherwise fall back to proxy
+					if providers := util.GetProviderName(normalized); len(providers) > 0 {
+						geminiV1Beta1Handler(c)
+						return
+					}
 				}
 			}
 		}
-
-		// STEP 3: Fallback to upstream proxy for non-model routes or GET requests
+		// Non-POST or no local provider available -> proxy upstream
 		proxyHandler(c)
 	})
 }
@@ -224,43 +178,24 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 //	/api/provider/openai/v1/chat/completions
 //	/api/provider/anthropic/v1/messages
 //	/api/provider/google/v1beta/models
-func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc, restrictToLocalhost bool, cfg *config.Config) {
+func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc) {
 	// Create handler instances for different providers
 	openaiHandlers := openai.NewOpenAIAPIHandler(baseHandler)
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(baseHandler)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(baseHandler)
 
-	// Create a dummy OAuth handler that just calls the base handlers
-	// This will be wrapped by the fallback handler for intelligent routing
-	oauthHandler := func(c *gin.Context) {
-		// The actual handler will be determined by the route
-		c.Next()
-	}
-
-	// Create fallback handler wrapper with hybrid routing support
-	// - Routes explicit models to LiteLLM (if configured)
-	// - Tries OAuth with fallback to LiteLLM on errors
-	// - Falls back to ampcode.com when no providers available
-	fallbackHandler := NewFallbackHandler(
-		cfg,
-		oauthHandler,
-		func() *httputil.ReverseProxy { return m.proxy },
-		m.liteLLMProxy,
-	)
+	// Create fallback handler wrapper that forwards to ampcode.com when provider not found
+	// Uses m.getProxy() for hot-reload support (proxy can be updated at runtime)
+	// Also includes model mapping support for routing unavailable models to alternatives
+	fallbackHandler := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
+		return m.getProxy()
+	}, m.modelMapper)
 
 	// Provider-specific routes under /api/provider/:provider
-	// Note: These routes do NOT use auth middleware because:
-	// 1. Amp CLI has its own authentication with the Amp upstream
-	// 2. Provider authentication uses OAuth tokens from auth files
-	// 3. Adding API key auth causes 401 errors for Amp CLI requests
-	var ampProviders *gin.RouterGroup
-	if restrictToLocalhost {
-		ampProviders = engine.Group("/api/provider", localhostOnlyMiddleware())
-		log.Info("Amp client endpoints (/api/provider/*) restricted to localhost only")
-	} else {
-		ampProviders = engine.Group("/api/provider")
-		log.Debug("Amp client endpoints (/api/provider/*) accepting remote connections")
+	ampProviders := engine.Group("/api/provider")
+	if auth != nil {
+		ampProviders.Use(auth)
 	}
 
 	provider := ampProviders.Group("/:provider")
@@ -309,17 +244,5 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 		v1betaAmp.GET("/models", geminiHandlers.GeminiModels)
 		v1betaAmp.POST("/models/:action", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
 		v1betaAmp.GET("/models/:action", geminiHandlers.GeminiGetHandler)
-	}
-
-	// /v1beta1 routes (Vertex AI native format with full publisher path)
-	// Pattern: /v1beta1/publishers/google/models/{model}:{action}
-	// This route group enables hybrid routing for v1beta1 requests by using FallbackHandler
-	// Note: Must be registered here (before registerManagementRoutes passthrough) for route precedence
-	v1beta1Amp := provider.Group("/v1beta1/publishers/google/models")
-	{
-		// Vertex AI format captures: "gemini-3-pro-preview:streamGenerateContent"
-		// FallbackHandler extracts model from URL path and checks litellm-models config
-		v1beta1Amp.POST("/*modelAction", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
-		v1beta1Amp.GET("/*modelAction", geminiHandlers.GeminiGetHandler)
 	}
 }

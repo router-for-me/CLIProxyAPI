@@ -1,54 +1,113 @@
 package amp
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
-	"net"
-	"net/http"
-	"net/http/httptest"
 	"net/http/httputil"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
-// FallbackHandler wraps a standard handler with fallback logic to ampcode.com
-// when the model's provider is not available in CLIProxyAPI.
-// With hybrid mode, it can also route to LiteLLM based on configuration.
-type FallbackHandler struct {
-	config       *config.Config
-	oauthHandler gin.HandlerFunc
-	getProxy     func() *httputil.ReverseProxy // Amp upstream proxy
-	liteLLMProxy *httputil.ReverseProxy         // LiteLLM proxy for hybrid routing
-}
+// AmpRouteType represents the type of routing decision made for an Amp request
+type AmpRouteType string
 
-// NewFallbackHandler creates a new fallback handler wrapper
-// The getProxy function allows lazy evaluation of the Amp proxy (useful when proxy is created after routes)
-// liteLLMProxy can be nil if LiteLLM is not configured
-func NewFallbackHandler(cfg *config.Config, oauthHandler gin.HandlerFunc, getProxy func() *httputil.ReverseProxy, liteLLMProxy *httputil.ReverseProxy) *FallbackHandler {
-	return &FallbackHandler{
-		config:       cfg,
-		oauthHandler: oauthHandler,
-		getProxy:     getProxy,
-		liteLLMProxy: liteLLMProxy,
+const (
+	// RouteTypeLocalProvider indicates the request is handled by a local OAuth provider (free)
+	RouteTypeLocalProvider AmpRouteType = "LOCAL_PROVIDER"
+	// RouteTypeModelMapping indicates the request was remapped to another available model (free)
+	RouteTypeModelMapping AmpRouteType = "MODEL_MAPPING"
+	// RouteTypeAmpCredits indicates the request is forwarded to ampcode.com (uses Amp credits)
+	RouteTypeAmpCredits AmpRouteType = "AMP_CREDITS"
+	// RouteTypeNoProvider indicates no provider or fallback available
+	RouteTypeNoProvider AmpRouteType = "NO_PROVIDER"
+)
+
+// logAmpRouting logs the routing decision for an Amp request with structured fields
+func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provider, path string) {
+	fields := log.Fields{
+		"component":       "amp-routing",
+		"route_type":      string(routeType),
+		"requested_model": requestedModel,
+		"path":            path,
+		"timestamp":       time.Now().Format(time.RFC3339),
+	}
+
+	if resolvedModel != "" && resolvedModel != requestedModel {
+		fields["resolved_model"] = resolvedModel
+	}
+	if provider != "" {
+		fields["provider"] = provider
+	}
+
+	switch routeType {
+	case RouteTypeLocalProvider:
+		fields["cost"] = "free"
+		fields["source"] = "local_oauth"
+		log.WithFields(fields).Infof("[amp] using local provider for model: %s", requestedModel)
+
+	case RouteTypeModelMapping:
+		fields["cost"] = "free"
+		fields["source"] = "local_oauth"
+		fields["mapping"] = requestedModel + " -> " + resolvedModel
+		log.WithFields(fields).Infof("[amp] model mapped: %s -> %s", requestedModel, resolvedModel)
+
+	case RouteTypeAmpCredits:
+		fields["cost"] = "amp_credits"
+		fields["source"] = "ampcode.com"
+		fields["model_id"] = requestedModel // Explicit model_id for easy config reference
+		log.WithFields(fields).Warnf("[amp] forwarding to ampcode.com (uses amp credits) - model_id: %s | To use local proxy, add to config: amp-model-mappings: [{from: \"%s\", to: \"<your-local-model>\"}]", requestedModel, requestedModel)
+
+	case RouteTypeNoProvider:
+		fields["cost"] = "none"
+		fields["source"] = "error"
+		fields["model_id"] = requestedModel // Explicit model_id for easy config reference
+		log.WithFields(fields).Warnf("[amp] no provider available for model_id: %s", requestedModel)
 	}
 }
 
-// WrapHandler wraps a gin.HandlerFunc with intelligent routing logic:
-// 1. Primary routing: Explicit models in litellm-models list → LiteLLM
-// 2. OAuth routing: Models with configured OAuth providers → OAuth (with fallback)
-// 3. Unknown models: Fallback to LiteLLM if enabled, otherwise Amp upstream
+// FallbackHandler wraps a standard handler with fallback logic to ampcode.com
+// when the model's provider is not available in CLIProxyAPI
+type FallbackHandler struct {
+	getProxy    func() *httputil.ReverseProxy
+	modelMapper ModelMapper
+}
+
+// NewFallbackHandler creates a new fallback handler wrapper
+// The getProxy function allows lazy evaluation of the proxy (useful when proxy is created after routes)
+func NewFallbackHandler(getProxy func() *httputil.ReverseProxy) *FallbackHandler {
+	return &FallbackHandler{
+		getProxy: getProxy,
+	}
+}
+
+// NewFallbackHandlerWithMapper creates a new fallback handler with model mapping support
+func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper) *FallbackHandler {
+	return &FallbackHandler{
+		getProxy:    getProxy,
+		modelMapper: mapper,
+	}
+}
+
+// SetModelMapper sets the model mapper for this handler (allows late binding)
+func (fh *FallbackHandler) SetModelMapper(mapper ModelMapper) {
+	fh.modelMapper = mapper
+}
+
+// WrapHandler wraps a gin.HandlerFunc with fallback logic
+// If the model's provider is not configured in CLIProxyAPI, it forwards to ampcode.com
 func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		requestPath := c.Request.URL.Path
+
 		// Read the request body to extract the model name
 		bodyBytes, err := io.ReadAll(c.Request.Body)
 		if err != nil {
-			log.Errorf("amp routing: failed to read request body: %v", err)
+			log.Errorf("amp fallback: failed to read request body: %v", err)
 			handler(c)
 			return
 		}
@@ -67,150 +126,101 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		// Normalize model (handles Gemini thinking suffixes)
 		normalizedModel, _ := util.NormalizeGeminiThinkingModel(modelName)
 
-		// STEP 1: PRIMARY ROUTING - Check if model explicitly configured for LiteLLM
-		if fh.shouldRouteLiteLLM(normalizedModel) {
-			log.Infof("amp routing: model %s → LiteLLM (explicit config)", normalizedModel)
-			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			handleProxyAbort(c, func() {
-			fh.liteLLMProxy.ServeHTTP(c.Writer, c.Request)
-		})
-			return
-		}
-
-		// STEP 2: Check if we have OAuth providers for this model
+		// Check if we have providers for this model
 		providers := util.GetProviderName(normalizedModel)
 
-		if len(providers) > 0 {
-			// OAuth providers available - try OAuth with fallback support
+		// Track resolved model for logging (may change if mapping is applied)
+		resolvedModel := normalizedModel
+		usedMapping := false
 
-			// Filter Anthropic-Beta header to remove features requiring special subscription
-			if betaHeader := c.Request.Header.Get("Anthropic-Beta"); betaHeader != "" {
-				filtered := filterBetaFeatures(betaHeader, "context-1m-2025-08-07")
-				if filtered != "" {
-					c.Request.Header.Set("Anthropic-Beta", filtered)
-				} else {
-					c.Request.Header.Del("Anthropic-Beta")
+		if len(providers) == 0 {
+			// No providers configured - check if we have a model mapping
+			if fh.modelMapper != nil {
+				if mappedModel := fh.modelMapper.MapModel(normalizedModel); mappedModel != "" {
+					// Mapping found - rewrite the model in request body
+					bodyBytes = rewriteModelInBody(bodyBytes, mappedModel)
+					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+					resolvedModel = mappedModel
+					usedMapping = true
+
+					// Get providers for the mapped model
+					providers = util.GetProviderName(mappedModel)
+
+					// Continue to handler with remapped model
+					goto handleRequest
 				}
 			}
 
-			// For streaming requests, skip error-based fallback (too complex to buffer)
-			if isStreamingRequest(c) {
-				log.Debugf("amp routing: model %s → OAuth (streaming, no fallback)", normalizedModel)
+			// No mapping found - check if we have a proxy for fallback
+			proxy := fh.getProxy()
+			if proxy != nil {
+				// Log: Forwarding to ampcode.com (uses Amp credits)
+				logAmpRouting(RouteTypeAmpCredits, modelName, "", "", requestPath)
+
+				// Restore body again for the proxy
 				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				handler(c)
+
+				// Forward to ampcode.com
+				proxy.ServeHTTP(c.Writer, c.Request)
 				return
 			}
 
-			// Non-streaming: Use response recorder to capture OAuth response for potential fallback
-			recorder := httptest.NewRecorder()
+			// No proxy available, let the normal handler return the error
+			logAmpRouting(RouteTypeNoProvider, modelName, "", "", requestPath)
+		}
 
-			// Restore body for OAuth handler
-			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	handleRequest:
 
-			// Call OAuth handler with recorder
-			origWriter := c.Writer
-			c.Writer = &responseWriterWrapper{ResponseWriter: recorder, ginWriter: origWriter}
-			handler(c)
-			c.Writer = origWriter
+		// Log the routing decision
+		providerName := ""
+		if len(providers) > 0 {
+			providerName = providers[0]
+		}
 
-			// STEP 3: ERROR-BASED FALLBACK - Check if OAuth failed and fallback is enabled
-			if fh.shouldFallbackToLiteLLM(recorder) {
-				log.Warnf("amp routing: OAuth failed for %s (status %d), falling back to LiteLLM", normalizedModel, recorder.Code)
-				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				handleProxyAbort(c, func() {
-			fh.liteLLMProxy.ServeHTTP(c.Writer, c.Request)
-		})
-				return
+		if usedMapping {
+			// Log: Model was mapped to another model
+			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
+		} else if len(providers) > 0 {
+			// Log: Using local provider (free)
+			logAmpRouting(RouteTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)
+		}
+
+		// Providers available or no proxy for fallback, restore body and use normal handler
+		// Filter Anthropic-Beta header to remove features requiring special subscription
+		// This is needed when using local providers (bypassing the Amp proxy)
+		if betaHeader := c.Request.Header.Get("Anthropic-Beta"); betaHeader != "" {
+			filtered := filterBetaFeatures(betaHeader, "context-1m-2025-08-07")
+			if filtered != "" {
+				c.Request.Header.Set("Anthropic-Beta", filtered)
+			} else {
+				c.Request.Header.Del("Anthropic-Beta")
 			}
-
-			// OAuth succeeded or fallback disabled - return OAuth response
-			copyResponse(c.Writer, recorder)
-			return
 		}
 
-		// STEP 4: No OAuth providers - check LiteLLM fallback for unknown models
-		if fh.config.LiteLLMFallbackEnabled && fh.liteLLMProxy != nil {
-			log.Infof("amp routing: model %s has no OAuth provider, trying LiteLLM", normalizedModel)
-			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			handleProxyAbort(c, func() {
-			fh.liteLLMProxy.ServeHTTP(c.Writer, c.Request)
-		})
-			return
-		}
-
-		// STEP 5: FINAL FALLBACK - Amp upstream (ampcode.com)
-		proxy := fh.getProxy()
-		if proxy != nil {
-			log.Infof("amp routing: model %s → Amp upstream (no OAuth, no LiteLLM)", normalizedModel)
-			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			handleProxyAbort(c, func() {
-			proxy.ServeHTTP(c.Writer, c.Request)
-		})
-			return
-		}
-
-		// No fallback available, let the handler return an error
-		log.Debugf("amp routing: model %s has no providers and no fallback available", normalizedModel)
+		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		handler(c)
 	}
 }
 
-// responseWriterWrapper wraps httptest.ResponseRecorder to implement gin.ResponseWriter
-type responseWriterWrapper struct {
-	http.ResponseWriter
-	ginWriter gin.ResponseWriter
-}
-
-func (w *responseWriterWrapper) WriteHeader(code int) {
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *responseWriterWrapper) Write(data []byte) (int, error) {
-	return w.ResponseWriter.Write(data)
-}
-
-func (w *responseWriterWrapper) WriteHeaderNow() {
-	// No-op for recorder
-}
-
-func (w *responseWriterWrapper) Status() int {
-	if rw, ok := w.ResponseWriter.(*httptest.ResponseRecorder); ok {
-		return rw.Code
+// rewriteModelInBody replaces the model name in a JSON request body
+func rewriteModelInBody(body []byte, newModel string) []byte {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		log.Warnf("amp model mapping: failed to parse body for rewrite: %v", err)
+		return body
 	}
-	return 0
-}
 
-func (w *responseWriterWrapper) Size() int {
-	if rw, ok := w.ResponseWriter.(*httptest.ResponseRecorder); ok {
-		return rw.Body.Len()
+	if _, exists := payload["model"]; exists {
+		payload["model"] = newModel
+		newBody, err := json.Marshal(payload)
+		if err != nil {
+			log.Warnf("amp model mapping: failed to marshal rewritten body: %v", err)
+			return body
+		}
+		return newBody
 	}
-	return 0
-}
 
-func (w *responseWriterWrapper) Written() bool {
-	return w.Size() > 0
-}
-
-func (w *responseWriterWrapper) Pusher() http.Pusher {
-	return nil
-}
-
-func (w *responseWriterWrapper) CloseNotify() <-chan bool {
-	// Return a channel that never closes (deprecated method)
-	return make(<-chan bool)
-}
-
-func (w *responseWriterWrapper) Flush() {
-	// No-op for recorder - httptest.ResponseRecorder doesn't support flushing
-}
-
-func (w *responseWriterWrapper) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	// Not supported for response recorder
-	return nil, nil, http.ErrNotSupported
-}
-
-func (w *responseWriterWrapper) WriteString(s string) (int, error) {
-	return w.Write([]byte(s))
+	return body
 }
 
 // extractModelFromRequest attempts to extract the model name from various request formats
@@ -224,37 +234,13 @@ func extractModelFromRequest(body []byte, c *gin.Context) string {
 		}
 	}
 
-	// For Gemini v1beta requests, model is in the URL path: /models/{model}:generateContent
-	// Extract from :action parameter (e.g., "gemini-pro:generateContent")
+	// For Gemini requests, model is in the URL path
+	// Standard format: /models/{model}:generateContent -> :action parameter
 	if action := c.Param("action"); action != "" {
 		// Split by colon to get model name (e.g., "gemini-pro:generateContent" -> "gemini-pro")
 		parts := strings.Split(action, ":")
 		if len(parts) > 0 && parts[0] != "" {
 			return parts[0]
-		}
-	}
-
-	// For Gemini v1beta1 requests (Vertex AI format), model is in the URL path
-	// Pattern: /v1beta1/publishers/google/models/{model}:{action}
-	// Example: /api/provider/google/v1beta1/publishers/google/models/gemini-3-pro-preview:streamGenerateContent
-	path := c.Request.URL.Path
-	if strings.Contains(path, "/publishers/google/models/") {
-		parts := strings.Split(path, "/models/")
-		if len(parts) >= 2 {
-			modelAction := parts[1]
-			// Remove action suffix (e.g., ":streamGenerateContent" or query params)
-			if idx := strings.Index(modelAction, ":"); idx > 0 {
-				return modelAction[:idx]
-			}
-			// If no colon, might have query params or be malformed - try to extract up to first special char
-			for i, ch := range modelAction {
-				if ch == '?' || ch == '/' {
-					if i > 0 {
-						return modelAction[:i]
-					}
-					break
-				}
-			}
 		}
 	}
 
@@ -272,103 +258,4 @@ func extractModelFromRequest(body []byte, c *gin.Context) string {
 	}
 
 	return ""
-}
-
-// shouldRouteLiteLLM checks if the given model should be explicitly routed to LiteLLM
-func (fh *FallbackHandler) shouldRouteLiteLLM(model string) bool {
-	if !fh.config.LiteLLMHybridMode || fh.liteLLMProxy == nil {
-		return false
-	}
-
-	// Check if model is in the explicit LiteLLM models list
-	for _, m := range fh.config.LiteLLMModels {
-		if m == model {
-			return true
-		}
-	}
-
-	return false
-}
-
-// shouldFallbackToLiteLLM determines if an OAuth error should trigger fallback to LiteLLM
-func (fh *FallbackHandler) shouldFallbackToLiteLLM(recorder *httptest.ResponseRecorder) bool {
-	if !fh.config.LiteLLMFallbackEnabled || fh.liteLLMProxy == nil {
-		return false
-	}
-
-	statusCode := recorder.Code
-
-	// Fallback on specific error codes
-	fallbackCodes := []int{
-		http.StatusUnauthorized,          // 401 - Auth error
-		http.StatusPaymentRequired,       // 402 - Quota/payment required
-		http.StatusTooManyRequests,       // 429 - Rate limit
-		http.StatusServiceUnavailable,    // 503 - Service unavailable
-	}
-
-	for _, code := range fallbackCodes {
-		if statusCode == code {
-			return true
-		}
-	}
-
-	// Only check response body for quota-related keywords on error status codes
-	// (don't trigger fallback on successful 2xx responses that happen to contain these words)
-	if statusCode >= 400 {
-		body := recorder.Body.String()
-		quotaKeywords := []string{
-			"quota",
-			"rate limit",
-			"insufficient_quota",
-			"credit",
-			"billing",
-		}
-
-		bodyLower := strings.ToLower(body)
-		for _, keyword := range quotaKeywords {
-			if strings.Contains(bodyLower, keyword) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-// isStreamingRequest detects if the request is expecting a streaming response
-func isStreamingRequest(c *gin.Context) bool {
-	// Check Accept header
-	if c.GetHeader("Accept") == "text/event-stream" {
-		return true
-	}
-
-	// Check stream query parameter
-	if c.Query("stream") == "true" {
-		return true
-	}
-
-	// Check stream in request body
-	if c.Request.Body != nil {
-		// Note: Body is already read by WrapHandler, so this is safe
-		// We just need to check if there's a stream field
-		return false // Body will be checked in WrapHandler
-	}
-
-	return false
-}
-
-// copyResponse copies a recorded response to the actual response writer
-func copyResponse(w gin.ResponseWriter, recorder *httptest.ResponseRecorder) {
-	// Copy headers
-	for k, v := range recorder.Header() {
-		for _, vv := range v {
-			w.Header().Add(k, vv)
-		}
-	}
-
-	// Write status code
-	w.WriteHeader(recorder.Code)
-
-	// Write body
-	w.Write(recorder.Body.Bytes())
 }

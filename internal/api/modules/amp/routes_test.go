@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 )
 
@@ -14,16 +13,26 @@ func TestRegisterManagementRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
-	// Spy to track if proxy handler was called
-	proxyCalled := false
-	proxyHandler := func(c *gin.Context) {
-		proxyCalled = true
-		c.String(200, "proxied")
+	// Create module with proxy for testing
+	m := &AmpModule{
+		restrictToLocalhost: false, // disable localhost restriction for tests
 	}
 
-	m := &AmpModule{}
+	// Create a mock proxy that tracks calls
+	proxyCalled := false
+	mockProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyCalled = true
+		w.WriteHeader(200)
+		w.Write([]byte("proxied"))
+	}))
+	defer mockProxy.Close()
+
+	// Create real proxy to mock server
+	proxy, _ := createReverseProxy(mockProxy.URL, NewStaticSecretSource(""))
+	m.setProxy(proxy)
+
 	base := &handlers.BaseAPIHandler{}
-	m.registerManagementRoutes(r, base, proxyHandler, false, nil) // false = don't restrict to localhost in tests
+	m.registerManagementRoutes(r, base)
 
 	managementPaths := []struct {
 		path   string
@@ -40,6 +49,11 @@ func TestRegisterManagementRoutes(t *testing.T) {
 		{"/api/threads", http.MethodGet},
 		{"/threads.rss", http.MethodGet}, // Root-level route (no /api prefix)
 		{"/api/otel", http.MethodGet},
+		{"/api/tab", http.MethodGet},
+		{"/api/tab/some/path", http.MethodGet},
+		{"/auth", http.MethodGet},           // Root-level auth route
+		{"/auth/cli-login", http.MethodGet}, // CLI login flow
+		{"/auth/callback", http.MethodGet},  // OAuth callback
 		// Google v1beta1 bridge should still proxy non-model requests (GET) and allow POST
 		{"/api/provider/google/v1beta1/models", http.MethodGet},
 		{"/api/provider/google/v1beta1/models", http.MethodPost},
@@ -69,17 +83,17 @@ func TestRegisterProviderAliases_AllProvidersRegistered(t *testing.T) {
 	// Minimal base handler setup (no need to initialize, just check routing)
 	base := &handlers.BaseAPIHandler{}
 
+	// Track if auth middleware was called
+	authCalled := false
 	authMiddleware := func(c *gin.Context) {
+		authCalled = true
 		c.Header("X-Auth", "ok")
 		// Abort with success to avoid calling the actual handler (which needs full setup)
 		c.AbortWithStatus(http.StatusOK)
 	}
 
-	// Create a minimal config for testing
-	testCfg := &config.Config{}
-
 	m := &AmpModule{authMiddleware_: authMiddleware}
-	m.registerProviderAliases(r, base, authMiddleware, false, testCfg)
+	m.registerProviderAliases(r, base, authMiddleware)
 
 	paths := []struct {
 		path   string
@@ -89,14 +103,14 @@ func TestRegisterProviderAliases_AllProvidersRegistered(t *testing.T) {
 		{"/api/provider/anthropic/models", http.MethodGet},
 		{"/api/provider/google/models", http.MethodGet},
 		{"/api/provider/groq/models", http.MethodGet},
-		// Skip POST routes - they require full handler initialization
-		// {"/api/provider/openai/chat/completions", http.MethodPost},
-		// {"/api/provider/anthropic/v1/messages", http.MethodPost},
+		{"/api/provider/openai/chat/completions", http.MethodPost},
+		{"/api/provider/anthropic/v1/messages", http.MethodPost},
 		{"/api/provider/google/v1beta/models", http.MethodGet},
 	}
 
 	for _, tc := range paths {
 		t.Run(tc.path, func(t *testing.T) {
+			authCalled = false
 			req := httptest.NewRequest(tc.method, tc.path, nil)
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
@@ -104,7 +118,12 @@ func TestRegisterProviderAliases_AllProvidersRegistered(t *testing.T) {
 			if w.Code == http.StatusNotFound {
 				t.Fatalf("route %s %s not registered", tc.method, tc.path)
 			}
-			// Note: Auth middleware is not applied to provider routes
+			if !authCalled {
+				t.Fatalf("auth middleware not executed for %s", tc.path)
+			}
+			if w.Header().Get("X-Auth") != "ok" {
+				t.Fatalf("auth middleware header not set for %s", tc.path)
+			}
 		})
 	}
 }
@@ -114,10 +133,9 @@ func TestRegisterProviderAliases_DynamicModelsHandler(t *testing.T) {
 	r := gin.New()
 
 	base := &handlers.BaseAPIHandler{}
-	testCfg := &config.Config{}
 
 	m := &AmpModule{authMiddleware_: func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }}
-	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }, false, testCfg)
+	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) })
 
 	providers := []string{"openai", "anthropic", "google", "groq", "cerebras"}
 
@@ -141,21 +159,19 @@ func TestRegisterProviderAliases_V1Routes(t *testing.T) {
 	r := gin.New()
 
 	base := &handlers.BaseAPIHandler{}
-	testCfg := &config.Config{}
 
 	m := &AmpModule{authMiddleware_: func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }}
-	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }, false, testCfg)
+	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) })
 
 	v1Paths := []struct {
 		path   string
 		method string
 	}{
 		{"/api/provider/openai/v1/models", http.MethodGet},
-		// Skip POST routes - they require full handler initialization
-		// {"/api/provider/openai/v1/chat/completions", http.MethodPost},
-		// {"/api/provider/openai/v1/completions", http.MethodPost},
-		// {"/api/provider/anthropic/v1/messages", http.MethodPost},
-		// {"/api/provider/anthropic/v1/messages/count_tokens", http.MethodPost},
+		{"/api/provider/openai/v1/chat/completions", http.MethodPost},
+		{"/api/provider/openai/v1/completions", http.MethodPost},
+		{"/api/provider/anthropic/v1/messages", http.MethodPost},
+		{"/api/provider/anthropic/v1/messages/count_tokens", http.MethodPost},
 	}
 
 	for _, tc := range v1Paths {
@@ -176,18 +192,16 @@ func TestRegisterProviderAliases_V1BetaRoutes(t *testing.T) {
 	r := gin.New()
 
 	base := &handlers.BaseAPIHandler{}
-	testCfg := &config.Config{}
 
 	m := &AmpModule{authMiddleware_: func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }}
-	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }, false, testCfg)
+	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) })
 
 	v1betaPaths := []struct {
 		path   string
 		method string
 	}{
 		{"/api/provider/google/v1beta/models", http.MethodGet},
-		// Skip POST routes - they require full handler initialization
-		// {"/api/provider/google/v1beta/models/generateContent", http.MethodPost},
+		{"/api/provider/google/v1beta/models/generateContent", http.MethodPost},
 	}
 
 	for _, tc := range v1betaPaths {
@@ -209,10 +223,9 @@ func TestRegisterProviderAliases_NoAuthMiddleware(t *testing.T) {
 	r := gin.New()
 
 	base := &handlers.BaseAPIHandler{}
-	testCfg := &config.Config{}
 
 	m := &AmpModule{authMiddleware_: nil} // No auth middleware
-	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }, false, testCfg)
+	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/api/provider/openai/models", nil)
 	w := httptest.NewRecorder()
@@ -228,8 +241,13 @@ func TestLocalhostOnlyMiddleware_PreventsSpoofing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
-	// Apply localhost-only middleware
-	r.Use(localhostOnlyMiddleware())
+	// Create module with localhost restriction enabled
+	m := &AmpModule{
+		restrictToLocalhost: true,
+	}
+
+	// Apply dynamic localhost-only middleware
+	r.Use(m.localhostOnlyMiddleware())
 	r.GET("/test", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
@@ -300,5 +318,55 @@ func TestLocalhostOnlyMiddleware_PreventsSpoofing(t *testing.T) {
 				t.Errorf("%s: expected status %d, got %d", tt.description, tt.expectedStatus, w.Code)
 			}
 		})
+	}
+}
+
+func TestLocalhostOnlyMiddleware_HotReload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	// Create module with localhost restriction initially enabled
+	m := &AmpModule{
+		restrictToLocalhost: true,
+	}
+
+	// Apply dynamic localhost-only middleware
+	r.Use(m.localhostOnlyMiddleware())
+	r.GET("/test", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	// Test 1: Remote IP should be blocked when restriction is enabled
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.100:12345"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 when restriction enabled, got %d", w.Code)
+	}
+
+	// Test 2: Hot-reload - disable restriction
+	m.setRestrictToLocalhost(false)
+
+	req = httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.100:12345"
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected 200 after disabling restriction, got %d", w.Code)
+	}
+
+	// Test 3: Hot-reload - re-enable restriction
+	m.setRestrictToLocalhost(true)
+
+	req = httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.100:12345"
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 after re-enabling restriction, got %d", w.Code)
 	}
 }

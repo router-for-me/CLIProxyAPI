@@ -570,6 +570,35 @@ func summarizeExcludedModels(list []string) excludedModelsSummary {
 	}
 }
 
+type ampModelMappingsSummary struct {
+	hash  string
+	count int
+}
+
+func summarizeAmpModelMappings(mappings []config.AmpModelMapping) ampModelMappingsSummary {
+	if len(mappings) == 0 {
+		return ampModelMappingsSummary{}
+	}
+	entries := make([]string, 0, len(mappings))
+	for _, mapping := range mappings {
+		from := strings.TrimSpace(mapping.From)
+		to := strings.TrimSpace(mapping.To)
+		if from == "" && to == "" {
+			continue
+		}
+		entries = append(entries, from+"->"+to)
+	}
+	if len(entries) == 0 {
+		return ampModelMappingsSummary{}
+	}
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
+	return ampModelMappingsSummary{
+		hash:  hex.EncodeToString(sum[:]),
+		count: len(entries),
+	}
+}
+
 func summarizeOAuthExcludedModels(entries map[string][]string) map[string]excludedModelsSummary {
 	if len(entries) == 0 {
 		return nil
@@ -1760,6 +1789,31 @@ func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				changes = append(changes, fmt.Sprintf("codex[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
 			}
 		}
+	}
+
+	// AmpCode settings (redacted where needed)
+	oldAmpURL := strings.TrimSpace(oldCfg.AmpCode.UpstreamURL)
+	newAmpURL := strings.TrimSpace(newCfg.AmpCode.UpstreamURL)
+	if oldAmpURL != newAmpURL {
+		changes = append(changes, fmt.Sprintf("ampcode.upstream-url: %s -> %s", oldAmpURL, newAmpURL))
+	}
+	oldAmpKey := strings.TrimSpace(oldCfg.AmpCode.UpstreamAPIKey)
+	newAmpKey := strings.TrimSpace(newCfg.AmpCode.UpstreamAPIKey)
+	switch {
+	case oldAmpKey == "" && newAmpKey != "":
+		changes = append(changes, "ampcode.upstream-api-key: added")
+	case oldAmpKey != "" && newAmpKey == "":
+		changes = append(changes, "ampcode.upstream-api-key: removed")
+	case oldAmpKey != newAmpKey:
+		changes = append(changes, "ampcode.upstream-api-key: updated")
+	}
+	if oldCfg.AmpCode.RestrictManagementToLocalhost != newCfg.AmpCode.RestrictManagementToLocalhost {
+		changes = append(changes, fmt.Sprintf("ampcode.restrict-management-to-localhost: %t -> %t", oldCfg.AmpCode.RestrictManagementToLocalhost, newCfg.AmpCode.RestrictManagementToLocalhost))
+	}
+	oldMappings := summarizeAmpModelMappings(oldCfg.AmpCode.ModelMappings)
+	newMappings := summarizeAmpModelMappings(newCfg.AmpCode.ModelMappings)
+	if oldMappings.hash != newMappings.hash {
+		changes = append(changes, fmt.Sprintf("ampcode.model-mappings: updated (%d -> %d entries)", oldMappings.count, newMappings.count))
 	}
 
 	if entries, _ := diffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
