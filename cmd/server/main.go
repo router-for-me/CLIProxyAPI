@@ -47,6 +47,19 @@ func init() {
 	buildinfo.BuildDate = BuildDate
 }
 
+// setKiroIncognitoMode sets the incognito browser mode for Kiro authentication.
+// Kiro defaults to incognito mode for multi-account support.
+// Users can explicitly override with --incognito or --no-incognito flags.
+func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
+	if useIncognito {
+		cfg.IncognitoBrowser = true
+	} else if noIncognito {
+		cfg.IncognitoBrowser = false
+	} else {
+		cfg.IncognitoBrowser = true // Kiro default
+	}
+}
+
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
@@ -465,36 +478,18 @@ func main() {
 		// Users can explicitly override with --no-incognito
 		// Note: This config mutation is safe - auth commands exit after completion
 		// and don't share config with StartService (which is in the else branch)
-		if useIncognito {
-			cfg.IncognitoBrowser = true
-		} else if noIncognito {
-			cfg.IncognitoBrowser = false
-		} else {
-			cfg.IncognitoBrowser = true // Kiro default
-		}
+		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		cmd.DoKiroLogin(cfg, options)
 	} else if kiroGoogleLogin {
 		// For Kiro auth, default to incognito mode for multi-account support
 		// Users can explicitly override with --no-incognito
 		// Note: This config mutation is safe - auth commands exit after completion
-		if useIncognito {
-			cfg.IncognitoBrowser = true
-		} else if noIncognito {
-			cfg.IncognitoBrowser = false
-		} else {
-			cfg.IncognitoBrowser = true // Kiro default
-		}
+		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		cmd.DoKiroGoogleLogin(cfg, options)
 	} else if kiroAWSLogin {
 		// For Kiro auth, default to incognito mode for multi-account support
 		// Users can explicitly override with --no-incognito
-		if useIncognito {
-			cfg.IncognitoBrowser = true
-		} else if noIncognito {
-			cfg.IncognitoBrowser = false
-		} else {
-			cfg.IncognitoBrowser = true // Kiro default
-		}
+		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		cmd.DoKiroAWSLogin(cfg, options)
 	} else if kiroImport {
 		cmd.DoKiroImport(cfg, options)
