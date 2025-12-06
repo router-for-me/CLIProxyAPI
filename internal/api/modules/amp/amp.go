@@ -253,7 +253,6 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 	// >>> LITELLM_HOOK_RELOAD - LiteLLM config hot-reload (see FORK_MAINTENANCE.md)
 	if m.litellmConfig != nil {
 		m.litellmConfig.Update(cfg)
-		changes = append(changes, "litellm-config")
 		log.Debugf("litellm config reloaded: enabled=%v, models=%d",
 			m.litellmConfig.IsEnabled(), m.litellmConfig.GetModelCount())
 	}
