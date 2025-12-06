@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -29,6 +31,22 @@ func (a *CopilotAuthenticator) Provider() string { return "copilot" }
 // RefreshLead returns nil (no refresh flow supported yet).
 func (a *CopilotAuthenticator) RefreshLead() *time.Duration { return nil }
 
+// openBrowser opens a URL in the default browser.
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return fmt.Errorf("unsupported platform")
+	}
+	return cmd.Start()
+}
+
 // Login executes the GitHub device flow to obtain a Copilot token.
 func (a *CopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
 	if ctx == nil {
@@ -46,8 +64,15 @@ func (a *CopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, op
 	}
 
 	fmt.Printf("\nTo authenticate Copilot, visit:\n  %s\nthen enter code: %s\n\n", dc.VerificationURI, dc.UserCode)
+	
+	// Auto-open browser with the verification URL
+	browserURL := dc.VerificationURI
 	if dc.VerificationURIComplete != "" {
-		fmt.Printf("Direct link: %s\n\n", dc.VerificationURIComplete)
+		browserURL = dc.VerificationURIComplete
+		fmt.Printf("Opening browser: %s\n\n", browserURL)
+	}
+	if err := openBrowser(browserURL); err != nil {
+		fmt.Printf("Could not open browser automatically. Please visit the URL above manually.\n\n")
 	}
 
 	pollCtx, cancel := context.WithTimeout(ctx, time.Duration(dc.ExpiresIn)*time.Second)
@@ -64,7 +89,10 @@ func (a *CopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, op
 		return nil, err
 	}
 
-	expiresAt := time.Now().Add(time.Duration(token.ExpiresIn) * time.Second).UTC().Format(time.RFC3339)
+	// GitHub OAuth tokens don't truly expire - the Copilot API handles session management.
+	// Set a long expiry (30 days) to avoid showing "expired" in the UI unnecessarily.
+	// The actual API will return 401 if the token is revoked, which CLIProxyAPI handles.
+	expiresAt := time.Now().Add(30 * 24 * time.Hour).UTC().Format(time.RFC3339)
 
 	fileName := fmt.Sprintf("copilot-%s.json", strings.TrimSpace(user.Login))
 	storage := &copilot.TokenStorage{
