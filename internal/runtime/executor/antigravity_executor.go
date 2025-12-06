@@ -77,7 +77,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	// Ensure max_tokens > thinking.budget_tokens for any Claude API format request with thinking enabled
 	payload := ensureMaxTokensForThinking(req.Model, bytes.Clone(req.Payload))
 	// Also fix OriginalRequest since it's used by TranslateNonStream for Claude models
-	opts.OriginalRequest = ensureMaxTokensForThinking(req.Model, opts.OriginalRequest)
+	modifiedOriginalRequest := ensureMaxTokensForThinking(req.Model, opts.OriginalRequest)
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, payload, false)
 
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
