@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"gopkg.in/yaml.v3"
@@ -1357,11 +1358,11 @@ if !ok {
 			a.Attributes["api_key"] = accessToken
 			a.Attributes["provider_key"] = "copilot"
 			a.Attributes["compat_name"] = "copilot"
-			// Required headers for GitHub Copilot API
-			a.Attributes["header:Editor-Version"] = "vscode/1.96.0"
-			a.Attributes["header:Editor-Plugin-Version"] = "copilot-chat/0.24.0"
-			a.Attributes["header:Copilot-Integration-Id"] = "vscode-chat"
-			a.Attributes["header:User-Agent"] = "GitHubCopilotChat/0.24.0"
+			// Required headers for GitHub Copilot API (using centralized constants)
+			a.Attributes["header:Editor-Version"] = copilot.CopilotEditorVersion
+			a.Attributes["header:Editor-Plugin-Version"] = copilot.CopilotEditorPluginVersion
+			a.Attributes["header:Copilot-Integration-Id"] = copilot.CopilotIntegrationID
+			a.Attributes["header:User-Agent"] = copilot.CopilotUserAgent
 		}
 		applyAuthExcludedModelsMeta(a, cfg, nil, "oauth")
 		if provider == "gemini-cli" {

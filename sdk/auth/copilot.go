@@ -82,11 +82,11 @@ func (a *CopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, op
 		"api_key":      token.AccessToken,
 		"provider_key": "copilot",
 		"compat_name":  "copilot",
-		// Required headers for GitHub Copilot API
-		"header:Editor-Version":         "vscode/1.96.0",
-		"header:Editor-Plugin-Version":  "copilot-chat/0.24.0",
-		"header:Copilot-Integration-Id": "vscode-chat",
-		"header:User-Agent":             "GitHubCopilotChat/0.24.0",
+		// Required headers for GitHub Copilot API (using centralized constants)
+		"header:Editor-Version":         copilot.CopilotEditorVersion,
+		"header:Editor-Plugin-Version":  copilot.CopilotEditorPluginVersion,
+		"header:Copilot-Integration-Id": copilot.CopilotIntegrationID,
+		"header:User-Agent":             copilot.CopilotUserAgent,
 	}
 
 	now := time.Now().UTC()

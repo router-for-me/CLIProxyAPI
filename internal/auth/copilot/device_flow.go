@@ -10,7 +10,22 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
+
+// Copilot API header constants - centralized for consistency across the codebase
+const (
+	CopilotEditorVersion       = "vscode/1.96.0"
+	CopilotEditorPluginVersion = "copilot-chat/0.24.0"
+	CopilotIntegrationID       = "vscode-chat"
+	CopilotUserAgent           = "GitHubCopilotChat/0.24.0"
+)
+
+// httpClient is a shared HTTP client with a reasonable timeout for device flow operations.
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
 
 const (
 	githubDeviceCodeEndpoint = "https://github.com/login/device/code"
@@ -58,7 +73,7 @@ func StartDeviceFlow(ctx context.Context, clientID, scope string) (*DeviceCodeRe
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -102,21 +117,32 @@ func PollForToken(ctx context.Context, clientID, deviceCode string, interval tim
 			req.Header.Set("Accept", "application/json")
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := httpClient.Do(req)
 			if err != nil {
 				return nil, err
 			}
-			bodyBytes, _ := io.ReadAll(resp.Body)
+			bodyBytes, err := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
+			if err != nil {
+				log.WithError(err).Debug("copilot: failed to read token response body")
+				return nil, err
+			}
 
 			var token TokenResponse
 			if err = json.Unmarshal(bodyBytes, &token); err != nil {
-				fmt.Printf("[copilot] token poll decode error (status %d): %v body=%s\n", resp.StatusCode, err, string(bodyBytes))
+				log.WithFields(log.Fields{
+					"status": resp.StatusCode,
+					"body":   string(bodyBytes),
+				}).WithError(err).Debug("copilot: token poll decode error")
 				return nil, err
 			}
 
 			if token.Error != "" || token.AccessToken != "" {
-				fmt.Printf("[copilot] poll status=%d error=%s access_token_present=%t\n", resp.StatusCode, token.Error, token.AccessToken != "")
+				log.WithFields(log.Fields{
+					"status":               resp.StatusCode,
+					"error":                token.Error,
+					"access_token_present": token.AccessToken != "",
+				}).Debug("copilot: poll response")
 			}
 
 			switch token.Error {
@@ -136,7 +162,7 @@ func PollForToken(ctx context.Context, clientID, deviceCode string, interval tim
 
 			if token.AccessToken != "" {
 				fmt.Println() // newline after dots
-				fmt.Printf("[copilot] received access token\n")
+				log.Debug("copilot: received access token")
 				return &token, nil
 			}
 
@@ -156,7 +182,7 @@ func FetchUser(ctx context.Context, accessToken string) (*UserResponse, error) {
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
