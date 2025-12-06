@@ -2,7 +2,6 @@ package amp
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"net/http/httputil"
 	"strings"
@@ -11,6 +10,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // AmpRouteType represents the type of routing decision made for an Amp request
@@ -138,7 +139,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			if fh.modelMapper != nil {
 				if mappedModel := fh.modelMapper.MapModel(normalizedModel); mappedModel != "" {
 					// Mapping found - rewrite the model in request body
-					bodyBytes = rewriteModelInBody(bodyBytes, mappedModel)
+					bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
 					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 					resolvedModel = mappedModel
 					usedMapping = true
@@ -179,59 +180,62 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 
 		if usedMapping {
 			// Log: Model was mapped to another model
+			log.Debugf("amp model mapping: request %s -> %s", normalizedModel, resolvedModel)
 			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
+			rewriter := NewResponseRewriter(c.Writer, normalizedModel)
+			c.Writer = rewriter
+			// Filter Anthropic-Beta header only for local handling paths
+			filterAntropicBetaHeader(c)
+			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			handler(c)
+			rewriter.Flush()
+			log.Debugf("amp model mapping: response %s -> %s", resolvedModel, normalizedModel)
 		} else if len(providers) > 0 {
 			// Log: Using local provider (free)
 			logAmpRouting(RouteTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)
+			// Filter Anthropic-Beta header only for local handling paths
+			filterAntropicBetaHeader(c)
+			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			handler(c)
+		} else {
+			// No provider, no mapping, no proxy: fall back to the wrapped handler so it can return an error response
+			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			handler(c)
 		}
-
-		// Providers available or no proxy for fallback, restore body and use normal handler
-		// Filter Anthropic-Beta header to remove features requiring special subscription
-		// This is needed when using local providers (bypassing the Amp proxy)
-		if betaHeader := c.Request.Header.Get("Anthropic-Beta"); betaHeader != "" {
-			filtered := filterBetaFeatures(betaHeader, "context-1m-2025-08-07")
-			if filtered != "" {
-				c.Request.Header.Set("Anthropic-Beta", filtered)
-			} else {
-				c.Request.Header.Del("Anthropic-Beta")
-			}
-		}
-
-		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		handler(c)
 	}
 }
 
-// rewriteModelInBody replaces the model name in a JSON request body
-func rewriteModelInBody(body []byte, newModel string) []byte {
-	var payload map[string]interface{}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		log.Warnf("amp model mapping: failed to parse body for rewrite: %v", err)
+// filterAntropicBetaHeader filters Anthropic-Beta header to remove features requiring special subscription
+// This is needed when using local providers (bypassing the Amp proxy)
+func filterAntropicBetaHeader(c *gin.Context) {
+	if betaHeader := c.Request.Header.Get("Anthropic-Beta"); betaHeader != "" {
+		if filtered := filterBetaFeatures(betaHeader, "context-1m-2025-08-07"); filtered != "" {
+			c.Request.Header.Set("Anthropic-Beta", filtered)
+		} else {
+			c.Request.Header.Del("Anthropic-Beta")
+		}
+	}
+}
+
+// rewriteModelInRequest replaces the model name in a JSON request body
+func rewriteModelInRequest(body []byte, newModel string) []byte {
+	if !gjson.GetBytes(body, "model").Exists() {
 		return body
 	}
-
-	if _, exists := payload["model"]; exists {
-		payload["model"] = newModel
-		newBody, err := json.Marshal(payload)
-		if err != nil {
-			log.Warnf("amp model mapping: failed to marshal rewritten body: %v", err)
-			return body
-		}
-		return newBody
+	result, err := sjson.SetBytes(body, "model", newModel)
+	if err != nil {
+		log.Warnf("amp model mapping: failed to rewrite model in request body: %v", err)
+		return body
 	}
-
-	return body
+	return result
 }
 
 // extractModelFromRequest attempts to extract the model name from various request formats
 func extractModelFromRequest(body []byte, c *gin.Context) string {
 	// First try to parse from JSON body (OpenAI, Claude, etc.)
-	var payload map[string]interface{}
-	if err := json.Unmarshal(body, &payload); err == nil {
-		// Check common model field names
-		if model, ok := payload["model"].(string); ok {
-			return model
-		}
+	// Check common model field names
+	if result := gjson.GetBytes(body, "model"); result.Exists() && result.Type == gjson.String {
+		return result.String()
 	}
 
 	// For Gemini requests, model is in the URL path
