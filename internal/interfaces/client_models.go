@@ -85,6 +85,9 @@ type InlineData struct {
 // FunctionCall represents a tool call requested by the model.
 // It includes the function name and its arguments that the model wants to execute.
 type FunctionCall struct {
+	// ID is the identifier of the function to be called.
+	ID string `json:"id,omitempty"`
+
 	// Name is the identifier of the function to be called.
 	Name string `json:"name"`
 
@@ -95,6 +98,9 @@ type FunctionCall struct {
 // FunctionResponse represents the result of a tool execution.
 // This is sent back to the model after a tool call has been processed.
 type FunctionResponse struct {
+	// ID is the identifier of the function to be called.
+	ID string `json:"id,omitempty"`
+
 	// Name is the identifier of the function that was called.
 	Name string `json:"name"`
 

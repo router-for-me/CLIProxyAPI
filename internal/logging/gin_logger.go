@@ -14,6 +14,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const skipGinLogKey = "__gin_skip_request_logging__"
+
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
 // using logrus. It captures request details including method, path, status code, latency,
 // client IP, and any error messages, formatting them in a Gin-style log format.
@@ -27,6 +29,10 @@ func GinLogrusLogger() gin.HandlerFunc {
 		raw := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 
 		c.Next()
+
+		if shouldSkipGinRequestLogging(c) {
+			return
+		}
 
 		if raw != "" {
 			path = path + "?" + raw
@@ -76,4 +82,25 @@ func GinLogrusRecovery() gin.HandlerFunc {
 
 		c.AbortWithStatus(http.StatusInternalServerError)
 	})
+}
+
+// SkipGinRequestLogging marks the provided Gin context so that GinLogrusLogger
+// will skip emitting a log line for the associated request.
+func SkipGinRequestLogging(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(skipGinLogKey, true)
+}
+
+func shouldSkipGinRequestLogging(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	val, exists := c.Get(skipGinLogKey)
+	if !exists {
+		return false
+	}
+	flag, ok := val.(bool)
+	return ok && flag
 }

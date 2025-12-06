@@ -249,6 +249,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				functionCall := `{"functionCall":{"name":"","args":{}}}`
 				functionCall, _ = sjson.Set(functionCall, "functionCall.name", name)
 				functionCall, _ = sjson.Set(functionCall, "thoughtSignature", geminiResponsesThoughtSignature)
+				functionCall, _ = sjson.Set(functionCall, "functionCall.id", item.Get("call_id").String())
 
 				// Parse arguments JSON string and set as args object
 				if arguments != "" {
@@ -285,6 +286,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 
 				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.name", functionName)
+				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.id", callID)
 
 				// Set the raw JSON output directly (preserves string encoding)
 				if outputRaw != "" && outputRaw != "null" {

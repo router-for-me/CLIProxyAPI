@@ -79,6 +79,15 @@ func RenameKey(jsonStr, oldKeyPath, newKeyPath string) (string, error) {
 	return finalJson, nil
 }
 
+func DeleteKey(jsonStr, keyName string) string {
+	paths := make([]string, 0)
+	Walk(gjson.Parse(jsonStr), "", keyName, &paths)
+	for _, p := range paths {
+		jsonStr, _ = sjson.Delete(jsonStr, p)
+	}
+	return jsonStr
+}
+
 // FixJSON converts non-standard JSON that uses single quotes for strings into
 // RFC 8259-compliant JSON by converting those single-quoted strings to
 // double-quoted strings with proper escaping.

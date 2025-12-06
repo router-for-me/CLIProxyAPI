@@ -66,7 +66,6 @@ func (m *DefaultModelMapper) MapModel(requestedModel string) string {
 	}
 
 	// Note: Detailed routing log is handled by logAmpRouting in fallback_handlers.go
-	log.Debugf("amp model mapping: resolved %s -> %s", requestedModel, targetModel)
 	return targetModel
 }
 

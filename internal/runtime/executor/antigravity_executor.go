@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -508,8 +509,46 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		requestURL.WriteString(url.QueryEscape(alt))
 	}
 
-	payload = geminiToAntigravity(modelName, payload)
+	// Extract project_id from auth metadata if available
+	projectID := ""
+	if auth != nil && auth.Metadata != nil {
+		if pid, ok := auth.Metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+	}
+	payload = geminiToAntigravity(modelName, payload, projectID)
 	payload, _ = sjson.SetBytes(payload, "model", alias2ModelName(modelName))
+
+	if strings.Contains(modelName, "claude") {
+		strJSON := string(payload)
+		paths := make([]string, 0)
+		util.Walk(gjson.ParseBytes(payload), "", "parametersJsonSchema", &paths)
+		for _, p := range paths {
+			strJSON, _ = util.RenameKey(strJSON, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
+		}
+
+		strJSON = util.DeleteKey(strJSON, "$schema")
+		strJSON = util.DeleteKey(strJSON, "maxItems")
+		strJSON = util.DeleteKey(strJSON, "minItems")
+		strJSON = util.DeleteKey(strJSON, "minLength")
+		strJSON = util.DeleteKey(strJSON, "maxLength")
+		strJSON = util.DeleteKey(strJSON, "exclusiveMinimum")
+
+		paths = make([]string, 0)
+		util.Walk(gjson.Parse(strJSON), "", "anyOf", &paths)
+		for _, p := range paths {
+			anyOf := gjson.Get(strJSON, p)
+			if anyOf.IsArray() {
+				anyOfItems := anyOf.Array()
+				if len(anyOfItems) > 0 {
+					strJSON, _ = sjson.SetRaw(strJSON, p[:len(p)-len(".anyOf")], anyOfItems[0].Raw)
+				}
+			}
+		}
+
+		payload = []byte(strJSON)
+	}
+
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
 	if errReq != nil {
 		return nil, errReq
@@ -670,10 +709,16 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-func geminiToAntigravity(modelName string, payload []byte) []byte {
+func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
 	template, _ := sjson.Set(string(payload), "model", modelName)
 	template, _ = sjson.Set(template, "userAgent", "antigravity")
-	template, _ = sjson.Set(template, "project", generateProjectID())
+
+	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
+	if projectID != "" {
+		template, _ = sjson.Set(template, "project", projectID)
+	} else {
+		template, _ = sjson.Set(template, "project", generateProjectID())
+	}
 	template, _ = sjson.Set(template, "requestId", generateRequestID())
 	template, _ = sjson.Set(template, "request.sessionId", generateSessionID())
 
