@@ -181,6 +181,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if v := gjson.GetBytes(rawJSON, "top_k"); v.Exists() && v.Type == gjson.Number {
 		out, _ = sjson.Set(out, "request.generationConfig.topK", v.Num)
 	}
+	if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() && v.Type == gjson.Number {
+		out, _ = sjson.Set(out, "request.generationConfig.maxOutputTokens", v.Num)
+	}
 
 	outBytes := []byte(out)
 	outBytes = common.AttachDefaultSafetySettings(outBytes, "request.safetySettings")

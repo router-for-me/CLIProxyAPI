@@ -728,7 +728,7 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 
 	template, _ = sjson.Delete(template, "request.safetySettings")
 	template, _ = sjson.Set(template, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-	template, _ = sjson.Delete(template, "request.generationConfig.maxOutputTokens")
+
 	if !strings.HasPrefix(modelName, "gemini-3-") {
 		if thinkingLevel := gjson.Get(template, "request.generationConfig.thinkingConfig.thinkingLevel"); thinkingLevel.Exists() {
 			template, _ = sjson.Delete(template, "request.generationConfig.thinkingConfig.thinkingLevel")
@@ -736,7 +736,7 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 		}
 	}
 
-	if strings.HasPrefix(modelName, "claude-sonnet-") {
+	if strings.Contains(modelName, "claude") {
 		gjson.Get(template, "request.tools").ForEach(func(key, tool gjson.Result) bool {
 			tool.Get("functionDeclarations").ForEach(func(funKey, funcDecl gjson.Result) bool {
 				if funcDecl.Get("parametersJsonSchema").Exists() {
@@ -748,6 +748,8 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 			})
 			return true
 		})
+	} else {
+		template, _ = sjson.Delete(template, "request.generationConfig.maxOutputTokens")
 	}
 
 	return []byte(template)
