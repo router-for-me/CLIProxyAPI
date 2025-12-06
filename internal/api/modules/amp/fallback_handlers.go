@@ -28,6 +28,9 @@ const (
 	RouteTypeNoProvider AmpRouteType = "NO_PROVIDER"
 )
 
+// MappedModelContextKey is the Gin context key for passing mapped model names.
+const MappedModelContextKey = "mapped_model"
+
 // logAmpRouting logs the routing decision for an Amp request with structured fields
 func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provider, path string) {
 	fields := log.Fields{
@@ -141,6 +144,8 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 					// Mapping found - rewrite the model in request body
 					bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
 					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+					// Store mapped model in context for handlers that check it (like gemini bridge)
+					c.Set(MappedModelContextKey, mappedModel)
 					resolvedModel = mappedModel
 					usedMapping = true
 

@@ -170,9 +170,9 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	// If no local OAuth is available, falls back to ampcode.com proxy.
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
 	geminiBridge := createGeminiBridgeHandler(geminiHandlers)
-	geminiV1Beta1Fallback := NewFallbackHandler(func() *httputil.ReverseProxy {
+	geminiV1Beta1Fallback := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
 		return m.getProxy()
-	})
+	}, m.modelMapper)
 	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
 
 	// Route POST model calls through Gemini bridge when a local provider exists, otherwise proxy.
@@ -187,8 +187,14 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 				}
 				if modelPart != "" {
 					normalized, _ := util.NormalizeGeminiThinkingModel(modelPart)
-					// Only handle locally when we have a provider; otherwise fall back to proxy
-					if providers := util.GetProviderName(normalized); len(providers) > 0 {
+					// Only handle locally when we have a provider or a valid mapping; otherwise fall back to proxy
+					hasProvider := len(util.GetProviderName(normalized)) > 0
+					if !hasProvider && m.modelMapper != nil {
+						// Check if mapped model has provider (MapModel returns target only if it has providers)
+						hasProvider = m.modelMapper.MapModel(normalized) != ""
+					}
+
+					if hasProvider {
 						geminiV1Beta1Handler(c)
 						return
 					}

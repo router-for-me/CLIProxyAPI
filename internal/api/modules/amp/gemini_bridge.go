@@ -26,6 +26,18 @@ func createGeminiBridgeHandler(geminiHandler *gemini.GeminiAPIHandler) gin.Handl
 			// Extract everything after "/models/"
 			actionPart := path[idx+8:] // Skip "/models/"
 
+			// Check if model was mapped by FallbackHandler
+			if mappedModel, exists := c.Get(MappedModelContextKey); exists {
+				if strModel, ok := mappedModel.(string); ok && strModel != "" {
+					// Replace the model part in the action
+					// actionPart is like "model-name:method"
+					if colonIdx := strings.Index(actionPart, ":"); colonIdx > 0 {
+						method := actionPart[colonIdx:] // ":method"
+						actionPart = strModel + method
+					}
+				}
+			}
+
 			// Set this as the :action parameter that the Gemini handler expects
 			c.Params = append(c.Params, gin.Param{
 				Key:   "action",
