@@ -41,6 +41,11 @@ type AmpModule struct {
 	// configMu protects lastConfig for partial reload comparison
 	configMu   sync.RWMutex
 	lastConfig *config.AmpCode
+
+	// >>> LITELLM_HOOK_FIELDS - LiteLLM routing integration (see FORK_MAINTENANCE.md)
+	litellmConfig *LiteLLMConfig
+	litellmProxy  *httputil.ReverseProxy
+	// <<< LITELLM_HOOK_FIELDS
 }
 
 // New creates a new Amp routing module with the given options.
@@ -122,6 +127,19 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 
 		// Initialize localhost restriction setting (hot-reloadable)
 		m.setRestrictToLocalhost(settings.RestrictManagementToLocalhost)
+
+		// >>> LITELLM_HOOK_INIT - LiteLLM routing integration (see FORK_MAINTENANCE.md)
+		m.litellmConfig = NewLiteLLMConfig(ctx.Config)
+		if m.litellmConfig.IsEnabled() {
+			var litellmErr error
+			m.litellmProxy, litellmErr = CreateLiteLLMProxy(m.litellmConfig)
+			if litellmErr != nil {
+				log.Errorf("failed to create LiteLLM proxy: %v", litellmErr)
+			} else {
+				log.Infof("LiteLLM routing enabled for: %s (%d models)", m.litellmConfig.GetBaseURL(), m.litellmConfig.GetModelCount())
+			}
+		}
+		// <<< LITELLM_HOOK_INIT
 
 		// Always register provider aliases - these work without an upstream
 		m.registerProviderAliases(ctx.Engine, ctx.BaseHandler, auth)
@@ -253,6 +271,15 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 			}
 		}
 	}
+
+	// >>> LITELLM_HOOK_RELOAD - LiteLLM config hot-reload (see FORK_MAINTENANCE.md)
+	if m.litellmConfig != nil {
+		m.litellmConfig.Update(cfg)
+		changes = append(changes, "litellm-config")
+		log.Debugf("litellm config reloaded: enabled=%v, models=%d",
+			m.litellmConfig.IsEnabled(), m.litellmConfig.GetModelCount())
+	}
+	// <<< LITELLM_HOOK_RELOAD
 
 	// Store current config for next comparison
 	m.configMu.Lock()

@@ -198,6 +198,12 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 		ampProviders.Use(auth)
 	}
 
+	// >>> LITELLM_HOOK_MIDDLEWARE - LiteLLM routing integration (see FORK_MAINTENANCE.md)
+	if m.litellmConfig != nil && m.litellmProxy != nil {
+		ampProviders.Use(LiteLLMMiddleware(m.litellmConfig, m.litellmProxy))
+	}
+	// <<< LITELLM_HOOK_MIDDLEWARE
+
 	provider := ampProviders.Group("/:provider")
 
 	// Dynamic models handler - routes to appropriate provider based on path parameter
