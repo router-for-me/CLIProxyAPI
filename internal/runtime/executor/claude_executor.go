@@ -464,7 +464,11 @@ func ensureMaxTokensForThinking(modelName string, body []byte) []byte {
 		return body
 	}
 
+	// Check both snake_case (Anthropic native) and camelCase (AI SDK) formats
 	budgetTokens := gjson.GetBytes(body, "thinking.budget_tokens").Int()
+	if budgetTokens <= 0 {
+		budgetTokens = gjson.GetBytes(body, "thinking.budgetTokens").Int()
+	}
 	if budgetTokens <= 0 {
 		return body
 	}
