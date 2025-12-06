@@ -1342,6 +1342,21 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		// Handle Copilot OAuth auth files
+		if provider == "copilot" {
+			accessToken, _ := metadata["access_token"].(string)
+			login, _ := metadata["login"].(string)
+			a.Label = login
+			a.Attributes["base_url"] = "https://api.githubcopilot.com"
+			a.Attributes["api_key"] = accessToken
+			a.Attributes["provider_key"] = "copilot"
+			a.Attributes["compat_name"] = "copilot"
+			// Required headers for GitHub Copilot API
+			a.Attributes["header:Editor-Version"] = "vscode/1.96.0"
+			a.Attributes["header:Editor-Plugin-Version"] = "copilot-chat/0.24.0"
+			a.Attributes["header:Copilot-Integration-Id"] = "vscode-chat"
+			a.Attributes["header:User-Agent"] = "GitHubCopilotChat/0.24.0"
+		}
 		applyAuthExcludedModelsMeta(a, cfg, nil, "oauth")
 		if provider == "gemini-cli" {
 			if virtuals := synthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {

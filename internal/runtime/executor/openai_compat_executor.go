@@ -11,11 +11,13 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -354,3 +356,129 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+// FetchCopilotModels retrieves available models from GitHub Copilot API.
+func FetchCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	if auth == nil {
+		return nil
+	}
+
+	baseURL := "https://api.githubcopilot.com"
+	if v := strings.TrimSpace(auth.Attributes["base_url"]); v != "" {
+		baseURL = v
+	}
+	apiKey := strings.TrimSpace(auth.Attributes["api_key"])
+	if apiKey == "" {
+		return nil
+	}
+
+	url := strings.TrimSuffix(baseURL, "/") + "/models"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		log.WithError(err).Debug("copilot: failed to create models request")
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "application/json")
+	// Required Copilot headers
+	req.Header.Set("Editor-Version", "vscode/1.96.0")
+	req.Header.Set("Editor-Plugin-Version", "copilot-chat/0.24.0")
+	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
+	req.Header.Set("User-Agent", "GitHubCopilotChat/0.24.0")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.WithError(err).Debug("copilot: models request failed")
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.WithField("status", resp.StatusCode).Debug("copilot: models request returned non-200")
+		return nil
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.WithError(err).Debug("copilot: failed to read models response")
+		return nil
+	}
+
+	return parseCopilotModels(bodyBytes)
+}
+
+func parseCopilotModels(data []byte) []*registry.ModelInfo {
+	result := gjson.GetBytes(data, "data")
+	if !result.Exists() || !result.IsArray() {
+		return nil
+	}
+
+	now := time.Now().Unix()
+	var models []*registry.ModelInfo
+
+	result.ForEach(func(_, value gjson.Result) bool {
+		id := value.Get("id").String()
+		if id == "" {
+			return true
+		}
+
+		// Skip non-chat models (embeddings, etc.)
+		capType := value.Get("capabilities.type").String()
+		if capType != "chat" {
+			return true
+		}
+
+		// Check if model is enabled (policy.state == "enabled")
+		policyState := value.Get("policy.state").String()
+		if policyState == "disabled" {
+			return true
+		}
+
+		vendor := value.Get("vendor").String()
+		displayName := value.Get("name").String()
+		if displayName == "" {
+			displayName = id
+		}
+
+		modelInfo := &registry.ModelInfo{
+			ID:          id,
+			Name:        id,
+			DisplayName: displayName,
+			Description: fmt.Sprintf("%s via GitHub Copilot", displayName),
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     strings.ToLower(vendor),
+			Type:        "copilot",
+		}
+
+		// Extract limits
+		if limits := value.Get("capabilities.limits"); limits.Exists() {
+			if v := limits.Get("max_context_window_tokens").Int(); v > 0 {
+				modelInfo.ContextLength = int(v)
+			}
+			if v := limits.Get("max_output_tokens").Int(); v > 0 {
+				modelInfo.MaxCompletionTokens = int(v)
+			}
+		}
+
+		// Extract thinking support
+		if supports := value.Get("capabilities.supports"); supports.Exists() {
+			minBudget := supports.Get("min_thinking_budget").Int()
+			maxBudget := supports.Get("max_thinking_budget").Int()
+			if maxBudget > 0 {
+				modelInfo.Thinking = &registry.ThinkingSupport{
+					Min:            int(minBudget),
+					Max:            int(maxBudget),
+					ZeroAllowed:    minBudget == 0,
+					DynamicAllowed: true,
+				}
+			}
+		}
+
+		models = append(models, modelInfo)
+		return true
+	})
+
+	return models
+}
