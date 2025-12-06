@@ -1344,8 +1344,14 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 		}
 		// Handle Copilot OAuth auth files
 		if provider == "copilot" {
-			accessToken, _ := metadata["access_token"].(string)
-			login, _ := metadata["login"].(string)
+accessToken, ok := metadata["access_token"].(string)
+if !ok {
+	log.Warnf("copilot auth file %s missing or invalid 'access_token'", a.ID)
+}
+login, ok := metadata["login"].(string)
+if !ok {
+	log.Warnf("copilot auth file %s missing or invalid 'login'", a.ID)
+}
 			a.Label = login
 			a.Attributes["base_url"] = "https://api.githubcopilot.com"
 			a.Attributes["api_key"] = accessToken
