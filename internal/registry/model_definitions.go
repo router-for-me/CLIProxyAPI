@@ -1170,3 +1170,161 @@ func GetGitHubCopilotModels() []*ModelInfo {
 		},
 	}
 }
+
+// GetKiroModels returns the Kiro (AWS CodeWhisperer) model definitions
+func GetKiroModels() []*ModelInfo {
+	return []*ModelInfo{
+		{
+			ID:                  "kiro-auto",
+			Object:              "model",
+			Created:             1732752000, // 2024-11-28
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Auto",
+			Description:         "Automatic model selection by AWS CodeWhisperer",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "kiro-claude-opus-4.5",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Opus 4.5",
+			Description:         "Claude Opus 4.5 via Kiro (2.2x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "kiro-claude-sonnet-4.5",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Sonnet 4.5",
+			Description:         "Claude Sonnet 4.5 via Kiro (1.3x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "kiro-claude-sonnet-4",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Sonnet 4",
+			Description:         "Claude Sonnet 4 via Kiro (1.3x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "kiro-claude-haiku-4.5",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Haiku 4.5",
+			Description:         "Claude Haiku 4.5 via Kiro (0.4x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		// --- Chat Variant (No tool calling, for pure conversation) ---
+		{
+			ID:                  "kiro-claude-opus-4.5-chat",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Opus 4.5 (Chat)",
+			Description:         "Claude Opus 4.5 for chat only (no tool calling)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		// --- Agentic Variants (Optimized for coding agents with chunked writes) ---
+		{
+			ID:                  "kiro-claude-opus-4.5-agentic",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Opus 4.5 (Agentic)",
+			Description:         "Claude Opus 4.5 optimized for coding agents (chunked writes)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "kiro-claude-sonnet-4.5-agentic",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Sonnet 4.5 (Agentic)",
+			Description:         "Claude Sonnet 4.5 optimized for coding agents (chunked writes)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+	}
+}
+
+// GetAmazonQModels returns the Amazon Q (AWS CodeWhisperer) model definitions.
+// These models use the same API as Kiro and share the same executor.
+func GetAmazonQModels() []*ModelInfo {
+	return []*ModelInfo{
+		{
+			ID:                  "amazonq-auto",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro", // Uses Kiro executor - same API
+			DisplayName:         "Amazon Q Auto",
+			Description:         "Automatic model selection by Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "amazonq-claude-opus-4.5",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Amazon Q Claude Opus 4.5",
+			Description:         "Claude Opus 4.5 via Amazon Q (2.2x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "amazonq-claude-sonnet-4.5",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Amazon Q Claude Sonnet 4.5",
+			Description:         "Claude Sonnet 4.5 via Amazon Q (1.3x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "amazonq-claude-sonnet-4",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Amazon Q Claude Sonnet 4",
+			Description:         "Claude Sonnet 4 via Amazon Q (1.3x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "amazonq-claude-haiku-4.5",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Amazon Q Claude Haiku 4.5",
+			Description:         "Claude Haiku 4.5 via Amazon Q (0.4x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+	}
+}
