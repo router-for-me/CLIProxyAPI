@@ -58,6 +58,9 @@ type Config struct {
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
+	// KiroKey defines a list of Kiro (AWS CodeWhisperer) configurations.
+	KiroKey []KiroKey `yaml:"kiro" json:"kiro"`
+
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
@@ -79,6 +82,11 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	// IncognitoBrowser enables opening OAuth URLs in incognito/private browsing mode.
+	// This is useful when you want to login with a different account without logging out
+	// from your current session. Default: false.
+	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
@@ -240,6 +248,31 @@ type GeminiKey struct {
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
+// KiroKey represents the configuration for Kiro (AWS CodeWhisperer) authentication.
+type KiroKey struct {
+	// TokenFile is the path to the Kiro token file (default: ~/.aws/sso/cache/kiro-auth-token.json)
+	TokenFile string `yaml:"token-file,omitempty" json:"token-file,omitempty"`
+
+	// AccessToken is the OAuth access token for direct configuration.
+	AccessToken string `yaml:"access-token,omitempty" json:"access-token,omitempty"`
+
+	// RefreshToken is the OAuth refresh token for token renewal.
+	RefreshToken string `yaml:"refresh-token,omitempty" json:"refresh-token,omitempty"`
+
+	// ProfileArn is the AWS CodeWhisperer profile ARN.
+	ProfileArn string `yaml:"profile-arn,omitempty" json:"profile-arn,omitempty"`
+
+	// Region is the AWS region (default: us-east-1).
+	Region string `yaml:"region,omitempty" json:"region,omitempty"`
+
+	// ProxyURL optionally overrides the global proxy for this configuration.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// AgentTaskType sets the Kiro API task type. Known values: "vibe", "dev", "chat".
+	// Leave empty to let API use defaults. Different values may inject different system prompts.
+	AgentTaskType string `yaml:"agent-task-type,omitempty" json:"agent-task-type,omitempty"`
+}
+
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.
 type OpenAICompatibility struct {
@@ -320,6 +353,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
 	cfg.AmpCode.RestrictManagementToLocalhost = true // Default to secure: only localhost access
+	cfg.IncognitoBrowser = false                     // Default to normal browser (AWS uses incognito by force)
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -369,6 +403,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
+
+	// Sanitize Kiro keys: trim whitespace from credential fields
+	cfg.SanitizeKiroKeys()
 
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
@@ -443,6 +480,22 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry := &cfg.ClaudeKey[i]
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+	}
+}
+
+// SanitizeKiroKeys trims whitespace from Kiro credential fields.
+func (cfg *Config) SanitizeKiroKeys() {
+	if cfg == nil || len(cfg.KiroKey) == 0 {
+		return
+	}
+	for i := range cfg.KiroKey {
+		entry := &cfg.KiroKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.AccessToken = strings.TrimSpace(entry.AccessToken)
+		entry.RefreshToken = strings.TrimSpace(entry.RefreshToken)
+		entry.ProfileArn = strings.TrimSpace(entry.ProfileArn)
+		entry.Region = strings.TrimSpace(entry.Region)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	}
 }
 

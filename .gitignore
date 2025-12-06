@@ -1,5 +1,6 @@
 # Binaries
 cli-proxy-api
+cliproxy
 *.exe
 
 # Configuration
@@ -31,6 +32,7 @@ GEMINI.md
 .vscode/*
 .claude/*
 .serena/*
+.mcp/cache/
 
 # macOS
 .DS_Store
