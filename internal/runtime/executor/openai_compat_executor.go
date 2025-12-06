@@ -380,11 +380,8 @@ func FetchCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *confi
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")
-	// Required Copilot headers
-	req.Header.Set("Editor-Version", "vscode/1.96.0")
-	req.Header.Set("Editor-Plugin-Version", "copilot-chat/0.24.0")
-	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
-	req.Header.Set("User-Agent", "GitHubCopilotChat/0.24.0")
+	// Apply Copilot custom headers from auth attributes for maintainability
+	util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
