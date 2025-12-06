@@ -11,6 +11,7 @@ The Plus release stays in lockstep with the mainline features.
 ## Differences from the Mainline
 
 - Added GitHub Copilot support (OAuth login), provided by [em4gp](https://github.com/em4go/CLIProxyAPI/tree/feature/github-copilot-auth)
+- Added Kiro (AWS CodeWhisperer) support (OAuth login), provided by [fuko2935](https://github.com/fuko2935/CLIProxyAPI/tree/feature/kiro-integration)
 
 ## Contributing
 
