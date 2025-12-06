@@ -86,6 +86,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
 						clientContent.Parts = append(clientContent.Parts, client.Part{Text: prompt})
+					} else if contentTypeResult.Type == gjson.String && (contentTypeResult.String() == "thinking" || contentTypeResult.String() == "redacted_thinking") {
+						// Skip thinking blocks from conversation history
+						// These are internal reasoning and should not be sent back to the model
+						continue
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_use" {
 						functionName := contentResult.Get("name").String()
 						functionArgs := contentResult.Get("input").String()
@@ -128,10 +132,24 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
+
+			// Check for standard tools with input_schema at top level
 			inputSchemaResult := toolResult.Get("input_schema")
+
+			// Also check for custom tools (computer_use, bash, text_editor)
+			// which have schema nested at custom.input_schema
+			if !inputSchemaResult.Exists() || !inputSchemaResult.IsObject() {
+				customInputSchemaResult := toolResult.Get("custom.input_schema")
+				if customInputSchemaResult.Exists() && customInputSchemaResult.IsObject() {
+					inputSchemaResult = customInputSchemaResult
+				}
+			}
+
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				inputSchema := inputSchemaResult.Raw
 				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
+				tool, _ = sjson.Delete(tool, "custom.input_schema")
+				tool, _ = sjson.Delete(tool, "custom")
 				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
 				tool, _ = sjson.Delete(tool, "strict")
 				tool, _ = sjson.Delete(tool, "input_examples")
@@ -162,16 +180,29 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
-	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() && util.ModelSupportsThinking(modelName) {
+	// For Antigravity (Gemini backend), always honor client's thinking request since Gemini 2.5+ models support it.
+	// This allows OpenCode and other clients to use thinking with any model name mapped to Gemini.
+	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() {
 		if t.Get("type").String() == "enabled" {
+			// Default budget if not specified (8192 tokens = medium)
+			budget := 8192
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
-				budget := int(b.Int())
-				budget = util.NormalizeThinkingBudget(modelName, budget)
-				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+				budget = int(b.Int())
 			}
+			budget = util.NormalizeThinkingBudget(modelName, budget)
+			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		}
 	}
+
+	// Auto-enable thinking for models with "-thinking" suffix when no explicit config provided
+	if !gjson.Get(out, "request.generationConfig.thinkingConfig").Exists() {
+		if strings.HasSuffix(modelName, "-thinking") {
+			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+		}
+	}
+
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {
 		out, _ = sjson.Set(out, "request.generationConfig.temperature", v.Num)
 	}

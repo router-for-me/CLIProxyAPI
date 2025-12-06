@@ -74,7 +74,11 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
-	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	// Ensure max_tokens > thinking.budget_tokens for Claude models on Vertex AI
+	payload := ensureMaxTokensForThinking(req.Model, bytes.Clone(req.Payload))
+	// Also fix OriginalRequest since it's used by TranslateNonStream for Claude models
+	opts.OriginalRequest = ensureMaxTokensForThinking(req.Model, opts.OriginalRequest)
+	translated := sdktranslator.TranslateRequest(from, to, req.Model, payload, false)
 
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
@@ -167,7 +171,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
-	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	// Ensure max_tokens > thinking.budget_tokens for Claude models on Vertex AI
+	payload := ensureMaxTokensForThinking(req.Model, bytes.Clone(req.Payload))
+	// Also fix OriginalRequest since it's used by TranslateStream for Claude models
+	opts.OriginalRequest = ensureMaxTokensForThinking(req.Model, opts.OriginalRequest)
+	translated := sdktranslator.TranslateRequest(from, to, req.Model, payload, true)
 
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
@@ -725,7 +733,9 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	template, _ = sjson.Delete(template, "request.safetySettings")
 	template, _ = sjson.Set(template, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 
-	if !strings.HasPrefix(modelName, "gemini-3-") {
+	// Only reset thinkingBudget to -1 for Gemini models (not Claude, not Gemini-3)
+	isClaude := strings.Contains(modelName, "claude")
+	if !strings.HasPrefix(modelName, "gemini-3-") && !isClaude {
 		if thinkingLevel := gjson.Get(template, "request.generationConfig.thinkingConfig.thinkingLevel"); thinkingLevel.Exists() {
 			template, _ = sjson.Delete(template, "request.generationConfig.thinkingConfig.thinkingLevel")
 			template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
