@@ -83,7 +83,7 @@ func PollForToken(ctx context.Context, clientID, deviceCode string, interval tim
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	fmt.Printf("Waiting for authorization (polling every %s)", interval)
+	fmt.Printf("Waiting for authorization (polling every %s)\n", interval)
 
 	for {
 		select {
