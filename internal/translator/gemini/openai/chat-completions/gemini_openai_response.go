@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -78,8 +79,8 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 
 	// Extract and set the finish reason.
 	if finishReasonResult := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finishReasonResult.Exists() {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReasonResult.String())
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReasonResult.String())
+		template, _ = sjson.Set(template, "choices.0.finish_reason", strings.ToLower(finishReasonResult.String()))
+		template, _ = sjson.Set(template, "choices.0.native_finish_reason", strings.ToLower(finishReasonResult.String()))
 	}
 
 	// Extract and set usage metadata (token counts).
@@ -230,8 +231,8 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 	}
 
 	if finishReasonResult := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finishReasonResult.Exists() {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReasonResult.String())
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReasonResult.String())
+		template, _ = sjson.Set(template, "choices.0.finish_reason", strings.ToLower(finishReasonResult.String()))
+		template, _ = sjson.Set(template, "choices.0.native_finish_reason", strings.ToLower(finishReasonResult.String()))
 	}
 
 	if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
