@@ -518,6 +518,29 @@ func cleanSchemaForClaudeRecursive(schema map[string]interface{}) {
 		delete(schema, "const")
 	}
 
+	// CRITICAL: Handle "anyOf" by taking the first element
+	// This preserves type information instead of losing it completely
+	// Example: {"anyOf": [{"type": "string"}, {"type": "null"}]} → {"type": "string"}
+	if anyOf, ok := schema["anyOf"].([]interface{}); ok && len(anyOf) > 0 {
+		if firstItem, ok := anyOf[0].(map[string]interface{}); ok {
+			// Merge first anyOf item into schema
+			for k, v := range firstItem {
+				schema[k] = v
+			}
+		}
+		delete(schema, "anyOf")
+	}
+
+	// Handle "oneOf" similarly - take first element
+	if oneOf, ok := schema["oneOf"].([]interface{}); ok && len(oneOf) > 0 {
+		if firstItem, ok := oneOf[0].(map[string]interface{}); ok {
+			for k, v := range firstItem {
+				schema[k] = v
+			}
+		}
+		delete(schema, "oneOf")
+	}
+
 	// Lowercase type fields for consistency
 	if typeVal, ok := schema["type"].(string); ok {
 		schema["type"] = strings.ToLower(typeVal)
@@ -526,8 +549,8 @@ func cleanSchemaForClaudeRecursive(schema map[string]interface{}) {
 	// Fields that Claude doesn't support in JSON Schema
 	// Based on JSON Schema draft 2020-12 compatibility
 	unsupportedFields := []string{
-		// Composition keywords that Claude doesn't support
-		"anyOf", "oneOf", "allOf", "not",
+		// Composition keywords - anyOf/oneOf handled above, others just deleted
+		"allOf", "not",
 		// Snake_case variants
 		"any_of", "one_of", "all_of",
 		// Reference keywords

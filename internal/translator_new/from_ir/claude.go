@@ -237,7 +237,12 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 	case ir.EventTypeToken:
 		result.WriteString(emitTextDelta(event.Content, state))
 	case ir.EventTypeReasoning:
-		result.WriteString(emitThinkingDelta(event.Reasoning, state))
+		// If we have a thought signature, emit signature_delta instead of thinking_delta
+		if event.ThoughtSignature != "" {
+			result.WriteString(emitSignatureDelta(event.ThoughtSignature, state))
+		} else {
+			result.WriteString(emitThinkingDelta(event.Reasoning, state))
+		}
 	case ir.EventTypeToolCall:
 		if event.ToolCall != nil {
 			result.WriteString(emitToolCall(event.ToolCall, state))
@@ -356,6 +361,28 @@ func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
 		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
 		"delta": map[string]interface{}{"type": "thinking_delta", "thinking": thinking},
+	}))
+	return result.String()
+}
+
+// emitSignatureDelta emits a signature_delta event for Claude thinking mode.
+// This is used when Gemini returns a thoughtSignature instead of readable thinking text.
+func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
+	var result strings.Builder
+	idx := 0
+	if state != nil {
+		idx = state.TextBlockIndex
+		if !state.TextBlockStarted {
+			state.TextBlockStarted = true
+			result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]interface{}{
+				"type": ir.ClaudeSSEContentBlockStart, "index": idx,
+				"content_block": map[string]interface{}{"type": ir.ClaudeBlockThinking, "thinking": ""},
+			}))
+		}
+	}
+	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
+		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
+		"delta": map[string]interface{}{"type": "signature_delta", "signature": signature},
 	}))
 	return result.String()
 }
