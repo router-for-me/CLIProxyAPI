@@ -604,10 +604,22 @@ type kiroHistoryMessage struct {
 	AssistantResponseMessage *kiroAssistantResponseMessage `json:"assistantResponseMessage,omitempty"`
 }
 
+// kiroImage represents an image in Kiro API format
+type kiroImage struct {
+	Format string          `json:"format"`
+	Source kiroImageSource `json:"source"`
+}
+
+// kiroImageSource contains the image data
+type kiroImageSource struct {
+	Bytes string `json:"bytes"` // base64 encoded image data
+}
+
 type kiroUserInputMessage struct {
 	Content                 string                       `json:"content"`
 	ModelID                 string                       `json:"modelId"`
 	Origin                  string                       `json:"origin"`
+	Images                  []kiroImage                  `json:"images,omitempty"`
 	UserInputMessageContext *kiroUserInputMessageContext `json:"userInputMessageContext,omitempty"`
 }
 
@@ -824,6 +836,7 @@ func (e *KiroExecutor) buildUserMessageStruct(msg gjson.Result, modelID, origin 
 	content := msg.Get("content")
 	var contentBuilder strings.Builder
 	var toolResults []kiroToolResult
+	var images []kiroImage
 
 	if content.IsArray() {
 		for _, part := range content.Array() {
@@ -831,6 +844,25 @@ func (e *KiroExecutor) buildUserMessageStruct(msg gjson.Result, modelID, origin 
 			switch partType {
 			case "text":
 				contentBuilder.WriteString(part.Get("text").String())
+			case "image":
+				// Extract image data from Claude API format
+				mediaType := part.Get("source.media_type").String()
+				data := part.Get("source.data").String()
+				
+				// Extract format from media_type (e.g., "image/png" -> "png")
+				format := ""
+				if idx := strings.LastIndex(mediaType, "/"); idx != -1 {
+					format = mediaType[idx+1:]
+				}
+				
+				if format != "" && data != "" {
+					images = append(images, kiroImage{
+						Format: format,
+						Source: kiroImageSource{
+							Bytes: data,
+						},
+					})
+				}
 			case "tool_result":
 				// Extract tool result for API
 				toolUseID := part.Get("tool_use_id").String()
@@ -872,11 +904,18 @@ func (e *KiroExecutor) buildUserMessageStruct(msg gjson.Result, modelID, origin 
 		contentBuilder.WriteString(content.String())
 	}
 
-	return kiroUserInputMessage{
+	userMsg := kiroUserInputMessage{
 		Content: contentBuilder.String(),
 		ModelID: modelID,
 		Origin:  origin,
-	}, toolResults
+	}
+
+	// Add images to message if present
+	if len(images) > 0 {
+		userMsg.Images = images
+	}
+
+	return userMsg, toolResults
 }
 
 // buildAssistantMessageStruct builds an assistant message with tool uses
