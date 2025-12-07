@@ -185,20 +185,20 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 						} else if partType == "image_url" {
 							imageURL := part.Get("image_url.url").String()
 							
-							// 检查是否是base64格式 (data:image/png;base64,xxxxx)
+							// Check if it's base64 format (data:image/png;base64,xxxxx)
 							if strings.HasPrefix(imageURL, "data:") {
-								// 解析 data URL 格式
-								// 格式: data:image/png;base64,xxxxx
+								// Parse data URL format
+								// Format: data:image/png;base64,xxxxx
 								commaIdx := strings.Index(imageURL, ",")
 								if commaIdx != -1 {
-									// 提取 media_type (例如 "image/png")
-									header := imageURL[5:commaIdx] // 去掉 "data:" 前缀
+									// Extract media_type (e.g., "image/png")
+									header := imageURL[5:commaIdx] // Remove "data:" prefix
 									mediaType := header
 									if semiIdx := strings.Index(header, ";"); semiIdx != -1 {
 										mediaType = header[:semiIdx]
 									}
 									
-									// 提取 base64 数据
+									// Extract base64 data
 									base64Data := imageURL[commaIdx+1:]
 									
 									contentParts = append(contentParts, map[string]interface{}{
@@ -211,7 +211,7 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 									})
 								}
 							} else {
-								// 普通URL格式 - 保持原有逻辑
+								// Regular URL format - keep original logic
 								contentParts = append(contentParts, map[string]interface{}{
 									"type": "image",
 									"source": map[string]interface{}{
@@ -247,20 +247,20 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 					} else if partType == "image_url" {
 						imageURL := part.Get("image_url.url").String()
 						
-						// 检查是否是base64格式 (data:image/png;base64,xxxxx)
+						// Check if it's base64 format (data:image/png;base64,xxxxx)
 						if strings.HasPrefix(imageURL, "data:") {
-							// 解析 data URL 格式
-							// 格式: data:image/png;base64,xxxxx
+							// Parse data URL format
+							// Format: data:image/png;base64,xxxxx
 							commaIdx := strings.Index(imageURL, ",")
 							if commaIdx != -1 {
-								// 提取 media_type (例如 "image/png")
-								header := imageURL[5:commaIdx] // 去掉 "data:" 前缀
+								// Extract media_type (e.g., "image/png")
+								header := imageURL[5:commaIdx] // Remove "data:" prefix
 								mediaType := header
 								if semiIdx := strings.Index(header, ";"); semiIdx != -1 {
 									mediaType = header[:semiIdx]
 								}
 								
-								// 提取 base64 数据
+								// Extract base64 data
 								base64Data := imageURL[commaIdx+1:]
 								
 								contentParts = append(contentParts, map[string]interface{}{
@@ -273,7 +273,7 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 								})
 							}
 						} else {
-							// 普通URL格式 - 保持原有逻辑
+							// Regular URL format - keep original logic
 							contentParts = append(contentParts, map[string]interface{}{
 								"type": "image",
 								"source": map[string]interface{}{
