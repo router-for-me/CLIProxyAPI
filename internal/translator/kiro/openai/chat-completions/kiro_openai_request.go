@@ -4,6 +4,7 @@ package chat_completions
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -182,13 +183,43 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 								"text": part.Get("text").String(),
 							})
 						} else if partType == "image_url" {
-							contentParts = append(contentParts, map[string]interface{}{
-								"type": "image",
-								"source": map[string]interface{}{
-									"type": "url",
-									"url":  part.Get("image_url.url").String(),
-								},
-							})
+							imageURL := part.Get("image_url.url").String()
+							
+							// Check if it's base64 format (data:image/png;base64,xxxxx)
+							if strings.HasPrefix(imageURL, "data:") {
+								// Parse data URL format
+								// Format: data:image/png;base64,xxxxx
+								commaIdx := strings.Index(imageURL, ",")
+								if commaIdx != -1 {
+									// Extract media_type (e.g., "image/png")
+									header := imageURL[5:commaIdx] // Remove "data:" prefix
+									mediaType := header
+									if semiIdx := strings.Index(header, ";"); semiIdx != -1 {
+										mediaType = header[:semiIdx]
+									}
+									
+									// Extract base64 data
+									base64Data := imageURL[commaIdx+1:]
+									
+									contentParts = append(contentParts, map[string]interface{}{
+										"type": "image",
+										"source": map[string]interface{}{
+											"type":       "base64",
+											"media_type": mediaType,
+											"data":       base64Data,
+										},
+									})
+								}
+							} else {
+								// Regular URL format - keep original logic
+								contentParts = append(contentParts, map[string]interface{}{
+									"type": "image",
+									"source": map[string]interface{}{
+										"type": "url",
+										"url":  imageURL,
+									},
+								})
+							}
 						}
 					}
 				} else if content.String() != "" {
@@ -214,13 +245,43 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 							"text": part.Get("text").String(),
 						})
 					} else if partType == "image_url" {
-						contentParts = append(contentParts, map[string]interface{}{
-							"type": "image",
-							"source": map[string]interface{}{
-								"type": "url",
-								"url":  part.Get("image_url.url").String(),
-							},
-						})
+						imageURL := part.Get("image_url.url").String()
+						
+						// Check if it's base64 format (data:image/png;base64,xxxxx)
+						if strings.HasPrefix(imageURL, "data:") {
+							// Parse data URL format
+							// Format: data:image/png;base64,xxxxx
+							commaIdx := strings.Index(imageURL, ",")
+							if commaIdx != -1 {
+								// Extract media_type (e.g., "image/png")
+								header := imageURL[5:commaIdx] // Remove "data:" prefix
+								mediaType := header
+								if semiIdx := strings.Index(header, ";"); semiIdx != -1 {
+									mediaType = header[:semiIdx]
+								}
+								
+								// Extract base64 data
+								base64Data := imageURL[commaIdx+1:]
+								
+								contentParts = append(contentParts, map[string]interface{}{
+									"type": "image",
+									"source": map[string]interface{}{
+										"type":       "base64",
+										"media_type": mediaType,
+										"data":       base64Data,
+									},
+								})
+							}
+						} else {
+							// Regular URL format - keep original logic
+							contentParts = append(contentParts, map[string]interface{}{
+								"type": "image",
+								"source": map[string]interface{}{
+									"type": "url",
+									"url":  imageURL,
+								},
+							})
+						}
 					}
 				}
 				claudeMsg["content"] = contentParts
