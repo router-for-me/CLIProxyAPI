@@ -4,6 +4,7 @@ package chat_completions
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -182,13 +183,43 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 								"text": part.Get("text").String(),
 							})
 						} else if partType == "image_url" {
-							contentParts = append(contentParts, map[string]interface{}{
-								"type": "image",
-								"source": map[string]interface{}{
-									"type": "url",
-									"url":  part.Get("image_url.url").String(),
-								},
-							})
+							imageURL := part.Get("image_url.url").String()
+							
+							// 检查是否是base64格式 (data:image/png;base64,xxxxx)
+							if strings.HasPrefix(imageURL, "data:") {
+								// 解析 data URL 格式
+								// 格式: data:image/png;base64,xxxxx
+								commaIdx := strings.Index(imageURL, ",")
+								if commaIdx != -1 {
+									// 提取 media_type (例如 "image/png")
+									header := imageURL[5:commaIdx] // 去掉 "data:" 前缀
+									mediaType := header
+									if semiIdx := strings.Index(header, ";"); semiIdx != -1 {
+										mediaType = header[:semiIdx]
+									}
+									
+									// 提取 base64 数据
+									base64Data := imageURL[commaIdx+1:]
+									
+									contentParts = append(contentParts, map[string]interface{}{
+										"type": "image",
+										"source": map[string]interface{}{
+											"type":       "base64",
+											"media_type": mediaType,
+											"data":       base64Data,
+										},
+									})
+								}
+							} else {
+								// 普通URL格式 - 保持原有逻辑
+								contentParts = append(contentParts, map[string]interface{}{
+									"type": "image",
+									"source": map[string]interface{}{
+										"type": "url",
+										"url":  imageURL,
+									},
+								})
+							}
 						}
 					}
 				} else if content.String() != "" {
@@ -214,13 +245,43 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 							"text": part.Get("text").String(),
 						})
 					} else if partType == "image_url" {
-						contentParts = append(contentParts, map[string]interface{}{
-							"type": "image",
-							"source": map[string]interface{}{
-								"type": "url",
-								"url":  part.Get("image_url.url").String(),
-							},
-						})
+						imageURL := part.Get("image_url.url").String()
+						
+						// 检查是否是base64格式 (data:image/png;base64,xxxxx)
+						if strings.HasPrefix(imageURL, "data:") {
+							// 解析 data URL 格式
+							// 格式: data:image/png;base64,xxxxx
+							commaIdx := strings.Index(imageURL, ",")
+							if commaIdx != -1 {
+								// 提取 media_type (例如 "image/png")
+								header := imageURL[5:commaIdx] // 去掉 "data:" 前缀
+								mediaType := header
+								if semiIdx := strings.Index(header, ";"); semiIdx != -1 {
+									mediaType = header[:semiIdx]
+								}
+								
+								// 提取 base64 数据
+								base64Data := imageURL[commaIdx+1:]
+								
+								contentParts = append(contentParts, map[string]interface{}{
+									"type": "image",
+									"source": map[string]interface{}{
+										"type":       "base64",
+										"media_type": mediaType,
+										"data":       base64Data,
+									},
+								})
+							}
+						} else {
+							// 普通URL格式 - 保持原有逻辑
+							contentParts = append(contentParts, map[string]interface{}{
+								"type": "image",
+								"source": map[string]interface{}{
+									"type": "url",
+									"url":  imageURL,
+								},
+							})
+						}
 					}
 				}
 				claudeMsg["content"] = contentParts
