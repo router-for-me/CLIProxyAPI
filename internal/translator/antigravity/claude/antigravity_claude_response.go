@@ -111,8 +111,11 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
 				if partResult.Get("thought").Bool() {
-					// Continue existing thinking block if already in thinking state
-					if params.ResponseType == 2 {
+					if thoughtSignature := partResult.Get("thoughtSignature"); thoughtSignature.Exists() && thoughtSignature.String() != "" {
+						output = output + "event: content_block_delta\n"
+						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", thoughtSignature.String())
+						output = output + fmt.Sprintf("data: %s\n\n\n", data)
+					} else if params.ResponseType == 2 { // Continue existing thinking block if already in thinking state
 						output = output + "event: content_block_delta\n"
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex), "delta.thinking", partTextResult.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
@@ -163,15 +166,16 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 								output = output + "\n\n\n"
 								params.ResponseIndex++
 							}
-
-							// Start a new text content block
-							output = output + "event: content_block_start\n"
-							output = output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex)
-							output = output + "\n\n\n"
-							output = output + "event: content_block_delta\n"
-							data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", partTextResult.String())
-							output = output + fmt.Sprintf("data: %s\n\n\n", data)
-							params.ResponseType = 1 // Set state to content
+							if partTextResult.String() != "" {
+								// Start a new text content block
+								output = output + "event: content_block_start\n"
+								output = output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex)
+								output = output + "\n\n\n"
+								output = output + "event: content_block_delta\n"
+								data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", partTextResult.String())
+								output = output + fmt.Sprintf("data: %s\n\n\n", data)
+								params.ResponseType = 1 // Set state to content
+							}
 						}
 					}
 				}

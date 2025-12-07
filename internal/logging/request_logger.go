@@ -20,6 +20,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
@@ -603,6 +604,7 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 	var content strings.Builder
 
 	content.WriteString("=== REQUEST INFO ===\n")
+	content.WriteString(fmt.Sprintf("Version: %s\n", buildinfo.Version))
 	content.WriteString(fmt.Sprintf("URL: %s\n", url))
 	content.WriteString(fmt.Sprintf("Method: %s\n", method))
 	content.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))

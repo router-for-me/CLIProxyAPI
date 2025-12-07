@@ -56,6 +56,8 @@ type Content struct {
 // Part represents a distinct piece of content within a message.
 // A part can be text, inline data (like an image), a function call, or a function response.
 type Part struct {
+	Thought bool `json:"thought,omitempty"`
+
 	// Text contains plain text content.
 	Text string `json:"text,omitempty"`
 
