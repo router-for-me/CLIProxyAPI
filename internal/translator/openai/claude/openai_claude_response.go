@@ -128,29 +128,40 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		param.CreatedAt = root.Get("created").Int()
 	}
 
+	// Helper to ensure message_start is sent before any content_block_start
+	// This is required by the Anthropic SSE protocol - message_start must come first.
+	// Some OpenAI-compatible providers (like GitHub Copilot) may not send role: "assistant"
+	// in the first chunk, so we need to emit message_start when we first see content.
+	ensureMessageStarted := func() {
+		if param.MessageStarted {
+			return
+		}
+		messageStart := map[string]interface{}{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"id":            param.MessageID,
+				"type":          "message",
+				"role":          "assistant",
+				"model":         param.Model,
+				"content":       []interface{}{},
+				"stop_reason":   nil,
+				"stop_sequence": nil,
+				"usage": map[string]interface{}{
+					"input_tokens":  0,
+					"output_tokens": 0,
+				},
+			},
+		}
+		messageStartJSON, _ := json.Marshal(messageStart)
+		results = append(results, "event: message_start\ndata: "+string(messageStartJSON)+"\n\n")
+		param.MessageStarted = true
+	}
+
 	// Check if this is the first chunk (has role)
 	if delta := root.Get("choices.0.delta"); delta.Exists() {
 		if role := delta.Get("role"); role.Exists() && role.String() == "assistant" && !param.MessageStarted {
 			// Send message_start event
-			messageStart := map[string]interface{}{
-				"type": "message_start",
-				"message": map[string]interface{}{
-					"id":            param.MessageID,
-					"type":          "message",
-					"role":          "assistant",
-					"model":         param.Model,
-					"content":       []interface{}{},
-					"stop_reason":   nil,
-					"stop_sequence": nil,
-					"usage": map[string]interface{}{
-						"input_tokens":  0,
-						"output_tokens": 0,
-					},
-				},
-			}
-			messageStartJSON, _ := json.Marshal(messageStart)
-			results = append(results, "event: message_start\ndata: "+string(messageStartJSON)+"\n\n")
-			param.MessageStarted = true
+			ensureMessageStarted()
 
 			// Don't send content_block_start for text here - wait for actual content
 		}
@@ -163,6 +174,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				}
 				stopTextContentBlock(param, &results)
 				if !param.ThinkingContentBlockStarted {
+					ensureMessageStarted() // Must send message_start before content_block_start
 					if param.ThinkingContentBlockIndex == -1 {
 						param.ThinkingContentBlockIndex = param.NextContentBlockIndex
 						param.NextContentBlockIndex++
@@ -197,6 +209,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		if content := delta.Get("content"); content.Exists() && content.String() != "" {
 			// Send content_block_start for text if not already sent
 			if !param.TextContentBlockStarted {
+				ensureMessageStarted() // Must send message_start before content_block_start
 				stopThinkingContentBlock(param, &results)
 				if param.TextContentBlockIndex == -1 {
 					param.TextContentBlockIndex = param.NextContentBlockIndex
@@ -256,6 +269,8 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				if function := toolCall.Get("function"); function.Exists() {
 					if name := function.Get("name"); name.Exists() {
 						accumulator.Name = name.String()
+
+						ensureMessageStarted() // Must send message_start before content_block_start
 
 						stopThinkingContentBlock(param, &results)
 
