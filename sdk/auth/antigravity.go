@@ -320,6 +320,11 @@ const (
 	antigravityClientMetadata = `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
 )
 
+// FetchAntigravityProjectID exposes project discovery for external callers.
+func FetchAntigravityProjectID(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
+	return fetchAntigravityProjectID(ctx, accessToken, httpClient)
+}
+
 // fetchAntigravityProjectID retrieves the project ID for the authenticated user via loadCodeAssist.
 // This uses the same approach as Gemini CLI to get the cloudaicompanionProject.
 func fetchAntigravityProjectID(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
