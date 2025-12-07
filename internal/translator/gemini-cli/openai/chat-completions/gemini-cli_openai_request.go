@@ -48,16 +48,30 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		case "low":
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 1024))
+			if util.IsGemini3Model(modelName) {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", "low")
+			} else {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 1024))
+			}
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		case "medium":
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 8192))
+			if !util.IsGemini3Model(modelName) {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 8192))
+			}
+			// Gemini 3: no thinkingLevel for medium, uses dynamic thinking (auto)
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		case "high":
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 32768))
+			if util.IsGemini3Model(modelName) {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
+			} else {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 32768))
+			}
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		default:
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+			if !util.IsGemini3Model(modelName) {
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+			}
+			// Gemini 3: no thinkingLevel for auto/default, uses dynamic thinking
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		}
 	}
@@ -88,12 +102,10 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 		}
 	}
 
-	// For gemini-3-pro-preview, always send default thinkingConfig when none specified.
-	// This matches the official Gemini CLI behavior which always sends:
-	// { thinkingBudget: -1, includeThoughts: true }
-	// See: ai-gemini-cli/packages/core/src/config/defaultModelConfigs.ts
-	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() && modelName == "gemini-3-pro-preview" {
-		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+	// For Gemini 3 models, enable thought summaries when no thinkingConfig is specified.
+	// Don't set thinkingLevel - let API use dynamic thinking by default.
+	// See: https://ai.google.dev/gemini-api/docs/thinking#thinking-levels
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() && util.IsGemini3Model(modelName) {
 		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 	}
 
