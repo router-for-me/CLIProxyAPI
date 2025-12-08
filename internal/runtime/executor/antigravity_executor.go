@@ -81,6 +81,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
+	translated = normalizeAntigravityThinking(req.Model, translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -174,6 +175,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
+	translated = normalizeAntigravityThinking(req.Model, translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -370,7 +372,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		}
 
 		now := time.Now().Unix()
-		thinkingConfig := registry.GetAntigravityThinkingConfig()
+		modelConfig := registry.GetAntigravityModelConfig()
 		models := make([]*registry.ModelInfo, 0, len(result.Map()))
 		for originalName := range result.Map() {
 			aliasName := modelName2Alias(originalName)
@@ -387,8 +389,13 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 					Type:        antigravityAuthType,
 				}
 				// Look up Thinking support from static config using alias name
-				if thinking, ok := thinkingConfig[aliasName]; ok {
-					modelInfo.Thinking = thinking
+				if cfg, ok := modelConfig[aliasName]; ok {
+					if cfg.Thinking != nil {
+						modelInfo.Thinking = cfg.Thinking
+					}
+					if cfg.MaxCompletionTokens > 0 {
+						modelInfo.MaxCompletionTokens = cfg.MaxCompletionTokens
+					}
 				}
 				models = append(models, modelInfo)
 			}
@@ -811,4 +818,54 @@ func alias2ModelName(modelName string) string {
 	default:
 		return modelName
 	}
+}
+
+// normalizeAntigravityThinking clamps or removes thinking config based on model support.
+// For Claude models, it additionally ensures thinking budget < max_tokens.
+func normalizeAntigravityThinking(model string, payload []byte) []byte {
+	payload = util.StripThinkingConfigIfUnsupported(model, payload)
+	if !util.ModelSupportsThinking(model) {
+		return payload
+	}
+	budget := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
+	if !budget.Exists() {
+		return payload
+	}
+	raw := int(budget.Int())
+	normalized := util.NormalizeThinkingBudget(model, raw)
+
+	isClaude := strings.Contains(strings.ToLower(model), "claude")
+	if isClaude {
+		effectiveMax, setDefaultMax := antigravityEffectiveMaxTokens(model, payload)
+		if effectiveMax > 0 && normalized >= effectiveMax {
+			normalized = effectiveMax - 1
+			if normalized < 1 {
+				normalized = 1
+			}
+		}
+		if setDefaultMax {
+			if res, errSet := sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", effectiveMax); errSet == nil {
+				payload = res
+			}
+		}
+	}
+
+	updated, err := sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget", normalized)
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+// antigravityEffectiveMaxTokens returns the max tokens to cap thinking:
+// prefer request-provided maxOutputTokens; otherwise fall back to model default.
+// The boolean indicates whether the value came from the model default (and thus should be written back).
+func antigravityEffectiveMaxTokens(model string, payload []byte) (max int, fromModel bool) {
+	if maxTok := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxTok.Exists() && maxTok.Int() > 0 {
+		return int(maxTok.Int()), false
+	}
+	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(model); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+		return modelInfo.MaxCompletionTokens, true
+	}
+	return 0, false
 }

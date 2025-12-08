@@ -240,16 +240,6 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 		Value *bool `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
-		var m map[string]any
-		if err2 := c.ShouldBindJSON(&m); err2 == nil {
-			for _, v := range m {
-				if b, ok := v.(bool); ok {
-					set(b)
-					h.persist(c)
-					return
-				}
-			}
-		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}

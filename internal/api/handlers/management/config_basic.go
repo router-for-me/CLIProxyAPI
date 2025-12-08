@@ -241,11 +241,3 @@ func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
 }
-
-// Force Model Mappings (for Amp CLI)
-func (h *Handler) GetForceModelMappings(c *gin.Context) {
-	c.JSON(200, gin.H{"force-model-mappings": h.cfg.AmpCode.ForceModelMappings})
-}
-func (h *Handler) PutForceModelMappings(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.AmpCode.ForceModelMappings = v })
-}
