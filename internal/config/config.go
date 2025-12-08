@@ -23,6 +23,12 @@ type Config struct {
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
 
+    // RoutingStrategy defines the routing strategy: "round-robin" (default) or "sequential"
+	RoutingStrategy string `yaml:"routing-strategy"`
+
+	// ProviderPriorities defines the priority of providers (higher value means higher priority)
+	ProviderPriorities map[string]int `yaml:"provider-priorities"`
+
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
