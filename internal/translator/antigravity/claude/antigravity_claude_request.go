@@ -190,7 +190,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		}
 		// type=="disabled" or other: respect explicit config
-	} else if !hasThinkingField && util.ModelSupportsThinking(modelName) {
+	} else if !t.Exists() && util.ModelSupportsThinking(modelName) {
 		// Auto-enable thinking when NO explicit thinking field was sent
 		budget := util.NormalizeThinkingBudget(modelName, defaultClaudeThinkingBudget)
 		out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
