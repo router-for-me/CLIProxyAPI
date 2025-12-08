@@ -91,6 +91,7 @@ type ModelRegistry struct {
 	clientProviders map[string]string
 	// mutex ensures thread-safe access to the registry
 	mutex *sync.RWMutex
+	priorities map[string]int
 }
 
 // Global model registry instance
@@ -105,6 +106,7 @@ func GetGlobalRegistry() *ModelRegistry {
 			clientModels:    make(map[string][]string),
 			clientProviders: make(map[string]string),
 			mutex:           &sync.RWMutex{},
+			priorities:      make(map[string]int),
 		}
 	})
 	return globalRegistry
@@ -378,6 +380,16 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 		copyModel.SupportedParameters = append([]string(nil), model.SupportedParameters...)
 	}
 	return &copyModel
+}
+
+func (r *ModelRegistry) SetPriorities(p map[string]int) {
+    r.mutex.Lock()
+    defer r.mutex.Unlock()
+    newPriorities := make(map[string]int, len(p))
+    for k, v := range p {
+        newPriorities[strings.ToLower(k)] = v
+    }
+    r.priorities = newPriorities
 }
 
 // UnregisterClient removes a client and decrements counts for its models
@@ -681,11 +693,28 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 		return nil
 	}
 
-	sort.Slice(providers, func(i, j int) bool {
-		if providers[i].count == providers[j].count {
-			return providers[i].name < providers[j].name
+	getPriority := func(name string) int {
+		if r.priorities == nil {
+			return 0
 		}
-		return providers[i].count > providers[j].count
+		return r.priorities[strings.ToLower(name)]
+	}
+
+	sort.Slice(providers, func(i, j int) bool {
+		// 1. Sort by configured priority in descending order (higher value has higher priority)
+		p1 := getPriority(providers[i].name)
+		p2 := getPriority(providers[j].name)
+		if p1 != p2 {
+			return p1 > p2
+		}
+
+		// 2. If priority is the same, sort by available account count in descending order (original logic)
+		if providers[i].count != providers[j].count {
+			return providers[i].count > providers[j].count
+		}
+
+		// 3. Finally, sort by name in alphabetical ascending order (to ensure determinism)
+		return providers[i].name < providers[j].name
 	})
 
 	result := make([]string, 0, len(providers))
