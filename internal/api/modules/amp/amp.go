@@ -100,14 +100,14 @@ func (m *AmpModule) Name() string {
 	return "amp-routing"
 }
 
-// getPrioritizeModelMappings returns whether model mappings should take precedence over local API keys
-func (m *AmpModule) getPrioritizeModelMappings() bool {
+// forceModelMappings returns whether model mappings should take precedence over local API keys
+func (m *AmpModule) forceModelMappings() bool {
 	m.configMu.RLock()
 	defer m.configMu.RUnlock()
 	if m.lastConfig == nil {
 		return false
 	}
-	return m.lastConfig.PrioritizeModelMappings
+	return m.lastConfig.ForceModelMappings
 }
 
 // Register sets up Amp routes if configured.

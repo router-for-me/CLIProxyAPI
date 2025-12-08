@@ -77,29 +77,29 @@ func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provid
 // FallbackHandler wraps a standard handler with fallback logic to ampcode.com
 // when the model's provider is not available in CLIProxyAPI
 type FallbackHandler struct {
-	getProxy                   func() *httputil.ReverseProxy
-	modelMapper                ModelMapper
-	getPrioritizeModelMappings func() bool
+	getProxy           func() *httputil.ReverseProxy
+	modelMapper        ModelMapper
+	forceModelMappings func() bool
 }
 
 // NewFallbackHandler creates a new fallback handler wrapper
 // The getProxy function allows lazy evaluation of the proxy (useful when proxy is created after routes)
 func NewFallbackHandler(getProxy func() *httputil.ReverseProxy) *FallbackHandler {
 	return &FallbackHandler{
-		getProxy:                   getProxy,
-		getPrioritizeModelMappings: func() bool { return false },
+		getProxy:           getProxy,
+		forceModelMappings: func() bool { return false },
 	}
 }
 
 // NewFallbackHandlerWithMapper creates a new fallback handler with model mapping support
-func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper, getPrioritize func() bool) *FallbackHandler {
-	if getPrioritize == nil {
-		getPrioritize = func() bool { return false }
+func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper, forceModelMappings func() bool) *FallbackHandler {
+	if forceModelMappings == nil {
+		forceModelMappings = func() bool { return false }
 	}
 	return &FallbackHandler{
-		getProxy:                   getProxy,
-		modelMapper:                mapper,
-		getPrioritizeModelMappings: getPrioritize,
+		getProxy:           getProxy,
+		modelMapper:        mapper,
+		forceModelMappings: forceModelMappings,
 	}
 }
 
@@ -141,11 +141,11 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		usedMapping := false
 		var providers []string
 
-		// Check if model mappings should take priority over local API keys
-		prioritizeMappings := fh.getPrioritizeModelMappings != nil && fh.getPrioritizeModelMappings()
+		// Check if model mappings should be forced ahead of local API keys
+		forceMappings := fh.forceModelMappings != nil && fh.forceModelMappings()
 
-		if prioritizeMappings {
-			// PRIORITY MODE: Check model mappings FIRST (takes precedence over local API keys)
+		if forceMappings {
+			// FORCE MODE: Check model mappings FIRST (takes precedence over local API keys)
 			// This allows users to route Amp requests to their preferred OAuth providers
 			if fh.modelMapper != nil {
 				if mappedModel := fh.modelMapper.MapModel(normalizedModel); mappedModel != "" {

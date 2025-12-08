@@ -149,6 +149,8 @@ ws-auth: false
 #   upstream-api-key: ""
 #   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (recommended)
 #   restrict-management-to-localhost: true
+#   # Force model mappings to run before checking local API keys (default: false)
+#   force-model-mappings: false
 #   # Amp Model Mappings
 #   # Route unavailable Amp models to alternative models available in your local proxy.
 #   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
