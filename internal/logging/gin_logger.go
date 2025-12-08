@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,10 @@ import (
 )
 
 const skipGinLogKey = "__gin_skip_request_logging__"
+
+// maxBodyReadSize limits how much of the request body we read for model extraction
+// to prevent memory issues with large payloads.
+const maxBodyReadSize = 64 * 1024 // 64KB
 
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
 // using logrus. It captures request details including method, path, status code, latency,
@@ -56,7 +61,10 @@ func GinLogrusLogger() gin.HandlerFunc {
 		method := c.Request.Method
 		errorMessage := c.Errors.ByType(gin.ErrorTypePrivate).String()
 		timestamp := time.Now().Format("2006/01/02 - 15:04:05")
-		logLine := fmt.Sprintf("[GIN] %s | %3d | %13v | %15s | %-7s \"%s\" | model=%s", timestamp, statusCode, latency, clientIP, method, path, model)
+		logLine := fmt.Sprintf("[GIN] %s | %3d | %13v | %15s | %-7s \"%s\"", timestamp, statusCode, latency, clientIP, method, path)
+		if model != "" {
+			logLine = logLine + " | model=" + model
+		}
 		if errorMessage != "" {
 			logLine = logLine + " | " + errorMessage
 		}
@@ -113,15 +121,30 @@ func shouldSkipGinRequestLogging(c *gin.Context) bool {
 
 // extractModelFromRequest reads the request body to extract the "model" field
 // for logging purposes. It restores the body so downstream handlers can read it.
+// Only extracts from POST/PUT/PATCH requests with JSON content-type.
+// Returns empty string if model cannot be extracted.
 func extractModelFromRequest(c *gin.Context) string {
-	if c.Request.Body == nil {
-		return "unknown"
+	// Only extract model for methods that typically have a JSON body
+	method := c.Request.Method
+	if method != http.MethodPost && method != http.MethodPut && method != http.MethodPatch {
+		return ""
 	}
 
-	// Read the body
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	// Only extract if content-type is JSON
+	contentType := c.GetHeader("Content-Type")
+	if contentType == "" || !strings.HasPrefix(contentType, "application/json") {
+		return ""
+	}
+
+	if c.Request.Body == nil {
+		return ""
+	}
+
+	// Read the body with size limit to prevent memory issues
+	limitedReader := io.LimitReader(c.Request.Body, maxBodyReadSize)
+	bodyBytes, err := io.ReadAll(limitedReader)
 	if err != nil {
-		return "unknown"
+		return ""
 	}
 
 	// Restore the body for downstream handlers
@@ -132,11 +155,7 @@ func extractModelFromRequest(c *gin.Context) string {
 		Model string `json:"model"`
 	}
 	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
-		return "unknown"
-	}
-
-	if payload.Model == "" {
-		return "unknown"
+		return ""
 	}
 
 	return payload.Model
