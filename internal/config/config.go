@@ -21,7 +21,7 @@ import (
 type Config struct {
 	config.SDKConfig `yaml:",inline"`
 	// Host is the network host/interface on which the API server will bind.
-	// Default is "0.0.0.0" (all interfaces). Use "127.0.0.1" or "localhost" for local-only access.
+	// Default is empty ("") to bind all interfaces (IPv4 + IPv6). Use "127.0.0.1" or "localhost" for local-only access.
 	Host string `yaml:"host" json:"-"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
@@ -323,7 +323,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Unmarshal the YAML data into the Config struct.
 	var cfg Config
 	// Set defaults before unmarshal so that absent keys keep defaults.
-	cfg.Host = "0.0.0.0" // Default to all interfaces for backward compatibility
+	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
 	cfg.LoggingToFile = false
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
