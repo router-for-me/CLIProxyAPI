@@ -300,7 +300,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create HTTP server
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Port),
+		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler: engine,
 	}
 

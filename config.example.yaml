@@ -1,3 +1,7 @@
+# Server host/interface to bind to. Default is "0.0.0.0" (all interfaces).
+# Use "127.0.0.1" or "localhost" to restrict access to local machine only.
+host: 0.0.0.0
+
 # Server port
 port: 8317
 
