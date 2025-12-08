@@ -18,6 +18,7 @@ import (
 )
 
 const geminiCLIClaudeThoughtSignature = "skip_thought_signature_validator"
+const defaultClaudeThinkingBudget = -1 // dynamic mode - let the model decide
 
 // ConvertClaudeRequestToAntigravity parses and transforms a Claude Code API request into Gemini CLI API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
@@ -176,15 +177,24 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
-	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() && util.ModelSupportsThinking(modelName) {
+	t := gjson.GetBytes(rawJSON, "thinking")
+	hasThinkingField := t.Exists() && t.IsObject()
+	if hasThinkingField && util.ModelSupportsThinking(modelName) {
 		if t.Get("type").String() == "enabled" {
+			budget := defaultClaudeThinkingBudget
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
-				budget := int(b.Int())
-				budget = util.NormalizeThinkingBudget(modelName, budget)
-				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+				budget = int(b.Int())
 			}
+			budget = util.NormalizeThinkingBudget(modelName, budget)
+			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 		}
+		// type=="disabled" or other: respect explicit config
+	} else if !hasThinkingField && util.ModelSupportsThinking(modelName) {
+		// Auto-enable thinking when NO explicit thinking field was sent
+		budget := util.NormalizeThinkingBudget(modelName, defaultClaudeThinkingBudget)
+		out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+		out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 	}
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {
 		out, _ = sjson.Set(out, "request.generationConfig.temperature", v.Num)
