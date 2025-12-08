@@ -17,11 +17,19 @@ type KiroProvider struct{}
 
 // ConvertRequest converts UnifiedChatRequest to Kiro API JSON format.
 func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
+	// Extract origin from metadata (default to AI_EDITOR)
+	origin := "AI_EDITOR"
+	if req.Metadata != nil {
+		if o, ok := req.Metadata["origin"].(string); ok && o != "" {
+			origin = o
+		}
+	}
+
 	tools := extractTools(req.Tools)
 	systemPrompt := extractSystemPrompt(req.Messages)
-	history, currentMessage := processMessages(req.Messages, tools, req.Model)
+	history, currentMessage := processMessages(req.Messages, tools, req.Model, origin)
 
-	injectSystemPrompt(systemPrompt, &history, currentMessage, req.Model)
+	injectSystemPrompt(systemPrompt, &history, currentMessage, req.Model, origin)
 
 	request := map[string]interface{}{
 		"conversationState": map[string]interface{}{
@@ -70,7 +78,7 @@ func extractSystemPrompt(messages []ir.Message) string {
 	return strings.Join(parts, "\n")
 }
 
-func processMessages(messages []ir.Message, tools []interface{}, modelID string) ([]interface{}, map[string]interface{}) {
+func processMessages(messages []ir.Message, tools []interface{}, modelID, origin string) ([]interface{}, map[string]interface{}) {
 	var nonSystem []ir.Message
 	for _, msg := range messages {
 		if msg.Role != ir.RoleSystem {
@@ -119,11 +127,11 @@ func processMessages(messages []ir.Message, tools []interface{}, modelID string)
 	if lastMsg.Role == ir.RoleUser {
 		history := make([]interface{}, 0, len(nonSystem)-1)
 		for i := 0; i < len(nonSystem)-1; i++ {
-			if m := convertMessage(nonSystem[i], tools, modelID, false); m != nil {
+			if m := convertMessage(nonSystem[i], tools, modelID, origin, false); m != nil {
 				history = append(history, m)
 			}
 		}
-		return history, convertMessage(lastMsg, tools, modelID, true)
+		return history, convertMessage(lastMsg, tools, modelID, origin, true)
 	}
 
 	// Handle trailing tool messages
@@ -138,33 +146,33 @@ func processMessages(messages []ir.Message, tools []interface{}, modelID string)
 
 	history := make([]interface{}, 0, trailingStart)
 	for i := 0; i < trailingStart; i++ {
-		if m := convertMessage(nonSystem[i], tools, modelID, false); m != nil {
+		if m := convertMessage(nonSystem[i], tools, modelID, origin, false); m != nil {
 			history = append(history, m)
 		}
 	}
 
 	var currentMessage map[string]interface{}
 	if trailingStart < len(nonSystem) {
-		currentMessage = buildMergedToolResultMessage(nonSystem[trailingStart:], tools, modelID)
+		currentMessage = buildMergedToolResultMessage(nonSystem[trailingStart:], tools, modelID, origin)
 	} else {
-		currentMessage = convertMessage(nonSystem[len(nonSystem)-1], tools, modelID, true)
+		currentMessage = convertMessage(nonSystem[len(nonSystem)-1], tools, modelID, origin, true)
 	}
 	return history, currentMessage
 }
 
-func convertMessage(msg ir.Message, tools []interface{}, modelID string, isCurrent bool) map[string]interface{} {
+func convertMessage(msg ir.Message, tools []interface{}, modelID, origin string, isCurrent bool) map[string]interface{} {
 	switch msg.Role {
 	case ir.RoleUser:
-		return buildUserMessage(msg, tools, modelID, isCurrent)
+		return buildUserMessage(msg, tools, modelID, origin, isCurrent)
 	case ir.RoleAssistant:
 		return buildAssistantMessage(msg, isCurrent)
 	case ir.RoleTool:
-		return buildToolResultMessage(msg, modelID)
+		return buildToolResultMessage(msg, modelID, origin)
 	}
 	return nil
 }
 
-func buildUserMessage(msg ir.Message, tools []interface{}, modelID string, isCurrent bool) map[string]interface{} {
+func buildUserMessage(msg ir.Message, tools []interface{}, modelID, origin string, isCurrent bool) map[string]interface{} {
 	content := ir.CombineTextParts(msg)
 	var toolResults, images []interface{}
 	for _, part := range msg.Content {
@@ -188,7 +196,7 @@ func buildUserMessage(msg ir.Message, tools []interface{}, modelID string, isCur
 	}
 
 	userInput := map[string]interface{}{
-		"content": content, "modelId": modelID, "origin": "AI_EDITOR", "userInputMessageContext": ctx,
+		"content": content, "modelId": modelID, "origin": origin, "userInputMessageContext": ctx,
 	}
 	if len(images) > 0 {
 		userInput["images"] = images
@@ -210,7 +218,7 @@ func buildAssistantMessage(msg ir.Message, _ bool) map[string]interface{} {
 	return map[string]interface{}{"assistantResponseMessage": assistantMsg}
 }
 
-func buildToolResultMessage(msg ir.Message, modelID string) map[string]interface{} {
+func buildToolResultMessage(msg ir.Message, modelID, origin string) map[string]interface{} {
 	var toolResults []interface{}
 	for _, part := range msg.Content {
 		if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
@@ -222,13 +230,13 @@ func buildToolResultMessage(msg ir.Message, modelID string) map[string]interface
 	}
 	return map[string]interface{}{
 		"userInputMessage": map[string]interface{}{
-			"content": "Continue", "modelId": modelID, "origin": "AI_EDITOR", "images": []interface{}{},
+			"content": "Continue", "modelId": modelID, "origin": origin, "images": []interface{}{},
 			"userInputMessageContext": map[string]interface{}{"toolResults": toolResults},
 		},
 	}
 }
 
-func buildMergedToolResultMessage(msgs []ir.Message, tools []interface{}, modelID string) map[string]interface{} {
+func buildMergedToolResultMessage(msgs []ir.Message, tools []interface{}, modelID, origin string) map[string]interface{} {
 	var toolResults []interface{}
 	var textParts []string
 	for _, msg := range msgs {
@@ -250,7 +258,7 @@ func buildMergedToolResultMessage(msgs []ir.Message, tools []interface{}, modelI
 	}
 	return map[string]interface{}{
 		"userInputMessage": map[string]interface{}{
-			"content": content, "modelId": modelID, "origin": "AI_EDITOR", "images": nil, "userInputMessageContext": ctx,
+			"content": content, "modelId": modelID, "origin": origin, "images": nil, "userInputMessageContext": ctx,
 		},
 	}
 }
@@ -270,7 +278,7 @@ func buildImageItem(img *ir.ImagePart) map[string]interface{} {
 	return map[string]interface{}{"format": format, "source": map[string]interface{}{"bytes": img.Data}}
 }
 
-func injectSystemPrompt(prompt string, history *[]interface{}, currentMessage map[string]interface{}, modelID string) {
+func injectSystemPrompt(prompt string, history *[]interface{}, currentMessage map[string]interface{}, modelID, origin string) {
 	if prompt == "" {
 		return
 	}
@@ -297,7 +305,7 @@ func injectSystemPrompt(prompt string, history *[]interface{}, currentMessage ma
 
 	*history = append([]interface{}{map[string]interface{}{
 		"userInputMessage": map[string]interface{}{
-			"content": prompt, "modelId": modelID, "origin": "AI_EDITOR",
+			"content": prompt, "modelId": modelID, "origin": origin,
 		},
 	}}, *history...)
 }

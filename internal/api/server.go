@@ -942,7 +942,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	for _, p := range cfg.OpenAICompatibility {
 		providerNames = append(providerNames, p.Name)
 	}
-	s.handlers.OpenAICompatProviders = providerNames
+	s.handlers.SetOpenAICompatProviders(providerNames)
 
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 

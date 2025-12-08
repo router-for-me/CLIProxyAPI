@@ -1,8 +1,9 @@
 # CLIProxyAPI-Extended
 
-> Fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with unified Canonical IR translation architecture and new providers (Kiro, Cline, Ollama)
+> Fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with unified Canonical IR translation architecture and new providers (Kiro, GitHub Copilot, Cline, Ollama)
 
 [![Original Repo](https://img.shields.io/badge/Original-router--for--me%2FCLIProxyAPI-blue)](https://github.com/router-for-me/CLIProxyAPI)
+[![Plus Version](https://img.shields.io/badge/Plus-router--for--me%2FCLIProxyAPIPlus-green)](https://github.com/router-for-me/CLIProxyAPIPlus)
 
 ## 📋 Contributing Notice
 
@@ -23,7 +24,8 @@ Contributions are welcome! Simple bug fixes with ready-to-merge code will likely
 |-----------|-------------|
 | **Canonical IR Translator** | Hub-and-spoke architecture for format translation |
 | **Ollama API** | Full implementation of Ollama-compatible server |
-| **Kiro (Amazon Q)** | New provider with access to Claude via Amazon Q |
+| **Kiro (Amazon Q)** | Provider with access to Claude via Amazon Q (multiple auth methods) |
+| **GitHub Copilot** | New provider with OAuth Device Flow authentication |
 | **Cline** | Provider with free models (MiniMax M2, Grok) |
 | **Model Registry** | Support for provider:modelID keys, visual prefixes |
 | **ThinkingSupport** | Metadata for reasoning-capable models |
@@ -32,7 +34,7 @@ Contributions are welcome! Simple bug fixes with ready-to-merge code will likely
 
 > **62% codebase reduction** — from 13,930 to 5,302 lines  
 > **86% Google providers unification** — from 5,651 to 780 lines  
-> **New providers:** Ollama, Kiro (Amazon Q), Cline (free models)
+> **New providers:** Ollama, Kiro (Amazon Q), GitHub Copilot, Cline (free models)
 
 ## Problem
 
@@ -59,8 +61,8 @@ internal/translator/
     Claude ─────┤                       ├───── Claude
     Ollama ─────┼─────► Canonical ◄─────┼───── Gemini (AI Studio)
       Kiro ─────┤       IR              ├───── Gemini CLI
-     Cline ─────┘                       ├───── Antigravity
-                                        ├───── Ollama
+     Cline ─────┤                       ├───── Antigravity
+   Copilot ─────┘                       ├───── Ollama
                                         └───── Cline
 ```
 
@@ -95,13 +97,20 @@ internal/translator/
 | Antigravity   | ✅ (shared w/ Gemini)| ✅ (via GeminiCLI)   |
 | Ollama        | ✅ Req/Resp/Stream   | ✅ Req/Resp/Stream   |
 | Kiro          | ✅ Resp/Stream       | ✅ Req               |
+| Copilot       | ✅ (via OpenAI)      | ✅ (via OpenAI)      |
 | Cline         | ✅ (via OpenAI)      | ✅ (via OpenAI)      |
+
+**GitHub Copilot** — provider with access to GPT and Claude models via GitHub Copilot subscription:
+- GPT-4o, GPT-4.1, Claude Sonnet 4, o3-mini, o4-mini and other models
+- Uses OAuth Device Flow for authentication
+- Automatic token caching and refresh
 
 **Cline** — provider with free models (MiniMax M2, Grok Code Fast 1), uses OpenAI-compatible format.
 
-**Kiro (Amazon Q)** — new provider with access to Claude models via Amazon Q:
+**Kiro (Amazon Q)** — provider with access to Claude models via Amazon Q:
 - Claude Sonnet 4.5, Claude 4 Opus, Claude 3.7 Sonnet, Claude 3.5 Sonnet/Haiku
 - Uses binary AWS Event Stream protocol
+- Multiple authentication methods (see below)
 
 ### Ollama as Output Format
 
@@ -185,7 +194,8 @@ translator_new/
 | aistudio           | ✅     | AI Studio, tested |
 | openai_compat      | ✅     | OpenAI-compatible, tested |
 | cline              | ✅     | Free models, tested |
-| kiro               | ✅     | Amazon Q (new translator only) |
+| kiro               | ✅     | Amazon Q, tested (multiple auth methods) |
+| github_copilot     | ✅     | GitHub Copilot, tested |
 | claude             | ⚠️     | Anthropic — not tested |
 | **codex**          | ❌     | Requires migration |
 | **qwen**           | ❌     | Requires migration |
@@ -201,12 +211,21 @@ translator_new/
 - JWT token is used with `workos:` prefix for API requests
 - **Important:** Obtaining the refresh token requires modification of the Cline extension source code
 
+### GitHub Copilot
+- Uses **OAuth Device Flow** for secure authentication
+- Run `cliproxy login github-copilot` to authenticate
+- Opens browser with device code, user confirms on GitHub
+- Tokens are automatically cached and refreshed
+- Access to GPT-4o, GPT-4.1, Claude Sonnet 4, o3-mini, o4-mini and other Copilot models
+
 ### Kiro (Amazon Q)
 - Tokens are automatically loaded from JSON file in auth directory (watcher) if you're logged into Kiro IDE, or can be configured manually
-- Supports two authentication methods:
-  - **Social auth** (Google, etc.) — via `prod.*.auth.desktop.kiro.dev`
-  - **IAM/SSO auth** — via AWS OIDC endpoint
+- Supports multiple authentication methods:
+  - **AWS Builder ID** — via AWS SSO OIDC device code flow (`cliproxy login kiro --method builderid`)
+  - **Social auth** (Google/GitHub) — via Kiro AuthService with custom `kiro://` protocol handler
+  - **Manual token** — load tokens from Kiro IDE cache automatically
 - Tokens are automatically refreshed via the corresponding endpoint
+- Run `cliproxy login kiro` to see available authentication options
 
 ## Compatibility and Migration
 
@@ -235,6 +254,7 @@ New providers (Kiro, Cline, Ollama API) only work with the flag enabled.
 - Claude Code support via OAuth login
 - Qwen Code support via OAuth login
 - iFlow support via OAuth login
+- GitHub Copilot support via OAuth Device Flow login
 - Streaming and non-streaming responses
 - Function calling/tools support
 - Multimodal input support (text and images)
@@ -272,36 +292,9 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+This project only accepts pull requests that relate to third-party provider support. Any pull requests unrelated to third-party provider support will be rejected.
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## Who is with us?
-
-Those projects are based on CLIProxyAPI:
-
-### [vibeproxy](https://github.com/automazeio/vibeproxy)
-
-Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with AI coding tools - no API keys needed
-
-### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
-
-Browser-based tool to translate SRT subtitles using your Gemini subscription via CLIProxyAPI with automatic validation/error correction - no API keys needed
-
-### [CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)
-
-CLI wrapper for instant switching between multiple Claude accounts and alternative models (Gemini, Codex, Antigravity) via CLIProxyAPI OAuth - no API keys needed
-
-### [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)
-
-Native macOS GUI for managing CLIProxyAPI: configure providers, model mappings, and endpoints via OAuth - no API keys needed.
-
-> [!NOTE]  
-> If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
+If you need to submit any non-third-party provider changes, please open them against the mainline repository.
 
 ## License
 

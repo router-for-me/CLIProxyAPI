@@ -384,6 +384,8 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewClineExecutor(s.cfg))
 	case "kiro":
 		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
+	case "copilot":
+		s.coreManager.RegisterExecutor(executor.NewGitHubCopilotExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -728,12 +730,14 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "iflow":
 		models = registry.GetIFlowModels()
-		models = applyExcludedModels(models, excluded)
-	case "cline":
-		models = registry.GetClineModels()
+	case "copilot":
+		models = registry.GetGitHubCopilotModels()
 		models = applyExcludedModels(models, excluded)
 	case "kiro":
 		models = registry.GetKiroModels()
+		models = applyExcludedModels(models, excluded)
+	case "cline":
+		models = registry.GetClineModels()
 		models = applyExcludedModels(models, excluded)
 	default:
 		log.Debugf("registerModelsForAuth: provider %s not matched, going to default", provider)

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -28,9 +29,20 @@ const (
 	iFlowAPIKeyEndpoint = "https://platform.iflow.cn/api/openapi/apikey"
 
 	// Client credentials provided by iFlow for the Code Assist integration.
-	iFlowOAuthClientID     = "10009311001"
-	iFlowOAuthClientSecret = "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW"
+	iFlowOAuthClientID = "10009311001"
+	// Default client secret (can be overridden via IFLOW_CLIENT_SECRET env var)
+	defaultIFlowClientSecret = "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW"
 )
+
+// getIFlowClientSecret returns the iFlow OAuth client secret.
+// It first checks the IFLOW_CLIENT_SECRET environment variable,
+// falling back to the default value if not set.
+func getIFlowClientSecret() string {
+	if secret := os.Getenv("IFLOW_CLIENT_SECRET"); secret != "" {
+		return secret
+	}
+	return defaultIFlowClientSecret
+}
 
 // DefaultAPIBaseURL is the canonical chat completions endpoint.
 const DefaultAPIBaseURL = "https://apis.iflow.cn/v1"
@@ -72,7 +84,7 @@ func (ia *IFlowAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectUR
 	form.Set("code", code)
 	form.Set("redirect_uri", redirectURI)
 	form.Set("client_id", iFlowOAuthClientID)
-	form.Set("client_secret", iFlowOAuthClientSecret)
+	form.Set("client_secret", getIFlowClientSecret())
 
 	req, err := ia.newTokenRequest(ctx, form)
 	if err != nil {
@@ -88,7 +100,7 @@ func (ia *IFlowAuth) RefreshTokens(ctx context.Context, refreshToken string) (*I
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 	form.Set("client_id", iFlowOAuthClientID)
-	form.Set("client_secret", iFlowOAuthClientSecret)
+	form.Set("client_secret", getIFlowClientSecret())
 
 	req, err := ia.newTokenRequest(ctx, form)
 	if err != nil {
@@ -104,7 +116,7 @@ func (ia *IFlowAuth) newTokenRequest(ctx context.Context, form url.Values) (*htt
 		return nil, fmt.Errorf("iflow token: create request failed: %w", err)
 	}
 
-	basic := base64.StdEncoding.EncodeToString([]byte(iFlowOAuthClientID + ":" + iFlowOAuthClientSecret))
+	basic := base64.StdEncoding.EncodeToString([]byte(iFlowOAuthClientID + ":" + getIFlowClientSecret()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Basic "+basic)

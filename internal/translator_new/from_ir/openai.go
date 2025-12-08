@@ -355,14 +355,24 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 		choice["delta"] = ir.BuildReasoningDelta(event.Reasoning, event.ThoughtSignature)
 	case ir.EventTypeToolCall:
 		if event.ToolCall != nil {
+			// Build tool call chunk - only include non-empty fields
+			tcChunk := map[string]interface{}{
+				"index": event.ToolCallIndex,
+			}
+			if event.ToolCall.ID != "" {
+				tcChunk["id"] = event.ToolCall.ID
+				tcChunk["type"] = "function"
+			}
+			funcChunk := map[string]interface{}{}
+			if event.ToolCall.Name != "" {
+				funcChunk["name"] = event.ToolCall.Name
+			}
+			// Args contains the delta for streaming
+			funcChunk["arguments"] = event.ToolCall.Args
+			tcChunk["function"] = funcChunk
+
 			choice["delta"] = map[string]interface{}{
-				"role": "assistant",
-				"tool_calls": []interface{}{
-					map[string]interface{}{
-						"index": chunkIndex, "id": event.ToolCall.ID, "type": "function",
-						"function": map[string]interface{}{"name": event.ToolCall.Name, "arguments": event.ToolCall.Args},
-					},
-				},
+				"tool_calls": []interface{}{tcChunk},
 			}
 		}
 	case ir.EventTypeImage:
@@ -390,12 +400,12 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 		if event.ContentFilter != nil {
 			choice["content_filter_results"] = event.ContentFilter
 		}
-		
+
 		if event.Usage != nil {
 			usageMap := map[string]interface{}{
 				"prompt_tokens": event.Usage.PromptTokens, "completion_tokens": event.Usage.CompletionTokens, "total_tokens": event.Usage.TotalTokens,
 			}
-			
+
 			promptDetails := map[string]interface{}{}
 			if event.Usage.CachedTokens > 0 {
 				promptDetails["cached_tokens"] = event.Usage.CachedTokens
@@ -426,7 +436,7 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 			if len(completionDetails) > 0 {
 				usageMap["completion_tokens_details"] = completionDetails
 			}
-			
+
 			chunk["usage"] = usageMap
 		}
 	case ir.EventTypeError:
@@ -434,7 +444,7 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 	default:
 		return nil, nil
 	}
-	
+
 	// Add logprobs to non-finish events if present (though usually only on finish or token)
 	if event.Logprobs != nil && event.Type != ir.EventTypeFinish {
 		choice["logprobs"] = event.Logprobs

@@ -762,7 +762,38 @@ func (r *ModelRegistry) GetModelInfo(modelID string) *ModelInfo {
 	return nil
 }
 
-// formatProviderPrefix creates a visual prefix for a model based on its type.
+// providerDisplayNames maps provider type keys to human-readable display names.
+// This is the single source of truth for provider naming across the registry.
+// CLI versions use OAuth authentication, others use API keys.
+var providerDisplayNames = map[string]string{
+	"gemini-cli":  "Gemini CLI",
+	"gemini":      "Gemini",
+	"vertex":      "Vertex AI",
+	"aistudio":    "AI Studio",
+	"claude":      "Claude",
+	"codex":       "Codex",
+	"qwen":        "Qwen",
+	"iflow":       "iFlow",
+	"cline":       "Cline",
+	"kiro":        "Kiro",
+	"copilot":     "Copilot",
+	"antigravity": "Antigravity",
+	"openai":      "OpenAI",
+	"anthropic":   "Anthropic",
+	"google":      "Google",
+}
+
+// displayNameToProvider is the reverse mapping of providerDisplayNames.
+// Built once at init time for efficient lookups.
+var displayNameToProvider map[string]string
+
+func init() {
+	displayNameToProvider = make(map[string]string, len(providerDisplayNames))
+	for provider, displayName := range providerDisplayNames {
+		displayNameToProvider[displayName] = provider
+	}
+}
+
 // ModelIDNormalizer provides centralized model ID normalization and prefix handling.
 type ModelIDNormalizer struct{}
 
@@ -794,25 +825,8 @@ func (n *ModelIDNormalizer) ExtractProviderFromPrefixedID(modelID string) string
 	modelID = strings.TrimSpace(modelID)
 	if strings.HasPrefix(modelID, "[") {
 		if idx := strings.Index(modelID, "] "); idx != -1 {
-			prefix := strings.TrimSpace(modelID[1:idx])
-			// Map display names back to provider types
-			providerMap := map[string]string{
-				"Gemini CLI":  "gemini-cli",
-				"Gemini":      "gemini",
-				"Vertex AI":   "vertex",
-				"AI Studio":   "aistudio",
-				"Antigravity": "antigravity",
-				"Claude":      "claude",
-				"Codex":       "codex",
-				"Qwen":        "qwen",
-				"iFlow":       "iflow",
-				"Cline":       "cline",
-				"Kiro":        "kiro",
-				"OpenAI":      "openai",
-				"Anthropic":   "anthropic",
-				"Google":      "google",
-			}
-			if provider, exists := providerMap[prefix]; exists {
+			displayName := strings.TrimSpace(modelID[1:idx])
+			if provider, exists := displayNameToProvider[displayName]; exists {
 				return provider
 			}
 		}
@@ -827,33 +841,15 @@ func StripProviderPrefix(modelID string) string {
 	return normalizer.NormalizeModelID(modelID)
 }
 
+// formatProviderPrefix creates a visual prefix for a model based on its type.
 // Returns empty string if prefixes are disabled or type is empty.
 func (r *ModelRegistry) formatProviderPrefix(modelType string) string {
 	if !r.showProviderPrefixes || modelType == "" {
 		return ""
 	}
 
-	// Map provider types to human-readable names
-	// CLI versions use OAuth authentication, others use API keys
-	providerNames := map[string]string{
-		"gemini-cli":  "Gemini CLI",
-		"gemini":      "Gemini",
-		"vertex":      "Vertex AI",
-		"aistudio":    "AI Studio",
-		"claude":      "Claude",
-		"codex":       "Codex",
-		"qwen":        "Qwen",
-		"iflow":       "iFlow",
-		"cline":       "Cline",
-		"kiro":        "Kiro",
-		"antigravity": "Antigravity",
-		"openai":      "OpenAI",
-		"anthropic":   "Anthropic",
-		"google":      "Google",
-	}
-
 	typeLower := strings.ToLower(strings.TrimSpace(modelType))
-	if displayName, exists := providerNames[typeLower]; exists {
+	if displayName, exists := providerDisplayNames[typeLower]; exists {
 		return "[" + displayName + "] "
 	}
 

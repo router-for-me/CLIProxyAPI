@@ -28,6 +28,6 @@ const (
 	// Ollama represents the Ollama API format identifier.
 	Ollama = "ollama"
 
-	// Kiro represents the Kiro (Amazon Q) provider identifier.
+	// Kiro represents the Kiro (Amazon Q / AWS CodeWhisperer) provider identifier.
 	Kiro = "kiro"
 )
