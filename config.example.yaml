@@ -55,6 +55,27 @@ quota-exceeded:
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
+# Routing Strategy
+# round-robin: Load balancing mode (default), rotates requests across multiple providers and accounts.
+# sequential: Sequential/Failover mode, strictly follows priority order (prioritizes higher-priority Providers).
+routing-strategy: "round-robin"
+
+# Provider Priority Settings (Only effective in sequential mode)
+# Higher values indicate higher priority. The system will prioritize exhausting high-priority providers
+# before using lower-priority ones.
+# Unconfigured Providers have a default priority of 0.
+provider-priorities:
+  gemini-cli: 100        # Highest priority, try this first
+  antigravity: 80        # Fallback if CLI fails
+# vertex:         
+# aistudio: 
+# gemini: 
+# openai-compatibility: 
+# codex:
+# iflow:
+# claude:
+# qwen:
+
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
