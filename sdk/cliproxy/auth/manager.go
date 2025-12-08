@@ -273,13 +273,10 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
     }
     
     // Modify the original rotateProviders call
-    var rotated []string
-    if m.getStrategy() == "sequential" {
-        rotated = normalized
-    } else {
-        rotated = m.rotateProviders(req.Model, normalized)
-        defer m.advanceProviderCursor(req.Model, normalized)
-    }
+	rotated, advance := m.getProvidersForExecution(req.Model, normalized)
+	if advance {
+		defer m.advanceProviderCursor(req.Model, normalized)
+	}
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -318,13 +315,10 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-    var rotated []string
-    if m.getStrategy() == "sequential" {
-        rotated = normalized
-    } else {
-        rotated = m.rotateProviders(req.Model, normalized)
-        defer m.advanceProviderCursor(req.Model, normalized)
-    }
+    rotated, advance := m.getProvidersForExecution(req.Model, normalized)
+	if advance {
+		defer m.advanceProviderCursor(req.Model, normalized)
+	}
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -363,13 +357,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-    var rotated []string
-    if m.getStrategy() == "sequential" {
-        rotated = normalized
-    } else {
-        rotated = m.rotateProviders(req.Model, normalized)
-        defer m.advanceProviderCursor(req.Model, normalized)
-    }
+    rotated, advance := m.getProvidersForExecution(req.Model, normalized)
+	if advance {
+		defer m.advanceProviderCursor(req.Model, normalized)
+	}
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -1570,4 +1561,13 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 		return p.PrepareRequest(req, a)
 	}
 	return nil
+}
+
+// getProvidersForExecution determines the provider list order based on the current routing strategy.
+// It returns the provider list to use and a boolean indicating whether the provider cursor should be advanced (for round-robin).
+func (m *Manager) getProvidersForExecution(model string, normalized []string) (rotated []string, advanceCursor bool) {
+	if m.getStrategy() == "sequential" {
+		return normalized, false
+	}
+	return m.rotateProviders(model, normalized), true
 }
