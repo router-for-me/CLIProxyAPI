@@ -370,29 +370,25 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		}
 
 		now := time.Now().Unix()
+		thinkingConfig := registry.GetAntigravityThinkingConfig()
 		models := make([]*registry.ModelInfo, 0, len(result.Map()))
-		for id := range result.Map() {
-			id = modelName2Alias(id)
-			if id != "" {
+		for originalName := range result.Map() {
+			aliasName := modelName2Alias(originalName)
+			if aliasName != "" {
 				modelInfo := &registry.ModelInfo{
-					ID:          id,
-					Name:        id,
-					Description: id,
-					DisplayName: id,
-					Version:     id,
+					ID:          aliasName,
+					Name:        aliasName,
+					Description: aliasName,
+					DisplayName: aliasName,
+					Version:     aliasName,
 					Object:      "model",
 					Created:     now,
 					OwnedBy:     antigravityAuthType,
 					Type:        antigravityAuthType,
 				}
-				// Add Thinking support for thinking models
-				if strings.HasSuffix(id, "-thinking") || strings.Contains(id, "-thinking-") {
-					modelInfo.Thinking = &registry.ThinkingSupport{
-						Min:            1024,
-						Max:            100000,
-						ZeroAllowed:    false,
-						DynamicAllowed: true,
-					}
+				// Look up Thinking support from static config using alias name
+				if thinking, ok := thinkingConfig[aliasName]; ok {
+					modelInfo.Thinking = thinking
 				}
 				models = append(models, modelInfo)
 			}

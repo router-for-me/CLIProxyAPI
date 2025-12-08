@@ -77,23 +77,29 @@ func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provid
 // FallbackHandler wraps a standard handler with fallback logic to ampcode.com
 // when the model's provider is not available in CLIProxyAPI
 type FallbackHandler struct {
-	getProxy    func() *httputil.ReverseProxy
-	modelMapper ModelMapper
+	getProxy                   func() *httputil.ReverseProxy
+	modelMapper                ModelMapper
+	getPrioritizeModelMappings func() bool
 }
 
 // NewFallbackHandler creates a new fallback handler wrapper
 // The getProxy function allows lazy evaluation of the proxy (useful when proxy is created after routes)
 func NewFallbackHandler(getProxy func() *httputil.ReverseProxy) *FallbackHandler {
 	return &FallbackHandler{
-		getProxy: getProxy,
+		getProxy:                   getProxy,
+		getPrioritizeModelMappings: func() bool { return false },
 	}
 }
 
 // NewFallbackHandlerWithMapper creates a new fallback handler with model mapping support
-func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper) *FallbackHandler {
+func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper, getPrioritize func() bool) *FallbackHandler {
+	if getPrioritize == nil {
+		getPrioritize = func() bool { return false }
+	}
 	return &FallbackHandler{
-		getProxy:    getProxy,
-		modelMapper: mapper,
+		getProxy:                   getProxy,
+		modelMapper:                mapper,
+		getPrioritizeModelMappings: getPrioritize,
 	}
 }
 
@@ -130,34 +136,65 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		// Normalize model (handles Gemini thinking suffixes)
 		normalizedModel, _ := util.NormalizeGeminiThinkingModel(modelName)
 
-		// Check if we have providers for this model
-		providers := util.GetProviderName(normalizedModel)
-
 		// Track resolved model for logging (may change if mapping is applied)
 		resolvedModel := normalizedModel
 		usedMapping := false
+		var providers []string
 
-		if len(providers) == 0 {
-			// No providers configured - check if we have a model mapping
+		// Check if model mappings should take priority over local API keys
+		prioritizeMappings := fh.getPrioritizeModelMappings != nil && fh.getPrioritizeModelMappings()
+
+		if prioritizeMappings {
+			// PRIORITY MODE: Check model mappings FIRST (takes precedence over local API keys)
+			// This allows users to route Amp requests to their preferred OAuth providers
 			if fh.modelMapper != nil {
 				if mappedModel := fh.modelMapper.MapModel(normalizedModel); mappedModel != "" {
-					// Mapping found - rewrite the model in request body
-					bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
-					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-					// Store mapped model in context for handlers that check it (like gemini bridge)
-					c.Set(MappedModelContextKey, mappedModel)
-					resolvedModel = mappedModel
-					usedMapping = true
-
-					// Get providers for the mapped model
-					providers = util.GetProviderName(mappedModel)
-
-					// Continue to handler with remapped model
-					goto handleRequest
+					// Mapping found - check if we have a provider for the mapped model
+					mappedProviders := util.GetProviderName(mappedModel)
+					if len(mappedProviders) > 0 {
+						// Mapping found and provider available - rewrite the model in request body
+						bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
+						c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+						// Store mapped model in context for handlers that check it (like gemini bridge)
+						c.Set(MappedModelContextKey, mappedModel)
+						resolvedModel = mappedModel
+						usedMapping = true
+						providers = mappedProviders
+					}
 				}
 			}
 
-			// No mapping found - check if we have a proxy for fallback
+			// If no mapping applied, check for local providers
+			if !usedMapping {
+				providers = util.GetProviderName(normalizedModel)
+			}
+		} else {
+			// DEFAULT MODE: Check local providers first, then mappings as fallback
+			providers = util.GetProviderName(normalizedModel)
+
+			if len(providers) == 0 {
+				// No providers configured - check if we have a model mapping
+				if fh.modelMapper != nil {
+					if mappedModel := fh.modelMapper.MapModel(normalizedModel); mappedModel != "" {
+						// Mapping found - check if we have a provider for the mapped model
+						mappedProviders := util.GetProviderName(mappedModel)
+						if len(mappedProviders) > 0 {
+							// Mapping found and provider available - rewrite the model in request body
+							bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
+							c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+							// Store mapped model in context for handlers that check it (like gemini bridge)
+							c.Set(MappedModelContextKey, mappedModel)
+							resolvedModel = mappedModel
+							usedMapping = true
+							providers = mappedProviders
+						}
+					}
+				}
+			}
+		}
+
+		// If no providers available, fallback to ampcode.com
+		if len(providers) == 0 {
 			proxy := fh.getProxy()
 			if proxy != nil {
 				// Log: Forwarding to ampcode.com (uses Amp credits)
@@ -174,8 +211,6 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			// No proxy available, let the normal handler return the error
 			logAmpRouting(RouteTypeNoProvider, modelName, "", "", requestPath)
 		}
-
-	handleRequest:
 
 		// Log the routing decision
 		providerName := ""

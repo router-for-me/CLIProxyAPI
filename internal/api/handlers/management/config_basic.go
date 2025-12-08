@@ -241,3 +241,11 @@ func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
 }
+
+// Prioritize Model Mappings (for Amp CLI)
+func (h *Handler) GetPrioritizeModelMappings(c *gin.Context) {
+	c.JSON(200, gin.H{"prioritize-model-mappings": h.cfg.AmpCode.PrioritizeModelMappings})
+}
+func (h *Handler) PutPrioritizeModelMappings(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.AmpCode.PrioritizeModelMappings = v })
+}

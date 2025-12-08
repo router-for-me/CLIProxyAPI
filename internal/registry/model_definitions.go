@@ -943,8 +943,19 @@ func GetQwenModels() []*ModelInfo {
 	}
 }
 
-// GetIFlowModels returns supported models for iFlow OAuth accounts.
+// GetAntigravityThinkingConfig returns the Thinking configuration for antigravity models.
+// Keys use the ALIASED model names (after modelName2Alias conversion) for direct lookup.
+func GetAntigravityThinkingConfig() map[string]*ThinkingSupport {
+	return map[string]*ThinkingSupport{
+		"gemini-2.5-flash":                  {Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+		"gemini-2.5-flash-lite":             {Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+		"gemini-3-pro-preview":              {Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+		"gemini-claude-sonnet-4-5-thinking": {Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true},
+		"gemini-claude-opus-4-5-thinking":   {Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true},
+	}
+}
 
+// GetIFlowModels returns supported models for iFlow OAuth accounts.
 func GetIFlowModels() []*ModelInfo {
 	entries := []struct {
 		ID          string

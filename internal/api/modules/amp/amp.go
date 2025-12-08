@@ -100,6 +100,16 @@ func (m *AmpModule) Name() string {
 	return "amp-routing"
 }
 
+// getPrioritizeModelMappings returns whether model mappings should take precedence over local API keys
+func (m *AmpModule) getPrioritizeModelMappings() bool {
+	m.configMu.RLock()
+	defer m.configMu.RUnlock()
+	if m.lastConfig == nil {
+		return false
+	}
+	return m.lastConfig.PrioritizeModelMappings
+}
+
 // Register sets up Amp routes if configured.
 // This implements the RouteModuleV2 interface with Context.
 // Routes are registered only once via sync.Once for idempotent behavior.

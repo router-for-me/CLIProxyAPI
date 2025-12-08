@@ -88,6 +88,20 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
+	// Claude/Anthropic API format: thinking.type == "enabled" with budget_tokens
+	// This allows Claude Code and other Claude API clients to pass thinking configuration
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() && util.ModelSupportsThinking(modelName) {
+		if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() {
+			if t.Get("type").String() == "enabled" {
+				if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
+					budget := util.NormalizeThinkingBudget(modelName, int(b.Int()))
+					out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+					out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+				}
+			}
+		}
+	}
+
 	// For gemini-3-pro-preview, always send default thinkingConfig when none specified.
 	// This matches the official Gemini CLI behavior which always sends:
 	// { thinkingBudget: -1, includeThoughts: true }
