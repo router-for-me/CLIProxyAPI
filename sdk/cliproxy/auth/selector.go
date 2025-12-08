@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"sync/atomic"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -18,6 +19,7 @@ import (
 type RoundRobinSelector struct {
 	mu      sync.Mutex
 	cursors map[string]int
+	strategy atomic.Value
 }
 
 type blockReason int
@@ -87,6 +89,10 @@ func (e *modelCooldownError) StatusCode() int {
 	return http.StatusTooManyRequests
 }
 
+func (s *RoundRobinSelector) SetStrategy(strategy string) {
+    s.strategy.Store(strategy)
+}
+
 func (e *modelCooldownError) Headers() http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
@@ -140,6 +146,12 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	if len(available) > 1 {
 		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}
+
+    currentStrategy, _ := s.strategy.Load().(string)
+    if currentStrategy == "sequential" {
+        return available[0], nil
+    }
+
 	key := provider + ":" + model
 	s.mu.Lock()
 	index := s.cursors[key]
