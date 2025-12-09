@@ -28,18 +28,18 @@ import (
 )
 
 const (
-	antigravityBaseURLDaily        = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLAutopush     = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLProd         = "https://cloudcode-pa.googleapis.com"
-	antigravityStreamPath          = "/v1internal:streamGenerateContent"
-	antigravityGeneratePath        = "/v1internal:generateContent"
-	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
-	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret        = "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"
-	defaultAntigravityAgent        = "antigravity/1.11.5 windows/amd64"
-	antigravityAuthType            = "antigravity"
-	refreshSkew                    = 3000 * time.Second
-	streamScannerBuffer        int = 20_971_520
+	antigravityBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	// antigravityBaseURLAutopush     = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
+	antigravityBaseURLProd      = "https://cloudcode-pa.googleapis.com"
+	antigravityStreamPath       = "/v1internal:streamGenerateContent"
+	antigravityGeneratePath     = "/v1internal:generateContent"
+	antigravityModelsPath       = "/v1internal:fetchAvailableModels"
+	antigravityClientID         = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	antigravityClientSecret     = "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"
+	defaultAntigravityAgent     = "antigravity/1.11.5 windows/amd64"
+	antigravityAuthType         = "antigravity"
+	refreshSkew                 = 3000 * time.Second
+	streamScannerBuffer     int = 20_971_520
 )
 
 var (
@@ -665,7 +665,7 @@ func buildBaseURL(auth *cliproxyauth.Auth) string {
 	if baseURLs := antigravityBaseURLFallbackOrder(auth); len(baseURLs) > 0 {
 		return baseURLs[0]
 	}
-	return antigravityBaseURLAutopush
+	return antigravityBaseURLDaily
 }
 
 func resolveHost(base string) string {
@@ -701,7 +701,7 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	}
 	return []string{
 		antigravityBaseURLDaily,
-		antigravityBaseURLAutopush,
+		// antigravityBaseURLAutopush,
 		antigravityBaseURLProd,
 	}
 }
