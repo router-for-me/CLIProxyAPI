@@ -547,8 +547,6 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 // Agentic variants (-agentic suffix) map to the same backend model IDs.
 func (e *KiroExecutor) mapModelToKiro(model string) string {
 	modelMap := map[string]string{
-		// Proxy format (kiro- prefix)
-		"kiro-auto":              "auto",
 		"kiro-claude-opus-4.5":   "claude-opus-4.5",
 		"kiro-claude-sonnet-4.5": "claude-sonnet-4.5",
 		"kiro-claude-sonnet-4":   "claude-sonnet-4",
