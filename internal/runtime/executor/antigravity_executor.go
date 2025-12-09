@@ -541,6 +541,8 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		strJSON = util.DeleteKey(strJSON, "maxLength")
 		strJSON = util.DeleteKey(strJSON, "exclusiveMinimum")
 		strJSON = util.DeleteKey(strJSON, "exclusiveMaximum")
+		strJSON = util.DeleteKey(strJSON, "$ref")
+		strJSON = util.DeleteKey(strJSON, "$defs")
 
 		paths = make([]string, 0)
 		util.Walk(gjson.Parse(strJSON), "", "anyOf", &paths)

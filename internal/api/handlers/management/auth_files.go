@@ -736,14 +736,16 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	// Generate PKCE codes
 	pkceCodes, err := claude.GeneratePKCECodes()
 	if err != nil {
-		log.Fatalf("Failed to generate PKCE codes: %v", err)
+		log.Errorf("Failed to generate PKCE codes: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
 		return
 	}
 
 	// Generate random state parameter
 	state, err := misc.GenerateRandomState()
 	if err != nil {
-		log.Fatalf("Failed to generate state parameter: %v", err)
+		log.Errorf("Failed to generate state parameter: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
 		return
 	}
 
@@ -753,7 +755,8 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
 	if err != nil {
-		log.Fatalf("Failed to generate authorization URL: %v", err)
+		log.Errorf("Failed to generate authorization URL: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return
 	}
 
@@ -895,7 +898,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
-			log.Fatalf("Failed to save authentication tokens: %v", errSave)
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			setOAuthStatus(state, "Failed to save authentication tokens")
 			return
 		}
@@ -1068,7 +1071,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		gemAuth := geminiAuth.NewGeminiAuth()
 		gemClient, errGetClient := gemAuth.GetAuthenticatedClient(ctx, &ts, h.cfg, true)
 		if errGetClient != nil {
-			log.Fatalf("failed to get authenticated client: %v", errGetClient)
+			log.Errorf("failed to get authenticated client: %v", errGetClient)
 			setOAuthStatus(state, "Failed to get authenticated client")
 			return
 		}
@@ -1133,7 +1136,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
-			log.Fatalf("Failed to save token to file: %v", errSave)
+			log.Errorf("Failed to save token to file: %v", errSave)
 			setOAuthStatus(state, "Failed to save token to file")
 			return
 		}
@@ -1154,14 +1157,16 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	// Generate PKCE codes
 	pkceCodes, err := codex.GeneratePKCECodes()
 	if err != nil {
-		log.Fatalf("Failed to generate PKCE codes: %v", err)
+		log.Errorf("Failed to generate PKCE codes: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
 		return
 	}
 
 	// Generate random state parameter
 	state, err := misc.GenerateRandomState()
 	if err != nil {
-		log.Fatalf("Failed to generate state parameter: %v", err)
+		log.Errorf("Failed to generate state parameter: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
 		return
 	}
 
@@ -1171,7 +1176,8 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	// Generate authorization URL
 	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
 	if err != nil {
-		log.Fatalf("Failed to generate authorization URL: %v", err)
+		log.Errorf("Failed to generate authorization URL: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return
 	}
 
@@ -1305,8 +1311,8 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			setOAuthStatus(state, "Failed to save authentication tokens")
-			log.Fatalf("Failed to save authentication tokens: %v", errSave)
 			return
 		}
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
@@ -1341,7 +1347,8 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
-		log.Fatalf("Failed to generate state parameter: %v", errState)
+		log.Errorf("Failed to generate state parameter: %v", errState)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
 		return
 	}
 
@@ -1537,7 +1544,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
-			log.Fatalf("Failed to save token to file: %v", errSave)
+			log.Errorf("Failed to save token to file: %v", errSave)
 			setOAuthStatus(state, "Failed to save token to file")
 			return
 		}
@@ -1566,7 +1573,8 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 	// Generate authorization URL
 	deviceFlow, err := qwenAuth.InitiateDeviceFlow(ctx)
 	if err != nil {
-		log.Fatalf("Failed to generate authorization URL: %v", err)
+		log.Errorf("Failed to generate authorization URL: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return
 	}
 	authURL := deviceFlow.VerificationURIComplete
@@ -1593,7 +1601,7 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
-			log.Fatalf("Failed to save authentication tokens: %v", errSave)
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			setOAuthStatus(state, "Failed to save authentication tokens")
 			return
 		}
@@ -1696,8 +1704,8 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
 			setOAuthStatus(state, "Failed to save authentication tokens")
-			log.Fatalf("Failed to save authentication tokens: %v", errSave)
 			return
 		}
 
@@ -2126,6 +2134,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 				continue
 			}
 		}
+		_ = resp.Body.Close()
 		return false, fmt.Errorf("project activation required: %s", errMessage)
 	}
 	return true, nil
