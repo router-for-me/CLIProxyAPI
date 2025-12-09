@@ -96,20 +96,28 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						clientContent.Parts = append(clientContent.Parts, client.Part{Text: prompt})
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_use" {
 						functionName := contentResult.Get("name").String()
-						functionArgs := contentResult.Get("input").String()
+						functionArgsResult := contentResult.Get("input")
 						functionID := contentResult.Get("id").String()
 						var args map[string]any
-						if err := json.Unmarshal([]byte(functionArgs), &args); err == nil {
-							if strings.Contains(modelName, "claude") {
-								clientContent.Parts = append(clientContent.Parts, client.Part{
-									FunctionCall: &client.FunctionCall{ID: functionID, Name: functionName, Args: args},
-								})
-							} else {
-								clientContent.Parts = append(clientContent.Parts, client.Part{
-									FunctionCall:     &client.FunctionCall{ID: functionID, Name: functionName, Args: args},
-									ThoughtSignature: geminiCLIClaudeThoughtSignature,
-								})
-							}
+						// Use .Raw for objects/arrays, fall back to .String() for primitives
+						functionArgs := functionArgsResult.Raw
+						if functionArgs == "" {
+							functionArgs = functionArgsResult.String()
+						}
+						if err := json.Unmarshal([]byte(functionArgs), &args); err != nil {
+							// Preserve tool_use block with empty args on parse failure
+							// to maintain tool_use/tool_result pairing required by Claude API
+							args = make(map[string]any)
+						}
+						if strings.Contains(modelName, "claude") {
+							clientContent.Parts = append(clientContent.Parts, client.Part{
+								FunctionCall: &client.FunctionCall{ID: functionID, Name: functionName, Args: args},
+							})
+						} else {
+							clientContent.Parts = append(clientContent.Parts, client.Part{
+								FunctionCall:     &client.FunctionCall{ID: functionID, Name: functionName, Args: args},
+								ThoughtSignature: geminiCLIClaudeThoughtSignature,
+							})
 						}
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
 						toolCallID := contentResult.Get("tool_use_id").String()
