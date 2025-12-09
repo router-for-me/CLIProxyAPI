@@ -788,7 +788,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							Created:     time.Now().Unix(),
 							OwnedBy:     compat.Name,
 							Type:        "openai-compatibility",
-							DisplayName: m.Name,
+							DisplayName: modelID,
 						})
 					}
 					// Register and return
