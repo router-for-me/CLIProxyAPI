@@ -271,16 +271,20 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 
 						// Append a single tool content combining name + response per function
+						// Only include functionResponse for tool_calls that have actual responses
+						// to maintain proper tool_use/tool_result pairing required by Claude API
 						toolNode := []byte(`{"role":"user","parts":[]}`)
 						pp := 0
 						for _, fid := range fIDs {
 							if name, ok := tcID2Name[fid]; ok {
+								// Skip tool_calls without actual responses to avoid breaking
+								// Claude's tool_use/tool_result pairing requirement
+								resp, hasResp := toolResponses[fid]
+								if !hasResp || resp == "" {
+									continue
+								}
 								toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.id", fid)
 								toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.name", name)
-								resp := toolResponses[fid]
-								if resp == "" {
-									resp = "{}"
-								}
 								// Handle non-JSON output gracefully (matches dev branch approach)
 								if resp != "null" {
 									parsed := gjson.Parse(resp)
