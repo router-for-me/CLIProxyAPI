@@ -17,6 +17,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const defaultMaxRetryIntervalSeconds = 30
+
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	config.SDKConfig `yaml:",inline"`
@@ -327,8 +329,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
-	cfg.MaxRetryInterval = 30                        // Default 30 seconds for retry cooldown
-	cfg.AmpCode.RestrictManagementToLocalhost = true // Default to secure: only localhost access
+	cfg.MaxRetryInterval = defaultMaxRetryIntervalSeconds // Default 30 seconds for retry cooldown
+	cfg.AmpCode.RestrictManagementToLocalhost = true      // Default to secure: only localhost access
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
