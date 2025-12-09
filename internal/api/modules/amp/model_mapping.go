@@ -3,6 +3,7 @@
 package amp
 
 import (
+	"sort"
 	"strings"
 	"sync"
 
@@ -57,18 +58,28 @@ func (m *DefaultModelMapper) MapModel(requestedModel string) string {
 	// Check for direct mapping first
 	targetModel, exists := m.mappings[normalizedRequest]
 
-	// If no direct match, try prefix/wildcard matching
+	// If no direct match, try prefix/wildcard matching with deterministic order
 	// This allows mappings like "claude-haiku-*" to match "claude-haiku-4-5-20251001"
 	if !exists {
-		for pattern, target := range m.mappings {
+		patterns := make([]string, 0, len(m.mappings))
+		for pattern := range m.mappings {
 			if strings.HasSuffix(pattern, "*") {
-				prefix := strings.TrimSuffix(pattern, "*")
-				if strings.HasPrefix(normalizedRequest, prefix) {
-					targetModel = target
-					exists = true
-					log.Debugf("amp model mapping: wildcard match %s -> %s (pattern: %s)", normalizedRequest, target, pattern)
-					break
-				}
+				patterns = append(patterns, pattern)
+			}
+		}
+		sort.Slice(patterns, func(i, j int) bool {
+			if len(patterns[i]) == len(patterns[j]) {
+				return patterns[i] < patterns[j]
+			}
+			return len(patterns[i]) > len(patterns[j])
+		})
+		for _, pattern := range patterns {
+			prefix := strings.TrimSuffix(pattern, "*")
+			if strings.HasPrefix(normalizedRequest, prefix) {
+				targetModel = m.mappings[pattern]
+				exists = true
+				log.Debugf("amp model mapping: wildcard match %s -> %s (pattern: %s)", normalizedRequest, targetModel, pattern)
+				break
 			}
 		}
 	}

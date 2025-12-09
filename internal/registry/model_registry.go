@@ -93,6 +93,11 @@ type ModelRegistry struct {
 	mutex *sync.RWMutex
 }
 
+// normalizeModelID normalizes model IDs by replacing underscores with dashes
+func normalizeModelID(modelID string) string {
+	return strings.ReplaceAll(strings.TrimSpace(modelID), "_", "-")
+}
+
 // Global model registry instance
 var globalRegistry *ModelRegistry
 var registryOnce sync.Once
@@ -121,20 +126,21 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 
 	provider := strings.ToLower(clientProvider)
 	uniqueModelIDs := make([]string, 0, len(models))
-	rawModelIDs := make([]string, 0, len(models))
+	normalizedModelIDs := make([]string, 0, len(models))
 	newModels := make(map[string]*ModelInfo, len(models))
 	newCounts := make(map[string]int, len(models))
 	for _, model := range models {
 		if model == nil || model.ID == "" {
 			continue
 		}
-		rawModelIDs = append(rawModelIDs, model.ID)
-		newCounts[model.ID]++
-		if _, exists := newModels[model.ID]; exists {
+		normalizedID := normalizeModelID(model.ID)
+		normalizedModelIDs = append(normalizedModelIDs, normalizedID)
+		newCounts[normalizedID]++
+		if _, exists := newModels[normalizedID]; exists {
 			continue
 		}
-		newModels[model.ID] = model
-		uniqueModelIDs = append(uniqueModelIDs, model.ID)
+		newModels[normalizedID] = model
+		uniqueModelIDs = append(uniqueModelIDs, normalizedID)
 	}
 
 	if len(uniqueModelIDs) == 0 {
@@ -153,24 +159,25 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	providerChanged := oldProvider != provider
 	if !hadExisting {
 		// Pure addition path.
-		for _, modelID := range rawModelIDs {
+		for _, modelID := range normalizedModelIDs {
 			model := newModels[modelID]
 			r.addModelRegistration(modelID, provider, model, now)
 		}
-		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
+		r.clientModels[clientID] = append([]string(nil), normalizedModelIDs...)
 		if provider != "" {
 			r.clientProviders[clientID] = provider
 		} else {
 			delete(r.clientProviders, clientID)
 		}
-		log.Debugf("Registered client %s from provider %s with %d models", clientID, clientProvider, len(rawModelIDs))
+		log.Debugf("Registered client %s from provider %s with %d models", clientID, clientProvider, len(normalizedModelIDs))
 		misc.LogCredentialSeparator()
 		return
 	}
 
 	oldCounts := make(map[string]int, len(oldModels))
 	for _, id := range oldModels {
-		oldCounts[id]++
+		normID := normalizeModelID(id)
+		oldCounts[normID]++
 	}
 
 	added := make([]string, 0)
@@ -281,8 +288,8 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	}
 
 	// Update client bookkeeping.
-	if len(rawModelIDs) > 0 {
-		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
+	if len(normalizedModelIDs) > 0 {
+		r.clientModels[clientID] = append([]string(nil), normalizedModelIDs...)
 	}
 	if provider != "" {
 		r.clientProviders[clientID] = provider
