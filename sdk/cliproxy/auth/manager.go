@@ -632,14 +632,53 @@ func (m *Manager) shouldRetryAfterError(err error, attempt, maxAttempts int, pro
 	if maxWait <= 0 {
 		return 0, false
 	}
-	if status := statusCodeFromError(err); status == http.StatusOK {
+	status := statusCodeFromError(err)
+	if status == http.StatusOK {
 		return 0, false
 	}
+
+	// Check if this is a hard 403 error - don't retry unless configured
+	if status == http.StatusForbidden {
+		if authErr := errorToAuthError(err); authErr != nil && IsHard403(authErr) {
+			if !ShouldRetryHard403() {
+				return 0, false
+			}
+			// Limit retries for hard 403s
+			if attempt >= GetHard403MaxRetries() {
+				return 0, false
+			}
+		}
+	}
+
 	wait, found := m.closestCooldownWait(providers, model)
 	if !found || wait > maxWait {
 		return 0, false
 	}
 	return wait, true
+}
+
+// errorToAuthError attempts to extract an *Error from a generic error.
+func errorToAuthError(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	if authErr, ok := err.(*Error); ok {
+		return authErr
+	}
+	// Check if the error has StatusCode method
+	type statusCoder interface {
+		StatusCode() int
+	}
+	type messager interface {
+		Error() string
+	}
+	if sc, ok := err.(statusCoder); ok {
+		return &Error{
+			HTTPStatus: sc.StatusCode(),
+			Message:    err.Error(),
+		}
+	}
+	return nil
 }
 
 func waitForCooldown(ctx context.Context, wait time.Duration) error {
@@ -721,6 +760,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				auth.UpdatedAt = now
 				shouldResumeModel = true
 				clearModelQuota = true
+				// Close circuit breaker on successful model request
+				CloseCircuitBreaker(auth)
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
@@ -738,6 +779,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 
 				statusCode := statusCodeFromResult(result.Error)
+
+				// Check for hard 403 errors and open circuit breaker at auth level
+				if statusCode == 403 {
+					hard403Type := ClassifyHard403(result.Error)
+					if hard403Type != Hard403None {
+						OpenCircuitBreaker(auth, hard403Type, now)
+						auth.StatusMessage = string(hard403Type)
+						auth.NextRetryAfter = auth.CircuitBreaker.CooldownUntil
+						state.NextRetryAfter = auth.CircuitBreaker.CooldownUntil
+						suspendReason = string(hard403Type)
+						shouldSuspendModel = true
+						auth.Status = StatusError
+						auth.UpdatedAt = now
+						updateAggregatedAvailability(auth, now)
+						// Skip normal status code handling for hard 403
+						goto persistResult
+					}
+				}
+
 				switch statusCode {
 				case 401:
 					next := now.Add(30 * time.Minute)
@@ -745,7 +805,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					suspendReason = "unauthorized"
 					shouldSuspendModel = true
 				case 402, 403:
-					next := now.Add(30 * time.Minute)
+					// Soft 403 (not classified as hard 403 above)
+					next := now.Add(GetSoft403Cooldown())
 					state.NextRetryAfter = next
 					suspendReason = "payment_required"
 					shouldSuspendModel = true
@@ -790,6 +851,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
 		}
+	persistResult:
 
 		_ = m.persist(ctx, auth)
 	}
@@ -933,6 +995,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
 	auth.UpdatedAt = now
+	CloseCircuitBreaker(auth)
 }
 
 func cloneError(err *Error) *Error {
@@ -1001,13 +1064,25 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
+
+	// Check for hard 403 errors and open circuit breaker
+	if statusCode == 403 {
+		hard403Type := ClassifyHard403(resultErr)
+		if hard403Type != Hard403None {
+			OpenCircuitBreaker(auth, hard403Type, now)
+			auth.StatusMessage = string(hard403Type)
+			auth.NextRetryAfter = auth.CircuitBreaker.CooldownUntil
+			return
+		}
+	}
+
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
 		auth.NextRetryAfter = now.Add(30 * time.Minute)
 	case 402, 403:
 		auth.StatusMessage = "payment_required"
-		auth.NextRetryAfter = now.Add(30 * time.Minute)
+		auth.NextRetryAfter = now.Add(GetSoft403Cooldown())
 	case 404:
 		auth.StatusMessage = "not_found"
 		auth.NextRetryAfter = now.Add(12 * time.Hour)
@@ -1091,11 +1166,18 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
 	registryRef := registry.GetGlobalRegistry()
+	now := time.Now()
+	skippedCircuitBreaker := 0
 	for _, candidate := range m.auths {
 		if candidate.Provider != provider || candidate.Disabled {
 			continue
 		}
 		if _, used := tried[candidate.ID]; used {
+			continue
+		}
+		// Skip auths with open circuit breakers
+		if IsCircuitBreakerOpen(candidate, now) {
+			skippedCircuitBreaker++
 			continue
 		}
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
@@ -1105,6 +1187,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
+		if skippedCircuitBreaker > 0 {
+			return nil, nil, &Error{Code: "auth_unavailable", Message: "all auths have open circuit breakers", HTTPStatus: 503}
+		}
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	selected, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
