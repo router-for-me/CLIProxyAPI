@@ -75,11 +75,20 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
+	// Inject reasoning_effort for Gemini 3 model variants
+	payload := injectGemini3ReasoningEffort(req.Model, req.Payload, req.Metadata)
+
 	// Official Gemini API via API key or OAuth bearer
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	body = applyThinkingMetadata(body, req.Metadata, req.Model)
+	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(payload), false)
+	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
+		if budgetOverride != nil {
+			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+			budgetOverride = &norm
+		}
+		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
+	}
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
 	body = fixGeminiImageAspectRatio(req.Model, body)
 	body = applyPayloadConfig(e.cfg, req.Model, body)
@@ -165,10 +174,19 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
+	// Inject reasoning_effort for Gemini 3 model variants
+	payload := injectGemini3ReasoningEffort(req.Model, req.Payload, req.Metadata)
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-	body = applyThinkingMetadata(body, req.Metadata, req.Model)
+	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(payload), true)
+	if budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
+		if budgetOverride != nil {
+			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
+			budgetOverride = &norm
+		}
+		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
+	}
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
 	body = fixGeminiImageAspectRatio(req.Model, body)
 	body = applyPayloadConfig(e.cfg, req.Model, body)
