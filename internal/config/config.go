@@ -327,6 +327,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
+	cfg.MaxRetryInterval = 30                        // Default 30 seconds for retry cooldown
 	cfg.AmpCode.RestrictManagementToLocalhost = true // Default to secure: only localhost access
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
