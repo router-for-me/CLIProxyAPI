@@ -532,6 +532,9 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 		return false
 	}
 
+	// Normalize model ID: replace underscores with dashes for consistent lookup
+	normalizedModelID := strings.ReplaceAll(modelID, "_", "-")
+
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
@@ -541,7 +544,8 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	}
 
 	for _, id := range models {
-		if strings.EqualFold(strings.TrimSpace(id), modelID) {
+		trimmedID := strings.TrimSpace(id)
+		if strings.EqualFold(trimmedID, modelID) || strings.EqualFold(trimmedID, normalizedModelID) {
 			return true
 		}
 	}
@@ -614,7 +618,14 @@ func (r *ModelRegistry) GetModelCount(modelID string) int {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if registration, exists := r.models[modelID]; exists {
+	// Normalize model ID: replace underscores with dashes for consistent lookup
+	normalizedID := strings.ReplaceAll(modelID, "_", "-")
+	registration, exists := r.models[normalizedID]
+	if !exists {
+		registration, exists = r.models[modelID]
+	}
+
+	if exists {
 		now := time.Now()
 		quotaExpiredDuration := 5 * time.Minute
 
@@ -648,7 +659,15 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	registration, exists := r.models[modelID]
+	// Normalize model ID: replace underscores with dashes for consistent lookup
+	// This handles cases like "claude-sonnet-4_5-20250929" -> "claude-sonnet-4-5-20250929"
+	normalizedID := strings.ReplaceAll(modelID, "_", "-")
+
+	registration, exists := r.models[normalizedID]
+	// Fall back to original ID if normalized version not found
+	if !exists {
+		registration, exists = r.models[modelID]
+	}
 	if !exists || registration == nil || len(registration.Providers) == 0 {
 		return nil
 	}
@@ -700,6 +719,12 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 func (r *ModelRegistry) GetModelInfo(modelID string) *ModelInfo {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
+	// Normalize model ID: replace underscores with dashes for consistent lookup
+	normalizedID := strings.ReplaceAll(modelID, "_", "-")
+	if reg, ok := r.models[normalizedID]; ok && reg != nil {
+		return reg.Info
+	}
+	// Fall back to original ID if normalized version not found
 	if reg, ok := r.models[modelID]; ok && reg != nil {
 		return reg.Info
 	}

@@ -50,10 +50,29 @@ func (m *DefaultModelMapper) MapModel(requestedModel string) string {
 	defer m.mu.RUnlock()
 
 	// Normalize the requested model for lookup
+	// Replace underscores with dashes for consistent lookup (e.g., claude-sonnet-4_5 -> claude-sonnet-4-5)
 	normalizedRequest := strings.ToLower(strings.TrimSpace(requestedModel))
+	normalizedRequest = strings.ReplaceAll(normalizedRequest, "_", "-")
 
-	// Check for direct mapping
+	// Check for direct mapping first
 	targetModel, exists := m.mappings[normalizedRequest]
+
+	// If no direct match, try prefix/wildcard matching
+	// This allows mappings like "claude-haiku-*" to match "claude-haiku-4-5-20251001"
+	if !exists {
+		for pattern, target := range m.mappings {
+			if strings.HasSuffix(pattern, "*") {
+				prefix := strings.TrimSuffix(pattern, "*")
+				if strings.HasPrefix(normalizedRequest, prefix) {
+					targetModel = target
+					exists = true
+					log.Debugf("amp model mapping: wildcard match %s -> %s (pattern: %s)", normalizedRequest, target, pattern)
+					break
+				}
+			}
+		}
+	}
+
 	if !exists {
 		return ""
 	}
@@ -88,7 +107,9 @@ func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
 		}
 
 		// Store with normalized lowercase key for case-insensitive lookup
+		// Also normalize underscores to dashes for consistent matching
 		normalizedFrom := strings.ToLower(from)
+		normalizedFrom = strings.ReplaceAll(normalizedFrom, "_", "-")
 		m.mappings[normalizedFrom] = to
 
 		log.Debugf("amp model mapping registered: %s -> %s", from, to)
