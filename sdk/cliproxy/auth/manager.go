@@ -779,6 +779,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 
 				statusCode := statusCodeFromResult(result.Error)
+				handledHard403 := false
 
 				// Check for hard 403 errors and open circuit breaker at auth level
 				if statusCode == 403 {
@@ -793,65 +794,65 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						auth.Status = StatusError
 						auth.UpdatedAt = now
 						updateAggregatedAvailability(auth, now)
-						// Skip normal status code handling for hard 403
-						goto persistResult
+						handledHard403 = true
 					}
 				}
 
-				switch statusCode {
-				case 401:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
-					suspendReason = "unauthorized"
-					shouldSuspendModel = true
-				case 402, 403:
-					// Soft 403 (not classified as hard 403 above)
-					next := now.Add(GetSoft403Cooldown())
-					state.NextRetryAfter = next
-					suspendReason = "payment_required"
-					shouldSuspendModel = true
-				case 404:
-					next := now.Add(12 * time.Hour)
-					state.NextRetryAfter = next
-					suspendReason = "not_found"
-					shouldSuspendModel = true
-				case 429:
-					var next time.Time
-					backoffLevel := state.Quota.BackoffLevel
-					if result.RetryAfter != nil {
-						next = now.Add(*result.RetryAfter)
-					} else {
-						cooldown, nextLevel := nextQuotaCooldown(backoffLevel)
-						if cooldown > 0 {
-							next = now.Add(cooldown)
+				if !handledHard403 {
+					switch statusCode {
+					case 401:
+						next := now.Add(30 * time.Minute)
+						state.NextRetryAfter = next
+						suspendReason = "unauthorized"
+						shouldSuspendModel = true
+					case 402, 403:
+						// Soft 403 (not classified as hard 403 above)
+						next := now.Add(GetSoft403Cooldown())
+						state.NextRetryAfter = next
+						suspendReason = "payment_required"
+						shouldSuspendModel = true
+					case 404:
+						next := now.Add(12 * time.Hour)
+						state.NextRetryAfter = next
+						suspendReason = "not_found"
+						shouldSuspendModel = true
+					case 429:
+						var next time.Time
+						backoffLevel := state.Quota.BackoffLevel
+						if result.RetryAfter != nil {
+							next = now.Add(*result.RetryAfter)
+						} else {
+							cooldown, nextLevel := nextQuotaCooldown(backoffLevel)
+							if cooldown > 0 {
+								next = now.Add(cooldown)
+							}
+							backoffLevel = nextLevel
 						}
-						backoffLevel = nextLevel
+						state.NextRetryAfter = next
+						state.Quota = QuotaState{
+							Exceeded:      true,
+							Reason:        "quota",
+							NextRecoverAt: next,
+							BackoffLevel:  backoffLevel,
+						}
+						suspendReason = "quota"
+						shouldSuspendModel = true
+						setModelQuota = true
+					case 408, 500, 502, 503, 504:
+						next := now.Add(1 * time.Minute)
+						state.NextRetryAfter = next
+					default:
+						state.NextRetryAfter = time.Time{}
 					}
-					state.NextRetryAfter = next
-					state.Quota = QuotaState{
-						Exceeded:      true,
-						Reason:        "quota",
-						NextRecoverAt: next,
-						BackoffLevel:  backoffLevel,
-					}
-					suspendReason = "quota"
-					shouldSuspendModel = true
-					setModelQuota = true
-				case 408, 500, 502, 503, 504:
-					next := now.Add(1 * time.Minute)
-					state.NextRetryAfter = next
-				default:
-					state.NextRetryAfter = time.Time{}
-				}
 
-				auth.Status = StatusError
-				auth.UpdatedAt = now
-				updateAggregatedAvailability(auth, now)
+					auth.Status = StatusError
+					auth.UpdatedAt = now
+					updateAggregatedAvailability(auth, now)
+				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
 		}
-	persistResult:
 
 		_ = m.persist(ctx, auth)
 	}

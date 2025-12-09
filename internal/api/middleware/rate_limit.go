@@ -4,7 +4,9 @@
 package middleware
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,20 +30,62 @@ type LimiterStore interface {
 
 // TokenBucket represents a single token bucket for rate limiting.
 type TokenBucket struct {
-	tokens     float64
-	lastRefill time.Time
-	mu         sync.Mutex
+	tokens       float64
+	lastRefill   time.Time
+	lastAccessed time.Time
+	mu           sync.Mutex
 }
 
 // InMemoryLimiterStore implements LimiterStore using in-memory token buckets.
 // This is suitable for single-instance deployments.
 type InMemoryLimiterStore struct {
-	buckets sync.Map // map[string]*TokenBucket
+	buckets     sync.Map // map[string]*TokenBucket
+	stopCleanup chan struct{}
 }
 
 // NewInMemoryLimiterStore creates a new in-memory rate limiter store.
+// It starts a background goroutine to clean up stale buckets.
 func NewInMemoryLimiterStore() *InMemoryLimiterStore {
-	return &InMemoryLimiterStore{}
+	s := &InMemoryLimiterStore{
+		stopCleanup: make(chan struct{}),
+	}
+	go s.cleanupLoop()
+	return s
+}
+
+// cleanupLoop periodically removes stale buckets that haven't been accessed recently.
+func (s *InMemoryLimiterStore) cleanupLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.evictStaleBuckets(10 * time.Minute)
+		case <-s.stopCleanup:
+			return
+		}
+	}
+}
+
+// evictStaleBuckets removes buckets that haven't been accessed within the given duration.
+func (s *InMemoryLimiterStore) evictStaleBuckets(maxAge time.Duration) {
+	cutoff := time.Now().Add(-maxAge)
+	s.buckets.Range(func(key, value any) bool {
+		bucket := value.(*TokenBucket)
+		bucket.mu.Lock()
+		lastAccessed := bucket.lastAccessed
+		bucket.mu.Unlock()
+		if lastAccessed.Before(cutoff) {
+			s.buckets.Delete(key)
+		}
+		return true
+	})
+}
+
+// Stop stops the cleanup goroutine.
+func (s *InMemoryLimiterStore) Stop() {
+	close(s.stopCleanup)
 }
 
 // TryConsume attempts to consume a token from the bucket.
@@ -52,14 +96,16 @@ func (s *InMemoryLimiterStore) TryConsume(key string, capacity int, refillPerSec
 
 	now := time.Now()
 	bucketI, _ := s.buckets.LoadOrStore(key, &TokenBucket{
-		tokens:     float64(capacity),
-		lastRefill: now,
+		tokens:       float64(capacity),
+		lastRefill:   now,
+		lastAccessed: now,
 	})
 	bucket := bucketI.(*TokenBucket)
 
 	bucket.mu.Lock()
 	defer bucket.mu.Unlock()
 
+	bucket.lastAccessed = now
 	elapsed := now.Sub(bucket.lastRefill).Seconds()
 	bucket.tokens += elapsed * refillPerSecond
 	if bucket.tokens > float64(capacity) {
@@ -306,16 +352,10 @@ func RequestBodyCaptureMiddleware() gin.HandlerFunc {
 		}
 
 		c.Set("request_body", body)
-		c.Request.Body = nopCloser{strings.NewReader(string(body))}
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 		c.Next()
 	}
 }
-
-type nopCloser struct {
-	*strings.Reader
-}
-
-func (nopCloser) Close() error { return nil }
 
 // MarshalJSON implements json.Marshaler for RateLimitError.
 func (e RateLimitError) MarshalJSON() ([]byte, error) {
