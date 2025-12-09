@@ -1196,17 +1196,6 @@ func GetGitHubCopilotModels() []*ModelInfo {
 func GetKiroModels() []*ModelInfo {
 	return []*ModelInfo{
 		{
-			ID:                  "kiro-auto",
-			Object:              "model",
-			Created:             1732752000, // 2024-11-28
-			OwnedBy:             "aws",
-			Type:                "kiro",
-			DisplayName:         "Kiro Auto",
-			Description:         "Automatic model selection by AWS CodeWhisperer",
-			ContextLength:       200000,
-			MaxCompletionTokens: 64000,
-		},
-		{
 			ID:                  "kiro-claude-opus-4.5",
 			Object:              "model",
 			Created:             1732752000,
