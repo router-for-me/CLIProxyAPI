@@ -232,7 +232,16 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 			w.streamDone = nil
 		}
 
+		// Write API Request and Response to the streaming log before closing
 		if w.streamWriter != nil {
+			apiRequest := w.extractAPIRequest(c)
+			if len(apiRequest) > 0 {
+				_ = w.streamWriter.WriteAPIRequest(apiRequest)
+			}
+			apiResponse := w.extractAPIResponse(c)
+			if len(apiResponse) > 0 {
+				_ = w.streamWriter.WriteAPIResponse(apiResponse)
+			}
 			if err := w.streamWriter.Close(); err != nil {
 				w.streamWriter = nil
 				return err

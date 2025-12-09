@@ -400,16 +400,16 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", -1)
 			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
 		case "minimal":
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 1024))
+			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 1024)
 			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
 		case "low":
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 4096))
+			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 4096)
 			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
 		case "medium":
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 8192))
+			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 8192)
 			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
 		case "high":
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", util.NormalizeThinkingBudget(modelName, 32768))
+			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 32768)
 			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
 		default:
 			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", -1)
@@ -421,30 +421,20 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	if !hasOfficialThinking && util.ModelSupportsThinking(modelName) {
 		if tc := root.Get("extra_body.google.thinking_config"); tc.Exists() && tc.IsObject() {
 			var setBudget bool
-			var normalized int
+			var budget int
 			if v := tc.Get("thinking_budget"); v.Exists() {
-				normalized = util.NormalizeThinkingBudget(modelName, int(v.Int()))
-				out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", normalized)
+				budget = int(v.Int())
+				out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", budget)
 				setBudget = true
 			}
 			if v := tc.Get("include_thoughts"); v.Exists() {
 				out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", v.Bool())
 			} else if setBudget {
-				if normalized != 0 {
+				if budget != 0 {
 					out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
 				}
 			}
 		}
-	}
-
-	// For gemini-3-pro-preview, always send default thinkingConfig when none specified.
-	// This matches the official Gemini CLI behavior which always sends:
-	// { thinkingBudget: -1, includeThoughts: true }
-	// See: ai-gemini-cli/packages/core/src/config/defaultModelConfigs.ts
-	if !gjson.Get(out, "generationConfig.thinkingConfig").Exists() && modelName == "gemini-3-pro-preview" {
-		out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", -1)
-		out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
-		// log.Debugf("Applied default thinkingConfig for gemini-3-pro-preview (matches Gemini CLI): thinkingBudget=-1, include_thoughts=true")
 	}
 
 	result := []byte(out)

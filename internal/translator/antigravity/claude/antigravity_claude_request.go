@@ -83,7 +83,15 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				for j := 0; j < len(contentResults); j++ {
 					contentResult := contentResults[j]
 					contentTypeResult := contentResult.Get("type")
-					if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
+					if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "thinking" {
+						prompt := contentResult.Get("thinking").String()
+						signatureResult := contentResult.Get("signature")
+						signature := geminiCLIClaudeThoughtSignature
+						if signatureResult.Exists() {
+							signature = signatureResult.String()
+						}
+						clientContent.Parts = append(clientContent.Parts, client.Part{Text: prompt, Thought: true, ThoughtSignature: signature})
+					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
 						clientContent.Parts = append(clientContent.Parts, client.Part{Text: prompt})
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_use" {
@@ -92,10 +100,16 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						functionID := contentResult.Get("id").String()
 						var args map[string]any
 						if err := json.Unmarshal([]byte(functionArgs), &args); err == nil {
-							clientContent.Parts = append(clientContent.Parts, client.Part{
-								FunctionCall:     &client.FunctionCall{ID: functionID, Name: functionName, Args: args},
-								ThoughtSignature: geminiCLIClaudeThoughtSignature,
-							})
+							if strings.Contains(modelName, "claude") {
+								clientContent.Parts = append(clientContent.Parts, client.Part{
+									FunctionCall: &client.FunctionCall{ID: functionID, Name: functionName, Args: args},
+								})
+							} else {
+								clientContent.Parts = append(clientContent.Parts, client.Part{
+									FunctionCall:     &client.FunctionCall{ID: functionID, Name: functionName, Args: args},
+									ThoughtSignature: geminiCLIClaudeThoughtSignature,
+								})
+							}
 						}
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
 						toolCallID := contentResult.Get("tool_use_id").String()
@@ -166,7 +180,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		if t.Get("type").String() == "enabled" {
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
-				budget = util.NormalizeThinkingBudget(modelName, budget)
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 			}
@@ -180,6 +193,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 	if v := gjson.GetBytes(rawJSON, "top_k"); v.Exists() && v.Type == gjson.Number {
 		out, _ = sjson.Set(out, "request.generationConfig.topK", v.Num)
+	}
+	if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() && v.Type == gjson.Number {
+		out, _ = sjson.Set(out, "request.generationConfig.maxOutputTokens", v.Num)
 	}
 
 	outBytes := []byte(out)

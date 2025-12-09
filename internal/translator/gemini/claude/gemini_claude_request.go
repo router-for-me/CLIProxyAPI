@@ -158,7 +158,6 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		if t.Get("type").String() == "enabled" {
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
-				budget = util.NormalizeThinkingBudget(modelName, budget)
 				out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", budget)
 				out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
 			}

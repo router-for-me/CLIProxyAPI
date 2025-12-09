@@ -9,7 +9,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
@@ -157,6 +156,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	rootMiddleware := []gin.HandlerFunc{m.managementAvailabilityMiddleware(), noCORSMiddleware(), m.localhostOnlyMiddleware()}
 	engine.GET("/threads/*path", append(rootMiddleware, proxyHandler)...)
 	engine.GET("/threads.rss", append(rootMiddleware, proxyHandler)...)
+	engine.GET("/news.rss", append(rootMiddleware, proxyHandler)...)
 
 	// Root-level auth routes for CLI login flow
 	// Amp uses multiple auth routes: /auth/cli-login, /auth/callback, /auth/sign-in, /auth/logout
@@ -169,30 +169,22 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	// We bridge these to our standard Gemini handler to enable local OAuth.
 	// If no local OAuth is available, falls back to ampcode.com proxy.
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
-	geminiBridge := createGeminiBridgeHandler(geminiHandlers)
-	geminiV1Beta1Fallback := NewFallbackHandler(func() *httputil.ReverseProxy {
+	geminiBridge := createGeminiBridgeHandler(geminiHandlers.GeminiHandler)
+	geminiV1Beta1Fallback := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
 		return m.getProxy()
-	})
+	}, m.modelMapper, m.forceModelMappings)
 	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
 
-	// Route POST model calls through Gemini bridge when a local provider exists, otherwise proxy.
+	// Route POST model calls through Gemini bridge with FallbackHandler.
+	// FallbackHandler checks provider -> mapping -> proxy fallback automatically.
 	// All other methods (e.g., GET model listing) always proxy to upstream to preserve Amp CLI behavior.
 	ampAPI.Any("/provider/google/v1beta1/*path", func(c *gin.Context) {
 		if c.Request.Method == "POST" {
-			// Attempt to extract the model name from the AMP-style path
 			if path := c.Param("path"); strings.Contains(path, "/models/") {
-				modelPart := path[strings.Index(path, "/models/")+len("/models/"):]
-				if colonIdx := strings.Index(modelPart, ":"); colonIdx > 0 {
-					modelPart = modelPart[:colonIdx]
-				}
-				if modelPart != "" {
-					normalized, _ := util.NormalizeGeminiThinkingModel(modelPart)
-					// Only handle locally when we have a provider; otherwise fall back to proxy
-					if providers := util.GetProviderName(normalized); len(providers) > 0 {
-						geminiV1Beta1Handler(c)
-						return
-					}
-				}
+				// POST with /models/ path -> use Gemini bridge with fallback handler
+				// FallbackHandler will check provider/mapping and proxy if needed
+				geminiV1Beta1Handler(c)
+				return
 			}
 		}
 		// Non-POST or no local provider available -> proxy upstream
@@ -218,7 +210,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	// Also includes model mapping support for routing unavailable models to alternatives
 	fallbackHandler := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
 		return m.getProxy()
-	}, m.modelMapper)
+	}, m.modelMapper, m.forceModelMappings)
 
 	// Provider-specific routes under /api/provider/:provider
 	ampProviders := engine.Group("/api/provider")

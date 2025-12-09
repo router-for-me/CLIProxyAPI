@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
@@ -75,8 +76,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 	// Extract and set the finish reason.
 	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReasonResult.String())
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReasonResult.String())
+		template, _ = sjson.Set(template, "choices.0.finish_reason", strings.ToLower(finishReasonResult.String()))
+		template, _ = sjson.Set(template, "choices.0.native_finish_reason", strings.ToLower(finishReasonResult.String()))
 	}
 
 	// Extract and set usage metadata (token counts).
