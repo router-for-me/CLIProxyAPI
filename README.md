@@ -5,16 +5,16 @@
 [![Original Repo](https://img.shields.io/badge/Original-router--for--me%2FCLIProxyAPI-blue)](https://github.com/router-for-me/CLIProxyAPI)
 [![Plus Version](https://img.shields.io/badge/Plus-router--for--me%2FCLIProxyAPIPlus-green)](https://github.com/router-for-me/CLIProxyAPIPlus)
 
-## 📋 Contributing Notice
+## Quick Start
 
-**This is an experimental fork.** I'm sharing this work for the community to use and build upon.
+To enable all experimental features of this fork, add to your `config.yaml`:
 
-- **Cherry-pick what you need** — feel free to take individual features or fixes that are useful for your projects
-- **Limited maintenance** — I have limited time to review extensive change requests
-- **Tested but experimental** — the code works in my testing environment, but your mileage may vary
-- **Clear solutions only** — if you report an issue, please provide a specific fix or clear reproduction steps; I don't have time to investigate vague problem descriptions
+```yaml
+use-canonical-translator: true   # Enable new IR translation architecture
+show-provider-prefixes: true     # Optional: show provider prefixes in model list
+```
 
-Contributions are welcome! Simple bug fixes with ready-to-merge code will likely be accepted. For larger changes or feature requests, consider forking — this gives you full control over the direction of your modifications.
+Without `use-canonical-translator: true`, the system runs on the legacy translator from the original project.
 
 ---
 
@@ -290,11 +290,17 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 - Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
 - Custom Provider Example: `examples/custom-provider`
 
-## Contributing
+## 📋 Contributing Notice
 
-This project only accepts pull requests that relate to third-party provider support. Any pull requests unrelated to third-party provider support will be rejected.
+**This is an experimental fork.** I'm sharing this work for the community to use and build upon.
 
-If you need to submit any non-third-party provider changes, please open them against the mainline repository.
+- **Cherry-pick what you need** — feel free to take individual features or fixes that are useful for your projects
+- **Limited maintenance** — I have limited time to review extensive change requests
+- **Tested but experimental** — the code works in my testing environment, but your mileage may vary
+- **Clear solutions only** — if you report an issue, please provide a specific fix or clear reproduction steps; I don't have time to investigate vague problem descriptions
+
+Contributions are welcome! Simple bug fixes with ready-to-merge code will likely be accepted. For larger changes or feature requests, consider forking — this gives you full control over the direction of your modifications.
+
 
 ## License
 

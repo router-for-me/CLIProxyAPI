@@ -88,6 +88,20 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
+	// Claude/Anthropic API format: thinking.type == "enabled" with budget_tokens
+	// This allows Claude Code and other Claude API clients to pass thinking configuration
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() && util.ModelSupportsThinking(modelName) {
+		if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() {
+			if t.Get("type").String() == "enabled" {
+				if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
+					budget := util.NormalizeThinkingBudget(modelName, int(b.Int()))
+					out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+					out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+				}
+			}
+		}
+	}
+
 	// For gemini-3-pro-preview, always send default thinkingConfig when none specified.
 	// This matches the official Gemini CLI behavior which always sends:
 	// { thinkingBudget: -1, includeThoughts: true }
@@ -97,7 +111,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
 	}
 
-	// Temperature/top_p/top_k
+	// Temperature/top_p/top_k/max_tokens
 	if tr := gjson.GetBytes(rawJSON, "temperature"); tr.Exists() && tr.Type == gjson.Number {
 		out, _ = sjson.SetBytes(out, "request.generationConfig.temperature", tr.Num)
 	}
@@ -106,6 +120,9 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 	if tkr := gjson.GetBytes(rawJSON, "top_k"); tkr.Exists() && tkr.Type == gjson.Number {
 		out, _ = sjson.SetBytes(out, "request.generationConfig.topK", tkr.Num)
+	}
+	if maxTok := gjson.GetBytes(rawJSON, "max_tokens"); maxTok.Exists() && maxTok.Type == gjson.Number {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.maxOutputTokens", maxTok.Num)
 	}
 
 	// Map OpenAI modalities -> Gemini CLI request.generationConfig.responseModalities

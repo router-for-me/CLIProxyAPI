@@ -555,7 +555,8 @@ func parseOpenAIMessage(m gjson.Result) ir.Message {
 func parseOpenAIContentPart(item gjson.Result, msg *ir.Message) *ir.ContentPart {
 	switch item.Get("type").String() {
 	case "text":
-		if text := item.Get("text").String(); text != "" {
+		// Filter whitespace-only text content (matches old translator behavior)
+		if text := item.Get("text").String(); strings.TrimSpace(text) != "" {
 			return &ir.ContentPart{Type: ir.ContentTypeText, Text: text}
 		}
 	case "image_url":
@@ -664,6 +665,26 @@ func parseThinkingConfig(root gjson.Result) *ir.ThinkingConfig {
 			thinking.IncludeThoughts = v.Bool()
 		}
 	}
+
+	// Anthropic/Claude API format: thinking.type == "enabled" with budget_tokens
+	// This allows Claude Code and other Claude API clients to pass thinking configuration
+	// through OpenAI-compatible endpoints
+	if t := root.Get("thinking"); t.Exists() && t.IsObject() {
+		if t.Get("type").String() == "enabled" {
+			if thinking == nil {
+				thinking = &ir.ThinkingConfig{}
+			}
+			thinking.IncludeThoughts = true
+			if b := t.Get("budget_tokens"); b.Exists() {
+				thinking.Budget = int(b.Int())
+			} else {
+				thinking.Budget = -1 // Auto
+			}
+		} else if t.Get("type").String() == "disabled" {
+			thinking = &ir.ThinkingConfig{IncludeThoughts: false, Budget: 0}
+		}
+	}
+
 	return thinking
 }
 
