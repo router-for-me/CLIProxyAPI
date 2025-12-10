@@ -76,7 +76,8 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 			auth := &proxy.Auth{User: username, Password: password}
 			dialer, errSOCKS5 := proxy.SOCKS5("tcp", proxyURL.Host, auth, proxy.Direct)
 			if errSOCKS5 != nil {
-				log.Fatalf("create SOCKS5 dialer failed: %v", errSOCKS5)
+				log.Errorf("create SOCKS5 dialer failed: %v", errSOCKS5)
+				return nil, fmt.Errorf("create SOCKS5 dialer failed: %w", errSOCKS5)
 			}
 			transport = &http.Transport{
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -238,7 +239,11 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config,
 	// Start the server in a goroutine.
 	go func() {
 		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("ListenAndServe(): %v", err)
+			log.Errorf("ListenAndServe(): %v", err)
+			select {
+			case errChan <- err:
+			default:
+			}
 		}
 	}()
 

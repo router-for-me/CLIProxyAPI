@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
@@ -23,6 +24,9 @@ type convertCliResponseToOpenAIChatParams struct {
 	UnixTimestamp int64
 	FunctionIndex int
 }
+
+// functionCallIDCounter provides a process-wide unique counter for function call identifiers.
+var functionCallIDCounter uint64
 
 // ConvertAntigravityResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini CLI API format to the OpenAI Chat Completions streaming format.
@@ -146,7 +150,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 				functionCallTemplate := `{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`
 				fcName := functionCallResult.Get("name").String()
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", fmt.Sprintf("%s-%d", fcName, time.Now().UnixNano()))
+				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
 				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "index", functionCallIndex)
 				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", fcName)
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {

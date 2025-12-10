@@ -693,8 +693,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5 Low",
-			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
+			DisplayName:         "GPT 5.1 Nothink",
+			Description:         "Stable version of GPT 5.1, The best model for coding and agentic tasks across domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -719,8 +719,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5 Medium",
-			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
+			DisplayName:         "GPT 5.1 Medium",
+			Description:         "Stable version of GPT 5.1, The best model for coding and agentic tasks across domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -732,8 +732,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5 High",
-			Description:         "Stable version of GPT 5, The best model for coding and agentic tasks across domains.",
+			DisplayName:         "GPT 5.1 High",
+			Description:         "Stable version of GPT 5.1, The best model for coding and agentic tasks across domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -745,8 +745,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5 Codex",
-			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
+			DisplayName:         "GPT 5.1 Codex",
+			Description:         "Stable version of GPT 5.1 Codex, The best model for coding and agentic tasks across domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -758,8 +758,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5 Codex Low",
-			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
+			DisplayName:         "GPT 5.1 Codex Low",
+			Description:         "Stable version of GPT 5.1 Codex, The best model for coding and agentic tasks across domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -771,8 +771,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5 Codex Medium",
-			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
+			DisplayName:         "GPT 5.1 Codex Medium",
+			Description:         "Stable version of GPT 5.1 Codex, The best model for coding and agentic tasks across domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -784,8 +784,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5 Codex High",
-			Description:         "Stable version of GPT 5 Codex, The best model for coding and agentic tasks across domains.",
+			DisplayName:         "GPT 5.1 Codex High",
+			Description:         "Stable version of GPT 5.1 Codex, The best model for coding and agentic tasks across domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -797,8 +797,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5 Codex Mini",
-			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
+			DisplayName:         "GPT 5.1 Codex Mini",
+			Description:         "Stable version of GPT 5.1 Codex Mini: cheaper, faster, but less capable version of GPT 5.1 Codex.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -810,8 +810,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5 Codex Mini Medium",
-			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
+			DisplayName:         "GPT 5.1 Codex Mini Medium",
+			Description:         "Stable version of GPT 5.1 Codex Mini: cheaper, faster, but less capable version of GPT 5.1 Codex.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -823,8 +823,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-2025-11-12",
-			DisplayName:         "GPT 5 Codex Mini High",
-			Description:         "Stable version of GPT 5 Codex Mini: cheaper, faster, but less capable version of GPT 5 Codex.",
+			DisplayName:         "GPT 5.1 Codex Mini High",
+			Description:         "Stable version of GPT 5.1 Codex Mini: cheaper, faster, but less capable version of GPT 5.1 Codex.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -837,8 +837,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-max",
-			DisplayName:         "GPT 5 Codex Max",
-			Description:         "Stable version of GPT 5 Codex Max",
+			DisplayName:         "GPT 5.1 Codex Max",
+			Description:         "Stable version of GPT 5.1 Codex Max",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -850,8 +850,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-max",
-			DisplayName:         "GPT 5 Codex Max Low",
-			Description:         "Stable version of GPT 5 Codex Max Low",
+			DisplayName:         "GPT 5.1 Codex Max Low",
+			Description:         "Stable version of GPT 5.1 Codex Max Low",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -863,8 +863,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-max",
-			DisplayName:         "GPT 5 Codex Max Medium",
-			Description:         "Stable version of GPT 5 Codex Max Medium",
+			DisplayName:         "GPT 5.1 Codex Max Medium",
+			Description:         "Stable version of GPT 5.1 Codex Max Medium",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -876,8 +876,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-max",
-			DisplayName:         "GPT 5 Codex Max High",
-			Description:         "Stable version of GPT 5 Codex Max High",
+			DisplayName:         "GPT 5.1 Codex Max High",
+			Description:         "Stable version of GPT 5.1 Codex Max High",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -889,8 +889,8 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.1-max",
-			DisplayName:         "GPT 5 Codex Max XHigh",
-			Description:         "Stable version of GPT 5 Codex Max XHigh",
+			DisplayName:         "GPT 5.1 Codex Max XHigh",
+			Description:         "Stable version of GPT 5.1 Codex Max XHigh",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -944,7 +944,6 @@ func GetQwenModels() []*ModelInfo {
 }
 
 // GetIFlowModels returns supported models for iFlow OAuth accounts.
-
 func GetIFlowModels() []*ModelInfo {
 	entries := []struct {
 		ID          string
@@ -985,6 +984,28 @@ func GetIFlowModels() []*ModelInfo {
 		})
 	}
 	return models
+}
+
+// AntigravityModelConfig captures static antigravity model overrides, including
+// Thinking budget limits and provider max completion tokens.
+type AntigravityModelConfig struct {
+	Thinking            *ThinkingSupport
+	MaxCompletionTokens int
+	Name                string
+}
+
+// GetAntigravityModelConfig returns static configuration for antigravity models.
+// Keys use the ALIASED model names (after modelName2Alias conversion) for direct lookup.
+func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
+	return map[string]*AntigravityModelConfig{
+		"gemini-2.5-flash":                        {Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true}, Name: "models/gemini-2.5-flash"},
+		"gemini-2.5-flash-lite":                   {Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true}, Name: "models/gemini-2.5-flash-lite"},
+		"gemini-2.5-computer-use-preview-10-2025": {Name: "models/gemini-2.5-computer-use-preview-10-2025"},
+		"gemini-3-pro-preview":                    {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true}, Name: "models/gemini-3-pro-preview"},
+		"gemini-3-pro-image-preview":              {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true}, Name: "models/gemini-3-pro-image-preview"},
+		"gemini-claude-sonnet-4-5-thinking":       {Thinking: &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true}, MaxCompletionTokens: 64000},
+		"gemini-claude-opus-4-5-thinking":         {Thinking: &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true}, MaxCompletionTokens: 64000},
+	}
 }
 
 // GetGitHubCopilotModels returns the available models for GitHub Copilot.
@@ -1174,17 +1195,6 @@ func GetGitHubCopilotModels() []*ModelInfo {
 // GetKiroModels returns the Kiro (AWS CodeWhisperer) model definitions
 func GetKiroModels() []*ModelInfo {
 	return []*ModelInfo{
-		{
-			ID:                  "kiro-auto",
-			Object:              "model",
-			Created:             1732752000, // 2024-11-28
-			OwnedBy:             "aws",
-			Type:                "kiro",
-			DisplayName:         "Kiro Auto",
-			Description:         "Automatic model selection by AWS CodeWhisperer",
-			ContextLength:       200000,
-			MaxCompletionTokens: 64000,
-		},
 		{
 			ID:                  "kiro-claude-opus-4.5",
 			Object:              "model",

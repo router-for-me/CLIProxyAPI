@@ -1272,7 +1272,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 		}
 		for i := range cfg.KiroKey {
 			kk := cfg.KiroKey[i]
-			var accessToken, profileArn string
+			var accessToken, profileArn, refreshToken string
 
 			// Try to load from token file first
 			if kk.TokenFile != "" && kAuth != nil {
@@ -1282,6 +1282,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				} else {
 					accessToken = tokenData.AccessToken
 					profileArn = tokenData.ProfileArn
+					refreshToken = tokenData.RefreshToken
 				}
 			}
 
@@ -1291,6 +1292,9 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			}
 			if kk.ProfileArn != "" {
 				profileArn = kk.ProfileArn
+			}
+			if kk.RefreshToken != "" {
+				refreshToken = kk.RefreshToken
 			}
 
 			if accessToken == "" {
@@ -1313,6 +1317,9 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			if kk.AgentTaskType != "" {
 				attrs["agent_task_type"] = kk.AgentTaskType
 			}
+			if refreshToken != "" {
+				attrs["refresh_token"] = refreshToken
+			}
 			proxyURL := strings.TrimSpace(kk.ProxyURL)
 			a := &coreauth.Auth{
 				ID:         id,
@@ -1324,6 +1331,14 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				CreatedAt:  now,
 				UpdatedAt:  now,
 			}
+
+			if refreshToken != "" {
+				if a.Metadata == nil {
+					a.Metadata = make(map[string]any)
+				}
+				a.Metadata["refresh_token"] = refreshToken
+			}
+
 			out = append(out, a)
 		}
 		for i := range cfg.OpenAICompatibility {

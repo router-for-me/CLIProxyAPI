@@ -300,7 +300,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create HTTP server
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Port),
+		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler: engine,
 	}
 
@@ -519,6 +519,26 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/ws-auth", s.mgmt.GetWebsocketAuth)
 		mgmt.PUT("/ws-auth", s.mgmt.PutWebsocketAuth)
 		mgmt.PATCH("/ws-auth", s.mgmt.PutWebsocketAuth)
+
+		mgmt.GET("/ampcode", s.mgmt.GetAmpCode)
+		mgmt.GET("/ampcode/upstream-url", s.mgmt.GetAmpUpstreamURL)
+		mgmt.PUT("/ampcode/upstream-url", s.mgmt.PutAmpUpstreamURL)
+		mgmt.PATCH("/ampcode/upstream-url", s.mgmt.PutAmpUpstreamURL)
+		mgmt.DELETE("/ampcode/upstream-url", s.mgmt.DeleteAmpUpstreamURL)
+		mgmt.GET("/ampcode/upstream-api-key", s.mgmt.GetAmpUpstreamAPIKey)
+		mgmt.PUT("/ampcode/upstream-api-key", s.mgmt.PutAmpUpstreamAPIKey)
+		mgmt.PATCH("/ampcode/upstream-api-key", s.mgmt.PutAmpUpstreamAPIKey)
+		mgmt.DELETE("/ampcode/upstream-api-key", s.mgmt.DeleteAmpUpstreamAPIKey)
+		mgmt.GET("/ampcode/restrict-management-to-localhost", s.mgmt.GetAmpRestrictManagementToLocalhost)
+		mgmt.PUT("/ampcode/restrict-management-to-localhost", s.mgmt.PutAmpRestrictManagementToLocalhost)
+		mgmt.PATCH("/ampcode/restrict-management-to-localhost", s.mgmt.PutAmpRestrictManagementToLocalhost)
+		mgmt.GET("/ampcode/model-mappings", s.mgmt.GetAmpModelMappings)
+		mgmt.PUT("/ampcode/model-mappings", s.mgmt.PutAmpModelMappings)
+		mgmt.PATCH("/ampcode/model-mappings", s.mgmt.PatchAmpModelMappings)
+		mgmt.DELETE("/ampcode/model-mappings", s.mgmt.DeleteAmpModelMappings)
+		mgmt.GET("/ampcode/force-model-mappings", s.mgmt.GetAmpForceModelMappings)
+		mgmt.PUT("/ampcode/force-model-mappings", s.mgmt.PutAmpForceModelMappings)
+		mgmt.PATCH("/ampcode/force-model-mappings", s.mgmt.PutAmpForceModelMappings)
 
 		mgmt.GET("/request-retry", s.mgmt.GetRequestRetry)
 		mgmt.PUT("/request-retry", s.mgmt.PutRequestRetry)

@@ -156,6 +156,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	rootMiddleware := []gin.HandlerFunc{m.managementAvailabilityMiddleware(), noCORSMiddleware(), m.localhostOnlyMiddleware()}
 	engine.GET("/threads/*path", append(rootMiddleware, proxyHandler)...)
 	engine.GET("/threads.rss", append(rootMiddleware, proxyHandler)...)
+	engine.GET("/news.rss", append(rootMiddleware, proxyHandler)...)
 
 	// Root-level auth routes for CLI login flow
 	// Amp uses multiple auth routes: /auth/cli-login, /auth/callback, /auth/sign-in, /auth/logout
@@ -171,7 +172,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	geminiBridge := createGeminiBridgeHandler(geminiHandlers.GeminiHandler)
 	geminiV1Beta1Fallback := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
 		return m.getProxy()
-	}, m.modelMapper)
+	}, m.modelMapper, m.forceModelMappings)
 	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
 
 	// Route POST model calls through Gemini bridge with FallbackHandler.
@@ -209,7 +210,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	// Also includes model mapping support for routing unavailable models to alternatives
 	fallbackHandler := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
 		return m.getProxy()
-	}, m.modelMapper)
+	}, m.modelMapper, m.forceModelMappings)
 
 	// Provider-specific routes under /api/provider/:provider
 	ampProviders := engine.Group("/api/provider")

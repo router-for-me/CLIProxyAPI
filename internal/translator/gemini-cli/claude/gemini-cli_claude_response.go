@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -26,6 +27,9 @@ type Params struct {
 	ResponseType     int  // Current response type: 0=none, 1=content, 2=thinking, 3=function
 	ResponseIndex    int  // Index counter for content blocks in the streaming response
 }
+
+// toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
+var toolUseIDCounter uint64
 
 // ConvertGeminiCLIResponseToClaude performs sophisticated streaming response format conversion.
 // This function implements a complex state machine that translates backend client responses
@@ -180,7 +184,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 
 				// Create the tool use block with unique ID and function details
 				data := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`, (*param).(*Params).ResponseIndex)
-				data, _ = sjson.Set(data, "content_block.id", fmt.Sprintf("%s-%d", fcName, time.Now().UnixNano()))
+				data, _ = sjson.Set(data, "content_block.id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1)))
 				data, _ = sjson.Set(data, "content_block.name", fcName)
 				sb.WriteString(fmt.Sprintf("data: %s\n\n\n", data))
 

@@ -20,6 +20,9 @@ import (
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	config.SDKConfig `yaml:",inline"`
+	// Host is the network host/interface on which the API server will bind.
+	// Default is empty ("") to bind all interfaces (IPv4 + IPv6). Use "127.0.0.1" or "localhost" for local-only access.
+	Host string `yaml:"host" json:"-"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
 
@@ -151,6 +154,10 @@ type AmpCode struct {
 	// When Amp requests a model that isn't available locally, these mappings
 	// allow routing to an alternative model that IS available.
 	ModelMappings []AmpModelMapping `yaml:"model-mappings" json:"model-mappings"`
+
+	// ForceModelMappings when true, model mappings take precedence over local API keys.
+	// When false (default), local API keys are used first if available.
+	ForceModelMappings bool `yaml:"force-model-mappings" json:"force-model-mappings"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -349,6 +356,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Unmarshal the YAML data into the Config struct.
 	var cfg Config
 	// Set defaults before unmarshal so that absent keys keep defaults.
+	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
 	cfg.LoggingToFile = false
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
