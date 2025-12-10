@@ -12,8 +12,8 @@ import (
 // applyThinkingMetadata applies thinking config from model suffix metadata (e.g., -reasoning, -thinking-N)
 // for standard Gemini format payloads. It normalizes the budget when the model supports thinking.
 func applyThinkingMetadata(payload []byte, metadata map[string]any, model string) []byte {
-	budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(metadata)
-	if !ok {
+	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(model, metadata)
+	if !ok || (budgetOverride == nil && includeOverride == nil) {
 		return payload
 	}
 	if !util.ModelSupportsThinking(model) {
@@ -29,15 +29,58 @@ func applyThinkingMetadata(payload []byte, metadata map[string]any, model string
 // applyThinkingMetadataCLI applies thinking config from model suffix metadata (e.g., -reasoning, -thinking-N)
 // for Gemini CLI format payloads (nested under "request"). It normalizes the budget when the model supports thinking.
 func applyThinkingMetadataCLI(payload []byte, metadata map[string]any, model string) []byte {
-	budgetOverride, includeOverride, ok := util.GeminiThinkingFromMetadata(metadata)
-	if !ok {
+	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(model, metadata)
+	if !ok || (budgetOverride == nil && includeOverride == nil) {
 		return payload
 	}
-	if budgetOverride != nil && util.ModelSupportsThinking(model) {
+	if !util.ModelSupportsThinking(model) {
+		return payload
+	}
+	if budgetOverride != nil {
 		norm := util.NormalizeThinkingBudget(model, *budgetOverride)
 		budgetOverride = &norm
 	}
 	return util.ApplyGeminiCLIThinkingConfig(payload, budgetOverride, includeOverride)
+}
+
+// applyReasoningEffortMetadata applies reasoning effort overrides (reasoning.effort) when present in metadata.
+// It avoids overwriting an existing reasoning.effort field and only applies to models that support thinking.
+func applyReasoningEffortMetadata(payload []byte, metadata map[string]any, model string) []byte {
+	if len(metadata) == 0 {
+		return payload
+	}
+	if !util.ModelSupportsThinking(model) {
+		return payload
+	}
+	if gjson.GetBytes(payload, "reasoning.effort").Exists() {
+		return payload
+	}
+	if effort, ok := util.ReasoningEffortFromMetadata(metadata); ok && effort != "" {
+		if updated, err := sjson.SetBytes(payload, "reasoning.effort", effort); err == nil {
+			return updated
+		}
+	}
+	return payload
+}
+
+// applyReasoningEffortMetadataChatCompletions applies reasoning_effort (OpenAI chat completions field)
+// when present in metadata. It avoids overwriting an existing reasoning_effort field.
+func applyReasoningEffortMetadataChatCompletions(payload []byte, metadata map[string]any, model string) []byte {
+	if len(metadata) == 0 {
+		return payload
+	}
+	if !util.ModelSupportsThinking(model) {
+		return payload
+	}
+	if gjson.GetBytes(payload, "reasoning_effort").Exists() {
+		return payload
+	}
+	if effort, ok := util.ReasoningEffortFromMetadata(metadata); ok && effort != "" {
+		if updated, err := sjson.SetBytes(payload, "reasoning_effort", effort); err == nil {
+			return updated
+		}
+	}
+	return payload
 }
 
 // applyPayloadConfig applies payload default and override rules from configuration

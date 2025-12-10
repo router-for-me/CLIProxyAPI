@@ -57,6 +57,10 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	body = applyReasoningEffortMetadataChatCompletions(body, req.Metadata, req.Model)
+	if upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata); upstreamModel != "" {
+		body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
@@ -139,6 +143,10 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	to := sdktranslator.FromString("openai")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
+	body = applyReasoningEffortMetadataChatCompletions(body, req.Metadata, req.Model)
+	if upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata); upstreamModel != "" {
+		body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	}
 	// Ensure tools array exists to avoid provider quirks similar to Qwen's behaviour.
 	toolsResult := gjson.GetBytes(body, "tools")
 	if toolsResult.Exists() && toolsResult.IsArray() && len(toolsResult.Array()) == 0 {

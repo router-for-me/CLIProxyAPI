@@ -343,18 +343,32 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 
 	providerName, extractedModelName, isDynamic := h.parseDynamicModel(resolvedModelName)
 
-	// First, normalize the model name to handle suffixes like "-thinking-128"
-	// This needs to happen before determining the provider for non-dynamic models.
-	normalizedModel, metadata = normalizeModelMetadata(resolvedModelName)
+	targetModelName := resolvedModelName
+	if isDynamic {
+		targetModelName = extractedModelName
+	}
+
+	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
+	normalizedModel, metadata = normalizeModelMetadata(targetModelName)
 
 	if isDynamic {
 		providers = []string{providerName}
-		// For dynamic models, the extractedModelName is already normalized by parseDynamicModel
-		// so we use it as the final normalizedModel.
-		normalizedModel = extractedModelName
 	} else {
 		// For non-dynamic models, use the normalizedModel to get the provider name.
 		providers = util.GetProviderName(normalizedModel)
+		if len(providers) == 0 && metadata != nil {
+			if originalRaw, ok := metadata[util.ThinkingOriginalModelMetadataKey]; ok {
+				if originalModel, okStr := originalRaw.(string); okStr {
+					originalModel = strings.TrimSpace(originalModel)
+					if originalModel != "" && !strings.EqualFold(originalModel, normalizedModel) {
+						if altProviders := util.GetProviderName(originalModel); len(altProviders) > 0 {
+							providers = altProviders
+							normalizedModel = originalModel
+						}
+					}
+				}
+			}
+		}
 	}
 
 	if len(providers) == 0 {
@@ -402,7 +416,7 @@ func cloneBytes(src []byte) []byte {
 }
 
 func normalizeModelMetadata(modelName string) (string, map[string]any) {
-	return util.NormalizeGeminiThinkingModel(modelName)
+	return util.NormalizeThinkingModel(modelName)
 }
 
 func cloneMetadata(src map[string]any) map[string]any {

@@ -133,8 +133,8 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			return
 		}
 
-		// Normalize model (handles Gemini thinking suffixes)
-		normalizedModel, _ := util.NormalizeGeminiThinkingModel(modelName)
+		// Normalize model (handles dynamic thinking suffixes)
+		normalizedModel, _ := util.NormalizeThinkingModel(modelName)
 
 		// Track resolved model for logging (may change if mapping is applied)
 		resolvedModel := normalizedModel
