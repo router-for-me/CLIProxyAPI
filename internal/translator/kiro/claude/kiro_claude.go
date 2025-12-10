@@ -1,5 +1,6 @@
 // Package claude provides translation between Kiro and Claude formats.
-// Since Kiro uses Claude-compatible format internally, translations are mostly pass-through.
+// Since Kiro executor generates Claude-compatible SSE format internally (with event: prefix),
+// translations are pass-through.
 package claude
 
 import (
@@ -14,6 +15,8 @@ func ConvertClaudeRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 }
 
 // ConvertKiroResponseToClaude converts Kiro streaming response to Claude format.
+// Kiro executor already generates complete SSE format with "event:" prefix,
+// so this is a simple pass-through.
 func ConvertKiroResponseToClaude(ctx context.Context, model string, originalRequest, request, rawResponse []byte, param *any) []string {
 	return []string{string(rawResponse)}
 }
