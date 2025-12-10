@@ -45,12 +45,13 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 
 	service, err := builder.Build()
 	if err != nil {
-		log.Fatalf("failed to build proxy service: %v", err)
+		log.Errorf("failed to build proxy service: %v", err)
+		return
 	}
 
 	err = service.Run(runCtx)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("proxy service exited with error: %v", err)
+		log.Errorf("proxy service exited with error: %v", err)
 	}
 }
 

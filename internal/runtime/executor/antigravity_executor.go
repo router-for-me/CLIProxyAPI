@@ -31,18 +31,18 @@ import (
 // When UseCanonicalTranslator is enabled, TranslateToGeminiCLI handles the conversion.
 
 const (
-	antigravityBaseURLDaily        = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLAutopush     = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLProd         = "https://cloudcode-pa.googleapis.com"
-	antigravityStreamPath          = "/v1internal:streamGenerateContent"
-	antigravityGeneratePath        = "/v1internal:generateContent"
-	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
-	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret        = "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"
-	defaultAntigravityAgent        = "antigravity/1.11.5 windows/amd64"
-	antigravityAuthType            = "antigravity"
-	refreshSkew                    = 3000 * time.Second
-	streamScannerBuffer        int = 20_971_520
+	antigravityBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	// antigravityBaseURLAutopush     = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
+	antigravityBaseURLProd      = "https://cloudcode-pa.googleapis.com"
+	antigravityStreamPath       = "/v1internal:streamGenerateContent"
+	antigravityGeneratePath     = "/v1internal:generateContent"
+	antigravityModelsPath       = "/v1internal:fetchAvailableModels"
+	antigravityClientID         = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	antigravityClientSecret     = "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"
+	defaultAntigravityAgent     = "antigravity/1.11.5 windows/amd64"
+	antigravityAuthType         = "antigravity"
+	refreshSkew                 = 3000 * time.Second
+	streamScannerBuffer     int = 20_971_520
 )
 
 // Note: We use crypto/rand via uuid package for thread-safe random generation
@@ -95,6 +95,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
+	translated = util.ApplyDefaultThinkingIfNeededCLI(req.Model, translated)
 	translated = normalizeAntigravityThinking(req.Model, translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
@@ -220,6 +221,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 
 	translated = applyThinkingMetadataCLI(translated, req.Metadata, req.Model)
+	translated = util.ApplyDefaultThinkingIfNeededCLI(req.Model, translated)
 	translated = normalizeAntigravityThinking(req.Model, translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
@@ -451,9 +453,14 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		for originalName := range result.Map() {
 			aliasName := modelName2Alias(originalName)
 			if aliasName != "" {
+				cfg := modelConfig[aliasName]
+				modelName := aliasName
+				if cfg != nil && cfg.Name != "" {
+					modelName = cfg.Name
+				}
 				modelInfo := &registry.ModelInfo{
 					ID:          aliasName,
-					Name:        aliasName,
+					Name:        modelName,
 					Description: aliasName,
 					DisplayName: aliasName,
 					Version:     aliasName,
@@ -463,7 +470,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 					Type:        antigravityAuthType,
 				}
 				// Look up Thinking support from static config using alias name
-				if cfg, ok := modelConfig[aliasName]; ok {
+				if cfg != nil {
 					if cfg.Thinking != nil {
 						modelInfo.Thinking = cfg.Thinking
 					}
@@ -616,6 +623,8 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		strJSON = util.DeleteKey(strJSON, "maxLength")
 		strJSON = util.DeleteKey(strJSON, "exclusiveMinimum")
 		strJSON = util.DeleteKey(strJSON, "exclusiveMaximum")
+		strJSON = util.DeleteKey(strJSON, "$ref")
+		strJSON = util.DeleteKey(strJSON, "$defs")
 
 		paths = make([]string, 0)
 		util.Walk(gjson.Parse(strJSON), "", "anyOf", &paths)
@@ -731,7 +740,7 @@ func buildBaseURL(auth *cliproxyauth.Auth) string {
 	if baseURLs := antigravityBaseURLFallbackOrder(auth); len(baseURLs) > 0 {
 		return baseURLs[0]
 	}
-	return antigravityBaseURLAutopush
+	return antigravityBaseURLDaily
 }
 
 func resolveHost(base string) string {
@@ -770,7 +779,7 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	return []string{
 		antigravityBaseURLProd,
 		antigravityBaseURLDaily,
-		antigravityBaseURLAutopush,
+		// antigravityBaseURLAutopush,
 	}
 }
 
@@ -957,9 +966,12 @@ func normalizeAntigravityThinking(model string, payload []byte) []byte {
 		effectiveMax, setDefaultMax := antigravityEffectiveMaxTokens(model, payload)
 		if effectiveMax > 0 && normalized >= effectiveMax {
 			normalized = effectiveMax - 1
-			if normalized < 1 {
-				normalized = 1
-			}
+		}
+		minBudget := antigravityMinThinkingBudget(model)
+		if minBudget > 0 && normalized >= 0 && normalized < minBudget {
+			// Budget is below minimum, remove thinking config entirely
+			payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig")
+			return payload
 		}
 		if setDefaultMax {
 			if res, errSet := sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", effectiveMax); errSet == nil {
@@ -986,4 +998,13 @@ func antigravityEffectiveMaxTokens(model string, payload []byte) (max int, fromM
 		return modelInfo.MaxCompletionTokens, true
 	}
 	return 0, false
+}
+
+// antigravityMinThinkingBudget returns the minimum thinking budget for a model.
+// Falls back to -1 if no model info is found.
+func antigravityMinThinkingBudget(model string) int {
+	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(model); modelInfo != nil && modelInfo.Thinking != nil {
+		return modelInfo.Thinking.Min
+	}
+	return -1
 }

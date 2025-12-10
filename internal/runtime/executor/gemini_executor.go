@@ -90,6 +90,9 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
 	}
+	// Apply default thinking for models that require it (e.g., gemini-3-pro-preview)
+	body = util.ApplyDefaultThinkingIfNeeded(req.Model, body)
+	body = util.NormalizeGeminiThinkingBudget(req.Model, body)
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
 	// Only apply fixGeminiImageAspectRatio if new translator is disabled (new translator handles it internally)
 	if e.cfg == nil || !e.cfg.UseCanonicalTranslator {
@@ -199,6 +202,9 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
 	}
+	// Apply default thinking for models that require it (e.g., gemini-3-pro-preview)
+	body = util.ApplyDefaultThinkingIfNeeded(req.Model, body)
+	body = util.NormalizeGeminiThinkingBudget(req.Model, body)
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
 	// Only apply fixGeminiImageAspectRatio if new translator is disabled (new translator handles it internally)
 	if e.cfg == nil || !e.cfg.UseCanonicalTranslator {

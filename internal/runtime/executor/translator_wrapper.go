@@ -7,6 +7,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -93,6 +94,10 @@ func TranslateToGeminiCLI(cfg *config.Config, from sdktranslator.Format, model s
 	if err != nil {
 		return nil, err
 	}
+
+	// Apply default thinking for models that require it (e.g., gemini-3-pro-preview)
+	geminiJSON = util.ApplyDefaultThinkingIfNeededCLI(model, geminiJSON)
+	geminiJSON = util.NormalizeGeminiCLIThinkingBudget(model, geminiJSON)
 
 	// Apply payload config overrides from YAML
 	return applyPayloadConfigToIR(cfg, model, geminiJSON), nil
@@ -207,6 +212,10 @@ func TranslateToGemini(cfg *config.Config, from sdktranslator.Format, model stri
 	if err != nil {
 		return nil, err
 	}
+
+	// Apply default thinking for models that require it (e.g., gemini-3-pro-preview)
+	geminiJSON = util.ApplyDefaultThinkingIfNeeded(model, geminiJSON)
+	geminiJSON = util.NormalizeGeminiThinkingBudget(model, geminiJSON)
 
 	// Apply payload config overrides from YAML
 	return applyPayloadConfigToIR(cfg, model, geminiJSON), nil

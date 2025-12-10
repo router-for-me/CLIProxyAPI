@@ -156,6 +156,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	rootMiddleware := []gin.HandlerFunc{m.managementAvailabilityMiddleware(), noCORSMiddleware(), m.localhostOnlyMiddleware()}
 	engine.GET("/threads/*path", append(rootMiddleware, proxyHandler)...)
 	engine.GET("/threads.rss", append(rootMiddleware, proxyHandler)...)
+	engine.GET("/news.rss", append(rootMiddleware, proxyHandler)...)
 
 	// Root-level auth routes for CLI login flow
 	// Amp uses multiple auth routes: /auth/cli-login, /auth/callback, /auth/sign-in, /auth/logout

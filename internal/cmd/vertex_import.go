@@ -29,30 +29,30 @@ func DoVertexImport(cfg *config.Config, keyPath string) {
 	}
 	rawPath := strings.TrimSpace(keyPath)
 	if rawPath == "" {
-		log.Fatalf("vertex-import: missing service account key path")
+		log.Errorf("vertex-import: missing service account key path")
 		return
 	}
 	data, errRead := os.ReadFile(rawPath)
 	if errRead != nil {
-		log.Fatalf("vertex-import: read file failed: %v", errRead)
+		log.Errorf("vertex-import: read file failed: %v", errRead)
 		return
 	}
 	var sa map[string]any
 	if errUnmarshal := json.Unmarshal(data, &sa); errUnmarshal != nil {
-		log.Fatalf("vertex-import: invalid service account json: %v", errUnmarshal)
+		log.Errorf("vertex-import: invalid service account json: %v", errUnmarshal)
 		return
 	}
 	// Validate and normalize private_key before saving
 	normalizedSA, errFix := vertex.NormalizeServiceAccountMap(sa)
 	if errFix != nil {
-		log.Fatalf("vertex-import: %v", errFix)
+		log.Errorf("vertex-import: %v", errFix)
 		return
 	}
 	sa = normalizedSA
 	email, _ := sa["client_email"].(string)
 	projectID, _ := sa["project_id"].(string)
 	if strings.TrimSpace(projectID) == "" {
-		log.Fatalf("vertex-import: project_id missing in service account json")
+		log.Errorf("vertex-import: project_id missing in service account json")
 		return
 	}
 	if strings.TrimSpace(email) == "" {
@@ -92,7 +92,7 @@ func DoVertexImport(cfg *config.Config, keyPath string) {
 	}
 	path, errSave := store.Save(context.Background(), record)
 	if errSave != nil {
-		log.Fatalf("vertex-import: save credential failed: %v", errSave)
+		log.Errorf("vertex-import: save credential failed: %v", errSave)
 		return
 	}
 	fmt.Printf("Vertex credentials imported: %s\n", path)
