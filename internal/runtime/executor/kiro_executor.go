@@ -461,6 +461,7 @@ func (e *KiroExecutor) executeWithRetry(rc *requestContext) (cliproxyexecutor.Re
 
 func (e *KiroExecutor) handleEventStreamResponse(body io.ReadCloser, model string) (cliproxyexecutor.Response, error) {
 	scanner := bufio.NewScanner(body)
+	scanner.Buffer(nil, 20_971_520) // 20MB buffer to handle large AWS EventStream frames
 	scanner.Split(splitAWSEventStream)
 	state := to_ir.NewKiroStreamState()
 
@@ -612,6 +613,7 @@ func (e *KiroExecutor) processStream(resp *http.Response, model string, requestP
 	defer close(out)
 
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(nil, 20_971_520) // 20MB buffer to handle large AWS EventStream frames
 	scanner.Split(splitAWSEventStream)
 	state := to_ir.NewKiroStreamState()
 	messageID := "chatcmpl-" + uuid.New().String()
