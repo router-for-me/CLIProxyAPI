@@ -253,20 +253,23 @@ type GeminiCLIStreamState struct {
 	ReasoningCharsAccum  int                   // Track accumulated reasoning characters (for estimation if provider doesn't give count)
 	ToolSchemaCtx        *ir.ToolSchemaContext // Schema context for normalizing tool call parameters
 	FinishSent           bool                  // Track if finish event was already sent (prevent duplicates)
+	ToolCallSentHeader   map[int]bool          // Track which tool call indices have sent their header (ID/Name/Type)
 }
 
 // NewAntigravityStreamState creates a new stream state with tool schema context for Antigravity provider.
 // Antigravity has a known issue where Gemini ignores tool parameter schemas and returns
 // different parameter names (e.g., "path" instead of "target_file").
 // This function extracts the expected schema from the original request to normalize responses.
+// Also detects if the client is using Claude format (tool_use) to ensure proper response formatting.
 // Uses gjson for efficient extraction without full JSON unmarshaling.
 func NewAntigravityStreamState(originalRequest []byte) *GeminiCLIStreamState {
 	state := &GeminiCLIStreamState{
-		ClaudeState: from_ir.NewClaudeStreamState(),
+		ClaudeState:        from_ir.NewClaudeStreamState(),
+		ToolCallSentHeader: make(map[int]bool),
 	}
 
-	// Extract tool schemas efficiently using gjson (no full unmarshal)
 	if len(originalRequest) > 0 {
+		// Extract tool schemas efficiently using gjson (no full unmarshal)
 		tools := gjson.GetBytes(originalRequest, "tools").Array()
 		if len(tools) > 0 {
 			state.ToolSchemaCtx = ir.NewToolSchemaContextFromGJSON(tools)
@@ -304,6 +307,7 @@ func TranslateGeminiCLIResponseStream(cfg *config.Config, to sdktranslator.Forma
 
 	// Step 2: Convert IR events to target format chunks
 	toStr := to.String()
+
 	// Initialize as empty slice (not nil) so that even when all events are skipped,
 	// we return non-nil to prevent fallback to old translator
 	chunks := make([][]byte, 0)
@@ -311,7 +315,10 @@ func TranslateGeminiCLIResponseStream(cfg *config.Config, to sdktranslator.Forma
 	switch toStr {
 	case "openai", "cline":
 		if state == nil {
-			state = &GeminiCLIStreamState{}
+			state = &GeminiCLIStreamState{ToolCallSentHeader: make(map[int]bool)}
+		}
+		if state.ToolCallSentHeader == nil {
+			state.ToolCallSentHeader = make(map[int]bool)
 		}
 		for i := range events {
 			event := &events[i]
@@ -340,6 +347,18 @@ func TranslateGeminiCLIResponseStream(cfg *config.Config, to sdktranslator.Forma
 				idx = state.ToolCallIndex
 				state.ToolCallIndex++
 			}
+
+			// Set correct tool call index and ensure ID/Name sent only once per tool
+			if event.ToolCall != nil {
+				event.ToolCallIndex = idx
+				if state.ToolCallSentHeader[idx] {
+					event.ToolCall.ID = ""
+					event.ToolCall.Name = ""
+				} else {
+					state.ToolCallSentHeader[idx] = true
+				}
+			}
+
 			// Track reasoning tokens for final usage
 			if event.Type == ir.EventTypeReasoning && event.Reasoning != "" {
 				state.ReasoningCharsAccum += len(event.Reasoning)
