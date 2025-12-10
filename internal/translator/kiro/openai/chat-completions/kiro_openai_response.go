@@ -171,7 +171,7 @@ func convertClaudeEventToOpenAI(jsonStr string, model string) []string {
 		return results
 
 	case "message_delta":
-		// Final message delta with stop_reason
+		// Final message delta with stop_reason and usage
 		stopReason := root.Get("delta.stop_reason").String()
 		if stopReason != "" {
 			finishReason := "stop"
@@ -196,6 +196,19 @@ func convertClaudeEventToOpenAI(jsonStr string, model string) []string {
 					},
 				},
 			}
+
+			// Extract and include usage information from message_delta event
+			usage := root.Get("usage")
+			if usage.Exists() {
+				inputTokens := usage.Get("input_tokens").Int()
+				outputTokens := usage.Get("output_tokens").Int()
+				response["usage"] = map[string]interface{}{
+					"prompt_tokens":     inputTokens,
+					"completion_tokens": outputTokens,
+					"total_tokens":      inputTokens + outputTokens,
+				}
+			}
+
 			result, _ := json.Marshal(response)
 			results = append(results, string(result))
 		}
