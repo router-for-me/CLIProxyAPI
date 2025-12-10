@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -36,6 +37,12 @@ type geminiToResponsesState struct {
 	FuncNames   map[int]string
 	FuncCallIDs map[int]string
 }
+
+// responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
+var responseIDCounter uint64
+
+// funcCallIDCounter provides a process-wide unique counter for function call identifiers.
+var funcCallIDCounter uint64
 
 func emitEvent(event string, payload string) string {
 	return fmt.Sprintf("event: %s\ndata: %s", event, payload)
@@ -205,7 +212,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					st.FuncArgsBuf[idx] = &strings.Builder{}
 				}
 				if st.FuncCallIDs[idx] == "" {
-					st.FuncCallIDs[idx] = fmt.Sprintf("call_%d", time.Now().UnixNano())
+					st.FuncCallIDs[idx] = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
 				}
 				st.FuncNames[idx] = name
 
@@ -464,7 +471,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	// id: prefer provider responseId, otherwise synthesize
 	id := root.Get("responseId").String()
 	if id == "" {
-		id = fmt.Sprintf("resp_%x", time.Now().UnixNano())
+		id = fmt.Sprintf("resp_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&responseIDCounter, 1))
 	}
 	// Normalize to response-style id (prefix resp_ if missing)
 	if !strings.HasPrefix(id, "resp_") {
@@ -575,7 +582,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			if fc := p.Get("functionCall"); fc.Exists() {
 				name := fc.Get("name").String()
 				args := fc.Get("args")
-				callID := fmt.Sprintf("call_%x", time.Now().UnixNano())
+				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
 				outputs = append(outputs, map[string]interface{}{
 					"id":     fmt.Sprintf("fc_%s", callID),
 					"type":   "function_call",
