@@ -157,7 +157,7 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if ginCtx == nil {
 		return
 	}
-	_, attempt := ensureAttempt(ginCtx)
+	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
 
 	if !attempt.headersWritten {
@@ -175,6 +175,8 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	}
 	attempt.response.WriteString(string(data))
 	attempt.bodyHasContent = true
+
+	updateAggregatedResponse(ginCtx, attempts)
 }
 
 func ginContextFrom(ctx context.Context) *gin.Context {
