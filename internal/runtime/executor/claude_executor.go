@@ -54,15 +54,22 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
-	modelForUpstream := req.Model
-	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
-		body, _ = sjson.SetBytes(body, "model", modelOverride)
-		modelForUpstream = modelOverride
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
 	}
-	// Inject thinking config based on model suffix for thinking variants
-	body = e.injectThinkingConfig(req.Model, body)
+	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
+		upstreamModel = modelOverride
+	} else if !strings.EqualFold(upstreamModel, req.Model) {
+		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+			upstreamModel = modelOverride
+		}
+	}
+	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	// Inject thinking config based on model metadata for thinking variants
+	body = e.injectThinkingConfig(req.Model, req.Metadata, body)
 
-	if !strings.HasPrefix(modelForUpstream, "claude-3-5-haiku") {
+	if !strings.HasPrefix(upstreamModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
@@ -161,11 +168,20 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
-		body, _ = sjson.SetBytes(body, "model", modelOverride)
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
 	}
-	// Inject thinking config based on model suffix for thinking variants
-	body = e.injectThinkingConfig(req.Model, body)
+	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
+		upstreamModel = modelOverride
+	} else if !strings.EqualFold(upstreamModel, req.Model) {
+		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+			upstreamModel = modelOverride
+		}
+	}
+	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	// Inject thinking config based on model metadata for thinking variants
+	body = e.injectThinkingConfig(req.Model, req.Metadata, body)
 	body = checkSystemInstructions(body)
 	body = applyPayloadConfig(e.cfg, req.Model, body)
 
@@ -295,13 +311,20 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
-	modelForUpstream := req.Model
-	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
-		body, _ = sjson.SetBytes(body, "model", modelOverride)
-		modelForUpstream = modelOverride
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
 	}
+	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
+		upstreamModel = modelOverride
+	} else if !strings.EqualFold(upstreamModel, req.Model) {
+		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+			upstreamModel = modelOverride
+		}
+	}
+	body, _ = sjson.SetBytes(body, "model", upstreamModel)
 
-	if !strings.HasPrefix(modelForUpstream, "claude-3-5-haiku") {
+	if !strings.HasPrefix(upstreamModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
 
@@ -427,31 +450,59 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
-// injectThinkingConfig adds thinking configuration based on model name suffix
-func (e *ClaudeExecutor) injectThinkingConfig(modelName string, body []byte) []byte {
+// injectThinkingConfig adds thinking configuration based on metadata or legacy suffixes.
+func (e *ClaudeExecutor) injectThinkingConfig(modelName string, metadata map[string]any, body []byte) []byte {
 	// Only inject if thinking config is not already present
 	if gjson.GetBytes(body, "thinking").Exists() {
 		return body
 	}
 
-	var budgetTokens int
-	switch {
-	case strings.HasSuffix(modelName, "-thinking-low"):
-		budgetTokens = 1024
-	case strings.HasSuffix(modelName, "-thinking-medium"):
-		budgetTokens = 8192
-	case strings.HasSuffix(modelName, "-thinking-high"):
-		budgetTokens = 24576
-	case strings.HasSuffix(modelName, "-thinking"):
-		// Default thinking without suffix uses medium budget
-		budgetTokens = 8192
-	default:
+	budgetTokens, ok := resolveClaudeThinkingBudget(modelName, metadata)
+	if !ok || budgetTokens <= 0 {
 		return body
 	}
 
 	body, _ = sjson.SetBytes(body, "thinking.type", "enabled")
 	body, _ = sjson.SetBytes(body, "thinking.budget_tokens", budgetTokens)
 	return body
+}
+
+func resolveClaudeThinkingBudget(modelName string, metadata map[string]any) (int, bool) {
+	budget, include, effort, matched := util.ThinkingFromMetadata(metadata)
+	if matched {
+		if include != nil && !*include {
+			return 0, false
+		}
+		if budget != nil {
+			normalized := util.NormalizeThinkingBudget(modelName, *budget)
+			if normalized > 0 {
+				return normalized, true
+			}
+			return 0, false
+		}
+		if effort != nil {
+			if derived, ok := util.ThinkingEffortToBudget(modelName, *effort); ok && derived > 0 {
+				return derived, true
+			}
+		}
+	}
+	return claudeBudgetFromSuffix(modelName)
+}
+
+func claudeBudgetFromSuffix(modelName string) (int, bool) {
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	switch {
+	case strings.HasSuffix(lower, "-thinking-low"):
+		return 1024, true
+	case strings.HasSuffix(lower, "-thinking-medium"):
+		return 8192, true
+	case strings.HasSuffix(lower, "-thinking-high"):
+		return 24576, true
+	case strings.HasSuffix(lower, "-thinking"):
+		return 8192, true
+	default:
+		return 0, false
+	}
 }
 
 // ensureMaxTokensForThinking ensures max_tokens > thinking.budget_tokens when thinking is enabled.
@@ -491,35 +542,45 @@ func ensureMaxTokensForThinking(modelName string, body []byte) []byte {
 }
 
 func (e *ClaudeExecutor) resolveUpstreamModel(alias string, auth *cliproxyauth.Auth) string {
-	if alias == "" {
+	trimmed := strings.TrimSpace(alias)
+	if trimmed == "" {
 		return ""
 	}
-	// Hardcoded mappings for thinking models to actual Claude model names
-	switch alias {
-	case "claude-opus-4-5-thinking", "claude-opus-4-5-thinking-low", "claude-opus-4-5-thinking-medium", "claude-opus-4-5-thinking-high":
-		return "claude-opus-4-5-20251101"
-	case "claude-sonnet-4-5-thinking":
-		return "claude-sonnet-4-5-20250929"
-	}
+
 	entry := e.resolveClaudeConfig(auth)
 	if entry == nil {
 		return ""
 	}
+
+	normalizedModel, metadata := util.NormalizeThinkingModel(trimmed)
+
+	// Candidate names to match against configured aliases/names.
+	candidates := []string{strings.TrimSpace(normalizedModel)}
+	if !strings.EqualFold(normalizedModel, trimmed) {
+		candidates = append(candidates, trimmed)
+	}
+	if original := util.ResolveOriginalModel(normalizedModel, metadata); original != "" && !strings.EqualFold(original, normalizedModel) {
+		candidates = append(candidates, original)
+	}
+
 	for i := range entry.Models {
 		model := entry.Models[i]
 		name := strings.TrimSpace(model.Name)
 		modelAlias := strings.TrimSpace(model.Alias)
-		if modelAlias != "" {
-			if strings.EqualFold(modelAlias, alias) {
+
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			if modelAlias != "" && strings.EqualFold(modelAlias, candidate) {
 				if name != "" {
 					return name
 				}
-				return alias
+				return candidate
 			}
-			continue
-		}
-		if name != "" && strings.EqualFold(name, alias) {
-			return name
+			if name != "" && strings.EqualFold(name, candidate) {
+				return name
+			}
 		}
 	}
 	return ""
