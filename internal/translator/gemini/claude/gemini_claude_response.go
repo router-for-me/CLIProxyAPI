@@ -25,6 +25,7 @@ type Params struct {
 	HasFirstResponse bool
 	ResponseType     int
 	ResponseIndex    int
+	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -57,9 +58,13 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		return []string{
-			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n\n",
+		// Only send message_stop if we have actually output content
+		if (*param).(*Params).HasContent {
+			return []string{
+				"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n\n",
+			}
 		}
+		return []string{}
 	}
 
 	// Track whether tools are being used in this response chunk
@@ -108,6 +113,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						output = output + "event: content_block_delta\n"
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex), "delta.thinking", partTextResult.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
+						(*param).(*Params).HasContent = true
 					} else {
 						// Transition from another state to thinking
 						// First, close any existing content block
@@ -131,6 +137,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex), "delta.thinking", partTextResult.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
 						(*param).(*Params).ResponseType = 2 // Set state to thinking
+						(*param).(*Params).HasContent = true
 					}
 				} else {
 					// Process regular text content (user-visible output)
@@ -139,6 +146,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						output = output + "event: content_block_delta\n"
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, (*param).(*Params).ResponseIndex), "delta.text", partTextResult.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
+						(*param).(*Params).HasContent = true
 					} else {
 						// Transition from another state to text content
 						// First, close any existing content block
@@ -162,6 +170,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, (*param).(*Params).ResponseIndex), "delta.text", partTextResult.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
 						(*param).(*Params).ResponseType = 1 // Set state to content
+						(*param).(*Params).HasContent = true
 					}
 				}
 			} else if functionCallResult.Exists() {
@@ -211,6 +220,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					output = output + fmt.Sprintf("data: %s\n\n\n", data)
 				}
 				(*param).(*Params).ResponseType = 3
+				(*param).(*Params).HasContent = true
 			}
 		}
 	}
@@ -218,23 +228,26 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 	usageResult := gjson.GetBytes(rawJSON, "usageMetadata")
 	if usageResult.Exists() && bytes.Contains(rawJSON, []byte(`"finishReason"`)) {
 		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			output = output + "event: content_block_stop\n"
-			output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex)
-			output = output + "\n\n\n"
+			// Only send final events if we have actually output content
+			if (*param).(*Params).HasContent {
+				output = output + "event: content_block_stop\n"
+				output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex)
+				output = output + "\n\n\n"
 
-			output = output + "event: message_delta\n"
-			output = output + `data: `
+				output = output + "event: message_delta\n"
+				output = output + `data: `
 
-			template := `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
-			if usedTool {
-				template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
+				template := `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
+				if usedTool {
+					template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
+				}
+
+				thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
+				template, _ = sjson.Set(template, "usage.output_tokens", candidatesTokenCountResult.Int()+thoughtsTokenCount)
+				template, _ = sjson.Set(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
+
+				output = output + template + "\n\n\n"
 			}
-
-			thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-			template, _ = sjson.Set(template, "usage.output_tokens", candidatesTokenCountResult.Int()+thoughtsTokenCount)
-			template, _ = sjson.Set(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
-
-			output = output + template + "\n\n\n"
 		}
 	}
 

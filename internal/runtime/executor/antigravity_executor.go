@@ -39,7 +39,7 @@ const (
 	defaultAntigravityAgent     = "antigravity/1.11.5 windows/amd64"
 	antigravityAuthType         = "antigravity"
 	refreshSkew                 = 3000 * time.Second
-	streamScannerBuffer     int = 20_971_520
+	streamScannerBuffer     int = 52_428_800 // 50MB
 )
 
 var (

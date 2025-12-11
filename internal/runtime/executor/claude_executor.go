@@ -254,7 +254,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		// If from == to (Claude → Claude), directly forward the SSE stream without translation
 		if from == to {
 			scanner := bufio.NewScanner(decodedBody)
-			scanner.Buffer(nil, 20_971_520)
+			scanner.Buffer(nil, 52_428_800) // 50MB
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				appendAPIResponseChunk(ctx, e.cfg, line)
@@ -277,7 +277,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 		// For other formats, use translation
 		scanner := bufio.NewScanner(decodedBody)
-		scanner.Buffer(nil, 20_971_520)
+		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -450,59 +450,15 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
-// injectThinkingConfig adds thinking configuration based on metadata or legacy suffixes.
+// injectThinkingConfig adds thinking configuration based on metadata using the unified flow.
+// It uses util.ResolveClaudeThinkingConfig which internally calls ResolveThinkingConfigFromMetadata
+// and NormalizeThinkingBudget, ensuring consistency with other executors like Gemini.
 func (e *ClaudeExecutor) injectThinkingConfig(modelName string, metadata map[string]any, body []byte) []byte {
-	// Only inject if thinking config is not already present
-	if gjson.GetBytes(body, "thinking").Exists() {
+	budget, ok := util.ResolveClaudeThinkingConfig(modelName, metadata)
+	if !ok {
 		return body
 	}
-
-	budgetTokens, ok := resolveClaudeThinkingBudget(modelName, metadata)
-	if !ok || budgetTokens <= 0 {
-		return body
-	}
-
-	body, _ = sjson.SetBytes(body, "thinking.type", "enabled")
-	body, _ = sjson.SetBytes(body, "thinking.budget_tokens", budgetTokens)
-	return body
-}
-
-func resolveClaudeThinkingBudget(modelName string, metadata map[string]any) (int, bool) {
-	budget, include, effort, matched := util.ThinkingFromMetadata(metadata)
-	if matched {
-		if include != nil && !*include {
-			return 0, false
-		}
-		if budget != nil {
-			normalized := util.NormalizeThinkingBudget(modelName, *budget)
-			if normalized > 0 {
-				return normalized, true
-			}
-			return 0, false
-		}
-		if effort != nil {
-			if derived, ok := util.ThinkingEffortToBudget(modelName, *effort); ok && derived > 0 {
-				return derived, true
-			}
-		}
-	}
-	return claudeBudgetFromSuffix(modelName)
-}
-
-func claudeBudgetFromSuffix(modelName string) (int, bool) {
-	lower := strings.ToLower(strings.TrimSpace(modelName))
-	switch {
-	case strings.HasSuffix(lower, "-thinking-low"):
-		return 1024, true
-	case strings.HasSuffix(lower, "-thinking-medium"):
-		return 8192, true
-	case strings.HasSuffix(lower, "-thinking-high"):
-		return 24576, true
-	case strings.HasSuffix(lower, "-thinking"):
-		return 8192, true
-	default:
-		return 0, false
-	}
+	return util.ApplyClaudeThinkingConfig(body, budget)
 }
 
 // ensureMaxTokensForThinking ensures max_tokens > thinking.budget_tokens when thinking is enabled.

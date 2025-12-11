@@ -1,6 +1,8 @@
 package util
 
 import (
+	"strings"
+
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 )
 
@@ -66,4 +68,40 @@ func thinkingRangeFromRegistry(model string) (found bool, min int, max int, zero
 		return false, 0, 0, false, false
 	}
 	return true, info.Thinking.Min, info.Thinking.Max, info.Thinking.ZeroAllowed, info.Thinking.DynamicAllowed
+}
+
+// GetModelThinkingLevels returns the discrete reasoning effort levels for the model.
+// Returns nil if the model has no thinking support or no levels defined.
+func GetModelThinkingLevels(model string) []string {
+	if model == "" {
+		return nil
+	}
+	info := registry.GetGlobalRegistry().GetModelInfo(model)
+	if info == nil || info.Thinking == nil {
+		return nil
+	}
+	return info.Thinking.Levels
+}
+
+// ModelUsesThinkingLevels reports whether the model uses discrete reasoning
+// effort levels instead of numeric budgets.
+func ModelUsesThinkingLevels(model string) bool {
+	levels := GetModelThinkingLevels(model)
+	return len(levels) > 0
+}
+
+// NormalizeReasoningEffortLevel validates and normalizes a reasoning effort
+// level for the given model. Returns false when the level is not supported.
+func NormalizeReasoningEffortLevel(model, effort string) (string, bool) {
+	levels := GetModelThinkingLevels(model)
+	if len(levels) == 0 {
+		return "", false
+	}
+	loweredEffort := strings.ToLower(strings.TrimSpace(effort))
+	for _, lvl := range levels {
+		if strings.ToLower(lvl) == loweredEffort {
+			return lvl, true
+		}
+	}
+	return "", false
 }

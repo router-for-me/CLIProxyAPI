@@ -579,7 +579,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			}
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 20_971_520)
+		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -696,7 +696,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			}
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 20_971_520)
+		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()

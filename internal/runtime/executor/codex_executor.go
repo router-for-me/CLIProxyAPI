@@ -54,7 +54,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model)
+	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning.effort")
+	body = normalizeThinkingConfig(body, upstreamModel)
+	if errValidate := validateThinkingConfig(body, upstreamModel); errValidate != nil {
+		return resp, errValidate
+	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
 	body, _ = sjson.SetBytes(body, "model", upstreamModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
@@ -148,7 +152,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	to := sdktranslator.FromString("codex")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
-	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model)
+	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning.effort")
+	body = normalizeThinkingConfig(body, upstreamModel)
+	if errValidate := validateThinkingConfig(body, upstreamModel); errValidate != nil {
+		return nil, errValidate
+	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.SetBytes(body, "model", upstreamModel)
@@ -208,7 +216,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 20_971_520)
+		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -246,7 +254,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 
 	modelForCounting := req.Model
 
-	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model)
+	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning.effort")
 	body, _ = sjson.SetBytes(body, "model", upstreamModel)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.SetBytes(body, "stream", false)
