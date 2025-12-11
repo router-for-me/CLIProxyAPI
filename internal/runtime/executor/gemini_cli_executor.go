@@ -1,3 +1,6 @@
+// Package executor provides runtime execution capabilities for various AI service providers.
+// This file implements the Gemini CLI executor that talks to Cloud Code Assist endpoints
+// using OAuth credentials from auth metadata.
 package executor
 
 import (
@@ -29,11 +32,11 @@ import (
 const (
 	codeAssistEndpoint      = "https://cloudcode-pa.googleapis.com"
 	codeAssistVersion       = "v1internal"
-	geminiOauthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	geminiOauthClientSecret = "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"
+	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+	geminiOAuthClientSecret = "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"
 )
 
-var geminiOauthScopes = []string{
+var geminiOAuthScopes = []string{
 	"https://www.googleapis.com/auth/cloud-platform",
 	"https://www.googleapis.com/auth/userinfo.email",
 	"https://www.googleapis.com/auth/userinfo.profile",
@@ -44,14 +47,24 @@ type GeminiCLIExecutor struct {
 	cfg *config.Config
 }
 
+// NewGeminiCLIExecutor creates a new Gemini CLI executor instance.
+//
+// Parameters:
+//   - cfg: The application configuration
+//
+// Returns:
+//   - *GeminiCLIExecutor: A new Gemini CLI executor instance
 func NewGeminiCLIExecutor(cfg *config.Config) *GeminiCLIExecutor {
 	return &GeminiCLIExecutor{cfg: cfg}
 }
 
+// Identifier returns the executor identifier.
 func (e *GeminiCLIExecutor) Identifier() string { return "gemini-cli" }
 
+// PrepareRequest prepares the HTTP request for execution (no-op for Gemini CLI).
 func (e *GeminiCLIExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
 
+// Execute performs a non-streaming request to the Gemini CLI API.
 func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
 	if err != nil {
@@ -189,6 +202,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	return resp, err
 }
 
+// ExecuteStream performs a streaming request to the Gemini CLI API.
 func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
 	if err != nil {
@@ -309,7 +323,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			}()
 			if opts.Alt == "" {
 				scanner := bufio.NewScanner(resp.Body)
-				scanner.Buffer(nil, 52_428_800) // 50MB
+				scanner.Buffer(nil, streamScannerBuffer)
 				var param any
 				for scanner.Scan() {
 					line := scanner.Bytes()
@@ -371,6 +385,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	return nil, err
 }
 
+// CountTokens counts tokens for the given request using the Gemini CLI API.
 func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
 	if err != nil {
@@ -471,9 +486,8 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	return cliproxyexecutor.Response{}, newGeminiStatusErr(lastStatus, lastBody)
 }
 
-func (e *GeminiCLIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	log.Debugf("gemini cli executor: refresh called")
-	_ = ctx
+// Refresh refreshes the authentication credentials (no-op for Gemini CLI).
+func (e *GeminiCLIExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	return auth, nil
 }
 
@@ -515,9 +529,9 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 	}
 
 	conf := &oauth2.Config{
-		ClientID:     geminiOauthClientID,
-		ClientSecret: geminiOauthClientSecret,
-		Scopes:       geminiOauthScopes,
+		ClientID:     geminiOAuthClientID,
+		ClientSecret: geminiOAuthClientSecret,
+		Scopes:       geminiOAuthScopes,
 		Endpoint:     google.Endpoint,
 	}
 
