@@ -21,6 +21,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"gopkg.in/yaml.v3"
 
@@ -176,12 +177,40 @@ func (w *Watcher) Start(ctx context.Context) error {
 	}
 	log.Debugf("watching auth directory: %s", w.authDir)
 
+	// Watch Kiro IDE token file directory for automatic token updates
+	w.watchKiroIDETokenFile()
+
 	// Start the event processing goroutine
 	go w.processEvents(ctx)
 
 	// Perform an initial full reload based on current config and auth dir
 	w.reloadClients(true, nil)
 	return nil
+}
+
+// watchKiroIDETokenFile adds the Kiro IDE token file directory to the watcher.
+// This enables automatic detection of token updates from Kiro IDE.
+func (w *Watcher) watchKiroIDETokenFile() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Debugf("failed to get home directory for Kiro IDE token watch: %v", err)
+		return
+	}
+
+	// Kiro IDE stores tokens in ~/.aws/sso/cache/
+	kiroTokenDir := filepath.Join(homeDir, ".aws", "sso", "cache")
+	
+	// Check if directory exists
+	if _, statErr := os.Stat(kiroTokenDir); os.IsNotExist(statErr) {
+		log.Debugf("Kiro IDE token directory does not exist: %s", kiroTokenDir)
+		return
+	}
+
+	if errAdd := w.watcher.Add(kiroTokenDir); errAdd != nil {
+		log.Debugf("failed to watch Kiro IDE token directory %s: %v", kiroTokenDir, errAdd)
+		return
+	}
+	log.Debugf("watching Kiro IDE token directory: %s", kiroTokenDir)
 }
 
 // Stop stops the file watcher
@@ -744,8 +773,18 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	isConfigEvent := event.Name == w.configPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := strings.HasPrefix(event.Name, w.authDir) && strings.HasSuffix(event.Name, ".json") && event.Op&authOps != 0
-	if !isConfigEvent && !isAuthJSON {
+	
+	// Check for Kiro IDE token file changes
+	isKiroIDEToken := w.isKiroIDETokenFile(event.Name) && event.Op&authOps != 0
+	
+	if !isConfigEvent && !isAuthJSON && !isKiroIDEToken {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
+		return
+	}
+	
+	// Handle Kiro IDE token file changes
+	if isKiroIDEToken {
+		w.handleKiroIDETokenChange(event)
 		return
 	}
 
@@ -803,6 +842,51 @@ func (w *Watcher) scheduleConfigReload() {
 		w.configReloadMu.Unlock()
 		w.reloadConfigIfChanged()
 	})
+}
+
+// isKiroIDETokenFile checks if the given path is the Kiro IDE token file.
+func (w *Watcher) isKiroIDETokenFile(path string) bool {
+	// Check if it's the kiro-auth-token.json file in ~/.aws/sso/cache/
+	// Use filepath.ToSlash to ensure consistent separators across platforms (Windows uses backslashes)
+	normalized := filepath.ToSlash(path)
+	return strings.HasSuffix(normalized, "kiro-auth-token.json") && strings.Contains(normalized, ".aws/sso/cache")
+}
+
+// handleKiroIDETokenChange processes changes to the Kiro IDE token file.
+// When the token file is updated by Kiro IDE, this triggers a reload of Kiro auth.
+func (w *Watcher) handleKiroIDETokenChange(event fsnotify.Event) {
+	log.Debugf("Kiro IDE token file event detected: %s %s", event.Op.String(), event.Name)
+
+	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		// Token file removed - wait briefly for potential atomic replace
+		time.Sleep(replaceCheckDelay)
+		if _, statErr := os.Stat(event.Name); statErr != nil {
+			log.Debugf("Kiro IDE token file removed: %s", event.Name)
+			return
+		}
+	}
+
+	// Try to load the updated token
+	tokenData, err := kiroauth.LoadKiroIDEToken()
+	if err != nil {
+		log.Debugf("failed to load Kiro IDE token after change: %v", err)
+		return
+	}
+
+	log.Infof("Kiro IDE token file updated, access token refreshed (provider: %s)", tokenData.Provider)
+
+	// Trigger auth state refresh to pick up the new token
+	w.refreshAuthState()
+
+	// Notify callback if set
+	w.clientsMutex.RLock()
+	cfg := w.config
+	w.clientsMutex.RUnlock()
+
+	if w.reloadCallback != nil && cfg != nil {
+		log.Debugf("triggering server update callback after Kiro IDE token change")
+		w.reloadCallback(cfg)
+	}
 }
 
 func (w *Watcher) reloadConfigIfChanged() {
@@ -1181,6 +1265,82 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			applyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
 			out = append(out, a)
 		}
+		// Kiro (AWS CodeWhisperer) -> synthesize auths
+		var kAuth *kiroauth.KiroAuth
+		if len(cfg.KiroKey) > 0 {
+			kAuth = kiroauth.NewKiroAuth(cfg)
+		}
+		for i := range cfg.KiroKey {
+			kk := cfg.KiroKey[i]
+			var accessToken, profileArn, refreshToken string
+
+			// Try to load from token file first
+			if kk.TokenFile != "" && kAuth != nil {
+				tokenData, err := kAuth.LoadTokenFromFile(kk.TokenFile)
+				if err != nil {
+					log.Warnf("failed to load kiro token file %s: %v", kk.TokenFile, err)
+				} else {
+					accessToken = tokenData.AccessToken
+					profileArn = tokenData.ProfileArn
+					refreshToken = tokenData.RefreshToken
+				}
+			}
+
+			// Override with direct config values if provided
+			if kk.AccessToken != "" {
+				accessToken = kk.AccessToken
+			}
+			if kk.ProfileArn != "" {
+				profileArn = kk.ProfileArn
+			}
+			if kk.RefreshToken != "" {
+				refreshToken = kk.RefreshToken
+			}
+
+			if accessToken == "" {
+				log.Warnf("kiro config[%d] missing access_token, skipping", i)
+				continue
+			}
+
+			// profileArn is optional for AWS Builder ID users
+			id, token := idGen.next("kiro:token", accessToken, profileArn)
+			attrs := map[string]string{
+				"source":       fmt.Sprintf("config:kiro[%s]", token),
+				"access_token": accessToken,
+			}
+			if profileArn != "" {
+				attrs["profile_arn"] = profileArn
+			}
+			if kk.Region != "" {
+				attrs["region"] = kk.Region
+			}
+			if kk.AgentTaskType != "" {
+				attrs["agent_task_type"] = kk.AgentTaskType
+			}
+			if refreshToken != "" {
+				attrs["refresh_token"] = refreshToken
+			}
+			proxyURL := strings.TrimSpace(kk.ProxyURL)
+			a := &coreauth.Auth{
+				ID:         id,
+				Provider:   "kiro",
+				Label:      "kiro-token",
+				Status:     coreauth.StatusActive,
+				ProxyURL:   proxyURL,
+				Attributes: attrs,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+
+			if refreshToken != "" {
+				if a.Metadata == nil {
+					a.Metadata = make(map[string]any)
+				}
+				a.Metadata["refresh_token"] = refreshToken
+			}
+
+			out = append(out, a)
+		}
 		for i := range cfg.OpenAICompatibility {
 			compat := &cfg.OpenAICompatibility[i]
 			providerName := strings.ToLower(strings.TrimSpace(compat.Name))
@@ -1287,7 +1447,12 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	}
 
 	// Also synthesize auth entries directly from auth files (for OAuth/file-backed providers)
-	entries, _ := os.ReadDir(w.authDir)
+	log.Debugf("SnapshotCoreAuths: scanning auth directory: %s", w.authDir)
+	entries, readErr := os.ReadDir(w.authDir)
+	if readErr != nil {
+		log.Errorf("SnapshotCoreAuths: failed to read auth directory %s: %v", w.authDir, readErr)
+	}
+	log.Debugf("SnapshotCoreAuths: found %d entries in auth directory", len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -1306,9 +1471,20 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			continue
 		}
 		t, _ := metadata["type"].(string)
+		
+		// Detect Kiro auth files by auth_method field (they don't have "type" field)
 		if t == "" {
+			if authMethod, _ := metadata["auth_method"].(string); authMethod == "builder-id" || authMethod == "social" {
+				t = "kiro"
+				log.Debugf("SnapshotCoreAuths: detected Kiro auth by auth_method: %s", name)
+			}
+		}
+		
+		if t == "" {
+			log.Debugf("SnapshotCoreAuths: skipping file without type: %s", name)
 			continue
 		}
+		log.Debugf("SnapshotCoreAuths: processing auth file: %s (type=%s)", name, t)
 		provider := strings.ToLower(t)
 		if provider == "gemini" {
 			provider = "gemini-cli"
@@ -1316,6 +1492,12 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 		label := provider
 		if email, _ := metadata["email"].(string); email != "" {
 			label = email
+		}
+		// For Kiro, use provider field as label if available
+		if provider == "kiro" {
+			if kiroProvider, _ := metadata["provider"].(string); kiroProvider != "" {
+				label = fmt.Sprintf("kiro-%s", strings.ToLower(kiroProvider))
+			}
 		}
 		// Use relative path under authDir as ID to stay consistent with the file-based token store
 		id := full
@@ -1342,6 +1524,16 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		// Set NextRefreshAfter for Kiro auth based on expires_at
+		if provider == "kiro" {
+			if expiresAtStr, ok := metadata["expires_at"].(string); ok && expiresAtStr != "" {
+				if expiresAt, parseErr := time.Parse(time.RFC3339, expiresAtStr); parseErr == nil {
+					// Refresh 30 minutes before expiry
+					a.NextRefreshAfter = expiresAt.Add(-30 * time.Minute)
+				}
+			}
+		}
+
 		applyAuthExcludedModelsMeta(a, cfg, nil, "oauth")
 		if provider == "gemini-cli" {
 			if virtuals := synthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
