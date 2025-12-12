@@ -158,6 +158,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
 				tool, _ = sjson.Delete(tool, "strict")
 				tool, _ = sjson.Delete(tool, "input_examples")
+				if schema := gjson.Get(tool, "parametersJsonSchema"); schema.Exists() && (schema.IsObject() || schema.IsArray()) {
+					sanitized := util.SanitizeGeminiSchemaJSON([]byte(schema.Raw))
+					tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", string(sanitized))
+				}
 				var toolDeclaration any
 				if err := json.Unmarshal([]byte(tool), &toolDeclaration); err == nil {
 					tools[0].FunctionDeclarations = append(tools[0].FunctionDeclarations, toolDeclaration)

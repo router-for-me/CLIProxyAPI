@@ -345,6 +345,10 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 					}
 					fnRaw, _ = sjson.Delete(fnRaw, "strict")
+					if schema := gjson.Get(fnRaw, "parametersJsonSchema"); schema.Exists() && (schema.IsObject() || schema.IsArray()) {
+						sanitized := util.SanitizeGeminiSchemaJSON([]byte(schema.Raw))
+						fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema", string(sanitized))
+					}
 					if !hasFunction {
 						toolNode, _ = sjson.SetRawBytes(toolNode, "functionDeclarations", []byte("[]"))
 					}
