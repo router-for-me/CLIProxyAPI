@@ -80,6 +80,11 @@ type Config struct {
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
+	// AuthPriority maps auth file names to their priority values.
+	// Higher values indicate higher priority. Default is 0 for unmapped files.
+	// Example: {"claude-xxx@example.com.json": 100, "gemini-yyy@gmail.com.json": 50}
+	AuthPriority map[string]int `yaml:"auth-priority,omitempty" json:"auth-priority,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -189,6 +194,11 @@ type ClaudeKey struct {
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// Priority defines the selection priority for this API key. Higher values indicate higher priority.
+	// When multiple keys are available, those with higher priority are selected first.
+	// Keys with the same priority are selected using round-robin. Default is 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
 	// Models defines upstream model names and aliases for request routing.
 	Models []ClaudeModel `yaml:"models" json:"models"`
 
@@ -221,6 +231,11 @@ type CodexKey struct {
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// Priority defines the selection priority for this API key. Higher values indicate higher priority.
+	// When multiple keys are available, those with higher priority are selected first.
+	// Keys with the same priority are selected using round-robin. Default is 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
@@ -239,6 +254,11 @@ type GeminiKey struct {
 
 	// ProxyURL optionally overrides the global proxy for this API key.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Priority defines the selection priority for this API key. Higher values indicate higher priority.
+	// When multiple keys are available, those with higher priority are selected first.
+	// Keys with the same priority are selected using round-robin. Default is 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
@@ -273,6 +293,11 @@ type OpenAICompatibilityAPIKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Priority defines the selection priority for this API key. Higher values indicate higher priority.
+	// When multiple keys are available, those with higher priority are selected first.
+	// Keys with the same priority are selected using round-robin. Default is 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 }
 
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,

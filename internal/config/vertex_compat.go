@@ -21,6 +21,11 @@ type VertexCompatKey struct {
 	// ProxyURL optionally overrides the global proxy for this API key.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 
+	// Priority defines the selection priority for this API key. Higher values indicate higher priority.
+	// When multiple keys are available, those with higher priority are selected first.
+	// Keys with the same priority are selected using round-robin. Default is 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	// Commonly used for cookies, user-agent, and other authentication headers.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
