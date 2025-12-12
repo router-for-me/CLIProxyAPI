@@ -349,6 +349,12 @@ func (s *Server) setupRoutes() {
 			},
 		})
 	})
+
+	// Event logging endpoint - handles Claude Code telemetry requests
+	// Returns 200 OK to prevent 404 errors in logs
+	s.engine.POST("/api/event_logging/batch", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
 
 	// OAuth callback endpoints (reuse main server port)
@@ -922,7 +928,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	for _, p := range cfg.OpenAICompatibility {
 		providerNames = append(providerNames, p.Name)
 	}
-	s.handlers.OpenAICompatProviders = providerNames
+	s.handlers.SetOpenAICompatProviders(providerNames)
 
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 
