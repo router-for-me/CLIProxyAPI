@@ -134,6 +134,28 @@ func convertClaudeEventToOpenAI(jsonStr string, model string) []string {
 				result, _ := json.Marshal(response)
 				results = append(results, string(result))
 			}
+		} else if deltaType == "thinking_delta" {
+			// Thinking/reasoning content delta - convert to OpenAI reasoning_content format
+			thinkingDelta := root.Get("delta.thinking").String()
+			if thinkingDelta != "" {
+				response := map[string]interface{}{
+					"id":      "chatcmpl-" + uuid.New().String()[:24],
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   model,
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": map[string]interface{}{
+								"reasoning_content": thinkingDelta,
+							},
+							"finish_reason": nil,
+						},
+					},
+				}
+				result, _ := json.Marshal(response)
+				results = append(results, string(result))
+			}
 		} else if deltaType == "input_json_delta" {
 			// Tool input delta (streaming arguments)
 			partialJSON := root.Get("delta.partial_json").String()
@@ -298,6 +320,7 @@ func ConvertKiroResponseToOpenAINonStream(ctx context.Context, model string, ori
 	root := gjson.ParseBytes(rawResponse)
 
 	var content string
+	var reasoningContent string
 	var toolCalls []map[string]interface{}
 
 	contentArray := root.Get("content")
@@ -306,6 +329,9 @@ func ConvertKiroResponseToOpenAINonStream(ctx context.Context, model string, ori
 			itemType := item.Get("type").String()
 			if itemType == "text" {
 				content += item.Get("text").String()
+			} else if itemType == "thinking" {
+				// Extract thinking/reasoning content
+				reasoningContent += item.Get("thinking").String()
 			} else if itemType == "tool_use" {
 				// Convert Claude tool_use to OpenAI tool_calls format
 				inputJSON := item.Get("input").String()
@@ -337,6 +363,11 @@ func ConvertKiroResponseToOpenAINonStream(ctx context.Context, model string, ori
 	message := map[string]interface{}{
 		"role":    "assistant",
 		"content": content,
+	}
+
+	// Add reasoning_content if present (OpenAI reasoning format)
+	if reasoningContent != "" {
+		message["reasoning_content"] = reasoningContent
 	}
 
 	// Add tool_calls if present

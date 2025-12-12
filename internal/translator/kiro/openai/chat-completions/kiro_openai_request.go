@@ -10,9 +10,18 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// reasoningEffortToBudget maps OpenAI reasoning_effort values to Claude thinking budget_tokens.
+// OpenAI uses "low", "medium", "high" while Claude uses numeric budget_tokens.
+var reasoningEffortToBudget = map[string]int{
+	"low":    4000,
+	"medium": 16000,
+	"high":   32000,
+}
+
 // ConvertOpenAIRequestToKiro transforms an OpenAI Chat Completions API request into Kiro (Claude) format.
 // Kiro uses Claude-compatible format internally, so we primarily pass through to Claude format.
 // Supports tool calling: OpenAI tools -> Claude tools, tool_calls -> tool_use, tool messages -> tool_result.
+// Supports reasoning/thinking: OpenAI reasoning_effort -> Claude thinking parameter.
 func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
 	root := gjson.ParseBytes(rawJSON)
@@ -36,6 +45,26 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 	// Copy top_p if present
 	if v := root.Get("top_p"); v.Exists() {
 		out, _ = sjson.Set(out, "top_p", v.Float())
+	}
+
+	// Handle OpenAI reasoning_effort parameter -> Claude thinking parameter
+	// OpenAI format: {"reasoning_effort": "low"|"medium"|"high"}
+	// Claude format: {"thinking": {"type": "enabled", "budget_tokens": N}}
+	if v := root.Get("reasoning_effort"); v.Exists() {
+		effort := v.String()
+		if budget, ok := reasoningEffortToBudget[effort]; ok {
+			thinking := map[string]interface{}{
+				"type":          "enabled",
+				"budget_tokens": budget,
+			}
+			out, _ = sjson.Set(out, "thinking", thinking)
+		}
+	}
+
+	// Also support direct thinking parameter passthrough (for Claude API compatibility)
+	// Claude format: {"thinking": {"type": "enabled", "budget_tokens": N}}
+	if v := root.Get("thinking"); v.Exists() && v.IsObject() {
+		out, _ = sjson.Set(out, "thinking", v.Value())
 	}
 
 	// Convert OpenAI tools to Claude tools format
