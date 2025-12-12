@@ -1164,6 +1164,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				Label:      "gemini-apikey",
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,
+				Priority:   entry.Priority,
 				Attributes: attrs,
 				CreatedAt:  now,
 				UpdatedAt:  now,
@@ -1199,6 +1200,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				Label:      "claude-apikey",
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,
+				Priority:   ck.Priority,
 				Attributes: attrs,
 				CreatedAt:  now,
 				UpdatedAt:  now,
@@ -1229,6 +1231,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				Label:      "codex-apikey",
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,
+				Priority:   ck.Priority,
 				Attributes: attrs,
 				CreatedAt:  now,
 				UpdatedAt:  now,
@@ -1271,6 +1274,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 					Label:      compat.Name,
 					Status:     coreauth.StatusActive,
 					ProxyURL:   proxyURL,
+					Priority:   entry.Priority,
 					Attributes: attrs,
 					CreatedAt:  now,
 					UpdatedAt:  now,
@@ -1333,6 +1337,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			Label:      "vertex-apikey",
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
+			Priority:   compat.Priority,
 			Attributes: attrs,
 			CreatedAt:  now,
 			UpdatedAt:  now,
@@ -1383,6 +1388,14 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			proxyURL = p
 		}
 
+		// Look up priority from auth-priority config map by filename
+		priority := 0
+		if cfg.AuthPriority != nil {
+			if p, ok := cfg.AuthPriority[name]; ok {
+				priority = p
+			}
+		}
+
 		a := &coreauth.Auth{
 			ID:       id,
 			Provider: provider,
@@ -1393,6 +1406,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				"path":   full,
 			},
 			ProxyURL:  proxyURL,
+			Priority:  priority,
 			Metadata:  metadata,
 			CreatedAt: now,
 			UpdatedAt: now,
@@ -1473,6 +1487,7 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			Attributes: attrs,
 			Metadata:   metadataCopy,
 			ProxyURL:   primary.ProxyURL,
+			Priority:   primary.Priority,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 			Runtime:    geminicli.NewVirtualCredential(projectID, shared),

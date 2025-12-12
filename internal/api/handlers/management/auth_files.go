@@ -614,6 +614,16 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	if authID == "" {
 		authID = path
 	}
+	fileName := filepath.Base(path)
+
+	// Look up priority from auth-priority config map by filename
+	priority := 0
+	if h.cfg != nil && h.cfg.AuthPriority != nil {
+		if p, ok := h.cfg.AuthPriority[fileName]; ok {
+			priority = p
+		}
+	}
+
 	attr := map[string]string{
 		"path":   path,
 		"source": path,
@@ -621,9 +631,10 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	auth := &coreauth.Auth{
 		ID:         authID,
 		Provider:   provider,
-		FileName:   filepath.Base(path),
+		FileName:   fileName,
 		Label:      label,
 		Status:     coreauth.StatusActive,
+		Priority:   priority,
 		Attributes: attr,
 		Metadata:   metadata,
 		CreatedAt:  time.Now(),
