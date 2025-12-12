@@ -870,8 +870,9 @@ func GetGitHubCopilotModels() []*ModelInfo {
 // GetKiroModels returns the Kiro (AWS CodeWhisperer) model definitions
 func GetKiroModels() []*ModelInfo {
 	return []*ModelInfo{
+		// --- Base Models ---
 		{
-			ID:                  "kiro-claude-opus-4.5",
+			ID:                  "kiro-claude-opus-4-5",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -882,7 +883,7 @@ func GetKiroModels() []*ModelInfo {
 			MaxCompletionTokens: 64000,
 		},
 		{
-			ID:                  "kiro-claude-sonnet-4.5",
+			ID:                  "kiro-claude-sonnet-4-5",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -904,7 +905,7 @@ func GetKiroModels() []*ModelInfo {
 			MaxCompletionTokens: 64000,
 		},
 		{
-			ID:                  "kiro-claude-haiku-4.5",
+			ID:                  "kiro-claude-haiku-4-5",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -914,21 +915,9 @@ func GetKiroModels() []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
 		},
-		// --- Chat Variant (No tool calling, for pure conversation) ---
-		{
-			ID:                  "kiro-claude-opus-4.5-chat",
-			Object:              "model",
-			Created:             1732752000,
-			OwnedBy:             "aws",
-			Type:                "kiro",
-			DisplayName:         "Kiro Claude Opus 4.5 (Chat)",
-			Description:         "Claude Opus 4.5 for chat only (no tool calling)",
-			ContextLength:       200000,
-			MaxCompletionTokens: 64000,
-		},
 		// --- Agentic Variants (Optimized for coding agents with chunked writes) ---
 		{
-			ID:                  "kiro-claude-opus-4.5-agentic",
+			ID:                  "kiro-claude-opus-4-5-agentic",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -939,13 +928,35 @@ func GetKiroModels() []*ModelInfo {
 			MaxCompletionTokens: 64000,
 		},
 		{
-			ID:                  "kiro-claude-sonnet-4.5-agentic",
+			ID:                  "kiro-claude-sonnet-4-5-agentic",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
 			Type:                "kiro",
 			DisplayName:         "Kiro Claude Sonnet 4.5 (Agentic)",
 			Description:         "Claude Sonnet 4.5 optimized for coding agents (chunked writes)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "kiro-claude-sonnet-4-agentic",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Sonnet 4 (Agentic)",
+			Description:         "Claude Sonnet 4 optimized for coding agents (chunked writes)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "kiro-claude-haiku-4-5-agentic",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Haiku 4.5 (Agentic)",
+			Description:         "Claude Haiku 4.5 optimized for coding agents (chunked writes)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
 		},

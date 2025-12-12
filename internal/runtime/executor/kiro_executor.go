@@ -31,16 +31,18 @@ import (
 )
 
 const (
-	// kiroEndpoint is the Amazon Q streaming endpoint for chat API (GenerateAssistantResponse).
-	// Note: This is different from the CodeWhisperer management endpoint (codewhisperer.us-east-1.amazonaws.com)
-	// used in aws_auth.go for GetUsageLimits, ListProfiles, etc. Both endpoints are correct
-	// for their respective API operations.
-	kiroEndpoint       = "https://q.us-east-1.amazonaws.com"
-	kiroTargetChat     = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
-	kiroContentType    = "application/x-amz-json-1.0"
-	kiroAcceptStream   = "application/vnd.amazon.eventstream"
+	// kiroEndpoint is the CodeWhisperer streaming endpoint for chat API (GenerateAssistantResponse).
+	// Based on AIClient-2-API reference implementation.
+	// Note: Amazon Q uses a different endpoint (q.us-east-1.amazonaws.com) with different request format.
+	kiroEndpoint       = "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
+	kiroContentType    = "application/json"
+	kiroAcceptStream   = "application/json"
 	kiroMaxMessageSize = 10 * 1024 * 1024 // 10MB max message size for event stream
 	kiroMaxToolDescLen = 10237            // Kiro API limit is 10240 bytes, leave room for "..."
+	// kiroUserAgent matches AIClient-2-API format for x-amz-user-agent header
+	kiroUserAgent      = "aws-sdk-js/1.0.7 KiroIDE-0.1.25"
+	// kiroFullUserAgent is the complete user-agent header matching AIClient-2-API
+	kiroFullUserAgent  = "aws-sdk-js/1.0.7 ua/2.1 os/linux lang/go api/codewhispererstreaming#1.0.7 m/E KiroIDE-0.1.25"
 
 	// kiroAgenticSystemPrompt is injected only for -agentic models to prevent timeouts on large writes.
 	// AWS Kiro API has a 2-3 minute timeout for large file write operations.
@@ -157,14 +159,10 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	// Check if this is a chat-only model variant (no tool calling)
 	isChatOnly := strings.HasSuffix(req.Model, "-chat")
 	
-	// Determine initial origin based on model type
-	// Opus models use AI_EDITOR (Kiro IDE quota), others start with CLI (Amazon Q quota)
-	var currentOrigin string
-	if strings.Contains(strings.ToLower(req.Model), "opus") {
-		currentOrigin = "AI_EDITOR"
-	} else {
-		currentOrigin = "CLI"
-	}
+	// Determine initial origin - always use AI_EDITOR to match AIClient-2-API behavior
+	// AIClient-2-API uses AI_EDITOR for all models, which is the Kiro IDE quota
+	// Note: CLI origin is for Amazon Q quota, but AIClient-2-API doesn't use it
+	currentOrigin := "AI_EDITOR"
 	
 	// Determine if profileArn should be included based on auth method
 	// profileArn is only needed for social auth (Google OAuth), not for builder-id (AWS SSO)
@@ -196,9 +194,13 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 		}
 
 		httpReq.Header.Set("Content-Type", kiroContentType)
-		httpReq.Header.Set("x-amz-target", kiroTargetChat)
 		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 		httpReq.Header.Set("Accept", kiroAcceptStream)
+		httpReq.Header.Set("x-amz-user-agent", kiroUserAgent)
+		httpReq.Header.Set("User-Agent", kiroFullUserAgent)
+		httpReq.Header.Set("amz-sdk-request", "attempt=1; max=1")
+		httpReq.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+		httpReq.Header.Set("amz-sdk-invocation-id", uuid.New().String())
 
 		var attrs map[string]string
 		if auth != nil {
@@ -409,14 +411,9 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	// Check if this is a chat-only model variant (no tool calling)
 	isChatOnly := strings.HasSuffix(req.Model, "-chat")
 	
-	// Determine initial origin based on model type
-	// Opus models use AI_EDITOR (Kiro IDE quota), others start with CLI (Amazon Q quota)
-	var currentOrigin string
-	if strings.Contains(strings.ToLower(req.Model), "opus") {
-		currentOrigin = "AI_EDITOR"
-	} else {
-		currentOrigin = "CLI"
-	}
+	// Determine initial origin - always use AI_EDITOR to match AIClient-2-API behavior
+	// AIClient-2-API uses AI_EDITOR for all models, which is the Kiro IDE quota
+	currentOrigin := "AI_EDITOR"
 	
 	// Determine if profileArn should be included based on auth method
 	// profileArn is only needed for social auth (Google OAuth), not for builder-id (AWS SSO)
@@ -446,9 +443,13 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 		}
 
 		httpReq.Header.Set("Content-Type", kiroContentType)
-		httpReq.Header.Set("x-amz-target", kiroTargetChat)
 		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 		httpReq.Header.Set("Accept", kiroAcceptStream)
+		httpReq.Header.Set("x-amz-user-agent", kiroUserAgent)
+		httpReq.Header.Set("User-Agent", kiroFullUserAgent)
+		httpReq.Header.Set("amz-sdk-request", "attempt=1; max=1")
+		httpReq.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+		httpReq.Header.Set("amz-sdk-invocation-id", uuid.New().String())
 
 		var attrs map[string]string
 		if auth != nil {
@@ -630,36 +631,81 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 // Agentic variants (-agentic suffix) map to the same backend model IDs.
 func (e *KiroExecutor) mapModelToKiro(model string) string {
 	modelMap := map[string]string{
-		"kiro-claude-opus-4.5":   "claude-opus-4.5",
-		"kiro-claude-sonnet-4.5": "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4":   "claude-sonnet-4",
-		"kiro-claude-haiku-4.5":  "claude-haiku-4.5",
 		// Amazon Q format (amazonq- prefix) - same API as Kiro
-		"amazonq-auto":              "auto",
-		"amazonq-claude-opus-4.5":   "claude-opus-4.5",
-		"amazonq-claude-sonnet-4.5": "claude-sonnet-4.5",
-		"amazonq-claude-sonnet-4":   "claude-sonnet-4",
-		"amazonq-claude-haiku-4.5":  "claude-haiku-4.5",
-		// Native Kiro format (no prefix) - used by Kiro IDE directly
-		"claude-opus-4.5":   "claude-opus-4.5",
-		"claude-sonnet-4.5": "claude-sonnet-4.5",
-		"claude-sonnet-4":   "claude-sonnet-4",
-		"claude-haiku-4.5":  "claude-haiku-4.5",
-		"auto":              "auto",
-		// Chat variant (no tool calling support)
-		"kiro-claude-opus-4.5-chat": "claude-opus-4.5",
+		"amazonq-auto":                       "auto",
+		"amazonq-claude-opus-4-5":            "claude-opus-4.5",
+		"amazonq-claude-sonnet-4-5":          "claude-sonnet-4.5",
+		"amazonq-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
+		"amazonq-claude-sonnet-4":            "claude-sonnet-4",
+		"amazonq-claude-sonnet-4-20250514":   "claude-sonnet-4",
+		"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
+		// Kiro format (kiro- prefix) - valid model names that should be preserved
+		"kiro-claude-opus-4-5":            "claude-opus-4.5",
+		"kiro-claude-sonnet-4-5":          "claude-sonnet-4.5",
+		"kiro-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
+		"kiro-claude-sonnet-4":            "claude-sonnet-4",
+		"kiro-claude-sonnet-4-20250514":   "claude-sonnet-4",
+		"kiro-claude-haiku-4-5":           "claude-haiku-4.5",
+		"kiro-auto":                       "auto",
+		// Native format (no prefix) - used by Kiro IDE directly
+		"claude-opus-4-5":            "claude-opus-4.5",
+		"claude-opus-4.5":            "claude-opus-4.5",
+		"claude-haiku-4-5":           "claude-haiku-4.5",
+		"claude-haiku-4.5":           "claude-haiku-4.5",
+		"claude-sonnet-4-5":          "claude-sonnet-4.5",
+		"claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
+		"claude-sonnet-4.5":          "claude-sonnet-4.5",
+		"claude-sonnet-4":            "claude-sonnet-4",
+		"claude-sonnet-4-20250514":   "claude-sonnet-4",
+		"auto":                       "auto",
 		// Agentic variants (same backend model IDs, but with special system prompt)
-		"kiro-claude-opus-4.5-agentic":      "claude-opus-4.5",
-		"kiro-claude-sonnet-4.5-agentic":    "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4-agentic":      "claude-sonnet-4",
-		"kiro-claude-haiku-4.5-agentic":     "claude-haiku-4.5",
-		"amazonq-claude-sonnet-4.5-agentic": "claude-sonnet-4.5",
+		"claude-opus-4.5-agentic":            "claude-opus-4.5",
+		"claude-sonnet-4.5-agentic":          "claude-sonnet-4.5",
+		"claude-sonnet-4-agentic":            "claude-sonnet-4",
+		"claude-haiku-4.5-agentic":           "claude-haiku-4.5",
+		"kiro-claude-opus-4-5-agentic":       "claude-opus-4.5",
+		"kiro-claude-sonnet-4-5-agentic":     "claude-sonnet-4.5",
+		"kiro-claude-sonnet-4-agentic":       "claude-sonnet-4",
+		"kiro-claude-haiku-4-5-agentic":      "claude-haiku-4.5",
 	}
 	if kiroID, ok := modelMap[model]; ok {
 		return kiroID
 	}
-	log.Debugf("kiro: unknown model '%s', falling back to 'auto'", model)
-	return "auto"
+	
+	// Smart fallback: try to infer model type from name patterns
+	modelLower := strings.ToLower(model)
+	
+	// Check for Haiku variants
+	if strings.Contains(modelLower, "haiku") {
+		log.Debugf("kiro: unknown Haiku model '%s', mapping to claude-haiku-4.5", model)
+		return "claude-haiku-4.5"
+	}
+	
+	// Check for Sonnet variants
+	if strings.Contains(modelLower, "sonnet") {
+		// Check for specific version patterns
+		if strings.Contains(modelLower, "3-7") || strings.Contains(modelLower, "3.7") {
+			log.Debugf("kiro: unknown Sonnet 3.7 model '%s', mapping to claude-3-7-sonnet-20250219", model)
+			return "claude-3-7-sonnet-20250219"
+		}
+		if strings.Contains(modelLower, "4-5") || strings.Contains(modelLower, "4.5") {
+			log.Debugf("kiro: unknown Sonnet 4.5 model '%s', mapping to claude-sonnet-4.5", model)
+			return "claude-sonnet-4.5"
+		}
+		// Default to Sonnet 4
+		log.Debugf("kiro: unknown Sonnet model '%s', mapping to claude-sonnet-4", model)
+		return "claude-sonnet-4"
+	}
+	
+	// Check for Opus variants
+	if strings.Contains(modelLower, "opus") {
+		log.Debugf("kiro: unknown Opus model '%s', mapping to claude-opus-4.5", model)
+		return "claude-opus-4.5"
+	}
+	
+	// Final fallback to Sonnet 4.5 (most commonly used model)
+	log.Warnf("kiro: unknown model '%s', falling back to claude-sonnet-4.5", model)
+	return "claude-sonnet-4.5"
 }
 
 // Kiro API request structs - field order determines JSON key order
@@ -673,7 +719,7 @@ type kiroConversationState struct {
 	ChatTriggerType string               `json:"chatTriggerType"` // Required: "MANUAL" - must be first field
 	ConversationID  string               `json:"conversationId"`
 	CurrentMessage  kiroCurrentMessage   `json:"currentMessage"`
-	History         []kiroHistoryMessage `json:"history,omitempty"` // Only include when non-empty
+	History         []kiroHistoryMessage `json:"history,omitempty"`
 }
 
 type kiroCurrentMessage struct {
@@ -750,6 +796,24 @@ type kiroToolUse struct {
 // isAgentic parameter enables chunked write optimization prompt for -agentic model variants.
 // isChatOnly parameter disables tool calling for -chat model variants (pure conversation mode).
 func (e *KiroExecutor) buildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool) []byte {
+	// Normalize origin value for Kiro API compatibility
+	// Kiro API only accepts "CLI" or "AI_EDITOR" as valid origin values
+	switch origin {
+	case "KIRO_CLI":
+		origin = "CLI"
+	case "KIRO_AI_EDITOR":
+		origin = "AI_EDITOR"
+	case "AMAZON_Q":
+		origin = "CLI"
+	case "KIRO_IDE":
+		origin = "AI_EDITOR"
+	// Add any other non-standard origin values that need normalization
+	default:
+		// Keep the original value if it's already standard
+		// Valid values: "CLI", "AI_EDITOR"
+	}
+	log.Debugf("kiro: normalized origin value: %s", origin)
+	
 	messages := gjson.GetBytes(claudeBody, "messages")
 	
 	// For chat-only mode, don't include tools
@@ -942,13 +1006,12 @@ func (e *KiroExecutor) buildKiroPayload(claudeBody []byte, modelID, profileArn, 
 	}
 	
 	// Build payload with correct field order (matches struct definition)
-	// Note: history is omitempty, so nil/empty slice won't be serialized
 	payload := kiroPayload{
 		ConversationState: kiroConversationState{
 			ChatTriggerType: "MANUAL", // Required by Kiro API - must be first
 			ConversationID:  uuid.New().String(),
 			CurrentMessage:  currentMessage,
-			History:         history, // Will be omitted if empty due to omitempty tag
+			History:         history, // Now always included (non-nil slice)
 		},
 		ProfileArn: profileArn,
 	}
@@ -958,6 +1021,7 @@ func (e *KiroExecutor) buildKiroPayload(claudeBody []byte, modelID, profileArn, 
 		log.Debugf("kiro: failed to marshal payload: %v", err)
 		return nil
 	}
+	
 	return result
 }
 
@@ -2025,7 +2089,13 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	e.refreshMu.Lock()
 	defer e.refreshMu.Unlock()
 
-	log.Debugf("kiro executor: refresh called for auth %s", auth.ID)
+	var authID string
+	if auth != nil {
+		authID = auth.ID
+	} else {
+		authID = "<nil>"
+	}
+	log.Debugf("kiro executor: refresh called for auth %s", authID)
 	if auth == nil {
 		return nil, fmt.Errorf("kiro executor: auth is nil")
 	}
