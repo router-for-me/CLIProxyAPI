@@ -895,6 +895,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "Claude Opus 4.5 via Kiro (2.2x credit)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                  "kiro-claude-sonnet-4-5",
@@ -906,6 +907,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "Claude Sonnet 4.5 via Kiro (1.3x credit)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                  "kiro-claude-sonnet-4",
@@ -917,6 +919,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "Claude Sonnet 4 via Kiro (1.3x credit)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                  "kiro-claude-haiku-4-5",
@@ -928,6 +931,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "Claude Haiku 4.5 via Kiro (0.4x credit)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		// --- Agentic Variants (Optimized for coding agents with chunked writes) ---
 		{
@@ -940,6 +944,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "Claude Opus 4.5 optimized for coding agents (chunked writes)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                  "kiro-claude-sonnet-4-5-agentic",
@@ -951,6 +956,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "Claude Sonnet 4.5 optimized for coding agents (chunked writes)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                  "kiro-claude-sonnet-4-agentic",
@@ -962,6 +968,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "Claude Sonnet 4 optimized for coding agents (chunked writes)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                  "kiro-claude-haiku-4-5-agentic",
@@ -973,6 +980,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "Claude Haiku 4.5 optimized for coding agents (chunked writes)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 	}
 }

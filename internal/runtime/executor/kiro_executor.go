@@ -1118,10 +1118,18 @@ func (e *KiroExecutor) buildKiroPayload(claudeBody []byte, modelID, profileArn, 
 			// Read budget_tokens if specified - this value comes from:
 			// - Claude API: thinking.budget_tokens directly
 			// - OpenAI API: reasoning_effort -> budget_tokens (low:4000, medium:16000, high:32000)
-			if bt := thinkingField.Get("budget_tokens"); bt.Exists() && bt.Int() > 0 {
+			if bt := thinkingField.Get("budget_tokens"); bt.Exists() {
 				budgetTokens = bt.Int()
+				// If budget_tokens <= 0, disable thinking explicitly
+				// This allows users to disable thinking by setting budget_tokens to 0
+				if budgetTokens <= 0 {
+					thinkingEnabled = false
+					log.Debugf("kiro: thinking mode disabled via budget_tokens <= 0")
+				}
 			}
-			log.Debugf("kiro: thinking mode enabled via Claude API parameter, budget_tokens: %d", budgetTokens)
+			if thinkingEnabled {
+				log.Debugf("kiro: thinking mode enabled via Claude API parameter, budget_tokens: %d", budgetTokens)
+			}
 		}
 	}
 
@@ -1737,15 +1745,23 @@ func getString(m map[string]interface{}, key string) string {
 
 // buildClaudeResponse constructs a Claude-compatible response.
 // Supports tool_use blocks when tools are present in the response.
+// Supports thinking blocks - parses <thinking> tags and converts to Claude thinking content blocks.
 func (e *KiroExecutor) buildClaudeResponse(content string, toolUses []kiroToolUse, model string, usageInfo usage.Detail) []byte {
 	var contentBlocks []map[string]interface{}
 
-	// Add text content if present
+	// Extract thinking blocks and text from content
+	// This handles <thinking>...</thinking> tags from Kiro's response
 	if content != "" {
-		contentBlocks = append(contentBlocks, map[string]interface{}{
-			"type": "text",
-			"text": content,
-		})
+		blocks := e.extractThinkingFromContent(content)
+		contentBlocks = append(contentBlocks, blocks...)
+		
+		// DIAGNOSTIC: Log if thinking blocks were extracted
+		for _, block := range blocks {
+			if block["type"] == "thinking" {
+				thinkingContent := block["thinking"].(string)
+				log.Infof("kiro: buildClaudeResponse extracted thinking block (len: %d)", len(thinkingContent))
+			}
+		}
 	}
 
 	// Add tool_use blocks
@@ -1788,6 +1804,101 @@ func (e *KiroExecutor) buildClaudeResponse(content string, toolUses []kiroToolUs
 	return result
 }
 
+// extractThinkingFromContent parses content to extract thinking blocks and text.
+// Returns a list of content blocks in the order they appear in the content.
+// Handles interleaved thinking and text blocks correctly.
+// Based on the streaming implementation's thinking tag handling.
+func (e *KiroExecutor) extractThinkingFromContent(content string) []map[string]interface{} {
+	var blocks []map[string]interface{}
+	
+	if content == "" {
+		return blocks
+	}
+	
+	// Check if content contains thinking tags at all
+	if !strings.Contains(content, thinkingStartTag) {
+		// No thinking tags, return as plain text
+		return []map[string]interface{}{
+			{
+				"type": "text",
+				"text": content,
+			},
+		}
+	}
+	
+	log.Debugf("kiro: extractThinkingFromContent - found thinking tags in content (len: %d)", len(content))
+	
+	remaining := content
+	
+	for len(remaining) > 0 {
+		// Look for <thinking> tag
+		startIdx := strings.Index(remaining, thinkingStartTag)
+		
+		if startIdx == -1 {
+			// No more thinking tags, add remaining as text
+			if strings.TrimSpace(remaining) != "" {
+				blocks = append(blocks, map[string]interface{}{
+					"type": "text",
+					"text": remaining,
+				})
+			}
+			break
+		}
+		
+		// Add text before thinking tag (if any meaningful content)
+		if startIdx > 0 {
+			textBefore := remaining[:startIdx]
+			if strings.TrimSpace(textBefore) != "" {
+				blocks = append(blocks, map[string]interface{}{
+					"type": "text",
+					"text": textBefore,
+				})
+			}
+		}
+		
+		// Move past the opening tag
+		remaining = remaining[startIdx+len(thinkingStartTag):]
+		
+		// Find closing tag
+		endIdx := strings.Index(remaining, thinkingEndTag)
+		
+		if endIdx == -1 {
+			// No closing tag found, treat rest as thinking content (incomplete response)
+			if strings.TrimSpace(remaining) != "" {
+				blocks = append(blocks, map[string]interface{}{
+					"type":     "thinking",
+					"thinking": remaining,
+				})
+				log.Warnf("kiro: extractThinkingFromContent - missing closing </thinking> tag")
+			}
+			break
+		}
+		
+		// Extract thinking content between tags
+		thinkContent := remaining[:endIdx]
+		if strings.TrimSpace(thinkContent) != "" {
+			blocks = append(blocks, map[string]interface{}{
+				"type":     "thinking",
+				"thinking": thinkContent,
+			})
+			log.Debugf("kiro: extractThinkingFromContent - extracted thinking block (len: %d)", len(thinkContent))
+		}
+		
+		// Move past the closing tag
+		remaining = remaining[endIdx+len(thinkingEndTag):]
+	}
+	
+	// If no blocks were created (all whitespace), return empty text block
+	if len(blocks) == 0 {
+		blocks = append(blocks, map[string]interface{}{
+			"type": "text",
+			"text": "",
+		})
+	}
+	
+	return blocks
+}
+
 // NOTE: Tool uses are now extracted from API response, not parsed from text
 
 
@@ -1804,9 +1915,10 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	processedIDs := make(map[string]bool)
 	var currentToolUse *toolUseState
 
-	// Duplicate content detection - tracks last content event to filter duplicates
-	// Based on AIClient-2-API implementation for Kiro
-	var lastContentEvent string
+	// NOTE: Duplicate content filtering removed - it was causing legitimate repeated
+	// content (like consecutive newlines) to be incorrectly filtered out.
+	// The previous implementation compared lastContentEvent == contentDelta which
+	// is too aggressive for streaming scenarios.
 
 	// Streaming token calculation - accumulate content for real-time token counting
 	// Based on AIClient-2-API implementation
@@ -1904,6 +2016,56 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				
 				hasToolUses = true
 				currentToolUse = nil
+			}
+			
+			// Flush any pending tag characters at EOF
+			// These are partial tag prefixes that were held back waiting for more data
+			// Since no more data is coming, output them as regular text
+			var pendingText string
+			if pendingStartTagChars > 0 {
+				pendingText = thinkingStartTag[:pendingStartTagChars]
+				log.Debugf("kiro: flushing pending start tag chars at EOF: %q", pendingText)
+				pendingStartTagChars = 0
+			}
+			if pendingEndTagChars > 0 {
+				pendingText += thinkingEndTag[:pendingEndTagChars]
+				log.Debugf("kiro: flushing pending end tag chars at EOF: %q", pendingText)
+				pendingEndTagChars = 0
+			}
+			
+			// Output pending text if any
+			if pendingText != "" {
+				// If we're in a thinking block, output as thinking content
+				if inThinkBlock && isThinkingBlockOpen {
+					thinkingEvent := e.buildClaudeThinkingDeltaEvent(pendingText, thinkingBlockIndex)
+					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
+					for _, chunk := range sseData {
+						if chunk != "" {
+							out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+						}
+					}
+				} else {
+					// Output as regular text
+					if !isTextBlockOpen {
+						contentBlockIndex++
+						isTextBlockOpen = true
+						blockStart := e.buildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+						for _, chunk := range sseData {
+							if chunk != "" {
+								out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+							}
+						}
+					}
+					
+					claudeEvent := e.buildClaudeStreamEvent(pendingText, contentBlockIndex)
+					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+					for _, chunk := range sseData {
+						if chunk != "" {
+							out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+						}
+					}
+				}
 			}
 			break
 		}
@@ -2035,15 +2197,16 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				}
 			}
 
-			// Handle text content with duplicate detection and thinking mode support
+			// Handle text content with thinking mode support
 			if contentDelta != "" {
-				// Check for duplicate content - skip if identical to last content event
-				// Based on AIClient-2-API implementation for Kiro
-				if contentDelta == lastContentEvent {
-					log.Debugf("kiro: skipping duplicate content event (len: %d)", len(contentDelta))
-					continue
+				// DIAGNOSTIC: Check for thinking tags in response
+				if strings.Contains(contentDelta, "<thinking>") || strings.Contains(contentDelta, "</thinking>") {
+					log.Infof("kiro: DIAGNOSTIC - Found thinking tag in response (len: %d)", len(contentDelta))
 				}
-				lastContentEvent = contentDelta
+
+				// NOTE: Duplicate content filtering was removed because it incorrectly
+				// filtered out legitimate repeated content (like consecutive newlines "\n\n").
+				// Streaming naturally can have identical chunks that are valid content.
 
 				outputLen += len(contentDelta)
 				// Accumulate content for streaming token calculation
