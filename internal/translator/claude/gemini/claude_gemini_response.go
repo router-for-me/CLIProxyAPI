@@ -331,8 +331,8 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 	streamingEvents := make([][]byte, 0)
 
 	scanner := bufio.NewScanner(bytes.NewReader(rawJSON))
-	buffer := make([]byte, 20_971_520)
-	scanner.Buffer(buffer, 20_971_520)
+	buffer := make([]byte, 52_428_800) // 50MB
+	scanner.Buffer(buffer, 52_428_800)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		// log.Debug(string(line))

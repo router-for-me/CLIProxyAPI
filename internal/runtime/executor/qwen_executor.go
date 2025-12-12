@@ -12,6 +12,7 @@ import (
 
 	qwenauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -50,6 +51,15 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort")
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel != "" {
+		body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	}
+	body = normalizeThinkingConfig(body, upstreamModel)
+	if errValidate := validateThinkingConfig(body, upstreamModel); errValidate != nil {
+		return resp, errValidate
+	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
@@ -121,6 +131,15 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	to := sdktranslator.FromString("openai")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
+	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort")
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel != "" {
+		body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	}
+	body = normalizeThinkingConfig(body, upstreamModel)
+	if errValidate := validateThinkingConfig(body, upstreamModel); errValidate != nil {
+		return nil, errValidate
+	}
 	toolsResult := gjson.GetBytes(body, "tools")
 	// I'm addressing the Qwen3 "poisoning" issue, which is caused by the model needing a tool to be defined. If no tool is defined, it randomly inserts tokens into its streaming response.
 	// This will have no real consequences. It's just to scare Qwen3.
@@ -181,7 +200,7 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 20_971_520)
+		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()

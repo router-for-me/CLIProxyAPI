@@ -1,8 +1,6 @@
 package util
 
 import (
-	"encoding/json"
-	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -14,80 +12,6 @@ const (
 	GeminiIncludeThoughtsMetadataKey = "gemini_include_thoughts"
 	GeminiOriginalModelMetadataKey   = "gemini_original_model"
 )
-
-func ParseGeminiThinkingSuffix(model string) (string, *int, *bool, bool) {
-	if model == "" {
-		return model, nil, nil, false
-	}
-	lower := strings.ToLower(model)
-	if !strings.HasPrefix(lower, "gemini-") {
-		return model, nil, nil, false
-	}
-
-	if strings.HasSuffix(lower, "-nothinking") {
-		base := model[:len(model)-len("-nothinking")]
-		budgetValue := 0
-		if strings.HasPrefix(lower, "gemini-2.5-pro") {
-			budgetValue = 128
-		}
-		include := false
-		return base, &budgetValue, &include, true
-	}
-
-	// Handle "-reasoning" suffix: enables thinking with dynamic budget (-1)
-	// Maps: gemini-2.5-flash-reasoning -> gemini-2.5-flash with thinkingBudget=-1
-	if strings.HasSuffix(lower, "-reasoning") {
-		base := model[:len(model)-len("-reasoning")]
-		budgetValue := -1 // Dynamic budget
-		include := true
-		return base, &budgetValue, &include, true
-	}
-
-	idx := strings.LastIndex(lower, "-thinking-")
-	if idx == -1 {
-		return model, nil, nil, false
-	}
-
-	digits := model[idx+len("-thinking-"):]
-	if digits == "" {
-		return model, nil, nil, false
-	}
-	end := len(digits)
-	for i := 0; i < len(digits); i++ {
-		if digits[i] < '0' || digits[i] > '9' {
-			end = i
-			break
-		}
-	}
-	if end == 0 {
-		return model, nil, nil, false
-	}
-	valueStr := digits[:end]
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
-		return model, nil, nil, false
-	}
-	base := model[:idx]
-	budgetValue := value
-	return base, &budgetValue, nil, true
-}
-
-func NormalizeGeminiThinkingModel(modelName string) (string, map[string]any) {
-	baseModel, budget, include, matched := ParseGeminiThinkingSuffix(modelName)
-	if !matched {
-		return baseModel, nil
-	}
-	metadata := map[string]any{
-		GeminiOriginalModelMetadataKey: modelName,
-	}
-	if budget != nil {
-		metadata[GeminiThinkingBudgetMetadataKey] = *budget
-	}
-	if include != nil {
-		metadata[GeminiIncludeThoughtsMetadataKey] = *include
-	}
-	return baseModel, metadata
-}
 
 func ApplyGeminiThinkingConfig(body []byte, budget *int, includeThoughts *bool) []byte {
 	if budget == nil && includeThoughts == nil {
@@ -131,80 +55,6 @@ func ApplyGeminiCLIThinkingConfig(body []byte, budget *int, includeThoughts *boo
 		}
 	}
 	return updated
-}
-
-func GeminiThinkingFromMetadata(metadata map[string]any) (*int, *bool, bool) {
-	if len(metadata) == 0 {
-		return nil, nil, false
-	}
-	var (
-		budgetPtr  *int
-		includePtr *bool
-		matched    bool
-	)
-	if rawBudget, ok := metadata[GeminiThinkingBudgetMetadataKey]; ok {
-		switch v := rawBudget.(type) {
-		case int:
-			budget := v
-			budgetPtr = &budget
-			matched = true
-		case int32:
-			budget := int(v)
-			budgetPtr = &budget
-			matched = true
-		case int64:
-			budget := int(v)
-			budgetPtr = &budget
-			matched = true
-		case float64:
-			budget := int(v)
-			budgetPtr = &budget
-			matched = true
-		case json.Number:
-			if val, err := v.Int64(); err == nil {
-				budget := int(val)
-				budgetPtr = &budget
-				matched = true
-			}
-		}
-	}
-	if rawInclude, ok := metadata[GeminiIncludeThoughtsMetadataKey]; ok {
-		switch v := rawInclude.(type) {
-		case bool:
-			include := v
-			includePtr = &include
-			matched = true
-		case string:
-			if parsed, err := strconv.ParseBool(v); err == nil {
-				include := parsed
-				includePtr = &include
-				matched = true
-			}
-		case json.Number:
-			if val, err := v.Int64(); err == nil {
-				include := val != 0
-				includePtr = &include
-				matched = true
-			}
-		case int:
-			include := v != 0
-			includePtr = &include
-			matched = true
-		case int32:
-			include := v != 0
-			includePtr = &include
-			matched = true
-		case int64:
-			include := v != 0
-			includePtr = &include
-			matched = true
-		case float64:
-			include := v != 0
-			includePtr = &include
-			matched = true
-		}
-	}
-	return budgetPtr, includePtr, matched
 }
 
 // modelsWithDefaultThinking lists models that should have thinking enabled by default

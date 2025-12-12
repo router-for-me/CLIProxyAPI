@@ -271,6 +271,11 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 				continue
 			}
 			if errMsg != nil {
+				status := http.StatusInternalServerError
+				if errMsg.StatusCode > 0 {
+					status = errMsg.StatusCode
+				}
+				c.Status(status)
 				// An error occurred: emit as a proper SSE error event
 				errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
 				_, _ = writer.WriteString("event: error\n")
@@ -278,6 +283,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 				_, _ = writer.Write(errorBytes)
 				_, _ = writer.WriteString("\n\n")
 				_ = writer.Flush()
+				flusher.Flush()
 			}
 			var execErr error
 			if errMsg != nil {

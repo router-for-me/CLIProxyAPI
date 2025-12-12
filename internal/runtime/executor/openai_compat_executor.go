@@ -58,6 +58,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		translated = e.overrideModel(translated, modelOverride)
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
+	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort")
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel != "" {
+		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
+	}
+	translated = normalizeThinkingConfig(translated, upstreamModel)
+	if errValidate := validateThinkingConfig(translated, upstreamModel); errValidate != nil {
+		return resp, errValidate
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -143,6 +152,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		translated = e.overrideModel(translated, modelOverride)
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
+	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort")
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel != "" {
+		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
+	}
+	translated = normalizeThinkingConfig(translated, upstreamModel)
+	if errValidate := validateThinkingConfig(translated, upstreamModel); errValidate != nil {
+		return nil, errValidate
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -206,7 +224,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 20_971_520)
+		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()

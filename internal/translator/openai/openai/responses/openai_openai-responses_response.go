@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -40,6 +41,9 @@ type oaiToResponsesState struct {
 	ReasoningTokens  int64
 	UsageSeen        bool
 }
+
+// responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
+var responseIDCounter uint64
 
 func emitRespEvent(event string, payload string) string {
 	return fmt.Sprintf("event: %s\ndata: %s", event, payload)
@@ -590,7 +594,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	// id: use provider id if present, otherwise synthesize
 	id := root.Get("id").String()
 	if id == "" {
-		id = fmt.Sprintf("resp_%x", time.Now().UnixNano())
+		id = fmt.Sprintf("resp_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&responseIDCounter, 1))
 	}
 	resp, _ = sjson.Set(resp, "id", id)
 
