@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -21,8 +20,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 const (
@@ -31,6 +28,9 @@ const (
 
 	// glAPIVersion is the API version used for Gemini requests.
 	glAPIVersion = "v1beta"
+
+	// streamScannerBuffer is the buffer size for SSE stream scanning.
+	streamScannerBuffer = 52_428_800
 )
 
 // GeminiExecutor is a stateless executor for the official Gemini API using API keys.
@@ -48,9 +48,11 @@ type GeminiExecutor struct {
 //
 // Returns:
 //   - *GeminiExecutor: A new Gemini executor instance
-func NewGeminiExecutor(cfg *config.Config) *GeminiExecutor { return &GeminiExecutor{cfg: cfg} }
+func NewGeminiExecutor(cfg *config.Config) *GeminiExecutor {
+	return &GeminiExecutor{cfg: cfg}
+}
 
-// Identifier returns the executor identifier for Gemini.
+// Identifier returns the executor identifier.
 func (e *GeminiExecutor) Identifier() string { return "gemini" }
 
 // PrepareRequest prepares the HTTP request for execution (no-op for Gemini).
@@ -164,6 +166,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	return resp, nil
 }
 
+// ExecuteStream performs a streaming request to the Gemini API.
 func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
 	apiKey, bearer := geminiCreds(auth)
 
@@ -249,7 +252,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
+		scanner.Buffer(nil, streamScannerBuffer)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -280,6 +283,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	return stream, nil
 }
 
+// CountTokens counts tokens for the given request using the Gemini API.
 func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	apiKey, bearer := geminiCreds(auth)
 
@@ -353,106 +357,8 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
 }
 
-func (e *GeminiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	log.Debugf("gemini executor: refresh called")
-	// OAuth bearer token refresh for official Gemini API.
-	if auth == nil {
-		return nil, fmt.Errorf("gemini executor: auth is nil")
-	}
-	if auth.Metadata == nil {
-		return auth, nil
-	}
-	// Token data is typically nested under "token" map in Gemini files.
-	tokenMap, _ := auth.Metadata["token"].(map[string]any)
-	var refreshToken, accessToken, clientID, clientSecret, tokenURI, expiryStr string
-	if tokenMap != nil {
-		if v, ok := tokenMap["refresh_token"].(string); ok {
-			refreshToken = v
-		}
-		if v, ok := tokenMap["access_token"].(string); ok {
-			accessToken = v
-		}
-		if v, ok := tokenMap["client_id"].(string); ok {
-			clientID = v
-		}
-		if v, ok := tokenMap["client_secret"].(string); ok {
-			clientSecret = v
-		}
-		if v, ok := tokenMap["token_uri"].(string); ok {
-			tokenURI = v
-		}
-		if v, ok := tokenMap["expiry"].(string); ok {
-			expiryStr = v
-		}
-	} else {
-		// Fallback to top-level keys if present
-		if v, ok := auth.Metadata["refresh_token"].(string); ok {
-			refreshToken = v
-		}
-		if v, ok := auth.Metadata["access_token"].(string); ok {
-			accessToken = v
-		}
-		if v, ok := auth.Metadata["client_id"].(string); ok {
-			clientID = v
-		}
-		if v, ok := auth.Metadata["client_secret"].(string); ok {
-			clientSecret = v
-		}
-		if v, ok := auth.Metadata["token_uri"].(string); ok {
-			tokenURI = v
-		}
-		if v, ok := auth.Metadata["expiry"].(string); ok {
-			expiryStr = v
-		}
-	}
-	if refreshToken == "" {
-		// Nothing to do for API key or cookie based entries
-		return auth, nil
-	}
-
-	// Prepare oauth2 config; default to Google endpoints
-	endpoint := google.Endpoint
-	if tokenURI != "" {
-		endpoint.TokenURL = tokenURI
-	}
-	conf := &oauth2.Config{ClientID: clientID, ClientSecret: clientSecret, Endpoint: endpoint}
-
-	// Ensure proxy-aware HTTP client for token refresh
-	httpClient := util.SetProxy(&e.cfg.SDKConfig, &http.Client{})
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
-
-	// Build base token
-	tok := &oauth2.Token{AccessToken: accessToken, RefreshToken: refreshToken}
-	if t, err := time.Parse(time.RFC3339, expiryStr); err == nil {
-		tok.Expiry = t
-	}
-	newTok, err := conf.TokenSource(ctx, tok).Token()
-	if err != nil {
-		return nil, err
-	}
-
-	// Persist back to metadata; prefer nested token map if present
-	if tokenMap == nil {
-		tokenMap = make(map[string]any)
-	}
-	tokenMap["access_token"] = newTok.AccessToken
-	tokenMap["refresh_token"] = newTok.RefreshToken
-	tokenMap["expiry"] = newTok.Expiry.Format(time.RFC3339)
-	if clientID != "" {
-		tokenMap["client_id"] = clientID
-	}
-	if clientSecret != "" {
-		tokenMap["client_secret"] = clientSecret
-	}
-	if tokenURI != "" {
-		tokenMap["token_uri"] = tokenURI
-	}
-	auth.Metadata["token"] = tokenMap
-
-	// Also mirror top-level access_token for compatibility if previously present
-	if _, ok := auth.Metadata["access_token"]; ok {
-		auth.Metadata["access_token"] = newTok.AccessToken
-	}
+// Refresh refreshes the authentication credentials (no-op for Gemini API key).
+func (e *GeminiExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	return auth, nil
 }
 
