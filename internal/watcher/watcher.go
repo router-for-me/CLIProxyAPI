@@ -1317,6 +1317,12 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			if kk.AgentTaskType != "" {
 				attrs["agent_task_type"] = kk.AgentTaskType
 			}
+			if kk.PreferredEndpoint != "" {
+				attrs["preferred_endpoint"] = kk.PreferredEndpoint
+			} else if cfg.KiroPreferredEndpoint != "" {
+				// Apply global default if not overridden by specific key
+				attrs["preferred_endpoint"] = cfg.KiroPreferredEndpoint
+			}
 			if refreshToken != "" {
 				attrs["refresh_token"] = refreshToken
 			}
@@ -1530,6 +1536,17 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				if expiresAt, parseErr := time.Parse(time.RFC3339, expiresAtStr); parseErr == nil {
 					// Refresh 30 minutes before expiry
 					a.NextRefreshAfter = expiresAt.Add(-30 * time.Minute)
+				}
+			}
+			
+			// Apply global preferred endpoint setting if not present in metadata
+			if cfg.KiroPreferredEndpoint != "" {
+				// Check if already set in metadata (which takes precedence in executor)
+				if _, hasMeta := metadata["preferred_endpoint"]; !hasMeta {
+					if a.Attributes == nil {
+						a.Attributes = make(map[string]string)
+					}
+					a.Attributes["preferred_endpoint"] = cfg.KiroPreferredEndpoint
 				}
 			}
 		}
