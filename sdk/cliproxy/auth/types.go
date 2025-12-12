@@ -56,6 +56,11 @@ type Auth struct {
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
+	// Priority defines the selection priority for this auth. Higher values indicate higher priority.
+	// When multiple auths are available, those with higher priority are selected first.
+	// Auths with the same priority are selected using round-robin. Default is 0.
+	Priority int `json:"priority"`
+
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 

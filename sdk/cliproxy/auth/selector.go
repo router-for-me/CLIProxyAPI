@@ -99,6 +99,8 @@ func (e *modelCooldownError) Headers() http.Header {
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
+// It supports priority-based selection where higher priority auths are selected first.
+// Within the same priority level, round-robin is used to distribute load evenly.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = ctx
 	_ = opts
@@ -136,22 +138,70 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
-	// Make round-robin deterministic even if caller's candidate order is unstable.
+
+	// Check if all available auths have the same priority (including default 0).
+	// If so, use the original round-robin behavior for backwards compatibility.
+	allSamePriority := true
 	if len(available) > 1 {
-		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+		firstPriority := available[0].Priority
+		for i := 1; i < len(available); i++ {
+			if available[i].Priority != firstPriority {
+				allSamePriority = false
+				break
+			}
+		}
 	}
-	key := provider + ":" + model
+
+	if allSamePriority {
+		// Original behavior: sort by ID for determinism, then round-robin across all.
+		if len(available) > 1 {
+			sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+		}
+		key := provider + ":" + model
+		s.mu.Lock()
+		index := s.cursors[key]
+		if index >= 2_147_483_640 {
+			index = 0
+		}
+		s.cursors[key] = index + 1
+		s.mu.Unlock()
+		return available[index%len(available)], nil
+	}
+
+	// Priority-based selection: higher priority values are selected first.
+	// Group by priority and select from the highest priority group.
+	highestPriority := available[0].Priority
+	for i := 1; i < len(available); i++ {
+		if available[i].Priority > highestPriority {
+			highestPriority = available[i].Priority
+		}
+	}
+
+	// Filter to only include auths at the highest priority level.
+	highPriorityAuths := make([]*Auth, 0, len(available))
+	for i := 0; i < len(available); i++ {
+		if available[i].Priority == highestPriority {
+			highPriorityAuths = append(highPriorityAuths, available[i])
+		}
+	}
+
+	// Sort by ID for determinism within the same priority level.
+	if len(highPriorityAuths) > 1 {
+		sort.Slice(highPriorityAuths, func(i, j int) bool { return highPriorityAuths[i].ID < highPriorityAuths[j].ID })
+	}
+
+	// Round-robin within the highest priority group.
+	// Include priority in the key to maintain separate cursors for each priority level.
+	key := fmt.Sprintf("%s:%s:%d", provider, model, highestPriority)
 	s.mu.Lock()
 	index := s.cursors[key]
-
 	if index >= 2_147_483_640 {
 		index = 0
 	}
-
 	s.cursors[key] = index + 1
 	s.mu.Unlock()
-	// log.Debugf("available: %d, index: %d, key: %d", len(available), index, index%len(available))
-	return available[index%len(available)], nil
+
+	return highPriorityAuths[index%len(highPriorityAuths)], nil
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
