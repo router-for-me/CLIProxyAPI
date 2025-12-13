@@ -54,13 +54,20 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), opts.Stream)
-	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+	modelOverride := e.resolveUpstreamModel(req.Model, auth)
+	if modelOverride != "" {
 		translated = e.overrideModel(translated, modelOverride)
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
-	translated = applyReasoningEffortMetadataChatCompletions(translated, req.Metadata, req.Model)
-	if upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata); upstreamModel != "" {
+	allowCompat := e.allowCompatReasoningEffort(req.Model, auth)
+	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel != "" && modelOverride == "" {
 		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
+	}
+	translated = normalizeThinkingConfig(translated, upstreamModel, allowCompat)
+	if errValidate := validateThinkingConfig(translated, upstreamModel); errValidate != nil {
+		return resp, errValidate
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
@@ -143,13 +150,20 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+	modelOverride := e.resolveUpstreamModel(req.Model, auth)
+	if modelOverride != "" {
 		translated = e.overrideModel(translated, modelOverride)
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
-	translated = applyReasoningEffortMetadataChatCompletions(translated, req.Metadata, req.Model)
-	if upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata); upstreamModel != "" {
+	allowCompat := e.allowCompatReasoningEffort(req.Model, auth)
+	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel != "" && modelOverride == "" {
 		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
+	}
+	translated = normalizeThinkingConfig(translated, upstreamModel, allowCompat)
+	if errValidate := validateThinkingConfig(translated, upstreamModel); errValidate != nil {
+		return nil, errValidate
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
@@ -214,7 +228,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 20_971_520)
+		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -311,6 +325,27 @@ func (e *OpenAICompatExecutor) resolveUpstreamModel(alias string, auth *cliproxy
 		}
 	}
 	return ""
+}
+
+func (e *OpenAICompatExecutor) allowCompatReasoningEffort(model string, auth *cliproxyauth.Auth) bool {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" || e == nil || e.cfg == nil {
+		return false
+	}
+	compat := e.resolveCompatConfig(auth)
+	if compat == nil || len(compat.Models) == 0 {
+		return false
+	}
+	for i := range compat.Models {
+		entry := compat.Models[i]
+		if strings.EqualFold(strings.TrimSpace(entry.Alias), trimmed) {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(entry.Name), trimmed) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {

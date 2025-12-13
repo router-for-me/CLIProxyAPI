@@ -116,19 +116,29 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
-		if h.Cfg.RequestLog {
-			if len(params) == 1 {
-				data := params[0]
-				switch data.(type) {
-				case []byte:
-					appendAPIResponse(c, data.([]byte))
-				case error:
-					appendAPIResponse(c, []byte(data.(error).Error()))
-				case string:
-					appendAPIResponse(c, []byte(data.(string)))
-				case bool:
-				case nil:
+		if h.Cfg.RequestLog && len(params) == 1 {
+			var payload []byte
+			switch data := params[0].(type) {
+			case []byte:
+				payload = data
+			case error:
+				if data != nil {
+					payload = []byte(data.Error())
 				}
+			case string:
+				payload = []byte(data)
+			}
+			if len(payload) > 0 {
+				if existing, exists := c.Get("API_RESPONSE"); exists {
+					if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
+						trimmedPayload := bytes.TrimSpace(payload)
+						if len(trimmedPayload) > 0 && bytes.Contains(existingBytes, trimmedPayload) {
+							cancel()
+							return
+						}
+					}
+				}
+				appendAPIResponse(c, payload)
 			}
 		}
 

@@ -35,6 +35,7 @@ type Params struct {
 	TotalTokenCount      int64  // Cached total token count from usage metadata
 	HasSentFinalEvents   bool   // Indicates if final content/message events have been sent
 	HasToolUse           bool   // Indicates if tool use was observed in the stream
+	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -69,11 +70,14 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		output := ""
-		appendFinalEvents(params, &output, true)
-
-		return []string{
-			output + "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n\n",
+		// Only send final events if we have actually output content
+		if params.HasContent {
+			appendFinalEvents(params, &output, true)
+			return []string{
+				output + "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n\n",
+			}
 		}
+		return []string{}
 	}
 
 	output := ""
@@ -119,10 +123,12 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 						output = output + "event: content_block_delta\n"
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", thoughtSignature.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
+						params.HasContent = true
 					} else if params.ResponseType == 2 { // Continue existing thinking block if already in thinking state
 						output = output + "event: content_block_delta\n"
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex), "delta.thinking", partTextResult.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
+						params.HasContent = true
 					} else {
 						// Transition from another state to thinking
 						// First, close any existing content block
@@ -146,6 +152,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex), "delta.thinking", partTextResult.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
 						params.ResponseType = 2 // Set state to thinking
+						params.HasContent = true
 					}
 				} else {
 					finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason")
@@ -156,6 +163,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 							output = output + "event: content_block_delta\n"
 							data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", partTextResult.String())
 							output = output + fmt.Sprintf("data: %s\n\n\n", data)
+							params.HasContent = true
 						} else {
 							// Transition from another state to text content
 							// First, close any existing content block
@@ -179,6 +187,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 								data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", partTextResult.String())
 								output = output + fmt.Sprintf("data: %s\n\n\n", data)
 								params.ResponseType = 1 // Set state to content
+								params.HasContent = true
 							}
 						}
 					}
@@ -230,6 +239,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 					output = output + fmt.Sprintf("data: %s\n\n\n", data)
 				}
 				params.ResponseType = 3
+				params.HasContent = true
 			}
 		}
 	}
@@ -266,6 +276,11 @@ func appendFinalEvents(params *Params, output *string, force bool) {
 	}
 
 	if !params.HasUsageMetadata && !force {
+		return
+	}
+
+	// Only send final events if we have actually output content
+	if !params.HasContent {
 		return
 	}
 

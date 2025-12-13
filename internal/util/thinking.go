@@ -1,6 +1,8 @@
 package util
 
 import (
+	"strings"
+
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 )
 
@@ -23,33 +25,33 @@ func ModelSupportsThinking(model string) bool {
 // or min (0 if zero is allowed and mid <= 0).
 func NormalizeThinkingBudget(model string, budget int) int {
 	if budget == -1 { // dynamic
-		if found, min, max, zeroAllowed, dynamicAllowed := thinkingRangeFromRegistry(model); found {
+		if found, minBudget, maxBudget, zeroAllowed, dynamicAllowed := thinkingRangeFromRegistry(model); found {
 			if dynamicAllowed {
 				return -1
 			}
-			mid := (min + max) / 2
+			mid := (minBudget + maxBudget) / 2
 			if mid <= 0 && zeroAllowed {
 				return 0
 			}
 			if mid <= 0 {
-				return min
+				return minBudget
 			}
 			return mid
 		}
 		return -1
 	}
-	if found, min, max, zeroAllowed, _ := thinkingRangeFromRegistry(model); found {
+	if found, minBudget, maxBudget, zeroAllowed, _ := thinkingRangeFromRegistry(model); found {
 		if budget == 0 {
 			if zeroAllowed {
 				return 0
 			}
-			return min
+			return minBudget
 		}
-		if budget < min {
-			return min
+		if budget < minBudget {
+			return minBudget
 		}
-		if budget > max {
-			return max
+		if budget > maxBudget {
+			return maxBudget
 		}
 		return budget
 	}
@@ -66,4 +68,53 @@ func thinkingRangeFromRegistry(model string) (found bool, min int, max int, zero
 		return false, 0, 0, false, false
 	}
 	return true, info.Thinking.Min, info.Thinking.Max, info.Thinking.ZeroAllowed, info.Thinking.DynamicAllowed
+}
+
+// GetModelThinkingLevels returns the discrete reasoning effort levels for the model.
+// Returns nil if the model has no thinking support or no levels defined.
+func GetModelThinkingLevels(model string) []string {
+	if model == "" {
+		return nil
+	}
+	info := registry.GetGlobalRegistry().GetModelInfo(model)
+	if info == nil || info.Thinking == nil {
+		return nil
+	}
+	return info.Thinking.Levels
+}
+
+// ModelUsesThinkingLevels reports whether the model uses discrete reasoning
+// effort levels instead of numeric budgets.
+func ModelUsesThinkingLevels(model string) bool {
+	levels := GetModelThinkingLevels(model)
+	return len(levels) > 0
+}
+
+// NormalizeReasoningEffortLevel validates and normalizes a reasoning effort
+// level for the given model. Returns false when the level is not supported.
+func NormalizeReasoningEffortLevel(model, effort string) (string, bool) {
+	levels := GetModelThinkingLevels(model)
+	if len(levels) == 0 {
+		return "", false
+	}
+	loweredEffort := strings.ToLower(strings.TrimSpace(effort))
+	for _, lvl := range levels {
+		if strings.ToLower(lvl) == loweredEffort {
+			return lvl, true
+		}
+	}
+	return "", false
+}
+
+// IsOpenAICompatibilityModel reports whether the model is registered as an OpenAI-compatibility model.
+// These models may not advertise Thinking metadata in the registry.
+func IsOpenAICompatibilityModel(model string) bool {
+	if model == "" {
+		return false
+	}
+	info := registry.GetGlobalRegistry().GetModelInfo(model)
+	if info == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility")
 }

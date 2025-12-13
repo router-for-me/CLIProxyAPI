@@ -107,7 +107,7 @@ func (a *IFlowAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		return nil, fmt.Errorf("iflow authentication failed: missing account identifier")
 	}
 
-	fileName := fmt.Sprintf("iflow-%s.json", email)
+	fileName := fmt.Sprintf("iflow-%s-%d.json", email, time.Now().Unix())
 	metadata := map[string]any{
 		"email":         email,
 		"api_key":       tokenStorage.APIKey,

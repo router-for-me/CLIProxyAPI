@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -61,6 +62,7 @@ type Watcher struct {
 	reloadCallback    func(*config.Config)
 	watcher           *fsnotify.Watcher
 	lastAuthHashes    map[string]string
+	lastRemoveTimes   map[string]time.Time
 	lastConfigHash    string
 	authQueue         chan<- AuthUpdate
 	currentAuths      map[string]*coreauth.Auth
@@ -127,8 +129,9 @@ type AuthUpdate struct {
 const (
 	// replaceCheckDelay is a short delay to allow atomic replace (rename) to settle
 	// before deciding whether a Remove event indicates a real deletion.
-	replaceCheckDelay    = 50 * time.Millisecond
-	configReloadDebounce = 150 * time.Millisecond
+	replaceCheckDelay        = 50 * time.Millisecond
+	configReloadDebounce     = 150 * time.Millisecond
+	authRemoveDebounceWindow = 1 * time.Second
 )
 
 // NewWatcher creates a new file watcher instance
@@ -721,8 +724,9 @@ func (w *Watcher) authFileUnchanged(path string) (bool, error) {
 	sum := sha256.Sum256(data)
 	curHash := hex.EncodeToString(sum[:])
 
+	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.RLock()
-	prevHash, ok := w.lastAuthHashes[path]
+	prevHash, ok := w.lastAuthHashes[normalized]
 	w.clientsMutex.RUnlock()
 	if ok && prevHash == curHash {
 		return true, nil
@@ -731,19 +735,63 @@ func (w *Watcher) authFileUnchanged(path string) (bool, error) {
 }
 
 func (w *Watcher) isKnownAuthFile(path string) bool {
+	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.RLock()
 	defer w.clientsMutex.RUnlock()
-	_, ok := w.lastAuthHashes[path]
+	_, ok := w.lastAuthHashes[normalized]
 	return ok
+}
+
+func (w *Watcher) normalizeAuthPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	cleaned := filepath.Clean(trimmed)
+	if runtime.GOOS == "windows" {
+		cleaned = strings.TrimPrefix(cleaned, `\\?\`)
+		cleaned = strings.ToLower(cleaned)
+	}
+	return cleaned
+}
+
+func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) bool {
+	if normalizedPath == "" {
+		return false
+	}
+	w.clientsMutex.Lock()
+	if w.lastRemoveTimes == nil {
+		w.lastRemoveTimes = make(map[string]time.Time)
+	}
+	if last, ok := w.lastRemoveTimes[normalizedPath]; ok {
+		if now.Sub(last) < authRemoveDebounceWindow {
+			w.clientsMutex.Unlock()
+			return true
+		}
+	}
+	w.lastRemoveTimes[normalizedPath] = now
+	if len(w.lastRemoveTimes) > 128 {
+		cutoff := now.Add(-2 * authRemoveDebounceWindow)
+		for p, t := range w.lastRemoveTimes {
+			if t.Before(cutoff) {
+				delete(w.lastRemoveTimes, p)
+			}
+		}
+	}
+	w.clientsMutex.Unlock()
+	return false
 }
 
 // handleEvent processes individual file system events
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Filter only relevant events: config file or auth-dir JSON files.
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
-	isConfigEvent := event.Name == w.configPath && event.Op&configOps != 0
+	normalizedName := w.normalizeAuthPath(event.Name)
+	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
+	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
+	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := strings.HasPrefix(event.Name, w.authDir) && strings.HasSuffix(event.Name, ".json") && event.Op&authOps != 0
+	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
@@ -761,6 +809,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 
 	// Handle auth directory changes incrementally (.json only)
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		if w.shouldDebounceRemove(normalizedName, now) {
+			log.Debugf("debouncing remove event for %s", filepath.Base(event.Name))
+			return
+		}
 		// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
 		// Wait briefly; if the path exists again, treat as an update instead of removal.
 		time.Sleep(replaceCheckDelay)
@@ -978,7 +1030,8 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 				if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
 					if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
 						sum := sha256.Sum256(data)
-						w.lastAuthHashes[path] = hex.EncodeToString(sum[:])
+						normalizedPath := w.normalizeAuthPath(path)
+						w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
 					}
 				}
 				return nil
@@ -1025,6 +1078,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 	sum := sha256.Sum256(data)
 	curHash := hex.EncodeToString(sum[:])
+	normalized := w.normalizeAuthPath(path)
 
 	w.clientsMutex.Lock()
 
@@ -1034,14 +1088,14 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		w.clientsMutex.Unlock()
 		return
 	}
-	if prev, ok := w.lastAuthHashes[path]; ok && prev == curHash {
+	if prev, ok := w.lastAuthHashes[normalized]; ok && prev == curHash {
 		log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(path))
 		w.clientsMutex.Unlock()
 		return
 	}
 
 	// Update hash cache
-	w.lastAuthHashes[path] = curHash
+	w.lastAuthHashes[normalized] = curHash
 
 	w.clientsMutex.Unlock() // Unlock before the callback
 
@@ -1056,10 +1110,11 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 // removeClient handles the removal of a single client.
 func (w *Watcher) removeClient(path string) {
+	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()
 
 	cfg := w.config
-	delete(w.lastAuthHashes, path)
+	delete(w.lastAuthHashes, normalized)
 
 	w.clientsMutex.Unlock() // Release the lock before the callback
 
