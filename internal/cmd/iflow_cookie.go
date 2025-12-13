@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -34,6 +36,16 @@ func DoIFlowCookieAuth(cfg *config.Config, options *LoginOptions) {
 	cookie, err := promptForCookie(promptFn)
 	if err != nil {
 		fmt.Printf("Failed to get cookie: %v\n", err)
+		return
+	}
+
+	// Check for duplicate BXAuth before authentication
+	bxAuth := iflow.ExtractBXAuth(cookie)
+	if existingFile, err := iflow.CheckDuplicateBXAuth(cfg.AuthDir, bxAuth); err != nil {
+		fmt.Printf("Failed to check duplicate: %v\n", err)
+		return
+	} else if existingFile != "" {
+		fmt.Printf("Duplicate BXAuth found, authentication already exists: %s\n", filepath.Base(existingFile))
 		return
 	}
 
@@ -82,5 +94,5 @@ func promptForCookie(promptFn func(string) (string, error)) (string, error) {
 // getAuthFilePath returns the auth file path for the given provider and email
 func getAuthFilePath(cfg *config.Config, provider, email string) string {
 	fileName := iflow.SanitizeIFlowFileName(email)
-	return fmt.Sprintf("%s/%s-%s.json", cfg.AuthDir, provider, fileName)
+	return fmt.Sprintf("%s/%s-%s-%d.json", cfg.AuthDir, provider, fileName, time.Now().Unix())
 }

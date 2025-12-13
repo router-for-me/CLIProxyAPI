@@ -445,8 +445,8 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		// Use a simple scanner to iterate through raw bytes
 		// Note: extremely large responses may require increasing the buffer
 		scanner := bufio.NewScanner(bytes.NewReader(rawJSON))
-		buf := make([]byte, 20_971_520)
-		scanner.Buffer(buf, 20_971_520)
+		buf := make([]byte, 52_428_800) // 50MB
+		scanner.Buffer(buf, 52_428_800)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if !bytes.HasPrefix(line, dataTag) {

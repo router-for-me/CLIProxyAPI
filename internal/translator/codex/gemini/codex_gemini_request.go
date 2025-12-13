@@ -245,7 +245,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	// Fixed flags aligning with Codex expectations
 	out, _ = sjson.Set(out, "parallel_tool_calls", true)
-	out, _ = sjson.Set(out, "reasoning.effort", "low")
+	out, _ = sjson.Set(out, "reasoning.effort", "medium")
 	out, _ = sjson.Set(out, "reasoning.summary", "auto")
 	out, _ = sjson.Set(out, "stream", true)
 	out, _ = sjson.Set(out, "store", false)

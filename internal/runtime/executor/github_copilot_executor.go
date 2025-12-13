@@ -27,8 +27,8 @@ const (
 	githubCopilotTokenCacheTTL = 25 * time.Minute
 	// tokenExpiryBuffer is the time before expiry when we should refresh the token.
 	tokenExpiryBuffer = 5 * time.Minute
-	// maxScannerBufferSize is the maximum buffer size for SSE scanning (20MB).
-	maxScannerBufferSize = 20_971_520
+	// maxScannerBufferSize is the maximum buffer size for SSE scanning (50MB).
+	maxScannerBufferSize = 52_428_800
 
 	// Copilot API header values.
 	copilotUserAgent     = "GithubCopilot/1.0"

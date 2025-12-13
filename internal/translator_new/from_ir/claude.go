@@ -37,6 +37,7 @@ type ClaudeStreamState struct {
 	TextBlockIndex   int
 	ToolBlockCount   int
 	HasToolCalls     bool
+	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
 	FinishSent       bool
 }
 
@@ -337,6 +338,7 @@ func emitTextDelta(text string, state *ClaudeStreamState) string {
 				"content_block": map[string]interface{}{"type": ir.ClaudeBlockText, "text": ""},
 			}))
 		}
+		state.HasContent = true
 	}
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
 		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
@@ -357,6 +359,7 @@ func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
 				"content_block": map[string]interface{}{"type": ir.ClaudeBlockThinking, "thinking": ""},
 			}))
 		}
+		state.HasContent = true
 	}
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
 		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
@@ -379,6 +382,7 @@ func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
 				"content_block": map[string]interface{}{"type": ir.ClaudeBlockThinking, "thinking": ""},
 			}))
 		}
+		state.HasContent = true
 	}
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
 		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
@@ -397,6 +401,7 @@ func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 	idx := 1
 	if state != nil {
 		state.HasToolCalls = true
+		state.HasContent = true
 		idx = 1 + state.ToolBlockCount
 		state.ToolBlockCount++
 	}
@@ -419,6 +424,11 @@ func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 }
 
 func emitFinish(usage *ir.Usage, state *ClaudeStreamState) string {
+	// Only send final events if we have actually output content
+	if state != nil && !state.HasContent {
+		return ""
+	}
+
 	var result strings.Builder
 	stopReason := ir.ClaudeStopEndTurn
 	if state != nil && state.HasToolCalls {
