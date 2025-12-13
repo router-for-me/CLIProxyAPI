@@ -5,10 +5,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/metrics"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
@@ -45,6 +49,15 @@ func init() {
 	buildinfo.Version = Version
 	buildinfo.Commit = Commit
 	buildinfo.BuildDate = BuildDate
+}
+
+// hashAPIKey creates a SHA256 hash of the API key for storage
+func hashAPIKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
 }
 
 // main is the entry point of the application.
@@ -472,6 +485,76 @@ func main() {
 			cmd.WaitForCloudDeploy()
 			return
 		}
+
+		// ==================== METRICS INTEGRATION START ====================
+		// Initialize metrics store if enabled
+		var metricsStore metrics.MetricsStore
+		if cfg.MetricsEnabled {
+			log.Info("Initializing metrics store...")
+
+			// Set default values if not configured
+			if cfg.MetricsStoragePath == "" {
+				cfg.MetricsStoragePath = "./data/metrics.db"
+			}
+			if cfg.MetricsBindAddress == "" {
+				cfg.MetricsBindAddress = "127.0.0.1:8081"
+			}
+
+			// Create data directory if it doesn't exist
+			metricsDir := filepath.Dir(cfg.MetricsStoragePath)
+			if err := os.MkdirAll(metricsDir, 0755); err != nil {
+				log.Warnf("failed to create metrics directory: %v", err)
+			}
+
+			// Initialize the metrics store
+			metricsStore, err = metrics.NewMetricsStore(cfg.MetricsStoragePath)
+			if err != nil {
+				log.Errorf("failed to initialize metrics store: %v", err)
+				log.Warn("continuing without metrics...")
+			} else {
+				defer metricsStore.Close()
+
+				// Start metrics HTTP server in a goroutine
+				go func() {
+					metricsServer := metrics.NewMetricsServer(metricsStore)
+					mux := http.NewServeMux()
+
+					// Register endpoints
+					mux.HandleFunc("/_qs/health", metricsServer.HandleHealth)
+					mux.HandleFunc("/_qs/metrics", metricsServer.HandleMetrics)
+					mux.HandleFunc("/_qs/metrics/ui", metricsServer.HandleUI)
+
+					// Apply Basic Auth middleware if configured
+					handler := http.Handler(mux)
+					if cfg.MetricsBasicAuthUser != "" && cfg.MetricsBasicAuthPass != "" {
+						handler = metrics.BasicAuthMiddleware(
+							cfg.MetricsBasicAuthUser,
+							cfg.MetricsBasicAuthPass,
+						)(handler)
+						log.Info("Metrics server: Basic Auth enabled")
+					}
+
+					log.Infof("Starting metrics server on %s", cfg.MetricsBindAddress)
+					log.Infof("Metrics UI: http://%s/_qs/metrics/ui", cfg.MetricsBindAddress)
+					log.Infof("Metrics API: http://%s/_qs/metrics", cfg.MetricsBindAddress)
+
+					if err := http.ListenAndServe(cfg.MetricsBindAddress, handler); err != nil {
+						log.Errorf("metrics server error: %v", err)
+					}
+				}()
+
+				log.Info("Metrics collection enabled")
+				
+				// Make metricsStore globally available for collection
+				// Note: You'll need to implement actual metric collection in your request handlers
+				// This is a placeholder to show where the store is available
+				metrics.SetGlobalMetricsStore(metricsStore)
+			}
+		} else {
+			log.Info("Metrics collection disabled")
+		}
+		// ==================== METRICS INTEGRATION END ====================
+
 		// Start the main proxy service
 		managementasset.StartAutoUpdater(context.Background(), configFilePath)
 		cmd.StartService(cfg, configFilePath, password)

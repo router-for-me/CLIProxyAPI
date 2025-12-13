@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/metrics"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
@@ -83,6 +84,8 @@ type Service struct {
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
+
+	metricsStore metrics.MetricsStore
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
@@ -457,7 +460,7 @@ func (s *Service) Run(ctx context.Context) error {
 	// legacy clients removed; no caches to refresh
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
-	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.metricsStore, s.serverOptions...)
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()

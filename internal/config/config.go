@@ -84,6 +84,12 @@ type Config struct {
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+
+	MetricsEnabled       bool   `yaml:"metrics_enabled"`
+	MetricsBindAddress   string `yaml:"metrics_bind_address"`
+	MetricsBasicAuthUser string `yaml:"metrics_basic_auth_user"`
+	MetricsBasicAuthPass string `yaml:"metrics_basic_auth_pass"`
+	MetricsStoragePath   string `yaml:"metrics_storage_path"`
 }
 
 // TLSConfig holds HTTPS server settings.

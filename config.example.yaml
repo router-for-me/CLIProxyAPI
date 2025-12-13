@@ -188,3 +188,9 @@ ws-auth: false
 #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "reasoning.effort": "high"
+# Metrics configuration
+metrics_enabled: true
+metrics_bind_address: "127.0.0.1:8081"
+metrics_storage_path: "./data/metrics.db"
+# metrics_basic_auth_user: "admin"
+# metrics_basic_auth_pass: "secret123"

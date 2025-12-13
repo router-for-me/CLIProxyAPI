@@ -6,7 +6,9 @@ package api
 
 import (
 	"context"
+	"crypto/sha256" // [METRICS] Добавлено для хеширования ключей
 	"crypto/subtle"
+	"encoding/hex" // [METRICS] Добавлено для хеширования ключей
 	"errors"
 	"fmt"
 	"net/http"
@@ -26,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/metrics" // [METRICS] Импорт пакета метрик
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -153,6 +156,9 @@ type Server struct {
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
+	// metricsStore handles persistence of usage statistics
+	metricsStore metrics.MetricsStore // [METRICS] Ссылка на хранилище метрик
+
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
@@ -177,10 +183,18 @@ type Server struct {
 //   - cfg: The server configuration
 //   - authManager: core runtime auth manager
 //   - accessManager: request authentication manager
+//   - metricsStore: The usage metrics persistence store [METRICS]
 //
 // Returns:
 //   - *Server: A new server instance
-func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdkaccess.Manager, configFilePath string, opts ...ServerOption) *Server {
+func NewServer(
+	cfg *config.Config,
+	authManager *auth.Manager,
+	accessManager *sdkaccess.Manager,
+	configFilePath string,
+	metricsStore metrics.MetricsStore, // [METRICS] Добавлен аргумент
+	opts ...ServerOption,
+) *Server {
 	optionState := &serverOptionConfig{
 		requestLoggerFactory: defaultRequestLoggerFactory,
 	}
@@ -245,6 +259,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
+		metricsStore:        metricsStore, // [METRICS] Сохранение store
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -317,9 +332,13 @@ func (s *Server) setupRoutes() {
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
 
+	// [METRICS] Инициализация middleware для записи метрик
+	usageRecorder := s.UsageRecordingMiddleware()
+
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(AuthMiddleware(s.accessManager))
+	// [METRICS] Добавлен usageRecorder в цепочку middleware
+	v1.Use(AuthMiddleware(s.accessManager), usageRecorder)
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -331,7 +350,8 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(AuthMiddleware(s.accessManager))
+	// [METRICS] Добавлен usageRecorder в цепочку middleware
+	v1beta.Use(AuthMiddleware(s.accessManager), usageRecorder)
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/:action", geminiHandlers.GeminiHandler)
@@ -976,6 +996,89 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 	s.wsAuthChanged = fn
 }
 
+// hashAPIKey helper to create a secure hash of the API key for storage
+func hashAPIKey(key string) string {
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
+}
+
+// [METRICS] Middleware для сбора статистики использования
+// UsageRecordingMiddleware records usage statistics after the request has been processed.
+// It relies on the request handler setting the usage details in the Gin context.
+func (s *Server) UsageRecordingMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 1. Предварительная метка времени для расчета задержки
+		start := time.Now()
+
+		// 2. Продолжить выполнение цепочки (вызов основного обработчика)
+		c.Next()
+
+		// 3. Сбор данных после обработки запроса
+		if s.metricsStore == nil || !s.cfg.MetricsEnabled {
+			return // Метрики не включены или не инициализированы
+		}
+
+		// Задержка
+		latencyMs := time.Since(start).Milliseconds()
+
+		// Статус
+		status := fmt.Sprintf("%d", c.Writer.Status())
+
+		// Метаданные (должны быть установлены основным обработчиком)
+		// Ожидается, что основной обработчик (например, ChatCompletions)
+		// сохранит информацию об использовании в контексте Gin.
+		// ВАЖНО: Убедитесь, что ваши handler'ы (OpenAI/Claude/etc) делают c.Set(...) для этих полей!
+		model, _ := c.Get("model")
+		promptTokens, _ := c.Get("promptTokens")
+		completionTokens, _ := c.Get("completionTokens")
+		totalTokens, _ := c.Get("totalTokens")
+		requestID, _ := c.Get("requestID")
+		apiKeyHash, _ := c.Get("apiKeyHash") // Ожидаем хеш, если он был сохранен AuthMiddleware
+
+		// Проверка минимального набора данных (игнорируем запросы, которые не являются вызовами LLM)
+		if model == nil {
+			return
+		}
+
+		// Безопасное приведение типов
+		toString := func(v any) string {
+			if v == nil {
+				return ""
+			}
+			return fmt.Sprintf("%v", v)
+		}
+		toInt := func(v any) int {
+			if v == nil {
+				return 0
+			}
+			if i, ok := v.(int); ok {
+				return i
+			}
+			return 0
+		}
+
+		// 4. Формирование и запись метрики
+		metric := metrics.UsageMetric{
+			Timestamp:        start,
+			Model:            toString(model),
+			PromptTokens:     toInt(promptTokens),
+			CompletionTokens: toInt(completionTokens),
+			TotalTokens:      toInt(totalTokens),
+			RequestID:        toString(requestID),
+			Status:           status,
+			LatencyMs:        latencyMs,
+			APIKeyHash:       toString(apiKeyHash),
+		}
+
+		// Запись в базу данных в отдельной горутине, чтобы не блокировать ответ
+		go func() {
+			if err := s.metricsStore.RecordUsage(context.Background(), metric); err != nil {
+				log.Errorf("failed to record usage metric: %v", err)
+			}
+		}()
+	}
+}
+
 // (management handlers moved to internal/api/handlers/management)
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
@@ -992,6 +1095,10 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		if err == nil {
 			if result != nil {
 				c.Set("apiKey", result.Principal)
+				// [METRICS] Сохраняем хеш ключа для метрик
+				if result.Principal != "" {
+					c.Set("apiKeyHash", hashAPIKey(result.Principal))
+				}
 				c.Set("accessProvider", result.Provider)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
