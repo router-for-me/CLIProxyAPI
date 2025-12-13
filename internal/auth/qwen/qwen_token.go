@@ -30,6 +30,8 @@ type QwenTokenStorage struct {
 	Type string `json:"type"`
 	// Expire is the timestamp when the current access token expires.
 	Expire string `json:"expired"`
+	// UseGlobalProxy indicates whether to use the global proxy from config.yaml.
+	UseGlobalProxy bool `json:"use_global_proxy"`
 }
 
 // SaveTokenToFile serializes the Qwen token storage to a JSON file.
@@ -60,4 +62,9 @@ func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to write token to file: %w", err)
 	}
 	return nil
+}
+
+// SetUseGlobalProxy implements the GlobalProxySetter interface
+func (ts *QwenTokenStorage) SetUseGlobalProxy(value bool) {
+	ts.UseGlobalProxy = value
 }

@@ -35,6 +35,8 @@ type Auth struct {
 	Unavailable bool `json:"unavailable"`
 	// ProxyURL overrides the global proxy setting for this auth if provided.
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// UseGlobalProxy indicates whether to use the global proxy from config.yaml.
+	UseGlobalProxy bool `json:"use_global_proxy"`
 	// Attributes stores provider specific metadata needed by executors (immutable configuration).
 	Attributes map[string]string `json:"attributes,omitempty"`
 	// Metadata stores runtime mutable provider state (e.g. tokens, cookies).

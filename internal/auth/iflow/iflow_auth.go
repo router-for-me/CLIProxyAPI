@@ -489,7 +489,7 @@ func ShouldRefreshAPIKey(expireTime string) (bool, time.Duration, error) {
 }
 
 // CreateCookieTokenStorage converts cookie-based token data into persistence storage
-func (ia *IFlowAuth) CreateCookieTokenStorage(data *IFlowTokenData) *IFlowTokenStorage {
+func (ia *IFlowAuth) CreateCookieTokenStorage(data *IFlowTokenData, useGlobalProxy bool) *IFlowTokenStorage {
 	if data == nil {
 		return nil
 	}
@@ -502,12 +502,13 @@ func (ia *IFlowAuth) CreateCookieTokenStorage(data *IFlowTokenData) *IFlowTokenS
 	}
 
 	return &IFlowTokenStorage{
-		APIKey:      data.APIKey,
-		Email:       data.Email,
-		Expire:      data.Expire,
-		Cookie:      cookieToSave,
-		LastRefresh: time.Now().Format(time.RFC3339),
-		Type:        "iflow",
+		APIKey:         data.APIKey,
+		Email:          data.Email,
+		Expire:         data.Expire,
+		Cookie:         cookieToSave,
+		LastRefresh:    time.Now().Format(time.RFC3339),
+		Type:           "iflow",
+		UseGlobalProxy: useGlobalProxy,
 	}
 }
 

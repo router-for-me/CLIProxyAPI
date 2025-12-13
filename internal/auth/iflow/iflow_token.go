@@ -11,16 +11,17 @@ import (
 
 // IFlowTokenStorage persists iFlow OAuth credentials alongside the derived API key.
 type IFlowTokenStorage struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	LastRefresh  string `json:"last_refresh"`
-	Expire       string `json:"expired"`
-	APIKey       string `json:"api_key"`
-	Email        string `json:"email"`
-	TokenType    string `json:"token_type"`
-	Scope        string `json:"scope"`
-	Cookie       string `json:"cookie"`
-	Type         string `json:"type"`
+	AccessToken    string `json:"access_token"`
+	RefreshToken   string `json:"refresh_token"`
+	LastRefresh    string `json:"last_refresh"`
+	Expire         string `json:"expired"`
+	APIKey         string `json:"api_key"`
+	Email          string `json:"email"`
+	TokenType      string `json:"token_type"`
+	Scope          string `json:"scope"`
+	Cookie         string `json:"cookie"`
+	Type           string `json:"type"`
+	UseGlobalProxy bool   `json:"use_global_proxy"`
 }
 
 // SaveTokenToFile serialises the token storage to disk.
@@ -41,4 +42,9 @@ func (ts *IFlowTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("iflow token: encode token failed: %w", err)
 	}
 	return nil
+}
+
+// SetUseGlobalProxy implements the GlobalProxySetter interface
+func (ts *IFlowTokenStorage) SetUseGlobalProxy(value bool) {
+	ts.UseGlobalProxy = value
 }

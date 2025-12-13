@@ -71,7 +71,9 @@ func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		return nil, fmt.Errorf("qwen authentication failed: %w", err)
 	}
 
-	tokenStorage := authSvc.CreateTokenStorage(tokenData)
+	// Note: use_global_proxy will be set by manager.go's Login method
+	// Default to false for qwen
+	tokenStorage := authSvc.CreateTokenStorage(tokenData, false)
 
 	email := ""
 	if opts.Metadata != nil {
