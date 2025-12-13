@@ -24,6 +24,13 @@ type statusErr struct {
 
 func (e statusErr) Error() string { return e.msg }
 
+// isOpenAICompatModel returns true if the model is configured as an OpenAI-compatible
+// model that should have reasoning effort passed through even if not in registry.
+// This simulates the allowCompat behavior from OpenAICompatExecutor.
+func isOpenAICompatModel(model string) bool {
+	return model == "custom-thinking-model"
+}
+
 // registerCoreModels loads representative models across providers into the registry
 // so NormalizeThinkingBudget and level validation use real ranges.
 func registerCoreModels(t *testing.T) func() {
@@ -34,11 +41,28 @@ func registerCoreModels(t *testing.T) func() {
 	reg.RegisterClient(uid+"-claude", "claude", registry.GetClaudeModels())
 	reg.RegisterClient(uid+"-openai", "codex", registry.GetOpenAIModels())
 	reg.RegisterClient(uid+"-qwen", "qwen", registry.GetQwenModels())
+	// Custom openai-compatible model with forced thinking suffix passthrough.
+	// No Thinking field - simulates an external model added via openai-compat
+	// where the registry has no knowledge of its thinking capabilities.
+	// The allowCompat flag should preserve reasoning effort for such models.
+	customOpenAIModels := []*registry.ModelInfo{
+		{
+			ID:          "custom-thinking-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "custom-provider",
+			Type:        "openai",
+			DisplayName: "Custom Thinking Model",
+			Description: "OpenAI-compatible model with forced thinking suffix support",
+		},
+	}
+	reg.RegisterClient(uid+"-custom-openai", "codex", customOpenAIModels)
 	return func() {
 		reg.UnregisterClient(uid + "-gemini")
 		reg.UnregisterClient(uid + "-claude")
 		reg.UnregisterClient(uid + "-openai")
 		reg.UnregisterClient(uid + "-qwen")
+		reg.UnregisterClient(uid + "-custom-openai")
 	}
 }
 
@@ -70,24 +94,24 @@ func applyThinkingMetadataLocal(payload []byte, metadata map[string]any, model s
 }
 
 // applyReasoningEffortMetadataLocal mirrors executor.applyReasoningEffortMetadata.
-func applyReasoningEffortMetadataLocal(payload []byte, metadata map[string]any, model, field string) []byte {
+func applyReasoningEffortMetadataLocal(payload []byte, metadata map[string]any, model, field string, allowCompat bool) []byte {
 	if len(metadata) == 0 {
-		return payload
-	}
-	if !util.ModelSupportsThinking(model) {
 		return payload
 	}
 	if field == "" {
 		return payload
 	}
+	if !util.ModelSupportsThinking(model) && !allowCompat {
+		return payload
+	}
 	if effort, ok := util.ReasoningEffortFromMetadata(metadata); ok && effort != "" {
-		if util.ModelUsesThinkingLevels(model) {
+		if util.ModelUsesThinkingLevels(model) || allowCompat {
 			if updated, err := sjson.SetBytes(payload, field, effort); err == nil {
 				return updated
 			}
 		}
 	}
-	if util.ModelUsesThinkingLevels(model) {
+	if util.ModelUsesThinkingLevels(model) || allowCompat {
 		if budget, _, _, matched := util.ThinkingFromMetadata(metadata); matched && budget != nil {
 			if effort, ok := util.OpenAIThinkingBudgetToEffort(model, *budget); ok && effort != "" {
 				if updated, err := sjson.SetBytes(payload, field, effort); err == nil {
@@ -100,12 +124,17 @@ func applyReasoningEffortMetadataLocal(payload []byte, metadata map[string]any, 
 }
 
 // normalizeThinkingConfigLocal mirrors executor.normalizeThinkingConfig.
-func normalizeThinkingConfigLocal(payload []byte, model string) []byte {
+// When allowCompat is true, reasoning fields are preserved even for models
+// without thinking support (simulating openai-compat passthrough behavior).
+func normalizeThinkingConfigLocal(payload []byte, model string, allowCompat bool) []byte {
 	if len(payload) == 0 || model == "" {
 		return payload
 	}
 
 	if !util.ModelSupportsThinking(model) {
+		if allowCompat {
+			return payload
+		}
 		return stripThinkingFieldsLocal(payload, false)
 	}
 
@@ -187,8 +216,8 @@ func validateThinkingConfigLocal(payload []byte, model string) error {
 }
 
 // normalizeCodexPayload mirrors codex_executor's reasoning + streaming tweaks.
-func normalizeCodexPayload(body []byte, upstreamModel string) ([]byte, error) {
-	body = normalizeThinkingConfigLocal(body, upstreamModel)
+func normalizeCodexPayload(body []byte, upstreamModel string, allowCompat bool) ([]byte, error) {
+	body = normalizeThinkingConfigLocal(body, upstreamModel, allowCompat)
 	if err := validateThinkingConfigLocal(body, upstreamModel); err != nil {
 		return body, err
 	}
@@ -216,6 +245,7 @@ func buildBodyForProtocol(t *testing.T, fromProtocol, toProtocol, modelWithSuffi
 	)
 
 	var err error
+	allowCompat := isOpenAICompatModel(normalizedModel)
 	switch toProtocol {
 	case "gemini":
 		body = applyThinkingMetadataLocal(body, metadata, normalizedModel)
@@ -227,13 +257,14 @@ func buildBodyForProtocol(t *testing.T, fromProtocol, toProtocol, modelWithSuffi
 			body = util.ApplyClaudeThinkingConfig(body, budget)
 		}
 	case "openai":
-		body = applyReasoningEffortMetadataLocal(body, metadata, normalizedModel, "reasoning_effort")
-		body = normalizeThinkingConfigLocal(body, upstreamModel)
+		body = applyReasoningEffortMetadataLocal(body, metadata, normalizedModel, "reasoning_effort", allowCompat)
+		body = normalizeThinkingConfigLocal(body, upstreamModel, allowCompat)
 		err = validateThinkingConfigLocal(body, upstreamModel)
 	case "codex": // OpenAI responses / codex
-		body = applyReasoningEffortMetadataLocal(body, metadata, normalizedModel, "reasoning.effort")
+		// Codex does not support allowCompat; always use false.
+		body = applyReasoningEffortMetadataLocal(body, metadata, normalizedModel, "reasoning.effort", false)
 		// Mirror CodexExecutor final normalization and model override so tests log the final body.
-		body, err = normalizeCodexPayload(body, upstreamModel)
+		body, err = normalizeCodexPayload(body, upstreamModel, false)
 	default:
 	}
 
@@ -290,9 +321,10 @@ func TestThinkingConversionsAcrossProtocolsAndModels(t *testing.T) {
 	defer cleanup()
 
 	models := []string{
-		"gpt-5",             // supports levels (low/medium/high)
-		"gemini-2.5-pro",    // supports numeric budget
-		"qwen3-coder-flash", // no thinking support
+		"gpt-5",                 // supports levels (low/medium/high)
+		"gemini-2.5-pro",        // supports numeric budget
+		"qwen3-coder-flash",     // no thinking support
+		"custom-thinking-model", // openai-compatible model with forced thinking suffix
 	}
 	fromProtocols := []string{"openai", "claude", "gemini", "openai-response"}
 	toProtocols := []string{"gemini", "claude", "openai", "codex"}
@@ -404,7 +436,22 @@ func TestThinkingConversionsAcrossProtocolsAndModels(t *testing.T) {
 								}
 								return true, fmt.Sprintf("%d", *budget), false
 							case "openai":
-								if !util.ModelSupportsThinking(normalizedModel) {
+								allowCompat := isOpenAICompatModel(normalizedModel)
+								if !util.ModelSupportsThinking(normalizedModel) && !allowCompat {
+									return false, "", false
+								}
+								// For allowCompat models, pass through effort directly without validation
+								if allowCompat {
+									effort, ok := util.ReasoningEffortFromMetadata(metadata)
+									if ok && strings.TrimSpace(effort) != "" {
+										return true, strings.ToLower(strings.TrimSpace(effort)), false
+									}
+									// Check numeric budget fallback for allowCompat
+									if budget, _, _, matched := util.ThinkingFromMetadata(metadata); matched && budget != nil {
+										if mapped, okMap := util.OpenAIThinkingBudgetToEffort(normalizedModel, *budget); okMap && mapped != "" {
+											return true, mapped, false
+										}
+									}
 									return false, "", false
 								}
 								if !util.ModelUsesThinkingLevels(normalizedModel) {
@@ -429,14 +476,8 @@ func TestThinkingConversionsAcrossProtocolsAndModels(t *testing.T) {
 								}
 								return false, "", true // validation would fail
 							case "codex":
-								if !util.ModelSupportsThinking(normalizedModel) {
-									return false, "", false
-								}
-								if !util.ModelUsesThinkingLevels(normalizedModel) {
-									// Non-levels models don't support effort strings in codex
-									if from != "openai-response" {
-										return false, "", false
-									}
+								// Codex does not support allowCompat; require thinking-capable level models.
+								if !util.ModelSupportsThinking(normalizedModel) || !util.ModelUsesThinkingLevels(normalizedModel) {
 									return false, "", false
 								}
 								effort, ok := util.ReasoningEffortFromMetadata(metadata)
@@ -574,6 +615,7 @@ func buildBodyForProtocolWithRawThinking(t *testing.T, fromProtocol, toProtocol,
 	)
 
 	var err error
+	allowCompat := isOpenAICompatModel(model)
 	switch toProtocol {
 	case "gemini":
 		body = util.ApplyDefaultThinkingIfNeeded(model, body)
@@ -583,10 +625,11 @@ func buildBodyForProtocolWithRawThinking(t *testing.T, fromProtocol, toProtocol,
 		// For raw payload, Claude thinking is passed through by translator
 		// No additional processing needed as thinking is already in body
 	case "openai":
-		body = normalizeThinkingConfigLocal(body, model)
+		body = normalizeThinkingConfigLocal(body, model, allowCompat)
 		err = validateThinkingConfigLocal(body, model)
 	case "codex":
-		body, err = normalizeCodexPayload(body, model)
+		// Codex does not support allowCompat; always use false.
+		body, err = normalizeCodexPayload(body, model, false)
 	}
 
 	body, _ = sjson.SetBytes(body, "model", model)
@@ -599,9 +642,10 @@ func TestRawPayloadThinkingConversions(t *testing.T) {
 	defer cleanup()
 
 	models := []string{
-		"gpt-5",             // supports levels (low/medium/high)
-		"gemini-2.5-pro",    // supports numeric budget
-		"qwen3-coder-flash", // no thinking support
+		"gpt-5",                 // supports levels (low/medium/high)
+		"gemini-2.5-pro",        // supports numeric budget
+		"qwen3-coder-flash",     // no thinking support
+		"custom-thinking-model", // openai-compatible model with forced thinking suffix
 	}
 	fromProtocols := []string{"openai", "claude", "gemini", "openai-response"}
 	toProtocols := []string{"gemini", "claude", "openai", "codex"}
@@ -614,6 +658,7 @@ func TestRawPayloadThinkingConversions(t *testing.T) {
 	for _, model := range models {
 		supportsThinking := util.ModelSupportsThinking(model)
 		usesLevels := util.ModelUsesThinkingLevels(model)
+		allowCompat := isOpenAICompatModel(model)
 
 		for _, from := range fromProtocols {
 			var cases []scenario
@@ -659,46 +704,53 @@ func TestRawPayloadThinkingConversions(t *testing.T) {
 					t.Run(testName, func(t *testing.T) {
 						expectPresent, expectValue, expectErr := func() (bool, string, bool) {
 							if cs.thinkingParam == nil {
-								// No thinking param provided
-								if to == "codex" && from != "openai-response" {
-									// Codex translators default to medium
-									if supportsThinking && usesLevels {
-										return true, "medium", false
-									}
+								if to == "codex" && from != "openai-response" && supportsThinking && usesLevels {
+									// Codex translators default reasoning.effort to "medium" for thinking-capable level models
+									return true, "medium", false
 								}
-								return false, "", false
-							}
-							if !supportsThinking {
 								return false, "", false
 							}
 
 							switch to {
 							case "gemini":
+								if usesLevels {
+									return false, "", false
+								}
+								if !supportsThinking {
+									return false, "", false
+								}
 								// Gemini expects numeric budget
 								if budget, ok := cs.thinkingParam.(int); ok {
 									norm := util.NormalizeThinkingBudget(model, budget)
 									return true, fmt.Sprintf("%d", norm), false
 								}
-								if effort, ok := cs.thinkingParam.(string); ok && effort != "" {
-									if b, okB := util.ThinkingEffortToBudget(model, effort); okB {
-										return true, fmt.Sprintf("%d", b), false
-									}
-								}
 								return false, "", false
 							case "claude":
+								if usesLevels {
+									return false, "", false
+								}
+								if !supportsThinking {
+									return false, "", false
+								}
 								// Claude expects numeric budget
 								if budget, ok := cs.thinkingParam.(int); ok && budget > 0 {
 									norm := util.NormalizeThinkingBudget(model, budget)
 									return true, fmt.Sprintf("%d", norm), false
 								}
-								if effort, ok := cs.thinkingParam.(string); ok && effort != "" {
-									if b, okB := util.ThinkingEffortToBudget(model, effort); okB && b > 0 {
-										return true, fmt.Sprintf("%d", b), false
-									}
-								}
 								return false, "", false
 							case "openai":
-								if !usesLevels {
+								if allowCompat {
+									if effort, ok := cs.thinkingParam.(string); ok && strings.TrimSpace(effort) != "" {
+										return true, strings.ToLower(strings.TrimSpace(effort)), false
+									}
+									if budget, ok := cs.thinkingParam.(int); ok {
+										if mapped, okM := util.OpenAIThinkingBudgetToEffort(model, budget); okM && mapped != "" {
+											return true, mapped, false
+										}
+									}
+									return false, "", false
+								}
+								if !supportsThinking || !usesLevels {
 									return false, "", false
 								}
 								if effort, ok := cs.thinkingParam.(string); ok && effort != "" {
@@ -714,7 +766,8 @@ func TestRawPayloadThinkingConversions(t *testing.T) {
 								}
 								return false, "", false
 							case "codex":
-								if !usesLevels {
+								// Codex does not support allowCompat; require thinking-capable level models.
+								if !supportsThinking || !usesLevels {
 									return false, "", false
 								}
 								if effort, ok := cs.thinkingParam.(string); ok && effort != "" {
@@ -728,7 +781,10 @@ func TestRawPayloadThinkingConversions(t *testing.T) {
 										return true, mapped, false
 									}
 								}
-								// thinkingParam was non-nil but couldn't map - no default medium
+								if from != "openai-response" {
+									// Codex translators default reasoning.effort to "medium" for thinking-capable models
+									return true, "medium", false
+								}
 								return false, "", false
 							}
 							return false, "", false
