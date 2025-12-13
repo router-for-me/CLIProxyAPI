@@ -7,13 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -38,22 +36,6 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(parsed)
-
-	// Configure custom Transport with optimized connection pooling for high concurrency
-	proxy.Transport = &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20, // Increased from default 2 to support more concurrent users
-		MaxConnsPerHost:     0, // No limit on max concurrent connections per host
-		IdleConnTimeout:     90 * time.Second,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-
 	originalDirector := proxy.Director
 
 	// Modify outgoing requests to inject API key and fix routing
