@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -36,15 +37,25 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 				log.Errorf("create SOCKS5 dialer failed: %v", errSOCKS5)
 				return httpClient
 			}
-			// Set up a custom transport using the SOCKS5 dialer.
+			// Set up a custom transport using the SOCKS5 dialer with optimized connection pooling
 			transport = &http.Transport{
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					return dialer.Dial(network, addr)
 				},
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 20, // Increased from default 2 to support more concurrent users
+				MaxConnsPerHost:     0, // No limit on max concurrent connections per host
+				IdleConnTimeout:     90 * time.Second,
 			}
 		} else if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-			// Configure HTTP or HTTPS proxy.
-			transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+			// Configure HTTP or HTTPS proxy with optimized connection pooling
+			transport = &http.Transport{
+				Proxy:               http.ProxyURL(proxyURL),
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 20, // Increased from default 2 to support more concurrent users
+				MaxConnsPerHost:     0, // No limit on max concurrent connections per host
+				IdleConnTimeout:     90 * time.Second,
+			}
 		}
 	}
 	// If a new transport was created, apply it to the HTTP client.

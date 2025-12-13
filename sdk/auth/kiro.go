@@ -47,8 +47,9 @@ func (a *KiroAuthenticator) Provider() string {
 }
 
 // RefreshLead indicates how soon before expiry a refresh should be attempted.
+// Set to 5 minutes to match Antigravity and avoid frequent refresh checks while still ensuring timely token refresh.
 func (a *KiroAuthenticator) RefreshLead() *time.Duration {
-	d := 30 * time.Minute
+	d := 5 * time.Minute
 	return &d
 }
 
@@ -103,7 +104,8 @@ func (a *KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 			"source":      "aws-builder-id",
 			"email":       tokenData.Email,
 		},
-		NextRefreshAfter: expiresAt.Add(-30 * time.Minute),
+		// NextRefreshAfter is aligned with RefreshLead (5min)
+		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
 	}
 
 	if tokenData.Email != "" {
@@ -165,7 +167,8 @@ func (a *KiroAuthenticator) LoginWithGoogle(ctx context.Context, cfg *config.Con
 			"source":      "google-oauth",
 			"email":       tokenData.Email,
 		},
-		NextRefreshAfter: expiresAt.Add(-30 * time.Minute),
+		// NextRefreshAfter is aligned with RefreshLead (5min)
+		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
 	}
 
 	if tokenData.Email != "" {
@@ -227,7 +230,8 @@ func (a *KiroAuthenticator) LoginWithGitHub(ctx context.Context, cfg *config.Con
 			"source":      "github-oauth",
 			"email":       tokenData.Email,
 		},
-		NextRefreshAfter: expiresAt.Add(-30 * time.Minute),
+		// NextRefreshAfter is aligned with RefreshLead (5min)
+		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
 	}
 
 	if tokenData.Email != "" {
@@ -291,7 +295,8 @@ func (a *KiroAuthenticator) ImportFromKiroIDE(ctx context.Context, cfg *config.C
 			"source":      "kiro-ide-import",
 			"email":       tokenData.Email,
 		},
-		NextRefreshAfter: expiresAt.Add(-30 * time.Minute),
+		// NextRefreshAfter is aligned with RefreshLead (5min)
+		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
 	}
 
 	// Display the email if extracted
@@ -351,7 +356,8 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 	updated.Metadata["refresh_token"] = tokenData.RefreshToken
 	updated.Metadata["expires_at"] = tokenData.ExpiresAt
 	updated.Metadata["last_refresh"] = now.Format(time.RFC3339) // For double-check optimization
-	updated.NextRefreshAfter = expiresAt.Add(-30 * time.Minute)
+	// NextRefreshAfter is aligned with RefreshLead (5min)
+	updated.NextRefreshAfter = expiresAt.Add(-5 * time.Minute)
 
 	return updated, nil
 }

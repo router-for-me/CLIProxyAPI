@@ -137,15 +137,25 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 			log.Errorf("create SOCKS5 dialer failed: %v", errSOCKS5)
 			return nil
 		}
-		// Set up a custom transport using the SOCKS5 dialer
+		// Set up a custom transport using the SOCKS5 dialer with optimized connection pooling
 		transport = &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return dialer.Dial(network, addr)
 			},
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20, // Increased from default 2 to support more concurrent users
+			MaxConnsPerHost:     0, // No limit on max concurrent connections per host
+			IdleConnTimeout:     90 * time.Second,
 		}
 	} else if parsedURL.Scheme == "http" || parsedURL.Scheme == "https" {
-		// Configure HTTP or HTTPS proxy
-		transport = &http.Transport{Proxy: http.ProxyURL(parsedURL)}
+		// Configure HTTP or HTTPS proxy with optimized connection pooling
+		transport = &http.Transport{
+			Proxy:               http.ProxyURL(parsedURL),
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20, // Increased from default 2 to support more concurrent users
+			MaxConnsPerHost:     0, // No limit on max concurrent connections per host
+			IdleConnTimeout:     90 * time.Second,
+		}
 	} else {
 		log.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
 		return nil
