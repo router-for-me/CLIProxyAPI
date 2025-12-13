@@ -145,12 +145,12 @@ ws-auth: false
 #   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
 #   # but you have a similar model available (e.g., Claude Sonnet 4).
 #   model-mappings:
-#     - from: "claude-opus-4.5"       # Model requested by Amp CLI
+#     - from: "claude*"       # Model requested by Amp CLI
 #       to: "claude-sonnet-4"         # Route to this available model instead
-#     - from: "gpt-5"
+#     - from: "gpt*"
+#       to: "gpt-5-codex"
+#     - from: "gemini*"
 #       to: "gemini-2.5-pro"
-#     - from: "claude-3-opus-20240229"
-#       to: "claude-3-5-sonnet-20241022"
 
 # OAuth provider excluded models
 # oauth-excluded-models:

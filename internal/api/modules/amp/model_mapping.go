@@ -3,6 +3,7 @@
 package amp
 
 import (
+	"regexp"
 	"strings"
 	"sync"
 
@@ -25,88 +26,126 @@ type ModelMapper interface {
 
 // DefaultModelMapper implements ModelMapper with thread-safe mapping storage.
 type DefaultModelMapper struct {
-	mu       sync.RWMutex
-	mappings map[string]string // from -> to (normalized lowercase keys)
+	overrides []config.AmpModelMapping
+	patterns  []*compiledPattern
+	mu        sync.RWMutex
+}
+
+type compiledPattern struct {
+	from    string
+	to      string
+	regex   *regexp.Regexp
+	isExact bool
 }
 
 // NewModelMapper creates a new model mapper with the given initial mappings.
 func NewModelMapper(mappings []config.AmpModelMapping) *DefaultModelMapper {
 	m := &DefaultModelMapper{
-		mappings: make(map[string]string),
+		overrides: mappings,
 	}
-	m.UpdateMappings(mappings)
+	m.compilePatterns()
 	return m
 }
 
 // MapModel checks if a mapping exists for the requested model and if the
 // target model has available local providers. Returns the mapped model name
 // or empty string if no valid mapping exists.
-func (m *DefaultModelMapper) MapModel(requestedModel string) string {
-	if requestedModel == "" {
-		return ""
+func (r *DefaultModelMapper) MapModel(model string) string {
+	if r == nil || len(r.patterns) == 0 {
+		return model
 	}
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
-	// Normalize the requested model for lookup
-	normalizedRequest := strings.ToLower(strings.TrimSpace(requestedModel))
-
-	// Check for direct mapping
-	targetModel, exists := m.mappings[normalizedRequest]
-	if !exists {
-		return ""
+	for _, cp := range r.patterns {
+		if cp.isExact {
+			if cp.from == model {
+				log.Debugf("amp model override: %s -> %s (exact match)", model, cp.to)
+				return cp.to
+			}
+		} else if cp.regex != nil {
+			if cp.regex.MatchString(model) {
+				log.Debugf("amp model override: %s -> %s (pattern: %s)", model, cp.to, cp.from)
+				return cp.to
+			}
+		}
 	}
 
 	// Verify target model has available providers
-	providers := util.GetProviderName(targetModel)
+	providers := util.GetProviderName(model)
 	if len(providers) == 0 {
-		log.Debugf("amp model mapping: target model %s has no available providers, skipping mapping", targetModel)
+		log.Debugf("amp model mapping: target model %s has no available providers, skipping mapping", model)
 		return ""
 	}
 
 	// Note: Detailed routing log is handled by logAmpRouting in fallback_handlers.go
-	return targetModel
+	return model
 }
 
 // UpdateMappings refreshes the mapping configuration from config.
 // This is called during initialization and on config hot-reload.
-func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (r *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.overrides = mappings
+	r.compilePatterns()
+	log.Debugf("amp model override: updated with %d rules", len(r.patterns))
+}
 
-	// Clear and rebuild mappings
-	m.mappings = make(map[string]string, len(mappings))
-
-	for _, mapping := range mappings {
-		from := strings.TrimSpace(mapping.From)
-		to := strings.TrimSpace(mapping.To)
-
-		if from == "" || to == "" {
-			log.Warnf("amp model mapping: skipping invalid mapping (from=%q, to=%q)", from, to)
-			continue
+// compilePatterns pre-compiles wildcard patterns to regex for efficient matching.
+func (r *DefaultModelMapper) compilePatterns() {
+	r.patterns = make([]*compiledPattern, 0, len(r.overrides))
+	for _, override := range r.overrides {
+		cp := &compiledPattern{
+			from: override.From,
+			to:   override.To,
 		}
 
-		// Store with normalized lowercase key for case-insensitive lookup
-		normalizedFrom := strings.ToLower(from)
-		m.mappings[normalizedFrom] = to
-
-		log.Debugf("amp model mapping registered: %s -> %s", from, to)
-	}
-
-	if len(m.mappings) > 0 {
-		log.Infof("amp model mapping: loaded %d mapping(s)", len(m.mappings))
+		if !strings.Contains(override.From, "*") {
+			cp.isExact = true
+		} else {
+			pattern := globToRegex(override.From)
+			regex, err := regexp.Compile(pattern)
+			if err != nil {
+				log.Warnf("amp model override: invalid pattern %q, skipping: %v", override.From, err)
+				continue
+			}
+			cp.regex = regex
+		}
+		r.patterns = append(r.patterns, cp)
 	}
 }
 
+// globToRegex converts a glob pattern with * wildcards to a regex pattern.
+func globToRegex(glob string) string {
+	var result strings.Builder
+	result.WriteString("^")
+	for i := 0; i < len(glob); i++ {
+		c := glob[i]
+		switch c {
+		case '*':
+			result.WriteString(".*")
+		case '.', '+', '?', '[', ']', '(', ')', '{', '}', '^', '$', '|', '\\':
+			result.WriteByte('\\')
+			result.WriteByte(c)
+		default:
+			result.WriteByte(c)
+		}
+	}
+	result.WriteString("$")
+	return result.String()
+}
+
 // GetMappings returns a copy of current mappings (for debugging/status).
+// Returns map with pattern (from) as key and target model (to) as value.
 func (m *DefaultModelMapper) GetMappings() map[string]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	result := make(map[string]string, len(m.mappings))
-	for k, v := range m.mappings {
-		result[k] = v
+	result := make(map[string]string, len(m.patterns))
+	for _, cp := range m.patterns {
+		result[cp.from] = cp.to
 	}
 	return result
 }
