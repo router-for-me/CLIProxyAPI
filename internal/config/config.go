@@ -83,6 +83,12 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// RateLimit configures request rate limiting for API endpoints.
+	RateLimit RateLimitConfig `yaml:"rate-limit" json:"rate-limit"`
+
+	// CircuitBreaker configures circuit breaker behavior for persistent upstream errors.
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit-breaker" json:"circuit-breaker"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -174,6 +180,77 @@ type PayloadModelRule struct {
 	Name string `yaml:"name" json:"name"`
 	// Protocol restricts the rule to a specific translator format (e.g., "gemini", "responses").
 	Protocol string `yaml:"protocol" json:"protocol"`
+}
+
+// RateLimitConfig configures request rate limiting for API endpoints.
+type RateLimitConfig struct {
+	// Enabled toggles rate limiting on/off. Default: false.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Messages configures rate limits specifically for /v1/messages endpoint.
+	Messages MessagesRateLimitConfig `yaml:"messages" json:"messages"`
+}
+
+// MessagesRateLimitConfig defines rate limit buckets for the /v1/messages endpoint.
+type MessagesRateLimitConfig struct {
+	// PerIP defines the token bucket for per-IP rate limiting.
+	PerIP TokenBucketConfig `yaml:"per-ip" json:"per-ip"`
+
+	// PerAuth defines the token bucket for per-auth/key rate limiting.
+	PerAuth TokenBucketConfig `yaml:"per-auth" json:"per-auth"`
+
+	// PerModel defines the token bucket for per-model rate limiting.
+	PerModel TokenBucketConfig `yaml:"per-model" json:"per-model"`
+}
+
+// TokenBucketConfig defines a token bucket rate limiter configuration.
+type TokenBucketConfig struct {
+	// Capacity is the maximum number of tokens in the bucket.
+	Capacity int `yaml:"capacity" json:"capacity"`
+
+	// RefillPerSecond is the rate at which tokens are added to the bucket.
+	RefillPerSecond float64 `yaml:"refill-per-second" json:"refill-per-second"`
+}
+
+// CircuitBreakerConfig configures circuit breaker behavior for persistent upstream errors.
+type CircuitBreakerConfig struct {
+	// Enabled toggles circuit breaker on/off. Default: true.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// Hard403CooldownSeconds defines how long to cool down after CONSUMER_INVALID or SERVICE_DISABLED errors.
+	// Default: 600 (10 minutes).
+	Hard403CooldownSeconds int `yaml:"hard-403-cooldown-seconds" json:"hard-403-cooldown-seconds"`
+
+	// Soft403CooldownSeconds defines how long to cool down after other 403 errors.
+	// Default: 1800 (30 minutes).
+	Soft403CooldownSeconds int `yaml:"soft-403-cooldown-seconds" json:"soft-403-cooldown-seconds"`
+
+	// Hard403Retry defines max retries for hard 403 errors. Default: 0 (no retries).
+	Hard403Retry int `yaml:"hard-403-retry" json:"hard-403-retry"`
+}
+
+// CircuitBreakerEnabled returns whether the circuit breaker is enabled (defaults to true).
+func (c *CircuitBreakerConfig) CircuitBreakerEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// GetHard403CooldownSeconds returns the hard 403 cooldown with default fallback.
+func (c *CircuitBreakerConfig) GetHard403CooldownSeconds() int {
+	if c.Hard403CooldownSeconds <= 0 {
+		return 600 // 10 minutes default
+	}
+	return c.Hard403CooldownSeconds
+}
+
+// GetSoft403CooldownSeconds returns the soft 403 cooldown with default fallback.
+func (c *CircuitBreakerConfig) GetSoft403CooldownSeconds() int {
+	if c.Soft403CooldownSeconds <= 0 {
+		return 1800 // 30 minutes default
+	}
+	return c.Soft403CooldownSeconds
 }
 
 // ClaudeKey represents the configuration for a Claude API key,

@@ -56,6 +56,9 @@ type Auth struct {
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
+	// CircuitBreaker tracks circuit breaker state for persistent 403 errors.
+	CircuitBreaker CircuitBreakerState `json:"circuit_breaker,omitempty"`
+
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
@@ -72,6 +75,34 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+}
+
+// Hard403Type classifies persistent 403 errors for circuit breaker logic.
+type Hard403Type string
+
+const (
+	// Hard403None indicates the error is not a hard 403.
+	Hard403None Hard403Type = ""
+	// Hard403ConsumerInvalid indicates CONSUMER_INVALID error (bad key/project).
+	Hard403ConsumerInvalid Hard403Type = "CONSUMER_INVALID"
+	// Hard403ServiceDisabled indicates SERVICE_DISABLED error (API not enabled).
+	Hard403ServiceDisabled Hard403Type = "SERVICE_DISABLED"
+	// Hard403PermissionDenied indicates PERMISSION_DENIED error.
+	Hard403PermissionDenied Hard403Type = "PERMISSION_DENIED"
+)
+
+// CircuitBreakerState tracks circuit breaker status for an auth credential.
+type CircuitBreakerState struct {
+	// Open indicates the circuit breaker is open (blocking requests).
+	Open bool `json:"open"`
+	// Reason describes why the circuit breaker opened.
+	Reason Hard403Type `json:"reason,omitempty"`
+	// CooldownUntil is when the circuit breaker may close.
+	CooldownUntil time.Time `json:"cooldown_until"`
+	// OpenedAt records when the circuit breaker opened.
+	OpenedAt time.Time `json:"opened_at"`
+	// FailureCount tracks consecutive hard 403 failures.
+	FailureCount int `json:"failure_count"`
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.

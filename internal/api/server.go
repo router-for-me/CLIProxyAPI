@@ -168,6 +168,9 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	// rateLimiter handles rate limiting for API endpoints.
+	rateLimiter *middleware.RateLimiter
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -245,6 +248,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
+		rateLimiter:         middleware.NewRateLimiter(&cfg.RateLimit),
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -255,6 +259,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	// Initialize circuit breaker configuration
+	auth.SetCircuitBreakerConfig(
+		cfg.CircuitBreaker.CircuitBreakerEnabled(),
+		cfg.CircuitBreaker.GetHard403CooldownSeconds(),
+		cfg.CircuitBreaker.GetSoft403CooldownSeconds(),
+		cfg.CircuitBreaker.Hard403Retry,
+	)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if optionState.localPassword != "" {
@@ -324,7 +335,7 @@ func (s *Server) setupRoutes() {
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
-		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
+		v1.POST("/messages", middleware.RequestBodyCaptureMiddleware(), middleware.RateLimitMiddleware(s.rateLimiter), claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 	}
@@ -865,6 +876,19 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
 	}
+
+	// Update rate limiter configuration
+	if s.rateLimiter != nil {
+		s.rateLimiter.UpdateConfig(&cfg.RateLimit)
+	}
+
+	// Update circuit breaker configuration
+	auth.SetCircuitBreakerConfig(
+		cfg.CircuitBreaker.CircuitBreakerEnabled(),
+		cfg.CircuitBreaker.GetHard403CooldownSeconds(),
+		cfg.CircuitBreaker.GetSoft403CooldownSeconds(),
+		cfg.CircuitBreaker.Hard403Retry,
+	)
 
 	// Update log level dynamically when debug flag changes
 	if oldCfg == nil || oldCfg.Debug != cfg.Debug {

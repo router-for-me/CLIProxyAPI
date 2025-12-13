@@ -51,6 +51,29 @@ request-retry: 3
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
+# Rate limiting configuration for API endpoints (per-process, not distributed).
+# Protects upstream from client floods by limiting requests per IP, auth key, and model.
+# rate-limit:
+#   enabled: true
+#   messages:
+#     per-ip:
+#       capacity: 60           # Max burst size per IP
+#       refill-per-second: 1   # Tokens added per second
+#     per-auth:
+#       capacity: 120          # Max burst size per auth/key
+#       refill-per-second: 2   # Tokens added per second
+#     per-model:
+#       capacity: 120          # Max burst size per model
+#       refill-per-second: 2   # Tokens added per second
+
+# Circuit breaker configuration for persistent upstream errors.
+# Prevents repeated retries on hard 403 errors (CONSUMER_INVALID, SERVICE_DISABLED).
+# circuit-breaker:
+#   enabled: true
+#   hard-403-cooldown-seconds: 600   # 10 minutes cooldown for CONSUMER_INVALID/SERVICE_DISABLED
+#   soft-403-cooldown-seconds: 1800  # 30 minutes cooldown for other 403 errors
+#   hard-403-retry: 0                # No retries for hard 403 errors
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
