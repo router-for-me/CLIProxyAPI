@@ -1,3 +1,4 @@
+// Package claude provides translation between Kiro and Claude formats.
 package claude
 
 import (
@@ -12,8 +13,8 @@ func init() {
 		Kiro,
 		ConvertClaudeRequestToKiro,
 		interfaces.TranslateResponse{
-			Stream:    ConvertKiroResponseToClaude,
-			NonStream: ConvertKiroResponseToClaudeNonStream,
+			Stream:    ConvertKiroStreamToClaude,
+			NonStream: ConvertKiroNonStreamToClaude,
 		},
 	)
 }

@@ -10,38 +10,34 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 
-	"github.com/gin-gonic/gin"
 )
 
 const (
 	// Kiro API common constants
-	kiroContentType    = "application/x-amz-json-1.0"
-	kiroAcceptStream   = "*/*"
-	kiroMaxMessageSize = 10 * 1024 * 1024 // 10MB max message size for event stream
-	kiroMaxToolDescLen = 10237            // Kiro API limit is 10240 bytes, leave room for "..."
+	kiroContentType  = "application/x-amz-json-1.0"
+	kiroAcceptStream = "*/*"
 
 	// Event Stream frame size constants for boundary protection
 	// AWS Event Stream binary format: prelude (12 bytes) + headers + payload + message_crc (4 bytes)
 	// Prelude consists of: total_length (4) + headers_length (4) + prelude_crc (4)
-	minEventStreamFrameSize = 16        // Minimum: 4(total_len) + 4(headers_len) + 4(prelude_crc) + 4(message_crc)
-	maxEventStreamMsgSize   = 10 << 20  // Maximum message length: 10MB
+	minEventStreamFrameSize = 16       // Minimum: 4(total_len) + 4(headers_len) + 4(prelude_crc) + 4(message_crc)
+	maxEventStreamMsgSize   = 10 << 20 // Maximum message length: 10MB
 
 	// Event Stream error type constants
 	ErrStreamFatal     = "fatal"     // Connection/authentication errors, not recoverable
@@ -50,73 +46,13 @@ const (
 	kiroUserAgent = "aws-sdk-rust/1.3.9 os/macos lang/rust/1.87.0"
 	// kiroFullUserAgent is the complete x-amz-user-agent header matching amq2api
 	kiroFullUserAgent = "aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.88.0 os/macos lang/rust/1.87.0 m/E app/AmazonQ-For-CLI"
-
-	// Thinking mode support - based on amq2api implementation
-	// These tags wrap reasoning content in the response stream
-	thinkingStartTag = "<thinking>"
-	thinkingEndTag   = "</thinking>"
-	// thinkingHint is injected into the request to enable interleaved thinking mode
-	// This tells the model to use thinking tags and sets the max thinking length
-	thinkingHint     = "<thinking_mode>interleaved</thinking_mode><max_thinking_length>16000</max_thinking_length>"
-
-	// kiroAgenticSystemPrompt is injected only for -agentic models to prevent timeouts on large writes.
-	// AWS Kiro API has a 2-3 minute timeout for large file write operations.
-	kiroAgenticSystemPrompt = `
-# CRITICAL: CHUNKED WRITE PROTOCOL (MANDATORY)
-
-You MUST follow these rules for ALL file operations. Violation causes server timeouts and task failure.
-
-## ABSOLUTE LIMITS
-- **MAXIMUM 350 LINES** per single write/edit operation - NO EXCEPTIONS
-- **RECOMMENDED 300 LINES** or less for optimal performance
-- **NEVER** write entire files in one operation if >300 lines
-
-## MANDATORY CHUNKED WRITE STRATEGY
-
-### For NEW FILES (>300 lines total):
-1. FIRST: Write initial chunk (first 250-300 lines) using write_to_file/fsWrite
-2. THEN: Append remaining content in 250-300 line chunks using file append operations
-3. REPEAT: Continue appending until complete
-
-### For EDITING EXISTING FILES:
-1. Use surgical edits (apply_diff/targeted edits) - change ONLY what's needed
-2. NEVER rewrite entire files - use incremental modifications
-3. Split large refactors into multiple small, focused edits
-
-### For LARGE CODE GENERATION:
-1. Generate in logical sections (imports, types, functions separately)
-2. Write each section as a separate operation
-3. Use append operations for subsequent sections
-
-## EXAMPLES OF CORRECT BEHAVIOR
-
-✅ CORRECT: Writing a 600-line file
-- Operation 1: Write lines 1-300 (initial file creation)
-- Operation 2: Append lines 301-600
-
-✅ CORRECT: Editing multiple functions
-- Operation 1: Edit function A
-- Operation 2: Edit function B
-- Operation 3: Edit function C
-
-❌ WRONG: Writing 500 lines in single operation → TIMEOUT
-❌ WRONG: Rewriting entire file to change 5 lines → TIMEOUT
-❌ WRONG: Generating massive code blocks without chunking → TIMEOUT
-
-## WHY THIS MATTERS
-- Server has 2-3 minute timeout for operations
-- Large writes exceed timeout and FAIL completely
-- Chunked writes are FASTER and more RELIABLE
-- Failed writes waste time and require retry
-
-REMEMBER: When in doubt, write LESS per operation. Multiple small operations > one large operation.`
 )
 
 // Real-time usage estimation configuration
 // These control how often usage updates are sent during streaming
 var (
-	usageUpdateCharThreshold = 5000              // Send usage update every 5000 characters
-	usageUpdateTimeInterval  = 15 * time.Second  // Or every 15 seconds, whichever comes first
+	usageUpdateCharThreshold = 5000             // Send usage update every 5000 characters
+	usageUpdateTimeInterval  = 15 * time.Second // Or every 15 seconds, whichever comes first
 )
 
 // kiroEndpointConfig bundles endpoint URL with its compatible Origin and AmzTarget values.
@@ -186,7 +122,7 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	}
 
 	preference = strings.ToLower(strings.TrimSpace(preference))
-	
+
 	// Create new slice to avoid modifying global state
 	var sorted []kiroEndpointConfig
 	var remaining []kiroEndpointConfig
@@ -221,8 +157,8 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 
 // KiroExecutor handles requests to AWS CodeWhisperer (Kiro) API.
 type KiroExecutor struct {
-	cfg         *config.Config
-	refreshMu   sync.Mutex // Serializes token refresh operations to prevent race conditions
+	cfg       *config.Config
+	refreshMu sync.Mutex // Serializes token refresh operations to prevent race conditions
 }
 
 // NewKiroExecutor creates a new Kiro executor instance.
@@ -236,21 +172,12 @@ func (e *KiroExecutor) Identifier() string { return "kiro" }
 // PrepareRequest prepares the HTTP request before execution.
 func (e *KiroExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
 
-
 // Execute sends the request to Kiro API and returns the response.
 // Supports automatic token refresh on 401/403 errors.
 func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	accessToken, profileArn := kiroCredentials(auth)
 	if accessToken == "" {
 		return resp, fmt.Errorf("kiro: access token not found in auth")
-	}
-	if profileArn == "" {
-		// Only warn if not using builder-id auth (which doesn't need profileArn)
-		if auth == nil || auth.Metadata == nil {
-			log.Debugf("kiro: profile ARN not found in auth (may be normal for builder-id)")
-		} else if authMethod, ok := auth.Metadata["auth_method"].(string); !ok || authMethod != "builder-id" {
-			log.Warnf("kiro: profile ARN not found in auth, API calls may fail")
-		}
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
@@ -274,31 +201,14 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
 	kiroModelID := e.mapModelToKiro(req.Model)
-	
-	// Check if this is an agentic model variant
-	isAgentic := strings.HasSuffix(req.Model, "-agentic")
-	
-	// Check if this is a chat-only model variant (no tool calling)
-	isChatOnly := strings.HasSuffix(req.Model, "-chat")
-	
-	// Determine initial origin - always use AI_EDITOR to match AIClient-2-API behavior
-	// AIClient-2-API uses AI_EDITOR for all models, which is the Kiro IDE quota
-	// Note: CLI origin is for Amazon Q quota, but AIClient-2-API doesn't use it
-	currentOrigin := "AI_EDITOR"
-	
-	// Determine if profileArn should be included based on auth method
-	// profileArn is only needed for social auth (Google OAuth), not for builder-id (AWS SSO)
-	effectiveProfileArn := profileArn
-	if auth != nil && auth.Metadata != nil {
-		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && authMethod == "builder-id" {
-			effectiveProfileArn = "" // Don't include profileArn for builder-id auth
-		}
-	}
-	
-	kiroPayload := e.buildKiroPayload(body, kiroModelID, effectiveProfileArn, currentOrigin, isAgentic, isChatOnly)
+
+	// Determine agentic mode and effective profile ARN using helper functions
+	isAgentic, isChatOnly := determineAgenticMode(req.Model)
+	effectiveProfileArn := getEffectiveProfileArnWithWarning(auth, profileArn)
 
 	// Execute with retry on 401/403 and 429 (quota exhausted)
-	resp, err = e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, kiroPayload, body, from, to, reporter, currentOrigin, kiroModelID, isAgentic, isChatOnly)
+	// Note: currentOrigin and kiroPayload are built inside executeWithRetry for each endpoint
+	resp, err = e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, to, reporter, "", kiroModelID, isAgentic, isChatOnly)
 	return resp, err
 }
 
@@ -311,247 +221,252 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 	var resp cliproxyexecutor.Response
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
 	endpointConfigs := getKiroEndpointConfigs(auth)
+	var last429Err error
 
 	for endpointIdx := 0; endpointIdx < len(endpointConfigs); endpointIdx++ {
 		endpointConfig := endpointConfigs[endpointIdx]
 		url := endpointConfig.URL
 		// Use this endpoint's compatible Origin (critical for avoiding 403 errors)
 		currentOrigin = endpointConfig.Origin
-		
+
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload = e.buildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
-		
+		kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+
 		log.Debugf("kiro: trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(kiroPayload))
-		if err != nil {
-			return resp, err
-		}
-
-		httpReq.Header.Set("Content-Type", kiroContentType)
-		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
-		httpReq.Header.Set("Accept", kiroAcceptStream)
-		// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
-		httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
-		httpReq.Header.Set("User-Agent", kiroUserAgent)
-		httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
-		httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
-		httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
-
-		var attrs map[string]string
-		if auth != nil {
-			attrs = auth.Attributes
-		}
-		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-
-		var authID, authLabel, authType, authValue string
-		if auth != nil {
-			authID = auth.ID
-			authLabel = auth.Label
-			authType, authValue = auth.AccountInfo()
-		}
-		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-			URL:       url,
-			Method:    http.MethodPost,
-			Headers:   httpReq.Header.Clone(),
-			Body:      kiroPayload,
-			Provider:  e.Identifier(),
-			AuthID:    authID,
-			AuthLabel: authLabel,
-			AuthType:  authType,
-			AuthValue: authValue,
-		})
-
-		httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 120*time.Second)
-		httpResp, err := httpClient.Do(httpReq)
-		if err != nil {
-			recordAPIResponseError(ctx, e.cfg, err)
-			return resp, err
-		}
-		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-
-		// Handle 429 errors (quota exhausted) - try next endpoint
-		// Each endpoint has its own quota pool, so we can try different endpoints
-		if httpResp.StatusCode == 429 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
-
-			log.Warnf("kiro: %s endpoint quota exhausted (429), will try next endpoint", endpointConfig.Name)
-			
-			// Break inner retry loop to try next endpoint (which has different quota)
-			break
-		}
-
-		// Handle 5xx server errors with exponential backoff retry
-		if httpResp.StatusCode >= 500 && httpResp.StatusCode < 600 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
-
-			if attempt < maxRetries {
-				// Exponential backoff: 1s, 2s, 4s... (max 30s)
-				backoff := time.Duration(1<<attempt) * time.Second
-				if backoff > 30*time.Second {
-					backoff = 30 * time.Second
-				}
-				log.Warnf("kiro: server error %d, retrying in %v (attempt %d/%d)", httpResp.StatusCode, backoff, attempt+1, maxRetries)
-				time.Sleep(backoff)
-				continue
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(kiroPayload))
+			if err != nil {
+				return resp, err
 			}
-			log.Errorf("kiro: server error %d after %d retries", httpResp.StatusCode, maxRetries)
-			return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-		}
 
-		// Handle 401 errors with token refresh and retry
-		// 401 = Unauthorized (token expired/invalid) - refresh token
-		if httpResp.StatusCode == 401 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
+			httpReq.Header.Set("Content-Type", kiroContentType)
+			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+			httpReq.Header.Set("Accept", kiroAcceptStream)
+			// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
+			httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
+			httpReq.Header.Set("User-Agent", kiroUserAgent)
+			httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
+			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 
-			if attempt < maxRetries {
-				log.Warnf("kiro: received 401 error, attempting token refresh and retry (attempt %d/%d)", attempt+1, maxRetries+1)
+			var attrs map[string]string
+			if auth != nil {
+				attrs = auth.Attributes
+			}
+			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
-				if refreshErr != nil {
-					log.Errorf("kiro: token refresh failed: %v", refreshErr)
-					return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-				}
+			var authID, authLabel, authType, authValue string
+			if auth != nil {
+				authID = auth.ID
+				authLabel = auth.Label
+				authType, authValue = auth.AccountInfo()
+			}
+			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+				URL:       url,
+				Method:    http.MethodPost,
+				Headers:   httpReq.Header.Clone(),
+				Body:      kiroPayload,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
 
-				if refreshedAuth != nil {
-					auth = refreshedAuth
-					accessToken, profileArn = kiroCredentials(auth)
-					// Rebuild payload with new profile ARN if changed
-					kiroPayload = e.buildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
-					log.Infof("kiro: token refreshed successfully, retrying request")
+			httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 120*time.Second)
+			httpResp, err := httpClient.Do(httpReq)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return resp, err
+			}
+			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+			// Handle 429 errors (quota exhausted) - try next endpoint
+			// Each endpoint has its own quota pool, so we can try different endpoints
+			if httpResp.StatusCode == 429 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
+
+				// Preserve last 429 so callers can correctly backoff when all endpoints are exhausted
+				last429Err = statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+
+				log.Warnf("kiro: %s endpoint quota exhausted (429), will try next endpoint, body: %s",
+					endpointConfig.Name, summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
+
+				// Break inner retry loop to try next endpoint (which has different quota)
+				break
+			}
+
+			// Handle 5xx server errors with exponential backoff retry
+			if httpResp.StatusCode >= 500 && httpResp.StatusCode < 600 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
+
+				if attempt < maxRetries {
+					// Exponential backoff: 1s, 2s, 4s... (max 30s)
+					backoff := time.Duration(1<<attempt) * time.Second
+					if backoff > 30*time.Second {
+						backoff = 30 * time.Second
+					}
+					log.Warnf("kiro: server error %d, retrying in %v (attempt %d/%d)", httpResp.StatusCode, backoff, attempt+1, maxRetries)
+					time.Sleep(backoff)
 					continue
 				}
+				log.Errorf("kiro: server error %d after %d retries", httpResp.StatusCode, maxRetries)
+				return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 			}
 
-			log.Warnf("kiro request error, status: 401, body: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
-			return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-		}
+			// Handle 401 errors with token refresh and retry
+			// 401 = Unauthorized (token expired/invalid) - refresh token
+			if httpResp.StatusCode == 401 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
-		// Handle 402 errors - Monthly Limit Reached
-		if httpResp.StatusCode == 402 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
+				if attempt < maxRetries {
+					log.Warnf("kiro: received 401 error, attempting token refresh and retry (attempt %d/%d)", attempt+1, maxRetries+1)
 
-			log.Warnf("kiro: received 402 (monthly limit). Upstream body: %s", string(respBody))
+					refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+					if refreshErr != nil {
+						log.Errorf("kiro: token refresh failed: %v", refreshErr)
+						return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+					}
 
-			// Return upstream error body directly
-			return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-		}
-
-		// Handle 403 errors - Access Denied / Token Expired
-		// Do NOT switch endpoints for 403 errors
-		if httpResp.StatusCode == 403 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
-
-			// Log the 403 error details for debugging
-			log.Warnf("kiro: received 403 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
-
-			respBodyStr := string(respBody)
-
-			// Check for SUSPENDED status - return immediately without retry
-			if strings.Contains(respBodyStr, "SUSPENDED") || strings.Contains(respBodyStr, "TEMPORARILY_SUSPENDED") {
-				log.Errorf("kiro: account is suspended, cannot proceed")
-				return resp, statusErr{code: httpResp.StatusCode, msg: "account suspended: " + string(respBody)}
-			}
-
-			// Check if this looks like a token-related 403 (some APIs return 403 for expired tokens)
-			isTokenRelated := strings.Contains(respBodyStr, "token") ||
-				strings.Contains(respBodyStr, "expired") ||
-				strings.Contains(respBodyStr, "invalid") ||
-				strings.Contains(respBodyStr, "unauthorized")
-
-			if isTokenRelated && attempt < maxRetries {
-				log.Warnf("kiro: 403 appears token-related, attempting token refresh")
-				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
-				if refreshErr != nil {
-					log.Errorf("kiro: token refresh failed: %v", refreshErr)
-					// Token refresh failed - return error immediately
-					return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+					if refreshedAuth != nil {
+						auth = refreshedAuth
+						accessToken, profileArn = kiroCredentials(auth)
+						// Rebuild payload with new profile ARN if changed
+						kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+						log.Infof("kiro: token refreshed successfully, retrying request")
+						continue
+					}
 				}
-				if refreshedAuth != nil {
-					auth = refreshedAuth
-					accessToken, profileArn = kiroCredentials(auth)
-					kiroPayload = e.buildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
-					log.Infof("kiro: token refreshed for 403, retrying request")
-					continue
-				}
+
+				log.Warnf("kiro request error, status: 401, body: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
+				return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 			}
 
-			// For non-token 403 or after max retries, return error immediately
+			// Handle 402 errors - Monthly Limit Reached
+			if httpResp.StatusCode == 402 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
+
+				log.Warnf("kiro: received 402 (monthly limit). Upstream body: %s", string(respBody))
+
+				// Return upstream error body directly
+				return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+			}
+
+			// Handle 403 errors - Access Denied / Token Expired
 			// Do NOT switch endpoints for 403 errors
-			log.Warnf("kiro: 403 error, returning immediately (no endpoint switch)")
-			return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-		}
+			if httpResp.StatusCode == 403 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
-		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			b, _ := io.ReadAll(httpResp.Body)
-			appendAPIResponseChunk(ctx, e.cfg, b)
-			log.Debugf("kiro request error, status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("response body close error: %v", errClose)
-			}
-			return resp, err
-		}
+				// Log the 403 error details for debugging
+				log.Warnf("kiro: received 403 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
 
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("response body close error: %v", errClose)
-			}
-		}()
+				respBodyStr := string(respBody)
 
-		content, toolUses, usageInfo, stopReason, err := e.parseEventStream(httpResp.Body)
-		if err != nil {
-			recordAPIResponseError(ctx, e.cfg, err)
-			return resp, err
-		}
-
-		// Fallback for usage if missing from upstream
-		if usageInfo.TotalTokens == 0 {
-			if enc, encErr := getTokenizer(req.Model); encErr == nil {
-				if inp, countErr := countOpenAIChatTokens(enc, opts.OriginalRequest); countErr == nil {
-					usageInfo.InputTokens = inp
+				// Check for SUSPENDED status - return immediately without retry
+				if strings.Contains(respBodyStr, "SUSPENDED") || strings.Contains(respBodyStr, "TEMPORARILY_SUSPENDED") {
+					log.Errorf("kiro: account is suspended, cannot proceed")
+					return resp, statusErr{code: httpResp.StatusCode, msg: "account suspended: " + string(respBody)}
 				}
+
+				// Check if this looks like a token-related 403 (some APIs return 403 for expired tokens)
+				isTokenRelated := strings.Contains(respBodyStr, "token") ||
+					strings.Contains(respBodyStr, "expired") ||
+					strings.Contains(respBodyStr, "invalid") ||
+					strings.Contains(respBodyStr, "unauthorized")
+
+				if isTokenRelated && attempt < maxRetries {
+					log.Warnf("kiro: 403 appears token-related, attempting token refresh")
+					refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+					if refreshErr != nil {
+						log.Errorf("kiro: token refresh failed: %v", refreshErr)
+						// Token refresh failed - return error immediately
+						return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+					}
+					if refreshedAuth != nil {
+						auth = refreshedAuth
+						accessToken, profileArn = kiroCredentials(auth)
+						kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+						log.Infof("kiro: token refreshed for 403, retrying request")
+						continue
+					}
+				}
+
+				// For non-token 403 or after max retries, return error immediately
+				// Do NOT switch endpoints for 403 errors
+				log.Warnf("kiro: 403 error, returning immediately (no endpoint switch)")
+				return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 			}
-			if len(content) > 0 {
-				// Use tiktoken for more accurate output token calculation
+
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				b, _ := io.ReadAll(httpResp.Body)
+				appendAPIResponseChunk(ctx, e.cfg, b)
+				log.Debugf("kiro request error, status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+				err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("response body close error: %v", errClose)
+				}
+				return resp, err
+			}
+
+			defer func() {
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("response body close error: %v", errClose)
+				}
+			}()
+
+			content, toolUses, usageInfo, stopReason, err := e.parseEventStream(httpResp.Body)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return resp, err
+			}
+
+			// Fallback for usage if missing from upstream
+			if usageInfo.TotalTokens == 0 {
 				if enc, encErr := getTokenizer(req.Model); encErr == nil {
-					if tokenCount, countErr := enc.Count(content); countErr == nil {
-						usageInfo.OutputTokens = int64(tokenCount)
+					if inp, countErr := countOpenAIChatTokens(enc, opts.OriginalRequest); countErr == nil {
+						usageInfo.InputTokens = inp
 					}
 				}
-				// Fallback to character count estimation if tiktoken fails
-				if usageInfo.OutputTokens == 0 {
-					usageInfo.OutputTokens = int64(len(content) / 4)
+				if len(content) > 0 {
+					// Use tiktoken for more accurate output token calculation
+					if enc, encErr := getTokenizer(req.Model); encErr == nil {
+						if tokenCount, countErr := enc.Count(content); countErr == nil {
+							usageInfo.OutputTokens = int64(tokenCount)
+						}
+					}
+					// Fallback to character count estimation if tiktoken fails
 					if usageInfo.OutputTokens == 0 {
-						usageInfo.OutputTokens = 1
+						usageInfo.OutputTokens = int64(len(content) / 4)
+						if usageInfo.OutputTokens == 0 {
+							usageInfo.OutputTokens = 1
+						}
 					}
 				}
+				usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
 			}
-			usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
-		}
 
-		appendAPIResponseChunk(ctx, e.cfg, []byte(content))
-		reporter.publish(ctx, usageInfo)
+			appendAPIResponseChunk(ctx, e.cfg, []byte(content))
+			reporter.publish(ctx, usageInfo)
 
-		// Build response in Claude format for Kiro translator
-		// stopReason is extracted from upstream response by parseEventStream
-		kiroResponse := e.buildClaudeResponse(content, toolUses, req.Model, usageInfo, stopReason)
-		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, kiroResponse, nil)
-		resp = cliproxyexecutor.Response{Payload: []byte(out)}
-		return resp, nil
+			// Build response in Claude format for Kiro translator
+			// stopReason is extracted from upstream response by parseEventStream
+			kiroResponse := kiroclaude.BuildClaudeResponse(content, toolUses, req.Model, usageInfo, stopReason)
+			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, kiroResponse, nil)
+			resp = cliproxyexecutor.Response{Payload: []byte(out)}
+			return resp, nil
 		}
 		// Inner retry loop exhausted for this endpoint, try next endpoint
 		// Note: This code is unreachable because all paths in the inner loop
@@ -559,6 +474,9 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 	}
 
 	// All endpoints exhausted
+	if last429Err != nil {
+		return resp, last429Err
+	}
 	return resp, fmt.Errorf("kiro: all endpoints exhausted")
 }
 
@@ -568,14 +486,6 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	accessToken, profileArn := kiroCredentials(auth)
 	if accessToken == "" {
 		return nil, fmt.Errorf("kiro: access token not found in auth")
-	}
-	if profileArn == "" {
-		// Only warn if not using builder-id auth (which doesn't need profileArn)
-		if auth == nil || auth.Metadata == nil {
-			log.Debugf("kiro: profile ARN not found in auth (may be normal for builder-id)")
-		} else if authMethod, ok := auth.Metadata["auth_method"].(string); !ok || authMethod != "builder-id" {
-			log.Warnf("kiro: profile ARN not found in auth, API calls may fail")
-		}
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
@@ -599,30 +509,14 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
 	kiroModelID := e.mapModelToKiro(req.Model)
-	
-	// Check if this is an agentic model variant
-	isAgentic := strings.HasSuffix(req.Model, "-agentic")
-	
-	// Check if this is a chat-only model variant (no tool calling)
-	isChatOnly := strings.HasSuffix(req.Model, "-chat")
-	
-	// Determine initial origin - always use AI_EDITOR to match AIClient-2-API behavior
-	// AIClient-2-API uses AI_EDITOR for all models, which is the Kiro IDE quota
-	currentOrigin := "AI_EDITOR"
-	
-	// Determine if profileArn should be included based on auth method
-	// profileArn is only needed for social auth (Google OAuth), not for builder-id (AWS SSO)
-	effectiveProfileArn := profileArn
-	if auth != nil && auth.Metadata != nil {
-		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && authMethod == "builder-id" {
-			effectiveProfileArn = "" // Don't include profileArn for builder-id auth
-		}
-	}
-	
-	kiroPayload := e.buildKiroPayload(body, kiroModelID, effectiveProfileArn, currentOrigin, isAgentic, isChatOnly)
+
+	// Determine agentic mode and effective profile ARN using helper functions
+	isAgentic, isChatOnly := determineAgenticMode(req.Model)
+	effectiveProfileArn := getEffectiveProfileArnWithWarning(auth, profileArn)
 
 	// Execute stream with retry on 401/403 and 429 (quota exhausted)
-	return e.executeStreamWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, kiroPayload, body, from, reporter, currentOrigin, kiroModelID, isAgentic, isChatOnly)
+	// Note: currentOrigin and kiroPayload are built inside executeStreamWithRetry for each endpoint
+	return e.executeStreamWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, reporter, "", kiroModelID, isAgentic, isChatOnly)
 }
 
 // executeStreamWithRetry performs the streaming HTTP request with automatic retry on auth errors.
@@ -633,233 +527,238 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from sdktranslator.Format, reporter *usageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool) (<-chan cliproxyexecutor.StreamChunk, error) {
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
 	endpointConfigs := getKiroEndpointConfigs(auth)
+	var last429Err error
 
 	for endpointIdx := 0; endpointIdx < len(endpointConfigs); endpointIdx++ {
 		endpointConfig := endpointConfigs[endpointIdx]
 		url := endpointConfig.URL
 		// Use this endpoint's compatible Origin (critical for avoiding 403 errors)
 		currentOrigin = endpointConfig.Origin
-		
+
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload = e.buildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
-		
+		kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+
 		log.Debugf("kiro: stream trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(kiroPayload))
-		if err != nil {
-			return nil, err
-		}
-
-		httpReq.Header.Set("Content-Type", kiroContentType)
-		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
-		httpReq.Header.Set("Accept", kiroAcceptStream)
-		// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
-		httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
-		httpReq.Header.Set("User-Agent", kiroUserAgent)
-		httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
-		httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
-		httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
-
-		var attrs map[string]string
-		if auth != nil {
-			attrs = auth.Attributes
-		}
-		util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-
-		var authID, authLabel, authType, authValue string
-		if auth != nil {
-			authID = auth.ID
-			authLabel = auth.Label
-			authType, authValue = auth.AccountInfo()
-		}
-		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-			URL:       url,
-			Method:    http.MethodPost,
-			Headers:   httpReq.Header.Clone(),
-			Body:      kiroPayload,
-			Provider:  e.Identifier(),
-			AuthID:    authID,
-			AuthLabel: authLabel,
-			AuthType:  authType,
-			AuthValue: authValue,
-		})
-
-		httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-		httpResp, err := httpClient.Do(httpReq)
-		if err != nil {
-			recordAPIResponseError(ctx, e.cfg, err)
-			return nil, err
-		}
-		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-
-		// Handle 429 errors (quota exhausted) - try next endpoint
-		// Each endpoint has its own quota pool, so we can try different endpoints
-		if httpResp.StatusCode == 429 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
-
-			log.Warnf("kiro: stream %s endpoint quota exhausted (429), will try next endpoint", endpointConfig.Name)
-			
-			// Break inner retry loop to try next endpoint (which has different quota)
-			break
-		}
-
-		// Handle 5xx server errors with exponential backoff retry
-		if httpResp.StatusCode >= 500 && httpResp.StatusCode < 600 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
-
-			if attempt < maxRetries {
-				// Exponential backoff: 1s, 2s, 4s... (max 30s)
-				backoff := time.Duration(1<<attempt) * time.Second
-				if backoff > 30*time.Second {
-					backoff = 30 * time.Second
-				}
-				log.Warnf("kiro: stream server error %d, retrying in %v (attempt %d/%d)", httpResp.StatusCode, backoff, attempt+1, maxRetries)
-				time.Sleep(backoff)
-				continue
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(kiroPayload))
+			if err != nil {
+				return nil, err
 			}
-			log.Errorf("kiro: stream server error %d after %d retries", httpResp.StatusCode, maxRetries)
-			return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-		}
 
-		// Handle 400 errors - Credential/Validation issues
-		// Do NOT switch endpoints - return error immediately
-		if httpResp.StatusCode == 400 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
+			httpReq.Header.Set("Content-Type", kiroContentType)
+			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+			httpReq.Header.Set("Accept", kiroAcceptStream)
+			// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
+			httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
+			httpReq.Header.Set("User-Agent", kiroUserAgent)
+			httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
+			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 
-			log.Warnf("kiro: received 400 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
+			var attrs map[string]string
+			if auth != nil {
+				attrs = auth.Attributes
+			}
+			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-			// 400 errors indicate request validation issues - return immediately without retry
-			return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-		}
+			var authID, authLabel, authType, authValue string
+			if auth != nil {
+				authID = auth.ID
+				authLabel = auth.Label
+				authType, authValue = auth.AccountInfo()
+			}
+			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+				URL:       url,
+				Method:    http.MethodPost,
+				Headers:   httpReq.Header.Clone(),
+				Body:      kiroPayload,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
 
-		// Handle 401 errors with token refresh and retry
-		// 401 = Unauthorized (token expired/invalid) - refresh token
-		if httpResp.StatusCode == 401 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
+			httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+			httpResp, err := httpClient.Do(httpReq)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return nil, err
+			}
+			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
-			if attempt < maxRetries {
-				log.Warnf("kiro: stream received 401 error, attempting token refresh and retry (attempt %d/%d)", attempt+1, maxRetries+1)
+			// Handle 429 errors (quota exhausted) - try next endpoint
+			// Each endpoint has its own quota pool, so we can try different endpoints
+			if httpResp.StatusCode == 429 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
-				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
-				if refreshErr != nil {
-					log.Errorf("kiro: token refresh failed: %v", refreshErr)
-					return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-				}
+				// Preserve last 429 so callers can correctly backoff when all endpoints are exhausted
+				last429Err = statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 
-				if refreshedAuth != nil {
-					auth = refreshedAuth
-					accessToken, profileArn = kiroCredentials(auth)
-					// Rebuild payload with new profile ARN if changed
-					kiroPayload = e.buildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
-					log.Infof("kiro: token refreshed successfully, retrying stream request")
+				log.Warnf("kiro: stream %s endpoint quota exhausted (429), will try next endpoint, body: %s",
+					endpointConfig.Name, summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
+
+				// Break inner retry loop to try next endpoint (which has different quota)
+				break
+			}
+
+			// Handle 5xx server errors with exponential backoff retry
+			if httpResp.StatusCode >= 500 && httpResp.StatusCode < 600 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
+
+				if attempt < maxRetries {
+					// Exponential backoff: 1s, 2s, 4s... (max 30s)
+					backoff := time.Duration(1<<attempt) * time.Second
+					if backoff > 30*time.Second {
+						backoff = 30 * time.Second
+					}
+					log.Warnf("kiro: stream server error %d, retrying in %v (attempt %d/%d)", httpResp.StatusCode, backoff, attempt+1, maxRetries)
+					time.Sleep(backoff)
 					continue
 				}
+				log.Errorf("kiro: stream server error %d after %d retries", httpResp.StatusCode, maxRetries)
+				return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 			}
 
-			log.Warnf("kiro stream error, status: 401, body: %s", string(respBody))
-			return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-		}
+			// Handle 400 errors - Credential/Validation issues
+			// Do NOT switch endpoints - return error immediately
+			if httpResp.StatusCode == 400 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
-		// Handle 402 errors - Monthly Limit Reached
-		if httpResp.StatusCode == 402 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
+				log.Warnf("kiro: received 400 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
 
-			log.Warnf("kiro: stream received 402 (monthly limit). Upstream body: %s", string(respBody))
-
-			// Return upstream error body directly
-			return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-		}
-
-		// Handle 403 errors - Access Denied / Token Expired
-		// Do NOT switch endpoints for 403 errors
-		if httpResp.StatusCode == 403 {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			_ = httpResp.Body.Close()
-			appendAPIResponseChunk(ctx, e.cfg, respBody)
-
-			// Log the 403 error details for debugging
-			log.Warnf("kiro: stream received 403 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, string(respBody))
-
-			respBodyStr := string(respBody)
-
-			// Check for SUSPENDED status - return immediately without retry
-			if strings.Contains(respBodyStr, "SUSPENDED") || strings.Contains(respBodyStr, "TEMPORARILY_SUSPENDED") {
-				log.Errorf("kiro: account is suspended, cannot proceed")
-				return nil, statusErr{code: httpResp.StatusCode, msg: "account suspended: " + string(respBody)}
+				// 400 errors indicate request validation issues - return immediately without retry
+				return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 			}
 
-			// Check if this looks like a token-related 403 (some APIs return 403 for expired tokens)
-			isTokenRelated := strings.Contains(respBodyStr, "token") ||
-				strings.Contains(respBodyStr, "expired") ||
-				strings.Contains(respBodyStr, "invalid") ||
-				strings.Contains(respBodyStr, "unauthorized")
+			// Handle 401 errors with token refresh and retry
+			// 401 = Unauthorized (token expired/invalid) - refresh token
+			if httpResp.StatusCode == 401 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
-			if isTokenRelated && attempt < maxRetries {
-				log.Warnf("kiro: 403 appears token-related, attempting token refresh")
-				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
-				if refreshErr != nil {
-					log.Errorf("kiro: token refresh failed: %v", refreshErr)
-					// Token refresh failed - return error immediately
-					return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+				if attempt < maxRetries {
+					log.Warnf("kiro: stream received 401 error, attempting token refresh and retry (attempt %d/%d)", attempt+1, maxRetries+1)
+
+					refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+					if refreshErr != nil {
+						log.Errorf("kiro: token refresh failed: %v", refreshErr)
+						return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+					}
+
+					if refreshedAuth != nil {
+						auth = refreshedAuth
+						accessToken, profileArn = kiroCredentials(auth)
+						// Rebuild payload with new profile ARN if changed
+						kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+						log.Infof("kiro: token refreshed successfully, retrying stream request")
+						continue
+					}
 				}
-				if refreshedAuth != nil {
-					auth = refreshedAuth
-					accessToken, profileArn = kiroCredentials(auth)
-					kiroPayload = e.buildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
-					log.Infof("kiro: token refreshed for 403, retrying stream request")
-					continue
-				}
+
+				log.Warnf("kiro stream error, status: 401, body: %s", string(respBody))
+				return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 			}
 
-			// For non-token 403 or after max retries, return error immediately
+			// Handle 402 errors - Monthly Limit Reached
+			if httpResp.StatusCode == 402 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
+
+				log.Warnf("kiro: stream received 402 (monthly limit). Upstream body: %s", string(respBody))
+
+				// Return upstream error body directly
+				return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+			}
+
+			// Handle 403 errors - Access Denied / Token Expired
 			// Do NOT switch endpoints for 403 errors
-			log.Warnf("kiro: 403 error, returning immediately (no endpoint switch)")
-			return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
-		}
+			if httpResp.StatusCode == 403 {
+				respBody, _ := io.ReadAll(httpResp.Body)
+				_ = httpResp.Body.Close()
+				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
-		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			b, _ := io.ReadAll(httpResp.Body)
-			appendAPIResponseChunk(ctx, e.cfg, b)
-			log.Debugf("kiro stream error, status: %d, body: %s", httpResp.StatusCode, string(b))
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("response body close error: %v", errClose)
-			}
-			return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
-		}
+				// Log the 403 error details for debugging
+				log.Warnf("kiro: stream received 403 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, string(respBody))
 
-		out := make(chan cliproxyexecutor.StreamChunk)
+				respBodyStr := string(respBody)
 
-		go func(resp *http.Response) {
-			defer close(out)
-			defer func() {
-				if r := recover(); r != nil {
-					log.Errorf("kiro: panic in stream handler: %v", r)
-					out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("internal error: %v", r)}
+				// Check for SUSPENDED status - return immediately without retry
+				if strings.Contains(respBodyStr, "SUSPENDED") || strings.Contains(respBodyStr, "TEMPORARILY_SUSPENDED") {
+					log.Errorf("kiro: account is suspended, cannot proceed")
+					return nil, statusErr{code: httpResp.StatusCode, msg: "account suspended: " + string(respBody)}
 				}
-			}()
-			defer func() {
-				if errClose := resp.Body.Close(); errClose != nil {
+
+				// Check if this looks like a token-related 403 (some APIs return 403 for expired tokens)
+				isTokenRelated := strings.Contains(respBodyStr, "token") ||
+					strings.Contains(respBodyStr, "expired") ||
+					strings.Contains(respBodyStr, "invalid") ||
+					strings.Contains(respBodyStr, "unauthorized")
+
+				if isTokenRelated && attempt < maxRetries {
+					log.Warnf("kiro: 403 appears token-related, attempting token refresh")
+					refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+					if refreshErr != nil {
+						log.Errorf("kiro: token refresh failed: %v", refreshErr)
+						// Token refresh failed - return error immediately
+						return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+					}
+					if refreshedAuth != nil {
+						auth = refreshedAuth
+						accessToken, profileArn = kiroCredentials(auth)
+						kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+						log.Infof("kiro: token refreshed for 403, retrying stream request")
+						continue
+					}
+				}
+
+				// For non-token 403 or after max retries, return error immediately
+				// Do NOT switch endpoints for 403 errors
+				log.Warnf("kiro: 403 error, returning immediately (no endpoint switch)")
+				return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+			}
+
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				b, _ := io.ReadAll(httpResp.Body)
+				appendAPIResponseChunk(ctx, e.cfg, b)
+				log.Debugf("kiro stream error, status: %d, body: %s", httpResp.StatusCode, string(b))
+				if errClose := httpResp.Body.Close(); errClose != nil {
 					log.Errorf("response body close error: %v", errClose)
 				}
-			}()
+				return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
+			}
 
-			e.streamToChannel(ctx, resp.Body, out, from, req.Model, opts.OriginalRequest, body, reporter)
-		}(httpResp)
+			out := make(chan cliproxyexecutor.StreamChunk)
 
-		return out, nil
+			go func(resp *http.Response) {
+				defer close(out)
+				defer func() {
+					if r := recover(); r != nil {
+						log.Errorf("kiro: panic in stream handler: %v", r)
+						out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("internal error: %v", r)}
+					}
+				}()
+				defer func() {
+					if errClose := resp.Body.Close(); errClose != nil {
+						log.Errorf("response body close error: %v", errClose)
+					}
+				}()
+
+				e.streamToChannel(ctx, resp.Body, out, from, req.Model, opts.OriginalRequest, body, reporter)
+			}(httpResp)
+
+			return out, nil
 		}
 		// Inner retry loop exhausted for this endpoint, try next endpoint
 		// Note: This code is unreachable because all paths in the inner loop
@@ -867,16 +766,18 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 	}
 
 	// All endpoints exhausted
+	if last429Err != nil {
+		return nil, last429Err
+	}
 	return nil, fmt.Errorf("kiro: stream all endpoints exhausted")
 }
-
 
 // kiroCredentials extracts access token and profile ARN from auth.
 func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 	if auth == nil {
 		return "", ""
 	}
-	
+
 	// Try Metadata first (wrapper format)
 	if auth.Metadata != nil {
 		if token, ok := auth.Metadata["access_token"].(string); ok {
@@ -886,13 +787,13 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 			profileArn = arn
 		}
 	}
-	
+
 	// Try Attributes
 	if accessToken == "" && auth.Attributes != nil {
 		accessToken = auth.Attributes["access_token"]
 		profileArn = auth.Attributes["profile_arn"]
 	}
-	
+
 	// Try direct fields from flat JSON format (new AWS Builder ID format)
 	if accessToken == "" && auth.Metadata != nil {
 		if token, ok := auth.Metadata["accessToken"].(string); ok {
@@ -902,8 +803,44 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 			profileArn = arn
 		}
 	}
-	
+
 	return accessToken, profileArn
+}
+
+// determineAgenticMode determines if the model is an agentic or chat-only variant.
+// Returns (isAgentic, isChatOnly) based on model name suffixes.
+func determineAgenticMode(model string) (isAgentic, isChatOnly bool) {
+	isAgentic = strings.HasSuffix(model, "-agentic")
+	isChatOnly = strings.HasSuffix(model, "-chat")
+	return isAgentic, isChatOnly
+}
+
+// getEffectiveProfileArn determines if profileArn should be included based on auth method.
+// profileArn is only needed for social auth (Google OAuth), not for builder-id (AWS SSO).
+func getEffectiveProfileArn(auth *cliproxyauth.Auth, profileArn string) string {
+	if auth != nil && auth.Metadata != nil {
+		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && authMethod == "builder-id" {
+			return "" // Don't include profileArn for builder-id auth
+		}
+	}
+	return profileArn
+}
+
+// getEffectiveProfileArnWithWarning determines if profileArn should be included based on auth method,
+// and logs a warning if profileArn is missing for non-builder-id auth.
+// This consolidates the auth_method check that was previously done separately.
+func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn string) string {
+	if auth != nil && auth.Metadata != nil {
+		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && authMethod == "builder-id" {
+			// builder-id auth doesn't need profileArn
+			return ""
+		}
+	}
+	// For non-builder-id auth (social auth), profileArn is required
+	if profileArn == "" {
+		log.Warnf("kiro: profile ARN not found in auth, API calls may fail")
+	}
+	return profileArn
 }
 
 // mapModelToKiro maps external model names to Kiro model IDs.
@@ -939,28 +876,28 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"claude-sonnet-4-20250514":   "claude-sonnet-4",
 		"auto":                       "auto",
 		// Agentic variants (same backend model IDs, but with special system prompt)
-		"claude-opus-4.5-agentic":            "claude-opus-4.5",
-		"claude-sonnet-4.5-agentic":          "claude-sonnet-4.5",
-		"claude-sonnet-4-agentic":            "claude-sonnet-4",
-		"claude-haiku-4.5-agentic":           "claude-haiku-4.5",
-		"kiro-claude-opus-4-5-agentic":       "claude-opus-4.5",
-		"kiro-claude-sonnet-4-5-agentic":     "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4-agentic":       "claude-sonnet-4",
-		"kiro-claude-haiku-4-5-agentic":      "claude-haiku-4.5",
+		"claude-opus-4.5-agentic":        "claude-opus-4.5",
+		"claude-sonnet-4.5-agentic":      "claude-sonnet-4.5",
+		"claude-sonnet-4-agentic":        "claude-sonnet-4",
+		"claude-haiku-4.5-agentic":       "claude-haiku-4.5",
+		"kiro-claude-opus-4-5-agentic":   "claude-opus-4.5",
+		"kiro-claude-sonnet-4-5-agentic": "claude-sonnet-4.5",
+		"kiro-claude-sonnet-4-agentic":   "claude-sonnet-4",
+		"kiro-claude-haiku-4-5-agentic":  "claude-haiku-4.5",
 	}
 	if kiroID, ok := modelMap[model]; ok {
 		return kiroID
 	}
-	
+
 	// Smart fallback: try to infer model type from name patterns
 	modelLower := strings.ToLower(model)
-	
+
 	// Check for Haiku variants
 	if strings.Contains(modelLower, "haiku") {
 		log.Debugf("kiro: unknown Haiku model '%s', mapping to claude-haiku-4.5", model)
 		return "claude-haiku-4.5"
 	}
-	
+
 	// Check for Sonnet variants
 	if strings.Contains(modelLower, "sonnet") {
 		// Check for specific version patterns
@@ -976,13 +913,13 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		log.Debugf("kiro: unknown Sonnet model '%s', mapping to claude-sonnet-4", model)
 		return "claude-sonnet-4"
 	}
-	
+
 	// Check for Opus variants
 	if strings.Contains(modelLower, "opus") {
 		log.Debugf("kiro: unknown Opus model '%s', mapping to claude-opus-4.5", model)
 		return "claude-opus-4.5"
 	}
-	
+
 	// Final fallback to Sonnet 4.5 (most commonly used model)
 	log.Warnf("kiro: unknown model '%s', falling back to claude-sonnet-4.5", model)
 	return "claude-sonnet-4.5"
@@ -1008,582 +945,23 @@ type eventStreamMessage struct {
 	Payload   []byte // JSON payload of the message
 }
 
-// Kiro API request structs - field order determines JSON key order
-
-type kiroPayload struct {
-	ConversationState kiroConversationState `json:"conversationState"`
-	ProfileArn        string                `json:"profileArn,omitempty"`
-	InferenceConfig   *kiroInferenceConfig  `json:"inferenceConfig,omitempty"`
-}
-
-// kiroInferenceConfig contains inference parameters for the Kiro API.
-// NOTE: This is an experimental addition - Kiro/Amazon Q API may not support these parameters.
-// If the API ignores or rejects these fields, response length is controlled internally by the model.
-type kiroInferenceConfig struct {
-	MaxTokens   int `json:"maxTokens,omitempty"`   // Maximum output tokens (may be ignored by API)
-	Temperature float64 `json:"temperature,omitempty"` // Sampling temperature (may be ignored by API)
-}
-
-type kiroConversationState struct {
-	ChatTriggerType string               `json:"chatTriggerType"` // Required: "MANUAL" - must be first field
-	ConversationID  string               `json:"conversationId"`
-	CurrentMessage  kiroCurrentMessage   `json:"currentMessage"`
-	History         []kiroHistoryMessage `json:"history,omitempty"`
-}
-
-type kiroCurrentMessage struct {
-	UserInputMessage kiroUserInputMessage `json:"userInputMessage"`
-}
-
-type kiroHistoryMessage struct {
-	UserInputMessage         *kiroUserInputMessage         `json:"userInputMessage,omitempty"`
-	AssistantResponseMessage *kiroAssistantResponseMessage `json:"assistantResponseMessage,omitempty"`
-}
-
-// kiroImage represents an image in Kiro API format
-type kiroImage struct {
-	Format string          `json:"format"`
-	Source kiroImageSource `json:"source"`
-}
-
-// kiroImageSource contains the image data
-type kiroImageSource struct {
-	Bytes string `json:"bytes"` // base64 encoded image data
-}
-
-type kiroUserInputMessage struct {
-	Content                 string                       `json:"content"`
-	ModelID                 string                       `json:"modelId"`
-	Origin                  string                       `json:"origin"`
-	Images                  []kiroImage                  `json:"images,omitempty"`
-	UserInputMessageContext *kiroUserInputMessageContext `json:"userInputMessageContext,omitempty"`
-}
-
-type kiroUserInputMessageContext struct {
-	ToolResults []kiroToolResult       `json:"toolResults,omitempty"`
-	Tools       []kiroToolWrapper      `json:"tools,omitempty"`
-}
-
-type kiroToolResult struct {
-	Content   []kiroTextContent   `json:"content"`
-	Status    string              `json:"status"`
-	ToolUseID string              `json:"toolUseId"`
-}
-
-type kiroTextContent struct {
-	Text string `json:"text"`
-}
-
-type kiroToolWrapper struct {
-	ToolSpecification kiroToolSpecification `json:"toolSpecification"`
-}
-
-type kiroToolSpecification struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema kiroInputSchema `json:"inputSchema"`
-}
-
-type kiroInputSchema struct {
-	JSON interface{} `json:"json"`
-}
-
-type kiroAssistantResponseMessage struct {
-	Content  string         `json:"content"`
-	ToolUses []kiroToolUse  `json:"toolUses,omitempty"`
-}
-
-type kiroToolUse struct {
-	ToolUseID string                 `json:"toolUseId"`
-	Name      string                 `json:"name"`
-	Input     map[string]interface{} `json:"input"`
-}
-
-// buildKiroPayload constructs the Kiro API request payload.
-// Supports tool calling - tools are passed via userInputMessageContext.
-// origin parameter determines which quota to use: "CLI" for Amazon Q, "AI_EDITOR" for Kiro IDE.
-// isAgentic parameter enables chunked write optimization prompt for -agentic model variants.
-// isChatOnly parameter disables tool calling for -chat model variants (pure conversation mode).
-// Supports thinking mode - when Claude API thinking parameter is present, injects thinkingHint.
-//
-// max_tokens support: Kiro/Amazon Q API may not officially support max_tokens parameter.
-// We attempt to pass it via inferenceConfig.maxTokens, but the API may ignore it.
-// Response truncation can be detected via stop_reason == "max_tokens" in the response.
-func (e *KiroExecutor) buildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool) []byte {
-	// Extract max_tokens for potential use in inferenceConfig
-	var maxTokens int64
-	if mt := gjson.GetBytes(claudeBody, "max_tokens"); mt.Exists() {
-		maxTokens = mt.Int()
-	}
-	
-	// Extract temperature if specified
-	var temperature float64
-	var hasTemperature bool
-	if temp := gjson.GetBytes(claudeBody, "temperature"); temp.Exists() {
-		temperature = temp.Float()
-		hasTemperature = true
-	}
-
-	// Normalize origin value for Kiro API compatibility
-	// Kiro API only accepts "CLI" or "AI_EDITOR" as valid origin values
-	switch origin {
-	case "KIRO_CLI":
-		origin = "CLI"
-	case "KIRO_AI_EDITOR":
-		origin = "AI_EDITOR"
-	case "AMAZON_Q":
-		origin = "CLI"
-	case "KIRO_IDE":
-		origin = "AI_EDITOR"
-	// Add any other non-standard origin values that need normalization
-	default:
-		// Keep the original value if it's already standard
-		// Valid values: "CLI", "AI_EDITOR"
-	}
-	log.Debugf("kiro: normalized origin value: %s", origin)
-	
-	messages := gjson.GetBytes(claudeBody, "messages")
-	
-	// For chat-only mode, don't include tools
-	var tools gjson.Result
-	if !isChatOnly {
-		tools = gjson.GetBytes(claudeBody, "tools")
-	}
-	
-	// Extract system prompt - can be string or array of content blocks
-	systemField := gjson.GetBytes(claudeBody, "system")
-	var systemPrompt string
-	if systemField.IsArray() {
-		// System is array of content blocks, extract text
-		var sb strings.Builder
-		for _, block := range systemField.Array() {
-			if block.Get("type").String() == "text" {
-				sb.WriteString(block.Get("text").String())
-			} else if block.Type == gjson.String {
-				sb.WriteString(block.String())
-			}
-		}
-		systemPrompt = sb.String()
-	} else {
-		systemPrompt = systemField.String()
-	}
-
-	// Check for thinking parameter in Claude API request
-	// Claude API format: {"thinking": {"type": "enabled", "budget_tokens": 16000}}
-	// When thinking is enabled, inject dynamic thinkingHint based on budget_tokens
-	// This allows reasoning_effort (low/medium/high) to control actual thinking length
-	thinkingEnabled := false
-	var budgetTokens int64 = 16000 // Default value (same as OpenAI reasoning_effort "medium")
-	thinkingField := gjson.GetBytes(claudeBody, "thinking")
-	if thinkingField.Exists() {
-		// Check if thinking.type is "enabled"
-		thinkingType := thinkingField.Get("type").String()
-		if thinkingType == "enabled" {
-			thinkingEnabled = true
-			// Read budget_tokens if specified - this value comes from:
-			// - Claude API: thinking.budget_tokens directly
-			// - OpenAI API: reasoning_effort -> budget_tokens (low:4000, medium:16000, high:32000)
-			if bt := thinkingField.Get("budget_tokens"); bt.Exists() {
-				budgetTokens = bt.Int()
-				// If budget_tokens <= 0, disable thinking explicitly
-				// This allows users to disable thinking by setting budget_tokens to 0
-				if budgetTokens <= 0 {
-					thinkingEnabled = false
-					log.Debugf("kiro: thinking mode disabled via budget_tokens <= 0")
-				}
-			}
-			if thinkingEnabled {
-				log.Debugf("kiro: thinking mode enabled via Claude API parameter, budget_tokens: %d", budgetTokens)
-			}
-		}
-	}
-
-	// Inject timestamp context for better temporal awareness
-	// Based on amq2api implementation - helps model understand current time context
-	timestamp := time.Now().Format("2006-01-02 15:04:05 MST")
-	timestampContext := fmt.Sprintf("[Context: Current time is %s]", timestamp)
-	if systemPrompt != "" {
-		systemPrompt = timestampContext + "\n\n" + systemPrompt
-	} else {
-		systemPrompt = timestampContext
-	}
-	log.Debugf("kiro: injected timestamp context: %s", timestamp)
-
-	// Inject agentic optimization prompt for -agentic model variants
-	// This prevents AWS Kiro API timeouts during large file write operations
-	if isAgentic {
-		if systemPrompt != "" {
-			systemPrompt += "\n"
-		}
-		systemPrompt += kiroAgenticSystemPrompt
-	}
-
-	// Inject thinking hint when thinking mode is enabled
-	// This tells the model to use <thinking> tags in its response
-	// DYNAMICALLY set max_thinking_length based on budget_tokens from request
-	// This respects the reasoning_effort setting: low(4000), medium(16000), high(32000)
-	if thinkingEnabled {
-		if systemPrompt != "" {
-			systemPrompt += "\n"
-		}
-		// Build dynamic thinking hint with the actual budget_tokens value
-		dynamicThinkingHint := fmt.Sprintf("<thinking_mode>interleaved</thinking_mode><max_thinking_length>%d</max_thinking_length>", budgetTokens)
-		systemPrompt += dynamicThinkingHint
-		log.Debugf("kiro: injected dynamic thinking hint into system prompt, max_thinking_length: %d", budgetTokens)
-	}
-
-	// Convert Claude tools to Kiro format
-	var kiroTools []kiroToolWrapper
-	if tools.IsArray() {
-		for _, tool := range tools.Array() {
-			name := tool.Get("name").String()
-			description := tool.Get("description").String()
-			inputSchema := tool.Get("input_schema").Value()
-			
-			// Truncate long descriptions (Kiro API limit is in bytes)
-			// Truncate at valid UTF-8 boundary to avoid breaking multi-byte chars
-			// Add truncation notice to help model understand the description is incomplete
-			if len(description) > kiroMaxToolDescLen {
-				// Find a valid UTF-8 boundary before the limit
-				// Reserve space for truncation notice (about 30 bytes)
-				truncLen := kiroMaxToolDescLen - 30
-				for truncLen > 0 && !utf8.RuneStart(description[truncLen]) {
-					truncLen--
-				}
-				description = description[:truncLen] + "... (description truncated)"
-			}
-			
-			kiroTools = append(kiroTools, kiroToolWrapper{
-				ToolSpecification: kiroToolSpecification{
-					Name:        name,
-					Description: description,
-					InputSchema: kiroInputSchema{JSON: inputSchema},
-				},
-			})
-		}
-	}
-
-	var history []kiroHistoryMessage
-	var currentUserMsg *kiroUserInputMessage
-	var currentToolResults []kiroToolResult
-
-	// Merge adjacent messages with the same role before processing
-	// This reduces API call complexity and improves compatibility
-	messagesArray := mergeAdjacentMessages(messages.Array())
-	for i, msg := range messagesArray {
-		role := msg.Get("role").String()
-		isLastMessage := i == len(messagesArray)-1
-
-		if role == "user" {
-			userMsg, toolResults := e.buildUserMessageStruct(msg, modelID, origin)
-			if isLastMessage {
-				currentUserMsg = &userMsg
-				currentToolResults = toolResults
-			} else {
-				// CRITICAL: Kiro API requires content to be non-empty for history messages too
-				if strings.TrimSpace(userMsg.Content) == "" {
-					if len(toolResults) > 0 {
-						userMsg.Content = "Tool results provided."
-					} else {
-						userMsg.Content = "Continue"
-					}
-				}
-				// For history messages, embed tool results in context
-				if len(toolResults) > 0 {
-					userMsg.UserInputMessageContext = &kiroUserInputMessageContext{
-						ToolResults: toolResults,
-					}
-				}
-				history = append(history, kiroHistoryMessage{
-					UserInputMessage: &userMsg,
-				})
-			}
-		} else if role == "assistant" {
-			assistantMsg := e.buildAssistantMessageStruct(msg)
-			// If this is the last message and it's an assistant message,
-			// we need to add it to history and create a "Continue" user message
-			// because Kiro API requires currentMessage to be userInputMessage type
-			if isLastMessage {
-				history = append(history, kiroHistoryMessage{
-					AssistantResponseMessage: &assistantMsg,
-				})
-				// Create a "Continue" user message as currentMessage
-				currentUserMsg = &kiroUserInputMessage{
-					Content: "Continue",
-					ModelID: modelID,
-					Origin:  origin,
-				}
-			} else {
-				history = append(history, kiroHistoryMessage{
-					AssistantResponseMessage: &assistantMsg,
-				})
-			}
-		}
-	}
-
-	// Build content with system prompt
-	if currentUserMsg != nil {
-		var contentBuilder strings.Builder
-		
-		// Add system prompt if present
-		if systemPrompt != "" {
-			contentBuilder.WriteString("--- SYSTEM PROMPT ---\n")
-			contentBuilder.WriteString(systemPrompt)
-			contentBuilder.WriteString("\n--- END SYSTEM PROMPT ---\n\n")
-		}
-		
-		// Add the actual user message
-		contentBuilder.WriteString(currentUserMsg.Content)
-		finalContent := contentBuilder.String()
-		
-		// CRITICAL: Kiro API requires content to be non-empty, even when toolResults are present
-		// If content is empty or only whitespace, provide a default message
-		if strings.TrimSpace(finalContent) == "" {
-			if len(currentToolResults) > 0 {
-				finalContent = "Tool results provided."
-			} else {
-				finalContent = "Continue"
-			}
-			log.Debugf("kiro: content was empty, using default: %s", finalContent)
-		}
-		currentUserMsg.Content = finalContent
-		
-		// Deduplicate currentToolResults before adding to context
-		// Kiro API does not accept duplicate toolUseIds
-		if len(currentToolResults) > 0 {
-			seenIDs := make(map[string]bool)
-			uniqueToolResults := make([]kiroToolResult, 0, len(currentToolResults))
-			for _, tr := range currentToolResults {
-				if !seenIDs[tr.ToolUseID] {
-					seenIDs[tr.ToolUseID] = true
-					uniqueToolResults = append(uniqueToolResults, tr)
-				} else {
-					log.Debugf("kiro: skipping duplicate toolResult in currentMessage: %s", tr.ToolUseID)
-				}
-			}
-			currentToolResults = uniqueToolResults
-		}
-		
-		// Build userInputMessageContext with tools and tool results
-		if len(kiroTools) > 0 || len(currentToolResults) > 0 {
-			currentUserMsg.UserInputMessageContext = &kiroUserInputMessageContext{
-				Tools:       kiroTools,
-				ToolResults: currentToolResults,
-			}
-		}
-	}
-
-	// Build payload using structs (preserves key order)
-	var currentMessage kiroCurrentMessage
-	if currentUserMsg != nil {
-		currentMessage = kiroCurrentMessage{UserInputMessage: *currentUserMsg}
-	} else {
-		// Fallback when no user messages - still include system prompt if present
-		fallbackContent := ""
-		if systemPrompt != "" {
-			fallbackContent = "--- SYSTEM PROMPT ---\n" + systemPrompt + "\n--- END SYSTEM PROMPT ---\n"
-		}
-		currentMessage = kiroCurrentMessage{UserInputMessage: kiroUserInputMessage{
-			Content: fallbackContent,
-			ModelID: modelID,
-			Origin:  origin,
-		}}
-	}
-	
-	// Build inferenceConfig if we have any inference parameters
-	var inferenceConfig *kiroInferenceConfig
-	if maxTokens > 0 || hasTemperature {
-		inferenceConfig = &kiroInferenceConfig{}
-		if maxTokens > 0 {
-			inferenceConfig.MaxTokens = int(maxTokens)
-		}
-		if hasTemperature {
-			inferenceConfig.Temperature = temperature
-		}
-	}
-
-	// Build payload with correct field order (matches struct definition)
-	payload := kiroPayload{
-		ConversationState: kiroConversationState{
-			ChatTriggerType: "MANUAL", // Required by Kiro API - must be first
-			ConversationID:  uuid.New().String(),
-			CurrentMessage:  currentMessage,
-			History:         history, // Now always included (non-nil slice)
-		},
-		ProfileArn:      profileArn,
-		InferenceConfig: inferenceConfig,
-	}
-
-	result, err := json.Marshal(payload)
-	if err != nil {
-		log.Debugf("kiro: failed to marshal payload: %v", err)
-		return nil
-	}
-	
-	return result
-}
-
-// buildUserMessageStruct builds a user message and extracts tool results
-// origin parameter determines which quota to use: "CLI" for Amazon Q, "AI_EDITOR" for Kiro IDE.
-// IMPORTANT: Kiro API does not accept duplicate toolUseIds, so we deduplicate here.
-func (e *KiroExecutor) buildUserMessageStruct(msg gjson.Result, modelID, origin string) (kiroUserInputMessage, []kiroToolResult) {
-	content := msg.Get("content")
-	var contentBuilder strings.Builder
-	var toolResults []kiroToolResult
-	var images []kiroImage
-	
-	// Track seen toolUseIds to deduplicate - Kiro API rejects duplicate toolUseIds
-	seenToolUseIDs := make(map[string]bool)
-
-	if content.IsArray() {
-		for _, part := range content.Array() {
-			partType := part.Get("type").String()
-			switch partType {
-			case "text":
-				contentBuilder.WriteString(part.Get("text").String())
-			case "image":
-				// Extract image data from Claude API format
-				mediaType := part.Get("source.media_type").String()
-				data := part.Get("source.data").String()
-				
-				// Extract format from media_type (e.g., "image/png" -> "png")
-				format := ""
-				if idx := strings.LastIndex(mediaType, "/"); idx != -1 {
-					format = mediaType[idx+1:]
-				}
-				
-				if format != "" && data != "" {
-					images = append(images, kiroImage{
-						Format: format,
-						Source: kiroImageSource{
-							Bytes: data,
-						},
-					})
-				}
-			case "tool_result":
-				// Extract tool result for API
-				toolUseID := part.Get("tool_use_id").String()
-				
-				// Skip duplicate toolUseIds - Kiro API does not accept duplicates
-				if seenToolUseIDs[toolUseID] {
-					log.Debugf("kiro: skipping duplicate tool_result with toolUseId: %s", toolUseID)
-					continue
-				}
-				seenToolUseIDs[toolUseID] = true
-				
-				isError := part.Get("is_error").Bool()
-				resultContent := part.Get("content")
-				
-				// Convert content to Kiro format: [{text: "..."}]
-				var textContents []kiroTextContent
-				if resultContent.IsArray() {
-					for _, item := range resultContent.Array() {
-						if item.Get("type").String() == "text" {
-							textContents = append(textContents, kiroTextContent{Text: item.Get("text").String()})
-						} else if item.Type == gjson.String {
-							textContents = append(textContents, kiroTextContent{Text: item.String()})
-						}
-					}
-				} else if resultContent.Type == gjson.String {
-					textContents = append(textContents, kiroTextContent{Text: resultContent.String()})
-				}
-				
-				// If no content, add default message
-				if len(textContents) == 0 {
-					textContents = append(textContents, kiroTextContent{Text: "Tool use was cancelled by the user"})
-				}
-				
-				status := "success"
-				if isError {
-					status = "error"
-				}
-				
-				toolResults = append(toolResults, kiroToolResult{
-					ToolUseID: toolUseID,
-					Content:   textContents,
-					Status:    status,
-				})
-			}
-		}
-	} else {
-		contentBuilder.WriteString(content.String())
-	}
-
-	userMsg := kiroUserInputMessage{
-		Content: contentBuilder.String(),
-		ModelID: modelID,
-		Origin:  origin,
-	}
-
-	// Add images to message if present
-	if len(images) > 0 {
-		userMsg.Images = images
-	}
-
-	return userMsg, toolResults
-}
-
-// buildAssistantMessageStruct builds an assistant message with tool uses
-func (e *KiroExecutor) buildAssistantMessageStruct(msg gjson.Result) kiroAssistantResponseMessage {
-	content := msg.Get("content")
-	var contentBuilder strings.Builder
-	var toolUses []kiroToolUse
-
-	if content.IsArray() {
-		for _, part := range content.Array() {
-			partType := part.Get("type").String()
-			switch partType {
-			case "text":
-				contentBuilder.WriteString(part.Get("text").String())
-			case "tool_use":
-				// Extract tool use for API
-				toolUseID := part.Get("id").String()
-				toolName := part.Get("name").String()
-				toolInput := part.Get("input")
-				
-				// Convert input to map
-				var inputMap map[string]interface{}
-				if toolInput.IsObject() {
-					inputMap = make(map[string]interface{})
-					toolInput.ForEach(func(key, value gjson.Result) bool {
-						inputMap[key.String()] = value.Value()
-						return true
-					})
-				}
-				
-				toolUses = append(toolUses, kiroToolUse{
-					ToolUseID: toolUseID,
-					Name:      toolName,
-					Input:     inputMap,
-				})
-			}
-		}
-	} else {
-		contentBuilder.WriteString(content.String())
-	}
-
-	return kiroAssistantResponseMessage{
-		Content:  contentBuilder.String(),
-		ToolUses: toolUses,
-	}
-}
-
-// NOTE: Tool calling is now supported via userInputMessageContext.tools and toolResults
+// NOTE: Request building functions moved to internal/translator/kiro/claude/kiro_claude_request.go
+// The executor now uses kiroclaude.BuildKiroPayload() instead
 
 // parseEventStream parses AWS Event Stream binary format.
 // Extracts text content, tool uses, and stop_reason from the response.
 // Supports embedded [Called ...] tool calls and input buffering for toolUseEvent.
 // Returns: content, toolUses, usageInfo, stopReason, error
-func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, usage.Detail, string, error) {
+func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.KiroToolUse, usage.Detail, string, error) {
 	var content strings.Builder
-	var toolUses []kiroToolUse
+	var toolUses []kiroclaude.KiroToolUse
 	var usageInfo usage.Detail
 	var stopReason string // Extracted from upstream response
 	reader := bufio.NewReader(body)
 
 	// Tool use state tracking for input buffering and deduplication
 	processedIDs := make(map[string]bool)
-	var currentToolUse *toolUseState
+	var currentToolUse *kiroclaude.ToolUseState
 
 	for {
 		msg, eventErr := e.readEventStreamMessage(reader)
@@ -1635,11 +1013,11 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 
 		// Extract stop_reason from various event formats
 		// Kiro/Amazon Q API may include stop_reason in different locations
-		if sr := getString(event, "stop_reason"); sr != "" {
+		if sr := kirocommon.GetString(event, "stop_reason"); sr != "" {
 			stopReason = sr
 			log.Debugf("kiro: parseEventStream found stop_reason (top-level): %s", stopReason)
 		}
-		if sr := getString(event, "stopReason"); sr != "" {
+		if sr := kirocommon.GetString(event, "stopReason"); sr != "" {
 			stopReason = sr
 			log.Debugf("kiro: parseEventStream found stopReason (top-level): %s", stopReason)
 		}
@@ -1657,11 +1035,11 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 					content.WriteString(contentText)
 				}
 				// Extract stop_reason from assistantResponseEvent
-				if sr := getString(assistantResp, "stop_reason"); sr != "" {
+				if sr := kirocommon.GetString(assistantResp, "stop_reason"); sr != "" {
 					stopReason = sr
 					log.Debugf("kiro: parseEventStream found stop_reason in assistantResponseEvent: %s", stopReason)
 				}
-				if sr := getString(assistantResp, "stopReason"); sr != "" {
+				if sr := kirocommon.GetString(assistantResp, "stopReason"); sr != "" {
 					stopReason = sr
 					log.Debugf("kiro: parseEventStream found stopReason in assistantResponseEvent: %s", stopReason)
 				}
@@ -1669,17 +1047,17 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 				if toolUsesRaw, ok := assistantResp["toolUses"].([]interface{}); ok {
 					for _, tuRaw := range toolUsesRaw {
 						if tu, ok := tuRaw.(map[string]interface{}); ok {
-							toolUseID := getString(tu, "toolUseId")
+							toolUseID := kirocommon.GetStringValue(tu, "toolUseId")
 							// Check for duplicate
 							if processedIDs[toolUseID] {
 								log.Debugf("kiro: skipping duplicate tool use from assistantResponse: %s", toolUseID)
 								continue
 							}
 							processedIDs[toolUseID] = true
-							
-							toolUse := kiroToolUse{
+
+							toolUse := kiroclaude.KiroToolUse{
 								ToolUseID: toolUseID,
-								Name:      getString(tu, "name"),
+								Name:      kirocommon.GetStringValue(tu, "name"),
 							}
 							if input, ok := tu["input"].(map[string]interface{}); ok {
 								toolUse.Input = input
@@ -1697,17 +1075,17 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 			if toolUsesRaw, ok := event["toolUses"].([]interface{}); ok {
 				for _, tuRaw := range toolUsesRaw {
 					if tu, ok := tuRaw.(map[string]interface{}); ok {
-						toolUseID := getString(tu, "toolUseId")
+						toolUseID := kirocommon.GetStringValue(tu, "toolUseId")
 						// Check for duplicate
 						if processedIDs[toolUseID] {
 							log.Debugf("kiro: skipping duplicate direct tool use: %s", toolUseID)
 							continue
 						}
 						processedIDs[toolUseID] = true
-						
-						toolUse := kiroToolUse{
+
+						toolUse := kiroclaude.KiroToolUse{
 							ToolUseID: toolUseID,
-							Name:      getString(tu, "name"),
+							Name:      kirocommon.GetStringValue(tu, "name"),
 						}
 						if input, ok := tu["input"].(map[string]interface{}); ok {
 							toolUse.Input = input
@@ -1719,7 +1097,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 
 		case "toolUseEvent":
 			// Handle dedicated tool use events with input buffering
-			completedToolUses, newState := e.processToolUseEvent(event, currentToolUse, processedIDs)
+			completedToolUses, newState := kiroclaude.ProcessToolUseEvent(event, currentToolUse, processedIDs)
 			currentToolUse = newState
 			toolUses = append(toolUses, completedToolUses...)
 
@@ -1733,11 +1111,11 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 
 		case "messageStopEvent", "message_stop":
 			// Handle message stop events which may contain stop_reason
-			if sr := getString(event, "stop_reason"); sr != "" {
+			if sr := kirocommon.GetString(event, "stop_reason"); sr != "" {
 				stopReason = sr
 				log.Debugf("kiro: parseEventStream found stop_reason in messageStopEvent: %s", stopReason)
 			}
-			if sr := getString(event, "stopReason"); sr != "" {
+			if sr := kirocommon.GetString(event, "stopReason"); sr != "" {
 				stopReason = sr
 				log.Debugf("kiro: parseEventStream found stopReason in messageStopEvent: %s", stopReason)
 			}
@@ -1756,11 +1134,11 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 
 	// Parse embedded tool calls from content (e.g., [Called tool_name with args: {...}])
 	contentStr := content.String()
-	cleanedContent, embeddedToolUses := e.parseEmbeddedToolCalls(contentStr, processedIDs)
+	cleanedContent, embeddedToolUses := kiroclaude.ParseEmbeddedToolCalls(contentStr, processedIDs)
 	toolUses = append(toolUses, embeddedToolUses...)
 
 	// Deduplicate all tool uses
-	toolUses = deduplicateToolUses(toolUses)
+	toolUses = kiroclaude.DeduplicateToolUses(toolUses)
 
 	// Apply fallback logic for stop_reason if not provided by upstream
 	// Priority: upstream stopReason > tool_use detection > end_turn default
@@ -1876,13 +1254,59 @@ func (e *KiroExecutor) readEventStreamMessage(reader *bufio.Reader) (*eventStrea
 	}, nil
 }
 
+func skipEventStreamHeaderValue(headers []byte, offset int, valueType byte) (int, bool) {
+	switch valueType {
+	case 0, 1: // bool true / bool false
+		return offset, true
+	case 2: // byte
+		if offset+1 > len(headers) {
+			return offset, false
+		}
+		return offset + 1, true
+	case 3: // short
+		if offset+2 > len(headers) {
+			return offset, false
+		}
+		return offset + 2, true
+	case 4: // int
+		if offset+4 > len(headers) {
+			return offset, false
+		}
+		return offset + 4, true
+	case 5: // long
+		if offset+8 > len(headers) {
+			return offset, false
+		}
+		return offset + 8, true
+	case 6: // byte array (2-byte length + data)
+		if offset+2 > len(headers) {
+			return offset, false
+		}
+		valueLen := int(binary.BigEndian.Uint16(headers[offset : offset+2]))
+		offset += 2
+		if offset+valueLen > len(headers) {
+			return offset, false
+		}
+		return offset + valueLen, true
+	case 8: // timestamp
+		if offset+8 > len(headers) {
+			return offset, false
+		}
+		return offset + 8, true
+	case 9: // uuid
+		if offset+16 > len(headers) {
+			return offset, false
+		}
+		return offset + 16, true
+	default:
+		return offset, false
+	}
+}
+
 // extractEventTypeFromBytes extracts the event type from raw header bytes (without prelude CRC prefix)
 func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 	offset := 0
 	for offset < len(headers) {
-		if offset >= len(headers) {
-			break
-		}
 		nameLen := int(headers[offset])
 		offset++
 		if offset+nameLen > len(headers) {
@@ -1912,240 +1336,21 @@ func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 			if name == ":event-type" {
 				return value
 			}
-		} else {
-			// Skip other types
+			continue
+		}
+
+		nextOffset, ok := skipEventStreamHeaderValue(headers, offset, valueType)
+		if !ok {
 			break
 		}
+		offset = nextOffset
 	}
 	return ""
 }
 
-// extractEventType extracts the event type from AWS Event Stream headers
-// Note: This is the legacy version that expects headerBytes to include prelude CRC prefix
-func (e *KiroExecutor) extractEventType(headerBytes []byte) string {
-	// Skip prelude CRC (4 bytes)
-	if len(headerBytes) < 4 {
-		return ""
-	}
-	headers := headerBytes[4:]
 
-	offset := 0
-	for offset < len(headers) {
-		if offset >= len(headers) {
-			break
-		}
-		nameLen := int(headers[offset])
-		offset++
-		if offset+nameLen > len(headers) {
-			break
-		}
-		name := string(headers[offset : offset+nameLen])
-		offset += nameLen
-
-		if offset >= len(headers) {
-			break
-		}
-		valueType := headers[offset]
-		offset++
-
-		if valueType == 7 { // String type
-			if offset+2 > len(headers) {
-				break
-			}
-			valueLen := int(binary.BigEndian.Uint16(headers[offset : offset+2]))
-			offset += 2
-			if offset+valueLen > len(headers) {
-				break
-			}
-			value := string(headers[offset : offset+valueLen])
-			offset += valueLen
-
-			if name == ":event-type" {
-				return value
-			}
-		} else {
-			// Skip other types
-			break
-		}
-	}
-	return ""
-}
-
-// getString safely extracts a string from a map
-func getString(m map[string]interface{}, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-// buildClaudeResponse constructs a Claude-compatible response.
-// Supports tool_use blocks when tools are present in the response.
-// Supports thinking blocks - parses <thinking> tags and converts to Claude thinking content blocks.
-// stopReason is passed from upstream; fallback logic applied if empty.
-func (e *KiroExecutor) buildClaudeResponse(content string, toolUses []kiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
-	var contentBlocks []map[string]interface{}
-
-	// Extract thinking blocks and text from content
-	// This handles <thinking>...</thinking> tags from Kiro's response
-	if content != "" {
-		blocks := e.extractThinkingFromContent(content)
-		contentBlocks = append(contentBlocks, blocks...)
-		
-		// DIAGNOSTIC: Log if thinking blocks were extracted
-		for _, block := range blocks {
-			if block["type"] == "thinking" {
-				thinkingContent := block["thinking"].(string)
-				log.Infof("kiro: buildClaudeResponse extracted thinking block (len: %d)", len(thinkingContent))
-			}
-		}
-	}
-
-	// Add tool_use blocks
-	for _, toolUse := range toolUses {
-		contentBlocks = append(contentBlocks, map[string]interface{}{
-			"type":  "tool_use",
-			"id":    toolUse.ToolUseID,
-			"name":  toolUse.Name,
-			"input": toolUse.Input,
-		})
-	}
-
-	// Ensure at least one content block (Claude API requires non-empty content)
-	if len(contentBlocks) == 0 {
-		contentBlocks = append(contentBlocks, map[string]interface{}{
-			"type": "text",
-			"text": "",
-		})
-	}
-
-	// Use upstream stopReason; apply fallback logic if not provided
-	if stopReason == "" {
-		stopReason = "end_turn"
-		if len(toolUses) > 0 {
-			stopReason = "tool_use"
-		}
-		log.Debugf("kiro: buildClaudeResponse using fallback stop_reason: %s", stopReason)
-	}
-
-	// Log warning if response was truncated due to max_tokens
-	if stopReason == "max_tokens" {
-		log.Warnf("kiro: response truncated due to max_tokens limit (buildClaudeResponse)")
-	}
-
-	response := map[string]interface{}{
-		"id":          "msg_" + uuid.New().String()[:24],
-		"type":        "message",
-		"role":        "assistant",
-		"model":       model,
-		"content":     contentBlocks,
-		"stop_reason": stopReason,
-		"usage": map[string]interface{}{
-			"input_tokens":  usageInfo.InputTokens,
-			"output_tokens": usageInfo.OutputTokens,
-		},
-	}
-	result, _ := json.Marshal(response)
-	return result
-}
-
-// extractThinkingFromContent parses content to extract thinking blocks and text.
-// Returns a list of content blocks in the order they appear in the content.
-// Handles interleaved thinking and text blocks correctly.
-// Based on the streaming implementation's thinking tag handling.
-func (e *KiroExecutor) extractThinkingFromContent(content string) []map[string]interface{} {
-	var blocks []map[string]interface{}
-	
-	if content == "" {
-		return blocks
-	}
-	
-	// Check if content contains thinking tags at all
-	if !strings.Contains(content, thinkingStartTag) {
-		// No thinking tags, return as plain text
-		return []map[string]interface{}{
-			{
-				"type": "text",
-				"text": content,
-			},
-		}
-	}
-	
-	log.Debugf("kiro: extractThinkingFromContent - found thinking tags in content (len: %d)", len(content))
-	
-	remaining := content
-	
-	for len(remaining) > 0 {
-		// Look for <thinking> tag
-		startIdx := strings.Index(remaining, thinkingStartTag)
-		
-		if startIdx == -1 {
-			// No more thinking tags, add remaining as text
-			if strings.TrimSpace(remaining) != "" {
-				blocks = append(blocks, map[string]interface{}{
-					"type": "text",
-					"text": remaining,
-				})
-			}
-			break
-		}
-		
-		// Add text before thinking tag (if any meaningful content)
-		if startIdx > 0 {
-			textBefore := remaining[:startIdx]
-			if strings.TrimSpace(textBefore) != "" {
-				blocks = append(blocks, map[string]interface{}{
-					"type": "text",
-					"text": textBefore,
-				})
-			}
-		}
-		
-		// Move past the opening tag
-		remaining = remaining[startIdx+len(thinkingStartTag):]
-		
-		// Find closing tag
-		endIdx := strings.Index(remaining, thinkingEndTag)
-		
-		if endIdx == -1 {
-			// No closing tag found, treat rest as thinking content (incomplete response)
-			if strings.TrimSpace(remaining) != "" {
-				blocks = append(blocks, map[string]interface{}{
-					"type":     "thinking",
-					"thinking": remaining,
-				})
-				log.Warnf("kiro: extractThinkingFromContent - missing closing </thinking> tag")
-			}
-			break
-		}
-		
-		// Extract thinking content between tags
-		thinkContent := remaining[:endIdx]
-		if strings.TrimSpace(thinkContent) != "" {
-			blocks = append(blocks, map[string]interface{}{
-				"type":     "thinking",
-				"thinking": thinkContent,
-			})
-			log.Debugf("kiro: extractThinkingFromContent - extracted thinking block (len: %d)", len(thinkContent))
-		}
-		
-		// Move past the closing tag
-		remaining = remaining[endIdx+len(thinkingEndTag):]
-	}
-	
-	// If no blocks were created (all whitespace), return empty text block
-	if len(blocks) == 0 {
-		blocks = append(blocks, map[string]interface{}{
-			"type": "text",
-			"text": "",
-		})
-	}
-	
-	return blocks
-}
-
-// NOTE: Tool uses are now extracted from API response, not parsed from text
-
+// NOTE: Response building functions moved to internal/translator/kiro/claude/kiro_claude_response.go
+// The executor now uses kiroclaude.BuildClaudeResponse() and kiroclaude.ExtractThinkingFromContent() instead
 
 // streamToChannel converts AWS Event Stream to channel-based streaming.
 // Supports tool calling - emits tool_use content blocks when tools are used.
@@ -2155,12 +1360,12 @@ func (e *KiroExecutor) extractThinkingFromContent(content string) []map[string]i
 func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *usageReporter) {
 	reader := bufio.NewReaderSize(body, 20*1024*1024) // 20MB buffer to match other providers
 	var totalUsage usage.Detail
-	var hasToolUses bool                 // Track if any tool uses were emitted
-	var upstreamStopReason string        // Track stop_reason from upstream events
+	var hasToolUses bool          // Track if any tool uses were emitted
+	var upstreamStopReason string // Track stop_reason from upstream events
 
 	// Tool use state tracking for input buffering and deduplication
 	processedIDs := make(map[string]bool)
-	var currentToolUse *toolUseState
+	var currentToolUse *kiroclaude.ToolUseState
 
 	// NOTE: Duplicate content filtering removed - it was causing legitimate repeated
 	// content (like consecutive newlines) to be incorrectly filtered out.
@@ -2185,17 +1390,17 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// Thinking mode state tracking - based on amq2api implementation
 	// Tracks whether we're inside a <thinking> block and handles partial tags
 	inThinkBlock := false
-	pendingStartTagChars := 0            // Number of chars that might be start of <thinking>
-	pendingEndTagChars := 0              // Number of chars that might be start of </thinking>
-	isThinkingBlockOpen := false         // Track if thinking content block is open
-	thinkingBlockIndex := -1             // Index of the thinking content block
+	pendingStartTagChars := 0    // Number of chars that might be start of <thinking>
+	pendingEndTagChars := 0      // Number of chars that might be start of </thinking>
+	isThinkingBlockOpen := false // Track if thinking content block is open
+	thinkingBlockIndex := -1     // Index of the thinking content block
 
 	// Pre-calculate input tokens from request if possible
 	// Kiro uses Claude format, so try Claude format first, then OpenAI format, then fallback
 	if enc, err := getTokenizer(model); err == nil {
 		var inputTokens int64
 		var countMethod string
-		
+
 		// Try Claude format first (Kiro uses Claude API format)
 		if inp, err := countClaudeChatTokens(enc, claudeBody); err == nil && inp > 0 {
 			inputTokens = inp
@@ -2212,7 +1417,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			}
 			countMethod = "estimate"
 		}
-		
+
 		totalUsage.InputTokens = inputTokens
 		log.Debugf("kiro: streamToChannel pre-calculated input tokens: %d (method: %s, claude body: %d bytes, original req: %d bytes)",
 			totalUsage.InputTokens, countMethod, len(claudeBody), len(originalReq))
@@ -2239,7 +1444,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		if eventErr != nil {
 			// Log the error
 			log.Errorf("kiro: streamToChannel error: %v", eventErr)
-			
+
 			// Send error to channel for client notification
 			out <- cliproxyexecutor.StreamChunk{Err: eventErr}
 			return
@@ -2247,71 +1452,71 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		if msg == nil {
 			// Normal end of stream (EOF)
 			// Flush any incomplete tool use before ending stream
-			if currentToolUse != nil && !processedIDs[currentToolUse.toolUseID] {
-				log.Warnf("kiro: flushing incomplete tool use at EOF: %s (ID: %s)", currentToolUse.name, currentToolUse.toolUseID)
-				fullInput := currentToolUse.inputBuffer.String()
-				repairedJSON := repairJSON(fullInput)
+			if currentToolUse != nil && !processedIDs[currentToolUse.ToolUseID] {
+				log.Warnf("kiro: flushing incomplete tool use at EOF: %s (ID: %s)", currentToolUse.Name, currentToolUse.ToolUseID)
+				fullInput := currentToolUse.InputBuffer.String()
+				repairedJSON := kiroclaude.RepairJSON(fullInput)
 				var finalInput map[string]interface{}
 				if err := json.Unmarshal([]byte(repairedJSON), &finalInput); err != nil {
 					log.Warnf("kiro: failed to parse incomplete tool input at EOF: %v", err)
 					finalInput = make(map[string]interface{})
 				}
-				
-				processedIDs[currentToolUse.toolUseID] = true
+
+				processedIDs[currentToolUse.ToolUseID] = true
 				contentBlockIndex++
-				
+
 				// Send tool_use content block
-				blockStart := e.buildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", currentToolUse.toolUseID, currentToolUse.name)
+				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", currentToolUse.ToolUseID, currentToolUse.Name)
 				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 				for _, chunk := range sseData {
 					if chunk != "" {
 						out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
 					}
 				}
-				
+
 				// Send tool input as delta
 				inputBytes, _ := json.Marshal(finalInput)
-				inputDelta := e.buildClaudeInputJsonDeltaEvent(string(inputBytes), contentBlockIndex)
+				inputDelta := kiroclaude.BuildClaudeInputJsonDeltaEvent(string(inputBytes), contentBlockIndex)
 				sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, inputDelta, &translatorParam)
 				for _, chunk := range sseData {
 					if chunk != "" {
 						out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
 					}
 				}
-				
+
 				// Close block
-				blockStop := e.buildClaudeContentBlockStopEvent(contentBlockIndex)
+				blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
 				sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 				for _, chunk := range sseData {
 					if chunk != "" {
 						out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
 					}
 				}
-				
+
 				hasToolUses = true
 				currentToolUse = nil
 			}
-			
+
 			// Flush any pending tag characters at EOF
 			// These are partial tag prefixes that were held back waiting for more data
 			// Since no more data is coming, output them as regular text
 			var pendingText string
 			if pendingStartTagChars > 0 {
-				pendingText = thinkingStartTag[:pendingStartTagChars]
+				pendingText = kirocommon.ThinkingStartTag[:pendingStartTagChars]
 				log.Debugf("kiro: flushing pending start tag chars at EOF: %q", pendingText)
 				pendingStartTagChars = 0
 			}
 			if pendingEndTagChars > 0 {
-				pendingText += thinkingEndTag[:pendingEndTagChars]
+				pendingText += kirocommon.ThinkingEndTag[:pendingEndTagChars]
 				log.Debugf("kiro: flushing pending end tag chars at EOF: %q", pendingText)
 				pendingEndTagChars = 0
 			}
-			
+
 			// Output pending text if any
 			if pendingText != "" {
 				// If we're in a thinking block, output as thinking content
 				if inThinkBlock && isThinkingBlockOpen {
-					thinkingEvent := e.buildClaudeThinkingDeltaEvent(pendingText, thinkingBlockIndex)
+					thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(pendingText, thinkingBlockIndex)
 					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
 					for _, chunk := range sseData {
 						if chunk != "" {
@@ -2323,7 +1528,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					if !isTextBlockOpen {
 						contentBlockIndex++
 						isTextBlockOpen = true
-						blockStart := e.buildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+						blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
 						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 						for _, chunk := range sseData {
 							if chunk != "" {
@@ -2331,8 +1536,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 							}
 						}
 					}
-					
-					claudeEvent := e.buildClaudeStreamEvent(pendingText, contentBlockIndex)
+
+					claudeEvent := kiroclaude.BuildClaudeStreamEvent(pendingText, contentBlockIndex)
 					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
 					for _, chunk := range sseData {
 						if chunk != "" {
@@ -2386,18 +1591,18 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 		// Extract stop_reason from various event formats (streaming)
 		// Kiro/Amazon Q API may include stop_reason in different locations
-		if sr := getString(event, "stop_reason"); sr != "" {
+		if sr := kirocommon.GetString(event, "stop_reason"); sr != "" {
 			upstreamStopReason = sr
 			log.Debugf("kiro: streamToChannel found stop_reason (top-level): %s", upstreamStopReason)
 		}
-		if sr := getString(event, "stopReason"); sr != "" {
+		if sr := kirocommon.GetString(event, "stopReason"); sr != "" {
 			upstreamStopReason = sr
 			log.Debugf("kiro: streamToChannel found stopReason (top-level): %s", upstreamStopReason)
 		}
 
 		// Send message_start on first event
 		if !messageStartSent {
-			msgStart := e.buildClaudeMessageStartEvent(model, totalUsage.InputTokens)
+			msgStart := kiroclaude.BuildClaudeMessageStartEvent(model, totalUsage.InputTokens)
 			sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, msgStart, &translatorParam)
 			for _, chunk := range sseData {
 				if chunk != "" {
@@ -2415,11 +1620,11 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 		case "messageStopEvent", "message_stop":
 			// Handle message stop events which may contain stop_reason
-			if sr := getString(event, "stop_reason"); sr != "" {
+			if sr := kirocommon.GetString(event, "stop_reason"); sr != "" {
 				upstreamStopReason = sr
 				log.Debugf("kiro: streamToChannel found stop_reason in messageStopEvent: %s", upstreamStopReason)
 			}
-			if sr := getString(event, "stopReason"); sr != "" {
+			if sr := kirocommon.GetString(event, "stopReason"); sr != "" {
 				upstreamStopReason = sr
 				log.Debugf("kiro: streamToChannel found stopReason in messageStopEvent: %s", upstreamStopReason)
 			}
@@ -2427,17 +1632,17 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		case "assistantResponseEvent":
 			var contentDelta string
 			var toolUses []map[string]interface{}
-			
+
 			if assistantResp, ok := event["assistantResponseEvent"].(map[string]interface{}); ok {
 				if c, ok := assistantResp["content"].(string); ok {
 					contentDelta = c
 				}
 				// Extract stop_reason from assistantResponseEvent
-				if sr := getString(assistantResp, "stop_reason"); sr != "" {
+				if sr := kirocommon.GetString(assistantResp, "stop_reason"); sr != "" {
 					upstreamStopReason = sr
 					log.Debugf("kiro: streamToChannel found stop_reason in assistantResponseEvent: %s", upstreamStopReason)
 				}
-				if sr := getString(assistantResp, "stopReason"); sr != "" {
+				if sr := kirocommon.GetString(assistantResp, "stopReason"); sr != "" {
 					upstreamStopReason = sr
 					log.Debugf("kiro: streamToChannel found stopReason in assistantResponseEvent: %s", upstreamStopReason)
 				}
@@ -2473,7 +1678,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				outputLen += len(contentDelta)
 				// Accumulate content for streaming token calculation
 				accumulatedContent.WriteString(contentDelta)
-				
+
 				// Real-time usage estimation: Check if we should send a usage update
 				// This helps clients track context usage during long thinking sessions
 				shouldSendUsageUpdate := false
@@ -2482,7 +1687,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				} else if time.Since(lastUsageUpdateTime) >= usageUpdateTimeInterval && accumulatedContent.Len() > lastUsageUpdateLen {
 					shouldSendUsageUpdate = true
 				}
-				
+
 				if shouldSendUsageUpdate {
 					// Calculate current output tokens using tiktoken
 					var currentOutputTokens int64
@@ -2498,24 +1703,24 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 							currentOutputTokens = 1
 						}
 					}
-					
+
 					// Only send update if token count has changed significantly (at least 10 tokens)
 					if currentOutputTokens > lastReportedOutputTokens+10 {
 						// Send ping event with usage information
 						// This is a non-blocking update that clients can optionally process
-						pingEvent := e.buildClaudePingEventWithUsage(totalUsage.InputTokens, currentOutputTokens)
+						pingEvent := kiroclaude.BuildClaudePingEventWithUsage(totalUsage.InputTokens, currentOutputTokens)
 						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, pingEvent, &translatorParam)
 						for _, chunk := range sseData {
 							if chunk != "" {
 								out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
 							}
 						}
-						
+
 						lastReportedOutputTokens = currentOutputTokens
 						log.Debugf("kiro: sent real-time usage update - input: %d, output: %d (accumulated: %d chars)",
 							totalUsage.InputTokens, currentOutputTokens, accumulatedContent.Len())
 					}
-					
+
 					lastUsageUpdateLen = accumulatedContent.Len()
 					lastUsageUpdateTime = time.Now()
 				}
@@ -2526,20 +1731,20 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 				// If we have pending start tag chars from previous chunk, prepend them
 				if pendingStartTagChars > 0 {
-					remaining = thinkingStartTag[:pendingStartTagChars] + remaining
+					remaining = kirocommon.ThinkingStartTag[:pendingStartTagChars] + remaining
 					pendingStartTagChars = 0
 				}
-				
+
 				// If we have pending end tag chars from previous chunk, prepend them
 				if pendingEndTagChars > 0 {
-					remaining = thinkingEndTag[:pendingEndTagChars] + remaining
+					remaining = kirocommon.ThinkingEndTag[:pendingEndTagChars] + remaining
 					pendingEndTagChars = 0
 				}
 
 				for len(remaining) > 0 {
 					if inThinkBlock {
 						// Inside thinking block - look for </thinking> end tag
-						endIdx := strings.Index(remaining, thinkingEndTag)
+						endIdx := strings.Index(remaining, kirocommon.ThinkingEndTag)
 						if endIdx >= 0 {
 							// Found end tag - emit any content before end tag, then close block
 							thinkContent := remaining[:endIdx]
@@ -2550,7 +1755,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 									contentBlockIndex++
 									thinkingBlockIndex = contentBlockIndex
 									isThinkingBlockOpen = true
-									blockStart := e.buildClaudeContentBlockStartEvent(thinkingBlockIndex, "thinking", "", "")
+									blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(thinkingBlockIndex, "thinking", "", "")
 									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 									for _, chunk := range sseData {
 										if chunk != "" {
@@ -2558,9 +1763,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 										}
 									}
 								}
-								
+
 								// Send thinking delta immediately
-								thinkingEvent := e.buildClaudeThinkingDeltaEvent(thinkContent, thinkingBlockIndex)
+								thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(thinkContent, thinkingBlockIndex)
 								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
 								for _, chunk := range sseData {
 									if chunk != "" {
@@ -2574,7 +1779,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 							// Close thinking block
 							if isThinkingBlockOpen {
-								blockStop := e.buildClaudeContentBlockStopEvent(thinkingBlockIndex)
+								blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(thinkingBlockIndex)
 								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 								for _, chunk := range sseData {
 									if chunk != "" {
@@ -2585,13 +1790,13 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 							}
 
 							inThinkBlock = false
-							remaining = remaining[endIdx+len(thinkingEndTag):]
+							remaining = remaining[endIdx+len(kirocommon.ThinkingEndTag):]
 							log.Debugf("kiro: exited thinking block")
 						} else {
 							// No end tag found - TRUE STREAMING: emit content immediately
 							// Only save potential partial tag length for next iteration
-							pendingEnd := pendingTagSuffix(remaining, thinkingEndTag)
-							
+							pendingEnd := kiroclaude.PendingTagSuffix(remaining, kirocommon.ThinkingEndTag)
+
 							// Calculate content to emit immediately (excluding potential partial tag)
 							var contentToEmit string
 							if pendingEnd > 0 {
@@ -2601,7 +1806,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 							} else {
 								contentToEmit = remaining
 							}
-							
+
 							// TRUE STREAMING: Emit thinking content immediately
 							if contentToEmit != "" {
 								// Start thinking block if not open
@@ -2609,39 +1814,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 									contentBlockIndex++
 									thinkingBlockIndex = contentBlockIndex
 									isThinkingBlockOpen = true
-									blockStart := e.buildClaudeContentBlockStartEvent(thinkingBlockIndex, "thinking", "", "")
-									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
-									for _, chunk := range sseData {
-										if chunk != "" {
-											out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
-										}
-									}
-								}
-								
-								// Send thinking delta immediately - TRUE STREAMING!
-								thinkingEvent := e.buildClaudeThinkingDeltaEvent(contentToEmit, thinkingBlockIndex)
-								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
-								for _, chunk := range sseData {
-									if chunk != "" {
-										out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
-									}
-								}
-							}
-							
-							remaining = ""
-						}
-					} else {
-						// Outside thinking block - look for <thinking> start tag
-						startIdx := strings.Index(remaining, thinkingStartTag)
-						if startIdx >= 0 {
-							// Found start tag - emit text before it and switch to thinking mode
-							textBefore := remaining[:startIdx]
-							if textBefore != "" {
-								// Start text content block if needed
-								if !isTextBlockOpen {
-									contentBlockIndex++
-									isTextBlockOpen = true
-									blockStart := e.buildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+									blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(thinkingBlockIndex, "thinking", "", "")
 									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 									for _, chunk := range sseData {
 										if chunk != "" {
@@ -2650,7 +1823,39 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 									}
 								}
 
-								claudeEvent := e.buildClaudeStreamEvent(textBefore, contentBlockIndex)
+								// Send thinking delta immediately - TRUE STREAMING!
+								thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(contentToEmit, thinkingBlockIndex)
+								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
+								for _, chunk := range sseData {
+									if chunk != "" {
+										out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+									}
+								}
+							}
+
+							remaining = ""
+						}
+					} else {
+						// Outside thinking block - look for <thinking> start tag
+						startIdx := strings.Index(remaining, kirocommon.ThinkingStartTag)
+						if startIdx >= 0 {
+							// Found start tag - emit text before it and switch to thinking mode
+							textBefore := remaining[:startIdx]
+							if textBefore != "" {
+								// Start text content block if needed
+								if !isTextBlockOpen {
+									contentBlockIndex++
+									isTextBlockOpen = true
+									blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+									for _, chunk := range sseData {
+										if chunk != "" {
+											out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+										}
+									}
+								}
+
+								claudeEvent := kiroclaude.BuildClaudeStreamEvent(textBefore, contentBlockIndex)
 								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
 								for _, chunk := range sseData {
 									if chunk != "" {
@@ -2661,7 +1866,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 							// Close text block before starting thinking block
 							if isTextBlockOpen {
-								blockStop := e.buildClaudeContentBlockStopEvent(contentBlockIndex)
+								blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
 								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 								for _, chunk := range sseData {
 									if chunk != "" {
@@ -2672,11 +1877,11 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 							}
 
 							inThinkBlock = true
-							remaining = remaining[startIdx+len(thinkingStartTag):]
+							remaining = remaining[startIdx+len(kirocommon.ThinkingStartTag):]
 							log.Debugf("kiro: entered thinking block")
 						} else {
 							// No start tag found - check for partial start tag at buffer end
-							pendingStart := pendingTagSuffix(remaining, thinkingStartTag)
+							pendingStart := kiroclaude.PendingTagSuffix(remaining, kirocommon.ThinkingStartTag)
 							if pendingStart > 0 {
 								// Emit text except potential partial tag
 								textToEmit := remaining[:len(remaining)-pendingStart]
@@ -2685,7 +1890,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 									if !isTextBlockOpen {
 										contentBlockIndex++
 										isTextBlockOpen = true
-										blockStart := e.buildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+										blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
 										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 										for _, chunk := range sseData {
 											if chunk != "" {
@@ -2694,7 +1899,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 										}
 									}
 
-									claudeEvent := e.buildClaudeStreamEvent(textToEmit, contentBlockIndex)
+									claudeEvent := kiroclaude.BuildClaudeStreamEvent(textToEmit, contentBlockIndex)
 									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
 									for _, chunk := range sseData {
 										if chunk != "" {
@@ -2711,7 +1916,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 									if !isTextBlockOpen {
 										contentBlockIndex++
 										isTextBlockOpen = true
-										blockStart := e.buildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+										blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
 										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 										for _, chunk := range sseData {
 											if chunk != "" {
@@ -2720,7 +1925,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 										}
 									}
 
-									claudeEvent := e.buildClaudeStreamEvent(remaining, contentBlockIndex)
+									claudeEvent := kiroclaude.BuildClaudeStreamEvent(remaining, contentBlockIndex)
 									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
 									for _, chunk := range sseData {
 										if chunk != "" {
@@ -2734,22 +1939,22 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					}
 				}
 			}
-			
+
 			// Handle tool uses in response (with deduplication)
 			for _, tu := range toolUses {
-				toolUseID := getString(tu, "toolUseId")
-				
+				toolUseID := kirocommon.GetString(tu, "toolUseId")
+
 				// Check for duplicate
 				if processedIDs[toolUseID] {
 					log.Debugf("kiro: skipping duplicate tool use in stream: %s", toolUseID)
 					continue
 				}
 				processedIDs[toolUseID] = true
-				
+
 				hasToolUses = true
 				// Close text block if open before starting tool_use block
 				if isTextBlockOpen && contentBlockIndex >= 0 {
-					blockStop := e.buildClaudeContentBlockStopEvent(contentBlockIndex)
+					blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
 					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 					for _, chunk := range sseData {
 						if chunk != "" {
@@ -2758,19 +1963,19 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					}
 					isTextBlockOpen = false
 				}
-				
+
 				// Emit tool_use content block
 				contentBlockIndex++
-				toolName := getString(tu, "name")
-				
-				blockStart := e.buildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", toolUseID, toolName)
+				toolName := kirocommon.GetString(tu, "name")
+
+				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", toolUseID, toolName)
 				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 				for _, chunk := range sseData {
 					if chunk != "" {
 						out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
 					}
 				}
-				
+
 				// Send input_json_delta with the tool input
 				if input, ok := tu["input"].(map[string]interface{}); ok {
 					inputJSON, err := json.Marshal(input)
@@ -2778,7 +1983,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 						log.Debugf("kiro: failed to marshal tool input: %v", err)
 						// Don't continue - still need to close the block
 					} else {
-						inputDelta := e.buildClaudeInputJsonDeltaEvent(string(inputJSON), contentBlockIndex)
+						inputDelta := kiroclaude.BuildClaudeInputJsonDeltaEvent(string(inputJSON), contentBlockIndex)
 						sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, inputDelta, &translatorParam)
 						for _, chunk := range sseData {
 							if chunk != "" {
@@ -2787,9 +1992,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 						}
 					}
 				}
-				
+
 				// Close tool_use block (always close even if input marshal failed)
-				blockStop := e.buildClaudeContentBlockStopEvent(contentBlockIndex)
+				blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
 				sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 				for _, chunk := range sseData {
 					if chunk != "" {
@@ -2800,16 +2005,16 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 		case "toolUseEvent":
 			// Handle dedicated tool use events with input buffering
-			completedToolUses, newState := e.processToolUseEvent(event, currentToolUse, processedIDs)
+			completedToolUses, newState := kiroclaude.ProcessToolUseEvent(event, currentToolUse, processedIDs)
 			currentToolUse = newState
-			
+
 			// Emit completed tool uses
 			for _, tu := range completedToolUses {
 				hasToolUses = true
-				
+
 				// Close text block if open
 				if isTextBlockOpen && contentBlockIndex >= 0 {
-					blockStop := e.buildClaudeContentBlockStopEvent(contentBlockIndex)
+					blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
 					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 					for _, chunk := range sseData {
 						if chunk != "" {
@@ -2818,23 +2023,23 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					}
 					isTextBlockOpen = false
 				}
-				
+
 				contentBlockIndex++
-				
-				blockStart := e.buildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, tu.Name)
+
+				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, tu.Name)
 				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
 				for _, chunk := range sseData {
 					if chunk != "" {
 						out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
 					}
 				}
-				
+
 				if tu.Input != nil {
 					inputJSON, err := json.Marshal(tu.Input)
 					if err != nil {
 						log.Debugf("kiro: failed to marshal tool input in toolUseEvent: %v", err)
 					} else {
-						inputDelta := e.buildClaudeInputJsonDeltaEvent(string(inputJSON), contentBlockIndex)
+						inputDelta := kiroclaude.BuildClaudeInputJsonDeltaEvent(string(inputJSON), contentBlockIndex)
 						sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, inputDelta, &translatorParam)
 						for _, chunk := range sseData {
 							if chunk != "" {
@@ -2843,8 +2048,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 						}
 					}
 				}
-				
-				blockStop := e.buildClaudeContentBlockStopEvent(contentBlockIndex)
+
+				blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
 				sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 				for _, chunk := range sseData {
 					if chunk != "" {
@@ -2875,7 +2080,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Close content block if open
 	if isTextBlockOpen && contentBlockIndex >= 0 {
-		blockStop := e.buildClaudeContentBlockStopEvent(contentBlockIndex)
+		blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
 		sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 		for _, chunk := range sseData {
 			if chunk != "" {
@@ -2935,7 +2140,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	}
 
 	// Send message_delta event
-	msgDelta := e.buildClaudeMessageDeltaEvent(stopReason, totalUsage)
+	msgDelta := kiroclaude.BuildClaudeMessageDeltaEvent(stopReason, totalUsage)
 	sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, msgDelta, &translatorParam)
 	for _, chunk := range sseData {
 		if chunk != "" {
@@ -2944,7 +2149,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	}
 
 	// Send message_stop event separately
-	msgStop := e.buildClaudeMessageStopOnlyEvent()
+	msgStop := kiroclaude.BuildClaudeMessageStopOnlyEvent()
 	sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, msgStop, &translatorParam)
 	for _, chunk := range sseData {
 		if chunk != "" {
@@ -2954,180 +2159,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// reporter.publish is called via defer
 }
 
-
-// Claude SSE event builders
-// All builders return complete SSE format with "event:" line for Claude client compatibility.
-func (e *KiroExecutor) buildClaudeMessageStartEvent(model string, inputTokens int64) []byte {
-	event := map[string]interface{}{
-		"type": "message_start",
-		"message": map[string]interface{}{
-			"id":            "msg_" + uuid.New().String()[:24],
-			"type":          "message",
-			"role":          "assistant",
-			"content":       []interface{}{},
-			"model":         model,
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage":         map[string]interface{}{"input_tokens": inputTokens, "output_tokens": 0},
-		},
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: message_start\ndata: " + string(result))
-}
-
-func (e *KiroExecutor) buildClaudeContentBlockStartEvent(index int, blockType, toolUseID, toolName string) []byte {
-	var contentBlock map[string]interface{}
-	switch blockType {
-	case "tool_use":
-		contentBlock = map[string]interface{}{
-			"type":  "tool_use",
-			"id":    toolUseID,
-			"name":  toolName,
-			"input": map[string]interface{}{},
-		}
-	case "thinking":
-		contentBlock = map[string]interface{}{
-			"type":     "thinking",
-			"thinking": "",
-		}
-	default:
-		contentBlock = map[string]interface{}{
-			"type": "text",
-			"text": "",
-		}
-	}
-
-	event := map[string]interface{}{
-		"type":          "content_block_start",
-		"index":         index,
-		"content_block": contentBlock,
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: content_block_start\ndata: " + string(result))
-}
-
-func (e *KiroExecutor) buildClaudeStreamEvent(contentDelta string, index int) []byte {
-	event := map[string]interface{}{
-		"type":  "content_block_delta",
-		"index": index,
-		"delta": map[string]interface{}{
-			"type": "text_delta",
-			"text": contentDelta,
-		},
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: content_block_delta\ndata: " + string(result))
-}
-
-// buildClaudeInputJsonDeltaEvent creates an input_json_delta event for tool use streaming
-func (e *KiroExecutor) buildClaudeInputJsonDeltaEvent(partialJSON string, index int) []byte {
-	event := map[string]interface{}{
-		"type":  "content_block_delta",
-		"index": index,
-		"delta": map[string]interface{}{
-			"type":         "input_json_delta",
-			"partial_json": partialJSON,
-		},
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: content_block_delta\ndata: " + string(result))
-}
-
-func (e *KiroExecutor) buildClaudeContentBlockStopEvent(index int) []byte {
-	event := map[string]interface{}{
-		"type":  "content_block_stop",
-		"index": index,
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: content_block_stop\ndata: " + string(result))
-}
-
-// buildClaudeMessageDeltaEvent creates the message_delta event with stop_reason and usage.
-func (e *KiroExecutor) buildClaudeMessageDeltaEvent(stopReason string, usageInfo usage.Detail) []byte {
-	deltaEvent := map[string]interface{}{
-		"type": "message_delta",
-		"delta": map[string]interface{}{
-			"stop_reason":   stopReason,
-			"stop_sequence": nil,
-		},
-		"usage": map[string]interface{}{
-			"input_tokens":  usageInfo.InputTokens,
-			"output_tokens": usageInfo.OutputTokens,
-		},
-	}
-	deltaResult, _ := json.Marshal(deltaEvent)
-	return []byte("event: message_delta\ndata: " + string(deltaResult))
-}
-
-// buildClaudeMessageStopOnlyEvent creates only the message_stop event.
-func (e *KiroExecutor) buildClaudeMessageStopOnlyEvent() []byte {
-	stopEvent := map[string]interface{}{
-		"type": "message_stop",
-	}
-	stopResult, _ := json.Marshal(stopEvent)
-	return []byte("event: message_stop\ndata: " + string(stopResult))
-}
-
-// buildClaudeFinalEvent constructs the final Claude-style event.
-func (e *KiroExecutor) buildClaudeFinalEvent() []byte {
-	event := map[string]interface{}{
-		"type": "message_stop",
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: message_stop\ndata: " + string(result))
-}
-
-// buildClaudePingEventWithUsage creates a ping event with embedded usage information.
-// This is used for real-time usage estimation during streaming.
-// The usage field is a non-standard extension that clients can optionally process.
-// Clients that don't recognize the usage field will simply ignore it.
-func (e *KiroExecutor) buildClaudePingEventWithUsage(inputTokens, outputTokens int64) []byte {
-	event := map[string]interface{}{
-		"type": "ping",
-		"usage": map[string]interface{}{
-			"input_tokens":  inputTokens,
-			"output_tokens": outputTokens,
-			"total_tokens":  inputTokens + outputTokens,
-			"estimated":     true, // Flag to indicate this is an estimate, not final
-		},
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: ping\ndata: " + string(result))
-}
-
-// buildClaudeThinkingDeltaEvent creates a thinking_delta event for Claude API compatibility.
-// This is used when streaming thinking content wrapped in <thinking> tags.
-func (e *KiroExecutor) buildClaudeThinkingDeltaEvent(thinkingDelta string, index int) []byte {
-	event := map[string]interface{}{
-		"type":  "content_block_delta",
-		"index": index,
-		"delta": map[string]interface{}{
-			"type":     "thinking_delta",
-			"thinking": thinkingDelta,
-		},
-	}
-	result, _ := json.Marshal(event)
-	return []byte("event: content_block_delta\ndata: " + string(result))
-}
-
-// pendingTagSuffix detects if the buffer ends with a partial prefix of the given tag.
-// Returns the length of the partial match (0 if no match).
-// Based on amq2api implementation for handling cross-chunk tag boundaries.
-func pendingTagSuffix(buffer, tag string) int {
-	if buffer == "" || tag == "" {
-		return 0
-	}
-	maxLen := len(buffer)
-	if maxLen > len(tag)-1 {
-		maxLen = len(tag) - 1
-	}
-	for length := maxLen; length > 0; length-- {
-		if len(buffer) >= length && buffer[len(buffer)-length:] == tag[:length] {
-			return length
-		}
-	}
-	return 0
-}
+// NOTE: Claude SSE event builders moved to internal/translator/kiro/claude/kiro_claude_stream.go
+// The executor now uses kiroclaude.BuildClaude*Event() functions instead
 
 // CountTokens is not supported for Kiro provider.
 // Kiro/Amazon Q backend doesn't expose a token counting API.
@@ -3281,209 +2314,6 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	return updated, nil
 }
 
-// streamEventStream converts AWS Event Stream to SSE (legacy method for gin.Context).
-// Note: For full tool calling support, use streamToChannel instead.
-func (e *KiroExecutor) streamEventStream(ctx context.Context, body io.Reader, c *gin.Context, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *usageReporter) error {
-	reader := bufio.NewReader(body)
-	var totalUsage usage.Detail
-
-	// Translator param for maintaining tool call state across streaming events
-	var translatorParam any
-
-	// Pre-calculate input tokens from request if possible
-	if enc, err := getTokenizer(model); err == nil {
-		// Try OpenAI format first, then fall back to raw byte count estimation
-		if inp, err := countOpenAIChatTokens(enc, originalReq); err == nil && inp > 0 {
-			totalUsage.InputTokens = inp
-		} else {
-			// Fallback: estimate from raw request size (roughly 4 chars per token)
-			totalUsage.InputTokens = int64(len(originalReq) / 4)
-			if totalUsage.InputTokens == 0 && len(originalReq) > 0 {
-				totalUsage.InputTokens = 1
-			}
-		}
-		log.Debugf("kiro: streamEventStream pre-calculated input tokens: %d (request size: %d bytes)", totalUsage.InputTokens, len(originalReq))
-	}
-
-	contentBlockIndex := -1
-	messageStartSent := false
-	isBlockOpen := false
-	var outputLen int
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		prelude := make([]byte, 8)
-		_, err := io.ReadFull(reader, prelude)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("failed to read prelude: %w", err)
-		}
-
-		totalLen := binary.BigEndian.Uint32(prelude[0:4])
-		if totalLen < 8 {
-			return fmt.Errorf("invalid message length: %d", totalLen)
-		}
-		if totalLen > kiroMaxMessageSize {
-			return fmt.Errorf("message too large: %d bytes", totalLen)
-		}
-		headersLen := binary.BigEndian.Uint32(prelude[4:8])
-
-		remaining := make([]byte, totalLen-8)
-		_, err = io.ReadFull(reader, remaining)
-		if err != nil {
-			return fmt.Errorf("failed to read message: %w", err)
-		}
-
-		// Validate headersLen to prevent slice out of bounds
-		if headersLen+4 > uint32(len(remaining)) {
-			log.Warnf("kiro: invalid headersLen %d exceeds remaining buffer %d", headersLen, len(remaining))
-			continue
-		}
-
-		eventType := e.extractEventType(remaining[:headersLen+4])
-
-		payloadStart := 4 + headersLen
-		payloadEnd := uint32(len(remaining)) - 4
-		if payloadStart >= payloadEnd {
-			continue
-		}
-
-		payload := remaining[payloadStart:payloadEnd]
-		appendAPIResponseChunk(ctx, e.cfg, payload)
-
-		var event map[string]interface{}
-		if err := json.Unmarshal(payload, &event); err != nil {
-			log.Warnf("kiro: failed to unmarshal event payload: %v, raw: %s", err, string(payload))
-			continue
-		}
-
-		if !messageStartSent {
-			msgStart := e.buildClaudeMessageStartEvent(model, totalUsage.InputTokens)
-			sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, msgStart, &translatorParam)
-			for _, chunk := range sseData {
-				if chunk != "" {
-					c.Writer.Write([]byte(chunk + "\n\n"))
-				}
-			}
-			c.Writer.Flush()
-			messageStartSent = true
-		}
-
-		switch eventType {
-		case "assistantResponseEvent":
-			var contentDelta string
-			if assistantResp, ok := event["assistantResponseEvent"].(map[string]interface{}); ok {
-				if ct, ok := assistantResp["content"].(string); ok {
-					contentDelta = ct
-				}
-			}
-			if contentDelta == "" {
-				if ct, ok := event["content"].(string); ok {
-					contentDelta = ct
-				}
-			}
-
-			if contentDelta != "" {
-				outputLen += len(contentDelta)
-				// Start text content block if needed
-				if !isBlockOpen {
-					contentBlockIndex++
-					isBlockOpen = true
-					blockStart := e.buildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
-					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
-					for _, chunk := range sseData {
-						if chunk != "" {
-							c.Writer.Write([]byte(chunk + "\n\n"))
-						}
-					}
-					c.Writer.Flush()
-				}
-
-				claudeEvent := e.buildClaudeStreamEvent(contentDelta, contentBlockIndex)
-				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
-				for _, chunk := range sseData {
-					if chunk != "" {
-						c.Writer.Write([]byte(chunk + "\n\n"))
-					}
-				}
-				c.Writer.Flush()
-			}
-
-		// Note: For full toolUseEvent support, use streamToChannel
-
-		case "supplementaryWebLinksEvent":
-			if inputTokens, ok := event["inputTokens"].(float64); ok {
-				totalUsage.InputTokens = int64(inputTokens)
-			}
-			if outputTokens, ok := event["outputTokens"].(float64); ok {
-				totalUsage.OutputTokens = int64(outputTokens)
-			}
-		}
-
-		if usageEvent, ok := event["supplementaryWebLinksEvent"].(map[string]interface{}); ok {
-			if inputTokens, ok := usageEvent["inputTokens"].(float64); ok {
-				totalUsage.InputTokens = int64(inputTokens)
-			}
-			if outputTokens, ok := usageEvent["outputTokens"].(float64); ok {
-				totalUsage.OutputTokens = int64(outputTokens)
-			}
-		}
-	}
-
-	// Close content block if open
-	if isBlockOpen && contentBlockIndex >= 0 {
-		blockStop := e.buildClaudeContentBlockStopEvent(contentBlockIndex)
-		sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
-		for _, chunk := range sseData {
-			if chunk != "" {
-				c.Writer.Write([]byte(chunk + "\n\n"))
-			}
-		}
-		c.Writer.Flush()
-	}
-
-	// Fallback for output tokens if not received from upstream
-	if totalUsage.OutputTokens == 0 && outputLen > 0 {
-		totalUsage.OutputTokens = int64(outputLen / 4)
-		if totalUsage.OutputTokens == 0 {
-			totalUsage.OutputTokens = 1
-		}
-	}
-	totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens
-
-	// Send message_delta event
-	msgDelta := e.buildClaudeMessageDeltaEvent("end_turn", totalUsage)
-	sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, msgDelta, &translatorParam)
-	for _, chunk := range sseData {
-		if chunk != "" {
-			c.Writer.Write([]byte(chunk + "\n\n"))
-		}
-	}
-	c.Writer.Flush()
-
-	// Send message_stop event separately
-	msgStop := e.buildClaudeMessageStopOnlyEvent()
-	sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, msgStop, &translatorParam)
-	for _, chunk := range sseData {
-		if chunk != "" {
-			c.Writer.Write([]byte(chunk + "\n\n"))
-		}
-	}
-
-	c.Writer.Write([]byte("data: [DONE]\n\n"))
-	c.Writer.Flush()
-
-	reporter.publish(ctx, totalUsage)
-	return nil
-}
-
 // isTokenExpired checks if a JWT access token has expired.
 // Returns true if the token is expired or cannot be parsed.
 func (e *KiroExecutor) isTokenExpired(accessToken string) bool {
@@ -3542,666 +2372,6 @@ func (e *KiroExecutor) isTokenExpired(accessToken string) bool {
 	return isExpired
 }
 
-// ============================================================================
-// Message Merging Support - Merge adjacent messages with the same role
-// Based on AIClient-2-API implementation
-// ============================================================================
-
-// mergeAdjacentMessages merges adjacent messages with the same role.
-// This reduces API call complexity and improves compatibility.
-// Based on AIClient-2-API implementation.
-func mergeAdjacentMessages(messages []gjson.Result) []gjson.Result {
-	if len(messages) <= 1 {
-		return messages
-	}
-
-	var merged []gjson.Result
-	for _, msg := range messages {
-		if len(merged) == 0 {
-			merged = append(merged, msg)
-			continue
-		}
-
-		lastMsg := merged[len(merged)-1]
-		currentRole := msg.Get("role").String()
-		lastRole := lastMsg.Get("role").String()
-
-		if currentRole == lastRole {
-			// Merge content from current message into last message
-			mergedContent := mergeMessageContent(lastMsg, msg)
-			// Create a new merged message JSON
-			mergedMsg := createMergedMessage(lastRole, mergedContent)
-			merged[len(merged)-1] = gjson.Parse(mergedMsg)
-		} else {
-			merged = append(merged, msg)
-		}
-	}
-
-	return merged
-}
-
-// mergeMessageContent merges the content of two messages with the same role.
-// Handles both string content and array content (with text, tool_use, tool_result blocks).
-func mergeMessageContent(msg1, msg2 gjson.Result) string {
-	content1 := msg1.Get("content")
-	content2 := msg2.Get("content")
-
-	// Extract content blocks from both messages
-	var blocks1, blocks2 []map[string]interface{}
-
-	if content1.IsArray() {
-		for _, block := range content1.Array() {
-			blocks1 = append(blocks1, blockToMap(block))
-		}
-	} else if content1.Type == gjson.String {
-		blocks1 = append(blocks1, map[string]interface{}{
-			"type": "text",
-			"text": content1.String(),
-		})
-	}
-
-	if content2.IsArray() {
-		for _, block := range content2.Array() {
-			blocks2 = append(blocks2, blockToMap(block))
-		}
-	} else if content2.Type == gjson.String {
-		blocks2 = append(blocks2, map[string]interface{}{
-			"type": "text",
-			"text": content2.String(),
-		})
-	}
-
-	// Merge text blocks if both end/start with text
-	if len(blocks1) > 0 && len(blocks2) > 0 {
-		if blocks1[len(blocks1)-1]["type"] == "text" && blocks2[0]["type"] == "text" {
-			// Merge the last text block of msg1 with the first text block of msg2
-			text1 := blocks1[len(blocks1)-1]["text"].(string)
-			text2 := blocks2[0]["text"].(string)
-			blocks1[len(blocks1)-1]["text"] = text1 + "\n" + text2
-			blocks2 = blocks2[1:] // Remove the merged block from blocks2
-		}
-	}
-
-	// Combine all blocks
-	allBlocks := append(blocks1, blocks2...)
-
-	// Convert to JSON
-	result, _ := json.Marshal(allBlocks)
-	return string(result)
-}
-
-// blockToMap converts a gjson.Result block to a map[string]interface{}
-func blockToMap(block gjson.Result) map[string]interface{} {
-	result := make(map[string]interface{})
-	block.ForEach(func(key, value gjson.Result) bool {
-		if value.IsObject() {
-			result[key.String()] = blockToMap(value)
-		} else if value.IsArray() {
-			var arr []interface{}
-			for _, item := range value.Array() {
-				if item.IsObject() {
-					arr = append(arr, blockToMap(item))
-				} else {
-					arr = append(arr, item.Value())
-				}
-			}
-			result[key.String()] = arr
-		} else {
-			result[key.String()] = value.Value()
-		}
-		return true
-	})
-	return result
-}
-
-// createMergedMessage creates a JSON string for a merged message
-func createMergedMessage(role string, content string) string {
-	msg := map[string]interface{}{
-		"role":    role,
-		"content": json.RawMessage(content),
-	}
-	result, _ := json.Marshal(msg)
-	return string(result)
-}
-
-// ============================================================================
-// Tool Calling Support - Embedded tool call parsing and input buffering
-// Based on amq2api and AIClient-2-API implementations
-// ============================================================================
-
-// toolUseState tracks the state of an in-progress tool use during streaming.
-type toolUseState struct {
-	toolUseID   string
-	name        string
-	inputBuffer strings.Builder
-	isComplete  bool
-}
-
-// Pre-compiled regex patterns for performance (avoid recompilation on each call)
-var (
-	// embeddedToolCallPattern matches [Called tool_name with args: {...}] format
-	// This pattern is used by Kiro when it embeds tool calls in text content
-	embeddedToolCallPattern = regexp.MustCompile(`\[Called\s+(\w+)\s+with\s+args:\s*`)
-	// whitespaceCollapsePattern collapses multiple whitespace characters into single space
-	whitespaceCollapsePattern = regexp.MustCompile(`\s+`)
-	// trailingCommaPattern matches trailing commas before closing braces/brackets
-	trailingCommaPattern = regexp.MustCompile(`,\s*([}\]])`)
-)
-
-// parseEmbeddedToolCalls extracts [Called tool_name with args: {...}] format from text.
-// Kiro sometimes embeds tool calls in text content instead of using toolUseEvent.
-// Returns the cleaned text (with tool calls removed) and extracted tool uses.
-func (e *KiroExecutor) parseEmbeddedToolCalls(text string, processedIDs map[string]bool) (string, []kiroToolUse) {
-	if !strings.Contains(text, "[Called") {
-		return text, nil
-	}
-
-	var toolUses []kiroToolUse
-	cleanText := text
-
-	// Find all [Called markers
-	matches := embeddedToolCallPattern.FindAllStringSubmatchIndex(text, -1)
-	if len(matches) == 0 {
-		return text, nil
-	}
-
-	// Process matches in reverse order to maintain correct indices
-	for i := len(matches) - 1; i >= 0; i-- {
-		matchStart := matches[i][0]
-		toolNameStart := matches[i][2]
-		toolNameEnd := matches[i][3]
-
-		if toolNameStart < 0 || toolNameEnd < 0 {
-			continue
-		}
-
-		toolName := text[toolNameStart:toolNameEnd]
-
-		// Find the JSON object start (after "with args:")
-		jsonStart := matches[i][1]
-		if jsonStart >= len(text) {
-			continue
-		}
-
-		// Skip whitespace to find the opening brace
-		for jsonStart < len(text) && (text[jsonStart] == ' ' || text[jsonStart] == '\t') {
-			jsonStart++
-		}
-
-		if jsonStart >= len(text) || text[jsonStart] != '{' {
-			continue
-		}
-
-		// Find matching closing bracket
-		jsonEnd := findMatchingBracket(text, jsonStart)
-		if jsonEnd < 0 {
-			continue
-		}
-
-		// Extract JSON and find the closing bracket of [Called ...]
-		jsonStr := text[jsonStart : jsonEnd+1]
-		
-		// Find the closing ] after the JSON
-		closingBracket := jsonEnd + 1
-		for closingBracket < len(text) && text[closingBracket] != ']' {
-			closingBracket++
-		}
-		if closingBracket >= len(text) {
-			continue
-		}
-
-		// Extract and repair the full tool call text
-		fullMatch := text[matchStart : closingBracket+1]
-
-		// Repair and parse JSON
-		repairedJSON := repairJSON(jsonStr)
-		var inputMap map[string]interface{}
-		if err := json.Unmarshal([]byte(repairedJSON), &inputMap); err != nil {
-			log.Debugf("kiro: failed to parse embedded tool call JSON: %v, raw: %s", err, jsonStr)
-			continue
-		}
-
-		// Generate unique tool ID
-		toolUseID := "toolu_" + uuid.New().String()[:12]
-
-		// Check for duplicates using name+input as key
-		dedupeKey := toolName + ":" + repairedJSON
-		if processedIDs != nil {
-			if processedIDs[dedupeKey] {
-				log.Debugf("kiro: skipping duplicate embedded tool call: %s", toolName)
-				// Still remove from text even if duplicate
-				cleanText = strings.Replace(cleanText, fullMatch, "", 1)
-				continue
-			}
-			processedIDs[dedupeKey] = true
-		}
-
-		toolUses = append(toolUses, kiroToolUse{
-			ToolUseID: toolUseID,
-			Name:      toolName,
-			Input:     inputMap,
-		})
-
-		log.Infof("kiro: extracted embedded tool call: %s (ID: %s)", toolName, toolUseID)
-
-		// Remove from clean text
-		cleanText = strings.Replace(cleanText, fullMatch, "", 1)
-	}
-
-	// Clean up extra whitespace
-	cleanText = strings.TrimSpace(cleanText)
-	cleanText = whitespaceCollapsePattern.ReplaceAllString(cleanText, " ")
-
-	return cleanText, toolUses
-}
-
-// findMatchingBracket finds the index of the closing brace/bracket that matches
-// the opening one at startPos. Handles nested objects and strings correctly.
-func findMatchingBracket(text string, startPos int) int {
-	if startPos >= len(text) {
-		return -1
-	}
-
-	openChar := text[startPos]
-	var closeChar byte
-	switch openChar {
-	case '{':
-		closeChar = '}'
-	case '[':
-		closeChar = ']'
-	default:
-		return -1
-	}
-
-	depth := 1
-	inString := false
-	escapeNext := false
-
-	for i := startPos + 1; i < len(text); i++ {
-		char := text[i]
-
-		if escapeNext {
-			escapeNext = false
-			continue
-		}
-
-		if char == '\\' && inString {
-			escapeNext = true
-			continue
-		}
-
-		if char == '"' {
-			inString = !inString
-			continue
-		}
-
-		if !inString {
-			if char == openChar {
-				depth++
-			} else if char == closeChar {
-				depth--
-				if depth == 0 {
-					return i
-				}
-			}
-		}
-	}
-
-	return -1
-}
-
-// repairJSON attempts to fix common JSON issues that may occur in tool call arguments.
-// Based on AIClient-2-API's JSON repair implementation with a more conservative strategy.
-//
-// Conservative repair strategy:
-// 1. First try to parse JSON directly - if valid, return as-is
-// 2. Only attempt repair if parsing fails
-// 3. After repair, validate the result - if still invalid, return original
-//
-// Handles incomplete JSON by balancing brackets and removing trailing incomplete content.
-// Uses pre-compiled regex patterns for performance.
-func repairJSON(jsonString string) string {
-	// Handle empty or invalid input
-	if jsonString == "" {
-		return "{}"
-	}
-	
-	str := strings.TrimSpace(jsonString)
-	if str == "" {
-		return "{}"
-	}
-	
-	// CONSERVATIVE STRATEGY: First try to parse directly
-	// If the JSON is already valid, return it unchanged
-	var testParse interface{}
-	if err := json.Unmarshal([]byte(str), &testParse); err == nil {
-		log.Debugf("kiro: repairJSON - JSON is already valid, returning unchanged")
-		return str
-	}
-	
-	log.Debugf("kiro: repairJSON - JSON parse failed, attempting repair")
-	originalStr := str // Keep original for fallback
-	
-	// First, escape unescaped newlines/tabs within JSON string values
-	str = escapeNewlinesInStrings(str)
-	// Remove trailing commas before closing braces/brackets
-	str = trailingCommaPattern.ReplaceAllString(str, "$1")
-	
-	// Calculate bracket balance to detect incomplete JSON
-	braceCount := 0    // {} balance
-	bracketCount := 0  // [] balance
-	inString := false
-	escape := false
-	lastValidIndex := -1
-	
-	for i := 0; i < len(str); i++ {
-		char := str[i]
-		
-		// Handle escape sequences
-		if escape {
-			escape = false
-			continue
-		}
-		
-		if char == '\\' {
-			escape = true
-			continue
-		}
-		
-		// Handle string boundaries
-		if char == '"' {
-			inString = !inString
-			continue
-		}
-		
-		// Skip characters inside strings (they don't affect bracket balance)
-		if inString {
-			continue
-		}
-		
-		// Track bracket balance
-		switch char {
-		case '{':
-			braceCount++
-		case '}':
-			braceCount--
-		case '[':
-			bracketCount++
-		case ']':
-			bracketCount--
-		}
-		
-		// Record last valid position (where brackets are balanced or positive)
-		if braceCount >= 0 && bracketCount >= 0 {
-			lastValidIndex = i
-		}
-	}
-	
-	// If brackets are unbalanced, try to repair
-	if braceCount > 0 || bracketCount > 0 {
-		// Truncate to last valid position if we have incomplete content
-		if lastValidIndex > 0 && lastValidIndex < len(str)-1 {
-			// Check if truncation would help (only truncate if there's trailing garbage)
-			truncated := str[:lastValidIndex+1]
-			// Recount brackets after truncation
-			braceCount = 0
-			bracketCount = 0
-			inString = false
-			escape = false
-			for i := 0; i < len(truncated); i++ {
-				char := truncated[i]
-				if escape {
-					escape = false
-					continue
-				}
-				if char == '\\' {
-					escape = true
-					continue
-				}
-				if char == '"' {
-					inString = !inString
-					continue
-				}
-				if inString {
-					continue
-				}
-				switch char {
-				case '{':
-					braceCount++
-				case '}':
-					braceCount--
-				case '[':
-					bracketCount++
-				case ']':
-					bracketCount--
-				}
-			}
-			str = truncated
-		}
-		
-		// Add missing closing brackets
-		for braceCount > 0 {
-			str += "}"
-			braceCount--
-		}
-		for bracketCount > 0 {
-			str += "]"
-			bracketCount--
-		}
-	}
-	
-	// CONSERVATIVE STRATEGY: Validate repaired JSON
-	// If repair didn't produce valid JSON, return original string
-	if err := json.Unmarshal([]byte(str), &testParse); err != nil {
-		log.Warnf("kiro: repairJSON - repair failed to produce valid JSON, returning original")
-		return originalStr
-	}
-	
-	log.Debugf("kiro: repairJSON - successfully repaired JSON")
-	return str
-}
-
-// escapeNewlinesInStrings escapes literal newlines, tabs, and other control characters
-// that appear inside JSON string values. This handles cases where streaming fragments
-// contain unescaped control characters within string content.
-func escapeNewlinesInStrings(raw string) string {
-	var result strings.Builder
-	result.Grow(len(raw) + 100) // Pre-allocate with some extra space
-
-	inString := false
-	escaped := false
-
-	for i := 0; i < len(raw); i++ {
-		c := raw[i]
-
-		if escaped {
-			// Previous character was backslash, this is an escape sequence
-			result.WriteByte(c)
-			escaped = false
-			continue
-		}
-
-		if c == '\\' && inString {
-			// Start of escape sequence
-			result.WriteByte(c)
-			escaped = true
-			continue
-		}
-
-		if c == '"' {
-			// Toggle string state
-			inString = !inString
-			result.WriteByte(c)
-			continue
-		}
-
-		if inString {
-			// Inside a string, escape control characters
-			switch c {
-			case '\n':
-				result.WriteString("\\n")
-			case '\r':
-				result.WriteString("\\r")
-			case '\t':
-				result.WriteString("\\t")
-			default:
-				result.WriteByte(c)
-			}
-		} else {
-			result.WriteByte(c)
-		}
-	}
-
-	return result.String()
-}
-
-// processToolUseEvent handles a toolUseEvent from the Kiro stream.
-// It accumulates input fragments and emits tool_use blocks when complete.
-// Returns events to emit and updated state.
-func (e *KiroExecutor) processToolUseEvent(event map[string]interface{}, currentToolUse *toolUseState, processedIDs map[string]bool) ([]kiroToolUse, *toolUseState) {
-	var toolUses []kiroToolUse
-
-	// Extract from nested toolUseEvent or direct format
-	tu := event
-	if nested, ok := event["toolUseEvent"].(map[string]interface{}); ok {
-		tu = nested
-	}
-
-	toolUseID := getString(tu, "toolUseId")
-	toolName := getString(tu, "name")
-	isStop := false
-	if stop, ok := tu["stop"].(bool); ok {
-		isStop = stop
-	}
-
-	// Get input - can be string (fragment) or object (complete)
-	var inputFragment string
-	var inputMap map[string]interface{}
-	
-	if inputRaw, ok := tu["input"]; ok {
-		switch v := inputRaw.(type) {
-		case string:
-			inputFragment = v
-		case map[string]interface{}:
-			inputMap = v
-		}
-	}
-
-	// New tool use starting
-	if toolUseID != "" && toolName != "" {
-		if currentToolUse != nil && currentToolUse.toolUseID != toolUseID {
-			// New tool use arrived while another is in progress (interleaved events)
-			// This is unusual - log warning and complete the previous one
-			log.Warnf("kiro: interleaved tool use detected - new ID %s arrived while %s in progress, completing previous",
-				toolUseID, currentToolUse.toolUseID)
-			// Emit incomplete previous tool use
-			if !processedIDs[currentToolUse.toolUseID] {
-				incomplete := kiroToolUse{
-					ToolUseID: currentToolUse.toolUseID,
-					Name:      currentToolUse.name,
-				}
-				if currentToolUse.inputBuffer.Len() > 0 {
-					var input map[string]interface{}
-					if err := json.Unmarshal([]byte(currentToolUse.inputBuffer.String()), &input); err == nil {
-						incomplete.Input = input
-					}
-				}
-				toolUses = append(toolUses, incomplete)
-				processedIDs[currentToolUse.toolUseID] = true
-			}
-			currentToolUse = nil
-		}
-
-		if currentToolUse == nil {
-			// Check for duplicate
-			if processedIDs != nil && processedIDs[toolUseID] {
-				log.Debugf("kiro: skipping duplicate toolUseEvent: %s", toolUseID)
-				return nil, nil
-			}
-
-			currentToolUse = &toolUseState{
-				toolUseID: toolUseID,
-				name:      toolName,
-			}
-			log.Infof("kiro: starting new tool use: %s (ID: %s)", toolName, toolUseID)
-		}
-	}
-
-	// Accumulate input fragments
-	if currentToolUse != nil && inputFragment != "" {
-		// Accumulate fragments directly - they form valid JSON when combined
-		// The fragments are already decoded from JSON, so we just concatenate them
-		currentToolUse.inputBuffer.WriteString(inputFragment)
-		log.Debugf("kiro: accumulated input fragment, total length: %d", currentToolUse.inputBuffer.Len())
-	}
-
-	// If complete input object provided directly
-	if currentToolUse != nil && inputMap != nil {
-		inputBytes, _ := json.Marshal(inputMap)
-		currentToolUse.inputBuffer.Reset()
-		currentToolUse.inputBuffer.Write(inputBytes)
-	}
-
-	// Tool use complete
-	if isStop && currentToolUse != nil {
-		fullInput := currentToolUse.inputBuffer.String()
-		
-		// Repair and parse the accumulated JSON
-		repairedJSON := repairJSON(fullInput)
-		var finalInput map[string]interface{}
-		if err := json.Unmarshal([]byte(repairedJSON), &finalInput); err != nil {
-			log.Warnf("kiro: failed to parse accumulated tool input: %v, raw: %s", err, fullInput)
-			// Use empty input as fallback
-			finalInput = make(map[string]interface{})
-		}
-
-		toolUse := kiroToolUse{
-			ToolUseID: currentToolUse.toolUseID,
-			Name:      currentToolUse.name,
-			Input:     finalInput,
-		}
-		toolUses = append(toolUses, toolUse)
-
-		// Mark as processed
-		if processedIDs != nil {
-			processedIDs[currentToolUse.toolUseID] = true
-		}
-
-		log.Infof("kiro: completed tool use: %s (ID: %s)", currentToolUse.name, currentToolUse.toolUseID)
-		return toolUses, nil // Reset state
-	}
-
-	return toolUses, currentToolUse
-}
-
-// deduplicateToolUses removes duplicate tool uses based on toolUseId and content (name+arguments).
-// This prevents both ID-based duplicates and content-based duplicates (same tool call with different IDs).
-func deduplicateToolUses(toolUses []kiroToolUse) []kiroToolUse {
-	seenIDs := make(map[string]bool)
-	seenContent := make(map[string]bool) // Content-based deduplication (name + arguments)
-	var unique []kiroToolUse
-
-	for _, tu := range toolUses {
-		// Skip if we've already seen this ID
-		if seenIDs[tu.ToolUseID] {
-			log.Debugf("kiro: removing ID-duplicate tool use: %s (name: %s)", tu.ToolUseID, tu.Name)
-			continue
-		}
-
-		// Build content key for content-based deduplication
-		inputJSON, _ := json.Marshal(tu.Input)
-		contentKey := tu.Name + ":" + string(inputJSON)
-
-		// Skip if we've already seen this content (same name + arguments)
-		if seenContent[contentKey] {
-			log.Debugf("kiro: removing content-duplicate tool use: %s (id: %s)", tu.Name, tu.ToolUseID)
-			continue
-		}
-
-		seenIDs[tu.ToolUseID] = true
-		seenContent[contentKey] = true
-		unique = append(unique, tu)
-	}
-
-	return unique
-}
+// NOTE: Message merging functions moved to internal/translator/kiro/common/message_merge.go
+// NOTE: Tool calling support functions moved to internal/translator/kiro/claude/kiro_claude_tools.go
+// The executor now uses kiroclaude.* and kirocommon.* functions instead
