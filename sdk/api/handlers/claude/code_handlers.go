@@ -7,7 +7,6 @@
 package claude
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -219,58 +218,24 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 }
 
 func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
-	// v6.2: Immediate flush strategy for SSE streams
-	// SSE requires immediate data delivery to prevent client timeouts.
-	// Previous buffering strategy (16KB buffer, 8KB threshold) caused delays
-	// because SSE events are typically small (< 1KB), leading to client retries.
-	writer := bufio.NewWriterSize(c.Writer, 4*1024) // 4KB buffer (smaller for faster flush)
-	ticker := time.NewTicker(50 * time.Millisecond) // 50ms interval for responsive streaming
-	defer ticker.Stop()
-
-	var chunkIdx int
-
+	// OpenAI-style stream forwarding: write each SSE chunk and flush immediately.
+	// This guarantees clients see incremental output even for small responses.
 	for {
 		select {
 		case <-c.Request.Context().Done():
-			// Context cancelled, flush any remaining data before exit
-			_ = writer.Flush()
 			cancel(c.Request.Context().Err())
 			return
 
-		case <-ticker.C:
-			// Flush any buffered data on timer to ensure responsiveness
-			// For SSE, we flush whenever there's any data to prevent client timeouts
-			if writer.Buffered() > 0 {
-				if err := writer.Flush(); err != nil {
-					// Error flushing, cancel and return
-					cancel(err)
-					return
-				}
-				flusher.Flush() // Also flush the underlying http.ResponseWriter
-			}
-
 		case chunk, ok := <-data:
 			if !ok {
-				// Stream ended, flush remaining data
-				_ = writer.Flush()
 				flusher.Flush()
 				cancel(nil)
 				return
 			}
-
-			// Forward the complete SSE event block directly (already formatted by the translator).
-			// The translator returns a complete SSE-compliant event block, including event:, data:, and separators.
-			// The handler just needs to forward it without reassembly.
 			if len(chunk) > 0 {
-				_, _ = writer.Write(chunk)
-				// Immediately flush for first few chunks to establish connection quickly
-				// This prevents client timeout/retry on slow backends like Kiro
-				if chunkIdx < 3 {
-					_ = writer.Flush()
-					flusher.Flush()
-				}
+				_, _ = c.Writer.Write(chunk)
+				flusher.Flush()
 			}
-			chunkIdx++
 
 		case errMsg, ok := <-errs:
 			if !ok {
@@ -282,21 +247,20 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 					status = errMsg.StatusCode
 				}
 				c.Status(status)
+
 				// An error occurred: emit as a proper SSE error event
 				errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
-				_, _ = writer.WriteString("event: error\n")
-				_, _ = writer.WriteString("data: ")
-				_, _ = writer.Write(errorBytes)
-				_, _ = writer.WriteString("\n\n")
-				_ = writer.Flush()
+				_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 				flusher.Flush()
 			}
+
 			var execErr error
 			if errMsg != nil {
 				execErr = errMsg.Error
 			}
 			cancel(execErr)
 			return
+		case <-time.After(500 * time.Millisecond):
 		}
 	}
 }

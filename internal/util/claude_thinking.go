@@ -28,6 +28,9 @@ func ApplyClaudeThinkingConfig(body []byte, budget *int) []byte {
 // It uses the unified ResolveThinkingConfigFromMetadata and normalizes the budget.
 // Returns the normalized budget (nil if thinking should not be enabled) and whether it matched.
 func ResolveClaudeThinkingConfig(modelName string, metadata map[string]any) (*int, bool) {
+	if !ModelSupportsThinking(modelName) {
+		return nil, false
+	}
 	budget, include, matched := ResolveThinkingConfigFromMetadata(modelName, metadata)
 	if !matched {
 		return nil, false

@@ -51,12 +51,12 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort")
+	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
 	if upstreamModel != "" {
 		body, _ = sjson.SetBytes(body, "model", upstreamModel)
 	}
-	body = normalizeThinkingConfig(body, upstreamModel)
+	body = normalizeThinkingConfig(body, upstreamModel, false)
 	if errValidate := validateThinkingConfig(body, upstreamModel); errValidate != nil {
 		return resp, errValidate
 	}
@@ -131,12 +131,12 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	to := sdktranslator.FromString("openai")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
-	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort")
+	body = applyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
 	if upstreamModel != "" {
 		body, _ = sjson.SetBytes(body, "model", upstreamModel)
 	}
-	body = normalizeThinkingConfig(body, upstreamModel)
+	body = normalizeThinkingConfig(body, upstreamModel, false)
 	if errValidate := validateThinkingConfig(body, upstreamModel); errValidate != nil {
 		return nil, errValidate
 	}
