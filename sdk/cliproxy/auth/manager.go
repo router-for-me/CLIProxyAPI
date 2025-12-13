@@ -115,6 +115,7 @@ type Manager struct {
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
+	routingStrategy atomic.Value
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -147,6 +148,27 @@ func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 	m.mu.Lock()
 	m.rtProvider = p
 	m.mu.Unlock()
+}
+
+func (m *Manager) SetRoutingStrategy(strategy string) {
+    if m == nil {
+        return
+    }
+    m.routingStrategy.Store(strategy)
+    if s, ok := m.selector.(*RoundRobinSelector); ok {
+        s.SetStrategy(strategy)
+    }
+}
+
+func (m *Manager) getStrategy() string {
+    if m == nil {
+        return "round-robin"
+    }
+    s, _ := m.routingStrategy.Load().(string)
+    if s == "" {
+        return "round-robin"
+    }
+    return s
 }
 
 // SetRetryConfig updates retry attempts and cooldown wait interval.
@@ -245,12 +267,16 @@ func (m *Manager) Load(ctx context.Context) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	normalized := m.normalizeProviders(providers)
-	if len(normalized) == 0 {
-		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+    normalized := m.normalizeProviders(providers)
+    if len(normalized) == 0 {
+        return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+    }
+    
+    // Modify the original rotateProviders call
+	rotated, advance := m.getProvidersForExecution(req.Model, normalized)
+	if advance {
+		defer m.advanceProviderCursor(req.Model, normalized)
 	}
-	rotated := m.rotateProviders(req.Model, normalized)
-	defer m.advanceProviderCursor(req.Model, normalized)
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -288,8 +314,11 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	rotated := m.rotateProviders(req.Model, normalized)
-	defer m.advanceProviderCursor(req.Model, normalized)
+
+    rotated, advance := m.getProvidersForExecution(req.Model, normalized)
+	if advance {
+		defer m.advanceProviderCursor(req.Model, normalized)
+	}
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -327,8 +356,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	rotated := m.rotateProviders(req.Model, normalized)
-	defer m.advanceProviderCursor(req.Model, normalized)
+
+    rotated, advance := m.getProvidersForExecution(req.Model, normalized)
+	if advance {
+		defer m.advanceProviderCursor(req.Model, normalized)
+	}
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -1529,4 +1561,13 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 		return p.PrepareRequest(req, a)
 	}
 	return nil
+}
+
+// getProvidersForExecution determines the provider list order based on the current routing strategy.
+// It returns the provider list to use and a boolean indicating whether the provider cursor should be advanced (for round-robin).
+func (m *Manager) getProvidersForExecution(model string, normalized []string) (rotated []string, advanceCursor bool) {
+	if m.getStrategy() == "sequential" {
+		return normalized, false
+	}
+	return m.rotateProviders(model, normalized), true
 }

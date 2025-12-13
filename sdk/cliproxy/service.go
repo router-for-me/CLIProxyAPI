@@ -123,6 +123,24 @@ func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
 	go s.consumeAuthUpdates(queueCtx)
 }
 
+func (s *Service) applyRoutingStrategy(cfg *config.Config) {
+    if s == nil || s.coreManager == nil || cfg == nil {
+        return
+    }
+    strategy := "round-robin"
+    if cfg.RoutingStrategy != "" {
+        strategy = cfg.RoutingStrategy
+    }
+    s.coreManager.SetRoutingStrategy(strategy)
+}
+
+func (s *Service) applyProviderPriorities(cfg *config.Config) {
+    if cfg == nil {
+        return
+    }
+    registry.GetGlobalRegistry().SetPriorities(cfg.ProviderPriorities)
+}
+
 func (s *Service) consumeAuthUpdates(ctx context.Context) {
 	for {
 		select {
@@ -431,6 +449,8 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
+	s.applyRoutingStrategy(s.cfg)
+    s.applyProviderPriorities(s.cfg)
 
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
@@ -515,6 +535,8 @@ func (s *Service) Run(ctx context.Context) error {
 			return
 		}
 		s.applyRetryConfig(newCfg)
+		s.applyRoutingStrategy(newCfg)
+        s.applyProviderPriorities(newCfg)
 		if s.server != nil {
 			s.server.UpdateClients(newCfg)
 		}
