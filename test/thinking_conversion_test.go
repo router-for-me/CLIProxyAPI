@@ -81,8 +81,10 @@ func applyReasoningEffortMetadataLocal(payload []byte, metadata map[string]any, 
 		return payload
 	}
 	if effort, ok := util.ReasoningEffortFromMetadata(metadata); ok && effort != "" {
-		if updated, err := sjson.SetBytes(payload, field, effort); err == nil {
-			return updated
+		if util.ModelUsesThinkingLevels(model) {
+			if updated, err := sjson.SetBytes(payload, field, effort); err == nil {
+				return updated
+			}
 		}
 	}
 	if util.ModelUsesThinkingLevels(model) {
@@ -499,6 +501,273 @@ func TestThinkingConversionsAcrossProtocolsAndModels(t *testing.T) {
 
 						t.Logf("from=%s to=%s model=%s suffix=%s present(expect=%v got=%v) value(expect=%s got=%s) err(expect=%v got=%v) body=%s",
 							from, to, model, cs.modelSuffix, expectPresent, actualPresent, expectValue, actualValue, expectErr, err != nil, string(body))
+
+						if expectErr {
+							if err == nil {
+								t.Fatalf("expected validation error but got none, body=%s", string(body))
+							}
+							return
+						}
+						if err != nil {
+							t.Fatalf("unexpected error: %v body=%s", err, string(body))
+						}
+
+						if expectPresent != actualPresent {
+							t.Fatalf("presence mismatch: expect %v got %v body=%s", expectPresent, actualPresent, string(body))
+						}
+						if expectPresent && expectValue != actualValue {
+							t.Fatalf("value mismatch: expect %s got %s body=%s", expectValue, actualValue, string(body))
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// buildRawPayloadWithThinking creates a payload with thinking parameters already in the body.
+// This tests the path where thinking comes from the raw payload, not model suffix.
+func buildRawPayloadWithThinking(fromProtocol, model string, thinkingParam any) []byte {
+	switch fromProtocol {
+	case "gemini":
+		base := fmt.Sprintf(`{"model":"%s","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, model)
+		if budget, ok := thinkingParam.(int); ok {
+			base, _ = sjson.Set(base, "generationConfig.thinkingConfig.thinkingBudget", budget)
+		}
+		return []byte(base)
+	case "openai-response":
+		base := fmt.Sprintf(`{"model":"%s","input":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`, model)
+		if effort, ok := thinkingParam.(string); ok && effort != "" {
+			base, _ = sjson.Set(base, "reasoning.effort", effort)
+		}
+		return []byte(base)
+	case "openai":
+		base := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, model)
+		if effort, ok := thinkingParam.(string); ok && effort != "" {
+			base, _ = sjson.Set(base, "reasoning_effort", effort)
+		}
+		return []byte(base)
+	case "claude":
+		base := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, model)
+		if budget, ok := thinkingParam.(int); ok && budget > 0 {
+			base, _ = sjson.Set(base, "thinking.type", "enabled")
+			base, _ = sjson.Set(base, "thinking.budget_tokens", budget)
+		}
+		return []byte(base)
+	default:
+		return []byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, model))
+	}
+}
+
+// buildBodyForProtocolWithRawThinking translates payload with raw thinking params.
+func buildBodyForProtocolWithRawThinking(t *testing.T, fromProtocol, toProtocol, model string, thinkingParam any) ([]byte, error) {
+	t.Helper()
+	raw := buildRawPayloadWithThinking(fromProtocol, model, thinkingParam)
+	stream := fromProtocol != toProtocol
+
+	body := sdktranslator.TranslateRequest(
+		sdktranslator.FromString(fromProtocol),
+		sdktranslator.FromString(toProtocol),
+		model,
+		raw,
+		stream,
+	)
+
+	var err error
+	switch toProtocol {
+	case "gemini":
+		body = util.ApplyDefaultThinkingIfNeeded(model, body)
+		body = util.NormalizeGeminiThinkingBudget(model, body)
+		body = util.StripThinkingConfigIfUnsupported(model, body)
+	case "claude":
+		// For raw payload, Claude thinking is passed through by translator
+		// No additional processing needed as thinking is already in body
+	case "openai":
+		body = normalizeThinkingConfigLocal(body, model)
+		err = validateThinkingConfigLocal(body, model)
+	case "codex":
+		body, err = normalizeCodexPayload(body, model)
+	}
+
+	body, _ = sjson.SetBytes(body, "model", model)
+	body = filterThinkingBody(toProtocol, body, model, model)
+	return body, err
+}
+
+func TestRawPayloadThinkingConversions(t *testing.T) {
+	cleanup := registerCoreModels(t)
+	defer cleanup()
+
+	models := []string{
+		"gpt-5",             // supports levels (low/medium/high)
+		"gemini-2.5-pro",    // supports numeric budget
+		"qwen3-coder-flash", // no thinking support
+	}
+	fromProtocols := []string{"openai", "claude", "gemini", "openai-response"}
+	toProtocols := []string{"gemini", "claude", "openai", "codex"}
+
+	type scenario struct {
+		name          string
+		thinkingParam any // int for budget, string for effort level
+	}
+
+	for _, model := range models {
+		supportsThinking := util.ModelSupportsThinking(model)
+		usesLevels := util.ModelUsesThinkingLevels(model)
+
+		for _, from := range fromProtocols {
+			var cases []scenario
+			switch from {
+			case "openai", "openai-response":
+				cases = []scenario{
+					{name: "no-thinking", thinkingParam: nil},
+					{name: "effort-low", thinkingParam: "low"},
+					{name: "effort-medium", thinkingParam: "medium"},
+					{name: "effort-high", thinkingParam: "high"},
+					{name: "effort-invalid-xhigh", thinkingParam: "xhigh"},
+					{name: "effort-invalid-foo", thinkingParam: "foo"},
+				}
+			case "gemini":
+				cases = []scenario{
+					{name: "no-thinking", thinkingParam: nil},
+					{name: "budget-1024", thinkingParam: 1024},
+					{name: "budget-8192", thinkingParam: 8192},
+					{name: "budget-16384", thinkingParam: 16384},
+				}
+			case "claude":
+				cases = []scenario{
+					{name: "no-thinking", thinkingParam: nil},
+					{name: "budget-1024", thinkingParam: 1024},
+					{name: "budget-8192", thinkingParam: 8192},
+					{name: "budget-16384", thinkingParam: 16384},
+				}
+			}
+
+			for _, to := range toProtocols {
+				if from == to {
+					continue
+				}
+				t.Logf("═══════════════════════════════════════════════════════════════════════════════")
+				t.Logf("  RAW PAYLOAD: %s -> %s | model: %s", from, to, model)
+				t.Logf("═══════════════════════════════════════════════════════════════════════════════")
+
+				for _, cs := range cases {
+					from := from
+					to := to
+					cs := cs
+					testName := fmt.Sprintf("raw/%s->%s/%s/%s", from, to, model, cs.name)
+					t.Run(testName, func(t *testing.T) {
+						expectPresent, expectValue, expectErr := func() (bool, string, bool) {
+							if cs.thinkingParam == nil {
+								// No thinking param provided
+								if to == "codex" && from != "openai-response" {
+									// Codex translators default to medium
+									if supportsThinking && usesLevels {
+										return true, "medium", false
+									}
+								}
+								return false, "", false
+							}
+							if !supportsThinking {
+								return false, "", false
+							}
+
+							switch to {
+							case "gemini":
+								// Gemini expects numeric budget
+								if budget, ok := cs.thinkingParam.(int); ok {
+									norm := util.NormalizeThinkingBudget(model, budget)
+									return true, fmt.Sprintf("%d", norm), false
+								}
+								if effort, ok := cs.thinkingParam.(string); ok && effort != "" {
+									if b, okB := util.ThinkingEffortToBudget(model, effort); okB {
+										return true, fmt.Sprintf("%d", b), false
+									}
+								}
+								return false, "", false
+							case "claude":
+								// Claude expects numeric budget
+								if budget, ok := cs.thinkingParam.(int); ok && budget > 0 {
+									norm := util.NormalizeThinkingBudget(model, budget)
+									return true, fmt.Sprintf("%d", norm), false
+								}
+								if effort, ok := cs.thinkingParam.(string); ok && effort != "" {
+									if b, okB := util.ThinkingEffortToBudget(model, effort); okB && b > 0 {
+										return true, fmt.Sprintf("%d", b), false
+									}
+								}
+								return false, "", false
+							case "openai":
+								if !usesLevels {
+									return false, "", false
+								}
+								if effort, ok := cs.thinkingParam.(string); ok && effort != "" {
+									if normalized, okN := util.NormalizeReasoningEffortLevel(model, effort); okN {
+										return true, normalized, false
+									}
+									return false, "", true // invalid level
+								}
+								if budget, ok := cs.thinkingParam.(int); ok {
+									if mapped, okM := util.OpenAIThinkingBudgetToEffort(model, budget); okM && mapped != "" {
+										return true, mapped, false
+									}
+								}
+								return false, "", false
+							case "codex":
+								if !usesLevels {
+									return false, "", false
+								}
+								if effort, ok := cs.thinkingParam.(string); ok && effort != "" {
+									if normalized, okN := util.NormalizeReasoningEffortLevel(model, effort); okN {
+										return true, normalized, false
+									}
+									return false, "", true
+								}
+								if budget, ok := cs.thinkingParam.(int); ok {
+									if mapped, okM := util.OpenAIThinkingBudgetToEffort(model, budget); okM && mapped != "" {
+										return true, mapped, false
+									}
+								}
+								// thinkingParam was non-nil but couldn't map - no default medium
+								return false, "", false
+							}
+							return false, "", false
+						}()
+
+						body, err := buildBodyForProtocolWithRawThinking(t, from, to, model, cs.thinkingParam)
+						actualPresent, actualValue := func() (bool, string) {
+							path := ""
+							switch to {
+							case "gemini":
+								path = "generationConfig.thinkingConfig.thinkingBudget"
+							case "claude":
+								path = "thinking.budget_tokens"
+							case "openai":
+								path = "reasoning_effort"
+							case "codex":
+								path = "reasoning.effort"
+							}
+							if path == "" {
+								return false, ""
+							}
+							val := gjson.GetBytes(body, path)
+							if to == "codex" && !val.Exists() {
+								reasoning := gjson.GetBytes(body, "reasoning")
+								if reasoning.Exists() {
+									val = reasoning.Get("effort")
+								}
+							}
+							if !val.Exists() {
+								return false, ""
+							}
+							if val.Type == gjson.Number {
+								return true, fmt.Sprintf("%d", val.Int())
+							}
+							return true, val.String()
+						}()
+
+						t.Logf("from=%s to=%s model=%s param=%v present(expect=%v got=%v) value(expect=%s got=%s) err(expect=%v got=%v) body=%s",
+							from, to, model, cs.thinkingParam, expectPresent, actualPresent, expectValue, actualValue, expectErr, err != nil, string(body))
 
 						if expectErr {
 							if err == nil {

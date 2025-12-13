@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -65,7 +66,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	root := gjson.ParseBytes(rawJSON)
 
-	if v := root.Get("reasoning_effort"); v.Exists() {
+	if v := root.Get("reasoning_effort"); v.Exists() && util.ModelSupportsThinking(modelName) && !util.ModelUsesThinkingLevels(modelName) {
 		out, _ = sjson.Set(out, "thinking.type", "enabled")
 
 		switch v.String() {
@@ -77,6 +78,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			out, _ = sjson.Set(out, "thinking.budget_tokens", 8192)
 		case "high":
 			out, _ = sjson.Set(out, "thinking.budget_tokens", 24576)
+		case "xhigh":
+			out, _ = sjson.Set(out, "thinking.budget_tokens", 32768)
 		}
 	}
 
