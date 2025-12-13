@@ -49,6 +49,14 @@ func DoIFlowCookieAuth(cfg *config.Config, options *LoginOptions) {
 		return
 	}
 
+	// Ask if user wants to use global proxy
+	useGlobalProxy := false // Default to false for iFlow
+	answer, err := promptFn("Would you like to use the global proxy from config.yaml for this authentication? (yes/no, default: no) ")
+	if err == nil {
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		useGlobalProxy = answer == "y" || answer == "yes"
+	}
+
 	// Authenticate with cookie
 	auth := iflow.NewIFlowAuth(cfg)
 	ctx := context.Background()
@@ -60,7 +68,7 @@ func DoIFlowCookieAuth(cfg *config.Config, options *LoginOptions) {
 	}
 
 	// Create token storage
-	tokenStorage := auth.CreateCookieTokenStorage(tokenData)
+	tokenStorage := auth.CreateCookieTokenStorage(tokenData, useGlobalProxy)
 
 	// Get auth file path using email in filename
 	authFilePath := getAuthFilePath(cfg, "iflow", tokenData.Email)
