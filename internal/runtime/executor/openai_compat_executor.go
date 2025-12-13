@@ -59,12 +59,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		translated = e.overrideModel(translated, modelOverride)
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
-	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort")
+	allowCompat := e.allowCompatReasoningEffort(req.Model, auth)
+	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
 	if upstreamModel != "" && modelOverride == "" {
 		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
 	}
-	translated = normalizeThinkingConfig(translated, upstreamModel)
+	translated = normalizeThinkingConfig(translated, upstreamModel, allowCompat)
 	if errValidate := validateThinkingConfig(translated, upstreamModel); errValidate != nil {
 		return resp, errValidate
 	}
@@ -154,12 +155,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		translated = e.overrideModel(translated, modelOverride)
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
-	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort")
+	allowCompat := e.allowCompatReasoningEffort(req.Model, auth)
+	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
 	if upstreamModel != "" && modelOverride == "" {
 		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
 	}
-	translated = normalizeThinkingConfig(translated, upstreamModel)
+	translated = normalizeThinkingConfig(translated, upstreamModel, allowCompat)
 	if errValidate := validateThinkingConfig(translated, upstreamModel); errValidate != nil {
 		return nil, errValidate
 	}
@@ -323,6 +325,27 @@ func (e *OpenAICompatExecutor) resolveUpstreamModel(alias string, auth *cliproxy
 		}
 	}
 	return ""
+}
+
+func (e *OpenAICompatExecutor) allowCompatReasoningEffort(model string, auth *cliproxyauth.Auth) bool {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" || e == nil || e.cfg == nil {
+		return false
+	}
+	compat := e.resolveCompatConfig(auth)
+	if compat == nil || len(compat.Models) == 0 {
+		return false
+	}
+	for i := range compat.Models {
+		entry := compat.Models[i]
+		if strings.EqualFold(strings.TrimSpace(entry.Alias), trimmed) {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(entry.Name), trimmed) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {

@@ -163,6 +163,11 @@ func ResolveThinkingConfigFromMetadata(model string, metadata map[string]any) (*
 	if !matched {
 		return nil, nil, false
 	}
+	// Level-based models (OpenAI-style) do not accept numeric thinking budgets in
+	// Claude/Gemini-style protocols, so we don't derive budgets for them here.
+	if ModelUsesThinkingLevels(model) {
+		return nil, nil, false
+	}
 
 	if budget == nil && effort != nil {
 		if derived, ok := ThinkingEffortToBudget(model, *effort); ok {
