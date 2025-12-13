@@ -1,196 +1,40 @@
-# Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
-# Use "127.0.0.1" or "localhost" to restrict access to local machine only.
-host: ""
-
-# Server port
+# Основные настройки сервера
+host: "0.0.0.0"
 port: 8317
 
-# TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
-tls:
-  enable: false
-  cert: ""
-  key: ""
-
-# Management API settings
-remote-management:
-  # Whether to allow remote (non-localhost) management access.
-  # When false, only localhost can access management endpoints (a key is still required).
-  allow-remote: false
-
-  # Management key. If a plaintext value is provided here, it will be hashed on startup.
-  # All management requests (even from localhost) require this key.
-  # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
-  secret-key: ""
-
-  # Disable the bundled management control panel asset download and HTTP route when true.
-  disable-control-panel: false
-
-# Authentication directory (supports ~ for home directory)
-auth-dir: "~/.cli-proxy-api"
-
-# API keys for authentication
+# API ключи для доступа к прокси (ОБЯЗАТЕЛЬНО!)
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
+  - "your-secure-api-key-here"
 
-# Enable debug logging
-debug: false
+# Включить debug логи
+debug: true
 
-# When true, write application logs to rotating files instead of stdout
-logging-to-file: false
+# Метрики Prometheus
+metrics_enabled: true
+metrics_bind_address: "0.0.0.0:8081"
 
-# When false, disable in-memory usage statistics aggregation
-usage-statistics-enabled: false
+# Директория для хранения токенов OAuth
+auth-dir: "/root/.cli-proxy-api"
 
-# Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
-proxy-url: ""
-
-# Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
+# Повторные попытки при ошибках
 request-retry: 3
-
-# Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
-# Quota exceeded behavior
-quota-exceeded:
-  switch-project: true # Whether to automatically switch to another project when a quota is exceeded
-  switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
+# Статистика использования
+usage-statistics-enabled: true
 
-# When true, enable authentication for the WebSocket API (/v1/ws).
-ws-auth: false
-
-# Gemini API keys
+# Примеры провайдеров (добавьте свои ключи)
+# Gemini API
 # gemini-api-key:
-#   - api-key: "AIzaSy...01"
-#     base-url: "https://generativelanguage.googleapis.com"
-#     headers:
-#       X-Custom-Header: "custom-value"
-#     proxy-url: "socks5://proxy.example.com:1080"
-#     excluded-models:
-#       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
-#       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
-#       - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
-#       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
-#   - api-key: "AIzaSy...02"
+#   - api-key: "AIzaSy..."
 
-# Codex API keys
-# codex-api-key:
-#   - api-key: "sk-atSM..."
-#     base-url: "https://www.example.com" # use the custom codex API endpoint
-#     headers:
-#       X-Custom-Header: "custom-value"
-#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
-#     excluded-models:
-#       - "gpt-5.1"         # exclude specific models (exact match)
-#       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
-#       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
-#       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
-
-# Claude API keys
+# Claude API  
 # claude-api-key:
-#   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
-#   - api-key: "sk-atSM..."
-#     base-url: "https://www.example.com" # use the custom claude API endpoint
-#     headers:
-#       X-Custom-Header: "custom-value"
-#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
-#     models:
-#       - name: "claude-3-5-sonnet-20241022" # upstream model name
-#         alias: "claude-sonnet-latest" # client alias mapped to the upstream model
-#     excluded-models:
-#       - "claude-opus-4-5-20251101" # exclude specific models (exact match)
-#       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
-#       - "*-think"                  # wildcard matching suffix (e.g. claude-opus-4-5-thinking)
-#       - "*haiku*"                  # wildcard matching substring (e.g. claude-3-5-haiku-20241022)
+#   - api-key: "sk-ant-..."
 
-# OpenAI compatibility providers
+# OpenAI-совместимые провайдеры
 # openai-compatibility:
-#   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
-#     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
-#     headers:
-#       X-Custom-Header: "custom-value"
+#   - name: "openrouter"
+#     base-url: "https://openrouter.ai/api/v1"
 #     api-key-entries:
-#       - api-key: "sk-or-v1-...b780"
-#         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
-#       - api-key: "sk-or-v1-...b781" # without proxy-url
-#     models: # The models supported by the provider.
-#       - name: "moonshotai/kimi-k2:free" # The actual model name.
-#         alias: "kimi-k2" # The alias used in the API.
-
-# Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
-# vertex-api-key:
-#   - api-key: "vk-123..."                        # x-goog-api-key header
-#     base-url: "https://example.com/api"         # e.g. https://zenmux.ai/api
-#     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
-#     headers:
-#       X-Custom-Header: "custom-value"
-#     models:                                     # optional: map aliases to upstream model names
-#       - name: "gemini-2.0-flash"                # upstream model name
-#         alias: "vertex-flash"                   # client-visible alias
-#       - name: "gemini-1.5-pro"
-#         alias: "vertex-pro"
-
-# Amp Integration
-# ampcode:
-#   # Configure upstream URL for Amp CLI OAuth and management features
-#   upstream-url: "https://ampcode.com"
-#   # Optional: Override API key for Amp upstream (otherwise uses env or file)
-#   upstream-api-key: ""
-#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (recommended)
-#   restrict-management-to-localhost: true
-#   # Force model mappings to run before checking local API keys (default: false)
-#   force-model-mappings: false
-#   # Amp Model Mappings
-#   # Route unavailable Amp models to alternative models available in your local proxy.
-#   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
-#   # but you have a similar model available (e.g., Claude Sonnet 4).
-#   model-mappings:
-#     - from: "claude-opus-4.5"       # Model requested by Amp CLI
-#       to: "claude-sonnet-4"         # Route to this available model instead
-#     - from: "gpt-5"
-#       to: "gemini-2.5-pro"
-#     - from: "claude-3-opus-20240229"
-#       to: "claude-3-5-sonnet-20241022"
-
-# OAuth provider excluded models
-# oauth-excluded-models:
-#   gemini-cli:
-#     - "gemini-2.5-pro"     # exclude specific models (exact match)
-#     - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
-#     - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
-#     - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
-#   vertex:
-#     - "gemini-3-pro-preview"
-#   aistudio:
-#     - "gemini-3-pro-preview"
-#   antigravity:
-#     - "gemini-3-pro-preview"
-#   claude:
-#     - "claude-3-5-haiku-20241022"
-#   codex:
-#     - "gpt-5-codex-mini"
-#   qwen:
-#     - "vision-model"
-#   iflow:
-#     - "tstars2.0"
-
-# Optional payload configuration
-# payload:
-#   default: # Default rules only set parameters when they are missing in the payload.
-#     - models:
-#         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
-#       params: # JSON path (gjson/sjson syntax) -> value
-#         "generationConfig.thinkingConfig.thinkingBudget": 32768
-#   override: # Override rules always set parameters, overwriting any existing values.
-#     - models:
-#         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
-#       params: # JSON path (gjson/sjson syntax) -> value
-#         "reasoning.effort": "high"
-# Metrics configuration
-metrics_enabled: true
-metrics_bind_address: "127.0.0.1:8081"
-metrics_storage_path: "./data/metrics.db"
-# metrics_basic_auth_user: "admin"
-# metrics_basic_auth_pass: "secret123"
+#       - api-key: "sk-or-v1-..."
