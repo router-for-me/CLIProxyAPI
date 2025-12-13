@@ -54,13 +54,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), opts.Stream)
-	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+	modelOverride := e.resolveUpstreamModel(req.Model, auth)
+	if modelOverride != "" {
 		translated = e.overrideModel(translated, modelOverride)
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
 	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort")
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" {
+	if upstreamModel != "" && modelOverride == "" {
 		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
 	}
 	translated = normalizeThinkingConfig(translated, upstreamModel)
@@ -148,13 +149,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-	if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+	modelOverride := e.resolveUpstreamModel(req.Model, auth)
+	if modelOverride != "" {
 		translated = e.overrideModel(translated, modelOverride)
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
 	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort")
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" {
+	if upstreamModel != "" && modelOverride == "" {
 		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
 	}
 	translated = normalizeThinkingConfig(translated, upstreamModel)

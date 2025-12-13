@@ -25,33 +25,33 @@ func ModelSupportsThinking(model string) bool {
 // or min (0 if zero is allowed and mid <= 0).
 func NormalizeThinkingBudget(model string, budget int) int {
 	if budget == -1 { // dynamic
-		if found, min, max, zeroAllowed, dynamicAllowed := thinkingRangeFromRegistry(model); found {
+		if found, minBudget, maxBudget, zeroAllowed, dynamicAllowed := thinkingRangeFromRegistry(model); found {
 			if dynamicAllowed {
 				return -1
 			}
-			mid := (min + max) / 2
+			mid := (minBudget + maxBudget) / 2
 			if mid <= 0 && zeroAllowed {
 				return 0
 			}
 			if mid <= 0 {
-				return min
+				return minBudget
 			}
 			return mid
 		}
 		return -1
 	}
-	if found, min, max, zeroAllowed, _ := thinkingRangeFromRegistry(model); found {
+	if found, minBudget, maxBudget, zeroAllowed, _ := thinkingRangeFromRegistry(model); found {
 		if budget == 0 {
 			if zeroAllowed {
 				return 0
 			}
-			return min
+			return minBudget
 		}
-		if budget < min {
-			return min
+		if budget < minBudget {
+			return minBudget
 		}
-		if budget > max {
-			return max
+		if budget > maxBudget {
+			return maxBudget
 		}
 		return budget
 	}
@@ -104,4 +104,17 @@ func NormalizeReasoningEffortLevel(model, effort string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// IsOpenAICompatibilityModel reports whether the model is registered as an OpenAI-compatibility model.
+// These models may not advertise Thinking metadata in the registry.
+func IsOpenAICompatibilityModel(model string) bool {
+	if model == "" {
+		return false
+	}
+	info := registry.GetGlobalRegistry().GetModelInfo(model)
+	if info == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility")
 }

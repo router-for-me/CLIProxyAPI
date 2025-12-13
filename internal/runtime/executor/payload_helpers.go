@@ -52,10 +52,14 @@ func applyReasoningEffortMetadata(payload []byte, metadata map[string]any, model
 	if len(metadata) == 0 {
 		return payload
 	}
-	if !util.ModelSupportsThinking(model) {
+	if field == "" {
 		return payload
 	}
-	if field == "" {
+	baseModel := util.ResolveOriginalModel(model, metadata)
+	if baseModel == "" {
+		baseModel = model
+	}
+	if !util.ModelSupportsThinking(baseModel) && !util.IsOpenAICompatibilityModel(baseModel) {
 		return payload
 	}
 	if effort, ok := util.ReasoningEffortFromMetadata(metadata); ok && effort != "" {
@@ -226,6 +230,9 @@ func normalizeThinkingConfig(payload []byte, model string) []byte {
 	}
 
 	if !util.ModelSupportsThinking(model) {
+		if util.IsOpenAICompatibilityModel(model) {
+			return payload
+		}
 		return stripThinkingFields(payload)
 	}
 
