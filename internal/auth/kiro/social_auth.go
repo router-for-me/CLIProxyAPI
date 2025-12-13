@@ -126,8 +126,8 @@ func (c *SocialAuthClient) buildLoginURL(provider, redirectURI, codeChallenge, s
 	)
 }
 
-// createToken exchanges the authorization code for tokens.
-func (c *SocialAuthClient) createToken(ctx context.Context, req *CreateTokenRequest) (*SocialTokenResponse, error) {
+// CreateToken exchanges the authorization code for tokens.
+func (c *SocialAuthClient) CreateToken(ctx context.Context, req *CreateTokenRequest) (*SocialTokenResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal token request: %w", err)
@@ -326,7 +326,7 @@ func (c *SocialAuthClient) LoginWithSocial(ctx context.Context, provider SocialP
 		RedirectURI:  KiroRedirectURI,
 	}
 
-	tokenResp, err := c.createToken(ctx, tokenReq)
+	tokenResp, err := c.CreateToken(ctx, tokenReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange code for tokens: %w", err)
 	}

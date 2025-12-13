@@ -36,6 +36,16 @@ const (
 	kiroAcceptStream   = "*/*"
 	kiroMaxMessageSize = 10 * 1024 * 1024 // 10MB max message size for event stream
 	kiroMaxToolDescLen = 10237            // Kiro API limit is 10240 bytes, leave room for "..."
+
+	// Event Stream frame size constants for boundary protection
+	// AWS Event Stream binary format: prelude (12 bytes) + headers + payload + message_crc (4 bytes)
+	// Prelude consists of: total_length (4) + headers_length (4) + prelude_crc (4)
+	minEventStreamFrameSize = 16        // Minimum: 4(total_len) + 4(headers_len) + 4(prelude_crc) + 4(message_crc)
+	maxEventStreamMsgSize   = 10 << 20  // Maximum message length: 10MB
+
+	// Event Stream error type constants
+	ErrStreamFatal     = "fatal"     // Connection/authentication errors, not recoverable
+	ErrStreamMalformed = "malformed" // Format errors, data cannot be parsed
 	// kiroUserAgent matches amq2api format for User-Agent header
 	kiroUserAgent = "aws-sdk-rust/1.3.9 os/macos lang/rust/1.87.0"
 	// kiroFullUserAgent is the complete x-amz-user-agent header matching amq2api
@@ -100,6 +110,13 @@ You MUST follow these rules for ALL file operations. Violation causes server tim
 - Failed writes waste time and require retry
 
 REMEMBER: When in doubt, write LESS per operation. Multiple small operations > one large operation.`
+)
+
+// Real-time usage estimation configuration
+// These control how often usage updates are sent during streaming
+var (
+	usageUpdateCharThreshold = 5000              // Send usage update every 5000 characters
+	usageUpdateTimeInterval  = 15 * time.Second  // Or every 15 seconds, whichever comes first
 )
 
 // kiroEndpointConfig bundles endpoint URL with its compatible Origin and AmzTarget values.
@@ -495,7 +512,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			}
 		}()
 
-		content, toolUses, usageInfo, err := e.parseEventStream(httpResp.Body)
+		content, toolUses, usageInfo, stopReason, err := e.parseEventStream(httpResp.Body)
 		if err != nil {
 			recordAPIResponseError(ctx, e.cfg, err)
 			return resp, err
@@ -503,14 +520,14 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 		// Fallback for usage if missing from upstream
 		if usageInfo.TotalTokens == 0 {
-			if enc, encErr := tokenizerForModel(req.Model); encErr == nil {
+			if enc, encErr := getTokenizer(req.Model); encErr == nil {
 				if inp, countErr := countOpenAIChatTokens(enc, opts.OriginalRequest); countErr == nil {
 					usageInfo.InputTokens = inp
 				}
 			}
 			if len(content) > 0 {
 				// Use tiktoken for more accurate output token calculation
-				if enc, encErr := tokenizerForModel(req.Model); encErr == nil {
+				if enc, encErr := getTokenizer(req.Model); encErr == nil {
 					if tokenCount, countErr := enc.Count(content); countErr == nil {
 						usageInfo.OutputTokens = int64(tokenCount)
 					}
@@ -530,7 +547,8 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 		reporter.publish(ctx, usageInfo)
 
 		// Build response in Claude format for Kiro translator
-		kiroResponse := e.buildClaudeResponse(content, toolUses, req.Model, usageInfo)
+		// stopReason is extracted from upstream response by parseEventStream
+		kiroResponse := e.buildClaudeResponse(content, toolUses, req.Model, usageInfo, stopReason)
 		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, kiroResponse, nil)
 		resp = cliproxyexecutor.Response{Payload: []byte(out)}
 		return resp, nil
@@ -970,11 +988,40 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	return "claude-sonnet-4.5"
 }
 
+// EventStreamError represents an Event Stream processing error
+type EventStreamError struct {
+	Type    string // "fatal", "malformed"
+	Message string
+	Cause   error
+}
+
+func (e *EventStreamError) Error() string {
+	if e.Cause != nil {
+		return fmt.Sprintf("event stream %s: %s: %v", e.Type, e.Message, e.Cause)
+	}
+	return fmt.Sprintf("event stream %s: %s", e.Type, e.Message)
+}
+
+// eventStreamMessage represents a parsed AWS Event Stream message
+type eventStreamMessage struct {
+	EventType string // Event type from headers (e.g., "assistantResponseEvent")
+	Payload   []byte // JSON payload of the message
+}
+
 // Kiro API request structs - field order determines JSON key order
 
 type kiroPayload struct {
 	ConversationState kiroConversationState `json:"conversationState"`
 	ProfileArn        string                `json:"profileArn,omitempty"`
+	InferenceConfig   *kiroInferenceConfig  `json:"inferenceConfig,omitempty"`
+}
+
+// kiroInferenceConfig contains inference parameters for the Kiro API.
+// NOTE: This is an experimental addition - Kiro/Amazon Q API may not support these parameters.
+// If the API ignores or rejects these fields, response length is controlled internally by the model.
+type kiroInferenceConfig struct {
+	MaxTokens   int `json:"maxTokens,omitempty"`   // Maximum output tokens (may be ignored by API)
+	Temperature float64 `json:"temperature,omitempty"` // Sampling temperature (may be ignored by API)
 }
 
 type kiroConversationState struct {
@@ -1058,7 +1105,25 @@ type kiroToolUse struct {
 // isAgentic parameter enables chunked write optimization prompt for -agentic model variants.
 // isChatOnly parameter disables tool calling for -chat model variants (pure conversation mode).
 // Supports thinking mode - when Claude API thinking parameter is present, injects thinkingHint.
+//
+// max_tokens support: Kiro/Amazon Q API may not officially support max_tokens parameter.
+// We attempt to pass it via inferenceConfig.maxTokens, but the API may ignore it.
+// Response truncation can be detected via stop_reason == "max_tokens" in the response.
 func (e *KiroExecutor) buildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool) []byte {
+	// Extract max_tokens for potential use in inferenceConfig
+	var maxTokens int64
+	if mt := gjson.GetBytes(claudeBody, "max_tokens"); mt.Exists() {
+		maxTokens = mt.Int()
+	}
+	
+	// Extract temperature if specified
+	var temperature float64
+	var hasTemperature bool
+	if temp := gjson.GetBytes(claudeBody, "temperature"); temp.Exists() {
+		temperature = temp.Float()
+		hasTemperature = true
+	}
+
 	// Normalize origin value for Kiro API compatibility
 	// Kiro API only accepts "CLI" or "AI_EDITOR" as valid origin values
 	switch origin {
@@ -1118,10 +1183,18 @@ func (e *KiroExecutor) buildKiroPayload(claudeBody []byte, modelID, profileArn, 
 			// Read budget_tokens if specified - this value comes from:
 			// - Claude API: thinking.budget_tokens directly
 			// - OpenAI API: reasoning_effort -> budget_tokens (low:4000, medium:16000, high:32000)
-			if bt := thinkingField.Get("budget_tokens"); bt.Exists() && bt.Int() > 0 {
+			if bt := thinkingField.Get("budget_tokens"); bt.Exists() {
 				budgetTokens = bt.Int()
+				// If budget_tokens <= 0, disable thinking explicitly
+				// This allows users to disable thinking by setting budget_tokens to 0
+				if budgetTokens <= 0 {
+					thinkingEnabled = false
+					log.Debugf("kiro: thinking mode disabled via budget_tokens <= 0")
+				}
 			}
-			log.Debugf("kiro: thinking mode enabled via Claude API parameter, budget_tokens: %d", budgetTokens)
+			if thinkingEnabled {
+				log.Debugf("kiro: thinking mode enabled via Claude API parameter, budget_tokens: %d", budgetTokens)
+			}
 		}
 	}
 
@@ -1317,6 +1390,18 @@ func (e *KiroExecutor) buildKiroPayload(claudeBody []byte, modelID, profileArn, 
 		}}
 	}
 	
+	// Build inferenceConfig if we have any inference parameters
+	var inferenceConfig *kiroInferenceConfig
+	if maxTokens > 0 || hasTemperature {
+		inferenceConfig = &kiroInferenceConfig{}
+		if maxTokens > 0 {
+			inferenceConfig.MaxTokens = int(maxTokens)
+		}
+		if hasTemperature {
+			inferenceConfig.Temperature = temperature
+		}
+	}
+
 	// Build payload with correct field order (matches struct definition)
 	payload := kiroPayload{
 		ConversationState: kiroConversationState{
@@ -1325,7 +1410,8 @@ func (e *KiroExecutor) buildKiroPayload(claudeBody []byte, modelID, profileArn, 
 			CurrentMessage:  currentMessage,
 			History:         history, // Now always included (non-nil slice)
 		},
-		ProfileArn: profileArn,
+		ProfileArn:      profileArn,
+		InferenceConfig: inferenceConfig,
 	}
 
 	result, err := json.Marshal(payload)
@@ -1485,12 +1571,14 @@ func (e *KiroExecutor) buildAssistantMessageStruct(msg gjson.Result) kiroAssista
 // NOTE: Tool calling is now supported via userInputMessageContext.tools and toolResults
 
 // parseEventStream parses AWS Event Stream binary format.
-// Extracts text content and tool uses from the response.
+// Extracts text content, tool uses, and stop_reason from the response.
 // Supports embedded [Called ...] tool calls and input buffering for toolUseEvent.
-func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, usage.Detail, error) {
+// Returns: content, toolUses, usageInfo, stopReason, error
+func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, usage.Detail, string, error) {
 	var content strings.Builder
 	var toolUses []kiroToolUse
 	var usageInfo usage.Detail
+	var stopReason string // Extracted from upstream response
 	reader := bufio.NewReader(body)
 
 	// Tool use state tracking for input buffering and deduplication
@@ -1498,57 +1586,26 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 	var currentToolUse *toolUseState
 
 	for {
-		prelude := make([]byte, 8)
-		_, err := io.ReadFull(reader, prelude)
-		if err == io.EOF {
+		msg, eventErr := e.readEventStreamMessage(reader)
+		if eventErr != nil {
+			log.Errorf("kiro: parseEventStream error: %v", eventErr)
+			return content.String(), toolUses, usageInfo, stopReason, eventErr
+		}
+		if msg == nil {
+			// Normal end of stream (EOF)
 			break
 		}
-		if err != nil {
-			return content.String(), toolUses, usageInfo, fmt.Errorf("failed to read prelude: %w", err)
-		}
 
-		totalLen := binary.BigEndian.Uint32(prelude[0:4])
-		if totalLen < 8 {
-			return content.String(), toolUses, usageInfo, fmt.Errorf("invalid message length: %d", totalLen)
-		}
-		if totalLen > kiroMaxMessageSize {
-			return content.String(), toolUses, usageInfo, fmt.Errorf("message too large: %d bytes", totalLen)
-		}
-		headersLen := binary.BigEndian.Uint32(prelude[4:8])
-
-		remaining := make([]byte, totalLen-8)
-		_, err = io.ReadFull(reader, remaining)
-		if err != nil {
-			return content.String(), toolUses, usageInfo, fmt.Errorf("failed to read message: %w", err)
-		}
-
-		// Validate headersLen to prevent slice out of bounds
-		if headersLen+4 > uint32(len(remaining)) {
-			log.Warnf("kiro: invalid headersLen %d exceeds remaining buffer %d", headersLen, len(remaining))
+		eventType := msg.EventType
+		payload := msg.Payload
+		if len(payload) == 0 {
 			continue
 		}
-
-		// Extract event type from headers
-		eventType := e.extractEventType(remaining[:headersLen+4])
-
-		payloadStart := 4 + headersLen
-		payloadEnd := uint32(len(remaining)) - 4
-		if payloadStart >= payloadEnd {
-			continue
-		}
-
-		payload := remaining[payloadStart:payloadEnd]
 
 		var event map[string]interface{}
 		if err := json.Unmarshal(payload, &event); err != nil {
 			log.Debugf("kiro: skipping malformed event: %v", err)
 			continue
-		}
-
-		// DIAGNOSTIC: Log all received event types for debugging
-		log.Debugf("kiro: parseEventStream received event type: %s", eventType)
-		if log.IsLevelEnabled(log.TraceLevel) {
-			log.Tracef("kiro: parseEventStream event payload: %s", string(payload))
 		}
 
 		// Check for error/exception events in the payload (Kiro API may return errors with HTTP 200)
@@ -1560,7 +1617,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 				errMsg = msg
 			}
 			log.Errorf("kiro: received AWS error in event stream: type=%s, message=%s", errType, errMsg)
-			return "", nil, usageInfo, fmt.Errorf("kiro API error: %s - %s", errType, errMsg)
+			return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error: %s - %s", errType, errMsg)
 		}
 		if errType, hasErrType := event["type"].(string); hasErrType && (errType == "error" || errType == "exception") {
 			// Generic error event
@@ -1573,7 +1630,18 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 				}
 			}
 			log.Errorf("kiro: received error event in stream: type=%s, message=%s", errType, errMsg)
-			return "", nil, usageInfo, fmt.Errorf("kiro API error: %s", errMsg)
+			return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error: %s", errMsg)
+		}
+
+		// Extract stop_reason from various event formats
+		// Kiro/Amazon Q API may include stop_reason in different locations
+		if sr := getString(event, "stop_reason"); sr != "" {
+			stopReason = sr
+			log.Debugf("kiro: parseEventStream found stop_reason (top-level): %s", stopReason)
+		}
+		if sr := getString(event, "stopReason"); sr != "" {
+			stopReason = sr
+			log.Debugf("kiro: parseEventStream found stopReason (top-level): %s", stopReason)
 		}
 
 		// Handle different event types
@@ -1587,6 +1655,15 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 			if assistantResp, ok := event["assistantResponseEvent"].(map[string]interface{}); ok {
 				if contentText, ok := assistantResp["content"].(string); ok {
 					content.WriteString(contentText)
+				}
+				// Extract stop_reason from assistantResponseEvent
+				if sr := getString(assistantResp, "stop_reason"); sr != "" {
+					stopReason = sr
+					log.Debugf("kiro: parseEventStream found stop_reason in assistantResponseEvent: %s", stopReason)
+				}
+				if sr := getString(assistantResp, "stopReason"); sr != "" {
+					stopReason = sr
+					log.Debugf("kiro: parseEventStream found stopReason in assistantResponseEvent: %s", stopReason)
 				}
 				// Extract tool uses from response
 				if toolUsesRaw, ok := assistantResp["toolUses"].([]interface{}); ok {
@@ -1653,6 +1730,17 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 			if outputTokens, ok := event["outputTokens"].(float64); ok {
 				usageInfo.OutputTokens = int64(outputTokens)
 			}
+
+		case "messageStopEvent", "message_stop":
+			// Handle message stop events which may contain stop_reason
+			if sr := getString(event, "stop_reason"); sr != "" {
+				stopReason = sr
+				log.Debugf("kiro: parseEventStream found stop_reason in messageStopEvent: %s", stopReason)
+			}
+			if sr := getString(event, "stopReason"); sr != "" {
+				stopReason = sr
+				log.Debugf("kiro: parseEventStream found stopReason in messageStopEvent: %s", stopReason)
+			}
 		}
 
 		// Also check nested supplementaryWebLinksEvent
@@ -1674,10 +1762,166 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroToolUse, 
 	// Deduplicate all tool uses
 	toolUses = deduplicateToolUses(toolUses)
 
-	return cleanedContent, toolUses, usageInfo, nil
+	// Apply fallback logic for stop_reason if not provided by upstream
+	// Priority: upstream stopReason > tool_use detection > end_turn default
+	if stopReason == "" {
+		if len(toolUses) > 0 {
+			stopReason = "tool_use"
+			log.Debugf("kiro: parseEventStream using fallback stop_reason: tool_use (detected %d tool uses)", len(toolUses))
+		} else {
+			stopReason = "end_turn"
+			log.Debugf("kiro: parseEventStream using fallback stop_reason: end_turn")
+		}
+	}
+
+	// Log warning if response was truncated due to max_tokens
+	if stopReason == "max_tokens" {
+		log.Warnf("kiro: response truncated due to max_tokens limit")
+	}
+
+	return cleanedContent, toolUses, usageInfo, stopReason, nil
+}
+
+// readEventStreamMessage reads and validates a single AWS Event Stream message.
+// Returns the parsed message or a structured error for different failure modes.
+// This function implements boundary protection and detailed error classification.
+//
+// AWS Event Stream binary format:
+// - Prelude (12 bytes): total_length (4) + headers_length (4) + prelude_crc (4)
+// - Headers (variable): header entries
+// - Payload (variable): JSON data
+// - Message CRC (4 bytes): CRC32C of entire message (not validated, just skipped)
+func (e *KiroExecutor) readEventStreamMessage(reader *bufio.Reader) (*eventStreamMessage, *EventStreamError) {
+	// Read prelude (first 12 bytes: total_len + headers_len + prelude_crc)
+	prelude := make([]byte, 12)
+	_, err := io.ReadFull(reader, prelude)
+	if err == io.EOF {
+		return nil, nil // Normal end of stream
+	}
+	if err != nil {
+		return nil, &EventStreamError{
+			Type:    ErrStreamFatal,
+			Message: "failed to read prelude",
+			Cause:   err,
+		}
+	}
+
+	totalLength := binary.BigEndian.Uint32(prelude[0:4])
+	headersLength := binary.BigEndian.Uint32(prelude[4:8])
+	// Note: prelude[8:12] is prelude_crc - we read it but don't validate (no CRC check per requirements)
+
+	// Boundary check: minimum frame size
+	if totalLength < minEventStreamFrameSize {
+		return nil, &EventStreamError{
+			Type:    ErrStreamMalformed,
+			Message: fmt.Sprintf("invalid message length: %d (minimum is %d)", totalLength, minEventStreamFrameSize),
+		}
+	}
+
+	// Boundary check: maximum message size
+	if totalLength > maxEventStreamMsgSize {
+		return nil, &EventStreamError{
+			Type:    ErrStreamMalformed,
+			Message: fmt.Sprintf("message too large: %d bytes (maximum is %d)", totalLength, maxEventStreamMsgSize),
+		}
+	}
+
+	// Boundary check: headers length within message bounds
+	// Message structure: prelude(12) + headers(headersLength) + payload + message_crc(4)
+	// So: headersLength must be <= totalLength - 16 (12 for prelude + 4 for message_crc)
+	if headersLength > totalLength-16 {
+		return nil, &EventStreamError{
+			Type:    ErrStreamMalformed,
+			Message: fmt.Sprintf("headers length %d exceeds message bounds (total: %d)", headersLength, totalLength),
+		}
+	}
+
+	// Read the rest of the message (total - 12 bytes already read)
+	remaining := make([]byte, totalLength-12)
+	_, err = io.ReadFull(reader, remaining)
+	if err != nil {
+		return nil, &EventStreamError{
+			Type:    ErrStreamFatal,
+			Message: "failed to read message body",
+			Cause:   err,
+		}
+	}
+
+	// Extract event type from headers
+	// Headers start at beginning of 'remaining', length is headersLength
+	var eventType string
+	if headersLength > 0 && headersLength <= uint32(len(remaining)) {
+		eventType = e.extractEventTypeFromBytes(remaining[:headersLength])
+	}
+
+	// Calculate payload boundaries
+	// Payload starts after headers, ends before message_crc (last 4 bytes)
+	payloadStart := headersLength
+	payloadEnd := uint32(len(remaining)) - 4 // Skip message_crc at end
+
+	// Validate payload boundaries
+	if payloadStart >= payloadEnd {
+		// No payload, return empty message
+		return &eventStreamMessage{
+			EventType: eventType,
+			Payload:   nil,
+		}, nil
+	}
+
+	payload := remaining[payloadStart:payloadEnd]
+
+	return &eventStreamMessage{
+		EventType: eventType,
+		Payload:   payload,
+	}, nil
+}
+
+// extractEventTypeFromBytes extracts the event type from raw header bytes (without prelude CRC prefix)
+func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
+	offset := 0
+	for offset < len(headers) {
+		if offset >= len(headers) {
+			break
+		}
+		nameLen := int(headers[offset])
+		offset++
+		if offset+nameLen > len(headers) {
+			break
+		}
+		name := string(headers[offset : offset+nameLen])
+		offset += nameLen
+
+		if offset >= len(headers) {
+			break
+		}
+		valueType := headers[offset]
+		offset++
+
+		if valueType == 7 { // String type
+			if offset+2 > len(headers) {
+				break
+			}
+			valueLen := int(binary.BigEndian.Uint16(headers[offset : offset+2]))
+			offset += 2
+			if offset+valueLen > len(headers) {
+				break
+			}
+			value := string(headers[offset : offset+valueLen])
+			offset += valueLen
+
+			if name == ":event-type" {
+				return value
+			}
+		} else {
+			// Skip other types
+			break
+		}
+	}
+	return ""
 }
 
 // extractEventType extracts the event type from AWS Event Stream headers
+// Note: This is the legacy version that expects headerBytes to include prelude CRC prefix
 func (e *KiroExecutor) extractEventType(headerBytes []byte) string {
 	// Skip prelude CRC (4 bytes)
 	if len(headerBytes) < 4 {
@@ -1737,15 +1981,24 @@ func getString(m map[string]interface{}, key string) string {
 
 // buildClaudeResponse constructs a Claude-compatible response.
 // Supports tool_use blocks when tools are present in the response.
-func (e *KiroExecutor) buildClaudeResponse(content string, toolUses []kiroToolUse, model string, usageInfo usage.Detail) []byte {
+// Supports thinking blocks - parses <thinking> tags and converts to Claude thinking content blocks.
+// stopReason is passed from upstream; fallback logic applied if empty.
+func (e *KiroExecutor) buildClaudeResponse(content string, toolUses []kiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
 	var contentBlocks []map[string]interface{}
 
-	// Add text content if present
+	// Extract thinking blocks and text from content
+	// This handles <thinking>...</thinking> tags from Kiro's response
 	if content != "" {
-		contentBlocks = append(contentBlocks, map[string]interface{}{
-			"type": "text",
-			"text": content,
-		})
+		blocks := e.extractThinkingFromContent(content)
+		contentBlocks = append(contentBlocks, blocks...)
+		
+		// DIAGNOSTIC: Log if thinking blocks were extracted
+		for _, block := range blocks {
+			if block["type"] == "thinking" {
+				thinkingContent := block["thinking"].(string)
+				log.Infof("kiro: buildClaudeResponse extracted thinking block (len: %d)", len(thinkingContent))
+			}
+		}
 	}
 
 	// Add tool_use blocks
@@ -1766,10 +2019,18 @@ func (e *KiroExecutor) buildClaudeResponse(content string, toolUses []kiroToolUs
 		})
 	}
 
-	// Determine stop reason
-	stopReason := "end_turn"
-	if len(toolUses) > 0 {
-		stopReason = "tool_use"
+	// Use upstream stopReason; apply fallback logic if not provided
+	if stopReason == "" {
+		stopReason = "end_turn"
+		if len(toolUses) > 0 {
+			stopReason = "tool_use"
+		}
+		log.Debugf("kiro: buildClaudeResponse using fallback stop_reason: %s", stopReason)
+	}
+
+	// Log warning if response was truncated due to max_tokens
+	if stopReason == "max_tokens" {
+		log.Warnf("kiro: response truncated due to max_tokens limit (buildClaudeResponse)")
 	}
 
 	response := map[string]interface{}{
@@ -1788,6 +2049,101 @@ func (e *KiroExecutor) buildClaudeResponse(content string, toolUses []kiroToolUs
 	return result
 }
 
+// extractThinkingFromContent parses content to extract thinking blocks and text.
+// Returns a list of content blocks in the order they appear in the content.
+// Handles interleaved thinking and text blocks correctly.
+// Based on the streaming implementation's thinking tag handling.
+func (e *KiroExecutor) extractThinkingFromContent(content string) []map[string]interface{} {
+	var blocks []map[string]interface{}
+	
+	if content == "" {
+		return blocks
+	}
+	
+	// Check if content contains thinking tags at all
+	if !strings.Contains(content, thinkingStartTag) {
+		// No thinking tags, return as plain text
+		return []map[string]interface{}{
+			{
+				"type": "text",
+				"text": content,
+			},
+		}
+	}
+	
+	log.Debugf("kiro: extractThinkingFromContent - found thinking tags in content (len: %d)", len(content))
+	
+	remaining := content
+	
+	for len(remaining) > 0 {
+		// Look for <thinking> tag
+		startIdx := strings.Index(remaining, thinkingStartTag)
+		
+		if startIdx == -1 {
+			// No more thinking tags, add remaining as text
+			if strings.TrimSpace(remaining) != "" {
+				blocks = append(blocks, map[string]interface{}{
+					"type": "text",
+					"text": remaining,
+				})
+			}
+			break
+		}
+		
+		// Add text before thinking tag (if any meaningful content)
+		if startIdx > 0 {
+			textBefore := remaining[:startIdx]
+			if strings.TrimSpace(textBefore) != "" {
+				blocks = append(blocks, map[string]interface{}{
+					"type": "text",
+					"text": textBefore,
+				})
+			}
+		}
+		
+		// Move past the opening tag
+		remaining = remaining[startIdx+len(thinkingStartTag):]
+		
+		// Find closing tag
+		endIdx := strings.Index(remaining, thinkingEndTag)
+		
+		if endIdx == -1 {
+			// No closing tag found, treat rest as thinking content (incomplete response)
+			if strings.TrimSpace(remaining) != "" {
+				blocks = append(blocks, map[string]interface{}{
+					"type":     "thinking",
+					"thinking": remaining,
+				})
+				log.Warnf("kiro: extractThinkingFromContent - missing closing </thinking> tag")
+			}
+			break
+		}
+		
+		// Extract thinking content between tags
+		thinkContent := remaining[:endIdx]
+		if strings.TrimSpace(thinkContent) != "" {
+			blocks = append(blocks, map[string]interface{}{
+				"type":     "thinking",
+				"thinking": thinkContent,
+			})
+			log.Debugf("kiro: extractThinkingFromContent - extracted thinking block (len: %d)", len(thinkContent))
+		}
+		
+		// Move past the closing tag
+		remaining = remaining[endIdx+len(thinkingEndTag):]
+	}
+	
+	// If no blocks were created (all whitespace), return empty text block
+	if len(blocks) == 0 {
+		blocks = append(blocks, map[string]interface{}{
+			"type": "text",
+			"text": "",
+		})
+	}
+	
+	return blocks
+}
+
 // NOTE: Tool uses are now extracted from API response, not parsed from text
 
 
@@ -1795,23 +2151,32 @@ func (e *KiroExecutor) buildClaudeResponse(content string, toolUses []kiroToolUs
 // Supports tool calling - emits tool_use content blocks when tools are used.
 // Includes embedded [Called ...] tool call parsing and input buffering for toolUseEvent.
 // Implements duplicate content filtering using lastContentEvent detection (based on AIClient-2-API).
+// Extracts stop_reason from upstream events when available.
 func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *usageReporter) {
 	reader := bufio.NewReaderSize(body, 20*1024*1024) // 20MB buffer to match other providers
 	var totalUsage usage.Detail
-	var hasToolUses bool // Track if any tool uses were emitted
+	var hasToolUses bool                 // Track if any tool uses were emitted
+	var upstreamStopReason string        // Track stop_reason from upstream events
 
 	// Tool use state tracking for input buffering and deduplication
 	processedIDs := make(map[string]bool)
 	var currentToolUse *toolUseState
 
-	// Duplicate content detection - tracks last content event to filter duplicates
-	// Based on AIClient-2-API implementation for Kiro
-	var lastContentEvent string
+	// NOTE: Duplicate content filtering removed - it was causing legitimate repeated
+	// content (like consecutive newlines) to be incorrectly filtered out.
+	// The previous implementation compared lastContentEvent == contentDelta which
+	// is too aggressive for streaming scenarios.
 
 	// Streaming token calculation - accumulate content for real-time token counting
 	// Based on AIClient-2-API implementation
 	var accumulatedContent strings.Builder
 	accumulatedContent.Grow(4096) // Pre-allocate 4KB capacity to reduce reallocations
+
+	// Real-time usage estimation state
+	// These track when to send periodic usage updates during streaming
+	var lastUsageUpdateLen int           // Last accumulated content length when usage was sent
+	var lastUsageUpdateTime = time.Now() // Last time usage update was sent
+	var lastReportedOutputTokens int64   // Last reported output token count
 
 	// Translator param for maintaining tool call state across streaming events
 	// IMPORTANT: This must persist across all TranslateStream calls
@@ -1820,24 +2185,37 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// Thinking mode state tracking - based on amq2api implementation
 	// Tracks whether we're inside a <thinking> block and handles partial tags
 	inThinkBlock := false
-	pendingStartTagChars := 0                 // Number of chars that might be start of <thinking>
-	pendingEndTagChars := 0                   // Number of chars that might be start of </thinking>
-	isThinkingBlockOpen := false              // Track if thinking content block is open
-	thinkingBlockIndex := -1                  // Index of the thinking content block
+	pendingStartTagChars := 0            // Number of chars that might be start of <thinking>
+	pendingEndTagChars := 0              // Number of chars that might be start of </thinking>
+	isThinkingBlockOpen := false         // Track if thinking content block is open
+	thinkingBlockIndex := -1             // Index of the thinking content block
 
 	// Pre-calculate input tokens from request if possible
-	if enc, err := tokenizerForModel(model); err == nil {
-		// Try OpenAI format first, then fall back to raw byte count estimation
-		if inp, err := countOpenAIChatTokens(enc, originalReq); err == nil && inp > 0 {
-			totalUsage.InputTokens = inp
+	// Kiro uses Claude format, so try Claude format first, then OpenAI format, then fallback
+	if enc, err := getTokenizer(model); err == nil {
+		var inputTokens int64
+		var countMethod string
+		
+		// Try Claude format first (Kiro uses Claude API format)
+		if inp, err := countClaudeChatTokens(enc, claudeBody); err == nil && inp > 0 {
+			inputTokens = inp
+			countMethod = "claude"
+		} else if inp, err := countOpenAIChatTokens(enc, originalReq); err == nil && inp > 0 {
+			// Fallback to OpenAI format (for OpenAI-compatible requests)
+			inputTokens = inp
+			countMethod = "openai"
 		} else {
-			// Fallback: estimate from raw request size (roughly 4 chars per token)
-			totalUsage.InputTokens = int64(len(originalReq) / 4)
-			if totalUsage.InputTokens == 0 && len(originalReq) > 0 {
-				totalUsage.InputTokens = 1
+			// Final fallback: estimate from raw request size (roughly 4 chars per token)
+			inputTokens = int64(len(claudeBody) / 4)
+			if inputTokens == 0 && len(claudeBody) > 0 {
+				inputTokens = 1
 			}
+			countMethod = "estimate"
 		}
-		log.Debugf("kiro: streamToChannel pre-calculated input tokens: %d (request size: %d bytes)", totalUsage.InputTokens, len(originalReq))
+		
+		totalUsage.InputTokens = inputTokens
+		log.Debugf("kiro: streamToChannel pre-calculated input tokens: %d (method: %s, claude body: %d bytes, original req: %d bytes)",
+			totalUsage.InputTokens, countMethod, len(claudeBody), len(originalReq))
 	}
 
 	contentBlockIndex := -1
@@ -1857,9 +2235,17 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		default:
 		}
 
-		prelude := make([]byte, 8)
-		_, err := io.ReadFull(reader, prelude)
-		if err == io.EOF {
+		msg, eventErr := e.readEventStreamMessage(reader)
+		if eventErr != nil {
+			// Log the error
+			log.Errorf("kiro: streamToChannel error: %v", eventErr)
+			
+			// Send error to channel for client notification
+			out <- cliproxyexecutor.StreamChunk{Err: eventErr}
+			return
+		}
+		if msg == nil {
+			// Normal end of stream (EOF)
 			// Flush any incomplete tool use before ending stream
 			if currentToolUse != nil && !processedIDs[currentToolUse.toolUseID] {
 				log.Warnf("kiro: flushing incomplete tool use at EOF: %s (ID: %s)", currentToolUse.name, currentToolUse.toolUseID)
@@ -1905,58 +2291,70 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				hasToolUses = true
 				currentToolUse = nil
 			}
+			
+			// Flush any pending tag characters at EOF
+			// These are partial tag prefixes that were held back waiting for more data
+			// Since no more data is coming, output them as regular text
+			var pendingText string
+			if pendingStartTagChars > 0 {
+				pendingText = thinkingStartTag[:pendingStartTagChars]
+				log.Debugf("kiro: flushing pending start tag chars at EOF: %q", pendingText)
+				pendingStartTagChars = 0
+			}
+			if pendingEndTagChars > 0 {
+				pendingText += thinkingEndTag[:pendingEndTagChars]
+				log.Debugf("kiro: flushing pending end tag chars at EOF: %q", pendingText)
+				pendingEndTagChars = 0
+			}
+			
+			// Output pending text if any
+			if pendingText != "" {
+				// If we're in a thinking block, output as thinking content
+				if inThinkBlock && isThinkingBlockOpen {
+					thinkingEvent := e.buildClaudeThinkingDeltaEvent(pendingText, thinkingBlockIndex)
+					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
+					for _, chunk := range sseData {
+						if chunk != "" {
+							out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+						}
+					}
+				} else {
+					// Output as regular text
+					if !isTextBlockOpen {
+						contentBlockIndex++
+						isTextBlockOpen = true
+						blockStart := e.buildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+						for _, chunk := range sseData {
+							if chunk != "" {
+								out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+							}
+						}
+					}
+					
+					claudeEvent := e.buildClaudeStreamEvent(pendingText, contentBlockIndex)
+					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+					for _, chunk := range sseData {
+						if chunk != "" {
+							out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+						}
+					}
+				}
+			}
 			break
 		}
-		if err != nil {
-			out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("failed to read prelude: %w", err)}
-			return
-		}
 
-		totalLen := binary.BigEndian.Uint32(prelude[0:4])
-		if totalLen < 8 {
-			out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("invalid message length: %d", totalLen)}
-			return
-		}
-		if totalLen > kiroMaxMessageSize {
-			out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("message too large: %d bytes", totalLen)}
-			return
-		}
-		headersLen := binary.BigEndian.Uint32(prelude[4:8])
-
-		remaining := make([]byte, totalLen-8)
-		_, err = io.ReadFull(reader, remaining)
-		if err != nil {
-			out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("failed to read message: %w", err)}
-			return
-		}
-
-		// Validate headersLen to prevent slice out of bounds
-		if headersLen+4 > uint32(len(remaining)) {
-			log.Warnf("kiro: invalid headersLen %d exceeds remaining buffer %d", headersLen, len(remaining))
+		eventType := msg.EventType
+		payload := msg.Payload
+		if len(payload) == 0 {
 			continue
 		}
-
-		eventType := e.extractEventType(remaining[:headersLen+4])
-
-		payloadStart := 4 + headersLen
-		payloadEnd := uint32(len(remaining)) - 4
-		if payloadStart >= payloadEnd {
-			continue
-		}
-
-		payload := remaining[payloadStart:payloadEnd]
 		appendAPIResponseChunk(ctx, e.cfg, payload)
 
 		var event map[string]interface{}
 		if err := json.Unmarshal(payload, &event); err != nil {
 			log.Warnf("kiro: failed to unmarshal event payload: %v, raw: %s", err, string(payload))
 			continue
-		}
-
-		// DIAGNOSTIC: Log all received event types for debugging
-		log.Debugf("kiro: streamToChannel received event type: %s", eventType)
-		if log.IsLevelEnabled(log.TraceLevel) {
-			log.Tracef("kiro: streamToChannel event payload: %s", string(payload))
 		}
 
 		// Check for error/exception events in the payload (Kiro API may return errors with HTTP 200)
@@ -1986,6 +2384,17 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			return
 		}
 
+		// Extract stop_reason from various event formats (streaming)
+		// Kiro/Amazon Q API may include stop_reason in different locations
+		if sr := getString(event, "stop_reason"); sr != "" {
+			upstreamStopReason = sr
+			log.Debugf("kiro: streamToChannel found stop_reason (top-level): %s", upstreamStopReason)
+		}
+		if sr := getString(event, "stopReason"); sr != "" {
+			upstreamStopReason = sr
+			log.Debugf("kiro: streamToChannel found stopReason (top-level): %s", upstreamStopReason)
+		}
+
 		// Send message_start on first event
 		if !messageStartSent {
 			msgStart := e.buildClaudeMessageStartEvent(model, totalUsage.InputTokens)
@@ -2004,6 +2413,17 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			log.Debugf("kiro: streamToChannel ignoring followupPrompt event")
 			continue
 
+		case "messageStopEvent", "message_stop":
+			// Handle message stop events which may contain stop_reason
+			if sr := getString(event, "stop_reason"); sr != "" {
+				upstreamStopReason = sr
+				log.Debugf("kiro: streamToChannel found stop_reason in messageStopEvent: %s", upstreamStopReason)
+			}
+			if sr := getString(event, "stopReason"); sr != "" {
+				upstreamStopReason = sr
+				log.Debugf("kiro: streamToChannel found stopReason in messageStopEvent: %s", upstreamStopReason)
+			}
+
 		case "assistantResponseEvent":
 			var contentDelta string
 			var toolUses []map[string]interface{}
@@ -2011,6 +2431,15 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			if assistantResp, ok := event["assistantResponseEvent"].(map[string]interface{}); ok {
 				if c, ok := assistantResp["content"].(string); ok {
 					contentDelta = c
+				}
+				// Extract stop_reason from assistantResponseEvent
+				if sr := getString(assistantResp, "stop_reason"); sr != "" {
+					upstreamStopReason = sr
+					log.Debugf("kiro: streamToChannel found stop_reason in assistantResponseEvent: %s", upstreamStopReason)
+				}
+				if sr := getString(assistantResp, "stopReason"); sr != "" {
+					upstreamStopReason = sr
+					log.Debugf("kiro: streamToChannel found stopReason in assistantResponseEvent: %s", upstreamStopReason)
 				}
 				// Extract tool uses from response
 				if tus, ok := assistantResp["toolUses"].([]interface{}); ok {
@@ -2035,19 +2464,61 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				}
 			}
 
-			// Handle text content with duplicate detection and thinking mode support
+			// Handle text content with thinking mode support
 			if contentDelta != "" {
-				// Check for duplicate content - skip if identical to last content event
-				// Based on AIClient-2-API implementation for Kiro
-				if contentDelta == lastContentEvent {
-					log.Debugf("kiro: skipping duplicate content event (len: %d)", len(contentDelta))
-					continue
-				}
-				lastContentEvent = contentDelta
+				// NOTE: Duplicate content filtering was removed because it incorrectly
+				// filtered out legitimate repeated content (like consecutive newlines "\n\n").
+				// Streaming naturally can have identical chunks that are valid content.
 
 				outputLen += len(contentDelta)
 				// Accumulate content for streaming token calculation
 				accumulatedContent.WriteString(contentDelta)
+				
+				// Real-time usage estimation: Check if we should send a usage update
+				// This helps clients track context usage during long thinking sessions
+				shouldSendUsageUpdate := false
+				if accumulatedContent.Len()-lastUsageUpdateLen >= usageUpdateCharThreshold {
+					shouldSendUsageUpdate = true
+				} else if time.Since(lastUsageUpdateTime) >= usageUpdateTimeInterval && accumulatedContent.Len() > lastUsageUpdateLen {
+					shouldSendUsageUpdate = true
+				}
+				
+				if shouldSendUsageUpdate {
+					// Calculate current output tokens using tiktoken
+					var currentOutputTokens int64
+					if enc, encErr := getTokenizer(model); encErr == nil {
+						if tokenCount, countErr := enc.Count(accumulatedContent.String()); countErr == nil {
+							currentOutputTokens = int64(tokenCount)
+						}
+					}
+					// Fallback to character estimation if tiktoken fails
+					if currentOutputTokens == 0 {
+						currentOutputTokens = int64(accumulatedContent.Len() / 4)
+						if currentOutputTokens == 0 {
+							currentOutputTokens = 1
+						}
+					}
+					
+					// Only send update if token count has changed significantly (at least 10 tokens)
+					if currentOutputTokens > lastReportedOutputTokens+10 {
+						// Send ping event with usage information
+						// This is a non-blocking update that clients can optionally process
+						pingEvent := e.buildClaudePingEventWithUsage(totalUsage.InputTokens, currentOutputTokens)
+						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, pingEvent, &translatorParam)
+						for _, chunk := range sseData {
+							if chunk != "" {
+								out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+							}
+						}
+						
+						lastReportedOutputTokens = currentOutputTokens
+						log.Debugf("kiro: sent real-time usage update - input: %d, output: %d (accumulated: %d chars)",
+							totalUsage.InputTokens, currentOutputTokens, accumulatedContent.Len())
+					}
+					
+					lastUsageUpdateLen = accumulatedContent.Len()
+					lastUsageUpdateTime = time.Now()
+				}
 
 				// Process content with thinking tag detection - based on amq2api implementation
 				// This handles <thinking> and </thinking> tags that may span across chunks
@@ -2414,10 +2885,10 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	}
 
 	// Streaming token calculation - calculate output tokens from accumulated content
-	// This provides more accurate token counting than simple character division
+	// Only use local estimation if server didn't provide usage (server-side usage takes priority)
 	if totalUsage.OutputTokens == 0 && accumulatedContent.Len() > 0 {
 		// Try to use tiktoken for accurate counting
-		if enc, err := tokenizerForModel(model); err == nil {
+		if enc, err := getTokenizer(model); err == nil {
 			if tokenCount, countErr := enc.Count(accumulatedContent.String()); countErr == nil {
 				totalUsage.OutputTokens = int64(tokenCount)
 				log.Debugf("kiro: streamToChannel calculated output tokens using tiktoken: %d", totalUsage.OutputTokens)
@@ -2446,10 +2917,21 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	}
 	totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens
 
-	// Determine stop reason based on whether tool uses were emitted
-	stopReason := "end_turn"
-	if hasToolUses {
-		stopReason = "tool_use"
+	// Determine stop reason: prefer upstream, then detect tool_use, default to end_turn
+	stopReason := upstreamStopReason
+	if stopReason == "" {
+		if hasToolUses {
+			stopReason = "tool_use"
+			log.Debugf("kiro: streamToChannel using fallback stop_reason: tool_use")
+		} else {
+			stopReason = "end_turn"
+			log.Debugf("kiro: streamToChannel using fallback stop_reason: end_turn")
+		}
+	}
+
+	// Log warning if response was truncated due to max_tokens
+	if stopReason == "max_tokens" {
+		log.Warnf("kiro: response truncated due to max_tokens limit (streamToChannel)")
 	}
 
 	// Send message_delta event
@@ -2595,6 +3077,24 @@ func (e *KiroExecutor) buildClaudeFinalEvent() []byte {
 	return []byte("event: message_stop\ndata: " + string(result))
 }
 
+// buildClaudePingEventWithUsage creates a ping event with embedded usage information.
+// This is used for real-time usage estimation during streaming.
+// The usage field is a non-standard extension that clients can optionally process.
+// Clients that don't recognize the usage field will simply ignore it.
+func (e *KiroExecutor) buildClaudePingEventWithUsage(inputTokens, outputTokens int64) []byte {
+	event := map[string]interface{}{
+		"type": "ping",
+		"usage": map[string]interface{}{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+			"total_tokens":  inputTokens + outputTokens,
+			"estimated":     true, // Flag to indicate this is an estimate, not final
+		},
+	}
+	result, _ := json.Marshal(event)
+	return []byte("event: ping\ndata: " + string(result))
+}
+
 // buildClaudeThinkingDeltaEvent creates a thinking_delta event for Claude API compatibility.
 // This is used when streaming thinking content wrapped in <thinking> tags.
 func (e *KiroExecutor) buildClaudeThinkingDeltaEvent(thinkingDelta string, index int) []byte {
@@ -2674,10 +3174,21 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		// Also check if expires_at is now in the future with sufficient buffer
 		if expiresAt, ok := auth.Metadata["expires_at"].(string); ok {
 			if expTime, err := time.Parse(time.RFC3339, expiresAt); err == nil {
-				// If token expires more than 2 minutes from now, it's still valid
-				if time.Until(expTime) > 2*time.Minute {
+				// If token expires more than 5 minutes from now, it's still valid
+				if time.Until(expTime) > 5*time.Minute {
 					log.Debugf("kiro executor: token is still valid (expires in %v), skipping refresh", time.Until(expTime))
-					return auth, nil
+					// CRITICAL FIX: Set NextRefreshAfter to prevent frequent refresh checks
+					// Without this, shouldRefresh() will return true again in 5 seconds
+					updated := auth.Clone()
+					// Set next refresh to 5 minutes before expiry, or at least 30 seconds from now
+					nextRefresh := expTime.Add(-5 * time.Minute)
+					minNextRefresh := time.Now().Add(30 * time.Second)
+					if nextRefresh.Before(minNextRefresh) {
+						nextRefresh = minNextRefresh
+					}
+					updated.NextRefreshAfter = nextRefresh
+					log.Debugf("kiro executor: setting NextRefreshAfter to %v (in %v)", nextRefresh.Format(time.RFC3339), time.Until(nextRefresh))
+					return updated, nil
 				}
 			}
 		}
@@ -2761,9 +3272,9 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		updated.Attributes["profile_arn"] = tokenData.ProfileArn
 	}
 
-	// Set next refresh time to 30 minutes before expiry
+	// NextRefreshAfter is aligned with RefreshLead (5min)
 	if expiresAt, parseErr := time.Parse(time.RFC3339, tokenData.ExpiresAt); parseErr == nil {
-		updated.NextRefreshAfter = expiresAt.Add(-30 * time.Minute)
+		updated.NextRefreshAfter = expiresAt.Add(-5 * time.Minute)
 	}
 
 	log.Infof("kiro executor: token refreshed successfully, expires at %s", tokenData.ExpiresAt)
@@ -2780,7 +3291,7 @@ func (e *KiroExecutor) streamEventStream(ctx context.Context, body io.Reader, c 
 	var translatorParam any
 
 	// Pre-calculate input tokens from request if possible
-	if enc, err := tokenizerForModel(model); err == nil {
+	if enc, err := getTokenizer(model); err == nil {
 		// Try OpenAI format first, then fall back to raw byte count estimation
 		if inp, err := countOpenAIChatTokens(enc, originalReq); err == nil && inp > 0 {
 			totalUsage.InputTokens = inp
