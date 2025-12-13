@@ -96,6 +96,11 @@ type ModelRegistry struct {
 	mutex *sync.RWMutex
 }
 
+// normalizeModelID normalizes model IDs by replacing underscores with dashes
+func normalizeModelID(modelID string) string {
+	return strings.ReplaceAll(strings.TrimSpace(modelID), "_", "-")
+}
+
 // Global model registry instance
 var globalRegistry *ModelRegistry
 var registryOnce sync.Once
@@ -124,20 +129,21 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 
 	provider := strings.ToLower(clientProvider)
 	uniqueModelIDs := make([]string, 0, len(models))
-	rawModelIDs := make([]string, 0, len(models))
+	normalizedModelIDs := make([]string, 0, len(models))
 	newModels := make(map[string]*ModelInfo, len(models))
 	newCounts := make(map[string]int, len(models))
 	for _, model := range models {
 		if model == nil || model.ID == "" {
 			continue
 		}
-		rawModelIDs = append(rawModelIDs, model.ID)
-		newCounts[model.ID]++
-		if _, exists := newModels[model.ID]; exists {
+		normalizedID := normalizeModelID(model.ID)
+		normalizedModelIDs = append(normalizedModelIDs, normalizedID)
+		newCounts[normalizedID]++
+		if _, exists := newModels[normalizedID]; exists {
 			continue
 		}
-		newModels[model.ID] = model
-		uniqueModelIDs = append(uniqueModelIDs, model.ID)
+		newModels[normalizedID] = model
+		uniqueModelIDs = append(uniqueModelIDs, normalizedID)
 	}
 
 	if len(uniqueModelIDs) == 0 {
@@ -156,24 +162,25 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	providerChanged := oldProvider != provider
 	if !hadExisting {
 		// Pure addition path.
-		for _, modelID := range rawModelIDs {
+		for _, modelID := range normalizedModelIDs {
 			model := newModels[modelID]
 			r.addModelRegistration(modelID, provider, model, now)
 		}
-		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
+		r.clientModels[clientID] = append([]string(nil), normalizedModelIDs...)
 		if provider != "" {
 			r.clientProviders[clientID] = provider
 		} else {
 			delete(r.clientProviders, clientID)
 		}
-		log.Debugf("Registered client %s from provider %s with %d models", clientID, clientProvider, len(rawModelIDs))
+		log.Debugf("Registered client %s from provider %s with %d models", clientID, clientProvider, len(normalizedModelIDs))
 		misc.LogCredentialSeparator()
 		return
 	}
 
 	oldCounts := make(map[string]int, len(oldModels))
 	for _, id := range oldModels {
-		oldCounts[id]++
+		normID := normalizeModelID(id)
+		oldCounts[normID]++
 	}
 
 	added := make([]string, 0)
@@ -284,8 +291,8 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	}
 
 	// Update client bookkeeping.
-	if len(rawModelIDs) > 0 {
-		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
+	if len(normalizedModelIDs) > 0 {
+		r.clientModels[clientID] = append([]string(nil), normalizedModelIDs...)
 	}
 	if provider != "" {
 		r.clientProviders[clientID] = provider
@@ -535,6 +542,9 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 		return false
 	}
 
+	// Normalize model ID: replace underscores with dashes for consistent lookup
+	normalizedModelID := strings.ReplaceAll(modelID, "_", "-")
+
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
@@ -544,7 +554,8 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	}
 
 	for _, id := range models {
-		if strings.EqualFold(strings.TrimSpace(id), modelID) {
+		trimmedID := strings.TrimSpace(id)
+		if strings.EqualFold(trimmedID, modelID) || strings.EqualFold(trimmedID, normalizedModelID) {
 			return true
 		}
 	}
@@ -617,7 +628,14 @@ func (r *ModelRegistry) GetModelCount(modelID string) int {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if registration, exists := r.models[modelID]; exists {
+	// Normalize model ID: replace underscores with dashes for consistent lookup
+	normalizedID := strings.ReplaceAll(modelID, "_", "-")
+	registration, exists := r.models[normalizedID]
+	if !exists {
+		registration, exists = r.models[modelID]
+	}
+
+	if exists {
 		now := time.Now()
 		quotaExpiredDuration := 5 * time.Minute
 
@@ -651,7 +669,15 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	registration, exists := r.models[modelID]
+	// Normalize model ID: replace underscores with dashes for consistent lookup
+	// This handles cases like "claude-sonnet-4_5-20250929" -> "claude-sonnet-4-5-20250929"
+	normalizedID := strings.ReplaceAll(modelID, "_", "-")
+
+	registration, exists := r.models[normalizedID]
+	// Fall back to original ID if normalized version not found
+	if !exists {
+		registration, exists = r.models[modelID]
+	}
 	if !exists || registration == nil || len(registration.Providers) == 0 {
 		return nil
 	}
@@ -703,6 +729,12 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 func (r *ModelRegistry) GetModelInfo(modelID string) *ModelInfo {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
+	// Normalize model ID: replace underscores with dashes for consistent lookup
+	normalizedID := strings.ReplaceAll(modelID, "_", "-")
+	if reg, ok := r.models[normalizedID]; ok && reg != nil {
+		return reg.Info
+	}
+	// Fall back to original ID if normalized version not found
 	if reg, ok := r.models[modelID]; ok && reg != nil {
 		return reg.Info
 	}
