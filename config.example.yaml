@@ -63,6 +63,7 @@ ws-auth: false
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
 #     base-url: "https://generativelanguage.googleapis.com"
+#     priority: 100            # Higher values = higher priority. Default is 0.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080"
@@ -72,11 +73,13 @@ ws-auth: false
 #       - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
 #       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   - api-key: "AIzaSy...02"
+#     priority: 50             # Lower priority, used when higher priority keys fail or are in cooldown
 
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
+#     priority: 100          # Higher values = higher priority. Default is 0.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
@@ -89,8 +92,10 @@ ws-auth: false
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
+#     priority: 100          # Higher values = higher priority. Default is 0.
 #   - api-key: "sk-atSM..."
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
+#     priority: 50           # Lower priority, used as fallback
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
@@ -111,8 +116,10 @@ ws-auth: false
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
+#         priority: 100    # Higher values = higher priority. Default is 0.
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
-#       - api-key: "sk-or-v1-...b781" # without proxy-url
+#       - api-key: "sk-or-v1-...b781"
+#         priority: 50     # Lower priority, used as fallback
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.
@@ -121,6 +128,7 @@ ws-auth: false
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
 #     base-url: "https://example.com/api"         # e.g. https://zenmux.ai/api
+#     priority: 100                               # Higher values = higher priority. Default is 0.
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -173,6 +181,15 @@ ws-auth: false
 #     - "vision-model"
 #   iflow:
 #     - "tstars2.0"
+
+# Auth priority for OAuth/file-backed auth entries
+# Maps auth file names (in auth-dir) to priority values. Higher values = higher priority.
+# Useful for prioritizing specific OAuth accounts over others.
+# auth-priority:
+#   "claude-primary@example.com.json": 100   # Highest priority
+#   "claude-backup@example.com.json": 10     # Fallback
+#   "gemini-main@gmail.com.json": 80
+#   "gemini-free@gmail.com.json": 20
 
 # Optional payload configuration
 # payload:
