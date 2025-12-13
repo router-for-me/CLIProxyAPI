@@ -197,6 +197,12 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	// Load use_global_proxy from metadata, default to true if not set
+	// This maintains backward compatibility for existing auth files
+	auth.UseGlobalProxy = true // Default to true
+	if useGlobalProxy, ok := metadata["use_global_proxy"].(bool); ok {
+		auth.UseGlobalProxy = useGlobalProxy
+	}
 	return auth, nil
 }
 
