@@ -1,4 +1,5 @@
-package chat_completions
+// Package openai provides translation between OpenAI Chat Completions and Kiro formats.
+package openai
 
 import (
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -8,12 +9,12 @@ import (
 
 func init() {
 	translator.Register(
-		OpenAI,
-		Kiro,
+		OpenAI, // source format
+		Kiro,   // target format
 		ConvertOpenAIRequestToKiro,
 		interfaces.TranslateResponse{
-			Stream:    ConvertKiroResponseToOpenAI,
-			NonStream: ConvertKiroResponseToOpenAINonStream,
+			Stream:    ConvertKiroStreamToOpenAI,
+			NonStream: ConvertKiroNonStreamToOpenAI,
 		},
 	)
 }
