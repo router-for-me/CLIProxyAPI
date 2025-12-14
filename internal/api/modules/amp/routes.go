@@ -220,7 +220,10 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 
 	// >>> LITELLM_HOOK_MIDDLEWARE - LiteLLM routing integration (see FORK_MAINTENANCE.md)
 	if m.litellmConfig != nil && m.litellmProxy != nil {
+		// Explicit routing: models in litellm-models list go directly to LiteLLM
 		ampProviders.Use(LiteLLMMiddleware(m.litellmConfig, m.litellmProxy))
+		// Fallback: if OAuth returns quota/rate limit error, retry with LiteLLM
+		ampProviders.Use(LiteLLMFallbackMiddleware(m.litellmConfig, m.litellmProxy))
 	}
 	// <<< LITELLM_HOOK_MIDDLEWARE
 

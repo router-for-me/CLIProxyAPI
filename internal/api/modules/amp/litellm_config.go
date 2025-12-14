@@ -15,6 +15,7 @@ type LiteLLMConfig struct {
 	mu              sync.RWMutex
 	enabled         bool
 	passthroughMode bool
+	fallbackEnabled bool
 	models          map[string]bool
 	baseURL         string
 	apiKey          string
@@ -38,6 +39,7 @@ func (lc *LiteLLMConfig) Update(cfg *config.Config) {
 	lc.apiKey = cfg.LiteLLMAPIKey
 	lc.enabled = cfg.LiteLLMHybridMode && lc.baseURL != ""
 	lc.passthroughMode = cfg.LiteLLMPassthroughMode
+	lc.fallbackEnabled = cfg.LiteLLMFallbackEnabled && lc.baseURL != ""
 
 	// Rebuild models map
 	lc.models = make(map[string]bool)
@@ -58,6 +60,13 @@ func (lc *LiteLLMConfig) IsPassthroughMode() bool {
 	lc.mu.RLock()
 	defer lc.mu.RUnlock()
 	return lc.passthroughMode
+}
+
+// IsFallbackEnabled returns whether fallback to LiteLLM on quota errors is enabled
+func (lc *LiteLLMConfig) IsFallbackEnabled() bool {
+	lc.mu.RLock()
+	defer lc.mu.RUnlock()
+	return lc.fallbackEnabled
 }
 
 // GetBaseURL returns the LiteLLM base URL

@@ -140,13 +140,14 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 
 		// >>> LITELLM_HOOK_INIT - LiteLLM routing integration (see FORK_MAINTENANCE.md)
 		m.litellmConfig = NewLiteLLMConfig(ctx.Config)
-		if m.litellmConfig.IsEnabled() {
+		if m.litellmConfig.IsEnabled() || m.litellmConfig.IsFallbackEnabled() {
 			var litellmErr error
 			m.litellmProxy, litellmErr = CreateLiteLLMProxy(m.litellmConfig)
 			if litellmErr != nil {
 				log.Errorf("failed to create LiteLLM proxy: %v", litellmErr)
 			} else {
-				log.Infof("LiteLLM routing enabled for: %s (%d models)", m.litellmConfig.GetBaseURL(), m.litellmConfig.GetModelCount())
+				log.Infof("LiteLLM routing enabled for: %s (explicit: %d models, fallback: %v)",
+					m.litellmConfig.GetBaseURL(), m.litellmConfig.GetModelCount(), m.litellmConfig.IsFallbackEnabled())
 			}
 		}
 		// <<< LITELLM_HOOK_INIT
