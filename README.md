@@ -22,6 +22,7 @@ This fork extends the original CLI Proxy to provide:
 ```bash
 git clone --branch feature/usage-metrics git@github.com:Ybazylbe/CLIProxyAPI-YBFork.git
 cd CLIProxyAPI
+```
 
 ### Running with Docker
 ```bash
