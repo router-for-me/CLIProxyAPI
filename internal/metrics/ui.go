@@ -242,4 +242,4 @@ const metricsUIHTML = `<!DOCTYPE html>
         setInterval(refreshData, 30000);
     </script>
 </body>
-</html>` + "`"
+</html>`
