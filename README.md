@@ -18,6 +18,10 @@ This fork extends the original CLI Proxy to provide:
 - Go 1.21+ (for building from source)
 - Docker (for containerized deployment)
 
+# Clone and build
+git clone --branch feature/usage-metrics git@github.com:Ybazylbe/CLIProxyAPI-YBFork.git
+cd CLIProxyAPI
+
 ### Running with Docker
 ```bash
 # Build the image
@@ -39,17 +43,10 @@ open http://localhost:8081/_qs/metrics/ui
 
 ### Running from Source
 ```bash
-# Clone and build
-git clone --branch feature/usage-metrics git@github.com:Ybazylbe/CLIProxyAPI-YBFork.git
-cd CLIProxyAPI
-go build -o cliproxy
-
-# Configure metrics (see Configuration section)
-cp config.example.yaml config.yaml
-nano config.yaml
+go build -o cliproxy ./cmd/server
 
 # Run
-./cliproxy
+./cliproxy --config config.yaml
 ```
 
 ## 📊 Metrics Configuration

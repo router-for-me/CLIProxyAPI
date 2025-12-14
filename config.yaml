@@ -14,7 +14,7 @@ metrics_enabled: true
 metrics_bind_address: "0.0.0.0:8081"
 
 # Directory for storing OAuth tokens
-auth-dir: "/root/.cli-proxy-api"
+auth-dir: "~/.cli-proxy-api"
 
 # Retries on errors
 request-retry: 3
@@ -22,6 +22,9 @@ max-retry-interval: 30
 
 # Usage statistics
 usage-statistics-enabled: true
+
+metrics_basic_auth_user: "admin"      # login
+metrics_basic_auth_pass: "strongpassword123"  # password
 
 # Provider examples (add your own keys)
 # Gemini API
