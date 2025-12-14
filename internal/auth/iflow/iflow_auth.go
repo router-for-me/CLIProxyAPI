@@ -494,11 +494,18 @@ func (ia *IFlowAuth) CreateCookieTokenStorage(data *IFlowTokenData) *IFlowTokenS
 		return nil
 	}
 
+	// Only save the BXAuth field from the cookie
+	bxAuth := ExtractBXAuth(data.Cookie)
+	cookieToSave := ""
+	if bxAuth != "" {
+		cookieToSave = "BXAuth=" + bxAuth + ";"
+	}
+
 	return &IFlowTokenStorage{
 		APIKey:      data.APIKey,
 		Email:       data.Email,
 		Expire:      data.Expire,
-		Cookie:      data.Cookie,
+		Cookie:      cookieToSave,
 		LastRefresh: time.Now().Format(time.RFC3339),
 		Type:        "iflow",
 	}

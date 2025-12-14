@@ -871,3 +871,32 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 
 	return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
 }
+
+// GetModelsForClient returns the models registered for a specific client.
+// Parameters:
+//   - clientID: The client identifier (typically auth file name or auth ID)
+//
+// Returns:
+//   - []*ModelInfo: List of models registered for this client, nil if client not found
+func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	modelIDs, exists := r.clientModels[clientID]
+	if !exists || len(modelIDs) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	result := make([]*ModelInfo, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		if _, dup := seen[modelID]; dup {
+			continue
+		}
+		seen[modelID] = struct{}{}
+		if reg, ok := r.models[modelID]; ok && reg.Info != nil {
+			result = append(result, reg.Info)
+		}
+	}
+	return result
+}

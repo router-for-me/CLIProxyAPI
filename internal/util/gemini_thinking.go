@@ -25,9 +25,15 @@ func ApplyGeminiThinkingConfig(body []byte, budget *int, includeThoughts *bool) 
 			updated = rewritten
 		}
 	}
-	if includeThoughts != nil {
+	// Default to including thoughts when a budget override is present but no explicit include flag is provided.
+	incl := includeThoughts
+	if incl == nil && budget != nil && *budget != 0 {
+		defaultInclude := true
+		incl = &defaultInclude
+	}
+	if incl != nil {
 		valuePath := "generationConfig.thinkingConfig.include_thoughts"
-		rewritten, err := sjson.SetBytes(updated, valuePath, *includeThoughts)
+		rewritten, err := sjson.SetBytes(updated, valuePath, *incl)
 		if err == nil {
 			updated = rewritten
 		}
@@ -47,9 +53,15 @@ func ApplyGeminiCLIThinkingConfig(body []byte, budget *int, includeThoughts *boo
 			updated = rewritten
 		}
 	}
-	if includeThoughts != nil {
+	// Default to including thoughts when a budget override is present but no explicit include flag is provided.
+	incl := includeThoughts
+	if incl == nil && budget != nil && *budget != 0 {
+		defaultInclude := true
+		incl = &defaultInclude
+	}
+	if incl != nil {
 		valuePath := "request.generationConfig.thinkingConfig.include_thoughts"
-		rewritten, err := sjson.SetBytes(updated, valuePath, *includeThoughts)
+		rewritten, err := sjson.SetBytes(updated, valuePath, *incl)
 		if err == nil {
 			updated = rewritten
 		}

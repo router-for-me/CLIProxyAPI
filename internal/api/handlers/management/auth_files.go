@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -264,6 +265,54 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
 	c.JSON(200, gin.H{"files": files})
+}
+
+// GetAuthFileModels returns the models supported by a specific auth file
+func (h *Handler) GetAuthFileModels(c *gin.Context) {
+	name := c.Query("name")
+	if name == "" {
+		c.JSON(400, gin.H{"error": "name is required"})
+		return
+	}
+
+	// Try to find auth ID via authManager
+	var authID string
+	if h.authManager != nil {
+		auths := h.authManager.List()
+		for _, auth := range auths {
+			if auth.FileName == name || auth.ID == name {
+				authID = auth.ID
+				break
+			}
+		}
+	}
+
+	if authID == "" {
+		authID = name // fallback to filename as ID
+	}
+
+	// Get models from registry
+	reg := registry.GetGlobalRegistry()
+	models := reg.GetModelsForClient(authID)
+
+	result := make([]gin.H, 0, len(models))
+	for _, m := range models {
+		entry := gin.H{
+			"id": m.ID,
+		}
+		if m.DisplayName != "" {
+			entry["display_name"] = m.DisplayName
+		}
+		if m.Type != "" {
+			entry["type"] = m.Type
+		}
+		if m.OwnedBy != "" {
+			entry["owned_by"] = m.OwnedBy
+		}
+		result = append(result, entry)
+	}
+
+	c.JSON(200, gin.H{"models": result})
 }
 
 // List auth files from disk when the auth manager is unavailable.
@@ -1722,6 +1771,17 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 		return
 	}
 
+	// Check for duplicate BXAuth before authentication
+	bxAuth := iflowauth.ExtractBXAuth(cookieValue)
+	if existingFile, err := iflowauth.CheckDuplicateBXAuth(h.cfg.AuthDir, bxAuth); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to check duplicate"})
+		return
+	} else if existingFile != "" {
+		existingFileName := filepath.Base(existingFile)
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "duplicate BXAuth found", "existing_file": existingFileName})
+		return
+	}
+
 	authSvc := iflowauth.NewIFlowAuth(h.cfg)
 	tokenData, errAuth := authSvc.AuthenticateWithCookie(ctx, cookieValue)
 	if errAuth != nil {
@@ -1744,11 +1804,12 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 	}
 
 	tokenStorage.Email = email
+	timestamp := time.Now().Unix()
 
 	record := &coreauth.Auth{
-		ID:       fmt.Sprintf("iflow-%s.json", fileName),
+		ID:       fmt.Sprintf("iflow-%s-%d.json", fileName, timestamp),
 		Provider: "iflow",
-		FileName: fmt.Sprintf("iflow-%s.json", fileName),
+		FileName: fmt.Sprintf("iflow-%s-%d.json", fileName, timestamp),
 		Storage:  tokenStorage,
 		Metadata: map[string]any{
 			"email":        email,
