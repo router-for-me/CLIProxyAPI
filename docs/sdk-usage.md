@@ -2,6 +2,26 @@
 
 The `sdk/cliproxy` module exposes the proxy as a reusable Go library so external programs can embed the routing, authentication, hot‑reload, and translation layers without depending on the CLI binary.
 
+## External Projects: Use EmbedConfig API
+
+> **Important**: If you're embedding CLIProxyAPI in an **external Go project** (outside this repository), use the public `EmbedConfig` API instead of `internal/config.Config`. Go blocks external imports of internal packages.
+>
+> See **[Embedding Guide](./embedding-guide.md)** for complete documentation on the public API.
+>
+> Quick example:
+> ```go
+> svc, err := cliproxy.NewBuilder().
+>     WithEmbedConfig(&cliproxy.EmbedConfig{
+>         Host: "127.0.0.1",
+>         Port: 8317,
+>         AuthDir: "./auth",
+>     }).
+>     WithConfigPath("./config.yaml").
+>     Build()
+> ```
+
+The remainder of this guide covers the internal API using `internal/config.Config`, which is only available within the CLIProxyAPI repository.
+
 ## Install & Import
 
 ```bash

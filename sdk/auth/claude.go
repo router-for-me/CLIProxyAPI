@@ -37,9 +37,7 @@ func (a *ClaudeAuthenticator) RefreshLead() *time.Duration {
 }
 
 func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("cliproxy auth: configuration is required")
-	}
+	// Config is now optional - if nil, OAuth works without proxy settings
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -72,6 +70,7 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		}
 	}()
 
+	// NewClaudeAuth now accepts nil config and uses default HTTP client
 	authSvc := claude.NewClaudeAuth(cfg)
 
 	authURL, returnedState, err := authSvc.GenerateAuthURL(state, pkceCodes)

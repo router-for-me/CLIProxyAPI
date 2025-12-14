@@ -26,6 +26,7 @@ docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+openspec
 
 # Tooling metadata
 .vscode/*

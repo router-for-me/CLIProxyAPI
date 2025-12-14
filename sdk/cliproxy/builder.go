@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"fmt"
 
+	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -46,6 +47,9 @@ type Builder struct {
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
+
+	// configErr stores configuration validation errors from WithEmbedConfig.
+	configErr error
 }
 
 // Hooks allows callers to plug into service lifecycle stages.
@@ -91,6 +95,50 @@ func (b *Builder) WithConfig(cfg *config.Config) *Builder {
 //   - *Builder: The builder instance for method chaining
 func (b *Builder) WithConfigPath(path string) *Builder {
 	b.configPath = path
+	return b
+}
+
+// WithEmbedConfig sets the configuration using a public EmbedConfig type that can be
+// safely used by external Go applications without requiring access to internal packages.
+//
+// This method validates the configuration and converts it to the internal config.Config type.
+// Validation errors are stored and returned during the Build() phase.
+//
+// Use this method when embedding CLIProxyAPI in external applications:
+//
+//	svc, err := cliproxy.NewBuilder().
+//	    WithEmbedConfig(&cliproxy.EmbedConfig{
+//	        Host:    "127.0.0.1",
+//	        Port:    8317,
+//	        AuthDir: "./auth",
+//	    }).
+//	    WithConfigPath("./config.yaml").
+//	    Build()
+//
+// For provider-specific configurations (API keys, OAuth accounts, model mappings),
+// use WithConfigPath() to load provider settings from a YAML file. EmbedConfig
+// handles only essential server configuration options.
+//
+// Parameters:
+//   - embedCfg: The public embedding configuration
+//
+// Returns:
+//   - *Builder: The builder instance for method chaining
+func (b *Builder) WithEmbedConfig(embedCfg *EmbedConfig) *Builder {
+	if embedCfg == nil {
+		b.configErr = fmt.Errorf("embed config cannot be nil")
+		return b
+	}
+
+	// Validate configuration early - fail fast
+	if err := embedCfg.Validate(); err != nil {
+		// Store the validation error for later reporting in Build()
+		b.configErr = fmt.Errorf("embed config validation failed: %w", err)
+		return b
+	}
+
+	// Convert to internal config
+	b.cfg = convertToInternalConfig(embedCfg)
 	return b
 }
 
@@ -151,13 +199,65 @@ func (b *Builder) WithLocalManagementPassword(password string) *Builder {
 	return b
 }
 
+// loadAndMergeProviderConfigs loads provider configurations from the YAML file
+// and merges them into the existing config (which contains server settings from EmbedConfig).
+// This allows WithEmbedConfig to provide server configuration while WithConfigPath provides
+// provider-specific configurations (API keys, OAuth accounts, model mappings, etc.).
+func (b *Builder) loadAndMergeProviderConfigs() error {
+	// Load YAML config containing provider configurations
+	yamlCfg, err := config.LoadConfig(b.configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load config from %s: %w", b.configPath, err)
+	}
+
+	// Merge provider configs from YAML into the existing config
+	// Keep server settings from b.cfg (which came from EmbedConfig)
+	// and merge in provider configs from yamlCfg
+	b.cfg.GeminiKey = yamlCfg.GeminiKey
+	b.cfg.ClaudeKey = yamlCfg.ClaudeKey
+	b.cfg.CodexKey = yamlCfg.CodexKey
+	b.cfg.VertexCompatAPIKey = yamlCfg.VertexCompatAPIKey
+	b.cfg.OpenAICompatibility = yamlCfg.OpenAICompatibility
+	b.cfg.AmpCode = yamlCfg.AmpCode
+	b.cfg.OAuthExcludedModels = yamlCfg.OAuthExcludedModels
+	b.cfg.Payload = yamlCfg.Payload
+
+	// Merge SDK config fields but be selective to avoid overriding EmbedConfig settings
+	if len(yamlCfg.APIKeys) > 0 {
+		b.cfg.APIKeys = yamlCfg.APIKeys
+	}
+	if yamlCfg.ProxyURL != "" {
+		b.cfg.ProxyURL = yamlCfg.ProxyURL
+	}
+	if yamlCfg.RequestLog {
+		b.cfg.RequestLog = yamlCfg.RequestLog
+	}
+	// Note: We don't merge Access.Providers as they may reference unregistered provider types
+
+	return nil
+}
+
 // Build validates inputs, applies defaults, and returns a ready-to-run service.
 func (b *Builder) Build() (*Service, error) {
+	// Register access providers before building
+	configaccess.Register()
+
+	// Check for configuration validation errors from WithEmbedConfig
+	if b.configErr != nil {
+		return nil, b.configErr
+	}
+
 	if b.cfg == nil {
 		return nil, fmt.Errorf("cliproxy: configuration is required")
 	}
 	if b.configPath == "" {
-		return nil, fmt.Errorf("cliproxy: configuration path is required")
+		return nil, fmt.Errorf("cliproxy: configuration is required")
+	}
+
+	// Load provider configurations from YAML file and merge with EmbedConfig
+	// This allows EmbedConfig to provide server settings while YAML provides provider configs
+	if err := b.loadAndMergeProviderConfigs(); err != nil {
+		return nil, fmt.Errorf("failed to load provider configs: %w", err)
 	}
 
 	tokenProvider := b.tokenProvider

@@ -63,10 +63,12 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 
 ## SDK Docs
 
+- **Embedding in External Projects**: [docs/embedding-guide.md](docs/embedding-guide.md) - Use CLIProxyAPI as a library in your Go applications
 - Usage: [docs/sdk-usage.md](docs/sdk-usage.md)
 - Advanced (executors & translators): [docs/sdk-advanced.md](docs/sdk-advanced.md)
 - Access: [docs/sdk-access.md](docs/sdk-access.md)
 - Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
+- Embedding Example: `examples/embedding` - Full working example with OAuth and interactive chat
 - Custom Provider Example: `examples/custom-provider`
 
 ## Contributing

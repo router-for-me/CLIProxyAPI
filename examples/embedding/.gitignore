@@ -1,0 +1,32 @@
+# Environment variables (contains secrets!)
+.env
+
+# Auth directory (contains OAuth tokens!)
+auth/
+
+# Static directory from management its a generated file
+static/
+
+# server log directory
+logs/
+
+# Build output
+embedding-example
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test files
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# Editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

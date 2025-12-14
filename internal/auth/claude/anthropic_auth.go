@@ -51,15 +51,24 @@ type ClaudeAuth struct {
 
 // NewClaudeAuth creates a new Anthropic authentication service.
 // It initializes the HTTP client with proxy settings from the configuration.
+// If cfg is nil, a default HTTP client without proxy is used.
 //
 // Parameters:
-//   - cfg: The application configuration containing proxy settings
+//   - cfg: The application configuration containing proxy settings (optional, can be nil)
 //
 // Returns:
 //   - *ClaudeAuth: A new Claude authentication service instance
 func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
+	var httpClient *http.Client
+	if cfg != nil {
+		httpClient = util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	} else {
+		// Use default HTTP client when no config provided
+		httpClient = &http.Client{}
+	}
+
 	return &ClaudeAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+		httpClient: httpClient,
 	}
 }
 

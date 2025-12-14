@@ -1,0 +1,10 @@
+# Minimal test configuration for embedding example
+# This uses a dummy API key to test the embedding API structure
+
+# Request authentication API keys
+api-keys:
+  - "test-key-12345"
+
+# Claude API keys - using a dummy key for testing structure
+claude-api-key:
+  - api-key: "sk-ant-api03-test-dummy-key-for-structure-testing"
