@@ -19,6 +19,7 @@ This fork extends the original CLI Proxy to provide:
 - Docker (for containerized deployment)
 
 # Clone and build
+```bash
 git clone --branch feature/usage-metrics git@github.com:Ybazylbe/CLIProxyAPI-YBFork.git
 cd CLIProxyAPI
 
