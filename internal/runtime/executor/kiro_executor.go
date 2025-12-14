@@ -166,7 +166,8 @@ type KiroExecutor struct {
 // This is critical because OpenAI and Claude formats have different tool structures:
 // - OpenAI: tools[].function.name, tools[].function.description
 // - Claude: tools[].name, tools[].description
-func buildKiroPayloadForFormat(body []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, sourceFormat sdktranslator.Format) []byte {
+// Returns the serialized JSON payload and a boolean indicating whether thinking mode was injected.
+func buildKiroPayloadForFormat(body []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, sourceFormat sdktranslator.Format) ([]byte, bool) {
 	switch sourceFormat.String() {
 	case "openai":
 		log.Debugf("kiro: using OpenAI payload builder for source format: %s", sourceFormat.String())
@@ -248,7 +249,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+		kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 
 		log.Debugf("kiro: trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
@@ -358,7 +359,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
-						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed successfully, retrying request")
 						continue
 					}
@@ -415,7 +416,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					if refreshedAuth != nil {
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
-						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed for 403, retrying request")
 						continue
 					}
@@ -554,7 +555,10 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+		kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+		// Kiro API always returns <thinking> tags regardless of whether thinking mode was requested
+		// So we always enable thinking parsing for Kiro responses
+		thinkingEnabled := true
 
 		log.Debugf("kiro: stream trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
@@ -677,7 +681,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
-						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed successfully, retrying stream request")
 						continue
 					}
@@ -734,7 +738,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					if refreshedAuth != nil {
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
-						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed for 403, retrying stream request")
 						continue
 					}
@@ -758,7 +762,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 			out := make(chan cliproxyexecutor.StreamChunk)
 
-			go func(resp *http.Response) {
+			go func(resp *http.Response, thinkingEnabled bool) {
 				defer close(out)
 				defer func() {
 					if r := recover(); r != nil {
@@ -772,21 +776,12 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					}
 				}()
 
-				// Check if thinking mode was enabled in the original request
-				// Only parse <thinking> tags when thinking was explicitly requested
-				// Check multiple sources: original request, pre-translation payload, and translated body
-				// This handles different client formats (Claude API, OpenAI, AMP/Cursor)
-				thinkingEnabled := kiroclaude.IsThinkingEnabled(opts.OriginalRequest)
-				if !thinkingEnabled {
-					thinkingEnabled = kiroclaude.IsThinkingEnabled(req.Payload)
-				}
-				if !thinkingEnabled {
-					thinkingEnabled = kiroclaude.IsThinkingEnabled(body)
-				}
-				log.Debugf("kiro: stream thinkingEnabled = %v", thinkingEnabled)
+				// Kiro API always returns <thinking> tags regardless of request parameters
+				// So we always enable thinking parsing for Kiro responses
+				log.Debugf("kiro: stream thinkingEnabled = %v (always true for Kiro)", thinkingEnabled)
 
 				e.streamToChannel(ctx, resp.Body, out, from, req.Model, opts.OriginalRequest, body, reporter, thinkingEnabled)
-			}(httpResp)
+			}(httpResp, thinkingEnabled)
 
 			return out, nil
 		}
