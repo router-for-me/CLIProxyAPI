@@ -30,6 +30,7 @@ type KiroPayload struct {
 type KiroInferenceConfig struct {
 	MaxTokens   int     `json:"maxTokens,omitempty"`
 	Temperature float64 `json:"temperature,omitempty"`
+	TopP        float64 `json:"topP,omitempty"`
 }
 
 // KiroConversationState holds the conversation context
@@ -136,9 +137,15 @@ func ConvertClaudeRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 // Supports thinking mode - when Claude API thinking parameter is present, injects thinkingHint.
 func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool) []byte {
 	// Extract max_tokens for potential use in inferenceConfig
+	// Handle -1 as "use maximum" (Kiro max output is ~32000 tokens)
+	const kiroMaxOutputTokens = 32000
 	var maxTokens int64
 	if mt := gjson.GetBytes(claudeBody, "max_tokens"); mt.Exists() {
 		maxTokens = mt.Int()
+		if maxTokens == -1 {
+			maxTokens = kiroMaxOutputTokens
+			log.Debugf("kiro: max_tokens=-1 converted to %d", kiroMaxOutputTokens)
+		}
 	}
 
 	// Extract temperature if specified
@@ -147,6 +154,15 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	if temp := gjson.GetBytes(claudeBody, "temperature"); temp.Exists() {
 		temperature = temp.Float()
 		hasTemperature = true
+	}
+
+	// Extract top_p if specified
+	var topP float64
+	var hasTopP bool
+	if tp := gjson.GetBytes(claudeBody, "top_p"); tp.Exists() {
+		topP = tp.Float()
+		hasTopP = true
+		log.Debugf("kiro: extracted top_p: %.2f", topP)
 	}
 
 	// Normalize origin value for Kiro API compatibility
@@ -164,8 +180,26 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// Extract system prompt
 	systemPrompt := extractSystemPrompt(claudeBody)
 
-	// Check for thinking mode
-	thinkingEnabled, budgetTokens := checkThinkingMode(claudeBody)
+	// Check for thinking mode using the comprehensive IsThinkingEnabled function
+	// This supports Claude API format, OpenAI reasoning_effort, and AMP/Cursor format
+	thinkingEnabled := IsThinkingEnabled(claudeBody)
+	_, budgetTokens := checkThinkingMode(claudeBody) // Get budget tokens from Claude format if available
+	if budgetTokens <= 0 {
+		// Calculate budgetTokens based on max_tokens if available
+		// Use 50% of max_tokens for thinking, with min 8000 and max 24000
+		if maxTokens > 0 {
+			budgetTokens = maxTokens / 2
+			if budgetTokens < 8000 {
+				budgetTokens = 8000
+			}
+			if budgetTokens > 24000 {
+				budgetTokens = 24000
+			}
+			log.Debugf("kiro: budgetTokens calculated from max_tokens: %d (max_tokens=%d)", budgetTokens, maxTokens)
+		} else {
+			budgetTokens = 16000 // Default budget tokens
+		}
+	}
 
 	// Inject timestamp context
 	timestamp := time.Now().Format("2006-01-02 15:04:05 MST")
@@ -183,6 +217,17 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 			systemPrompt += "\n"
 		}
 		systemPrompt += kirocommon.KiroAgenticSystemPrompt
+	}
+
+	// Handle tool_choice parameter - Kiro doesn't support it natively, so we inject system prompt hints
+	// Claude tool_choice values: {"type": "auto/any/tool", "name": "..."}
+	toolChoiceHint := extractClaudeToolChoiceHint(claudeBody)
+	if toolChoiceHint != "" {
+		if systemPrompt != "" {
+			systemPrompt += "\n"
+		}
+		systemPrompt += toolChoiceHint
+		log.Debugf("kiro: injected tool_choice hint into system prompt")
 	}
 
 	// Inject thinking hint when thinking mode is enabled
@@ -235,13 +280,16 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 
 	// Build inferenceConfig if we have any inference parameters
 	var inferenceConfig *KiroInferenceConfig
-	if maxTokens > 0 || hasTemperature {
+	if maxTokens > 0 || hasTemperature || hasTopP {
 		inferenceConfig = &KiroInferenceConfig{}
 		if maxTokens > 0 {
 			inferenceConfig.MaxTokens = int(maxTokens)
 		}
 		if hasTemperature {
 			inferenceConfig.Temperature = temperature
+		}
+		if hasTopP {
+			inferenceConfig.TopP = topP
 		}
 	}
 
@@ -324,6 +372,93 @@ func checkThinkingMode(claudeBody []byte) (bool, int64) {
 	return thinkingEnabled, budgetTokens
 }
 
+// IsThinkingEnabled is a public wrapper to check if thinking mode is enabled.
+// This is used by the executor to determine whether to parse <thinking> tags in responses.
+// When thinking is NOT enabled in the request, <thinking> tags in responses should be
+// treated as regular text content, not as thinking blocks.
+//
+// Supports multiple formats:
+// - Claude API format: thinking.type = "enabled"
+// - OpenAI format: reasoning_effort parameter
+// - AMP/Cursor format: <thinking_mode>interleaved</thinking_mode> in system prompt
+func IsThinkingEnabled(body []byte) bool {
+	// Check Claude API format first (thinking.type = "enabled")
+	enabled, _ := checkThinkingMode(body)
+	if enabled {
+		log.Debugf("kiro: IsThinkingEnabled returning true (Claude API format)")
+		return true
+	}
+
+	// Check OpenAI format: reasoning_effort parameter
+	// Valid values: "low", "medium", "high", "auto" (not "none")
+	reasoningEffort := gjson.GetBytes(body, "reasoning_effort")
+	if reasoningEffort.Exists() {
+		effort := reasoningEffort.String()
+		if effort != "" && effort != "none" {
+			log.Debugf("kiro: thinking mode enabled via OpenAI reasoning_effort: %s", effort)
+			return true
+		}
+	}
+
+	// Check AMP/Cursor format: <thinking_mode>interleaved</thinking_mode> in system prompt
+	// This is how AMP client passes thinking configuration
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "<thinking_mode>") && strings.Contains(bodyStr, "</thinking_mode>") {
+		// Extract thinking mode value
+		startTag := "<thinking_mode>"
+		endTag := "</thinking_mode>"
+		startIdx := strings.Index(bodyStr, startTag)
+		if startIdx >= 0 {
+			startIdx += len(startTag)
+			endIdx := strings.Index(bodyStr[startIdx:], endTag)
+			if endIdx >= 0 {
+				thinkingMode := bodyStr[startIdx : startIdx+endIdx]
+				if thinkingMode == "interleaved" || thinkingMode == "enabled" {
+					log.Debugf("kiro: thinking mode enabled via AMP/Cursor format: %s", thinkingMode)
+					return true
+				}
+			}
+		}
+	}
+
+	// Check OpenAI format: max_completion_tokens with reasoning (o1-style)
+	// Some clients use this to indicate reasoning mode
+	if gjson.GetBytes(body, "max_completion_tokens").Exists() {
+		// If max_completion_tokens is set, check if model name suggests reasoning
+		model := gjson.GetBytes(body, "model").String()
+		if strings.Contains(strings.ToLower(model), "thinking") ||
+			strings.Contains(strings.ToLower(model), "reason") {
+			log.Debugf("kiro: thinking mode enabled via model name hint: %s", model)
+			return true
+		}
+	}
+
+	log.Debugf("kiro: IsThinkingEnabled returning false (no thinking mode detected)")
+	return false
+}
+
+// shortenToolNameIfNeeded shortens tool names that exceed 64 characters.
+// MCP tools often have long names like "mcp__server-name__tool-name".
+// This preserves the "mcp__" prefix and last segment when possible.
+func shortenToolNameIfNeeded(name string) string {
+	const limit = 64
+	if len(name) <= limit {
+		return name
+	}
+	// For MCP tools, try to preserve prefix and last segment
+	if strings.HasPrefix(name, "mcp__") {
+		idx := strings.LastIndex(name, "__")
+		if idx > 0 {
+			cand := "mcp__" + name[idx+2:]
+			if len(cand) > limit {
+				return cand[:limit]
+			}
+			return cand
+		}
+	}
+	return name[:limit]
+}
+
 // convertClaudeToolsToKiro converts Claude tools to Kiro format
 func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
@@ -335,6 +470,13 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		name := tool.Get("name").String()
 		description := tool.Get("description").String()
 		inputSchema := tool.Get("input_schema").Value()
+
+		// Shorten tool name if it exceeds 64 characters (common with MCP tools)
+		originalName := name
+		name = shortenToolNameIfNeeded(name)
+		if name != originalName {
+			log.Debugf("kiro: shortened tool name from '%s' to '%s'", originalName, name)
+		}
 
 		// CRITICAL FIX: Kiro API requires non-empty description
 		if strings.TrimSpace(description) == "" {
@@ -465,6 +607,34 @@ func deduplicateToolResults(toolResults []KiroToolResult) []KiroToolResult {
 		}
 	}
 	return unique
+}
+
+// extractClaudeToolChoiceHint extracts tool_choice from Claude request and returns a system prompt hint.
+// Claude tool_choice values:
+// - {"type": "auto"}: Model decides (default, no hint needed)
+// - {"type": "any"}: Must use at least one tool
+// - {"type": "tool", "name": "..."}: Must use specific tool
+func extractClaudeToolChoiceHint(claudeBody []byte) string {
+	toolChoice := gjson.GetBytes(claudeBody, "tool_choice")
+	if !toolChoice.Exists() {
+		return ""
+	}
+
+	toolChoiceType := toolChoice.Get("type").String()
+	switch toolChoiceType {
+	case "any":
+		return "[INSTRUCTION: You MUST use at least one of the available tools to respond. Do not respond with text only - always make a tool call.]"
+	case "tool":
+		toolName := toolChoice.Get("name").String()
+		if toolName != "" {
+			return fmt.Sprintf("[INSTRUCTION: You MUST use the tool named '%s' to respond. Do not use any other tool or respond with text only.]", toolName)
+		}
+	case "auto":
+		// Default behavior, no hint needed
+		return ""
+	}
+
+	return ""
 }
 
 // BuildUserMessageStruct builds a user message and extracts tool results

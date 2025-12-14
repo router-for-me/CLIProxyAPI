@@ -156,8 +156,9 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 		}
 
 	case "message_stop":
-		// Final event - emit [DONE]
-		results = append(results, BuildOpenAISSEDone())
+		// Final event - do NOT emit [DONE] here
+		// The handler layer (openai_handlers.go) will send [DONE] when the stream closes
+		// Emitting [DONE] here would cause duplicate [DONE] markers
 
 	case "ping":
 		// Ping event with usage - optionally emit usage chunk

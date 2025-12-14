@@ -29,6 +29,7 @@ type KiroPayload struct {
 type KiroInferenceConfig struct {
 	MaxTokens   int     `json:"maxTokens,omitempty"`
 	Temperature float64 `json:"temperature,omitempty"`
+	TopP        float64 `json:"topP,omitempty"`
 }
 
 // KiroConversationState holds the conversation context
@@ -134,9 +135,15 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 // isChatOnly parameter disables tool calling for -chat model variants (pure conversation mode).
 func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool) []byte {
 	// Extract max_tokens for potential use in inferenceConfig
+	// Handle -1 as "use maximum" (Kiro max output is ~32000 tokens)
+	const kiroMaxOutputTokens = 32000
 	var maxTokens int64
 	if mt := gjson.GetBytes(openaiBody, "max_tokens"); mt.Exists() {
 		maxTokens = mt.Int()
+		if maxTokens == -1 {
+			maxTokens = kiroMaxOutputTokens
+			log.Debugf("kiro-openai: max_tokens=-1 converted to %d", kiroMaxOutputTokens)
+		}
 	}
 
 	// Extract temperature if specified
@@ -145,6 +152,15 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 	if temp := gjson.GetBytes(openaiBody, "temperature"); temp.Exists() {
 		temperature = temp.Float()
 		hasTemperature = true
+	}
+
+	// Extract top_p if specified
+	var topP float64
+	var hasTopP bool
+	if tp := gjson.GetBytes(openaiBody, "top_p"); tp.Exists() {
+		topP = tp.Float()
+		hasTopP = true
+		log.Debugf("kiro-openai: extracted top_p: %.2f", topP)
 	}
 
 	// Normalize origin value for Kiro API compatibility
@@ -178,6 +194,54 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 			systemPrompt += "\n"
 		}
 		systemPrompt += kirocommon.KiroAgenticSystemPrompt
+	}
+
+	// Handle tool_choice parameter - Kiro doesn't support it natively, so we inject system prompt hints
+	// OpenAI tool_choice values: "none", "auto", "required", or {"type":"function","function":{"name":"..."}}
+	toolChoiceHint := extractToolChoiceHint(openaiBody)
+	if toolChoiceHint != "" {
+		if systemPrompt != "" {
+			systemPrompt += "\n"
+		}
+		systemPrompt += toolChoiceHint
+		log.Debugf("kiro-openai: injected tool_choice hint into system prompt")
+	}
+
+	// Handle response_format parameter - Kiro doesn't support it natively, so we inject system prompt hints
+	// OpenAI response_format: {"type": "json_object"} or {"type": "json_schema", "json_schema": {...}}
+	responseFormatHint := extractResponseFormatHint(openaiBody)
+	if responseFormatHint != "" {
+		if systemPrompt != "" {
+			systemPrompt += "\n"
+		}
+		systemPrompt += responseFormatHint
+		log.Debugf("kiro-openai: injected response_format hint into system prompt")
+	}
+
+	// Check for thinking mode and inject thinking hint
+	// Supports OpenAI reasoning_effort parameter and model name hints
+	thinkingEnabled, budgetTokens := checkThinkingModeFromOpenAI(openaiBody)
+	if thinkingEnabled {
+		// Adjust budgetTokens based on max_tokens if not explicitly set by reasoning_effort
+		// Use 50% of max_tokens for thinking, with min 8000 and max 24000
+		if maxTokens > 0 && budgetTokens == 16000 { // 16000 is the default, meaning not explicitly set
+			calculatedBudget := maxTokens / 2
+			if calculatedBudget < 8000 {
+				calculatedBudget = 8000
+			}
+			if calculatedBudget > 24000 {
+				calculatedBudget = 24000
+			}
+			budgetTokens = calculatedBudget
+			log.Debugf("kiro-openai: budgetTokens calculated from max_tokens: %d (max_tokens=%d)", budgetTokens, maxTokens)
+		}
+
+		if systemPrompt != "" {
+			systemPrompt += "\n"
+		}
+		dynamicThinkingHint := fmt.Sprintf("<thinking_mode>interleaved</thinking_mode><max_thinking_length>%d</max_thinking_length>", budgetTokens)
+		systemPrompt += dynamicThinkingHint
+		log.Debugf("kiro-openai: injected dynamic thinking hint into system prompt, max_thinking_length: %d", budgetTokens)
 	}
 
 	// Convert OpenAI tools to Kiro format
@@ -220,13 +284,16 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 
 	// Build inferenceConfig if we have any inference parameters
 	var inferenceConfig *KiroInferenceConfig
-	if maxTokens > 0 || hasTemperature {
+	if maxTokens > 0 || hasTemperature || hasTopP {
 		inferenceConfig = &KiroInferenceConfig{}
 		if maxTokens > 0 {
 			inferenceConfig.MaxTokens = int(maxTokens)
 		}
 		if hasTemperature {
 			inferenceConfig.Temperature = temperature
+		}
+		if hasTopP {
+			inferenceConfig.TopP = topP
 		}
 	}
 
@@ -292,6 +359,28 @@ func extractSystemPromptFromOpenAI(messages gjson.Result) string {
 	return strings.Join(systemParts, "\n")
 }
 
+// shortenToolNameIfNeeded shortens tool names that exceed 64 characters.
+// MCP tools often have long names like "mcp__server-name__tool-name".
+// This preserves the "mcp__" prefix and last segment when possible.
+func shortenToolNameIfNeeded(name string) string {
+	const limit = 64
+	if len(name) <= limit {
+		return name
+	}
+	// For MCP tools, try to preserve prefix and last segment
+	if strings.HasPrefix(name, "mcp__") {
+		idx := strings.LastIndex(name, "__")
+		if idx > 0 {
+			cand := "mcp__" + name[idx+2:]
+			if len(cand) > limit {
+				return cand[:limit]
+			}
+			return cand
+		}
+	}
+	return name[:limit]
+}
+
 // convertOpenAIToolsToKiro converts OpenAI tools to Kiro format
 func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
@@ -313,6 +402,13 @@ func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		name := fn.Get("name").String()
 		description := fn.Get("description").String()
 		parameters := fn.Get("parameters").Value()
+
+		// Shorten tool name if it exceeds 64 characters (common with MCP tools)
+		originalName := name
+		name = shortenToolNameIfNeeded(name)
+		if name != originalName {
+			log.Debugf("kiro-openai: shortened tool name from '%s' to '%s'", originalName, name)
+		}
 
 		// CRITICAL FIX: Kiro API requires non-empty description
 		if strings.TrimSpace(description) == "" {
@@ -582,6 +678,153 @@ func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResul
 	}
 
 	return finalContent
+}
+
+// checkThinkingModeFromOpenAI checks if thinking mode is enabled in the OpenAI request.
+// Returns (thinkingEnabled, budgetTokens).
+// Supports:
+// - reasoning_effort parameter (low/medium/high/auto)
+// - Model name containing "thinking" or "reason"
+// - <thinking_mode> tag in system prompt (AMP/Cursor format)
+func checkThinkingModeFromOpenAI(openaiBody []byte) (bool, int64) {
+	var budgetTokens int64 = 16000 // Default budget
+
+	// Check OpenAI format: reasoning_effort parameter
+	// Valid values: "low", "medium", "high", "auto" (not "none")
+	reasoningEffort := gjson.GetBytes(openaiBody, "reasoning_effort")
+	if reasoningEffort.Exists() {
+		effort := reasoningEffort.String()
+		if effort != "" && effort != "none" {
+			log.Debugf("kiro-openai: thinking mode enabled via reasoning_effort: %s", effort)
+			// Adjust budget based on effort level
+			switch effort {
+			case "low":
+				budgetTokens = 8000
+			case "medium":
+				budgetTokens = 16000
+			case "high":
+				budgetTokens = 32000
+			case "auto":
+				budgetTokens = 16000
+			}
+			return true, budgetTokens
+		}
+	}
+
+	// Check AMP/Cursor format: <thinking_mode>interleaved</thinking_mode> in system prompt
+	bodyStr := string(openaiBody)
+	if strings.Contains(bodyStr, "<thinking_mode>") && strings.Contains(bodyStr, "</thinking_mode>") {
+		startTag := "<thinking_mode>"
+		endTag := "</thinking_mode>"
+		startIdx := strings.Index(bodyStr, startTag)
+		if startIdx >= 0 {
+			startIdx += len(startTag)
+			endIdx := strings.Index(bodyStr[startIdx:], endTag)
+			if endIdx >= 0 {
+				thinkingMode := bodyStr[startIdx : startIdx+endIdx]
+				if thinkingMode == "interleaved" || thinkingMode == "enabled" {
+					log.Debugf("kiro-openai: thinking mode enabled via AMP/Cursor format: %s", thinkingMode)
+					// Try to extract max_thinking_length if present
+					if maxLenStart := strings.Index(bodyStr, "<max_thinking_length>"); maxLenStart >= 0 {
+						maxLenStart += len("<max_thinking_length>")
+						if maxLenEnd := strings.Index(bodyStr[maxLenStart:], "</max_thinking_length>"); maxLenEnd >= 0 {
+							maxLenStr := bodyStr[maxLenStart : maxLenStart+maxLenEnd]
+							if parsed, err := fmt.Sscanf(maxLenStr, "%d", &budgetTokens); err == nil && parsed == 1 {
+								log.Debugf("kiro-openai: extracted max_thinking_length: %d", budgetTokens)
+							}
+						}
+					}
+					return true, budgetTokens
+				}
+			}
+		}
+	}
+
+	// Check model name for thinking hints
+	model := gjson.GetBytes(openaiBody, "model").String()
+	modelLower := strings.ToLower(model)
+	if strings.Contains(modelLower, "thinking") || strings.Contains(modelLower, "-reason") {
+		log.Debugf("kiro-openai: thinking mode enabled via model name hint: %s", model)
+		return true, budgetTokens
+	}
+
+	log.Debugf("kiro-openai: no thinking mode detected in OpenAI request")
+	return false, budgetTokens
+}
+
+// extractToolChoiceHint extracts tool_choice from OpenAI request and returns a system prompt hint.
+// OpenAI tool_choice values:
+// - "none": Don't use any tools
+// - "auto": Model decides (default, no hint needed)
+// - "required": Must use at least one tool
+// - {"type":"function","function":{"name":"..."}} : Must use specific tool
+func extractToolChoiceHint(openaiBody []byte) string {
+	toolChoice := gjson.GetBytes(openaiBody, "tool_choice")
+	if !toolChoice.Exists() {
+		return ""
+	}
+
+	// Handle string values
+	if toolChoice.Type == gjson.String {
+		switch toolChoice.String() {
+		case "none":
+			// Note: When tool_choice is "none", we should ideally not pass tools at all
+			// But since we can't modify tool passing here, we add a strong hint
+			return "[INSTRUCTION: Do NOT use any tools. Respond with text only.]"
+		case "required":
+			return "[INSTRUCTION: You MUST use at least one of the available tools to respond. Do not respond with text only - always make a tool call.]"
+		case "auto":
+			// Default behavior, no hint needed
+			return ""
+		}
+	}
+
+	// Handle object value: {"type":"function","function":{"name":"..."}}
+	if toolChoice.IsObject() {
+		if toolChoice.Get("type").String() == "function" {
+			toolName := toolChoice.Get("function.name").String()
+			if toolName != "" {
+				return fmt.Sprintf("[INSTRUCTION: You MUST use the tool named '%s' to respond. Do not use any other tool or respond with text only.]", toolName)
+			}
+		}
+	}
+
+	return ""
+}
+
+// extractResponseFormatHint extracts response_format from OpenAI request and returns a system prompt hint.
+// OpenAI response_format values:
+// - {"type": "text"}: Default, no hint needed
+// - {"type": "json_object"}: Must respond with valid JSON
+// - {"type": "json_schema", "json_schema": {...}}: Must respond with JSON matching schema
+func extractResponseFormatHint(openaiBody []byte) string {
+	responseFormat := gjson.GetBytes(openaiBody, "response_format")
+	if !responseFormat.Exists() {
+		return ""
+	}
+
+	formatType := responseFormat.Get("type").String()
+	switch formatType {
+	case "json_object":
+		return "[INSTRUCTION: You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not wrap the JSON in markdown code blocks. Output raw JSON directly.]"
+	case "json_schema":
+		// Extract schema if provided
+		schema := responseFormat.Get("json_schema.schema")
+		if schema.Exists() {
+			schemaStr := schema.Raw
+			// Truncate if too long
+			if len(schemaStr) > 500 {
+				schemaStr = schemaStr[:500] + "..."
+			}
+			return fmt.Sprintf("[INSTRUCTION: You MUST respond with valid JSON that matches this schema: %s. Do not include any text before or after the JSON. Do not wrap the JSON in markdown code blocks. Output raw JSON directly.]", schemaStr)
+		}
+		return "[INSTRUCTION: You MUST respond with valid JSON only. Do not include any text before or after the JSON. Do not wrap the JSON in markdown code blocks. Output raw JSON directly.]"
+	case "text":
+		// Default behavior, no hint needed
+		return ""
+	}
+
+	return ""
 }
 
 // deduplicateToolResults removes duplicate tool results

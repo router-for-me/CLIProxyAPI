@@ -5,7 +5,6 @@ package openai
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,9 +33,12 @@ func NewOpenAIStreamState(model string) *OpenAIStreamState {
 	}
 }
 
-// FormatSSEEvent formats a JSON payload as an SSE event
+// FormatSSEEvent formats a JSON payload for SSE streaming.
+// Note: This returns raw JSON data without "data:" prefix.
+// The SSE "data:" prefix is added by the Handler layer (e.g., openai_handlers.go)
+// to maintain architectural consistency and avoid double-prefix issues.
 func FormatSSEEvent(data []byte) string {
-	return fmt.Sprintf("data: %s", string(data))
+	return string(data)
 }
 
 // BuildOpenAISSETextDelta creates an SSE event for text content delta
@@ -130,9 +132,12 @@ func BuildOpenAISSEUsage(state *OpenAIStreamState, usageInfo usage.Detail) strin
 	return FormatSSEEvent(result)
 }
 
-// BuildOpenAISSEDone creates the final [DONE] SSE event
+// BuildOpenAISSEDone creates the final [DONE] SSE event.
+// Note: This returns raw "[DONE]" without "data:" prefix.
+// The SSE "data:" prefix is added by the Handler layer (e.g., openai_handlers.go)
+// to maintain architectural consistency and avoid double-prefix issues.
 func BuildOpenAISSEDone() string {
-	return "data: [DONE]"
+	return "[DONE]"
 }
 
 // buildBaseChunk creates a base chunk structure for streaming

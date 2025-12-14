@@ -12,6 +12,15 @@ const (
 	// ThinkingEndTag is the end tag for thinking blocks in responses.
 	ThinkingEndTag = "</thinking>"
 
+	// CodeFenceMarker is the markdown code fence marker.
+	CodeFenceMarker = "```"
+
+	// AltCodeFenceMarker is the alternative markdown code fence marker.
+	AltCodeFenceMarker = "~~~"
+
+	// InlineCodeMarker is the markdown inline code marker (backtick).
+	InlineCodeMarker = "`"
+
 	// KiroAgenticSystemPrompt is injected only for -agentic models to prevent timeouts on large writes.
 	// AWS Kiro API has a 2-3 minute timeout for large file write operations.
 	KiroAgenticSystemPrompt = `

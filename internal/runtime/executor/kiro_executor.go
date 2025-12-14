@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
+	kiroopenai "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/openai"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -161,6 +162,22 @@ type KiroExecutor struct {
 	refreshMu sync.Mutex // Serializes token refresh operations to prevent race conditions
 }
 
+// buildKiroPayloadForFormat builds the Kiro API payload based on the source format.
+// This is critical because OpenAI and Claude formats have different tool structures:
+// - OpenAI: tools[].function.name, tools[].function.description
+// - Claude: tools[].name, tools[].description
+func buildKiroPayloadForFormat(body []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, sourceFormat sdktranslator.Format) []byte {
+	switch sourceFormat.String() {
+	case "openai":
+		log.Debugf("kiro: using OpenAI payload builder for source format: %s", sourceFormat.String())
+		return kiroopenai.BuildKiroPayloadFromOpenAI(body, modelID, profileArn, origin, isAgentic, isChatOnly)
+	default:
+		// Default to Claude format (also handles "claude", "kiro", etc.)
+		log.Debugf("kiro: using Claude payload builder for source format: %s", sourceFormat.String())
+		return kiroclaude.BuildKiroPayload(body, modelID, profileArn, origin, isAgentic, isChatOnly)
+	}
+}
+
 // NewKiroExecutor creates a new Kiro executor instance.
 func NewKiroExecutor(cfg *config.Config) *KiroExecutor {
 	return &KiroExecutor{cfg: cfg}
@@ -231,7 +248,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+		kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 
 		log.Debugf("kiro: trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
@@ -341,7 +358,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
-						kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed successfully, retrying request")
 						continue
 					}
@@ -398,7 +415,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					if refreshedAuth != nil {
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
-						kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed for 403, retrying request")
 						continue
 					}
@@ -537,7 +554,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+		kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 
 		log.Debugf("kiro: stream trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
@@ -660,7 +677,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
-						kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed successfully, retrying stream request")
 						continue
 					}
@@ -717,7 +734,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					if refreshedAuth != nil {
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
-						kiroPayload = kiroclaude.BuildKiroPayload(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly)
+						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed for 403, retrying stream request")
 						continue
 					}
@@ -755,7 +772,20 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					}
 				}()
 
-				e.streamToChannel(ctx, resp.Body, out, from, req.Model, opts.OriginalRequest, body, reporter)
+				// Check if thinking mode was enabled in the original request
+				// Only parse <thinking> tags when thinking was explicitly requested
+				// Check multiple sources: original request, pre-translation payload, and translated body
+				// This handles different client formats (Claude API, OpenAI, AMP/Cursor)
+				thinkingEnabled := kiroclaude.IsThinkingEnabled(opts.OriginalRequest)
+				if !thinkingEnabled {
+					thinkingEnabled = kiroclaude.IsThinkingEnabled(req.Payload)
+				}
+				if !thinkingEnabled {
+					thinkingEnabled = kiroclaude.IsThinkingEnabled(body)
+				}
+				log.Debugf("kiro: stream thinkingEnabled = %v", thinkingEnabled)
+
+				e.streamToChannel(ctx, resp.Body, out, from, req.Model, opts.OriginalRequest, body, reporter, thinkingEnabled)
 			}(httpResp)
 
 			return out, nil
@@ -805,6 +835,153 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 	}
 
 	return accessToken, profileArn
+}
+
+// findRealThinkingEndTag finds the real </thinking> end tag, skipping false positives.
+// Returns -1 if no real end tag is found.
+//
+// Real </thinking> tags from Kiro API have specific characteristics:
+// - Usually preceded by newline (.\n</thinking>)
+// - Usually followed by newline (\n\n)
+// - Not inside code blocks or inline code
+//
+// False positives (discussion text) have characteristics:
+// - In the middle of a sentence
+// - Preceded by discussion words like "标签", "tag", "returns"
+// - Inside code blocks or inline code
+//
+// Parameters:
+// - content: the content to search in
+// - alreadyInCodeBlock: whether we're already inside a code block from previous chunks
+// - alreadyInInlineCode: whether we're already inside inline code from previous chunks
+func findRealThinkingEndTag(content string, alreadyInCodeBlock, alreadyInInlineCode bool) int {
+	searchStart := 0
+	for {
+		endIdx := strings.Index(content[searchStart:], kirocommon.ThinkingEndTag)
+		if endIdx < 0 {
+			return -1
+		}
+		endIdx += searchStart // Adjust to absolute position
+
+		textBeforeEnd := content[:endIdx]
+		textAfterEnd := content[endIdx+len(kirocommon.ThinkingEndTag):]
+
+		// Check 1: Is it inside inline code?
+		// Count backticks in current content and add state from previous chunks
+		backtickCount := strings.Count(textBeforeEnd, "`")
+		effectiveInInlineCode := alreadyInInlineCode
+		if backtickCount%2 == 1 {
+			effectiveInInlineCode = !effectiveInInlineCode
+		}
+		if effectiveInInlineCode {
+			log.Debugf("kiro: found </thinking> inside inline code at pos %d, skipping", endIdx)
+			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
+			continue
+		}
+
+		// Check 2: Is it inside a code block?
+		// Count fences in current content and add state from previous chunks
+		fenceCount := strings.Count(textBeforeEnd, "```")
+		altFenceCount := strings.Count(textBeforeEnd, "~~~")
+		effectiveInCodeBlock := alreadyInCodeBlock
+		if fenceCount%2 == 1 || altFenceCount%2 == 1 {
+			effectiveInCodeBlock = !effectiveInCodeBlock
+		}
+		if effectiveInCodeBlock {
+			log.Debugf("kiro: found </thinking> inside code block at pos %d, skipping", endIdx)
+			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
+			continue
+		}
+
+		// Check 3: Real </thinking> tags are usually preceded by newline or at start
+		// and followed by newline or at end. Check the format.
+		charBeforeTag := byte(0)
+		if endIdx > 0 {
+			charBeforeTag = content[endIdx-1]
+		}
+		charAfterTag := byte(0)
+		if len(textAfterEnd) > 0 {
+			charAfterTag = textAfterEnd[0]
+		}
+
+		// Real end tag format: preceded by newline OR end of sentence (. ! ?)
+		// and followed by newline OR end of content
+		isPrecededByNewlineOrSentenceEnd := charBeforeTag == '\n' || charBeforeTag == '.' ||
+			charBeforeTag == '!' || charBeforeTag == '?' || charBeforeTag == 0
+		isFollowedByNewlineOrEnd := charAfterTag == '\n' || charAfterTag == 0
+
+		// If the tag has proper formatting (newline before/after), it's likely real
+		if isPrecededByNewlineOrSentenceEnd && isFollowedByNewlineOrEnd {
+			log.Debugf("kiro: found properly formatted </thinking> at pos %d", endIdx)
+			return endIdx
+		}
+
+		// Check 4: Is the tag preceded by discussion keywords on the same line?
+		lastNewlineIdx := strings.LastIndex(textBeforeEnd, "\n")
+		lineBeforeTag := textBeforeEnd
+		if lastNewlineIdx >= 0 {
+			lineBeforeTag = textBeforeEnd[lastNewlineIdx+1:]
+		}
+		lineBeforeTagLower := strings.ToLower(lineBeforeTag)
+
+		// Discussion patterns - if found, this is likely discussion text
+		discussionPatterns := []string{
+			"标签", "返回", "输出", "包含", "使用", "解析", "转换", "生成", // Chinese
+			"tag", "return", "output", "contain", "use", "parse", "emit", "convert", "generate", // English
+			"<thinking>", // discussing both tags together
+			"`</thinking>`", // explicitly in inline code
+		}
+		isDiscussion := false
+		for _, pattern := range discussionPatterns {
+			if strings.Contains(lineBeforeTagLower, pattern) {
+				isDiscussion = true
+				break
+			}
+		}
+		if isDiscussion {
+			log.Debugf("kiro: found </thinking> after discussion text at pos %d, skipping", endIdx)
+			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
+			continue
+		}
+
+		// Check 5: Is there text immediately after on the same line?
+		// Real end tags don't have text immediately after on the same line
+		if len(textAfterEnd) > 0 && charAfterTag != '\n' && charAfterTag != 0 {
+			// Find the next newline
+			nextNewline := strings.Index(textAfterEnd, "\n")
+			var textOnSameLine string
+			if nextNewline >= 0 {
+				textOnSameLine = textAfterEnd[:nextNewline]
+			} else {
+				textOnSameLine = textAfterEnd
+			}
+			// If there's non-whitespace text on the same line after the tag, it's discussion
+			if strings.TrimSpace(textOnSameLine) != "" {
+				log.Debugf("kiro: found </thinking> with text after on same line at pos %d, skipping", endIdx)
+				searchStart = endIdx + len(kirocommon.ThinkingEndTag)
+				continue
+			}
+		}
+
+		// Check 6: Is there another <thinking> tag after this </thinking>?
+		if strings.Contains(textAfterEnd, kirocommon.ThinkingStartTag) {
+			nextStartIdx := strings.Index(textAfterEnd, kirocommon.ThinkingStartTag)
+			textBeforeNextStart := textAfterEnd[:nextStartIdx]
+			nextBacktickCount := strings.Count(textBeforeNextStart, "`")
+			nextFenceCount := strings.Count(textBeforeNextStart, "```")
+			nextAltFenceCount := strings.Count(textBeforeNextStart, "~~~")
+
+			// If the next <thinking> is NOT in code, then this </thinking> is discussion text
+			if nextBacktickCount%2 == 0 && nextFenceCount%2 == 0 && nextAltFenceCount%2 == 0 {
+				log.Debugf("kiro: found </thinking> followed by <thinking> at pos %d, likely discussion text, skipping", endIdx)
+				searchStart = endIdx + len(kirocommon.ThinkingEndTag)
+				continue
+			}
+		}
+
+		// This looks like a real end tag
+		return endIdx
+	}
 }
 
 // determineAgenticMode determines if the model is an agentic or chat-only variant.
@@ -963,6 +1140,9 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 	processedIDs := make(map[string]bool)
 	var currentToolUse *kiroclaude.ToolUseState
 
+	// Upstream usage tracking - Kiro API returns credit usage and context percentage
+	var upstreamContextPercentage float64 // Context usage percentage from upstream (e.g., 78.56)
+
 	for {
 		msg, eventErr := e.readEventStreamMessage(reader)
 		if eventErr != nil {
@@ -1119,6 +1299,119 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				stopReason = sr
 				log.Debugf("kiro: parseEventStream found stopReason in messageStopEvent: %s", stopReason)
 			}
+
+		case "messageMetadataEvent":
+			// Handle message metadata events which may contain token counts
+			if metadata, ok := event["messageMetadataEvent"].(map[string]interface{}); ok {
+				if inputTokens, ok := metadata["inputTokens"].(float64); ok {
+					usageInfo.InputTokens = int64(inputTokens)
+					log.Debugf("kiro: parseEventStream found inputTokens in messageMetadataEvent: %d", usageInfo.InputTokens)
+				}
+				if outputTokens, ok := metadata["outputTokens"].(float64); ok {
+					usageInfo.OutputTokens = int64(outputTokens)
+					log.Debugf("kiro: parseEventStream found outputTokens in messageMetadataEvent: %d", usageInfo.OutputTokens)
+				}
+				if totalTokens, ok := metadata["totalTokens"].(float64); ok {
+					usageInfo.TotalTokens = int64(totalTokens)
+					log.Debugf("kiro: parseEventStream found totalTokens in messageMetadataEvent: %d", usageInfo.TotalTokens)
+				}
+			}
+
+		case "usageEvent", "usage":
+			// Handle dedicated usage events
+			if inputTokens, ok := event["inputTokens"].(float64); ok {
+				usageInfo.InputTokens = int64(inputTokens)
+				log.Debugf("kiro: parseEventStream found inputTokens in usageEvent: %d", usageInfo.InputTokens)
+			}
+			if outputTokens, ok := event["outputTokens"].(float64); ok {
+				usageInfo.OutputTokens = int64(outputTokens)
+				log.Debugf("kiro: parseEventStream found outputTokens in usageEvent: %d", usageInfo.OutputTokens)
+			}
+			if totalTokens, ok := event["totalTokens"].(float64); ok {
+				usageInfo.TotalTokens = int64(totalTokens)
+				log.Debugf("kiro: parseEventStream found totalTokens in usageEvent: %d", usageInfo.TotalTokens)
+			}
+			// Also check nested usage object
+			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+				if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
+					usageInfo.InputTokens = int64(inputTokens)
+				} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
+					usageInfo.InputTokens = int64(inputTokens)
+				}
+				if outputTokens, ok := usageObj["output_tokens"].(float64); ok {
+					usageInfo.OutputTokens = int64(outputTokens)
+				} else if outputTokens, ok := usageObj["completion_tokens"].(float64); ok {
+					usageInfo.OutputTokens = int64(outputTokens)
+				}
+				if totalTokens, ok := usageObj["total_tokens"].(float64); ok {
+					usageInfo.TotalTokens = int64(totalTokens)
+				}
+				log.Debugf("kiro: parseEventStream found usage object: input=%d, output=%d, total=%d",
+					usageInfo.InputTokens, usageInfo.OutputTokens, usageInfo.TotalTokens)
+			}
+
+		case "metricsEvent":
+			// Handle metrics events which may contain usage data
+			if metrics, ok := event["metricsEvent"].(map[string]interface{}); ok {
+				if inputTokens, ok := metrics["inputTokens"].(float64); ok {
+					usageInfo.InputTokens = int64(inputTokens)
+				}
+				if outputTokens, ok := metrics["outputTokens"].(float64); ok {
+					usageInfo.OutputTokens = int64(outputTokens)
+				}
+				log.Debugf("kiro: parseEventStream found metricsEvent: input=%d, output=%d",
+					usageInfo.InputTokens, usageInfo.OutputTokens)
+			}
+
+		default:
+			// Check for contextUsagePercentage in any event
+			if ctxPct, ok := event["contextUsagePercentage"].(float64); ok {
+				upstreamContextPercentage = ctxPct
+				log.Debugf("kiro: parseEventStream received context usage: %.2f%%", upstreamContextPercentage)
+			}
+			// Log unknown event types for debugging (to discover new event formats)
+			log.Debugf("kiro: parseEventStream unknown event type: %s, payload: %s", eventType, string(payload))
+		}
+
+		// Check for direct token fields in any event (fallback)
+		if usageInfo.InputTokens == 0 {
+			if inputTokens, ok := event["inputTokens"].(float64); ok {
+				usageInfo.InputTokens = int64(inputTokens)
+				log.Debugf("kiro: parseEventStream found direct inputTokens: %d", usageInfo.InputTokens)
+			}
+		}
+		if usageInfo.OutputTokens == 0 {
+			if outputTokens, ok := event["outputTokens"].(float64); ok {
+				usageInfo.OutputTokens = int64(outputTokens)
+				log.Debugf("kiro: parseEventStream found direct outputTokens: %d", usageInfo.OutputTokens)
+			}
+		}
+
+		// Check for usage object in any event (OpenAI format)
+		if usageInfo.InputTokens == 0 || usageInfo.OutputTokens == 0 {
+			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+				if usageInfo.InputTokens == 0 {
+					if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
+						usageInfo.InputTokens = int64(inputTokens)
+					} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
+						usageInfo.InputTokens = int64(inputTokens)
+					}
+				}
+				if usageInfo.OutputTokens == 0 {
+					if outputTokens, ok := usageObj["output_tokens"].(float64); ok {
+						usageInfo.OutputTokens = int64(outputTokens)
+					} else if outputTokens, ok := usageObj["completion_tokens"].(float64); ok {
+						usageInfo.OutputTokens = int64(outputTokens)
+					}
+				}
+				if usageInfo.TotalTokens == 0 {
+					if totalTokens, ok := usageObj["total_tokens"].(float64); ok {
+						usageInfo.TotalTokens = int64(totalTokens)
+					}
+				}
+				log.Debugf("kiro: parseEventStream found usage object (fallback): input=%d, output=%d, total=%d",
+					usageInfo.InputTokens, usageInfo.OutputTokens, usageInfo.TotalTokens)
+			}
 		}
 
 		// Also check nested supplementaryWebLinksEvent
@@ -1155,6 +1448,20 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 	// Log warning if response was truncated due to max_tokens
 	if stopReason == "max_tokens" {
 		log.Warnf("kiro: response truncated due to max_tokens limit")
+	}
+
+	// Use contextUsagePercentage to calculate more accurate input tokens
+	// Kiro model has 200k max context, contextUsagePercentage represents the percentage used
+	// Formula: input_tokens = contextUsagePercentage * 200000 / 100
+	if upstreamContextPercentage > 0 {
+		calculatedInputTokens := int64(upstreamContextPercentage * 200000 / 100)
+		if calculatedInputTokens > 0 {
+			localEstimate := usageInfo.InputTokens
+			usageInfo.InputTokens = calculatedInputTokens
+			usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
+			log.Infof("kiro: parseEventStream using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
+				upstreamContextPercentage, calculatedInputTokens, localEstimate)
+		}
 	}
 
 	return cleanedContent, toolUses, usageInfo, stopReason, nil
@@ -1357,7 +1664,8 @@ func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 // Includes embedded [Called ...] tool call parsing and input buffering for toolUseEvent.
 // Implements duplicate content filtering using lastContentEvent detection (based on AIClient-2-API).
 // Extracts stop_reason from upstream events when available.
-func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *usageReporter) {
+// thinkingEnabled controls whether <thinking> tags are parsed - only parse when request enabled thinking.
+func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *usageReporter, thinkingEnabled bool) {
 	reader := bufio.NewReaderSize(body, 20*1024*1024) // 20MB buffer to match other providers
 	var totalUsage usage.Detail
 	var hasToolUses bool          // Track if any tool uses were emitted
@@ -1383,6 +1691,11 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	var lastUsageUpdateTime = time.Now() // Last time usage update was sent
 	var lastReportedOutputTokens int64   // Last reported output token count
 
+	// Upstream usage tracking - Kiro API returns credit usage and context percentage
+	var upstreamCreditUsage float64        // Credit usage from upstream (e.g., 1.458)
+	var upstreamContextPercentage float64  // Context usage percentage from upstream (e.g., 78.56)
+	var hasUpstreamUsage bool              // Whether we received usage from upstream
+
 	// Translator param for maintaining tool call state across streaming events
 	// IMPORTANT: This must persist across all TranslateStream calls
 	var translatorParam any
@@ -1394,6 +1707,22 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	pendingEndTagChars := 0      // Number of chars that might be start of </thinking>
 	isThinkingBlockOpen := false // Track if thinking content block is open
 	thinkingBlockIndex := -1     // Index of the thinking content block
+
+	// Code block state tracking for heuristic thinking tag parsing
+	// When inside a markdown code block, <thinking> tags should NOT be parsed
+	// This prevents false positives when the model outputs code examples containing these tags
+	inCodeBlock := false
+	codeFenceType := "" // Track which fence type opened the block ("```" or "~~~")
+
+	// Inline code state tracking - when inside backticks, don't parse thinking tags
+	// This handles cases like `<thinking>` being discussed in text
+	inInlineCode := false
+
+	// Track if we've seen any non-whitespace content before a thinking tag
+	// Real thinking blocks from Kiro always start at the very beginning of the response
+	// If we see content before <thinking>, subsequent <thinking> tags are likely discussion text
+	hasSeenNonThinkingContent := false
+	thinkingBlockCompleted := false // Track if we've already completed a thinking block
 
 	// Pre-calculate input tokens from request if possible
 	// Kiro uses Claude format, so try Claude format first, then OpenAI format, then fallback
@@ -1629,6 +1958,66 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				log.Debugf("kiro: streamToChannel found stopReason in messageStopEvent: %s", upstreamStopReason)
 			}
 
+		default:
+			// Check for upstream usage events from Kiro API
+			// Format: {"unit":"credit","unitPlural":"credits","usage":1.458}
+			if unit, ok := event["unit"].(string); ok && unit == "credit" {
+				if usage, ok := event["usage"].(float64); ok {
+					upstreamCreditUsage = usage
+					hasUpstreamUsage = true
+					log.Debugf("kiro: received upstream credit usage: %.4f", upstreamCreditUsage)
+				}
+			}
+			// Format: {"contextUsagePercentage":78.56}
+			if ctxPct, ok := event["contextUsagePercentage"].(float64); ok {
+				upstreamContextPercentage = ctxPct
+				log.Debugf("kiro: received upstream context usage: %.2f%%", upstreamContextPercentage)
+			}
+
+			// Check for token counts in unknown events
+			if inputTokens, ok := event["inputTokens"].(float64); ok {
+				totalUsage.InputTokens = int64(inputTokens)
+				hasUpstreamUsage = true
+				log.Debugf("kiro: streamToChannel found inputTokens in event %s: %d", eventType, totalUsage.InputTokens)
+			}
+			if outputTokens, ok := event["outputTokens"].(float64); ok {
+				totalUsage.OutputTokens = int64(outputTokens)
+				hasUpstreamUsage = true
+				log.Debugf("kiro: streamToChannel found outputTokens in event %s: %d", eventType, totalUsage.OutputTokens)
+			}
+			if totalTokens, ok := event["totalTokens"].(float64); ok {
+				totalUsage.TotalTokens = int64(totalTokens)
+				log.Debugf("kiro: streamToChannel found totalTokens in event %s: %d", eventType, totalUsage.TotalTokens)
+			}
+
+			// Check for usage object in unknown events (OpenAI/Claude format)
+			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+				if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
+					totalUsage.InputTokens = int64(inputTokens)
+					hasUpstreamUsage = true
+				} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
+					totalUsage.InputTokens = int64(inputTokens)
+					hasUpstreamUsage = true
+				}
+				if outputTokens, ok := usageObj["output_tokens"].(float64); ok {
+					totalUsage.OutputTokens = int64(outputTokens)
+					hasUpstreamUsage = true
+				} else if outputTokens, ok := usageObj["completion_tokens"].(float64); ok {
+					totalUsage.OutputTokens = int64(outputTokens)
+					hasUpstreamUsage = true
+				}
+				if totalTokens, ok := usageObj["total_tokens"].(float64); ok {
+					totalUsage.TotalTokens = int64(totalTokens)
+				}
+				log.Debugf("kiro: streamToChannel found usage object in event %s: input=%d, output=%d, total=%d",
+					eventType, totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
+			}
+
+			// Log unknown event types for debugging (to discover new event formats)
+			if eventType != "" {
+				log.Debugf("kiro: streamToChannel unknown event type: %s, payload: %s", eventType, string(payload))
+			}
+
 		case "assistantResponseEvent":
 			var contentDelta string
 			var toolUses []map[string]interface{}
@@ -1742,9 +2131,243 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				}
 
 				for len(remaining) > 0 {
+					// CRITICAL FIX: Only parse <thinking> tags when thinking mode was enabled in the request.
+					// When thinking is NOT enabled, <thinking> tags in responses should be treated as
+					// regular text content, not as thinking blocks. This prevents normal text content
+					// from being incorrectly parsed as thinking when the model outputs <thinking> tags
+					// without the user requesting thinking mode.
+					if !thinkingEnabled {
+						// Thinking not enabled - emit all content as regular text without parsing tags
+						if remaining != "" {
+							if !isTextBlockOpen {
+								contentBlockIndex++
+								isTextBlockOpen = true
+								blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+								for _, chunk := range sseData {
+									if chunk != "" {
+										out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+									}
+								}
+							}
+
+							claudeEvent := kiroclaude.BuildClaudeStreamEvent(remaining, contentBlockIndex)
+							sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+							for _, chunk := range sseData {
+								if chunk != "" {
+									out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+								}
+							}
+						}
+						break // Exit the for loop - all content processed as text
+					}
+
+					// HEURISTIC FIX: Track code block and inline code state to avoid parsing <thinking> tags
+					// inside code contexts. When the model outputs code examples containing these tags,
+					// they should be treated as text.
+					if !inThinkBlock {
+						// Check for inline code backticks first (higher priority than code fences)
+						// This handles cases like `<thinking>` being discussed in text
+						backtickIdx := strings.Index(remaining, kirocommon.InlineCodeMarker)
+						thinkingIdx := strings.Index(remaining, kirocommon.ThinkingStartTag)
+
+						// If backtick comes before thinking tag, handle inline code
+						if backtickIdx >= 0 && (thinkingIdx < 0 || backtickIdx < thinkingIdx) {
+							if inInlineCode {
+								// Closing backtick - emit content up to and including backtick, exit inline code
+								textToEmit := remaining[:backtickIdx+1]
+								if textToEmit != "" {
+									if !isTextBlockOpen {
+										contentBlockIndex++
+										isTextBlockOpen = true
+										blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+										for _, chunk := range sseData {
+											if chunk != "" {
+												out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+											}
+										}
+									}
+									claudeEvent := kiroclaude.BuildClaudeStreamEvent(textToEmit, contentBlockIndex)
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+									for _, chunk := range sseData {
+										if chunk != "" {
+											out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+										}
+									}
+								}
+								remaining = remaining[backtickIdx+1:]
+								inInlineCode = false
+								continue
+							} else {
+								// Opening backtick - emit content before backtick, enter inline code
+								textToEmit := remaining[:backtickIdx+1]
+								if textToEmit != "" {
+									if !isTextBlockOpen {
+										contentBlockIndex++
+										isTextBlockOpen = true
+										blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+										for _, chunk := range sseData {
+											if chunk != "" {
+												out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+											}
+										}
+									}
+									claudeEvent := kiroclaude.BuildClaudeStreamEvent(textToEmit, contentBlockIndex)
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+									for _, chunk := range sseData {
+										if chunk != "" {
+											out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+										}
+									}
+								}
+								remaining = remaining[backtickIdx+1:]
+								inInlineCode = true
+								continue
+							}
+						}
+
+						// If inside inline code, emit all content as text (don't parse thinking tags)
+						if inInlineCode {
+							if remaining != "" {
+								if !isTextBlockOpen {
+									contentBlockIndex++
+									isTextBlockOpen = true
+									blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+									for _, chunk := range sseData {
+										if chunk != "" {
+											out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+										}
+									}
+								}
+								claudeEvent := kiroclaude.BuildClaudeStreamEvent(remaining, contentBlockIndex)
+								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+								for _, chunk := range sseData {
+									if chunk != "" {
+										out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+									}
+								}
+							}
+							break // Exit loop - remaining content is inside inline code
+						}
+
+						// Check for code fence markers (``` or ~~~) to toggle code block state
+						fenceIdx := strings.Index(remaining, kirocommon.CodeFenceMarker)
+						altFenceIdx := strings.Index(remaining, kirocommon.AltCodeFenceMarker)
+
+						// Find the earliest fence marker
+						earliestFenceIdx := -1
+						earliestFenceType := ""
+						if fenceIdx >= 0 && (altFenceIdx < 0 || fenceIdx < altFenceIdx) {
+							earliestFenceIdx = fenceIdx
+							earliestFenceType = kirocommon.CodeFenceMarker
+						} else if altFenceIdx >= 0 {
+							earliestFenceIdx = altFenceIdx
+							earliestFenceType = kirocommon.AltCodeFenceMarker
+						}
+
+						if earliestFenceIdx >= 0 {
+							// Check if this fence comes before any thinking tag
+							thinkingIdx := strings.Index(remaining, kirocommon.ThinkingStartTag)
+							if inCodeBlock {
+								// Inside code block - check if this fence closes it
+								if earliestFenceType == codeFenceType {
+									// This fence closes the code block
+									// Emit content up to and including the fence as text
+									textToEmit := remaining[:earliestFenceIdx+len(earliestFenceType)]
+									if textToEmit != "" {
+										if !isTextBlockOpen {
+											contentBlockIndex++
+											isTextBlockOpen = true
+											blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+											sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+											for _, chunk := range sseData {
+												if chunk != "" {
+													out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+												}
+											}
+										}
+										claudeEvent := kiroclaude.BuildClaudeStreamEvent(textToEmit, contentBlockIndex)
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+										for _, chunk := range sseData {
+											if chunk != "" {
+												out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+											}
+										}
+									}
+									remaining = remaining[earliestFenceIdx+len(earliestFenceType):]
+									inCodeBlock = false
+									codeFenceType = ""
+									log.Debugf("kiro: exited code block")
+									continue
+								}
+							} else if thinkingIdx < 0 || earliestFenceIdx < thinkingIdx {
+								// Not in code block, and fence comes before thinking tag (or no thinking tag)
+								// Emit content up to and including the fence as text, then enter code block
+								textToEmit := remaining[:earliestFenceIdx+len(earliestFenceType)]
+								if textToEmit != "" {
+									if !isTextBlockOpen {
+										contentBlockIndex++
+										isTextBlockOpen = true
+										blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+										for _, chunk := range sseData {
+											if chunk != "" {
+												out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+											}
+										}
+									}
+									claudeEvent := kiroclaude.BuildClaudeStreamEvent(textToEmit, contentBlockIndex)
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+									for _, chunk := range sseData {
+										if chunk != "" {
+											out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+										}
+									}
+								}
+								remaining = remaining[earliestFenceIdx+len(earliestFenceType):]
+								inCodeBlock = true
+								codeFenceType = earliestFenceType
+								log.Debugf("kiro: entered code block with fence: %s", earliestFenceType)
+								continue
+							}
+						}
+
+						// If inside code block, emit all content as text (don't parse thinking tags)
+						if inCodeBlock {
+							if remaining != "" {
+								if !isTextBlockOpen {
+									contentBlockIndex++
+									isTextBlockOpen = true
+									blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+									for _, chunk := range sseData {
+										if chunk != "" {
+											out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+										}
+									}
+								}
+								claudeEvent := kiroclaude.BuildClaudeStreamEvent(remaining, contentBlockIndex)
+								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+								for _, chunk := range sseData {
+									if chunk != "" {
+										out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+									}
+								}
+							}
+							break // Exit loop - all remaining content is inside code block
+						}
+					}
+
 					if inThinkBlock {
 						// Inside thinking block - look for </thinking> end tag
-						endIdx := strings.Index(remaining, kirocommon.ThinkingEndTag)
+						// CRITICAL FIX: Skip </thinking> tags that are not the real end tag
+						// This prevents false positives when thinking content discusses these tags
+						// Pass current code block/inline code state for accurate detection
+						endIdx := findRealThinkingEndTag(remaining, inCodeBlock, inInlineCode)
+						
 						if endIdx >= 0 {
 							// Found end tag - emit any content before end tag, then close block
 							thinkContent := remaining[:endIdx]
@@ -1790,8 +2413,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 							}
 
 							inThinkBlock = false
+							thinkingBlockCompleted = true // Mark that we've completed a thinking block
 							remaining = remaining[endIdx+len(kirocommon.ThinkingEndTag):]
-							log.Debugf("kiro: exited thinking block")
+							log.Debugf("kiro: exited thinking block, subsequent <thinking> tags will be treated as text")
 						} else {
 							// No end tag found - TRUE STREAMING: emit content immediately
 							// Only save potential partial tag length for next iteration
@@ -1837,11 +2461,29 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 						}
 					} else {
 						// Outside thinking block - look for <thinking> start tag
-						startIdx := strings.Index(remaining, kirocommon.ThinkingStartTag)
+						// CRITICAL FIX: Only parse <thinking> tags at the very beginning of the response
+						// or if we haven't completed a thinking block yet.
+						// After a thinking block is completed, subsequent <thinking> tags are likely
+						// discussion text (e.g., "Kiro returns `<thinking>` tags") and should NOT be parsed.
+						startIdx := -1
+						if !thinkingBlockCompleted && !hasSeenNonThinkingContent {
+							startIdx = strings.Index(remaining, kirocommon.ThinkingStartTag)
+							// If there's non-whitespace content before the tag, it's not a real thinking block
+							if startIdx > 0 {
+								textBefore := remaining[:startIdx]
+								if strings.TrimSpace(textBefore) != "" {
+									// There's real content before the tag - this is discussion text, not thinking
+									hasSeenNonThinkingContent = true
+									startIdx = -1
+									log.Debugf("kiro: found <thinking> tag after non-whitespace content, treating as text")
+								}
+							}
+						}
 						if startIdx >= 0 {
 							// Found start tag - emit text before it and switch to thinking mode
 							textBefore := remaining[:startIdx]
 							if textBefore != "" {
+								// Only whitespace before thinking tag is allowed
 								// Start text content block if needed
 								if !isTextBlockOpen {
 									contentBlockIndex++
@@ -1881,11 +2523,19 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 							log.Debugf("kiro: entered thinking block")
 						} else {
 							// No start tag found - check for partial start tag at buffer end
-							pendingStart := kiroclaude.PendingTagSuffix(remaining, kirocommon.ThinkingStartTag)
+							// Only check for partial tags if we haven't completed a thinking block yet
+							pendingStart := 0
+							if !thinkingBlockCompleted && !hasSeenNonThinkingContent {
+								pendingStart = kiroclaude.PendingTagSuffix(remaining, kirocommon.ThinkingStartTag)
+							}
 							if pendingStart > 0 {
 								// Emit text except potential partial tag
 								textToEmit := remaining[:len(remaining)-pendingStart]
 								if textToEmit != "" {
+									// Mark that we've seen non-thinking content
+									if strings.TrimSpace(textToEmit) != "" {
+										hasSeenNonThinkingContent = true
+									}
 									// Start text content block if needed
 									if !isTextBlockOpen {
 										contentBlockIndex++
@@ -1912,6 +2562,10 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 							} else {
 								// No partial tag - emit all as text
 								if remaining != "" {
+									// Mark that we've seen non-thinking content
+									if strings.TrimSpace(remaining) != "" {
+										hasSeenNonThinkingContent = true
+									}
 									// Start text content block if needed
 									if !isTextBlockOpen {
 										contentBlockIndex++
@@ -2065,6 +2719,69 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			if outputTokens, ok := event["outputTokens"].(float64); ok {
 				totalUsage.OutputTokens = int64(outputTokens)
 			}
+
+		case "messageMetadataEvent":
+			// Handle message metadata events which may contain token counts
+			if metadata, ok := event["messageMetadataEvent"].(map[string]interface{}); ok {
+				if inputTokens, ok := metadata["inputTokens"].(float64); ok {
+					totalUsage.InputTokens = int64(inputTokens)
+					log.Debugf("kiro: streamToChannel found inputTokens in messageMetadataEvent: %d", totalUsage.InputTokens)
+				}
+				if outputTokens, ok := metadata["outputTokens"].(float64); ok {
+					totalUsage.OutputTokens = int64(outputTokens)
+					log.Debugf("kiro: streamToChannel found outputTokens in messageMetadataEvent: %d", totalUsage.OutputTokens)
+				}
+				if totalTokens, ok := metadata["totalTokens"].(float64); ok {
+					totalUsage.TotalTokens = int64(totalTokens)
+					log.Debugf("kiro: streamToChannel found totalTokens in messageMetadataEvent: %d", totalUsage.TotalTokens)
+				}
+			}
+
+		case "usageEvent", "usage":
+			// Handle dedicated usage events
+			if inputTokens, ok := event["inputTokens"].(float64); ok {
+				totalUsage.InputTokens = int64(inputTokens)
+				log.Debugf("kiro: streamToChannel found inputTokens in usageEvent: %d", totalUsage.InputTokens)
+			}
+			if outputTokens, ok := event["outputTokens"].(float64); ok {
+				totalUsage.OutputTokens = int64(outputTokens)
+				log.Debugf("kiro: streamToChannel found outputTokens in usageEvent: %d", totalUsage.OutputTokens)
+			}
+			if totalTokens, ok := event["totalTokens"].(float64); ok {
+				totalUsage.TotalTokens = int64(totalTokens)
+				log.Debugf("kiro: streamToChannel found totalTokens in usageEvent: %d", totalUsage.TotalTokens)
+			}
+			// Also check nested usage object
+			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+				if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
+					totalUsage.InputTokens = int64(inputTokens)
+				} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
+					totalUsage.InputTokens = int64(inputTokens)
+				}
+				if outputTokens, ok := usageObj["output_tokens"].(float64); ok {
+					totalUsage.OutputTokens = int64(outputTokens)
+				} else if outputTokens, ok := usageObj["completion_tokens"].(float64); ok {
+					totalUsage.OutputTokens = int64(outputTokens)
+				}
+				if totalTokens, ok := usageObj["total_tokens"].(float64); ok {
+					totalUsage.TotalTokens = int64(totalTokens)
+				}
+				log.Debugf("kiro: streamToChannel found usage object: input=%d, output=%d, total=%d",
+					totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
+			}
+
+		case "metricsEvent":
+			// Handle metrics events which may contain usage data
+			if metrics, ok := event["metricsEvent"].(map[string]interface{}); ok {
+				if inputTokens, ok := metrics["inputTokens"].(float64); ok {
+					totalUsage.InputTokens = int64(inputTokens)
+				}
+				if outputTokens, ok := metrics["outputTokens"].(float64); ok {
+					totalUsage.OutputTokens = int64(outputTokens)
+				}
+				log.Debugf("kiro: streamToChannel found metricsEvent: input=%d, output=%d",
+					totalUsage.InputTokens, totalUsage.OutputTokens)
+			}
 		}
 
 		// Check nested usage event
@@ -2074,6 +2791,47 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			}
 			if outputTokens, ok := usageEvent["outputTokens"].(float64); ok {
 				totalUsage.OutputTokens = int64(outputTokens)
+			}
+		}
+
+		// Check for direct token fields in any event (fallback)
+		if totalUsage.InputTokens == 0 {
+			if inputTokens, ok := event["inputTokens"].(float64); ok {
+				totalUsage.InputTokens = int64(inputTokens)
+				log.Debugf("kiro: streamToChannel found direct inputTokens: %d", totalUsage.InputTokens)
+			}
+		}
+		if totalUsage.OutputTokens == 0 {
+			if outputTokens, ok := event["outputTokens"].(float64); ok {
+				totalUsage.OutputTokens = int64(outputTokens)
+				log.Debugf("kiro: streamToChannel found direct outputTokens: %d", totalUsage.OutputTokens)
+			}
+		}
+
+		// Check for usage object in any event (OpenAI format)
+		if totalUsage.InputTokens == 0 || totalUsage.OutputTokens == 0 {
+			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+				if totalUsage.InputTokens == 0 {
+					if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
+						totalUsage.InputTokens = int64(inputTokens)
+					} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
+						totalUsage.InputTokens = int64(inputTokens)
+					}
+				}
+				if totalUsage.OutputTokens == 0 {
+					if outputTokens, ok := usageObj["output_tokens"].(float64); ok {
+						totalUsage.OutputTokens = int64(outputTokens)
+					} else if outputTokens, ok := usageObj["completion_tokens"].(float64); ok {
+						totalUsage.OutputTokens = int64(outputTokens)
+					}
+				}
+				if totalUsage.TotalTokens == 0 {
+					if totalTokens, ok := usageObj["total_tokens"].(float64); ok {
+						totalUsage.TotalTokens = int64(totalTokens)
+					}
+				}
+				log.Debugf("kiro: streamToChannel found usage object (fallback): input=%d, output=%d, total=%d",
+					totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
 			}
 		}
 	}
@@ -2120,7 +2878,34 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			totalUsage.OutputTokens = 1
 		}
 	}
+
+	// Use contextUsagePercentage to calculate more accurate input tokens
+	// Kiro model has 200k max context, contextUsagePercentage represents the percentage used
+	// Formula: input_tokens = contextUsagePercentage * 200000 / 100
+	// Note: The effective input context is ~170k (200k - 30k reserved for output)
+	if upstreamContextPercentage > 0 {
+		// Calculate input tokens from context percentage
+		// Using 200k as the base since that's what Kiro reports against
+		calculatedInputTokens := int64(upstreamContextPercentage * 200000 / 100)
+		
+		// Only use calculated value if it's significantly different from local estimate
+		// This provides more accurate token counts based on upstream data
+		if calculatedInputTokens > 0 {
+			localEstimate := totalUsage.InputTokens
+			totalUsage.InputTokens = calculatedInputTokens
+			log.Infof("kiro: using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
+				upstreamContextPercentage, calculatedInputTokens, localEstimate)
+		}
+	}
+
 	totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens
+
+	// Log upstream usage information if received
+	if hasUpstreamUsage {
+		log.Infof("kiro: upstream usage - credits: %.4f, context: %.2f%%, final tokens - input: %d, output: %d, total: %d",
+			upstreamCreditUsage, upstreamContextPercentage,
+			totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
+	}
 
 	// Determine stop reason: prefer upstream, then detect tool_use, default to end_turn
 	stopReason := upstreamStopReason
@@ -2162,10 +2947,48 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 // NOTE: Claude SSE event builders moved to internal/translator/kiro/claude/kiro_claude_stream.go
 // The executor now uses kiroclaude.BuildClaude*Event() functions instead
 
-// CountTokens is not supported for Kiro provider.
-// Kiro/Amazon Q backend doesn't expose a token counting API.
-func (e *KiroExecutor) CountTokens(context.Context, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, statusErr{code: http.StatusNotImplemented, msg: "count tokens not supported for kiro"}
+// CountTokens counts tokens locally using tiktoken since Kiro API doesn't expose a token counting endpoint.
+// This provides approximate token counts for client requests.
+func (e *KiroExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	// Use tiktoken for local token counting
+	enc, err := getTokenizer(req.Model)
+	if err != nil {
+		log.Warnf("kiro: CountTokens failed to get tokenizer: %v, falling back to estimate", err)
+		// Fallback: estimate from payload size (roughly 4 chars per token)
+		estimatedTokens := len(req.Payload) / 4
+		if estimatedTokens == 0 && len(req.Payload) > 0 {
+			estimatedTokens = 1
+		}
+		return cliproxyexecutor.Response{
+			Payload: []byte(fmt.Sprintf(`{"count":%d}`, estimatedTokens)),
+		}, nil
+	}
+
+	// Try to count tokens from the request payload
+	var totalTokens int64
+
+	// Try OpenAI chat format first
+	if tokens, countErr := countOpenAIChatTokens(enc, req.Payload); countErr == nil && tokens > 0 {
+		totalTokens = tokens
+		log.Debugf("kiro: CountTokens counted %d tokens using OpenAI chat format", totalTokens)
+	} else {
+		// Fallback: count raw payload tokens
+		if tokenCount, countErr := enc.Count(string(req.Payload)); countErr == nil {
+			totalTokens = int64(tokenCount)
+			log.Debugf("kiro: CountTokens counted %d tokens from raw payload", totalTokens)
+		} else {
+			// Final fallback: estimate from payload size
+			totalTokens = int64(len(req.Payload) / 4)
+			if totalTokens == 0 && len(req.Payload) > 0 {
+				totalTokens = 1
+			}
+			log.Debugf("kiro: CountTokens estimated %d tokens from payload size", totalTokens)
+		}
+	}
+
+	return cliproxyexecutor.Response{
+		Payload: []byte(fmt.Sprintf(`{"count":%d}`, totalTokens)),
+	}, nil
 }
 
 // Refresh refreshes the Kiro OAuth token.
