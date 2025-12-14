@@ -42,6 +42,15 @@ func (p *ConvertCodexResponseToClaudeParams) indexForKey(key string) int {
 	return idx
 }
 
+func (p *ConvertCodexResponseToClaudeParams) toolBlockKey(outputIndex int64) string {
+	if key := p.ToolKeyByOutputIndex[outputIndex]; key != "" {
+		return key
+	}
+	key := fmt.Sprintf("tool_use:%d", outputIndex)
+	p.ToolKeyByOutputIndex[outputIndex] = key
+	return key
+}
+
 func codexClaudeThinkingKey(root gjson.Result) string {
 	outputIndex := root.Get("output_index").Int()
 	if summaryIndex := root.Get("summary_index"); summaryIndex.Exists() {
@@ -279,10 +288,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		itemType := itemResult.Get("type").String()
 		if itemType == "function_call" {
 			outputIndex := rootResult.Get("output_index").Int()
-			blockKey := p.ToolKeyByOutputIndex[outputIndex]
-			if blockKey == "" {
-				blockKey = fmt.Sprintf("tool_use:%d", outputIndex)
-			}
+			blockKey := p.toolBlockKey(outputIndex)
 			index := p.indexForKey(blockKey)
 
 			if !p.StartedKeys[blockKey] || p.StoppedKeys[blockKey] {
@@ -298,11 +304,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		}
 	} else if typeStr == "response.function_call_arguments.delta" {
 		outputIndex := rootResult.Get("output_index").Int()
-		blockKey := p.ToolKeyByOutputIndex[outputIndex]
-		if blockKey == "" {
-			blockKey = fmt.Sprintf("tool_use:%d", outputIndex)
-			p.ToolKeyByOutputIndex[outputIndex] = blockKey
-		}
+		blockKey := p.toolBlockKey(outputIndex)
 		index := p.indexForKey(blockKey)
 
 		if !p.StartedKeys[blockKey] || p.StoppedKeys[blockKey] {
