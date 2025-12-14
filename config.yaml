@@ -1,29 +1,29 @@
-# Основные настройки сервера
+# Main server settings
 host: "0.0.0.0"
 port: 8317
 
-# API ключи для доступа к прокси (ОБЯЗАТЕЛЬНО!)
+# API keys for accessing the proxy (REQUIRED!)
 api-keys:
   - "your-secure-api-key-here"
 
-# Включить debug логи
+# Enable debug logs
 debug: true
 
-# Метрики Prometheus
+# Prometheus metrics
 metrics_enabled: true
 metrics_bind_address: "0.0.0.0:8081"
 
-# Директория для хранения токенов OAuth
+# Directory for storing OAuth tokens
 auth-dir: "/root/.cli-proxy-api"
 
-# Повторные попытки при ошибках
+# Retries on errors
 request-retry: 3
 max-retry-interval: 30
 
-# Статистика использования
+# Usage statistics
 usage-statistics-enabled: true
 
-# Примеры провайдеров (добавьте свои ключи)
+# Provider examples (add your own keys)
 # Gemini API
 # gemini-api-key:
 #   - api-key: "AIzaSy..."
@@ -32,7 +32,7 @@ usage-statistics-enabled: true
 # claude-api-key:
 #   - api-key: "sk-ant-..."
 
-# OpenAI-совместимые провайдеры
+# OpenAI-compatible providers
 # openai-compatibility:
 #   - name: "openrouter"
 #     base-url: "https://openrouter.ai/api/v1"

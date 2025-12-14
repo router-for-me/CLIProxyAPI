@@ -40,7 +40,7 @@ open http://localhost:8081/_qs/metrics/ui
 ### Running from Source
 ```bash
 # Clone and build
-git clone git@github.com:Ybazylbe/CLIProxyAPI-YBFork.git
+git clone --branch feature/usage-metrics git@github.com:Ybazylbe/CLIProxyAPI-YBFork.git
 cd CLIProxyAPI
 go build -o cliproxy
 

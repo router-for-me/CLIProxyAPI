@@ -195,9 +195,9 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 // registerProviderAliases registers /api/provider/{provider}/... routes
 // These allow Amp CLI to route requests like:
 //
-//	/api/provider/openai/v1/chat/completions
-//	/api/provider/anthropic/v1/messages
-//	/api/provider/google/v1beta/models
+//      /api/provider/openai/v1/chat/completions
+//      /api/provider/anthropic/v1/messages
+//      /api/provider/google/v1beta/models
 func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc) {
 	// Create handler instances for different providers
 	openaiHandlers := openai.NewOpenAIAPIHandler(baseHandler)
@@ -235,26 +235,31 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 		}
 	}
 
+	// ============================================================================
+	// CHANGED: All POST handlers are now wrapped with MetricsMiddlewareWrapper
+	// This extracts usage data from responses and sets it in Gin context
+	// for metrics collection middleware to consume
+	// ============================================================================
+
 	// Root-level routes (for providers that omit /v1, like groq/cerebras)
-	// Wrap handlers with fallback logic to forward to ampcode.com when provider not found
-	provider.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback (no body to check)
-	provider.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
-	provider.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
-	provider.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
+	provider.GET("/models", ampModelsHandler) // Models endpoint doesn't need metrics
+	provider.POST("/chat/completions", fallbackHandler.WrapHandler(MetricsMiddlewareWrapper(openaiHandlers.ChatCompletions)))
+	provider.POST("/completions", fallbackHandler.WrapHandler(MetricsMiddlewareWrapper(openaiHandlers.Completions)))
+	provider.POST("/responses", fallbackHandler.WrapHandler(MetricsMiddlewareWrapper(openaiResponsesHandlers.Responses)))
 
 	// /v1 routes (OpenAI/Claude-compatible endpoints)
 	v1Amp := provider.Group("/v1")
 	{
-		v1Amp.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback
+		v1Amp.GET("/models", ampModelsHandler) // Models endpoint doesn't need metrics
 
-		// OpenAI-compatible endpoints with fallback
-		v1Amp.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
-		v1Amp.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
-		v1Amp.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
+		// OpenAI-compatible endpoints with metrics wrapper
+		v1Amp.POST("/chat/completions", fallbackHandler.WrapHandler(MetricsMiddlewareWrapper(openaiHandlers.ChatCompletions)))
+		v1Amp.POST("/completions", fallbackHandler.WrapHandler(MetricsMiddlewareWrapper(openaiHandlers.Completions)))
+		v1Amp.POST("/responses", fallbackHandler.WrapHandler(MetricsMiddlewareWrapper(openaiResponsesHandlers.Responses)))
 
-		// Claude/Anthropic-compatible endpoints with fallback
-		v1Amp.POST("/messages", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeMessages))
-		v1Amp.POST("/messages/count_tokens", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeCountTokens))
+		// Claude/Anthropic-compatible endpoints with metrics wrapper
+		v1Amp.POST("/messages", fallbackHandler.WrapHandler(MetricsMiddlewareWrapper(claudeCodeHandlers.ClaudeMessages)))
+		v1Amp.POST("/messages/count_tokens", fallbackHandler.WrapHandler(MetricsMiddlewareWrapper(claudeCodeHandlers.ClaudeCountTokens)))
 	}
 
 	// /v1beta routes (Gemini native API)
@@ -262,7 +267,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	v1betaAmp := provider.Group("/v1beta")
 	{
 		v1betaAmp.GET("/models", geminiHandlers.GeminiModels)
-		v1betaAmp.POST("/models/:action", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
+		v1betaAmp.POST("/models/:action", fallbackHandler.WrapHandler(MetricsMiddlewareWrapper(geminiHandlers.GeminiHandler)))
 		v1betaAmp.GET("/models/:action", geminiHandlers.GeminiGetHandler)
 	}
 }
