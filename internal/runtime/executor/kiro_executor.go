@@ -56,6 +56,34 @@ var (
 	usageUpdateTimeInterval  = 15 * time.Second // Or every 15 seconds, whichever comes first
 )
 
+// kiroRateMultipliers maps Kiro model IDs to their credit multipliers.
+// Used for cross-validation of token estimates against upstream credit usage.
+// Source: Kiro API model definitions
+var kiroRateMultipliers = map[string]float64{
+	"claude-haiku-4.5":  0.4,
+	"claude-sonnet-4":   1.3,
+	"claude-sonnet-4.5": 1.3,
+	"claude-opus-4.5":   2.2,
+	"auto":              1.0, // Default multiplier for auto model selection
+}
+
+// getKiroRateMultiplier returns the credit multiplier for a given model ID.
+// Returns 1.0 as default if model is not found.
+func getKiroRateMultiplier(modelID string) float64 {
+	if multiplier, ok := kiroRateMultipliers[modelID]; ok {
+		return multiplier
+	}
+	return 1.0
+}
+
+// abs64 returns the absolute value of an int64.
+func abs64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // kiroEndpointConfig bundles endpoint URL with its compatible Origin and AmzTarget values.
 // This solves the "triple mismatch" problem where different endpoints require matching
 // Origin and X-Amz-Target header values.
@@ -166,7 +194,8 @@ type KiroExecutor struct {
 // This is critical because OpenAI and Claude formats have different tool structures:
 // - OpenAI: tools[].function.name, tools[].function.description
 // - Claude: tools[].name, tools[].description
-func buildKiroPayloadForFormat(body []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, sourceFormat sdktranslator.Format) []byte {
+// Returns the serialized JSON payload and a boolean indicating whether thinking mode was injected.
+func buildKiroPayloadForFormat(body []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, sourceFormat sdktranslator.Format) ([]byte, bool) {
 	switch sourceFormat.String() {
 	case "openai":
 		log.Debugf("kiro: using OpenAI payload builder for source format: %s", sourceFormat.String())
@@ -248,7 +277,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+		kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 
 		log.Debugf("kiro: trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
@@ -358,7 +387,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
-						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed successfully, retrying request")
 						continue
 					}
@@ -415,7 +444,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					if refreshedAuth != nil {
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
-						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed for 403, retrying request")
 						continue
 					}
@@ -554,7 +583,10 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+		kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+		// Kiro API always returns <thinking> tags regardless of whether thinking mode was requested
+		// So we always enable thinking parsing for Kiro responses
+		thinkingEnabled := true
 
 		log.Debugf("kiro: stream trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
@@ -677,7 +709,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
-						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed successfully, retrying stream request")
 						continue
 					}
@@ -734,7 +766,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					if refreshedAuth != nil {
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
-						kiroPayload = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
 						log.Infof("kiro: token refreshed for 403, retrying stream request")
 						continue
 					}
@@ -758,7 +790,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 			out := make(chan cliproxyexecutor.StreamChunk)
 
-			go func(resp *http.Response) {
+			go func(resp *http.Response, thinkingEnabled bool) {
 				defer close(out)
 				defer func() {
 					if r := recover(); r != nil {
@@ -772,21 +804,12 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					}
 				}()
 
-				// Check if thinking mode was enabled in the original request
-				// Only parse <thinking> tags when thinking was explicitly requested
-				// Check multiple sources: original request, pre-translation payload, and translated body
-				// This handles different client formats (Claude API, OpenAI, AMP/Cursor)
-				thinkingEnabled := kiroclaude.IsThinkingEnabled(opts.OriginalRequest)
-				if !thinkingEnabled {
-					thinkingEnabled = kiroclaude.IsThinkingEnabled(req.Payload)
-				}
-				if !thinkingEnabled {
-					thinkingEnabled = kiroclaude.IsThinkingEnabled(body)
-				}
-				log.Debugf("kiro: stream thinkingEnabled = %v", thinkingEnabled)
+				// Kiro API always returns <thinking> tags regardless of request parameters
+				// So we always enable thinking parsing for Kiro responses
+				log.Debugf("kiro: stream thinkingEnabled = %v (always true for Kiro)", thinkingEnabled)
 
 				e.streamToChannel(ctx, resp.Body, out, from, req.Model, opts.OriginalRequest, body, reporter, thinkingEnabled)
-			}(httpResp)
+			}(httpResp, thinkingEnabled)
 
 			return out, nil
 		}
@@ -2905,6 +2928,32 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		log.Infof("kiro: upstream usage - credits: %.4f, context: %.2f%%, final tokens - input: %d, output: %d, total: %d",
 			upstreamCreditUsage, upstreamContextPercentage,
 			totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
+	}
+
+	// Cross-validate token estimates using creditUsage if available
+	// This helps detect estimation errors and provides insight into actual usage
+	if upstreamCreditUsage > 0 {
+		rateMultiplier := getKiroRateMultiplier(model)
+		// Credit usage represents total tokens (input + output) * multiplier / 1000
+		// Formula: total_tokens = creditUsage * 1000 / rateMultiplier
+		creditBasedTotal := int64(upstreamCreditUsage * 1000 / rateMultiplier)
+		localTotal := totalUsage.InputTokens + totalUsage.OutputTokens
+
+		// Calculate difference percentage
+		var diffPercent float64
+		if localTotal > 0 {
+			diffPercent = float64(abs64(creditBasedTotal-localTotal)) / float64(localTotal) * 100
+		}
+
+		// Log cross-validation result
+		if diffPercent > 20 {
+			// Significant mismatch - may indicate thinking tokens or estimation error
+			log.Warnf("kiro: token estimation mismatch > 20%% - local: %d, credit-based: %d (credits: %.4f, multiplier: %.1f, diff: %.1f%%)",
+				localTotal, creditBasedTotal, upstreamCreditUsage, rateMultiplier, diffPercent)
+		} else {
+			log.Debugf("kiro: token cross-validation - local: %d, credit-based: %d (credits: %.4f, multiplier: %.1f, diff: %.1f%%)",
+				localTotal, creditBasedTotal, upstreamCreditUsage, rateMultiplier, diffPercent)
+		}
 	}
 
 	// Determine stop reason: prefer upstream, then detect tool_use, default to end_turn

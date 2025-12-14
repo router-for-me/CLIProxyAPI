@@ -133,7 +133,8 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 // origin parameter determines which quota to use: "CLI" for Amazon Q, "AI_EDITOR" for Kiro IDE.
 // isAgentic parameter enables chunked write optimization prompt for -agentic model variants.
 // isChatOnly parameter disables tool calling for -chat model variants (pure conversation mode).
-func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool) []byte {
+// Returns the payload and a boolean indicating whether thinking mode was injected.
+func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool) ([]byte, bool) {
 	// Extract max_tokens for potential use in inferenceConfig
 	// Handle -1 as "use maximum" (Kiro max output is ~32000 tokens)
 	const kiroMaxOutputTokens = 32000
@@ -311,10 +312,10 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 	result, err := json.Marshal(payload)
 	if err != nil {
 		log.Debugf("kiro-openai: failed to marshal payload: %v", err)
-		return nil
+		return nil, false
 	}
 
-	return result
+	return result, thinkingEnabled
 }
 
 // normalizeOrigin normalizes origin value for Kiro API compatibility
