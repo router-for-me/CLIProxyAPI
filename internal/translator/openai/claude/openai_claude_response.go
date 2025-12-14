@@ -130,29 +130,36 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 	// Check if this is the first chunk (has role)
 	if delta := root.Get("choices.0.delta"); delta.Exists() {
-		if role := delta.Get("role"); role.Exists() && role.String() == "assistant" && !param.MessageStarted {
-			// Send message_start event
-			messageStart := map[string]interface{}{
-				"type": "message_start",
-				"message": map[string]interface{}{
-					"id":            param.MessageID,
-					"type":          "message",
-					"role":          "assistant",
-					"model":         param.Model,
-					"content":       []interface{}{},
-					"stop_reason":   nil,
-					"stop_sequence": nil,
-					"usage": map[string]interface{}{
-						"input_tokens":  0,
-						"output_tokens": 0,
-					},
-				},
-			}
-			messageStartJSON, _ := json.Marshal(messageStart)
-			results = append(results, "event: message_start\ndata: "+string(messageStartJSON)+"\n\n")
-			param.MessageStarted = true
+		// Ensure message_start is sent before any content
+		// Some providers (like copilot-api) may not send role in first chunk
+		if !param.MessageStarted {
+			hasContent := delta.Get("content").Exists() && delta.Get("content").String() != ""
+			hasReasoning := delta.Get("reasoning_content").Exists()
+			hasToolCalls := delta.Get("tool_calls").Exists()
+			hasRole := delta.Get("role").Exists() && delta.Get("role").String() == "assistant"
 
-			// Don't send content_block_start for text here - wait for actual content
+			if hasRole || hasContent || hasReasoning || hasToolCalls {
+				// Send message_start event
+				messageStart := map[string]interface{}{
+					"type": "message_start",
+					"message": map[string]interface{}{
+						"id":            param.MessageID,
+						"type":          "message",
+						"role":          "assistant",
+						"model":         param.Model,
+						"content":       []interface{}{},
+						"stop_reason":   nil,
+						"stop_sequence": nil,
+						"usage": map[string]interface{}{
+							"input_tokens":  0,
+							"output_tokens": 0,
+						},
+					},
+				}
+				messageStartJSON, _ := json.Marshal(messageStart)
+				results = append(results, "event: message_start\ndata: "+string(messageStartJSON)+"\n\n")
+				param.MessageStarted = true
+			}
 		}
 
 		// Handle reasoning content delta
