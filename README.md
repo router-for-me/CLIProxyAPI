@@ -41,6 +41,8 @@ docker run -d \
 
 # View metrics UI
 open http://localhost:8081/_qs/metrics/ui
+login admin
+password strongpassword123
 ```
 
 ### Running from Source
