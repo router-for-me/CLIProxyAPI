@@ -56,34 +56,6 @@ var (
 	usageUpdateTimeInterval  = 15 * time.Second // Or every 15 seconds, whichever comes first
 )
 
-// kiroRateMultipliers maps Kiro model IDs to their credit multipliers.
-// Used for cross-validation of token estimates against upstream credit usage.
-// Source: Kiro API model definitions
-var kiroRateMultipliers = map[string]float64{
-	"claude-haiku-4.5":  0.4,
-	"claude-sonnet-4":   1.3,
-	"claude-sonnet-4.5": 1.3,
-	"claude-opus-4.5":   2.2,
-	"auto":              1.0, // Default multiplier for auto model selection
-}
-
-// getKiroRateMultiplier returns the credit multiplier for a given model ID.
-// Returns 1.0 as default if model is not found.
-func getKiroRateMultiplier(modelID string) float64 {
-	if multiplier, ok := kiroRateMultipliers[modelID]; ok {
-		return multiplier
-	}
-	return 1.0
-}
-
-// abs64 returns the absolute value of an int64.
-func abs64(x int64) int64 {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
 // kiroEndpointConfig bundles endpoint URL with its compatible Origin and AmzTarget values.
 // This solves the "triple mismatch" problem where different endpoints require matching
 // Origin and X-Amz-Target header values.
@@ -2928,32 +2900,6 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		log.Infof("kiro: upstream usage - credits: %.4f, context: %.2f%%, final tokens - input: %d, output: %d, total: %d",
 			upstreamCreditUsage, upstreamContextPercentage,
 			totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
-	}
-
-	// Cross-validate token estimates using creditUsage if available
-	// This helps detect estimation errors and provides insight into actual usage
-	if upstreamCreditUsage > 0 {
-		rateMultiplier := getKiroRateMultiplier(model)
-		// Credit usage represents total tokens (input + output) * multiplier / 1000
-		// Formula: total_tokens = creditUsage * 1000 / rateMultiplier
-		creditBasedTotal := int64(upstreamCreditUsage * 1000 / rateMultiplier)
-		localTotal := totalUsage.InputTokens + totalUsage.OutputTokens
-
-		// Calculate difference percentage
-		var diffPercent float64
-		if localTotal > 0 {
-			diffPercent = float64(abs64(creditBasedTotal-localTotal)) / float64(localTotal) * 100
-		}
-
-		// Log cross-validation result
-		if diffPercent > 20 {
-			// Significant mismatch - may indicate thinking tokens or estimation error
-			log.Warnf("kiro: token estimation mismatch > 20%% - local: %d, credit-based: %d (credits: %.4f, multiplier: %.1f, diff: %.1f%%)",
-				localTotal, creditBasedTotal, upstreamCreditUsage, rateMultiplier, diffPercent)
-		} else {
-			log.Debugf("kiro: token cross-validation - local: %d, credit-based: %d (credits: %.4f, multiplier: %.1f, diff: %.1f%%)",
-				localTotal, creditBasedTotal, upstreamCreditUsage, rateMultiplier, diffPercent)
-		}
 	}
 
 	// Determine stop reason: prefer upstream, then detect tool_use, default to end_turn
