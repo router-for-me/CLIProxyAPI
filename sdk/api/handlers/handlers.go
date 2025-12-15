@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
@@ -51,7 +52,25 @@ type BaseAPIHandler struct {
 	Cfg *config.SDKConfig
 
 	// OpenAICompatProviders is a list of provider names for OpenAI compatibility.
-	OpenAICompatProviders []string
+	openAICompatProviders []string
+	openAICompatMutex     sync.RWMutex
+}
+
+// GetOpenAICompatProviders safely returns a copy of the provider names
+func (h *BaseAPIHandler) GetOpenAICompatProviders() []string {
+	h.openAICompatMutex.RLock()
+	defer h.openAICompatMutex.RUnlock()
+	result := make([]string, len(h.openAICompatProviders))
+	copy(result, h.openAICompatProviders)
+	return result
+}
+
+// SetOpenAICompatProviders safely sets the provider names
+func (h *BaseAPIHandler) SetOpenAICompatProviders(providers []string) {
+	h.openAICompatMutex.Lock()
+	defer h.openAICompatMutex.Unlock()
+	h.openAICompatProviders = make([]string, len(providers))
+	copy(h.openAICompatProviders, providers)
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -64,11 +83,12 @@ type BaseAPIHandler struct {
 // Returns:
 //   - *BaseAPIHandler: A new API handlers instance
 func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager, openAICompatProviders []string) *BaseAPIHandler {
-	return &BaseAPIHandler{
-		Cfg:                   cfg,
-		AuthManager:           authManager,
-		OpenAICompatProviders: openAICompatProviders,
+	h := &BaseAPIHandler{
+		Cfg:         cfg,
+		AuthManager: authManager,
 	}
+	h.SetOpenAICompatProviders(openAICompatProviders)
+	return h
 }
 
 // UpdateClients updates the handlers' client list and configuration.
@@ -398,7 +418,7 @@ func (h *BaseAPIHandler) parseDynamicModel(modelName string) (providerName, mode
 	}
 
 	// Check if the provider is a configured openai-compatibility provider
-	for _, pName := range h.OpenAICompatProviders {
+	for _, pName := range h.GetOpenAICompatProviders() {
 		if pName == providerPart {
 			return providerPart, modelPart, true
 		}

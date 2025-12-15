@@ -47,6 +47,19 @@ func init() {
 	buildinfo.BuildDate = BuildDate
 }
 
+// setKiroIncognitoMode sets the incognito browser mode for Kiro authentication.
+// Kiro defaults to incognito mode for multi-account support.
+// Users can explicitly override with --incognito or --no-incognito flags.
+func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
+	if useIncognito {
+		cfg.IncognitoBrowser = true
+	} else if noIncognito {
+		cfg.IncognitoBrowser = false
+	} else {
+		cfg.IncognitoBrowser = true // Kiro default
+	}
+}
+
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
@@ -62,10 +75,17 @@ func main() {
 	var iflowCookie bool
 	var noBrowser bool
 	var antigravityLogin bool
+	var kiroLogin bool
+	var kiroGoogleLogin bool
+	var kiroAWSLogin bool
+	var kiroImport bool
+	var githubCopilotLogin bool
 	var projectID string
 	var vertexImport string
 	var configPath string
 	var password string
+	var noIncognito bool
+	var useIncognito bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -75,7 +95,14 @@ func main() {
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
 	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
+	flag.BoolVar(&useIncognito, "incognito", false, "Open browser in incognito/private mode for OAuth (useful for multiple accounts)")
+	flag.BoolVar(&noIncognito, "no-incognito", false, "Force disable incognito mode (uses existing browser session)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
+	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro using Google OAuth")
+	flag.BoolVar(&kiroGoogleLogin, "kiro-google-login", false, "Login to Kiro using Google OAuth (same as --kiro-login)")
+	flag.BoolVar(&kiroAWSLogin, "kiro-aws-login", false, "Login to Kiro using AWS Builder ID (device code flow)")
+	flag.BoolVar(&kiroImport, "kiro-import", false, "Import Kiro token from Kiro IDE (~/.aws/sso/cache/kiro-auth-token.json)")
+	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -453,6 +480,9 @@ func main() {
 	} else if antigravityLogin {
 		// Handle Antigravity login
 		cmd.DoAntigravityLogin(cfg, options)
+	} else if githubCopilotLogin {
+		// Handle GitHub Copilot login
+		cmd.DoGitHubCopilotLogin(cfg, options)
 	} else if codexLogin {
 		// Handle Codex login
 		cmd.DoCodexLogin(cfg, options)
@@ -465,6 +495,26 @@ func main() {
 		cmd.DoIFlowLogin(cfg, options)
 	} else if iflowCookie {
 		cmd.DoIFlowCookieAuth(cfg, options)
+	} else if kiroLogin {
+		// For Kiro auth, default to incognito mode for multi-account support
+		// Users can explicitly override with --no-incognito
+		// Note: This config mutation is safe - auth commands exit after completion
+		// and don't share config with StartService (which is in the else branch)
+		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
+		cmd.DoKiroLogin(cfg, options)
+	} else if kiroGoogleLogin {
+		// For Kiro auth, default to incognito mode for multi-account support
+		// Users can explicitly override with --no-incognito
+		// Note: This config mutation is safe - auth commands exit after completion
+		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
+		cmd.DoKiroGoogleLogin(cfg, options)
+	} else if kiroAWSLogin {
+		// For Kiro auth, default to incognito mode for multi-account support
+		// Users can explicitly override with --no-incognito
+		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
+		cmd.DoKiroAWSLogin(cfg, options)
+	} else if kiroImport {
+		cmd.DoKiroImport(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
