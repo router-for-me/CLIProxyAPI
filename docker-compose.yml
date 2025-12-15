@@ -1,6 +1,6 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
+    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api-plus:latest}
     pull_policy: always
     build:
       context: .
@@ -9,7 +9,7 @@ services:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: cli-proxy-api
+    container_name: cli-proxy-api-plus
     # env_file:
     #   - .env
     environment:
