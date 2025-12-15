@@ -1730,6 +1730,9 @@ func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.RequestLog != newCfg.RequestLog {
 		changes = append(changes, fmt.Sprintf("request-log: %t -> %t", oldCfg.RequestLog, newCfg.RequestLog))
 	}
+	if oldCfg.CopilotUnlimitedMode != newCfg.CopilotUnlimitedMode {
+		changes = append(changes, fmt.Sprintf("copilot-unlimited-mode: %t -> %t", oldCfg.CopilotUnlimitedMode, newCfg.CopilotUnlimitedMode))
+	}
 	if oldCfg.RequestRetry != newCfg.RequestRetry {
 		changes = append(changes, fmt.Sprintf("request-retry: %d -> %d", oldCfg.RequestRetry, newCfg.RequestRetry))
 	}

@@ -12,6 +12,13 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
+	// CopilotUnlimitedMode prepends a default assistant message to /v1/chat/completions requests.
+	// This is intended for compatibility with copilot-api (OpenAI-compatible GitHub Copilot proxy),
+	// where this workaround may enable "unlimited" usage by avoiding rate-limit behavior.
+	//
+	// Config key: copilot-unlimited-mode
+	CopilotUnlimitedMode bool `yaml:"copilot-unlimited-mode" json:"copilot-unlimited-mode"`
+
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 

@@ -45,6 +45,10 @@ usage-statistics-enabled: false
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 
+# When true, prepend a default assistant message to /v1/chat/completions requests.
+# Intended for compatibility with copilot-api, where this workaround may avoid rate limiting.
+copilot-unlimited-mode: false
+
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
 

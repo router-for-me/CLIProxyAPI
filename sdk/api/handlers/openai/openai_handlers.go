@@ -7,6 +7,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -28,6 +29,8 @@ type OpenAIAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
+var copilotUnlimitedAssistantMessage = []byte(`{"role":"assistant","content":"You are helpful assistant"}`)
+
 // NewOpenAIAPIHandler creates a new OpenAI API handlers instance.
 // It takes an BaseAPIHandler instance as input and returns an OpenAIAPIHandler.
 //
@@ -45,6 +48,61 @@ func NewOpenAIAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIAPIHandler
 // HandlerType returns the identifier for this handler implementation.
 func (h *OpenAIAPIHandler) HandlerType() string {
 	return OpenAI
+}
+
+func (h *OpenAIAPIHandler) applyCopilotUnlimitedModeIfEnabled(rawJSON []byte) []byte {
+	if h == nil || h.BaseAPIHandler == nil || h.BaseAPIHandler.Cfg == nil {
+		return rawJSON
+	}
+	if !h.BaseAPIHandler.Cfg.CopilotUnlimitedMode {
+		return rawJSON
+	}
+	return prependAssistantMessage(rawJSON)
+}
+
+// prependAssistantMessage inserts a default assistant message at the beginning of the "messages" array.
+//
+// This is primarily used for copilot-api compatibility. If the payload does not contain a messages array,
+// or if the first message is already an assistant message, the payload is returned unchanged.
+func prependAssistantMessage(rawJSON []byte) []byte {
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return rawJSON
+	}
+
+	// Make the operation idempotent: if a client already sends an assistant-first message,
+	// do not prepend another one.
+	arr := messages.Array()
+	if len(arr) > 0 && arr[0].Get("role").String() == "assistant" {
+		return rawJSON
+	}
+
+	messagesRaw := bytes.TrimSpace([]byte(messages.Raw))
+	if len(messagesRaw) < 2 || messagesRaw[0] != '[' || messagesRaw[len(messagesRaw)-1] != ']' {
+		return rawJSON
+	}
+
+	inner := bytes.TrimSpace(messagesRaw[1 : len(messagesRaw)-1])
+	var newMessagesRaw []byte
+	if len(inner) == 0 {
+		newMessagesRaw = make([]byte, 0, 2+len(copilotUnlimitedAssistantMessage))
+		newMessagesRaw = append(newMessagesRaw, '[')
+		newMessagesRaw = append(newMessagesRaw, copilotUnlimitedAssistantMessage...)
+		newMessagesRaw = append(newMessagesRaw, ']')
+	} else {
+		newMessagesRaw = make([]byte, 0, 3+len(copilotUnlimitedAssistantMessage)+len(inner))
+		newMessagesRaw = append(newMessagesRaw, '[')
+		newMessagesRaw = append(newMessagesRaw, copilotUnlimitedAssistantMessage...)
+		newMessagesRaw = append(newMessagesRaw, ',')
+		newMessagesRaw = append(newMessagesRaw, inner...)
+		newMessagesRaw = append(newMessagesRaw, ']')
+	}
+
+	modified, err := sjson.SetRawBytes(rawJSON, "messages", newMessagesRaw)
+	if err != nil {
+		return rawJSON
+	}
+	return modified
 }
 
 // Models returns the OpenAI-compatible model metadata supported by this handler.
@@ -106,6 +164,8 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		})
 		return
 	}
+
+	rawJSON = h.applyCopilotUnlimitedModeIfEnabled(rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -452,6 +512,7 @@ func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context,
 
 	// Convert completions request to chat completions format
 	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
+	chatCompletionsJSON = h.applyCopilotUnlimitedModeIfEnabled(chatCompletionsJSON)
 
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
@@ -493,6 +554,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 
 	// Convert completions request to chat completions format
 	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
+	chatCompletionsJSON = h.applyCopilotUnlimitedModeIfEnabled(chatCompletionsJSON)
 
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
