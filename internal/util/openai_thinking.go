@@ -5,15 +5,18 @@ package util
 //
 // Ranges:
 //   - 0            -> "none"
+//   - -1           -> "auto"
 //   - 1..1024      -> "low"
 //   - 1025..8192   -> "medium"
 //   - 8193..24576  -> "high"
 //   - 24577..      -> highest supported level for the model (defaults to "xhigh")
 //
-// Negative values (except the dynamic -1 handled elsewhere) are treated as unsupported.
+// Negative values other than -1 are treated as unsupported.
 func OpenAIThinkingBudgetToEffort(model string, budget int) (string, bool) {
 	switch {
-	case budget < 0:
+	case budget == -1:
+		return "auto", true
+	case budget < -1:
 		return "", false
 	case budget == 0:
 		return "none", true
