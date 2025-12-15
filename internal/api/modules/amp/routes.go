@@ -84,7 +84,7 @@ func noCORSMiddleware() gin.HandlerFunc {
 // proxy is disabled, preventing noisy localhost warnings and accidental exposure.
 func (m *AmpModule) managementAvailabilityMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if m.getProxy() == nil {
+		if m.getManagementProxy() == nil {
 			logging.SkipGinRequestLogging(c)
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 				"error": "amp upstream proxy not available",
@@ -98,7 +98,8 @@ func (m *AmpModule) managementAvailabilityMiddleware() gin.HandlerFunc {
 // registerManagementRoutes registers Amp management proxy routes
 // These routes proxy through to the Amp control plane for OAuth, user management, etc.
 // Uses dynamic middleware and proxy getter for hot-reload support.
-// The auth middleware validates Authorization header against configured API keys.
+// Auth is handled by ampcode.com - KorProxy does not validate these requests.
+// Routes are protected by localhost-only and availability middleware.
 func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc) {
 	ampAPI := engine.Group("/api")
 
@@ -113,7 +114,8 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 		ampAPI.Use(auth)
 	}
 
-	// Dynamic proxy handler that uses m.getProxy() for hot-reload support
+	// Dynamic proxy handler that uses m.getManagementProxy() for hot-reload support
+	// Management proxy preserves client's Authorization header (Amp token)
 	proxyHandler := func(c *gin.Context) {
 		// Swallow ErrAbortHandler panics from ReverseProxy copyResponse to avoid noisy stack traces
 		defer func() {
@@ -126,7 +128,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 			}
 		}()
 
-		proxy := m.getProxy()
+		proxy := m.getManagementProxy()
 		if proxy == nil {
 			c.JSON(503, gin.H{"error": "amp upstream proxy not available"})
 			return
