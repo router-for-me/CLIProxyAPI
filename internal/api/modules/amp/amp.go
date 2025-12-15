@@ -195,6 +195,7 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 	if oldSettings != nil {
 		oldUpstreamURL = strings.TrimSpace(oldSettings.UpstreamURL)
 	}
+	upstreamURLChanged := oldUpstreamURL != newUpstreamURL
 
 	if !m.enabled && newUpstreamURL != "" {
 		if err := m.enableUpstreamProxy(newUpstreamURL, &newSettings); err != nil {
@@ -217,8 +218,8 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 		if newUpstreamURL == "" && oldUpstreamURL != "" {
 			m.setProxy(nil)
 			m.enabled = false
-		} else if oldUpstreamURL != "" && newUpstreamURL != oldUpstreamURL && newUpstreamURL != "" {
-			// Recreate proxy with new URL
+		} else if upstreamURLChanged && newUpstreamURL != "" {
+			// Recreate proxy with new URL (including "first config" cases where oldUpstreamURL is empty)
 			proxy, err := createReverseProxy(newUpstreamURL, m.secretSource)
 			if err != nil {
 				log.Errorf("amp config: failed to create proxy for new upstream URL %s: %v", newUpstreamURL, err)
@@ -233,6 +234,13 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 			if m.secretSource != nil {
 				if ms, ok := m.secretSource.(*MultiSourceSecret); ok {
 					ms.UpdateExplicitKey(newSettings.UpstreamAPIKey)
+					ms.InvalidateCache()
+				}
+			}
+		}
+		if upstreamURLChanged {
+			if m.secretSource != nil {
+				if ms, ok := m.secretSource.(*MultiSourceSecret); ok {
 					ms.InvalidateCache()
 				}
 			}

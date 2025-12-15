@@ -9,6 +9,13 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 )
 
+type closeNotifyRecorder struct {
+	*httptest.ResponseRecorder
+	closeCh chan bool
+}
+
+func (w *closeNotifyRecorder) CloseNotify() <-chan bool { return w.closeCh }
+
 func TestRegisterManagementRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -32,7 +39,7 @@ func TestRegisterManagementRoutes(t *testing.T) {
 	m.setProxy(proxy)
 
 	base := &handlers.BaseAPIHandler{}
-	m.registerManagementRoutes(r, base)
+	m.registerManagementRoutes(r, base, nil)
 
 	managementPaths := []struct {
 		path   string
@@ -64,7 +71,7 @@ func TestRegisterManagementRoutes(t *testing.T) {
 		t.Run(path.path, func(t *testing.T) {
 			proxyCalled = false
 			req := httptest.NewRequest(path.method, path.path, nil)
-			w := httptest.NewRecorder()
+			w := &closeNotifyRecorder{ResponseRecorder: httptest.NewRecorder(), closeCh: make(chan bool, 1)}
 			r.ServeHTTP(w, req)
 
 			if w.Code == http.StatusNotFound {
