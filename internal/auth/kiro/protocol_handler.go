@@ -471,7 +471,7 @@ foreach ($port in $ports) {
 
 	// Create batch wrapper
 	batchPath := filepath.Join(scriptDir, "kiro-oauth-handler.bat")
-	batchContent := fmt.Sprintf("@echo off\npowershell -ExecutionPolicy Bypass -File \"%s\" \"%%1\"\n", scriptPath)
+	batchContent := fmt.Sprintf("@echo off\npowershell -ExecutionPolicy Bypass -File \"%s\" %%1\n", scriptPath)
 
 	if err := os.WriteFile(batchPath, []byte(batchContent), 0644); err != nil {
 		return fmt.Errorf("failed to write batch wrapper: %w", err)
