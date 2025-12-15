@@ -99,6 +99,16 @@ func BuildClaudeContentBlockStopEvent(index int) []byte {
 	return []byte("event: content_block_stop\ndata: " + string(result))
 }
 
+// BuildClaudeThinkingBlockStopEvent creates a content_block_stop SSE event for thinking blocks.
+func BuildClaudeThinkingBlockStopEvent(index int) []byte {
+	event := map[string]interface{}{
+		"type":  "content_block_stop",
+		"index": index,
+	}
+	result, _ := json.Marshal(event)
+	return []byte("event: content_block_stop\ndata: " + string(result))
+}
+
 // BuildClaudeMessageDeltaEvent creates the message_delta event with stop_reason and usage
 func BuildClaudeMessageDeltaEvent(stopReason string, usageInfo usage.Detail) []byte {
 	deltaEvent := map[string]interface{}{

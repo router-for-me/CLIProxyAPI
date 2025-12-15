@@ -21,10 +21,23 @@ var functionCallIDCounter uint64
 // Supports tool_calls when tools are present in the response.
 // stopReason is passed from upstream; fallback logic applied if empty.
 func BuildOpenAIResponse(content string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
+	return BuildOpenAIResponseWithReasoning(content, "", toolUses, model, usageInfo, stopReason)
+}
+
+// BuildOpenAIResponseWithReasoning constructs an OpenAI Chat Completions-compatible response with reasoning_content support.
+// Supports tool_calls when tools are present in the response.
+// reasoningContent is included as reasoning_content field in the message when present.
+// stopReason is passed from upstream; fallback logic applied if empty.
+func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, model string, usageInfo usage.Detail, stopReason string) []byte {
 	// Build the message object
 	message := map[string]interface{}{
 		"role":    "assistant",
 		"content": content,
+	}
+
+	// Add reasoning_content if present (for thinking/reasoning models)
+	if reasoningContent != "" {
+		message["reasoning_content"] = reasoningContent
 	}
 
 	// Add tool_calls if present
