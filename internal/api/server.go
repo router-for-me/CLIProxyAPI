@@ -252,6 +252,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.applyAccessConfig(nil, cfg)
 	if authManager != nil {
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
+		authManager.SetTransientRetryInterval(time.Duration(cfg.TransientRetryInterval) * time.Second)
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
@@ -546,6 +547,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/max-retry-interval", s.mgmt.GetMaxRetryInterval)
 		mgmt.PUT("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
 		mgmt.PATCH("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
+		mgmt.GET("/transient-retry-interval", s.mgmt.GetTransientRetryInterval)
+		mgmt.PUT("/transient-retry-interval", s.mgmt.PutTransientRetryInterval)
+		mgmt.PATCH("/transient-retry-interval", s.mgmt.PutTransientRetryInterval)
 
 		mgmt.GET("/claude-api-key", s.mgmt.GetClaudeKeys)
 		mgmt.PUT("/claude-api-key", s.mgmt.PutClaudeKeys)
@@ -865,6 +869,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
+		s.handlers.AuthManager.SetTransientRetryInterval(time.Duration(cfg.TransientRetryInterval) * time.Second)
 	}
 
 	// Update log level dynamically when debug flag changes

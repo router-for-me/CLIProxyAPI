@@ -109,6 +109,7 @@ type Manager struct {
 	// Retry controls request retry behavior.
 	requestRetry     atomic.Int32
 	maxRetryInterval atomic.Int64
+	transientRetry   atomic.Int64
 
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
@@ -162,6 +163,17 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration) {
 	}
 	m.requestRetry.Store(int32(retry))
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
+}
+
+// SetTransientRetryInterval updates the cooldown used for transient upstream errors (408, 500, 502, 503, 504).
+func (m *Manager) SetTransientRetryInterval(interval time.Duration) {
+	if m == nil {
+		return
+	}
+	if interval < 0 {
+		interval = 0
+	}
+	m.transientRetry.Store(interval.Nanoseconds())
 }
 
 // RegisterExecutor registers a provider executor with the manager.
@@ -777,7 +789,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					shouldSuspendModel = true
 					setModelQuota = true
 				case 408, 500, 502, 503, 504:
-					next := now.Add(1 * time.Minute)
+					interval := time.Duration(m.transientRetry.Load())
+					if interval <= 0 {
+						interval = 1 * time.Minute
+					}
+					next := now.Add(interval)
 					state.NextRetryAfter = next
 				default:
 					state.NextRetryAfter = time.Time{}
@@ -787,7 +803,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				auth.UpdatedAt = now
 				updateAggregatedAvailability(auth, now)
 			} else {
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, time.Duration(m.transientRetry.Load()))
 			}
 		}
 
@@ -987,7 +1003,7 @@ func statusCodeFromResult(err *Error) int {
 	return err.StatusCode()
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, transientInterval time.Duration) {
 	if auth == nil {
 		return
 	}
@@ -1029,7 +1045,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
-		auth.NextRetryAfter = now.Add(1 * time.Minute)
+		if transientInterval <= 0 {
+			transientInterval = 1 * time.Minute
+		}
+		auth.NextRetryAfter = now.Add(transientInterval)
 	default:
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"

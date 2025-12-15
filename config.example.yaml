@@ -51,6 +51,10 @@ request-retry: 3
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
+# Cooldown time in seconds for transient upstream errors (408, 500, 502, 503, 504).
+# Lower this to detect backend recovery faster (default behavior is 60s when unset).
+transient-retry-interval: 60
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded

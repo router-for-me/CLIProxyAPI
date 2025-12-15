@@ -52,6 +52,9 @@ type Config struct {
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
+	// TransientRetryInterval defines the cooldown time in seconds for transient upstream errors (408, 500, 502, 503, 504).
+	TransientRetryInterval int `yaml:"transient-retry-interval" json:"transient-retry-interval"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
