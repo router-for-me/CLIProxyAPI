@@ -151,8 +151,8 @@ ws-auth: false
 #   upstream-url: "https://ampcode.com"
 #   # Optional: Override API key for Amp upstream (otherwise uses env or file)
 #   upstream-api-key: ""
-#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (recommended)
-#   restrict-management-to-localhost: true
+#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (default: false)
+#   restrict-management-to-localhost: false
 #   # Force model mappings to run before checking local API keys (default: false)
 #   force-model-mappings: false
 #   # Amp Model Mappings
