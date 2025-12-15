@@ -65,7 +65,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 
 			switch itemType {
-			case "message":
+			case "message", "":
 				// Handle regular message conversion
 				role := item.Get("role").String()
 				message := `{"role":"","content":""}`
@@ -107,6 +107,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					if len(toolCalls) > 0 {
 						message, _ = sjson.Set(message, "tool_calls", toolCalls)
 					}
+				} else if content.Type == gjson.String {
+					message, _ = sjson.Set(message, "content", content.String())
 				}
 
 				out, _ = sjson.SetRaw(out, "messages.-1", message)
