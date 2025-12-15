@@ -2894,7 +2894,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		if calculatedInputTokens > 0 {
 			localEstimate := totalUsage.InputTokens
 			totalUsage.InputTokens = calculatedInputTokens
-			log.Infof("kiro: using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
+			log.Debugf("kiro: using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
 				upstreamContextPercentage, calculatedInputTokens, localEstimate)
 		}
 	}
@@ -2903,7 +2903,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Log upstream usage information if received
 	if hasUpstreamUsage {
-		log.Infof("kiro: upstream usage - credits: %.4f, context: %.2f%%, final tokens - input: %d, output: %d, total: %d",
+		log.Debugf("kiro: upstream usage - credits: %.4f, context: %.2f%%, final tokens - input: %d, output: %d, total: %d",
 			upstreamCreditUsage, upstreamContextPercentage,
 			totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
 	}

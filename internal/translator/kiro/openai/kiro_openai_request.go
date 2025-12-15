@@ -244,7 +244,7 @@ IMPORTANT: You MUST use <thinking>...</thinking> tags to show your reasoning pro
 		} else {
 			systemPrompt = thinkingHint
 		}
-		log.Infof("kiro-openai: injected thinking prompt")
+		log.Debugf("kiro-openai: injected thinking prompt")
 	}
 
 	// Process messages and build history
