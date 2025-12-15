@@ -275,7 +275,15 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		arr := tools.Array()
 		for i := 0; i < len(arr); i++ {
 			t := arr[i]
-			if t.Get("type").String() == "function" {
+			toolType := t.Get("type").String()
+			// Pass through built-in tools (e.g. {"type":"web_search"}) directly for the Responses API.
+			// Only "function" needs structural conversion because Chat Completions nests details under "function".
+			if toolType != "" && toolType != "function" && t.IsObject() {
+				out, _ = sjson.SetRaw(out, "tools.-1", t.Raw)
+				continue
+			}
+
+			if toolType == "function" {
 				item := `{}`
 				item, _ = sjson.Set(item, "type", "function")
 				fn := t.Get("function")
@@ -300,6 +308,37 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					}
 				}
 				out, _ = sjson.SetRaw(out, "tools.-1", item)
+			}
+		}
+	}
+
+	// Map tool_choice when present.
+	// Chat Completions: "tool_choice" can be a string ("auto"/"none") or an object (e.g. {"type":"function","function":{"name":"..."}}).
+	// Responses API: keep built-in tool choices as-is; flatten function choice to {"type":"function","name":"..."}.
+	if tc := gjson.GetBytes(rawJSON, "tool_choice"); tc.Exists() {
+		switch {
+		case tc.Type == gjson.String:
+			out, _ = sjson.Set(out, "tool_choice", tc.String())
+		case tc.IsObject():
+			tcType := tc.Get("type").String()
+			if tcType == "function" {
+				name := tc.Get("function.name").String()
+				if name != "" {
+					if short, ok := originalToolNameMap[name]; ok {
+						name = short
+					} else {
+						name = shortenNameIfNeeded(name)
+					}
+				}
+				choice := `{}`
+				choice, _ = sjson.Set(choice, "type", "function")
+				if name != "" {
+					choice, _ = sjson.Set(choice, "name", name)
+				}
+				out, _ = sjson.SetRaw(out, "tool_choice", choice)
+			} else if tcType != "" {
+				// Built-in tool choices (e.g. {"type":"web_search"}) are already Responses-compatible.
+				out, _ = sjson.SetRaw(out, "tool_choice", tc.Raw)
 			}
 		}
 	}
