@@ -157,6 +157,20 @@ func (m *ModelState) Clone() *ModelState {
 	return &copyState
 }
 
+func (a *Auth) ProxyInfo() string {
+	if a == nil {
+		return ""
+	}
+	proxyStr := strings.TrimSpace(a.ProxyURL)
+	if proxyStr == "" {
+		return ""
+	}
+	if idx := strings.Index(proxyStr, "://"); idx > 0 {
+		return "via " + proxyStr[:idx] + " proxy"
+	}
+	return "via proxy"
+}
+
 func (a *Auth) AccountInfo() (string, string) {
 	if a == nil {
 		return "", ""

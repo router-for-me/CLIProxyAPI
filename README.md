@@ -5,16 +5,39 @@
 [![Original Repo](https://img.shields.io/badge/Original-router--for--me%2FCLIProxyAPI-blue)](https://github.com/router-for-me/CLIProxyAPI)
 [![Plus Version](https://img.shields.io/badge/Plus-router--for--me%2FCLIProxyAPIPlus-green)](https://github.com/router-for-me/CLIProxyAPIPlus)
 
-## Quick Start
+## Why This Fork?
 
-To enable all experimental features of this fork, add to your `config.yaml`:
+This fork introduces **Canonical IR** — an alternative translation architecture that improves compatibility with AI coding clients (Cursor, Copilot Chat, etc.) and simplifies the codebase.
 
-```yaml
-use-canonical-translator: true   # Enable new IR translation architecture
-show-provider-prefixes: true     # Optional: show provider prefixes in model list
+**Key improvements:**
+- Better client compatibility through unified request/response handling
+- Proper tool schema conversion (OpenAI `parameters` → Claude `input_schema`)
+- Simplified architecture: all formats go through a single intermediate representation
+- Easier to maintain and extend with new providers
+
+```
+Any Input  →  Unified IR  →  Any Output
 ```
 
-Without `use-canonical-translator: true`, the system runs on the legacy translator from the original project.
+Both translation architectures are available — switch via `use-canonical-translator` config option.
+
+---
+
+## Quick Start
+
+All experimental features of this fork are **enabled by default**:
+
+- ✅ **Canonical IR Translator** — new translation architecture
+- ✅ **Provider Prefixes** — visual provider identification in model list
+
+To disable these features, add to your `config.yaml`:
+
+```yaml
+use-canonical-translator: false  # Revert to legacy translator
+show-provider-prefixes: false    # Hide provider prefixes in model list
+```
+
+With `use-canonical-translator: false`, the system runs on the legacy translator from the original project.
 
 ---
 
@@ -36,25 +59,9 @@ Without `use-canonical-translator: true`, the system runs on the legacy translat
 > **86% Google providers unification** — from 5,651 to 780 lines  
 > **New providers:** Ollama, Kiro (Amazon Q), GitHub Copilot, Cline (free models)
 
-## Problem
+## Architecture
 
-Legacy translator used **N×M architecture** — each source→target pair required a separate directory with files:
-
-```
-internal/translator/
-├── openai/          → claude/, gemini/, gemini-cli/, openai/
-├── claude/          → gemini/, gemini-cli/, openai/
-├── codex/           → claude/, gemini/, gemini-cli/, openai/
-├── gemini/          → claude/, gemini/, gemini-cli/, openai/
-├── gemini-cli/      → claude/, gemini/, openai/
-└── antigravity/     → claude/, gemini/, openai/
-```
-
-**6 sources × 4-5 targets = 27 translation paths, 84 files, massive code duplication.**
-
-## Solution
-
-**Hub-and-spoke architecture** with unified Intermediate Representation (IR):
+**Hub-and-spoke** with unified Intermediate Representation (IR):
 
 ```
     OpenAI ─────┐                       ┌───── OpenAI
@@ -196,7 +203,7 @@ translator_new/
 | cline              | ✅     | Free models, tested |
 | kiro               | ✅     | Amazon Q, tested (multiple auth methods) |
 | github_copilot     | ✅     | GitHub Copilot, tested |
-| claude             | ⚠️     | Anthropic — not tested |
+| claude             | ✅     | Anthropic, tested (Claude Code) |
 | **codex**          | ❌     | Requires migration |
 | **qwen**           | ❌     | Requires migration |
 | **iflow**          | ❌     | Requires migration |
@@ -229,12 +236,12 @@ translator_new/
 
 ## Compatibility and Migration
 
-**All changes in this fork do not affect the main system operation** — new functionality is activated via feature flags:
+**New features are enabled by default** — to revert to legacy behavior, disable via config:
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `use-canonical-translator` | Enables new IR translation architecture | `false` |
-| `show-provider-prefixes` | Visual provider prefixes in model list | `false` |
+| `use-canonical-translator` | Enables new IR translation architecture | `true` |
+| `show-provider-prefixes` | Visual provider prefixes in model list | `true` |
 
 With `use-canonical-translator: false` the system runs on legacy translator without changes.  
 New providers (Kiro, Cline, Ollama API) only work with the flag enabled.
@@ -280,7 +287,7 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 - **Model mapping** to route unavailable models to alternatives (e.g., `claude-opus-4.5` → `claude-sonnet-4`)
 - Security-first design with localhost-only management endpoints
 
-**→ [Complete Amp CLI Integration Guide](docs/amp-cli-integration.md)**
+**→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
 
 ## SDK Docs
 

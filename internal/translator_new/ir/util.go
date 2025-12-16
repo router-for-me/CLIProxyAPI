@@ -77,16 +77,20 @@ func MapEffortToBudget(effort string) (int, bool) {
 	switch effort {
 	case "none":
 		return 0, false // Reasoning disabled
-	case "low", "minimal":
+	case "auto":
+		return -1, true // Dynamic budget, let provider decide
+	case "minimal":
+		return 512, true
+	case "low":
 		return 1024, true
 	case "medium":
 		return 8192, true
 	case "high":
-		return 32768, true
+		return 24576, true
 	case "xhigh":
-		return 65536, true
+		return 32768, true
 	default:
-		return -1, true // auto = let provider decide
+		return -1, true // Unknown effort = auto
 	}
 }
 

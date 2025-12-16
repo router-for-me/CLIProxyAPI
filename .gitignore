@@ -33,6 +33,7 @@ GEMINI.md
 .vscode/*
 .claude/*
 .serena/*
+.bmad/*
 .mcp/cache/
 
 # Local data (fork-specific)

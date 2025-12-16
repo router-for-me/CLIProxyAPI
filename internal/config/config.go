@@ -17,6 +17,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	config.SDKConfig `yaml:",inline"`
@@ -124,6 +126,9 @@ type RemoteManagement struct {
 	SecretKey string `yaml:"secret-key"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
+	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
+	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
+	PanelGitHubRepository string `yaml:"panel-github-repository"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -159,7 +164,7 @@ type AmpCode struct {
 
 	// RestrictManagementToLocalhost restricts Amp management routes (/api/user, /api/threads, etc.)
 	// to only accept connections from localhost (127.0.0.1, ::1). When true, prevents drive-by
-	// browser attacks and remote access to management endpoints. Default: true (recommended).
+	// browser attacks and remote access to management endpoints. Default: false (API key auth is sufficient).
 	RestrictManagementToLocalhost bool `yaml:"restrict-management-to-localhost" json:"restrict-management-to-localhost"`
 
 	// ModelMappings defines model name mappings for Amp CLI requests.
@@ -372,8 +377,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
-	cfg.AmpCode.RestrictManagementToLocalhost = true // Default to secure: only localhost access
-	cfg.IncognitoBrowser = false                     // Default to normal browser (AWS uses incognito by force)
+	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
+	cfg.IncognitoBrowser = false                      // Default to normal browser (Kiro uses incognito by force)
+	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.UseCanonicalTranslator = true                 // Default enabled: use new IR-based translators
+	cfg.ShowProviderPrefixes = true                   // Default enabled: show provider prefixes in model IDs
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -407,6 +415,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
 		// Preserve YAML comments and ordering; update only the nested key.
 		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
+	}
+
+	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
+	if cfg.RemoteManagement.PanelGitHubRepository == "" {
+		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	}
 
 	// Sync request authentication providers with inline API keys for backwards compatibility.

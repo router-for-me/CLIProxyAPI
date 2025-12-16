@@ -389,36 +389,16 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	}
 
 	// OpenAI official reasoning fields take precedence
+	// Only convert for models that use numeric budgets (not discrete levels).
 	hasOfficialThinking := root.Get("reasoning.effort").Exists()
-	if hasOfficialThinking && util.ModelSupportsThinking(modelName) {
+	if hasOfficialThinking && util.ModelSupportsThinking(modelName) && !util.ModelUsesThinkingLevels(modelName) {
 		reasoningEffort := root.Get("reasoning.effort")
-		switch reasoningEffort.String() {
-		case "none":
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", false)
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 0)
-		case "auto":
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", -1)
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
-		case "minimal":
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 1024)
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
-		case "low":
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 4096)
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
-		case "medium":
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 8192)
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
-		case "high":
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", 32768)
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
-		default:
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", -1)
-			out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
-		}
+		out = string(util.ApplyReasoningEffortToGemini([]byte(out), reasoningEffort.String()))
 	}
 
 	// Cherry Studio extension (applies only when official fields are missing)
-	if !hasOfficialThinking && util.ModelSupportsThinking(modelName) {
+	// Only apply for models that use numeric budgets, not discrete levels.
+	if !hasOfficialThinking && util.ModelSupportsThinking(modelName) && !util.ModelUsesThinkingLevels(modelName) {
 		if tc := root.Get("extra_body.google.thinking_config"); tc.Exists() && tc.IsObject() {
 			var setBudget bool
 			var budget int

@@ -25,6 +25,9 @@ remote-management:
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
 
+  # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
+  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
@@ -49,7 +52,8 @@ usage-statistics-enabled: false
 
 # When true, display provider prefixes in model IDs (e.g., "[Gemini CLI] gemini-2.5-pro")
 # This is purely visual and does not affect model routing to providers
-show-provider-prefixes: false
+# Default: true (enabled)
+show-provider-prefixes: true
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
@@ -79,7 +83,8 @@ disable-auth: false
 # consistency and maintainability across different providers.
 # The canonical translator handles all parameter transformations (thinking config,
 # safety settings, image config, payload overrides) internally for cleaner architecture.
-use-canonical-translator: false
+# Default: true (enabled)
+use-canonical-translator: true
 
 # Gemini API keys
 # gemini-api-key:
@@ -174,8 +179,8 @@ use-canonical-translator: false
 #   upstream-url: "https://ampcode.com"
 #   # Optional: Override API key for Amp upstream (otherwise uses env or file)
 #   upstream-api-key: ""
-#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (recommended)
-#   restrict-management-to-localhost: true
+#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (default: false)
+#   restrict-management-to-localhost: false
 #   # Force model mappings to run before checking local API keys (default: false)
 #   force-model-mappings: false
 #   # Amp Model Mappings

@@ -90,6 +90,9 @@ type ModelRegistry struct {
 	models map[string]*ModelRegistration
 	// clientModels maps client ID to the models it provides
 	clientModels map[string][]string
+	// clientModelInfos maps client ID to a map of model ID -> ModelInfo
+	// This preserves the original model info provided by each client
+	clientModelInfos map[string]map[string]*ModelInfo
 	// clientProviders maps client ID to its provider identifier
 	clientProviders map[string]string
 	// mutex ensures thread-safe access to the registry
@@ -108,9 +111,10 @@ func GetGlobalRegistry() *ModelRegistry {
 		globalRegistry = &ModelRegistry{
 			models:               make(map[string]*ModelRegistration),
 			clientModels:         make(map[string][]string),
+			clientModelInfos:     make(map[string]map[string]*ModelInfo),
 			clientProviders:      make(map[string]string),
 			mutex:                &sync.RWMutex{},
-			showProviderPrefixes: false,
+			showProviderPrefixes: true, // Default enabled for visual provider identification
 		}
 	})
 	return globalRegistry
@@ -159,6 +163,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		// No models supplied; unregister existing client state if present.
 		r.unregisterClientInternal(clientID)
 		delete(r.clientModels, clientID)
+		delete(r.clientModelInfos, clientID)
 		delete(r.clientProviders, clientID)
 		misc.LogCredentialSeparator()
 		return
@@ -167,7 +172,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	now := time.Now()
 
 	oldModels, hadExisting := r.clientModels[clientID]
-	oldProvider, _ := r.clientProviders[clientID]
+	oldProvider := r.clientProviders[clientID]
 	providerChanged := oldProvider != provider
 	if !hadExisting {
 		// Pure addition path.
@@ -176,6 +181,12 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 			r.addModelRegistration(modelID, provider, model, now)
 		}
 		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
+		// Store client's own model infos
+		clientInfos := make(map[string]*ModelInfo, len(newModels))
+		for id, m := range newModels {
+			clientInfos[id] = cloneModelInfo(m)
+		}
+		r.clientModelInfos[clientID] = clientInfos
 		if provider != "" {
 			r.clientProviders[clientID] = provider
 		} else {
@@ -302,6 +313,12 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	if len(rawModelIDs) > 0 {
 		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
 	}
+	// Update client's own model infos
+	clientInfos := make(map[string]*ModelInfo, len(newModels))
+	for id, m := range newModels {
+		clientInfos[id] = cloneModelInfo(m)
+	}
+	r.clientModelInfos[clientID] = clientInfos
 	if provider != "" {
 		r.clientProviders[clientID] = provider
 	} else {
@@ -465,6 +482,7 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 	}
 
 	delete(r.clientModels, clientID)
+	delete(r.clientModelInfos, clientID)
 	if hasProvider {
 		delete(r.clientProviders, clientID)
 	}
@@ -1028,4 +1046,45 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 	}
 
 	return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)
+}
+
+// GetModelsForClient returns the models registered for a specific client.
+// Parameters:
+//   - clientID: The client identifier (typically auth file name or auth ID)
+//
+// Returns:
+//   - []*ModelInfo: List of models registered for this client, nil if client not found
+func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	modelIDs, exists := r.clientModels[clientID]
+	if !exists || len(modelIDs) == 0 {
+		return nil
+	}
+
+	// Try to use client-specific model infos first
+	clientInfos := r.clientModelInfos[clientID]
+
+	seen := make(map[string]struct{})
+	result := make([]*ModelInfo, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		if _, dup := seen[modelID]; dup {
+			continue
+		}
+		seen[modelID] = struct{}{}
+
+		// Prefer client's own model info to preserve original type/owned_by
+		if clientInfos != nil {
+			if info, ok := clientInfos[modelID]; ok && info != nil {
+				result = append(result, info)
+				continue
+			}
+		}
+		// Fallback to global registry (for backwards compatibility)
+		if reg, ok := r.models[modelID]; ok && reg.Info != nil {
+			result = append(result, reg.Info)
+		}
+	}
+	return result
 }

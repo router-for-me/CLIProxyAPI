@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -214,7 +215,22 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	// Add additional configuration parameters for the Codex API.
 	template, _ = sjson.Set(template, "parallel_tool_calls", true)
-	template, _ = sjson.Set(template, "reasoning.effort", "medium")
+
+	// Convert thinking.budget_tokens to reasoning.effort for level-based models
+	reasoningEffort := "medium" // default
+	if thinking := rootResult.Get("thinking"); thinking.Exists() && thinking.IsObject() {
+		if thinking.Get("type").String() == "enabled" {
+			if util.ModelUsesThinkingLevels(modelName) {
+				if budgetTokens := thinking.Get("budget_tokens"); budgetTokens.Exists() {
+					budget := int(budgetTokens.Int())
+					if effort, ok := util.OpenAIThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
+						reasoningEffort = effort
+					}
+				}
+			}
+		}
+	}
+	template, _ = sjson.Set(template, "reasoning.effort", reasoningEffort)
 	template, _ = sjson.Set(template, "reasoning.summary", "auto")
 	template, _ = sjson.Set(template, "stream", true)
 	template, _ = sjson.Set(template, "store", false)

@@ -137,7 +137,8 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 		m.registerProviderAliases(ctx.Engine, ctx.BaseHandler, auth)
 
 		// Register management proxy routes once; middleware will gate access when upstream is unavailable.
-		m.registerManagementRoutes(ctx.Engine, ctx.BaseHandler)
+		// Pass auth middleware to require valid API key for all management routes.
+		m.registerManagementRoutes(ctx.Engine, ctx.BaseHandler, auth)
 
 		// If no upstream URL, skip proxy routes but provider aliases are still available
 		if upstreamURL == "" {
@@ -187,9 +188,6 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 
 	if oldSettings != nil && oldSettings.RestrictManagementToLocalhost != newSettings.RestrictManagementToLocalhost {
 		m.setRestrictToLocalhost(newSettings.RestrictManagementToLocalhost)
-		if !newSettings.RestrictManagementToLocalhost {
-			log.Warnf("amp management routes now accessible from any IP - this is insecure!")
-		}
 	}
 
 	newUpstreamURL := strings.TrimSpace(newSettings.UpstreamURL)
