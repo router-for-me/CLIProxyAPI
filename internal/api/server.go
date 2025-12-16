@@ -934,12 +934,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 
-	providerNames := make([]string, 0, len(cfg.OpenAICompatibility))
-	for _, p := range cfg.OpenAICompatibility {
-		providerNames = append(providerNames, p.Name)
-	}
-	s.handlers.SetOpenAICompatProviders(providerNames)
-
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 
 	if !cfg.RemoteManagement.DisableControlPanel {
