@@ -84,13 +84,18 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					contentResult := contentResults[j]
 					contentTypeResult := contentResult.Get("type")
 					if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "thinking" {
-						prompt := contentResult.Get("thinking").String()
+						// Claude "thinking" blocks are internal-only. They also require a valid provider signature
+						// when replayed as conversation history. Since we cannot mint signatures, only forward
+						// thinking blocks when the client provides a non-empty signature; otherwise, drop them.
 						signatureResult := contentResult.Get("signature")
-						signature := geminiCLIClaudeThoughtSignature
-						if signatureResult.Exists() {
-							signature = signatureResult.String()
+						if signatureResult.Type == gjson.String && signatureResult.String() != "" {
+							prompt := contentResult.Get("thinking").String()
+							clientContent.Parts = append(clientContent.Parts, client.Part{
+								Text:             prompt,
+								Thought:          true,
+								ThoughtSignature: signatureResult.String(),
+							})
 						}
-						clientContent.Parts = append(clientContent.Parts, client.Part{Text: prompt, Thought: true, ThoughtSignature: signature})
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
 						clientContent.Parts = append(clientContent.Parts, client.Part{Text: prompt})
@@ -117,9 +122,17 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							funcName := toolCallID
 							toolCallIDs := strings.Split(toolCallID, "-")
 							if len(toolCallIDs) > 1 {
-								funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
+								funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-2], "-")
 							}
-							responseData := contentResult.Get("content").Raw
+							functionResponseResult := contentResult.Get("content")
+
+							responseData := ""
+							if functionResponseResult.Type == gjson.String {
+								responseData = functionResponseResult.String()
+							} else {
+								responseData = contentResult.Get("content").Raw
+							}
+
 							functionResponse := client.FunctionResponse{ID: toolCallID, Name: funcName, Response: map[string]interface{}{"result": responseData}}
 							clientContent.Parts = append(clientContent.Parts, client.Part{FunctionResponse: &functionResponse})
 						}
@@ -134,7 +147,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 					}
 				}
-				contents = append(contents, clientContent)
+				if len(clientContent.Parts) > 0 {
+					contents = append(contents, clientContent)
+				}
 			} else if contentsResult.Type == gjson.String {
 				prompt := contentsResult.String()
 				contents = append(contents, client.Content{Role: role, Parts: []client.Part{{Text: prompt}}})

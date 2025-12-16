@@ -114,44 +114,54 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			// Extract the different types of content from each part
 			partTextResult := partResult.Get("text")
 			functionCallResult := partResult.Get("functionCall")
+			thoughtSignatureResult := partResult.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = partResult.Get("thought_signature")
+			}
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+			isThought := partResult.Get("thought").Bool()
+
+			// Some Antigravity/Vertex Claude streams emit the thought signature as a standalone part
+			// (no text payload). Claude requires this signature to be replayed verbatim on subsequent turns.
+			if isThought && hasThoughtSignature && !partTextResult.Exists() && !functionCallResult.Exists() {
+				if params.ResponseType == 2 {
+					output = output + "event: content_block_delta\n"
+					data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", thoughtSignatureResult.String())
+					output = output + fmt.Sprintf("data: %s\n\n\n", data)
+					params.HasContent = true
+				}
+				continue
+			}
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
-				if partResult.Get("thought").Bool() {
-					if thoughtSignature := partResult.Get("thoughtSignature"); thoughtSignature.Exists() && thoughtSignature.String() != "" {
-						output = output + "event: content_block_delta\n"
-						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", thoughtSignature.String())
-						output = output + fmt.Sprintf("data: %s\n\n\n", data)
-						params.HasContent = true
-					} else if params.ResponseType == 2 { // Continue existing thinking block if already in thinking state
-						output = output + "event: content_block_delta\n"
-						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex), "delta.thinking", partTextResult.String())
-						output = output + fmt.Sprintf("data: %s\n\n\n", data)
-						params.HasContent = true
-					} else {
-						// Transition from another state to thinking
-						// First, close any existing content block
+				if isThought {
+					// Ensure we have an open thinking block to attach thinking/signature deltas to.
+					if params.ResponseType != 2 {
 						if params.ResponseType != 0 {
-							if params.ResponseType == 2 {
-								// output = output + "event: content_block_delta\n"
-								// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
-								// output = output + "\n\n\n"
-							}
 							output = output + "event: content_block_stop\n"
 							output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
 							output = output + "\n\n\n"
 							params.ResponseIndex++
 						}
-
-						// Start a new thinking content block
 						output = output + "event: content_block_start\n"
 						output = output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, params.ResponseIndex)
 						output = output + "\n\n\n"
+						params.ResponseType = 2
+					}
+
+					if partTextResult.String() != "" {
 						output = output + "event: content_block_delta\n"
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex), "delta.thinking", partTextResult.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
-						params.ResponseType = 2 // Set state to thinking
+						params.HasContent = true
+					}
+
+					if hasThoughtSignature {
+						output = output + "event: content_block_delta\n"
+						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", thoughtSignatureResult.String())
+						output = output + fmt.Sprintf("data: %s\n\n\n", data)
 						params.HasContent = true
 					}
 				} else {
@@ -368,6 +378,7 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 	var contentBlocks []interface{}
 	textBuilder := strings.Builder{}
 	thinkingBuilder := strings.Builder{}
+	thinkingSignature := ""
 	toolIDCounter := 0
 	hasToolCall := false
 
@@ -386,19 +397,37 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		if thinkingBuilder.Len() == 0 {
 			return
 		}
-		contentBlocks = append(contentBlocks, map[string]interface{}{
+		block := map[string]interface{}{
 			"type":     "thinking",
 			"thinking": thinkingBuilder.String(),
-		})
+		}
+		if thinkingSignature != "" {
+			block["signature"] = thinkingSignature
+		}
+		contentBlocks = append(contentBlocks, block)
 		thinkingBuilder.Reset()
+		thinkingSignature = ""
 	}
 
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
+			thoughtSignatureResult := part.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = part.Get("thought_signature")
+			}
+			if part.Get("thought").Bool() && thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != "" && (!part.Get("text").Exists() || part.Get("text").String() == "") {
+				// Signature-only thought part (no text payload).
+				thinkingSignature = thoughtSignatureResult.String()
+				continue
+			}
+
 			if text := part.Get("text"); text.Exists() && text.String() != "" {
 				if part.Get("thought").Bool() {
 					flushText()
 					thinkingBuilder.WriteString(text.String())
+					if thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != "" {
+						thinkingSignature = thoughtSignatureResult.String()
+					}
 					continue
 				}
 				flushThinking()
