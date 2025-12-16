@@ -60,13 +60,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
 	allowCompat := e.allowCompatReasoningEffort(req.Model, auth)
-	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
+	translated = ApplyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
 	if upstreamModel != "" && modelOverride == "" {
 		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
 	}
-	translated = normalizeThinkingConfig(translated, upstreamModel, allowCompat)
-	if errValidate := validateThinkingConfig(translated, upstreamModel); errValidate != nil {
+	translated = NormalizeThinkingConfig(translated, upstreamModel, allowCompat)
+	if errValidate := ValidateThinkingConfig(translated, upstreamModel); errValidate != nil {
 		return resp, errValidate
 	}
 
@@ -156,13 +156,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
 	allowCompat := e.allowCompatReasoningEffort(req.Model, auth)
-	translated = applyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
+	translated = ApplyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
 	if upstreamModel != "" && modelOverride == "" {
 		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
 	}
-	translated = normalizeThinkingConfig(translated, upstreamModel, allowCompat)
-	if errValidate := validateThinkingConfig(translated, upstreamModel); errValidate != nil {
+	translated = NormalizeThinkingConfig(translated, upstreamModel, allowCompat)
+	if errValidate := ValidateThinkingConfig(translated, upstreamModel); errValidate != nil {
 		return nil, errValidate
 	}
 

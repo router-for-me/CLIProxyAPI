@@ -98,7 +98,8 @@ func (m *AmpModule) managementAvailabilityMiddleware() gin.HandlerFunc {
 // registerManagementRoutes registers Amp management proxy routes
 // These routes proxy through to the Amp control plane for OAuth, user management, etc.
 // Uses dynamic middleware and proxy getter for hot-reload support.
-func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler) {
+// The auth middleware validates Authorization header against configured API keys.
+func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc) {
 	ampAPI := engine.Group("/api")
 
 	// Always disable CORS for management routes to prevent browser-based attacks
@@ -107,8 +108,9 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	// Apply dynamic localhost-only restriction (hot-reloadable via m.IsRestrictedToLocalhost())
 	ampAPI.Use(m.localhostOnlyMiddleware())
 
-	if !m.IsRestrictedToLocalhost() {
-		log.Warn("amp management routes are NOT restricted to localhost - this is insecure!")
+	// Apply authentication middleware - requires valid API key in Authorization header
+	if auth != nil {
+		ampAPI.Use(auth)
 	}
 
 	// Dynamic proxy handler that uses m.getProxy() for hot-reload support
@@ -154,6 +156,9 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	// Root-level routes that AMP CLI expects without /api prefix
 	// These need the same security middleware as the /api/* routes (dynamic for hot-reload)
 	rootMiddleware := []gin.HandlerFunc{m.managementAvailabilityMiddleware(), noCORSMiddleware(), m.localhostOnlyMiddleware()}
+	if auth != nil {
+		rootMiddleware = append(rootMiddleware, auth)
+	}
 	engine.GET("/threads/*path", append(rootMiddleware, proxyHandler)...)
 	engine.GET("/threads.rss", append(rootMiddleware, proxyHandler)...)
 	engine.GET("/news.rss", append(rootMiddleware, proxyHandler)...)

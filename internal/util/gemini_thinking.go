@@ -152,6 +152,71 @@ func NormalizeGeminiCLIThinkingBudget(model string, body []byte) []byte {
 	return updated
 }
 
+// ReasoningEffortBudgetMapping defines the thinkingBudget values for each reasoning effort level.
+var ReasoningEffortBudgetMapping = map[string]int{
+	"none":    0,
+	"auto":    -1,
+	"minimal": 512,
+	"low":     1024,
+	"medium":  8192,
+	"high":    24576,
+	"xhigh":   32768,
+}
+
+// ApplyReasoningEffortToGemini applies OpenAI reasoning_effort to Gemini thinkingConfig
+// for standard Gemini API format (generationConfig.thinkingConfig path).
+// Returns the modified body with thinkingBudget and include_thoughts set.
+func ApplyReasoningEffortToGemini(body []byte, effort string) []byte {
+	normalized := strings.ToLower(strings.TrimSpace(effort))
+	if normalized == "" {
+		return body
+	}
+
+	budgetPath := "generationConfig.thinkingConfig.thinkingBudget"
+	includePath := "generationConfig.thinkingConfig.include_thoughts"
+
+	if normalized == "none" {
+		body, _ = sjson.DeleteBytes(body, "generationConfig.thinkingConfig")
+		return body
+	}
+
+	budget, ok := ReasoningEffortBudgetMapping[normalized]
+	if !ok {
+		return body
+	}
+
+	body, _ = sjson.SetBytes(body, budgetPath, budget)
+	body, _ = sjson.SetBytes(body, includePath, true)
+	return body
+}
+
+// ApplyReasoningEffortToGeminiCLI applies OpenAI reasoning_effort to Gemini CLI thinkingConfig
+// for Gemini CLI API format (request.generationConfig.thinkingConfig path).
+// Returns the modified body with thinkingBudget and include_thoughts set.
+func ApplyReasoningEffortToGeminiCLI(body []byte, effort string) []byte {
+	normalized := strings.ToLower(strings.TrimSpace(effort))
+	if normalized == "" {
+		return body
+	}
+
+	budgetPath := "request.generationConfig.thinkingConfig.thinkingBudget"
+	includePath := "request.generationConfig.thinkingConfig.include_thoughts"
+
+	if normalized == "none" {
+		body, _ = sjson.DeleteBytes(body, "request.generationConfig.thinkingConfig")
+		return body
+	}
+
+	budget, ok := ReasoningEffortBudgetMapping[normalized]
+	if !ok {
+		return body
+	}
+
+	body, _ = sjson.SetBytes(body, budgetPath, budget)
+	body, _ = sjson.SetBytes(body, includePath, true)
+	return body
+}
+
 // ConvertThinkingLevelToBudget checks for "generationConfig.thinkingConfig.thinkingLevel"
 // and converts it to "thinkingBudget".
 // "high" -> 32768

@@ -57,7 +57,7 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 - 智能模型回退与自动路由
 - 以安全为先的设计，管理端点仅限 localhost
 
-**→ [Amp CLI 完整集成指南](docs/amp-cli-integration_CN.md)**
+**→ [Amp CLI 完整集成指南](https://help.router-for.me/cn/agent-client/amp-cli.html)**
 
 ## SDK 文档
 

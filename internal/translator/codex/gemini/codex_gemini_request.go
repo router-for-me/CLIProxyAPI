@@ -245,7 +245,22 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	// Fixed flags aligning with Codex expectations
 	out, _ = sjson.Set(out, "parallel_tool_calls", true)
-	out, _ = sjson.Set(out, "reasoning.effort", "medium")
+
+	// Convert thinkingBudget to reasoning.effort for level-based models
+	reasoningEffort := "medium" // default
+	if genConfig := root.Get("generationConfig"); genConfig.Exists() {
+		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
+			if util.ModelUsesThinkingLevels(modelName) {
+				if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
+					budget := int(thinkingBudget.Int())
+					if effort, ok := util.OpenAIThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
+						reasoningEffort = effort
+					}
+				}
+			}
+		}
+	}
+	out, _ = sjson.Set(out, "reasoning.effort", reasoningEffort)
 	out, _ = sjson.Set(out, "reasoning.summary", "auto")
 	out, _ = sjson.Set(out, "stream", true)
 	out, _ = sjson.Set(out, "store", false)
