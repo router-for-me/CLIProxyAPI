@@ -28,9 +28,7 @@ func (a *GeminiAuthenticator) RefreshLead() *time.Duration {
 }
 
 func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("cliproxy auth: configuration is required")
-	}
+	// Config is now optional - if nil, OAuth works without proxy settings (same pattern as Claude)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -51,10 +49,17 @@ func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 
 	// Skip onboarding here; rely on upstream configuration
 
-	fileName := fmt.Sprintf("%s-%s.json", ts.Email, ts.ProjectID)
+	// Generate filename with gemini- prefix for easy identification
+	var fileName string
+	if ts.ProjectID != "" {
+		fileName = fmt.Sprintf("gemini-%s-%s.json", ts.Email, ts.ProjectID)
+	} else {
+		fileName = fmt.Sprintf("gemini-%s.json", ts.Email)
+	}
 	metadata := map[string]any{
 		"email":      ts.Email,
 		"project_id": ts.ProjectID,
+		"cli_oauth":  true, // Indicates CLI OAuth auth, uses Cloud Code Assist endpoint
 	}
 
 	fmt.Println("Gemini authentication successful")

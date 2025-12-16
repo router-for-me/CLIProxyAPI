@@ -7,9 +7,10 @@ This example demonstrates how to embed CLIProxyAPI as a library in your external
 The example shows:
 
 - ✅ Using `EmbedConfig` without internal package dependencies
-- ✅ **Built-in OAuth authentication** for Claude (no main CLI required!)
+- ✅ **Built-in OAuth authentication** for Claude and Gemini (no main CLI required!)
 - ✅ Configuring essential server options (host, port, TLS, management API)
 - ✅ Loading provider configurations from YAML
+- ✅ **Response verification** using Gemini to fact-check Claude's responses
 - ✅ **Automatic test request** to verify authentication
 - ✅ Starting the service programmatically
 - ✅ Graceful shutdown on SIGINT/SIGTERM
@@ -206,7 +207,7 @@ See `config.yaml` in this directory for a complete example.
 
 ## OAuth Authentication Flows
 
-For providers that use OAuth (Claude Code, OpenAI Codex, Qwen Code):
+For providers that use OAuth (Claude Code, OpenAI Codex, Qwen Code, Gemini):
 
 ### 1. Authenticate
 
@@ -214,6 +215,12 @@ For providers that use OAuth (Claude Code, OpenAI Codex, Qwen Code):
 ```bash
 go run main.go -claude-login
 # Or browserless: go run main.go -claude-login -no-browser
+```
+
+**Gemini (for response verification):**
+```bash
+go run main.go -gemini-login
+# Or browserless: go run main.go -gemini-login -no-browser
 ```
 
 **Other providers (from repository root):**
@@ -389,6 +396,55 @@ With `-chat`, the example demonstrates full streaming integration:
 go run main.go -chat
 # Starts interactive chat with streaming responses
 ```
+
+## Response Verification with Gemini
+
+The example supports **automatic response verification** using Gemini to fact-check Claude's responses. This feature uses Gemini's web search/grounding capabilities to verify factual claims.
+
+### Setup
+
+1. **Authenticate with Gemini:**
+   ```bash
+   go run main.go -gemini-login
+   ```
+
+2. **Start chat (verification auto-enabled):**
+   ```bash
+   go run main.go -chat
+   ```
+
+### How It Works
+
+- After each Claude response, Gemini verifies factual claims
+- Results display with status emojis: ✅ Verified, ⚠️ Partially Verified, ❌ Inaccurate, ℹ️ Unable to Verify
+- Verification streams in real-time below Claude's response
+- Results are cached (5 min TTL) to avoid redundant API calls
+
+### Chat Commands
+
+| Command | Description |
+|---------|-------------|
+| `verify` | Show current verification status |
+| `verify on` | Enable verification |
+| `verify off` | Disable verification |
+| `help` | Show all commands including verification status |
+
+### Command-Line Options
+
+```bash
+# Disable verification even when Gemini is configured
+go run main.go -chat -verify=false
+
+# Use a different model (default: claude-opus-4-5-20251101)
+go run main.go -chat -model claude-sonnet-4-20250514
+```
+
+### Features
+
+- **Caching**: Identical responses return cached verification (shows 📋 Cached indicator)
+- **Rate Limiting**: Automatic 60-second cooldown on rate limit errors
+- **Graceful Fallback**: Chat continues normally if verification fails
+- **Visual Separation**: Yellow header distinguishes verification from Claude's response
 
 ### Custom SDK Client Code
 

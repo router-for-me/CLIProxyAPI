@@ -359,6 +359,12 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 	}
 	switch strings.ToLower(a.Provider) {
 	case "gemini":
+		// Check if this is CLI OAuth auth (needs Cloud Code Assist endpoint)
+		// CLI OAuth tokens have cloud-platform scope or cli_oauth metadata
+		if isGeminiCLIOAuth(a) {
+			s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
+			return
+		}
 		s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
 	case "vertex":
 		s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
@@ -386,6 +392,33 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		}
 		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(providerKey, s.cfg))
 	}
+}
+
+// isGeminiCLIOAuth checks if a Gemini auth entry is CLI OAuth (needs Cloud Code Assist endpoint).
+// CLI OAuth tokens have the cloud-platform scope, while API key auth does not have token scopes.
+func isGeminiCLIOAuth(a *coreauth.Auth) bool {
+	if a == nil || a.Metadata == nil {
+		return false
+	}
+	// Check for explicit cli_oauth flag
+	if cliOAuth, ok := a.Metadata["cli_oauth"].(bool); ok && cliOAuth {
+		return true
+	}
+	// Check for cloud-platform scope in token data (CLI OAuth signature)
+	token, ok := a.Metadata["token"].(map[string]any)
+	if !ok {
+		return false
+	}
+	scopes, ok := token["scopes"].([]any)
+	if !ok {
+		return false
+	}
+	for _, scope := range scopes {
+		if s, ok := scope.(string); ok && s == "https://www.googleapis.com/auth/cloud-platform" {
+			return true
+		}
+	}
+	return false
 }
 
 // rebindExecutors refreshes provider executors so they observe the latest configuration.
