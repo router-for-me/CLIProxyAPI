@@ -3,7 +3,6 @@ package amp
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,11 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/util"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -29,69 +25,6 @@ type readCloser struct {
 
 func (rc *readCloser) Read(p []byte) (int, error) { return rc.r.Read(p) }
 func (rc *readCloser) Close() error               { return rc.c.Close() }
-
-// classifyProxyError determines the category of proxy error for appropriate logging
-func classifyProxyError(err error) string {
-	if err == nil {
-		return "unknown"
-	}
-
-	// Check for context cancellation (client disconnect)
-	if errors.Is(err, context.Canceled) {
-		return "client_disconnect"
-	}
-
-	// Check for timeout errors
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "timeout"
-	}
-
-	// Check for URL errors (network issues, DNS, etc.)
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		if urlErr.Timeout() {
-			return "network_timeout"
-		}
-		return "network_error"
-	}
-
-	return "proxy_error"
-}
-
-// getRequestContext extracts useful debugging context from HTTP request
-func getRequestContext(req *http.Request) map[string]interface{} {
-	ctx := make(map[string]interface{})
-
-	// Request ID for correlation
-	if requestID := req.Header.Get("X-Request-ID"); requestID != "" {
-		ctx["request_id"] = requestID
-	}
-
-	// Client information
-	if clientIP := req.RemoteAddr; clientIP != "" {
-		ctx["client_ip"] = clientIP
-	}
-
-	if userAgent := req.Header.Get("User-Agent"); userAgent != "" {
-		ctx["user_agent"] = userAgent
-	}
-
-	// Content type for debugging
-	if contentType := req.Header.Get("Content-Type"); contentType != "" {
-		ctx["content_type"] = contentType
-	}
-
-	return ctx
-}
-
-// getOrGenerateRequestID gets existing request ID or generates a new one
-func getOrGenerateRequestID(req *http.Request) string {
-	if id := req.Header.Get("X-Request-ID"); id != "" {
-		return id
-	}
-	// Simple timestamp-based ID (not UUID for performance)
-	return fmt.Sprintf("req-%d", time.Now().UnixNano())
-}
 
 // createReverseProxy creates a reverse proxy handler for Amp upstream
 // with automatic gzip decompression via ModifyResponse
@@ -114,9 +47,10 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		req.Header.Del("Authorization")
 		req.Header.Del("X-Api-Key")
 
-		// Preserve or generate correlation headers for distributed tracing
-		requestID := getOrGenerateRequestID(req)
+		// >>> FORK: Generate/propagate request ID for distributed tracing (uses shared helper)
+		requestID := GetOrGenerateRequestID(req)
 		req.Header.Set("X-Request-ID", requestID)
+		// <<< FORK
 
 		// Note: We do NOT filter Anthropic-Beta headers in the proxy path
 		// Users going through ampcode.com proxy are paying for the service and should get all features
@@ -218,33 +152,9 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		return nil
 	}
 
-	// Error handler for proxy failures
-	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		errorType := classifyProxyError(err)
-		requestCtx := getRequestContext(req)
-
-		// Use WARN for expected client-side issues, ERROR for upstream failures
-		if errorType == "client_disconnect" {
-			log.WithFields(log.Fields{
-				"error_type": errorType,
-				"method":     req.Method,
-				"path":       req.URL.Path,
-				"context":    requestCtx,
-			}).Warnf("amp upstream: client disconnected during %s %s", req.Method, req.URL.Path)
-		} else {
-			log.WithFields(log.Fields{
-				"error_type": errorType,
-				"method":     req.Method,
-				"path":       req.URL.Path,
-				"context":    requestCtx,
-				"error":      err.Error(),
-			}).Errorf("amp upstream proxy error for %s %s: %v", req.Method, req.URL.Path, err)
-		}
-
-		rw.Header().Set("Content-Type", "application/json")
-		rw.WriteHeader(http.StatusBadGateway)
-		_, _ = rw.Write([]byte(`{"error":"amp_upstream_proxy_error","message":"Failed to reach Amp upstream"}`))
-	}
+	// >>> FORK: Enhanced error handler using shared factory (see error_helpers.go)
+	proxy.ErrorHandler = NewProxyErrorHandler("amp upstream", "amp_upstream_proxy_error", "Failed to reach Amp upstream")
+	// <<< FORK
 
 	return proxy, nil
 }
@@ -264,7 +174,7 @@ func isStreamingResponse(resp *http.Response) bool {
 	return false
 }
 
-// handleProxyAbort safely wraps reverse proxy ServeHTTP calls to handle
+// >>> FORK: handleProxyAbort safely wraps reverse proxy ServeHTTP calls to handle
 // client disconnects gracefully. http.ErrAbortHandler is expected when
 // clients cancel streaming requests.
 func handleProxyAbort(c *gin.Context, proxyFn func()) {
@@ -273,7 +183,7 @@ func handleProxyAbort(c *gin.Context, proxyFn func()) {
 			if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 				log.Debugf("client disconnected during streaming: %s %s",
 					c.Request.Method, c.Request.URL.Path)
-				c.Abort()  // Stop further handler processing
+				c.Abort() // Stop further handler processing
 				return
 			}
 			// Re-panic real errors so Gin's Recovery handles them
@@ -283,12 +193,16 @@ func handleProxyAbort(c *gin.Context, proxyFn func()) {
 	proxyFn()
 }
 
+// <<< FORK
+
 // proxyHandler converts httputil.ReverseProxy to gin.HandlerFunc
 func proxyHandler(proxy *httputil.ReverseProxy) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// >>> FORK: Use handleProxyAbort for graceful disconnect handling
 		handleProxyAbort(c, func() {
 			proxy.ServeHTTP(c.Writer, c.Request)
 		})
+		// <<< FORK
 	}
 }
 
@@ -305,80 +219,4 @@ func filterBetaFeatures(header, featureToRemove string) string {
 	}
 
 	return strings.Join(filtered, ",")
-}
-
-// createLiteLLMProxy creates a reverse proxy handler for LiteLLM
-func createLiteLLMProxy(baseURL, apiKey string, cfg *config.Config) (*httputil.ReverseProxy, error) {
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid litellm base url: %w", err)
-	}
-
-	proxy := httputil.NewSingleHostReverseProxy(parsed)
-	originalDirector := proxy.Director
-
-	// Modify outgoing requests to inject API key and fix path
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.Host = parsed.Host
-
-		// Preserve or generate correlation headers for distributed tracing
-		requestID := getOrGenerateRequestID(req)
-		req.Header.Set("X-Request-ID", requestID)
-
-		// Strip /api/provider/{provider} prefix and normalize path for LiteLLM
-		// Handles Vertex AI Gemini format transformation and model name mappings
-		originalPath := req.URL.Path
-		path := req.URL.Path
-
-		// First strip the /api/provider/{provider} prefix if present
-		if strings.HasPrefix(path, "/api/provider/") {
-			parts := strings.SplitN(path, "/", 5) // ["", "api", "provider", "{provider}", "rest..."]
-			if len(parts) >= 5 {
-				path = "/" + parts[4] // Stripped path
-			} else if len(parts) == 4 {
-				path = "/" // Just root if no path after provider
-			}
-		}
-
-		// Apply LiteLLM-specific path transformations (Vertex AI -> standard Gemini format)
-		req.URL.Path = util.RewritePathForLiteLLM(path, cfg)
-
-		// Inject LiteLLM API key if provided
-		if apiKey != "" {
-			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
-		}
-
-		log.Debugf("litellm proxy: forwarding %s %s (original: %s)", req.Method, req.URL.Path, originalPath)
-	}
-
-	// Error handler for proxy failures
-	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		errorType := classifyProxyError(err)
-		requestCtx := getRequestContext(req)
-
-		// Use WARN for expected client-side issues, ERROR for upstream failures
-		if errorType == "client_disconnect" {
-			log.WithFields(log.Fields{
-				"error_type": errorType,
-				"method":     req.Method,
-				"path":       req.URL.Path,
-				"context":    requestCtx,
-			}).Warnf("litellm proxy: client disconnected during %s %s", req.Method, req.URL.Path)
-		} else {
-			log.WithFields(log.Fields{
-				"error_type": errorType,
-				"method":     req.Method,
-				"path":       req.URL.Path,
-				"context":    requestCtx,
-				"error":      err.Error(),
-			}).Errorf("litellm proxy error for %s %s: %v", req.Method, req.URL.Path, err)
-		}
-
-		rw.Header().Set("Content-Type", "application/json")
-		rw.WriteHeader(http.StatusBadGateway)
-		_, _ = rw.Write([]byte(`{"error":"litellm_proxy_error","message":"Failed to reach LiteLLM proxy"}`))
-	}
-
-	return proxy, nil
 }

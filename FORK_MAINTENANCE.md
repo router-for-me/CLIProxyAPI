@@ -33,8 +33,8 @@ This document describes the conflict-free architecture for maintaining custom Li
 | Explicit LiteLLM routing (`litellm-models`) | ✅ Included | Middleware intercept |
 | Passthrough mode (`litellm-passthrough-mode`) | ✅ Included | Middleware flag check |
 | Enhanced error logging | ✅ Included | Separate helpers file |
-| Request ID propagation | ✅ Included | Middleware adds header |
-| Fallback on OAuth error | ❌ Dropped | Too coupled to internals |
+| Request ID propagation | ✅ Included | Shared helper in error_helpers.go |
+| Fallback on OAuth error | ✅ Included | litellm_fallback.go middleware |
 
 ### Why This Architecture?
 
@@ -53,18 +53,19 @@ The new architecture uses **Gin middleware** to intercept requests **before** th
 ```
 internal/api/modules/amp/
 │
-├── # UPSTREAM FILES (do not modify except marked hooks)
-├── amp.go                    # 1 hook: register middleware
+├── # UPSTREAM FILES (minimal modifications with >>> FORK markers)
+├── amp.go                    # Hook: LiteLLM init + middleware registration
 ├── fallback_handlers.go      # no changes
-├── routes.go                 # no changes
-├── proxy.go                  # no changes
+├── routes.go                 # Hook: LiteLLM middleware in chain
+├── proxy.go                  # Minimal: request ID + error handler + handleProxyAbort
 ├── model_mapper.go           # no changes
 │
-├── # OUR FILES (never conflict)
-├── litellm_middleware.go     # LiteLLM routing middleware
+├── # OUR FILES (never conflict with upstream)
+├── litellm_middleware.go     # LiteLLM explicit routing middleware
 ├── litellm_proxy.go          # LiteLLM reverse proxy creation
+├── litellm_fallback.go       # LiteLLM fallback on quota errors
 ├── litellm_config.go         # Config helpers and validation
-└── error_helpers.go          # Error classification utilities
+└── error_helpers.go          # Error classification + NewProxyErrorHandler factory
 ```
 
 ---
@@ -592,10 +593,10 @@ git push origin main
 |------|--------|
 | `litellm_*.go` | Should NEVER conflict (our files) |
 | `error_helpers.go` | Should NEVER conflict (our file) |
-| `amp.go` | Re-apply LITELLM_HOOK markers |
+| `amp.go` | Re-apply LITELLM_HOOK markers if removed |
 | `fallback_handlers.go` | Accept upstream (we don't modify) |
-| `routes.go` | Accept upstream (we don't modify) |
-| `proxy.go` | Accept upstream (we don't modify) |
+| `routes.go` | Re-apply LITELLM_HOOK_MIDDLEWARE markers if removed |
+| `proxy.go` | Accept upstream, then re-apply >>> FORK sections (request ID, error handler, handleProxyAbort) |
 | `config.go` | Check our LiteLLM fields still exist |
 
 ---

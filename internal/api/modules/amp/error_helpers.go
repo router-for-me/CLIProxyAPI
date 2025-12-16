@@ -110,3 +110,15 @@ func LogProxyError(proxyName string, req *http.Request, err error) {
 			proxyName, ctx.Method, ctx.Path, err)
 	}
 }
+
+// NewProxyErrorHandler creates a standard error handler for reverse proxies.
+// This allows proxy.go to use a one-liner instead of inline error handling logic.
+func NewProxyErrorHandler(proxyName, errorID, message string) func(http.ResponseWriter, *http.Request, error) {
+	return func(rw http.ResponseWriter, req *http.Request, err error) {
+		LogProxyError(proxyName, req, err)
+
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusBadGateway)
+		_, _ = rw.Write([]byte(fmt.Sprintf(`{"error":%q,"message":%q}`, errorID, message)))
+	}
+}

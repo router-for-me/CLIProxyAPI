@@ -10,10 +10,12 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/util"
 	log "github.com/sirupsen/logrus"
 )
 
-// CreateLiteLLMProxy creates a reverse proxy for LiteLLM with enhanced error handling
+// CreateLiteLLMProxy creates a reverse proxy for LiteLLM with enhanced error handling.
+// This is the primary constructor used by amp.go for LiteLLM integration.
 func CreateLiteLLMProxy(liteLLMCfg *LiteLLMConfig) (*httputil.ReverseProxy, error) {
 	baseURL := liteLLMCfg.GetBaseURL()
 	if baseURL == "" {
@@ -29,26 +31,35 @@ func CreateLiteLLMProxy(liteLLMCfg *LiteLLMConfig) (*httputil.ReverseProxy, erro
 	originalDirector := proxy.Director
 
 	apiKey := liteLLMCfg.GetAPIKey()
+	cfg := liteLLMCfg.GetConfig()
 
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		req.Host = parsed.Host
 
-		// Generate/propagate request ID for distributed tracing
+		// Generate/propagate request ID for distributed tracing (uses shared helper)
 		requestID := GetOrGenerateRequestID(req)
 		req.Header.Set("X-Request-ID", requestID)
 
-		// Strip /api/provider/{provider} prefix if present
-		// Example: /api/provider/openai/v1/chat/completions -> /v1/chat/completions
+		// Strip /api/provider/{provider} prefix and normalize path for LiteLLM
 		originalPath := req.URL.Path
 		path := req.URL.Path
+
+		// First strip the /api/provider/{provider} prefix if present
 		if strings.HasPrefix(path, "/api/provider/") {
 			parts := strings.SplitN(path, "/", 5) // ["", "api", "provider", "{provider}", "rest..."]
 			if len(parts) >= 5 {
-				req.URL.Path = "/" + parts[4]
+				path = "/" + parts[4] // Stripped path
 			} else if len(parts) == 4 {
-				req.URL.Path = "/"
+				path = "/" // Just root if no path after provider
 			}
+		}
+
+		// Apply LiteLLM-specific path transformations (Vertex AI -> standard Gemini format)
+		if cfg != nil {
+			req.URL.Path = util.RewritePathForLiteLLM(path, cfg)
+		} else {
+			req.URL.Path = path
 		}
 
 		// Inject LiteLLM API key if configured
@@ -60,14 +71,8 @@ func CreateLiteLLMProxy(liteLLMCfg *LiteLLMConfig) (*httputil.ReverseProxy, erro
 			req.Method, req.URL.Path, originalPath)
 	}
 
-	// Enhanced error handler with classification
-	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		LogProxyError("litellm", req, err)
-
-		rw.Header().Set("Content-Type", "application/json")
-		rw.WriteHeader(http.StatusBadGateway)
-		_, _ = rw.Write([]byte(`{"error":"litellm_proxy_error","message":"Failed to reach LiteLLM proxy"}`))
-	}
+	// Enhanced error handler using shared factory
+	proxy.ErrorHandler = NewProxyErrorHandler("litellm", "litellm_proxy_error", "Failed to reach LiteLLM proxy")
 
 	return proxy, nil
 }

@@ -19,6 +19,7 @@ type LiteLLMConfig struct {
 	models          map[string]bool
 	baseURL         string
 	apiKey          string
+	cfg             *config.Config // Store reference for path rewriting
 }
 
 // NewLiteLLMConfig creates a new LiteLLM configuration from app config
@@ -35,6 +36,7 @@ func (lc *LiteLLMConfig) Update(cfg *config.Config) {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 
+	lc.cfg = cfg
 	lc.baseURL = strings.TrimSpace(cfg.LiteLLMBaseURL)
 	lc.apiKey = cfg.LiteLLMAPIKey
 	lc.enabled = cfg.LiteLLMHybridMode && lc.baseURL != ""
@@ -106,4 +108,11 @@ func (lc *LiteLLMConfig) GetModelCount() int {
 	lc.mu.RLock()
 	defer lc.mu.RUnlock()
 	return len(lc.models)
+}
+
+// GetConfig returns the underlying config for path rewriting
+func (lc *LiteLLMConfig) GetConfig() *config.Config {
+	lc.mu.RLock()
+	defer lc.mu.RUnlock()
+	return lc.cfg
 }

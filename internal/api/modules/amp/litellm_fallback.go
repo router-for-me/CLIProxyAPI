@@ -15,12 +15,14 @@ import (
 )
 
 // responseBuffer wraps gin.ResponseWriter to buffer the response
-// until we know if we need to fallback to LiteLLM
+// until we know if we need to fallback to LiteLLM.
+// It implements http.Flusher to intercept flush calls from streaming handlers.
 type responseBuffer struct {
 	gin.ResponseWriter
-	statusCode int
-	body       *bytes.Buffer
-	committed  bool // true once we've started writing to the real writer
+	statusCode     int
+	body           *bytes.Buffer
+	committed      bool // true once we've started writing to the real writer
+	shouldFallback bool // set when we detect a quota error that needs fallback
 }
 
 func newResponseBuffer(w gin.ResponseWriter) *responseBuffer {
@@ -29,6 +31,7 @@ func newResponseBuffer(w gin.ResponseWriter) *responseBuffer {
 		statusCode:     http.StatusOK,
 		body:           &bytes.Buffer{},
 		committed:      false,
+		shouldFallback: false,
 	}
 }
 
@@ -44,8 +47,41 @@ func (rb *responseBuffer) Write(data []byte) (int, error) {
 	return rb.body.Write(data)
 }
 
-// Flush commits the buffered response to the real writer
+// Status implements gin.ResponseWriter interface
+func (rb *responseBuffer) Status() int {
+	return rb.statusCode
+}
+
+// Flush implements http.Flusher - this is critical for intercepting streaming responses.
+// When a handler calls flusher.Flush(), we check if this is an error response
+// that should trigger fallback BEFORE actually flushing to the client.
 func (rb *responseBuffer) Flush() {
+	if rb.committed {
+		// Already committed, flush the underlying writer
+		if flusher, ok := rb.ResponseWriter.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		return
+	}
+
+	// Check if this is a quota/rate limit error BEFORE committing
+	if shouldFallbackOnError(rb.statusCode, rb.body.Bytes()) {
+		rb.shouldFallback = true
+		// Don't flush - let the middleware handle fallback
+		return
+	}
+
+	// Not an error that needs fallback - commit and flush
+	rb.committed = true
+	rb.ResponseWriter.WriteHeader(rb.statusCode)
+	rb.ResponseWriter.Write(rb.body.Bytes())
+	if flusher, ok := rb.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// CommitBuffer commits the buffered response to the real writer (called by middleware)
+func (rb *responseBuffer) CommitBuffer() {
 	if rb.committed {
 		return
 	}
@@ -131,8 +167,11 @@ func LiteLLMFallbackMiddleware(liteLLMCfg *LiteLLMConfig, proxy *httputil.Revers
 		// Let the request go through OAuth handlers
 		c.Next()
 
-		// Check if we should fallback
-		if !buffer.committed && shouldFallbackOnError(buffer.statusCode, buffer.body.Bytes()) {
+		// Check if we should fallback - either detected during Flush() or post-handler check
+		needsFallback := buffer.shouldFallback ||
+			(!buffer.committed && shouldFallbackOnError(buffer.statusCode, buffer.body.Bytes()))
+
+		if needsFallback {
 			log.Warnf("litellm fallback: OAuth failed for %s (status %d), retrying with LiteLLM",
 				model, buffer.statusCode)
 
@@ -149,7 +188,7 @@ func LiteLLMFallbackMiddleware(liteLLMCfg *LiteLLMConfig, proxy *httputil.Revers
 			return
 		}
 
-		// No fallback needed - flush the buffered response
-		buffer.Flush()
+		// No fallback needed - commit the buffered response if not already done
+		buffer.CommitBuffer()
 	}
 }
