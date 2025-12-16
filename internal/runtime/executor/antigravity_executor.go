@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,7 +44,10 @@ const (
 	refreshSkew             = 3000 * time.Second
 )
 
-var randSource = rand.New(rand.NewSource(time.Now().UnixNano()))
+var (
+	randSource      = rand.New(rand.NewSource(time.Now().UnixNano()))
+	randSourceMutex sync.Mutex
+)
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
 type AntigravityExecutor struct {
@@ -777,15 +781,19 @@ func generateRequestID() string {
 }
 
 func generateSessionID() string {
+	randSourceMutex.Lock()
 	n := randSource.Int63n(9_000_000_000_000_000_000)
+	randSourceMutex.Unlock()
 	return "-" + strconv.FormatInt(n, 10)
 }
 
 func generateProjectID() string {
 	adjectives := []string{"useful", "bright", "swift", "calm", "bold"}
 	nouns := []string{"fuze", "wave", "spark", "flow", "core"}
+	randSourceMutex.Lock()
 	adj := adjectives[randSource.Intn(len(adjectives))]
 	noun := nouns[randSource.Intn(len(nouns))]
+	randSourceMutex.Unlock()
 	randomPart := strings.ToLower(uuid.NewString())[:5]
 	return adj + "-" + noun + "-" + randomPart
 }
