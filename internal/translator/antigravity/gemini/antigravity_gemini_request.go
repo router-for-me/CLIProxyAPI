@@ -122,6 +122,38 @@ type FunctionCallGroup struct {
 	ResponsesNeeded int
 }
 
+// parseFunctionResponse attempts to unmarshal a function response part.
+// Falls back to gjson extraction if standard json.Unmarshal fails.
+func parseFunctionResponse(response gjson.Result) map[string]interface{} {
+	var responseMap map[string]interface{}
+	err := json.Unmarshal([]byte(response.Raw), &responseMap)
+	if err == nil {
+		return responseMap
+	}
+
+	log.Debugf("unmarshal function response failed, using fallback: %v", err)
+	funcResp := response.Get("functionResponse")
+	if funcResp.Exists() {
+		fr := map[string]interface{}{
+			"name": funcResp.Get("name").String(),
+			"response": map[string]interface{}{
+				"result": funcResp.Get("response").String(),
+			},
+		}
+		if id := funcResp.Get("id").String(); id != "" {
+			fr["id"] = id
+		}
+		return map[string]interface{}{"functionResponse": fr}
+	}
+
+	return map[string]interface{}{
+		"functionResponse": map[string]interface{}{
+			"name":     "unknown",
+			"response": map[string]interface{}{"result": response.String()},
+		},
+	}
+}
+
 // fixCLIToolResponse performs sophisticated tool response format conversion and grouping.
 // This function transforms the CLI tool response format by intelligently grouping function calls
 // with their corresponding responses, ensuring proper conversation flow and API compatibility.
@@ -180,13 +212,7 @@ func fixCLIToolResponse(input string) (string, error) {
 					// Create merged function response content
 					var responseParts []interface{}
 					for _, response := range groupResponses {
-						var responseMap map[string]interface{}
-						errUnmarshal := json.Unmarshal([]byte(response.Raw), &responseMap)
-						if errUnmarshal != nil {
-							log.Warnf("failed to unmarshal function response: %v\n", errUnmarshal)
-							continue
-						}
-						responseParts = append(responseParts, responseMap)
+						responseParts = append(responseParts, parseFunctionResponse(response))
 					}
 
 					if len(responseParts) > 0 {
@@ -265,13 +291,7 @@ func fixCLIToolResponse(input string) (string, error) {
 
 			var responseParts []interface{}
 			for _, response := range groupResponses {
-				var responseMap map[string]interface{}
-				errUnmarshal := json.Unmarshal([]byte(response.Raw), &responseMap)
-				if errUnmarshal != nil {
-					log.Warnf("failed to unmarshal function response: %v\n", errUnmarshal)
-					continue
-				}
-				responseParts = append(responseParts, responseMap)
+				responseParts = append(responseParts, parseFunctionResponse(response))
 			}
 
 			if len(responseParts) > 0 {

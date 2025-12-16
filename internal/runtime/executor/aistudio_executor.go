@@ -322,7 +322,7 @@ func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts c
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 	payload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
-	payload = applyThinkingMetadata(payload, req.Metadata, req.Model)
+	payload = ApplyThinkingMetadata(payload, req.Metadata, req.Model)
 	payload = util.ApplyDefaultThinkingIfNeeded(req.Model, payload)
 	payload = util.ConvertThinkingLevelToBudget(payload)
 	payload = util.NormalizeGeminiThinkingBudget(req.Model, payload)
@@ -384,8 +384,16 @@ func ensureColonSpacedJSON(payload []byte) []byte {
 
 	for i := 0; i < len(indented); i++ {
 		ch := indented[i]
-		if ch == '"' && (i == 0 || indented[i-1] != '\\') {
-			inString = !inString
+		if ch == '"' {
+			// A quote is escaped only when preceded by an odd number of consecutive backslashes.
+			// For example: "\\\"" keeps the quote inside the string, but "\\\\" closes the string.
+			backslashes := 0
+			for j := i - 1; j >= 0 && indented[j] == '\\'; j-- {
+				backslashes++
+			}
+			if backslashes%2 == 0 {
+				inString = !inString
+			}
 		}
 
 		if !inString {

@@ -41,6 +41,11 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		originalDirector(req)
 		req.Host = parsed.Host
 
+		// Remove client's Authorization header - it was only used for CLI Proxy API authentication
+		// We will set our own Authorization using the configured upstream-api-key
+		req.Header.Del("Authorization")
+		req.Header.Del("X-Api-Key")
+
 		// Preserve correlation headers for debugging
 		if req.Header.Get("X-Request-ID") == "" {
 			// Could generate one here if needed
@@ -50,7 +55,7 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		// Users going through ampcode.com proxy are paying for the service and should get all features
 		// including 1M context window (context-1m-2025-08-07)
 
-		// Inject API key from secret source (precedence: config > env > file)
+		// Inject API key from secret source (only uses upstream-api-key from config)
 		if key, err := secretSource.Get(req.Context()); err == nil && key != "" {
 			req.Header.Set("X-Api-Key", key)
 			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))

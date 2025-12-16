@@ -64,7 +64,7 @@ func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provid
 		fields["cost"] = "amp_credits"
 		fields["source"] = "ampcode.com"
 		fields["model_id"] = requestedModel // Explicit model_id for easy config reference
-		log.WithFields(fields).Warnf("forwarding to ampcode.com (uses amp credits) - model_id: %s | To use local proxy, add to config: amp-model-mappings: [{from: \"%s\", to: \"<your-local-model>\"}]", requestedModel, requestedModel)
+		log.WithFields(fields).Warnf("forwarding to ampcode.com (uses amp credits) - model_id: %s | To use local provider, add to config: ampcode.model-mappings: [{from: \"%s\", to: \"<your-local-model>\"}]", requestedModel, requestedModel)
 
 	case RouteTypeNoProvider:
 		fields["cost"] = "none"

@@ -375,10 +375,19 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		}
 
 		accountType, accountInfo := auth.AccountInfo()
+		proxyInfo := auth.ProxyInfo()
 		if accountType == "api_key" {
-			log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
+			if proxyInfo != "" {
+				log.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
+			} else {
+				log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
+			}
 		} else if accountType == "oauth" {
-			log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
+			if proxyInfo != "" {
+				log.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
+			} else {
+				log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
+			}
 		}
 
 		tried[auth.ID] = struct{}{}
@@ -423,10 +432,19 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		}
 
 		accountType, accountInfo := auth.AccountInfo()
+		proxyInfo := auth.ProxyInfo()
 		if accountType == "api_key" {
-			log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
+			if proxyInfo != "" {
+				log.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
+			} else {
+				log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
+			}
 		} else if accountType == "oauth" {
-			log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
+			if proxyInfo != "" {
+				log.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
+			} else {
+				log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
+			}
 		}
 
 		tried[auth.ID] = struct{}{}
@@ -471,10 +489,19 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		}
 
 		accountType, accountInfo := auth.AccountInfo()
+		proxyInfo := auth.ProxyInfo()
 		if accountType == "api_key" {
-			log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
+			if proxyInfo != "" {
+				log.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
+			} else {
+				log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
+			}
 		} else if accountType == "oauth" {
-			log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
+			if proxyInfo != "" {
+				log.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
+			} else {
+				log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
+			}
 		}
 
 		tried[auth.ID] = struct{}{}

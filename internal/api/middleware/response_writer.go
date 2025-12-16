@@ -71,19 +71,61 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(data)
 
 	// THEN: Handle logging based on response type
-	if w.isStreaming {
+	if w.isStreaming && w.chunkChannel != nil {
 		// For streaming responses: Send to async logging channel (non-blocking)
-		if w.chunkChannel != nil {
-			select {
-			case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
-			default: // Channel full, skip logging to avoid blocking
-			}
+		select {
+		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
+		default: // Channel full, skip logging to avoid blocking
 		}
-	} else {
-		// For non-streaming responses: Buffer complete response
+		return n, err
+	}
+
+	if w.shouldBufferResponseBody() {
 		w.body.Write(data)
 	}
 
+	return n, err
+}
+
+func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
+	if w.logger != nil && w.logger.IsEnabled() {
+		return true
+	}
+	if !w.logOnErrorOnly {
+		return false
+	}
+	status := w.statusCode
+	if status == 0 {
+		if statusWriter, ok := w.ResponseWriter.(interface{ Status() int }); ok && statusWriter != nil {
+			status = statusWriter.Status()
+		} else {
+			status = http.StatusOK
+		}
+	}
+	return status >= http.StatusBadRequest
+}
+
+// WriteString wraps the underlying ResponseWriter's WriteString method to capture response data.
+// Some handlers (and fmt/io helpers) write via io.StringWriter; without this override, those writes
+// bypass Write() and would be missing from request logs.
+func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
+	w.ensureHeadersCaptured()
+
+	// CRITICAL: Write to client first (zero latency)
+	n, err := w.ResponseWriter.WriteString(data)
+
+	// THEN: Capture for logging
+	if w.isStreaming && w.chunkChannel != nil {
+		select {
+		case w.chunkChannel <- []byte(data):
+		default:
+		}
+		return n, err
+	}
+
+	if w.shouldBufferResponseBody() {
+		w.body.WriteString(data)
+	}
 	return n, err
 }
 
@@ -160,12 +202,16 @@ func (w *ResponseWriterWrapper) detectStreaming(contentType string) bool {
 		return true
 	}
 
-	// Check request body for streaming indicators
-	if w.requestInfo.Body != nil {
+	// If a concrete Content-Type is already set (e.g., application/json for error responses),
+	// treat it as non-streaming instead of inferring from the request payload.
+	if strings.TrimSpace(contentType) != "" {
+		return false
+	}
+
+	// Only fall back to request payload hints when Content-Type is not set yet.
+	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
 		bodyStr := string(w.requestInfo.Body)
-		if strings.Contains(bodyStr, `"stream": true`) || strings.Contains(bodyStr, `"stream":true`) {
-			return true
-		}
+		return strings.Contains(bodyStr, `"stream": true`) || strings.Contains(bodyStr, `"stream":true`)
 	}
 
 	return false
@@ -221,7 +267,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		return nil
 	}
 
-	if w.isStreaming {
+	if w.isStreaming && w.streamWriter != nil {
 		if w.chunkChannel != nil {
 			close(w.chunkChannel)
 			w.chunkChannel = nil
@@ -233,24 +279,19 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		}
 
 		// Write API Request and Response to the streaming log before closing
-		if w.streamWriter != nil {
-			apiRequest := w.extractAPIRequest(c)
-			if len(apiRequest) > 0 {
-				_ = w.streamWriter.WriteAPIRequest(apiRequest)
-			}
-			apiResponse := w.extractAPIResponse(c)
-			if len(apiResponse) > 0 {
-				_ = w.streamWriter.WriteAPIResponse(apiResponse)
-			}
-			if err := w.streamWriter.Close(); err != nil {
-				w.streamWriter = nil
-				return err
-			}
+		apiRequest := w.extractAPIRequest(c)
+		if len(apiRequest) > 0 {
+			_ = w.streamWriter.WriteAPIRequest(apiRequest)
+		}
+		apiResponse := w.extractAPIResponse(c)
+		if len(apiResponse) > 0 {
+			_ = w.streamWriter.WriteAPIResponse(apiResponse)
+		}
+		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil
+			return err
 		}
-		if forceLog {
-			return w.logRequest(finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), slicesAPIResponseError, forceLog)
-		}
+		w.streamWriter = nil
 		return nil
 	}
 
@@ -334,27 +375,4 @@ func (w *ResponseWriterWrapper) logRequest(statusCode int, headers map[string][]
 		apiResponseBody,
 		apiResponseErrors,
 	)
-}
-
-// Status returns the HTTP response status code captured by the wrapper.
-// It defaults to 200 if WriteHeader has not been called.
-func (w *ResponseWriterWrapper) Status() int {
-	if w.statusCode == 0 {
-		return 200 // Default status code
-	}
-	return w.statusCode
-}
-
-// Size returns the size of the response body in bytes for non-streaming responses.
-// For streaming responses, it returns -1, as the total size is unknown.
-func (w *ResponseWriterWrapper) Size() int {
-	if w.isStreaming {
-		return -1 // Unknown size for streaming responses
-	}
-	return w.body.Len()
-}
-
-// Written returns true if the response header has been written (i.e., a status code has been set).
-func (w *ResponseWriterWrapper) Written() bool {
-	return w.statusCode != 0
 }

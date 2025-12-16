@@ -59,7 +59,7 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 - **Model mapping** to route unavailable models to alternatives (e.g., `claude-opus-4.5` → `claude-sonnet-4`)
 - Security-first design with localhost-only management endpoints
 
-**→ [Complete Amp CLI Integration Guide](docs/amp-cli-integration.md)**
+**→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
 
 ## SDK Docs
 

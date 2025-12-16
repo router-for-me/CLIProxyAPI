@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -74,6 +75,17 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			})
 			if len(stops) > 0 {
 				out, _ = sjson.Set(out, "stop", stops)
+			}
+		}
+
+		// Convert thinkingBudget to reasoning_effort
+		// Always perform conversion to support allowCompat models that may not be in registry
+		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
+			if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
+				budget := int(thinkingBudget.Int())
+				if effort, ok := util.OpenAIThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
+					out, _ = sjson.Set(out, "reasoning_effort", effort)
+				}
 			}
 		}
 	}
