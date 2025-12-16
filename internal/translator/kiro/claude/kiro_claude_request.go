@@ -6,6 +6,7 @@ package claude
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -32,6 +33,7 @@ type KiroInferenceConfig struct {
 	Temperature float64 `json:"temperature,omitempty"`
 	TopP        float64 `json:"topP,omitempty"`
 }
+
 
 // KiroConversationState holds the conversation context
 type KiroConversationState struct {
@@ -134,9 +136,11 @@ func ConvertClaudeRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 // origin parameter determines which quota to use: "CLI" for Amazon Q, "AI_EDITOR" for Kiro IDE.
 // isAgentic parameter enables chunked write optimization prompt for -agentic model variants.
 // isChatOnly parameter disables tool calling for -chat model variants (pure conversation mode).
-// Supports thinking mode - when Claude API thinking parameter is present, injects thinkingHint.
+// headers parameter allows checking Anthropic-Beta header for thinking mode detection.
+// metadata parameter is kept for API compatibility but no longer used for thinking configuration.
+// Supports thinking mode - when enabled, injects thinking tags into system prompt.
 // Returns the payload and a boolean indicating whether thinking mode was injected.
-func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool) ([]byte, bool) {
+func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, headers http.Header, metadata map[string]any) ([]byte, bool) {
 	// Extract max_tokens for potential use in inferenceConfig
 	// Handle -1 as "use maximum" (Kiro max output is ~32000 tokens)
 	const kiroMaxOutputTokens = 32000
@@ -181,26 +185,9 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// Extract system prompt
 	systemPrompt := extractSystemPrompt(claudeBody)
 
-	// Check for thinking mode using the comprehensive IsThinkingEnabled function
-	// This supports Claude API format, OpenAI reasoning_effort, and AMP/Cursor format
-	thinkingEnabled := IsThinkingEnabled(claudeBody)
-	_, budgetTokens := checkThinkingMode(claudeBody) // Get budget tokens from Claude format if available
-	if budgetTokens <= 0 {
-		// Calculate budgetTokens based on max_tokens if available
-		// Use 50% of max_tokens for thinking, with min 8000 and max 24000
-		if maxTokens > 0 {
-			budgetTokens = maxTokens / 2
-			if budgetTokens < 8000 {
-				budgetTokens = 8000
-			}
-			if budgetTokens > 24000 {
-				budgetTokens = 24000
-			}
-			log.Debugf("kiro: budgetTokens calculated from max_tokens: %d (max_tokens=%d)", budgetTokens, maxTokens)
-		} else {
-			budgetTokens = 16000 // Default budget tokens
-		}
-	}
+	// Check for thinking mode using the comprehensive IsThinkingEnabledWithHeaders function
+	// This supports Claude API format, OpenAI reasoning_effort, AMP/Cursor format, and Anthropic-Beta header
+	thinkingEnabled := IsThinkingEnabledWithHeaders(claudeBody, headers)
 
 	// Inject timestamp context
 	timestamp := time.Now().Format("2006-01-02 15:04:05 MST")
@@ -231,18 +218,25 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		log.Debugf("kiro: injected tool_choice hint into system prompt")
 	}
 
-	// Inject thinking hint when thinking mode is enabled
-	if thinkingEnabled {
-		if systemPrompt != "" {
-			systemPrompt += "\n"
-		}
-		dynamicThinkingHint := fmt.Sprintf("<thinking_mode>interleaved</thinking_mode><max_thinking_length>%d</max_thinking_length>", budgetTokens)
-		systemPrompt += dynamicThinkingHint
-		log.Debugf("kiro: injected dynamic thinking hint into system prompt, max_thinking_length: %d", budgetTokens)
-	}
-
 	// Convert Claude tools to Kiro format
 	kiroTools := convertClaudeToolsToKiro(tools)
+
+	// Thinking mode implementation:
+	// Kiro API doesn't accept max_tokens for thinking. Instead, thinking mode is enabled
+	// by injecting <thinking_mode> and <max_thinking_length> tags into the system prompt.
+	// We use a fixed max_thinking_length value since Kiro handles the actual budget internally.
+	if thinkingEnabled {
+		thinkingHint := `<thinking_mode>interleaved</thinking_mode>
+<max_thinking_length>200000</max_thinking_length>
+
+IMPORTANT: You MUST use <thinking>...</thinking> tags to show your reasoning process before providing your final response. Think step by step inside the thinking tags.`
+		if systemPrompt != "" {
+			systemPrompt = thinkingHint + "\n\n" + systemPrompt
+		} else {
+			systemPrompt = thinkingHint
+		}
+		log.Infof("kiro: injected thinking prompt, has_tools: %v", len(kiroTools) > 0)
+	}
 
 	// Process messages and build history
 	history, currentUserMsg, currentToolResults := processMessages(messages, modelID, origin)
@@ -280,6 +274,7 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	}
 
 	// Build inferenceConfig if we have any inference parameters
+	// Note: Kiro API doesn't actually use max_tokens for thinking budget
 	var inferenceConfig *KiroInferenceConfig
 	if maxTokens > 0 || hasTemperature || hasTopP {
 		inferenceConfig = &KiroInferenceConfig{}
@@ -350,7 +345,7 @@ func extractSystemPrompt(claudeBody []byte) string {
 // checkThinkingMode checks if thinking mode is enabled in the Claude request
 func checkThinkingMode(claudeBody []byte) (bool, int64) {
 	thinkingEnabled := false
-	var budgetTokens int64 = 16000
+	var budgetTokens int64 = 24000
 
 	thinkingField := gjson.GetBytes(claudeBody, "thinking")
 	if thinkingField.Exists() {
@@ -373,6 +368,32 @@ func checkThinkingMode(claudeBody []byte) (bool, int64) {
 	return thinkingEnabled, budgetTokens
 }
 
+// hasThinkingTagInBody checks if the request body already contains thinking configuration tags.
+// This is used to prevent duplicate injection when client (e.g., AMP/Cursor) already includes thinking config.
+func hasThinkingTagInBody(body []byte) bool {
+	bodyStr := string(body)
+	return strings.Contains(bodyStr, "<thinking_mode>") || strings.Contains(bodyStr, "<max_thinking_length>")
+}
+
+
+// IsThinkingEnabledFromHeader checks if thinking mode is enabled via Anthropic-Beta header.
+// Claude CLI uses "Anthropic-Beta: interleaved-thinking-2025-05-14" to enable thinking.
+func IsThinkingEnabledFromHeader(headers http.Header) bool {
+	if headers == nil {
+		return false
+	}
+	betaHeader := headers.Get("Anthropic-Beta")
+	if betaHeader == "" {
+		return false
+	}
+	// Check for interleaved-thinking beta feature
+	if strings.Contains(betaHeader, "interleaved-thinking") {
+		log.Debugf("kiro: thinking mode enabled via Anthropic-Beta header: %s", betaHeader)
+		return true
+	}
+	return false
+}
+
 // IsThinkingEnabled is a public wrapper to check if thinking mode is enabled.
 // This is used by the executor to determine whether to parse <thinking> tags in responses.
 // When thinking is NOT enabled in the request, <thinking> tags in responses should be
@@ -383,6 +404,21 @@ func checkThinkingMode(claudeBody []byte) (bool, int64) {
 // - OpenAI format: reasoning_effort parameter
 // - AMP/Cursor format: <thinking_mode>interleaved</thinking_mode> in system prompt
 func IsThinkingEnabled(body []byte) bool {
+	return IsThinkingEnabledWithHeaders(body, nil)
+}
+
+// IsThinkingEnabledWithHeaders checks if thinking mode is enabled from body or headers.
+// This is the comprehensive check that supports all thinking detection methods:
+// - Claude API format: thinking.type = "enabled"
+// - OpenAI format: reasoning_effort parameter
+// - AMP/Cursor format: <thinking_mode>interleaved</thinking_mode> in system prompt
+// - Anthropic-Beta header: interleaved-thinking-2025-05-14
+func IsThinkingEnabledWithHeaders(body []byte, headers http.Header) bool {
+	// Check Anthropic-Beta header first (Claude Code uses this)
+	if IsThinkingEnabledFromHeader(headers) {
+		return true
+	}
+
 	// Check Claude API format first (thinking.type = "enabled")
 	enabled, _ := checkThinkingMode(body)
 	if enabled {

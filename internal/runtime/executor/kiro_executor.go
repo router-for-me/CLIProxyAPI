@@ -166,16 +166,17 @@ type KiroExecutor struct {
 // This is critical because OpenAI and Claude formats have different tool structures:
 // - OpenAI: tools[].function.name, tools[].function.description
 // - Claude: tools[].name, tools[].description
+// headers parameter allows checking Anthropic-Beta header for thinking mode detection.
 // Returns the serialized JSON payload and a boolean indicating whether thinking mode was injected.
-func buildKiroPayloadForFormat(body []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, sourceFormat sdktranslator.Format) ([]byte, bool) {
+func buildKiroPayloadForFormat(body []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, sourceFormat sdktranslator.Format, headers http.Header) ([]byte, bool) {
 	switch sourceFormat.String() {
 	case "openai":
 		log.Debugf("kiro: using OpenAI payload builder for source format: %s", sourceFormat.String())
-		return kiroopenai.BuildKiroPayloadFromOpenAI(body, modelID, profileArn, origin, isAgentic, isChatOnly)
+		return kiroopenai.BuildKiroPayloadFromOpenAI(body, modelID, profileArn, origin, isAgentic, isChatOnly, headers, nil)
 	default:
 		// Default to Claude format (also handles "claude", "kiro", etc.)
 		log.Debugf("kiro: using Claude payload builder for source format: %s", sourceFormat.String())
-		return kiroclaude.BuildKiroPayload(body, modelID, profileArn, origin, isAgentic, isChatOnly)
+		return kiroclaude.BuildKiroPayload(body, modelID, profileArn, origin, isAgentic, isChatOnly, headers, nil)
 	}
 }
 
@@ -249,7 +250,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+		kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 
 		log.Debugf("kiro: trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
@@ -359,7 +360,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
-						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 						log.Infof("kiro: token refreshed successfully, retrying request")
 						continue
 					}
@@ -416,7 +417,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					if refreshedAuth != nil {
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
-						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 						log.Infof("kiro: token refreshed for 403, retrying request")
 						continue
 					}
@@ -555,10 +556,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
-		// Kiro API always returns <thinking> tags regardless of whether thinking mode was requested
-		// So we always enable thinking parsing for Kiro responses
-		thinkingEnabled := true
+		kiroPayload, thinkingEnabled := buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 
 		log.Debugf("kiro: stream trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
@@ -681,7 +679,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
-						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 						log.Infof("kiro: token refreshed successfully, retrying stream request")
 						continue
 					}
@@ -738,7 +736,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					if refreshedAuth != nil {
 						auth = refreshedAuth
 						accessToken, profileArn = kiroCredentials(auth)
-						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from)
+						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 						log.Infof("kiro: token refreshed for 403, retrying stream request")
 						continue
 					}
@@ -1702,6 +1700,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	pendingEndTagChars := 0      // Number of chars that might be start of </thinking>
 	isThinkingBlockOpen := false // Track if thinking content block is open
 	thinkingBlockIndex := -1     // Index of the thinking content block
+	var accumulatedThinkingContent strings.Builder // Accumulate thinking content for signature generation
 
 	// Code block state tracking for heuristic thinking tag parsing
 	// When inside a markdown code block, <thinking> tags should NOT be parsed
@@ -1847,6 +1846,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 							out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
 						}
 					}
+					// Accumulate thinking content for signature generation
+					accumulatedThinkingContent.WriteString(pendingText)
 				} else {
 					// Output as regular text
 					if !isTextBlockOpen {
@@ -2390,6 +2391,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 										out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
 									}
 								}
+								// Accumulate thinking content for signature generation
+								accumulatedThinkingContent.WriteString(thinkContent)
 							}
 
 							// Note: Partial tag handling is done via pendingEndTagChars
@@ -2397,7 +2400,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 							// Close thinking block
 							if isThinkingBlockOpen {
-								blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(thinkingBlockIndex)
+								blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
 								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 								for _, chunk := range sseData {
 									if chunk != "" {
@@ -2405,6 +2408,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 									}
 								}
 								isThinkingBlockOpen = false
+								accumulatedThinkingContent.Reset() // Reset for potential next thinking block
 							}
 
 							inThinkBlock = false
@@ -2450,6 +2454,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 										out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
 									}
 								}
+								// Accumulate thinking content for signature generation
+								accumulatedThinkingContent.WriteString(contentToEmit)
 							}
 
 							remaining = ""
@@ -2592,6 +2598,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			// Handle tool uses in response (with deduplication)
 			for _, tu := range toolUses {
 				toolUseID := kirocommon.GetString(tu, "toolUseId")
+				toolName := kirocommon.GetString(tu, "name")
 
 				// Check for duplicate
 				if processedIDs[toolUseID] {
@@ -2615,7 +2622,6 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 				// Emit tool_use content block
 				contentBlockIndex++
-				toolName := kirocommon.GetString(tu, "name")
 
 				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", toolUseID, toolName)
 				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
@@ -2888,7 +2894,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		if calculatedInputTokens > 0 {
 			localEstimate := totalUsage.InputTokens
 			totalUsage.InputTokens = calculatedInputTokens
-			log.Infof("kiro: using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
+			log.Debugf("kiro: using contextUsagePercentage (%.2f%%) to calculate input tokens: %d (local estimate was: %d)",
 				upstreamContextPercentage, calculatedInputTokens, localEstimate)
 		}
 	}
@@ -2897,7 +2903,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Log upstream usage information if received
 	if hasUpstreamUsage {
-		log.Infof("kiro: upstream usage - credits: %.4f, context: %.2f%%, final tokens - input: %d, output: %d, total: %d",
+		log.Debugf("kiro: upstream usage - credits: %.4f, context: %.2f%%, final tokens - input: %d, output: %d, total: %d",
 			upstreamCreditUsage, upstreamContextPercentage,
 			totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
 	}

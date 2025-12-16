@@ -187,6 +187,7 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 
 	// Extract content
 	var content string
+	var reasoningContent string
 	var toolUses []KiroToolUse
 	var stopReason string
 
@@ -202,7 +203,8 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 			case "text":
 				content += block.Get("text").String()
 			case "thinking":
-				// Skip thinking blocks for OpenAI format (or convert to reasoning_content if needed)
+				// Convert thinking blocks to reasoning_content for OpenAI format
+				reasoningContent += block.Get("thinking").String()
 			case "tool_use":
 				toolUseID := block.Get("id").String()
 				toolName := block.Get("name").String()
@@ -233,8 +235,8 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 	}
 	usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
 
-	// Build OpenAI response
-	openaiResponse := BuildOpenAIResponse(content, toolUses, model, usageInfo, stopReason)
+	// Build OpenAI response with reasoning_content support
+	openaiResponse := BuildOpenAIResponseWithReasoning(content, reasoningContent, toolUses, model, usageInfo, stopReason)
 	return string(openaiResponse)
 }
 

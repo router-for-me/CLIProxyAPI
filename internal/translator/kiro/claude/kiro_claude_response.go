@@ -4,6 +4,8 @@
 package claude
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 
@@ -13,6 +15,18 @@ import (
 
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
 )
+
+// generateThinkingSignature generates a signature for thinking content.
+// This is required by Claude API for thinking blocks in non-streaming responses.
+// The signature is a base64-encoded hash of the thinking content.
+func generateThinkingSignature(thinkingContent string) string {
+	if thinkingContent == "" {
+		return ""
+	}
+	// Generate a deterministic signature based on content hash
+	hash := sha256.Sum256([]byte(thinkingContent))
+	return base64.StdEncoding.EncodeToString(hash[:])
+}
 
 // Local references to kirocommon constants for thinking block parsing
 var (
@@ -149,9 +163,12 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 		if endIdx == -1 {
 			// No closing tag found, treat rest as thinking content (incomplete response)
 			if strings.TrimSpace(remaining) != "" {
+				// Generate signature for thinking content (required by Claude API)
+				signature := generateThinkingSignature(remaining)
 				blocks = append(blocks, map[string]interface{}{
-					"type":     "thinking",
-					"thinking": remaining,
+					"type":      "thinking",
+					"thinking":  remaining,
+					"signature": signature,
 				})
 				log.Warnf("kiro: extractThinkingFromContent - missing closing </thinking> tag")
 			}
@@ -161,9 +178,12 @@ func ExtractThinkingFromContent(content string) []map[string]interface{} {
 		// Extract thinking content between tags
 		thinkContent := remaining[:endIdx]
 		if strings.TrimSpace(thinkContent) != "" {
+			// Generate signature for thinking content (required by Claude API)
+			signature := generateThinkingSignature(thinkContent)
 			blocks = append(blocks, map[string]interface{}{
-				"type":     "thinking",
-				"thinking": thinkContent,
+				"type":      "thinking",
+				"thinking":  thinkContent,
+				"signature": signature,
 			})
 			log.Debugf("kiro: extractThinkingFromContent - extracted thinking block (len: %d)", len(thinkContent))
 		}

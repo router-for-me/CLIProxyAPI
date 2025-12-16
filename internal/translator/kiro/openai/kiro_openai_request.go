@@ -6,11 +6,13 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -133,8 +135,10 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 // origin parameter determines which quota to use: "CLI" for Amazon Q, "AI_EDITOR" for Kiro IDE.
 // isAgentic parameter enables chunked write optimization prompt for -agentic model variants.
 // isChatOnly parameter disables tool calling for -chat model variants (pure conversation mode).
+// headers parameter allows checking Anthropic-Beta header for thinking mode detection.
+// metadata parameter is kept for API compatibility but no longer used for thinking configuration.
 // Returns the payload and a boolean indicating whether thinking mode was injected.
-func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool) ([]byte, bool) {
+func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, headers http.Header, metadata map[string]any) ([]byte, bool) {
 	// Extract max_tokens for potential use in inferenceConfig
 	// Handle -1 as "use maximum" (Kiro max output is ~32000 tokens)
 	const kiroMaxOutputTokens = 32000
@@ -219,34 +223,29 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 		log.Debugf("kiro-openai: injected response_format hint into system prompt")
 	}
 
-	// Check for thinking mode and inject thinking hint
-	// Supports OpenAI reasoning_effort parameter and model name hints
-	thinkingEnabled, budgetTokens := checkThinkingModeFromOpenAI(openaiBody)
-	if thinkingEnabled {
-		// Adjust budgetTokens based on max_tokens if not explicitly set by reasoning_effort
-		// Use 50% of max_tokens for thinking, with min 8000 and max 24000
-		if maxTokens > 0 && budgetTokens == 16000 { // 16000 is the default, meaning not explicitly set
-			calculatedBudget := maxTokens / 2
-			if calculatedBudget < 8000 {
-				calculatedBudget = 8000
-			}
-			if calculatedBudget > 24000 {
-				calculatedBudget = 24000
-			}
-			budgetTokens = calculatedBudget
-			log.Debugf("kiro-openai: budgetTokens calculated from max_tokens: %d (max_tokens=%d)", budgetTokens, maxTokens)
-		}
-
-		if systemPrompt != "" {
-			systemPrompt += "\n"
-		}
-		dynamicThinkingHint := fmt.Sprintf("<thinking_mode>interleaved</thinking_mode><max_thinking_length>%d</max_thinking_length>", budgetTokens)
-		systemPrompt += dynamicThinkingHint
-		log.Debugf("kiro-openai: injected dynamic thinking hint into system prompt, max_thinking_length: %d", budgetTokens)
-	}
+	// Check for thinking mode
+	// Supports OpenAI reasoning_effort parameter, model name hints, and Anthropic-Beta header
+	thinkingEnabled := checkThinkingModeFromOpenAIWithHeaders(openaiBody, headers)
 
 	// Convert OpenAI tools to Kiro format
 	kiroTools := convertOpenAIToolsToKiro(tools)
+
+	// Thinking mode implementation:
+	// Kiro API doesn't accept max_tokens for thinking. Instead, thinking mode is enabled
+	// by injecting <thinking_mode> and <max_thinking_length> tags into the system prompt.
+	// We use a fixed max_thinking_length value since Kiro handles the actual budget internally.
+	if thinkingEnabled {
+		thinkingHint := `<thinking_mode>interleaved</thinking_mode>
+<max_thinking_length>200000</max_thinking_length>
+
+IMPORTANT: You MUST use <thinking>...</thinking> tags to show your reasoning process before providing your final response. Think step by step inside the thinking tags.`
+		if systemPrompt != "" {
+			systemPrompt = thinkingHint + "\n\n" + systemPrompt
+		} else {
+			systemPrompt = thinkingHint
+		}
+		log.Debugf("kiro-openai: injected thinking prompt")
+	}
 
 	// Process messages and build history
 	history, currentUserMsg, currentToolResults := processOpenAIMessages(messages, modelID, origin)
@@ -284,6 +283,7 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 	}
 
 	// Build inferenceConfig if we have any inference parameters
+	// Note: Kiro API doesn't actually use max_tokens for thinking budget
 	var inferenceConfig *KiroInferenceConfig
 	if maxTokens > 0 || hasTemperature || hasTopP {
 		inferenceConfig = &KiroInferenceConfig{}
@@ -682,13 +682,28 @@ func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResul
 }
 
 // checkThinkingModeFromOpenAI checks if thinking mode is enabled in the OpenAI request.
-// Returns (thinkingEnabled, budgetTokens).
+// Returns thinkingEnabled.
 // Supports:
 // - reasoning_effort parameter (low/medium/high/auto)
 // - Model name containing "thinking" or "reason"
 // - <thinking_mode> tag in system prompt (AMP/Cursor format)
-func checkThinkingModeFromOpenAI(openaiBody []byte) (bool, int64) {
-	var budgetTokens int64 = 16000 // Default budget
+func checkThinkingModeFromOpenAI(openaiBody []byte) bool {
+	return checkThinkingModeFromOpenAIWithHeaders(openaiBody, nil)
+}
+
+// checkThinkingModeFromOpenAIWithHeaders checks if thinking mode is enabled in the OpenAI request.
+// Returns thinkingEnabled.
+// Supports:
+// - Anthropic-Beta header with interleaved-thinking (Claude CLI)
+// - reasoning_effort parameter (low/medium/high/auto)
+// - Model name containing "thinking" or "reason"
+// - <thinking_mode> tag in system prompt (AMP/Cursor format)
+func checkThinkingModeFromOpenAIWithHeaders(openaiBody []byte, headers http.Header) bool {
+	// Check Anthropic-Beta header first (Claude CLI uses this)
+	if kiroclaude.IsThinkingEnabledFromHeader(headers) {
+		log.Debugf("kiro-openai: thinking mode enabled via Anthropic-Beta header")
+		return true
+	}
 
 	// Check OpenAI format: reasoning_effort parameter
 	// Valid values: "low", "medium", "high", "auto" (not "none")
@@ -697,18 +712,7 @@ func checkThinkingModeFromOpenAI(openaiBody []byte) (bool, int64) {
 		effort := reasoningEffort.String()
 		if effort != "" && effort != "none" {
 			log.Debugf("kiro-openai: thinking mode enabled via reasoning_effort: %s", effort)
-			// Adjust budget based on effort level
-			switch effort {
-			case "low":
-				budgetTokens = 8000
-			case "medium":
-				budgetTokens = 16000
-			case "high":
-				budgetTokens = 32000
-			case "auto":
-				budgetTokens = 16000
-			}
-			return true, budgetTokens
+			return true
 		}
 	}
 
@@ -725,17 +729,7 @@ func checkThinkingModeFromOpenAI(openaiBody []byte) (bool, int64) {
 				thinkingMode := bodyStr[startIdx : startIdx+endIdx]
 				if thinkingMode == "interleaved" || thinkingMode == "enabled" {
 					log.Debugf("kiro-openai: thinking mode enabled via AMP/Cursor format: %s", thinkingMode)
-					// Try to extract max_thinking_length if present
-					if maxLenStart := strings.Index(bodyStr, "<max_thinking_length>"); maxLenStart >= 0 {
-						maxLenStart += len("<max_thinking_length>")
-						if maxLenEnd := strings.Index(bodyStr[maxLenStart:], "</max_thinking_length>"); maxLenEnd >= 0 {
-							maxLenStr := bodyStr[maxLenStart : maxLenStart+maxLenEnd]
-							if parsed, err := fmt.Sscanf(maxLenStr, "%d", &budgetTokens); err == nil && parsed == 1 {
-								log.Debugf("kiro-openai: extracted max_thinking_length: %d", budgetTokens)
-							}
-						}
-					}
-					return true, budgetTokens
+					return true
 				}
 			}
 		}
@@ -746,12 +740,20 @@ func checkThinkingModeFromOpenAI(openaiBody []byte) (bool, int64) {
 	modelLower := strings.ToLower(model)
 	if strings.Contains(modelLower, "thinking") || strings.Contains(modelLower, "-reason") {
 		log.Debugf("kiro-openai: thinking mode enabled via model name hint: %s", model)
-		return true, budgetTokens
+		return true
 	}
 
 	log.Debugf("kiro-openai: no thinking mode detected in OpenAI request")
-	return false, budgetTokens
+	return false
 }
+
+// hasThinkingTagInBody checks if the request body already contains thinking configuration tags.
+// This is used to prevent duplicate injection when client (e.g., AMP/Cursor) already includes thinking config.
+func hasThinkingTagInBody(body []byte) bool {
+	bodyStr := string(body)
+	return strings.Contains(bodyStr, "<thinking_mode>") || strings.Contains(bodyStr, "<max_thinking_length>")
+}
+
 
 // extractToolChoiceHint extracts tool_choice from OpenAI request and returns a system prompt hint.
 // OpenAI tool_choice values:
