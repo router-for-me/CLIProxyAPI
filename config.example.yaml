@@ -25,6 +25,9 @@ remote-management:
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
 
+  # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
+  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
