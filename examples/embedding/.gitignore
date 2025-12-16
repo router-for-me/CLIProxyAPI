@@ -1,32 +1,15 @@
-# Environment variables (contains secrets!)
-.env
-
-# Auth directory (contains OAuth tokens!)
+# Auth tokens (sensitive)
+.cli-proxy-api/
 auth/
 
-# Static directory from management its a generated file
-static/
+# Environment variables (may contain secrets)
+.env
 
-# server log directory
+# Server logs
 logs/
 
-# Build output
-embedding-example
-*.exe
-*.dll
-*.so
-*.dylib
+# Generated static files (control panel)
+static/
 
-# Go test files
-*.test
-*.out
-
-# Go workspace file
-go.work
-
-# Editor directories
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# Temporary config files
+config-*.yaml
