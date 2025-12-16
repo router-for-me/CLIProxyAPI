@@ -653,6 +653,42 @@ type OpenAIStreamState struct {
 	ReasoningCharsAccum int // Track accumulated reasoning characters for token estimation
 }
 
+// TranslateToClaude converts request to Claude Messages API format.
+// Uses new translator if feature flag is enabled in config, otherwise uses old translator.
+// metadata contains additional context like thinking overrides from request metadata.
+func TranslateToClaude(cfg *config.Config, from sdktranslator.Format, model string, payload []byte, streaming bool, metadata map[string]any) ([]byte, error) {
+	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
+
+	if !useCanonical {
+		to := sdktranslator.FromString("claude")
+		return sdktranslator.TranslateRequest(from, to, model, payload, streaming), nil
+	}
+
+	// Convert to IR using shared helper
+	irReq, err := convertRequestToIR(from, model, payload, metadata)
+	if err != nil {
+		return nil, err
+	}
+	if irReq == nil {
+		// Unsupported format, fall back to old translator
+		to := sdktranslator.FromString("claude")
+		return sdktranslator.TranslateRequest(from, to, model, payload, streaming), nil
+	}
+
+	// Convert IR to Claude format
+	claudeJSON, err := (&from_ir.ClaudeProvider{}).ConvertRequest(irReq)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add stream parameter if streaming is requested
+	if streaming {
+		claudeJSON, _ = sjson.SetBytes(claudeJSON, "stream", true)
+	}
+
+	return claudeJSON, nil
+}
+
 // TranslateOpenAIResponseStream converts OpenAI streaming chunk to target format using new translator.
 // This is used for OpenAI-compatible providers (like Ollama) to ensure reasoning_tokens is properly set.
 // Returns nil if new translator is disabled (caller should use old translator as fallback).

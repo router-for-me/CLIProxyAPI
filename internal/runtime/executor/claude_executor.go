@@ -53,7 +53,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
+	body, err := TranslateToClaude(e.cfg, from, req.Model, bytes.Clone(req.Payload), stream, req.Metadata)
+	if err != nil {
+		return resp, err
+	}
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
 	if upstreamModel == "" {
 		upstreamModel = req.Model
@@ -175,7 +178,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	defer reporter.trackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	body, err := TranslateToClaude(e.cfg, from, req.Model, bytes.Clone(req.Payload), true, req.Metadata)
+	if err != nil {
+		return nil, err
+	}
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
 	if upstreamModel == "" {
 		upstreamModel = req.Model
@@ -336,7 +342,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
+	body, err := TranslateToClaude(e.cfg, from, req.Model, bytes.Clone(req.Payload), stream, req.Metadata)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
 	if upstreamModel == "" {
 		upstreamModel = req.Model
@@ -704,6 +713,13 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		}
 	}
 
+	// Filter out context-1m beta feature only for OAuth authentication
+	// OAuth (free accounts) doesn't support long context, but API Key (paid) does
+	isOAuth := isOAuthAuthentication(auth)
+	if isOAuth {
+		baseBetas = filterContextBeta(baseBetas)
+	}
+
 	// Merge extra betas from request body
 	if len(extraBetas) > 0 {
 		existingSet := make(map[string]bool)
@@ -780,4 +796,39 @@ func checkSystemInstructions(payload []byte) []byte {
 		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
 	}
 	return payload
+}
+
+// isOAuthAuthentication checks if the auth is using OAuth (free account) vs API Key (paid).
+// OAuth uses access_token from Metadata, while API Key uses api_key from Attributes.
+func isOAuthAuthentication(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	// If api_key is set in Attributes, it's API Key authentication (paid)
+	if auth.Attributes != nil && auth.Attributes["api_key"] != "" {
+		return false
+	}
+	// If we're using access_token from Metadata, it's OAuth (free)
+	if auth.Metadata != nil {
+		if _, ok := auth.Metadata["access_token"].(string); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// filterContextBeta removes context-1m beta feature from comma-separated list.
+// This feature is incompatible with OAuth authentication style.
+func filterContextBeta(header string) string {
+	features := strings.Split(header, ",")
+	filtered := make([]string, 0, len(features))
+
+	for _, feature := range features {
+		trimmed := strings.TrimSpace(feature)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "context-1m") {
+			filtered = append(filtered, trimmed)
+		}
+	}
+
+	return strings.Join(filtered, ",")
 }
