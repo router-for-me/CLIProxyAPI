@@ -630,14 +630,14 @@ func expandConfigEnvVars(configPath string, quiet bool) (string, error) {
 
 // createEmbedConfig creates and returns the EmbedConfig with all essential settings.
 // When chatMode is true, logging is minimized to keep the chat UI clean.
-func createEmbedConfig(chatMode bool) *cliproxy.EmbedConfig {
+func createEmbedConfig(chatMode bool, authDir string) *cliproxy.EmbedConfig {
 	return &cliproxy.EmbedConfig{
 		// Server host and port
 		Host: "127.0.0.1", // Localhost-only for security
 		Port: 8317,        // Default port
 
 		// Authentication directory for OAuth tokens
-		AuthDir: "./auth",
+		AuthDir: authDir,
 
 		// Disable debug logging in chat mode to keep output clean
 		Debug: !chatMode,
@@ -672,23 +672,16 @@ func createEmbedConfig(chatMode bool) *cliproxy.EmbedConfig {
 }
 
 // doGeminiLogin performs the Gemini OAuth authentication flow.
-// This creates an auth file in the ./auth directory that contains the OAuth tokens.
-func doGeminiLogin(noBrowser bool, projectID string) error {
+// This creates an auth file in the auth directory that contains the OAuth tokens.
+func doGeminiLogin(noBrowser bool, projectID string, authDir string) error {
 	fmt.Println("Starting Gemini OAuth authentication...")
 	fmt.Printf("Using project ID: %s\n", projectID)
-
-	// Create a minimal config for the login flow (not chat mode)
-	embedCfg := createEmbedConfig(false)
-
-	// Ensure auth directory exists
-	if err := os.MkdirAll(embedCfg.AuthDir, 0755); err != nil {
-		return fmt.Errorf("failed to create auth directory: %w", err)
-	}
+	fmt.Printf("Auth directory: %s\n", authDir)
 
 	// Create auth manager with Gemini authenticator
 	store := auth.GetTokenStore()
 	if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
-		dirSetter.SetBaseDir(embedCfg.AuthDir)
+		dirSetter.SetBaseDir(authDir)
 	}
 
 	manager := auth.NewManager(store, auth.NewGeminiAuthenticator())
@@ -717,22 +710,15 @@ func doGeminiLogin(noBrowser bool, projectID string) error {
 }
 
 // doClaudeLogin performs the Claude OAuth authentication flow.
-// This creates an auth file in the ./auth directory that contains the OAuth tokens.
-func doClaudeLogin(noBrowser bool) error {
+// This creates an auth file in the auth directory that contains the OAuth tokens.
+func doClaudeLogin(noBrowser bool, authDir string) error {
 	fmt.Println("Starting Claude OAuth authentication...")
-
-	// Create a minimal config for the login flow (not chat mode)
-	embedCfg := createEmbedConfig(false)
-
-	// Ensure auth directory exists
-	if err := os.MkdirAll(embedCfg.AuthDir, 0755); err != nil {
-		return fmt.Errorf("failed to create auth directory: %w", err)
-	}
+	fmt.Printf("Auth directory: %s\n", authDir)
 
 	// Create auth manager with Claude authenticator
 	store := auth.GetTokenStore()
 	if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
-		dirSetter.SetBaseDir(embedCfg.AuthDir)
+		dirSetter.SetBaseDir(authDir)
 	}
 
 	manager := auth.NewManager(store, auth.NewClaudeAuthenticator())
@@ -1077,6 +1063,29 @@ When writing code, use markdown code blocks with the appropriate language tag.`
 	}
 }
 
+// defaultAuthDir returns the default auth directory, checking local first then home.
+// Priority: ./.cli-proxy-api (if exists) > ~/.cli-proxy-api
+func defaultAuthDir() string {
+	// Check local directory first
+	localDir := "./.cli-proxy-api"
+	if info, err := os.Stat(localDir); err == nil && info.IsDir() {
+		return localDir
+	}
+
+	// Fall back to home directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return localDir // Use local if can't get home
+	}
+	homeDir := filepath.Join(home, ".cli-proxy-api")
+	if info, err := os.Stat(homeDir); err == nil && info.IsDir() {
+		return homeDir
+	}
+
+	// Default to local (will be created)
+	return localDir
+}
+
 func main() {
 	// Parse command-line flags
 	var claudeLogin bool
@@ -1087,6 +1096,7 @@ func main() {
 	var timeoutMinutes int
 	var verifyEnabled bool
 	var projectID string
+	var authDir string
 
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&geminiLogin, "gemini-login", false, "Login to Gemini using OAuth (enables response verification)")
@@ -1096,11 +1106,17 @@ func main() {
 	flag.StringVar(&model, "model", "claude-opus-4-5-20251101", "Model to use for chat (e.g., claude-opus-4-5-20251101, claude-sonnet-4-20250514)")
 	flag.IntVar(&timeoutMinutes, "timeout", 15, "Inactivity timeout in minutes before auto-shutdown (0 to disable)")
 	flag.BoolVar(&verifyEnabled, "verify", true, "Enable response verification with Gemini (requires -gemini-login)")
+	flag.StringVar(&authDir, "auth-dir", defaultAuthDir(), "Directory for OAuth tokens (default: ./.cli-proxy-api or ~/.cli-proxy-api)")
 	flag.Parse()
+
+	// Ensure auth directory exists
+	if err := os.MkdirAll(authDir, 0700); err != nil {
+		log.Fatalf("Failed to create auth directory %s: %v", authDir, err)
+	}
 
 	// If login mode, perform OAuth and exit
 	if claudeLogin {
-		if err := doClaudeLogin(noBrowser); err != nil {
+		if err := doClaudeLogin(noBrowser, authDir); err != nil {
 			log.Fatalf("Login failed: %v", err)
 		}
 		return
@@ -1109,7 +1125,7 @@ func main() {
 		if projectID == "" {
 			log.Fatal("Gemini login requires -project_id flag. Get your project ID from https://console.cloud.google.com")
 		}
-		if err := doGeminiLogin(noBrowser, projectID); err != nil {
+		if err := doGeminiLogin(noBrowser, projectID, authDir); err != nil {
 			log.Fatalf("Gemini login failed: %v", err)
 		}
 		return
@@ -1136,7 +1152,7 @@ func main() {
 	}
 
 	// Get the embed configuration (pass chatMode to suppress logging in chat)
-	embedCfg := createEmbedConfig(chatMode)
+	embedCfg := createEmbedConfig(chatMode, authDir)
 
 	// Get absolute path to config file
 	configPath := "./config.yaml"
