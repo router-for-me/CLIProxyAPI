@@ -53,6 +53,9 @@ usage-statistics-enabled: false
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 
+# When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
+force-model-prefix: false
+
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
 
@@ -70,6 +73,7 @@ ws-auth: false
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
+#     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -84,6 +88,7 @@ ws-auth: false
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
+#     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -98,6 +103,7 @@ ws-auth: false
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #   - api-key: "sk-atSM..."
+#     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -124,6 +130,7 @@ ws-auth: false
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
+#     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -138,6 +145,7 @@ ws-auth: false
 # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
+#     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
 #     base-url: "https://example.com/api"         # e.g. https://zenmux.ai/api
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #     headers:

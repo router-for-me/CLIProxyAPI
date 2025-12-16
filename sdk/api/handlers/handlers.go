@@ -362,30 +362,19 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// Resolve "auto" model to an actual available model first
 	resolvedModelName := util.ResolveAutoModel(modelName)
 
-	providerName, extractedModelName, isDynamic := h.parseDynamicModel(resolvedModelName)
-
-	targetModelName := resolvedModelName
-	if isDynamic {
-		targetModelName = extractedModelName
-	}
-
 	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
-	normalizedModel, metadata = normalizeModelMetadata(targetModelName)
+	normalizedModel, metadata = normalizeModelMetadata(resolvedModelName)
 
-	if isDynamic {
-		providers = []string{providerName}
-	} else {
-		// For non-dynamic models, use the normalizedModel to get the provider name.
-		providers = util.GetProviderName(normalizedModel)
-		if len(providers) == 0 && metadata != nil {
-			if originalRaw, ok := metadata[util.ThinkingOriginalModelMetadataKey]; ok {
-				if originalModel, okStr := originalRaw.(string); okStr {
-					originalModel = strings.TrimSpace(originalModel)
-					if originalModel != "" && !strings.EqualFold(originalModel, normalizedModel) {
-						if altProviders := util.GetProviderName(originalModel); len(altProviders) > 0 {
-							providers = altProviders
-							normalizedModel = originalModel
-						}
+	// Use the normalizedModel to get the provider name.
+	providers = util.GetProviderName(normalizedModel)
+	if len(providers) == 0 && metadata != nil {
+		if originalRaw, ok := metadata[util.ThinkingOriginalModelMetadataKey]; ok {
+			if originalModel, okStr := originalRaw.(string); okStr {
+				originalModel = strings.TrimSpace(originalModel)
+				if originalModel != "" && !strings.EqualFold(originalModel, normalizedModel) {
+					if altProviders := util.GetProviderName(originalModel); len(altProviders) > 0 {
+						providers = altProviders
+						normalizedModel = originalModel
 					}
 				}
 			}

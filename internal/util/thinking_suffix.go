@@ -201,36 +201,6 @@ func ReasoningEffortFromMetadata(metadata map[string]any) (string, bool) {
 	return "", true
 }
 
-// ThinkingEffortToBudget maps reasoning effort levels to approximate budgets,
-// clamping the result to the model's supported range.
-func ThinkingEffortToBudget(model, effort string) (int, bool) {
-	if effort == "" {
-		return 0, false
-	}
-	normalized, ok := NormalizeReasoningEffortLevel(model, effort)
-	if !ok {
-		normalized = strings.ToLower(strings.TrimSpace(effort))
-	}
-	switch normalized {
-	case "none":
-		return 0, true
-	case "auto":
-		return NormalizeThinkingBudget(model, -1), true
-	case "minimal":
-		return NormalizeThinkingBudget(model, 512), true
-	case "low":
-		return NormalizeThinkingBudget(model, 1024), true
-	case "medium":
-		return NormalizeThinkingBudget(model, 8192), true
-	case "high":
-		return NormalizeThinkingBudget(model, 24576), true
-	case "xhigh":
-		return NormalizeThinkingBudget(model, 32768), true
-	default:
-		return 0, false
-	}
-}
-
 // ResolveOriginalModel returns the original model name stored in metadata (if present),
 // otherwise falls back to the provided model.
 func ResolveOriginalModel(model string, metadata map[string]any) string {

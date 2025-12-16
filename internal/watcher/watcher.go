@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	"gopkg.in/yaml.v3"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -187,7 +188,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 	go w.processEvents(ctx)
 
 	// Perform an initial full reload based on current config and auth dir
-	w.reloadClients(true, nil)
+	w.reloadClients(true, nil, false)
 	return nil
 }
 
@@ -305,7 +306,7 @@ func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	return true
 }
 
-func (w *Watcher) refreshAuthState() {
+func (w *Watcher) refreshAuthState(force bool) {
 	auths := w.SnapshotCoreAuths()
 	w.clientsMutex.Lock()
 	if len(w.runtimeAuths) > 0 {
@@ -315,12 +316,12 @@ func (w *Watcher) refreshAuthState() {
 			}
 		}
 	}
-	updates := w.prepareAuthUpdatesLocked(auths)
+	updates := w.prepareAuthUpdatesLocked(auths, force)
 	w.clientsMutex.Unlock()
 	w.dispatchAuthUpdates(updates)
 }
 
-func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth) []AuthUpdate {
+func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) []AuthUpdate {
 	newState := make(map[string]*coreauth.Auth, len(auths))
 	for _, auth := range auths {
 		if auth == nil || auth.ID == "" {
@@ -347,7 +348,7 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth) []AuthUpdate 
 	for id, auth := range newState {
 		if existing, ok := w.currentAuths[id]; !ok {
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: auth.Clone()})
-		} else if !authEqual(existing, auth) {
+		} else if force || !authEqual(existing, auth) {
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionModify, ID: id, Auth: auth.Clone()})
 		}
 	}
@@ -514,170 +515,6 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 	return clone
 }
 
-// computeOpenAICompatModelsHash returns a stable hash for the compatibility models so that
-// changes to the model list trigger auth updates during hot reload.
-func computeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) string {
-	if len(models) == 0 {
-		return ""
-	}
-	data, err := json.Marshal(models)
-	if err != nil || len(data) == 0 {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-func computeVertexCompatModelsHash(models []config.VertexCompatModel) string {
-	if len(models) == 0 {
-		return ""
-	}
-	data, err := json.Marshal(models)
-	if err != nil || len(data) == 0 {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-// computeClaudeModelsHash returns a stable hash for Claude model aliases.
-func computeClaudeModelsHash(models []config.ClaudeModel) string {
-	if len(models) == 0 {
-		return ""
-	}
-	data, err := json.Marshal(models)
-	if err != nil || len(data) == 0 {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-func computeExcludedModelsHash(excluded []string) string {
-	if len(excluded) == 0 {
-		return ""
-	}
-	normalized := make([]string, 0, len(excluded))
-	for _, entry := range excluded {
-		if trimmed := strings.TrimSpace(entry); trimmed != "" {
-			normalized = append(normalized, strings.ToLower(trimmed))
-		}
-	}
-	if len(normalized) == 0 {
-		return ""
-	}
-	sort.Strings(normalized)
-	data, err := json.Marshal(normalized)
-	if err != nil || len(data) == 0 {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-type excludedModelsSummary struct {
-	hash  string
-	count int
-}
-
-func summarizeExcludedModels(list []string) excludedModelsSummary {
-	if len(list) == 0 {
-		return excludedModelsSummary{}
-	}
-	seen := make(map[string]struct{}, len(list))
-	normalized := make([]string, 0, len(list))
-	for _, entry := range list {
-		if trimmed := strings.ToLower(strings.TrimSpace(entry)); trimmed != "" {
-			if _, exists := seen[trimmed]; exists {
-				continue
-			}
-			seen[trimmed] = struct{}{}
-			normalized = append(normalized, trimmed)
-		}
-	}
-	sort.Strings(normalized)
-	return excludedModelsSummary{
-		hash:  computeExcludedModelsHash(normalized),
-		count: len(normalized),
-	}
-}
-
-type ampModelMappingsSummary struct {
-	hash  string
-	count int
-}
-
-func summarizeAmpModelMappings(mappings []config.AmpModelMapping) ampModelMappingsSummary {
-	if len(mappings) == 0 {
-		return ampModelMappingsSummary{}
-	}
-	entries := make([]string, 0, len(mappings))
-	for _, mapping := range mappings {
-		from := strings.TrimSpace(mapping.From)
-		to := strings.TrimSpace(mapping.To)
-		if from == "" && to == "" {
-			continue
-		}
-		entries = append(entries, from+"->"+to)
-	}
-	if len(entries) == 0 {
-		return ampModelMappingsSummary{}
-	}
-	sort.Strings(entries)
-	sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
-	return ampModelMappingsSummary{
-		hash:  hex.EncodeToString(sum[:]),
-		count: len(entries),
-	}
-}
-
-func summarizeOAuthExcludedModels(entries map[string][]string) map[string]excludedModelsSummary {
-	if len(entries) == 0 {
-		return nil
-	}
-	out := make(map[string]excludedModelsSummary, len(entries))
-	for k, v := range entries {
-		key := strings.ToLower(strings.TrimSpace(k))
-		if key == "" {
-			continue
-		}
-		out[key] = summarizeExcludedModels(v)
-	}
-	return out
-}
-
-func diffOAuthExcludedModelChanges(oldMap, newMap map[string][]string) ([]string, []string) {
-	oldSummary := summarizeOAuthExcludedModels(oldMap)
-	newSummary := summarizeOAuthExcludedModels(newMap)
-	keys := make(map[string]struct{}, len(oldSummary)+len(newSummary))
-	for k := range oldSummary {
-		keys[k] = struct{}{}
-	}
-	for k := range newSummary {
-		keys[k] = struct{}{}
-	}
-	changes := make([]string, 0, len(keys))
-	affected := make([]string, 0, len(keys))
-	for key := range keys {
-		oldInfo, okOld := oldSummary[key]
-		newInfo, okNew := newSummary[key]
-		switch {
-		case okOld && !okNew:
-			changes = append(changes, fmt.Sprintf("oauth-excluded-models[%s]: removed", key))
-			affected = append(affected, key)
-		case !okOld && okNew:
-			changes = append(changes, fmt.Sprintf("oauth-excluded-models[%s]: added (%d entries)", key, newInfo.count))
-			affected = append(affected, key)
-		case okOld && okNew && oldInfo.hash != newInfo.hash:
-			changes = append(changes, fmt.Sprintf("oauth-excluded-models[%s]: updated (%d -> %d entries)", key, oldInfo.count, newInfo.count))
-			affected = append(affected, key)
-		}
-	}
-	sort.Strings(changes)
-	sort.Strings(affected)
-	return changes, affected
-}
-
 func applyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey []string, authKind string) {
 	if auth == nil || cfg == nil {
 		return
@@ -706,7 +543,7 @@ func applyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 		combined = append(combined, k)
 	}
 	sort.Strings(combined)
-	hash := computeExcludedModelsHash(combined)
+	hash := diff.ComputeExcludedModelsHash(combined)
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
@@ -860,7 +697,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 				return
 			}
-			fmt.Printf("auth file changed (%s): %s, processing incrementally\n", event.Op.String(), filepath.Base(event.Name))
+			log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 			w.addOrUpdateClient(event.Name)
 			return
 		}
@@ -868,7 +705,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			log.Debugf("ignoring remove for unknown auth file: %s", filepath.Base(event.Name))
 			return
 		}
-		fmt.Printf("auth file changed (%s): %s, processing incrementally\n", event.Op.String(), filepath.Base(event.Name))
+		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 		w.removeClient(event.Name)
 		return
 	}
@@ -877,7 +714,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 			return
 		}
-		fmt.Printf("auth file changed (%s): %s, processing incrementally\n", event.Op.String(), filepath.Base(event.Name))
+		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 		w.addOrUpdateClient(event.Name)
 	}
 }
@@ -962,7 +799,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 		log.Debugf("config file content unchanged (hash match), skipping reload")
 		return
 	}
-	fmt.Printf("config file changed, reloading: %s\n", w.configPath)
+	log.Infof("config file changed, reloading: %s", w.configPath)
 	if w.reloadConfig() {
 		finalHash := newHash
 		if updatedData, errRead := os.ReadFile(w.configPath); errRead == nil && len(updatedData) > 0 {
@@ -1008,7 +845,7 @@ func (w *Watcher) reloadConfig() bool {
 
 	var affectedOAuthProviders []string
 	if oldConfig != nil {
-		_, affectedOAuthProviders = diffOAuthExcludedModelChanges(oldConfig.OAuthExcludedModels, newConfig.OAuthExcludedModels)
+		_, affectedOAuthProviders = diff.DiffOAuthExcludedModelChanges(oldConfig.OAuthExcludedModels, newConfig.OAuthExcludedModels)
 	}
 
 	// Always apply the current log level based on the latest config.
@@ -1021,7 +858,7 @@ func (w *Watcher) reloadConfig() bool {
 
 	// Log configuration changes in debug mode, only when there are material diffs
 	if oldConfig != nil {
-		details := buildConfigChangeDetails(oldConfig, newConfig)
+		details := diff.BuildConfigChangeDetails(oldConfig, newConfig)
 		if len(details) > 0 {
 			log.Debugf("config changes detected:")
 			for _, d := range details {
@@ -1033,15 +870,16 @@ func (w *Watcher) reloadConfig() bool {
 	}
 
 	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir
+	forceAuthRefresh := oldConfig != nil && oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix
 
 	log.Infof("config successfully reloaded, triggering client reload")
 	// Reload clients with new config
-	w.reloadClients(authDirChanged, affectedOAuthProviders)
+	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
 	return true
 }
 
 // reloadClients performs a full scan and reload of all clients.
-func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string) {
+func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) {
 	log.Debugf("starting full client load process")
 
 	w.clientsMutex.RLock()
@@ -1132,7 +970,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.reloadCallback(cfg)
 	}
 
-	w.refreshAuthState()
+	w.refreshAuthState(forceAuthRefresh)
 
 	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
 		totalNewClients,
@@ -1183,7 +1021,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 	w.clientsMutex.Unlock() // Unlock before the callback
 
-	w.refreshAuthState()
+	w.refreshAuthState(false)
 
 	if w.reloadCallback != nil {
 		log.Debugf("triggering server update callback after add/update")
@@ -1202,7 +1040,7 @@ func (w *Watcher) removeClient(path string) {
 
 	w.clientsMutex.Unlock() // Release the lock before the callback
 
-	w.refreshAuthState()
+	w.refreshAuthState(false)
 
 	if w.reloadCallback != nil {
 		log.Debugf("triggering server update callback after removal")
@@ -1231,6 +1069,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			if key == "" {
 				continue
 			}
+			prefix := strings.TrimSpace(entry.Prefix)
 			base := strings.TrimSpace(entry.BaseURL)
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
 			id, token := idGen.next("gemini:apikey", key, base)
@@ -1246,6 +1085,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				ID:         id,
 				Provider:   "gemini",
 				Label:      "gemini-apikey",
+				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,
 				Attributes: attrs,
@@ -1263,6 +1103,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			if key == "" {
 				continue
 			}
+			prefix := strings.TrimSpace(ck.Prefix)
 			base := strings.TrimSpace(ck.BaseURL)
 			id, token := idGen.next("claude:apikey", key, base)
 			attrs := map[string]string{
@@ -1272,7 +1113,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			if base != "" {
 				attrs["base_url"] = base
 			}
-			if hash := computeClaudeModelsHash(ck.Models); hash != "" {
+			if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(ck.Headers, attrs)
@@ -1281,6 +1122,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				ID:         id,
 				Provider:   "claude",
 				Label:      "claude-apikey",
+				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,
 				Attributes: attrs,
@@ -1297,6 +1139,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			if key == "" {
 				continue
 			}
+			prefix := strings.TrimSpace(ck.Prefix)
 			id, token := idGen.next("codex:apikey", key, ck.BaseURL)
 			attrs := map[string]string{
 				"source":  fmt.Sprintf("config:codex[%s]", token),
@@ -1311,6 +1154,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				ID:         id,
 				Provider:   "codex",
 				Label:      "codex-apikey",
+				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,
 				Attributes: attrs,
@@ -1404,6 +1248,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 		}
 		for i := range cfg.OpenAICompatibility {
 			compat := &cfg.OpenAICompatibility[i]
+			prefix := strings.TrimSpace(compat.Prefix)
 			providerName := strings.ToLower(strings.TrimSpace(compat.Name))
 			if providerName == "" {
 				providerName = "openai-compatibility"
@@ -1427,7 +1272,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 				if key != "" {
 					attrs["api_key"] = key
 				}
-				if hash := computeOpenAICompatModelsHash(compat.Models); hash != "" {
+				if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 					attrs["models_hash"] = hash
 				}
 				addConfigHeadersToAttrs(compat.Headers, attrs)
@@ -1435,6 +1280,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 					ID:         id,
 					Provider:   providerName,
 					Label:      compat.Name,
+					Prefix:     prefix,
 					Status:     coreauth.StatusActive,
 					ProxyURL:   proxyURL,
 					Attributes: attrs,
@@ -1453,7 +1299,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 					"compat_name":  compat.Name,
 					"provider_key": providerName,
 				}
-				if hash := computeOpenAICompatModelsHash(compat.Models); hash != "" {
+				if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 					attrs["models_hash"] = hash
 				}
 				addConfigHeadersToAttrs(compat.Headers, attrs)
@@ -1461,6 +1307,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 					ID:         id,
 					Provider:   providerName,
 					Label:      compat.Name,
+					Prefix:     prefix,
 					Status:     coreauth.StatusActive,
 					Attributes: attrs,
 					CreatedAt:  now,
@@ -1478,8 +1325,9 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 		base := strings.TrimSpace(compat.BaseURL)
 
 		key := strings.TrimSpace(compat.APIKey)
+		prefix := strings.TrimSpace(compat.Prefix)
 		proxyURL := strings.TrimSpace(compat.ProxyURL)
-		idKind := fmt.Sprintf("vertex:apikey:%s", base)
+		idKind := "vertex:apikey"
 		id, token := idGen.next(idKind, key, base, proxyURL)
 		attrs := map[string]string{
 			"source":       fmt.Sprintf("config:vertex-apikey[%s]", token),
@@ -1489,7 +1337,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 		if key != "" {
 			attrs["api_key"] = key
 		}
-		if hash := computeVertexCompatModelsHash(compat.Models); hash != "" {
+		if hash := diff.ComputeVertexCompatModelsHash(compat.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(compat.Headers, attrs)
@@ -1497,6 +1345,7 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			ID:         id,
 			Provider:   providerName,
 			Label:      "vertex-apikey",
+			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,
@@ -1571,10 +1420,20 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 			proxyURL = p
 		}
 
+		prefix := ""
+		if rawPrefix, ok := metadata["prefix"].(string); ok {
+			trimmed := strings.TrimSpace(rawPrefix)
+			trimmed = strings.Trim(trimmed, "/")
+			if trimmed != "" && !strings.Contains(trimmed, "/") {
+				prefix = trimmed
+			}
+		}
+
 		a := &coreauth.Auth{
 			ID:       id,
 			Provider: provider,
 			Label:    label,
+			Prefix:   prefix,
 			Status:   coreauth.StatusActive,
 			Attributes: map[string]string{
 				"source": full,
@@ -1682,6 +1541,7 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			Attributes: attrs,
 			Metadata:   metadataCopy,
 			ProxyURL:   primary.ProxyURL,
+			Prefix:     primary.Prefix,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 			Runtime:    geminicli.NewVirtualCredential(projectID, shared),
@@ -1795,329 +1655,6 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount
 }
 
-func diffOpenAICompatibility(oldList, newList []config.OpenAICompatibility) []string {
-	changes := make([]string, 0)
-	oldMap := make(map[string]config.OpenAICompatibility, len(oldList))
-	oldLabels := make(map[string]string, len(oldList))
-	for idx, entry := range oldList {
-		key, label := openAICompatKey(entry, idx)
-		oldMap[key] = entry
-		oldLabels[key] = label
-	}
-	newMap := make(map[string]config.OpenAICompatibility, len(newList))
-	newLabels := make(map[string]string, len(newList))
-	for idx, entry := range newList {
-		key, label := openAICompatKey(entry, idx)
-		newMap[key] = entry
-		newLabels[key] = label
-	}
-	keySet := make(map[string]struct{}, len(oldMap)+len(newMap))
-	for key := range oldMap {
-		keySet[key] = struct{}{}
-	}
-	for key := range newMap {
-		keySet[key] = struct{}{}
-	}
-	orderedKeys := make([]string, 0, len(keySet))
-	for key := range keySet {
-		orderedKeys = append(orderedKeys, key)
-	}
-	sort.Strings(orderedKeys)
-	for _, key := range orderedKeys {
-		oldEntry, oldOk := oldMap[key]
-		newEntry, newOk := newMap[key]
-		label := oldLabels[key]
-		if label == "" {
-			label = newLabels[key]
-		}
-		switch {
-		case !oldOk:
-			changes = append(changes, fmt.Sprintf("provider added: %s (api-keys=%d, models=%d)", label, countAPIKeys(newEntry), countOpenAIModels(newEntry.Models)))
-		case !newOk:
-			changes = append(changes, fmt.Sprintf("provider removed: %s (api-keys=%d, models=%d)", label, countAPIKeys(oldEntry), countOpenAIModels(oldEntry.Models)))
-		default:
-			if detail := describeOpenAICompatibilityUpdate(oldEntry, newEntry); detail != "" {
-				changes = append(changes, fmt.Sprintf("provider updated: %s %s", label, detail))
-			}
-		}
-	}
-	return changes
-}
-
-func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibility) string {
-	oldKeyCount := countAPIKeys(oldEntry)
-	newKeyCount := countAPIKeys(newEntry)
-	oldModelCount := countOpenAIModels(oldEntry.Models)
-	newModelCount := countOpenAIModels(newEntry.Models)
-	details := make([]string, 0, 3)
-	if oldKeyCount != newKeyCount {
-		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
-	}
-	if oldModelCount != newModelCount {
-		details = append(details, fmt.Sprintf("models %d -> %d", oldModelCount, newModelCount))
-	}
-	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
-		details = append(details, "headers updated")
-	}
-	if len(details) == 0 {
-		return ""
-	}
-	return "(" + strings.Join(details, ", ") + ")"
-}
-
-func countAPIKeys(entry config.OpenAICompatibility) int {
-	count := 0
-	for _, keyEntry := range entry.APIKeyEntries {
-		if strings.TrimSpace(keyEntry.APIKey) != "" {
-			count++
-		}
-	}
-	return count
-}
-
-func countOpenAIModels(models []config.OpenAICompatibilityModel) int {
-	count := 0
-	for _, model := range models {
-		name := strings.TrimSpace(model.Name)
-		alias := strings.TrimSpace(model.Alias)
-		if name == "" && alias == "" {
-			continue
-		}
-		count++
-	}
-	return count
-}
-
-func openAICompatKey(entry config.OpenAICompatibility, index int) (string, string) {
-	name := strings.TrimSpace(entry.Name)
-	if name != "" {
-		return "name:" + name, name
-	}
-	base := strings.TrimSpace(entry.BaseURL)
-	if base != "" {
-		return "base:" + base, base
-	}
-	for _, model := range entry.Models {
-		alias := strings.TrimSpace(model.Alias)
-		if alias == "" {
-			alias = strings.TrimSpace(model.Name)
-		}
-		if alias != "" {
-			return "alias:" + alias, alias
-		}
-	}
-	return fmt.Sprintf("index:%d", index), fmt.Sprintf("entry-%d", index+1)
-}
-
-// buildConfigChangeDetails computes a redacted, human-readable list of config changes.
-// It avoids printing secrets (like API keys) and focuses on structural or non-sensitive fields.
-func buildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
-	changes := make([]string, 0, 16)
-	if oldCfg == nil || newCfg == nil {
-		return changes
-	}
-
-	// Simple scalars
-	if oldCfg.Port != newCfg.Port {
-		changes = append(changes, fmt.Sprintf("port: %d -> %d", oldCfg.Port, newCfg.Port))
-	}
-	if oldCfg.AuthDir != newCfg.AuthDir {
-		changes = append(changes, fmt.Sprintf("auth-dir: %s -> %s", oldCfg.AuthDir, newCfg.AuthDir))
-	}
-	if oldCfg.Debug != newCfg.Debug {
-		changes = append(changes, fmt.Sprintf("debug: %t -> %t", oldCfg.Debug, newCfg.Debug))
-	}
-	if oldCfg.LoggingToFile != newCfg.LoggingToFile {
-		changes = append(changes, fmt.Sprintf("logging-to-file: %t -> %t", oldCfg.LoggingToFile, newCfg.LoggingToFile))
-	}
-	if oldCfg.UsageStatisticsEnabled != newCfg.UsageStatisticsEnabled {
-		changes = append(changes, fmt.Sprintf("usage-statistics-enabled: %t -> %t", oldCfg.UsageStatisticsEnabled, newCfg.UsageStatisticsEnabled))
-	}
-	if oldCfg.DisableCooling != newCfg.DisableCooling {
-		changes = append(changes, fmt.Sprintf("disable-cooling: %t -> %t", oldCfg.DisableCooling, newCfg.DisableCooling))
-	}
-	if oldCfg.RequestLog != newCfg.RequestLog {
-		changes = append(changes, fmt.Sprintf("request-log: %t -> %t", oldCfg.RequestLog, newCfg.RequestLog))
-	}
-	if oldCfg.RequestRetry != newCfg.RequestRetry {
-		changes = append(changes, fmt.Sprintf("request-retry: %d -> %d", oldCfg.RequestRetry, newCfg.RequestRetry))
-	}
-	if oldCfg.MaxRetryInterval != newCfg.MaxRetryInterval {
-		changes = append(changes, fmt.Sprintf("max-retry-interval: %d -> %d", oldCfg.MaxRetryInterval, newCfg.MaxRetryInterval))
-	}
-	if oldCfg.ProxyURL != newCfg.ProxyURL {
-		changes = append(changes, fmt.Sprintf("proxy-url: %s -> %s", oldCfg.ProxyURL, newCfg.ProxyURL))
-	}
-	if oldCfg.WebsocketAuth != newCfg.WebsocketAuth {
-		changes = append(changes, fmt.Sprintf("ws-auth: %t -> %t", oldCfg.WebsocketAuth, newCfg.WebsocketAuth))
-	}
-
-	// Quota-exceeded behavior
-	if oldCfg.QuotaExceeded.SwitchProject != newCfg.QuotaExceeded.SwitchProject {
-		changes = append(changes, fmt.Sprintf("quota-exceeded.switch-project: %t -> %t", oldCfg.QuotaExceeded.SwitchProject, newCfg.QuotaExceeded.SwitchProject))
-	}
-	if oldCfg.QuotaExceeded.SwitchPreviewModel != newCfg.QuotaExceeded.SwitchPreviewModel {
-		changes = append(changes, fmt.Sprintf("quota-exceeded.switch-preview-model: %t -> %t", oldCfg.QuotaExceeded.SwitchPreviewModel, newCfg.QuotaExceeded.SwitchPreviewModel))
-	}
-
-	// API keys (redacted) and counts
-	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
-		changes = append(changes, fmt.Sprintf("api-keys count: %d -> %d", len(oldCfg.APIKeys), len(newCfg.APIKeys)))
-	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
-		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
-	}
-	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
-		changes = append(changes, fmt.Sprintf("gemini-api-key count: %d -> %d", len(oldCfg.GeminiKey), len(newCfg.GeminiKey)))
-	} else {
-		for i := range oldCfg.GeminiKey {
-			if i >= len(newCfg.GeminiKey) {
-				break
-			}
-			o := oldCfg.GeminiKey[i]
-			n := newCfg.GeminiKey[i]
-			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
-			}
-			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].proxy-url: %s -> %s", i, strings.TrimSpace(o.ProxyURL), strings.TrimSpace(n.ProxyURL)))
-			}
-			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].api-key: updated", i))
-			}
-			if !equalStringMap(o.Headers, n.Headers) {
-				changes = append(changes, fmt.Sprintf("gemini[%d].headers: updated", i))
-			}
-			oldExcluded := summarizeExcludedModels(o.ExcludedModels)
-			newExcluded := summarizeExcludedModels(n.ExcludedModels)
-			if oldExcluded.hash != newExcluded.hash {
-				changes = append(changes, fmt.Sprintf("gemini[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
-			}
-		}
-	}
-
-	// Claude keys (do not print key material)
-	if len(oldCfg.ClaudeKey) != len(newCfg.ClaudeKey) {
-		changes = append(changes, fmt.Sprintf("claude-api-key count: %d -> %d", len(oldCfg.ClaudeKey), len(newCfg.ClaudeKey)))
-	} else {
-		for i := range oldCfg.ClaudeKey {
-			if i >= len(newCfg.ClaudeKey) {
-				break
-			}
-			o := oldCfg.ClaudeKey[i]
-			n := newCfg.ClaudeKey[i]
-			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("claude[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
-			}
-			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
-				changes = append(changes, fmt.Sprintf("claude[%d].proxy-url: %s -> %s", i, strings.TrimSpace(o.ProxyURL), strings.TrimSpace(n.ProxyURL)))
-			}
-			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
-				changes = append(changes, fmt.Sprintf("claude[%d].api-key: updated", i))
-			}
-			if !equalStringMap(o.Headers, n.Headers) {
-				changes = append(changes, fmt.Sprintf("claude[%d].headers: updated", i))
-			}
-			oldExcluded := summarizeExcludedModels(o.ExcludedModels)
-			newExcluded := summarizeExcludedModels(n.ExcludedModels)
-			if oldExcluded.hash != newExcluded.hash {
-				changes = append(changes, fmt.Sprintf("claude[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
-			}
-		}
-	}
-
-	// Codex keys (do not print key material)
-	if len(oldCfg.CodexKey) != len(newCfg.CodexKey) {
-		changes = append(changes, fmt.Sprintf("codex-api-key count: %d -> %d", len(oldCfg.CodexKey), len(newCfg.CodexKey)))
-	} else {
-		for i := range oldCfg.CodexKey {
-			if i >= len(newCfg.CodexKey) {
-				break
-			}
-			o := oldCfg.CodexKey[i]
-			n := newCfg.CodexKey[i]
-			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
-				changes = append(changes, fmt.Sprintf("codex[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
-			}
-			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
-				changes = append(changes, fmt.Sprintf("codex[%d].proxy-url: %s -> %s", i, strings.TrimSpace(o.ProxyURL), strings.TrimSpace(n.ProxyURL)))
-			}
-			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
-				changes = append(changes, fmt.Sprintf("codex[%d].api-key: updated", i))
-			}
-			if !equalStringMap(o.Headers, n.Headers) {
-				changes = append(changes, fmt.Sprintf("codex[%d].headers: updated", i))
-			}
-			oldExcluded := summarizeExcludedModels(o.ExcludedModels)
-			newExcluded := summarizeExcludedModels(n.ExcludedModels)
-			if oldExcluded.hash != newExcluded.hash {
-				changes = append(changes, fmt.Sprintf("codex[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
-			}
-		}
-	}
-
-	// AmpCode settings (redacted where needed)
-	oldAmpURL := strings.TrimSpace(oldCfg.AmpCode.UpstreamURL)
-	newAmpURL := strings.TrimSpace(newCfg.AmpCode.UpstreamURL)
-	if oldAmpURL != newAmpURL {
-		changes = append(changes, fmt.Sprintf("ampcode.upstream-url: %s -> %s", oldAmpURL, newAmpURL))
-	}
-	oldAmpKey := strings.TrimSpace(oldCfg.AmpCode.UpstreamAPIKey)
-	newAmpKey := strings.TrimSpace(newCfg.AmpCode.UpstreamAPIKey)
-	switch {
-	case oldAmpKey == "" && newAmpKey != "":
-		changes = append(changes, "ampcode.upstream-api-key: added")
-	case oldAmpKey != "" && newAmpKey == "":
-		changes = append(changes, "ampcode.upstream-api-key: removed")
-	case oldAmpKey != newAmpKey:
-		changes = append(changes, "ampcode.upstream-api-key: updated")
-	}
-	if oldCfg.AmpCode.RestrictManagementToLocalhost != newCfg.AmpCode.RestrictManagementToLocalhost {
-		changes = append(changes, fmt.Sprintf("ampcode.restrict-management-to-localhost: %t -> %t", oldCfg.AmpCode.RestrictManagementToLocalhost, newCfg.AmpCode.RestrictManagementToLocalhost))
-	}
-	oldMappings := summarizeAmpModelMappings(oldCfg.AmpCode.ModelMappings)
-	newMappings := summarizeAmpModelMappings(newCfg.AmpCode.ModelMappings)
-	if oldMappings.hash != newMappings.hash {
-		changes = append(changes, fmt.Sprintf("ampcode.model-mappings: updated (%d -> %d entries)", oldMappings.count, newMappings.count))
-	}
-
-	if entries, _ := diffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
-		changes = append(changes, entries...)
-	}
-
-	// Remote management (never print the key)
-	if oldCfg.RemoteManagement.AllowRemote != newCfg.RemoteManagement.AllowRemote {
-		changes = append(changes, fmt.Sprintf("remote-management.allow-remote: %t -> %t", oldCfg.RemoteManagement.AllowRemote, newCfg.RemoteManagement.AllowRemote))
-	}
-	if oldCfg.RemoteManagement.DisableControlPanel != newCfg.RemoteManagement.DisableControlPanel {
-		changes = append(changes, fmt.Sprintf("remote-management.disable-control-panel: %t -> %t", oldCfg.RemoteManagement.DisableControlPanel, newCfg.RemoteManagement.DisableControlPanel))
-	}
-	oldPanelRepo := strings.TrimSpace(oldCfg.RemoteManagement.PanelGitHubRepository)
-	newPanelRepo := strings.TrimSpace(newCfg.RemoteManagement.PanelGitHubRepository)
-	if oldPanelRepo != newPanelRepo {
-		changes = append(changes, fmt.Sprintf("remote-management.panel-github-repository: %s -> %s", oldPanelRepo, newPanelRepo))
-	}
-	if oldCfg.RemoteManagement.SecretKey != newCfg.RemoteManagement.SecretKey {
-		switch {
-		case oldCfg.RemoteManagement.SecretKey == "" && newCfg.RemoteManagement.SecretKey != "":
-			changes = append(changes, "remote-management.secret-key: created")
-		case oldCfg.RemoteManagement.SecretKey != "" && newCfg.RemoteManagement.SecretKey == "":
-			changes = append(changes, "remote-management.secret-key: deleted")
-		default:
-			changes = append(changes, "remote-management.secret-key: updated")
-		}
-	}
-
-	// OpenAI compatibility providers (summarized)
-	if compat := diffOpenAICompatibility(oldCfg.OpenAICompatibility, newCfg.OpenAICompatibility); len(compat) > 0 {
-		changes = append(changes, "openai-compatibility:")
-		for _, c := range compat {
-			changes = append(changes, "  "+c)
-		}
-	}
-
-	return changes
-}
-
 func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {
 	if len(headers) == 0 || attrs == nil {
 		return
@@ -2130,24 +1667,4 @@ func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string)
 		}
 		attrs["header:"+key] = val
 	}
-}
-
-func trimStrings(in []string) []string {
-	out := make([]string, len(in))
-	for i := range in {
-		out[i] = strings.TrimSpace(in[i])
-	}
-	return out
-}
-
-func equalStringMap(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
 }
