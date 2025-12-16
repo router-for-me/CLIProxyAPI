@@ -11,6 +11,9 @@ The example shows:
 - ✅ Configuring essential server options (host, port, TLS, management API)
 - ✅ Loading provider configurations from YAML
 - ✅ **Response verification** using Gemini to fact-check Claude's responses
+- ✅ **Auto-correction**: Failed verifications are fed back to Claude for correction
+- ✅ **Readline support**: Arrow keys for history navigation and line editing
+- ✅ **Shared auth directory**: Use `--auth-dir` to share tokens with main server
 - ✅ **Automatic test request** to verify authentication
 - ✅ Starting the service programmatically
 - ✅ Graceful shutdown on SIGINT/SIGTERM
@@ -88,7 +91,7 @@ go run main.go -claude-login -no-browser
 # The OAuth callback will still work even from a different machine
 ```
 
-This creates authentication tokens in `./auth/` directory that the embedded service will use.
+This creates authentication tokens in the auth directory (`./.cli-proxy-api` or `~/.cli-proxy-api`) that the embedded service will use.
 
 ### 3. Run the Example
 
@@ -157,7 +160,7 @@ Essential server options are set via `EmbedConfig` in `main.go`:
 |-------|------|---------|-------------|
 | `Host` | `string` | `""` (all interfaces) | Network interface to bind (use `127.0.0.1` for localhost-only) |
 | `Port` | `int` | **Required** | Server port (1-65535) |
-| `AuthDir` | `string` | `"./auth"` | Directory for OAuth token storage |
+| `AuthDir` | `string` | `./.cli-proxy-api` or `~/.cli-proxy-api` | Directory for OAuth token storage |
 | `Debug` | `bool` | `false` | Enable debug-level logging |
 | `LoggingToFile` | `bool` | `false` | Write logs to files (vs. stdout) |
 | `UsageStatisticsEnabled` | `bool` | `false` | Track usage statistics in memory |
@@ -219,9 +222,11 @@ go run main.go -claude-login
 
 **Gemini (for response verification):**
 ```bash
-go run main.go -gemini-login
-# Or browserless: go run main.go -gemini-login -no-browser
+# Requires Google Cloud project ID
+go run main.go -gemini-login -project_id YOUR_PROJECT_ID
+# Or browserless: go run main.go -gemini-login -project_id YOUR_PROJECT_ID -no-browser
 ```
+Get your project ID from https://console.cloud.google.com
 
 **Other providers (from repository root):**
 ```bash
@@ -229,7 +234,7 @@ go run cmd/server/main.go -codex-login
 go run cmd/server/main.go -qwen-login
 ```
 
-This opens a browser for OAuth consent and stores tokens in `./auth/`.
+This opens a browser for OAuth consent and stores tokens in the auth directory.
 
 ### 2. Configure AuthDir in EmbedConfig
 
@@ -405,7 +410,7 @@ The example supports **automatic response verification** using Gemini to fact-ch
 
 1. **Authenticate with Gemini:**
    ```bash
-   go run main.go -gemini-login
+   go run main.go -gemini-login -project_id YOUR_PROJECT_ID
    ```
 
 2. **Start chat (verification auto-enabled):**
@@ -417,6 +422,7 @@ The example supports **automatic response verification** using Gemini to fact-ch
 
 - After each Claude response, Gemini verifies factual claims
 - Results display with status emojis: ✅ Verified, ⚠️ Partially Verified, ❌ Inaccurate, ℹ️ Unable to Verify
+- **Auto-correction**: If verification fails (❌ or ⚠️), feedback is sent to Claude for correction
 - Verification streams in real-time below Claude's response
 - Results are cached (5 min TTL) to avoid redundant API calls
 
@@ -435,16 +441,28 @@ The example supports **automatic response verification** using Gemini to fact-ch
 # Disable verification even when Gemini is configured
 go run main.go -chat -verify=false
 
-# Use a different model (default: claude-opus-4-5-20251101)
+# Use a different Claude model (default: claude-opus-4-5-20251101)
 go run main.go -chat -model claude-sonnet-4-20250514
+
+# Use a different Gemini model for verification (default: gemini-2.5-flash)
+go run main.go -chat -verify-model gemini-2.5-pro
+
+# Use a custom auth directory (default: ./.cli-proxy-api or ~/.cli-proxy-api)
+go run main.go -chat -auth-dir ~/.my-auth
+
+# Set inactivity timeout (default: 15 minutes, 0 to disable)
+go run main.go -chat -timeout 30
 ```
 
 ### Features
 
+- **Auto-Correction**: Failed verifications trigger Claude to correct its response
+- **Readline Support**: Arrow keys for history navigation, Ctrl+R for search
 - **Caching**: Identical responses return cached verification (shows 📋 Cached indicator)
 - **Rate Limiting**: Automatic 60-second cooldown on rate limit errors
 - **Graceful Fallback**: Chat continues normally if verification fails
 - **Visual Separation**: Yellow header distinguishes verification from Claude's response
+- **Shared Auth**: Use `--auth-dir` to share tokens with main CLIProxyAPI server
 
 ### Custom SDK Client Code
 

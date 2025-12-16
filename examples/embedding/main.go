@@ -274,11 +274,16 @@ func hasGeminiAuth(authDir string) bool {
 
 // initVerificationState sets up verification state for the chat session.
 // Verification is enabled if Gemini auth exists and verifyFlag is true.
-func initVerificationState(authDir string, host string, port int, verifyFlag bool) *verificationState {
+func initVerificationState(authDir string, host string, port int, verifyFlag bool, verifyModel string) *verificationState {
+	// Use default model if not specified
+	if verifyModel == "" {
+		verifyModel = defaultVerificationModel
+	}
+
 	state := &verificationState{
 		enabled:     false,
 		proxyURL:    fmt.Sprintf("http://%s:%d", host, port),
-		model:       defaultVerificationModel,
+		model:       verifyModel,
 		httpClient:  &http.Client{Timeout: defaultVerificationTimeout},
 		cache:       newVerificationCache(defaultCacheTTL),
 		rateLimiter: newRateLimiter(),
@@ -1107,6 +1112,8 @@ func main() {
 	flag.IntVar(&timeoutMinutes, "timeout", 15, "Inactivity timeout in minutes before auto-shutdown (0 to disable)")
 	flag.BoolVar(&verifyEnabled, "verify", true, "Enable response verification with Gemini (requires -gemini-login)")
 	flag.StringVar(&authDir, "auth-dir", defaultAuthDir(), "Directory for OAuth tokens (default: ./.cli-proxy-api or ~/.cli-proxy-api)")
+	var verifyModel string
+	flag.StringVar(&verifyModel, "verify-model", "", "Gemini model for verification (default: gemini-2.5-flash)")
 	flag.Parse()
 
 	// Ensure auth directory exists
@@ -1263,7 +1270,7 @@ func main() {
 	// Initialize verification state for chat mode
 	var vs *verificationState
 	if chatMode {
-		vs = initVerificationState(embedCfg.AuthDir, embedCfg.Host, embedCfg.Port, verifyEnabled)
+		vs = initVerificationState(embedCfg.AuthDir, embedCfg.Host, embedCfg.Port, verifyEnabled, verifyModel)
 		if vs.enabled {
 			// Show a message that verification is enabled
 			fmt.Printf("%s🔍 Gemini verification enabled%s\n", colorGreen, colorReset)
