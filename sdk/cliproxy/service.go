@@ -400,10 +400,6 @@ func isGeminiCLIOAuth(a *coreauth.Auth) bool {
 	if a == nil || a.Metadata == nil {
 		return false
 	}
-	// Check for explicit cli_oauth flag
-	if cliOAuth, ok := a.Metadata["cli_oauth"].(bool); ok && cliOAuth {
-		return true
-	}
 	// Check for cloud-platform scope in token data (CLI OAuth signature)
 	token, ok := a.Metadata["token"].(map[string]any)
 	if !ok {

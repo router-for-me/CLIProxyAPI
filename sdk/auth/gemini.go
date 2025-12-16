@@ -59,7 +59,6 @@ func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 	metadata := map[string]any{
 		"email":      ts.Email,
 		"project_id": ts.ProjectID,
-		"cli_oauth":  true, // Indicates CLI OAuth auth, uses Cloud Code Assist endpoint
 	}
 
 	fmt.Println("Gemini authentication successful")
