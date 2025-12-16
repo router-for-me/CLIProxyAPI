@@ -1359,3 +1359,98 @@ func antigravityMinThinkingBudget(model string) int {
 	}
 	return -1
 }
+
+// AntigravityQuotaInfo represents quota information for a single model.
+type AntigravityQuotaInfo struct {
+	RemainingFraction float64 `json:"remainingFraction"`
+	ResetTime         string  `json:"resetTime"`
+}
+
+// FetchAntigravityQuotas retrieves quota information for all available models using the supplied auth.
+// Returns a map of model name to quota info, or an error if the request fails.
+func FetchAntigravityQuotas(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) (map[string]AntigravityQuotaInfo, error) {
+	exec := &AntigravityExecutor{cfg: cfg}
+	token, updatedAuth, errToken := exec.ensureAccessToken(ctx, auth)
+	if errToken != nil {
+		return nil, errToken
+	}
+	if token == "" {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+	}
+	if updatedAuth != nil {
+		auth = updatedAuth
+	}
+
+	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+
+	var lastErr error
+	for idx, baseURL := range baseURLs {
+		modelsURL := baseURL + antigravityModelsPath
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, bytes.NewReader([]byte(`{}`)))
+		if errReq != nil {
+			return nil, errReq
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		if host := resolveHost(baseURL); host != "" {
+			httpReq.Host = host
+		}
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			lastErr = errDo
+			if idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: quotas request error on base url %s, retrying with fallback: %s", baseURL, baseURLs[idx+1])
+				continue
+			}
+			return nil, errDo
+		}
+
+		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity executor: close response body error: %v", errClose)
+		}
+		if errRead != nil {
+			lastErr = errRead
+			if idx+1 < len(baseURLs) {
+				continue
+			}
+			return nil, errRead
+		}
+		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+			lastErr = statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+				continue
+			}
+			return nil, lastErr
+		}
+
+		result := gjson.GetBytes(bodyBytes, "models")
+		if !result.Exists() {
+			return nil, statusErr{code: http.StatusInternalServerError, msg: "models field not found in response"}
+		}
+
+		quotas := make(map[string]AntigravityQuotaInfo)
+		for modelName, modelData := range result.Map() {
+			quotaInfo := modelData.Get("quotaInfo")
+			if quotaInfo.Exists() {
+				aliasName := modelName2Alias(modelName)
+				if aliasName == "" {
+					aliasName = modelName
+				}
+				quotas[aliasName] = AntigravityQuotaInfo{
+					RemainingFraction: quotaInfo.Get("remainingFraction").Float(),
+					ResetTime:         quotaInfo.Get("resetTime").String(),
+				}
+			}
+		}
+		return quotas, nil
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, statusErr{code: http.StatusServiceUnavailable, msg: "no base url available"}
+}
