@@ -72,7 +72,7 @@ const (
 	defaultCacheTTL            = 5 * time.Minute
 	rateLimitCooldown          = 60 * time.Second
 	defaultVerificationModel   = "gemini-2.5-flash"
-	maxCorrectionAttempts      = 1 // Number of correction attempts after failed verification
+	maxCorrectionAttempts      = 3 // Number of correction attempts after failed verification
 )
 
 // correctionPrompt is the template for asking Claude to correct based on verification feedback
@@ -923,7 +923,7 @@ When writing code, use markdown code blocks with the appropriate language tag.`
 			fmt.Printf("  help         - Show this help message\n")
 			fmt.Printf("\n%sFeatures:%s\n", colorYellow, colorReset)
 			fmt.Printf("  • Arrow keys for history navigation and line editing\n")
-			fmt.Printf("  • Auto-correction: if verification fails, Claude is asked to correct\n")
+			fmt.Printf("  • Auto-correction: if verification fails, Claude retries up to %d times\n", maxCorrectionAttempts)
 			if vs != nil && vs.enabled {
 				fmt.Printf("\n%sVerification: %senabled%s\n", colorGray, colorGreen, colorReset)
 			} else if vs != nil {
@@ -1007,7 +1007,7 @@ When writing code, use markdown code blocks with the appropriate language tag.`
 				// If verification failed, feed back to Claude for correction
 				if result != nil && needsCorrection(result.status) {
 					for attempt := 0; attempt < maxCorrectionAttempts; attempt++ {
-						fmt.Printf("\n%s🔄 Requesting correction from Claude...%s\n", colorYellow, colorReset)
+						fmt.Printf("\n%s🔄 Requesting correction from Claude (attempt %d/%d)...%s\n", colorYellow, attempt+1, maxCorrectionAttempts, colorReset)
 
 						// Create correction request using the verification feedback
 						correctionFeedback := fmt.Sprintf(correctionPrompt, result.text)
