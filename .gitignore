@@ -32,7 +32,9 @@ GEMINI.md
 .vscode/*
 .claude/*
 .serena/*
+.agent/*
 .bmad/*
+_bmad/*
 .mcp/cache/
 
 # macOS

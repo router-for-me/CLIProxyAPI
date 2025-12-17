@@ -28,4 +28,6 @@ bin/*
 .claude/*
 .vscode/*
 .serena/*
+.agent/*
 .bmad/*
+_bmad/*
