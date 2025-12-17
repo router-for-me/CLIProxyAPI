@@ -185,6 +185,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.AmpCode.ForceModelMappings != newCfg.AmpCode.ForceModelMappings {
 		changes = append(changes, fmt.Sprintf("ampcode.force-model-mappings: %t -> %t", oldCfg.AmpCode.ForceModelMappings, newCfg.AmpCode.ForceModelMappings))
 	}
+	if oldCfg.AmpCode.AmpCreditsFallback != newCfg.AmpCode.AmpCreditsFallback {
+		changes = append(changes, fmt.Sprintf("ampcode.amp-credits-fallback: %t -> %t", oldCfg.AmpCode.AmpCreditsFallback, newCfg.AmpCode.AmpCreditsFallback))
+	}
 
 	if entries, _ := DiffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
 		changes = append(changes, entries...)

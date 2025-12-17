@@ -116,6 +116,7 @@ func TestBuildConfigChangeDetails_GeminiVertexHeadersAndForceMappings(t *testing
 		AmpCode: config.AmpCode{
 			ModelMappings:      []config.AmpModelMapping{{From: "a", To: "b"}},
 			ForceModelMappings: false,
+			AmpCreditsFallback: false,
 		},
 	}
 	newCfg := &config.Config{
@@ -128,6 +129,7 @@ func TestBuildConfigChangeDetails_GeminiVertexHeadersAndForceMappings(t *testing
 		AmpCode: config.AmpCode{
 			ModelMappings:      []config.AmpModelMapping{{From: "a", To: "c"}},
 			ForceModelMappings: true,
+			AmpCreditsFallback: true,
 		},
 	}
 
@@ -136,6 +138,7 @@ func TestBuildConfigChangeDetails_GeminiVertexHeadersAndForceMappings(t *testing
 	expectContains(t, details, "gemini[0].excluded-models: updated (1 -> 2 entries)")
 	expectContains(t, details, "ampcode.model-mappings: updated (1 -> 1 entries)")
 	expectContains(t, details, "ampcode.force-model-mappings: false -> true")
+	expectContains(t, details, "ampcode.amp-credits-fallback: false -> true")
 }
 
 func TestBuildConfigChangeDetails_ModelPrefixes(t *testing.T) {
@@ -327,6 +330,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			RestrictManagementToLocalhost: false,
 			ModelMappings:                 []config.AmpModelMapping{{From: "a", To: "b"}},
 			ForceModelMappings:            false,
+			AmpCreditsFallback:            false,
 		},
 		RemoteManagement: config.RemoteManagement{
 			AllowRemote:           false,
@@ -379,6 +383,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			RestrictManagementToLocalhost: true,
 			ModelMappings:                 []config.AmpModelMapping{{From: "a", To: "c"}},
 			ForceModelMappings:            true,
+			AmpCreditsFallback:            true,
 		},
 		RemoteManagement: config.RemoteManagement{
 			AllowRemote:           true,
@@ -447,6 +452,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "ampcode.restrict-management-to-localhost: false -> true")
 	expectContains(t, changes, "ampcode.model-mappings: updated (1 -> 1 entries)")
 	expectContains(t, changes, "ampcode.force-model-mappings: false -> true")
+	expectContains(t, changes, "ampcode.amp-credits-fallback: false -> true")
 	expectContains(t, changes, "oauth-excluded-models[p1]: updated (1 -> 2 entries)")
 	expectContains(t, changes, "oauth-excluded-models[p2]: added (1 entries)")
 	expectContains(t, changes, "remote-management.allow-remote: false -> true")

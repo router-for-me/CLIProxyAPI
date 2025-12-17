@@ -17,6 +17,7 @@ import (
 )
 
 const DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+const DefaultAmpUpstreamURL = "https://ampcode.com"
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
@@ -154,6 +155,11 @@ type AmpCode struct {
 	// ForceModelMappings when true, model mappings take precedence over local API keys.
 	// When false (default), local API keys are used first if available.
 	ForceModelMappings bool `yaml:"force-model-mappings" json:"force-model-mappings"`
+
+	// AmpCreditsFallback when true, forwards requests to ampcode.com (using Amp credits)
+	// when all local providers fail (429 rate limit, 401 unauthorized, 5xx errors, etc.).
+	// Default: false (local provider errors are returned to client).
+	AmpCreditsFallback bool `yaml:"amp-credits-fallback" json:"amp-credits-fallback"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -364,6 +370,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		if cfg.migrateLegacyAmpConfig(&legacy) {
 			cfg.legacyMigrationPending = true
 		}
+	}
+
+	// Set AmpCode.UpstreamURL default after migration so legacy values take precedence
+	if cfg.AmpCode.UpstreamURL == "" {
+		cfg.AmpCode.UpstreamURL = DefaultAmpUpstreamURL
 	}
 
 	// Hash remote management key if plaintext is detected (nested)

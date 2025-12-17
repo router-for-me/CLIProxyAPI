@@ -64,7 +64,6 @@ quota-exceeded:
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
-
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
@@ -151,6 +150,10 @@ ws-auth: false
 #   restrict-management-to-localhost: false
 #   # Force model mappings to run before checking local API keys (default: false)
 #   force-model-mappings: false
+#   # Use Amp as fallback when all local providers fail (429, 401, 5xx errors).
+#   # When enabled, requests are forwarded to ampcode.com (uses Amp credits) after
+#   # exhausting local credentials (default: false)
+#   amp-credits-fallback: false
 #   # Amp Model Mappings
 #   # Route unavailable Amp models to alternative models available in your local proxy.
 #   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
