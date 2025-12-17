@@ -1,0 +1,92 @@
+# Example configuration for CLIProxyAPI embedding
+#
+# Copy this file to config.yaml and customize as needed:
+#   cp config.yaml.example config.yaml
+#
+# This file contains provider-specific configurations (API keys, OAuth accounts, model mappings).
+# Server configuration (host, port, TLS, etc.) is handled by EmbedConfig in main.go.
+#
+# For detailed configuration options, see: https://github.com/router-for-me/CLIProxyAPI
+
+# =============================================================================
+# REQUEST AUTHENTICATION
+# =============================================================================
+
+# API keys that clients must provide in the Authorization header
+# Example: Authorization: Bearer test-key
+api-keys:
+  - "test-key"
+
+# =============================================================================
+# CLAUDE CONFIGURATION
+# =============================================================================
+
+# Claude API keys - supports both standard API keys AND OAuth tokens
+#
+# Option 1: Use environment variable (recommended)
+#   Set CLAUDE_API_KEY in .env or environment
+#
+# Option 2: Direct API key
+#   api-key: "sk-ant-api03-your-key-here"
+#
+# Option 3: OAuth token (from -claude-login)
+#   OAuth tokens are auto-loaded from ./auth directory
+#
+claude-api-key:
+  - api-key: "${CLAUDE_API_KEY}"  # Uses CLAUDE_API_KEY environment variable
+    # base-url: "https://api.anthropic.com"  # Optional custom endpoint
+    # models:  # Optional: restrict available models
+    #   - name: "claude-sonnet-4-20250514"
+    #     alias: "claude-sonnet"
+
+# =============================================================================
+# GEMINI CONFIGURATION (for response verification)
+# =============================================================================
+
+# Gemini is used for response verification in chat mode.
+# Authenticate via: go run main.go -gemini-login -project_id YOUR_PROJECT_ID
+#
+# OAuth tokens are auto-loaded from ./auth directory.
+#
+# Alternative: Use API key directly (uncomment below)
+# gemini-api-key:
+#   - api-key: "AIza..."
+
+# =============================================================================
+# OPENAI / CODEX CONFIGURATION (optional)
+# =============================================================================
+
+# OpenAI/Codex API keys
+# OAuth-based Codex access is configured via: go run main.go -codex-login
+#
+# codex-api-key:
+#   - api-key: "sk-..."
+#     base-url: "https://api.openai.com"
+
+# =============================================================================
+# OPENAI-COMPATIBLE PROVIDERS (optional)
+# =============================================================================
+
+# Add custom OpenAI-compatible providers here
+# openai-compatibility:
+#   - name: "my-provider"
+#     base-url: "https://api.my-provider.com/v1"
+#     api-key: "my-api-key"
+#     models:
+#       - name: "my-model"
+#         alias: "gpt-4"  # Optional alias for compatibility
+
+# =============================================================================
+# ADVANCED OPTIONS
+# =============================================================================
+
+# Global proxy URL for outbound requests (optional)
+# proxy-url: "http://proxy.example.com:8080"
+
+# Enable request logging (optional, default: false)
+# request-log: false
+
+# Models excluded from OAuth accounts (optional)
+# oauth-excluded-models:
+#   claude:
+#     - "claude-3-opus-*"  # Wildcards supported

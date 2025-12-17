@@ -55,13 +55,12 @@ import (
 
 // ANSI color codes for terminal output
 const (
-	colorReset   = "\033[0m"
-	colorCyan    = "\033[36m"
-	colorGreen   = "\033[32m"
-	colorYellow  = "\033[33m"
-	colorGray    = "\033[90m"
-	colorRed     = "\033[31m"
-	colorMagenta = "\033[35m"
+	colorReset  = "\033[0m"
+	colorCyan   = "\033[36m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorGray   = "\033[90m"
+	colorRed    = "\033[31m"
 )
 
 // Default inactivity timeout before auto-shutdown
@@ -815,7 +814,7 @@ func runInteractiveChat(host string, port int, model string, activity *activityT
 
 	fmt.Println()
 	fmt.Printf("%s╭─────────────────────────────────────────────────────────╮%s\n", colorCyan, colorReset)
-	fmt.Printf("%s│%s   🤖 Interactive Chat with Verification                 %s│%s\n", colorCyan, colorReset, colorCyan, colorReset)
+	fmt.Printf("%s│%s   🤖 Interactive Chat                                   %s│%s\n", colorCyan, colorReset, colorCyan, colorReset)
 	fmt.Printf("%s│%s   Chat: %-47s %s│%s\n", colorCyan, colorGray, model, colorCyan, colorReset)
 	if verifyModel != "" {
 		fmt.Printf("%s│%s   Verify: %-45s %s│%s\n", colorCyan, colorGray, verifyModel, colorCyan, colorReset)

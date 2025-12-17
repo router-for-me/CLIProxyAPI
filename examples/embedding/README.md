@@ -206,7 +206,11 @@ Provider-specific settings are defined in `config.yaml`:
 - **Model Mappings**: Alias configurations and routing rules
 - **Amp CLI Integration**: Model mappings and upstream configuration
 
-See `config.yaml` in this directory for a complete example.
+See `config.yaml.example` in this directory for a complete template. Copy it to get started:
+
+```bash
+cp config.yaml.example config.yaml
+```
 
 ## OAuth Authentication Flows
 
@@ -253,30 +257,30 @@ The embedded service automatically loads OAuth tokens from `AuthDir`.
 
 ```
 ┌─────────────────────────────────────┐
-│  Your Go Application (main.go)     │
+│  Your Go Application (main.go)      │
 │                                     │
-│  ┌───────────────────────────────┐ │
-│  │ EmbedConfig (Public API)      │ │
-│  │ - Host, Port, TLS             │ │
-│  │ - AuthDir, Debug              │ │
-│  │ - RemoteManagement            │ │
-│  └───────────────────────────────┘ │
+│  ┌───────────────────────────────┐  │
+│  │ EmbedConfig (Public API)      │  │
+│  │ - Host, Port, TLS             │  │
+│  │ - AuthDir, Debug              │  │
+│  │ - RemoteManagement            │  │
+│  └───────────────────────────────┘  │
 │             ↓                       │
-│  ┌───────────────────────────────┐ │
-│  │ cliproxy.Service              │ │
-│  │ - HTTP Server                 │ │
-│  │ - OAuth Token Management      │ │
-│  │ - Provider Routing            │ │
-│  │ - Request Translation         │ │
-│  └───────────────────────────────┘ │
+│  ┌───────────────────────────────┐  │
+│  │ cliproxy.Service              │  │
+│  │ - HTTP Server                 │  │
+│  │ - OAuth Token Management      │  │
+│  │ - Provider Routing            │  │
+│  │ - Request Translation         │  │
+│  └───────────────────────────────┘  │
 │             ↓                       │
-│  ┌───────────────────────────────┐ │
-│  │ AI Providers                  │ │
-│  │ - Claude Code (OAuth)         │ │
-│  │ - OpenAI Codex (OAuth)        │ │
-│  │ - Gemini CLI (API Key)        │ │
-│  │ - Custom Providers            │ │
-│  └───────────────────────────────┘ │
+│  ┌───────────────────────────────┐  │
+│  │ AI Providers                  │  │
+│  │ - Claude Code (OAuth)         │  │
+│  │ - OpenAI Codex (OAuth)        │  │
+│  │ - Gemini CLI (API Key)        │  │
+│  │ - Custom Providers            │  │
+│  └───────────────────────────────┘  │
 └─────────────────────────────────────┘
 ```
 
@@ -433,7 +437,7 @@ The example supports **automatic response verification** using Gemini to fact-ch
 | `verify` | Show current verification status |
 | `verify on` | Enable verification |
 | `verify off` | Disable verification |
-| `help` | Show all commands including verification status |
+| `help` | Show all commands |
 
 ### Command-Line Options
 

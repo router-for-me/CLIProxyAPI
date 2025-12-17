@@ -248,10 +248,10 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	if b.cfg == nil {
-		return nil, fmt.Errorf("cliproxy: configuration is required")
+		return nil, fmt.Errorf("cliproxy: configuration is required (use WithConfig or WithEmbedConfig)")
 	}
 	if b.configPath == "" {
-		return nil, fmt.Errorf("cliproxy: configuration is required")
+		return nil, fmt.Errorf("cliproxy: configuration path is required (use WithConfigPath)")
 	}
 
 	// Load provider configurations from YAML file and merge with EmbedConfig
