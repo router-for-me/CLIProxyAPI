@@ -33,15 +33,16 @@ import (
 const (
 	antigravityBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
 	// antigravityBaseURLAutopush     = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLProd  = "https://cloudcode-pa.googleapis.com"
-	antigravityStreamPath   = "/v1internal:streamGenerateContent"
-	antigravityGeneratePath = "/v1internal:generateContent"
-	antigravityModelsPath   = "/v1internal:fetchAvailableModels"
-	antigravityClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret = "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"
-	defaultAntigravityAgent = "antigravity/1.11.5 windows/amd64"
-	antigravityAuthType     = "antigravity"
-	refreshSkew             = 3000 * time.Second
+	antigravityBaseURLProd     = "https://cloudcode-pa.googleapis.com"
+	antigravityCountTokensPath = "/v1internal:countTokens"
+	antigravityStreamPath      = "/v1internal:streamGenerateContent"
+	antigravityGeneratePath    = "/v1internal:generateContent"
+	antigravityModelsPath      = "/v1internal:fetchAvailableModels"
+	antigravityClientID        = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	antigravityClientSecret    = "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"
+	defaultAntigravityAgent    = "antigravity/1.11.5 windows/amd64"
+	antigravityAuthType        = "antigravity"
+	refreshSkew                = 3000 * time.Second
 )
 
 var (
@@ -650,9 +651,131 @@ func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Au
 	return updated, nil
 }
 
-// CountTokens counts tokens for the given request (not supported for Antigravity).
-func (e *AntigravityExecutor) CountTokens(context.Context, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, statusErr{code: http.StatusNotImplemented, msg: "count tokens not supported"}
+// CountTokens counts tokens for the given request using the Antigravity API.
+func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
+	if errToken != nil {
+		return cliproxyexecutor.Response{}, errToken
+	}
+	if updatedAuth != nil {
+		auth = updatedAuth
+	}
+	if strings.TrimSpace(token) == "" {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+	}
+
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("antigravity")
+	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+
+	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+
+	var lastStatus int
+	var lastBody []byte
+	var lastErr error
+
+	for idx, baseURL := range baseURLs {
+		payload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+		payload = applyThinkingMetadataCLI(payload, req.Metadata, req.Model)
+		payload = util.ApplyDefaultThinkingIfNeededCLI(req.Model, payload)
+		payload = normalizeAntigravityThinking(req.Model, payload)
+		payload = deleteJSONField(payload, "project")
+		payload = deleteJSONField(payload, "model")
+		payload = deleteJSONField(payload, "request.safetySettings")
+
+		base := strings.TrimSuffix(baseURL, "/")
+		if base == "" {
+			base = buildBaseURL(auth)
+		}
+
+		var requestURL strings.Builder
+		requestURL.WriteString(base)
+		requestURL.WriteString(antigravityCountTokensPath)
+		if opts.Alt != "" {
+			requestURL.WriteString("?$alt=")
+			requestURL.WriteString(url.QueryEscape(opts.Alt))
+		}
+
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
+		if errReq != nil {
+			return cliproxyexecutor.Response{}, errReq
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("Accept", "application/json")
+		if host := resolveHost(base); host != "" {
+			httpReq.Host = host
+		}
+
+		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+			URL:       requestURL.String(),
+			Method:    http.MethodPost,
+			Headers:   httpReq.Header.Clone(),
+			Body:      payload,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			recordAPIResponseError(ctx, e.cfg, errDo)
+			lastStatus = 0
+			lastBody = nil
+			lastErr = errDo
+			if idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				continue
+			}
+			return cliproxyexecutor.Response{}, errDo
+		}
+
+		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity executor: close response body error: %v", errClose)
+		}
+		if errRead != nil {
+			recordAPIResponseError(ctx, e.cfg, errRead)
+			return cliproxyexecutor.Response{}, errRead
+		}
+		appendAPIResponseChunk(ctx, e.cfg, bodyBytes)
+
+		if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
+			count := gjson.GetBytes(bodyBytes, "totalTokens").Int()
+			translated := sdktranslator.TranslateTokenCount(respCtx, to, from, count, bodyBytes)
+			return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
+		}
+
+		lastStatus = httpResp.StatusCode
+		lastBody = append([]byte(nil), bodyBytes...)
+		lastErr = nil
+		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+			continue
+		}
+		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+	}
+
+	switch {
+	case lastStatus != 0:
+		return cliproxyexecutor.Response{}, statusErr{code: lastStatus, msg: string(lastBody)}
+	case lastErr != nil:
+		return cliproxyexecutor.Response{}, lastErr
+	default:
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity executor: no base url available"}
+	}
 }
 
 // FetchAntigravityModels retrieves available models using the supplied auth.
@@ -1122,6 +1245,8 @@ func modelName2Alias(modelName string) string {
 		return "gemini-3-pro-image-preview"
 	case "gemini-3-pro-high":
 		return "gemini-3-pro-preview"
+	case "gemini-3-flash":
+		return "gemini-3-flash-preview"
 	case "claude-sonnet-4-5":
 		return "gemini-claude-sonnet-4-5"
 	case "claude-sonnet-4-5-thinking":
@@ -1143,6 +1268,8 @@ func alias2ModelName(modelName string) string {
 		return "gemini-3-pro-image"
 	case "gemini-3-pro-preview":
 		return "gemini-3-pro-high"
+	case "gemini-3-flash-preview":
+		return "gemini-3-flash"
 	case "gemini-claude-sonnet-4-5":
 		return "claude-sonnet-4-5"
 	case "gemini-claude-sonnet-4-5-thinking":

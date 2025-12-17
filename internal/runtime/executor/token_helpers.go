@@ -73,9 +73,11 @@ func tokenizerForModel(model string) (*TokenizerWrapper, error) {
 	switch {
 	case sanitized == "":
 		enc, err = tokenizer.Get(tokenizer.Cl100kBase)
-	case strings.HasPrefix(sanitized, "gpt-5"):
+	case strings.HasPrefix(sanitized, "gpt-5.2"):
 		enc, err = tokenizer.ForModel(tokenizer.GPT5)
 	case strings.HasPrefix(sanitized, "gpt-5.1"):
+		enc, err = tokenizer.ForModel(tokenizer.GPT5)
+	case strings.HasPrefix(sanitized, "gpt-5"):
 		enc, err = tokenizer.ForModel(tokenizer.GPT5)
 	case strings.HasPrefix(sanitized, "gpt-4.1"):
 		enc, err = tokenizer.ForModel(tokenizer.GPT41)
@@ -154,10 +156,10 @@ func countClaudeChatTokens(enc *TokenizerWrapper, payload []byte) (int64, error)
 
 	// Collect system prompt (can be string or array of content blocks)
 	collectClaudeSystem(root.Get("system"), &segments)
-	
+
 	// Collect messages
 	collectClaudeMessages(root.Get("messages"), &segments)
-	
+
 	// Collect tools
 	collectClaudeTools(root.Get("tools"), &segments)
 
