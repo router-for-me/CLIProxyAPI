@@ -25,14 +25,15 @@ type Option func(*AmpModule)
 //   - Automatic gzip decompression for misconfigured upstreams
 //   - Model mapping for routing unavailable models to alternatives
 type AmpModule struct {
-	secretSource    SecretSource
-	proxy           *httputil.ReverseProxy
-	proxyMu         sync.RWMutex // protects proxy for hot-reload
-	accessManager   *sdkaccess.Manager
-	authMiddleware_ gin.HandlerFunc
-	modelMapper     *DefaultModelMapper
-	enabled         bool
-	registerOnce    sync.Once
+	secretSource      SecretSource
+	proxy             *httputil.ReverseProxy // For provider routes (strips client auth, injects upstream-api-key)
+	managementProxy   *httputil.ReverseProxy // For management routes (preserves client auth/Amp token)
+	proxyMu           sync.RWMutex           // protects both proxies for hot-reload
+	accessManager     *sdkaccess.Manager
+	authMiddleware_   gin.HandlerFunc
+	modelMapper       *DefaultModelMapper
+	enabled           bool
+	registerOnce      sync.Once
 
 	// restrictToLocalhost controls localhost-only access for management routes (hot-reloadable)
 	restrictToLocalhost bool
@@ -137,8 +138,9 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 		m.registerProviderAliases(ctx.Engine, ctx.BaseHandler, auth)
 
 		// Register management proxy routes once; middleware will gate access when upstream is unavailable.
-		// Pass auth middleware to require valid API key for all management routes.
-		m.registerManagementRoutes(ctx.Engine, ctx.BaseHandler, auth)
+		// Management routes do NOT use KorProxy API key auth - ampcode.com handles its own authentication.
+		// These routes are still protected by localhost-only and availability middleware.
+		m.registerManagementRoutes(ctx.Engine, ctx.BaseHandler, nil)
 
 		// If no upstream URL, skip proxy routes but provider aliases are still available
 		if upstreamURL == "" {
@@ -257,12 +259,20 @@ func (m *AmpModule) enableUpstreamProxy(upstreamURL string, settings *config.Amp
 		ms.InvalidateCache()
 	}
 
+	// Create provider proxy (strips client auth, injects upstream-api-key)
 	proxy, err := createReverseProxy(upstreamURL, m.secretSource)
 	if err != nil {
 		return err
 	}
 
+	// Create management proxy (preserves client auth/Amp token)
+	mgmtProxy, err := createManagementProxy(upstreamURL)
+	if err != nil {
+		return err
+	}
+
 	m.setProxy(proxy)
+	m.setManagementProxy(mgmtProxy)
 	m.enabled = true
 
 	log.Infof("amp upstream proxy enabled for: %s", upstreamURL)
@@ -323,6 +333,20 @@ func (m *AmpModule) setProxy(proxy *httputil.ReverseProxy) {
 	m.proxyMu.Lock()
 	defer m.proxyMu.Unlock()
 	m.proxy = proxy
+}
+
+// getManagementProxy returns the current management proxy instance (thread-safe).
+func (m *AmpModule) getManagementProxy() *httputil.ReverseProxy {
+	m.proxyMu.RLock()
+	defer m.proxyMu.RUnlock()
+	return m.managementProxy
+}
+
+// setManagementProxy updates the management proxy instance (thread-safe for hot-reload).
+func (m *AmpModule) setManagementProxy(proxy *httputil.ReverseProxy) {
+	m.proxyMu.Lock()
+	defer m.proxyMu.Unlock()
+	m.managementProxy = proxy
 }
 
 // IsRestrictedToLocalhost returns whether management routes are restricted to localhost.

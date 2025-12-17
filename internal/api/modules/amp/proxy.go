@@ -25,6 +25,36 @@ type readCloser struct {
 func (rc *readCloser) Read(p []byte) (int, error) { return rc.r.Read(p) }
 func (rc *readCloser) Close() error               { return rc.c.Close() }
 
+// createManagementProxy creates a reverse proxy for Amp management routes
+// that preserves the client's Authorization header (Amp tokens).
+// This is used for /api/user, /api/auth, etc. where the client authenticates
+// directly with ampcode.com using their Amp token.
+func createManagementProxy(upstreamURL string) (*httputil.ReverseProxy, error) {
+	parsed, err := url.Parse(upstreamURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid amp upstream url: %w", err)
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(parsed)
+	originalDirector := proxy.Director
+
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.Host = parsed.Host
+		// Preserve client's Authorization header - it contains the Amp token
+		// Do NOT strip or replace it
+	}
+
+	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+		log.Errorf("amp management proxy error for %s %s: %v", req.Method, req.URL.Path, err)
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusBadGateway)
+		_, _ = rw.Write([]byte(`{"error":"amp_upstream_proxy_error","message":"Failed to reach Amp upstream"}`))
+	}
+
+	return proxy, nil
+}
+
 // createReverseProxy creates a reverse proxy handler for Amp upstream
 // with automatic gzip decompression via ModifyResponse
 func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputil.ReverseProxy, error) {
