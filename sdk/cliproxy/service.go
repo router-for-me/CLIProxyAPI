@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -22,7 +24,6 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -215,6 +216,44 @@ func (s *Service) ensureWebsocketGateway() {
 	s.wsGateway = wsrelay.NewManager(opts)
 }
 
+func (s *Service) ensureAmpProvider(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+
+	const ampAuthID = "amp:proxy"
+
+	// Check if already registered
+	if existing, ok := s.coreManager.GetByID(ampAuthID); ok && existing != nil {
+		if !existing.Disabled && existing.Status == coreauth.StatusActive {
+			return
+		}
+	}
+
+	now := time.Now().UTC()
+	auth := &coreauth.Auth{
+		ID:        ampAuthID,
+		Provider:  "amp",
+		Label:     "Amp Credits",
+		Status:    coreauth.StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Attributes: map[string]string{
+			"runtime_only": "true",
+			"auth_kind":    "proxy",
+			"source":       "runtime:amp-proxy",
+		},
+		Metadata: nil, // stateless proxy mode - no credentials to store
+	}
+
+	log.Debug("registering amp fallback provider")
+	s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionAdd,
+		ID:     auth.ID,
+		Auth:   auth,
+	})
+}
+
 func (s *Service) wsOnConnected(channelID string) {
 	if s == nil || channelID == "" {
 		return
@@ -379,6 +418,9 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "iflow":
 		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
+	case "amp":
+		secretSource := amp.NewMultiSourceSecret(s.cfg.AmpCode.UpstreamAPIKey, 0)
+		s.coreManager.RegisterExecutor(executor.NewAmpExecutor(s.cfg, secretSource))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -458,6 +500,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+
+	// Register amp provider and executor for fallback support
+	s.ensureAmpProvider(ctx)
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
