@@ -1169,7 +1169,7 @@ func main() {
 
 	// Check if config file exists
 	if _, err := os.Stat(absConfigPath); os.IsNotExist(err) {
-		log.Fatalf("Config file not found: %s\nPlease create config.yaml with your provider settings.", absConfigPath)
+		log.Fatalf("Config file not found: %s\nRun: cp config.yaml.example config.yaml", absConfigPath)
 	}
 
 	// Expand environment variables in config file (supports ${VAR} syntax)
