@@ -833,6 +833,17 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			MaxCompletionTokens: 16384,
 		},
 		{
+			ID:                  "gpt-5.2",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "github-copilot",
+			Type:                "github-copilot",
+			DisplayName:         "GPT-5.2",
+			Description:         "OpenAI GPT-5.2 via GitHub Copilot",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+		},
+		{
 			ID:                  "claude-haiku-4.5",
 			Object:              "model",
 			Created:             now,
