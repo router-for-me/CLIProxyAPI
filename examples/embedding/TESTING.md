@@ -19,9 +19,13 @@ Edit `.env` and add your token:
 CLAUDE_API_KEY=sk-ant-oat01-your-token-here
 ```
 
-### 3. Verify config.yaml Loads Environment Variable
+### 3. Create config.yaml from Template
 
-Check that `config.yaml` has:
+```bash
+cp config.yaml.example config.yaml
+```
+
+Verify `config.yaml` has:
 ```yaml
 claude-api-key:
   - api-key: "${CLAUDE_API_KEY}"
