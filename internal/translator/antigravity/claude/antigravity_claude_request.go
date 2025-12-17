@@ -7,10 +7,8 @@ package claude
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 
-	client "github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
@@ -42,27 +40,30 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	rawJSON = bytes.Replace(rawJSON, []byte(`"url":{"type":"string","format":"uri",`), []byte(`"url":{"type":"string",`), -1)
 
 	// system instruction
-	var systemInstruction *client.Content
+	systemInstructionJSON := ""
+	hasSystemInstruction := false
 	systemResult := gjson.GetBytes(rawJSON, "system")
 	if systemResult.IsArray() {
 		systemResults := systemResult.Array()
-		systemInstruction = &client.Content{Role: "user", Parts: []client.Part{}}
+		systemInstructionJSON = `{"role":"user","parts":[]}`
 		for i := 0; i < len(systemResults); i++ {
 			systemPromptResult := systemResults[i]
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
 				systemPrompt := systemPromptResult.Get("text").String()
-				systemPart := client.Part{Text: systemPrompt}
-				systemInstruction.Parts = append(systemInstruction.Parts, systemPart)
+				partJSON := `{}`
+				if systemPrompt != "" {
+					partJSON, _ = sjson.Set(partJSON, "text", systemPrompt)
+				}
+				systemInstructionJSON, _ = sjson.SetRaw(systemInstructionJSON, "parts.-1", partJSON)
+				hasSystemInstruction = true
 			}
-		}
-		if len(systemInstruction.Parts) == 0 {
-			systemInstruction = nil
 		}
 	}
 
 	// contents
-	contents := make([]client.Content, 0)
+	contentsJSON := "[]"
+	hasContents := false
 	messagesResult := gjson.GetBytes(rawJSON, "messages")
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
@@ -76,7 +77,8 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			if role == "assistant" {
 				role = "model"
 			}
-			clientContent := client.Content{Role: role, Parts: []client.Part{}}
+			clientContentJSON := `{"role":"","parts":[]}`
+			clientContentJSON, _ = sjson.Set(clientContentJSON, "role", role)
 			contentsResult := messageResult.Get("content")
 			if contentsResult.IsArray() {
 				contentResults := contentsResult.Array()
@@ -84,36 +86,45 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					contentResult := contentResults[j]
 					contentTypeResult := contentResult.Get("type")
 					if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "thinking" {
-						// Claude "thinking" blocks are internal-only. They also require a valid provider signature
-						// when replayed as conversation history. Since we cannot mint signatures, only forward
-						// thinking blocks when the client provides a non-empty signature; otherwise, drop them.
+						prompt := contentResult.Get("thinking").String()
 						signatureResult := contentResult.Get("signature")
-						if signatureResult.Type == gjson.String && signatureResult.String() != "" {
-							prompt := contentResult.Get("thinking").String()
-							clientContent.Parts = append(clientContent.Parts, client.Part{
-								Text:             prompt,
-								Thought:          true,
-								ThoughtSignature: signatureResult.String(),
-							})
+						signature := geminiCLIClaudeThoughtSignature
+						if signatureResult.Exists() {
+							signature = signatureResult.String()
 						}
+						partJSON := `{}`
+						partJSON, _ = sjson.Set(partJSON, "thought", true)
+						if prompt != "" {
+							partJSON, _ = sjson.Set(partJSON, "text", prompt)
+						}
+						if signature != "" {
+							partJSON, _ = sjson.Set(partJSON, "thoughtSignature", signature)
+						}
+						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
-						clientContent.Parts = append(clientContent.Parts, client.Part{Text: prompt})
+						partJSON := `{}`
+						if prompt != "" {
+							partJSON, _ = sjson.Set(partJSON, "text", prompt)
+						}
+						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_use" {
 						functionName := contentResult.Get("name").String()
 						functionArgs := contentResult.Get("input").String()
 						functionID := contentResult.Get("id").String()
-						var args map[string]any
-						if err := json.Unmarshal([]byte(functionArgs), &args); err == nil {
-							if strings.Contains(modelName, "claude") {
-								clientContent.Parts = append(clientContent.Parts, client.Part{
-									FunctionCall: &client.FunctionCall{ID: functionID, Name: functionName, Args: args},
-								})
-							} else {
-								clientContent.Parts = append(clientContent.Parts, client.Part{
-									FunctionCall:     &client.FunctionCall{ID: functionID, Name: functionName, Args: args},
-									ThoughtSignature: geminiCLIClaudeThoughtSignature,
-								})
+						if gjson.Valid(functionArgs) {
+							argsResult := gjson.Parse(functionArgs)
+							if argsResult.IsObject() {
+								partJSON := `{}`
+								if !strings.Contains(modelName, "claude") {
+									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", geminiCLIClaudeThoughtSignature)
+								}
+								if functionID != "" {
+									partJSON, _ = sjson.Set(partJSON, "functionCall.id", functionID)
+								}
+								partJSON, _ = sjson.Set(partJSON, "functionCall.name", functionName)
+								partJSON, _ = sjson.SetRaw(partJSON, "functionCall.args", argsResult.Raw)
+								clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 							}
 						}
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
@@ -126,43 +137,70 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							}
 							functionResponseResult := contentResult.Get("content")
 
+							functionResponseJSON := `{}`
+							functionResponseJSON, _ = sjson.Set(functionResponseJSON, "id", toolCallID)
+							functionResponseJSON, _ = sjson.Set(functionResponseJSON, "name", funcName)
+
 							responseData := ""
 							if functionResponseResult.Type == gjson.String {
 								responseData = functionResponseResult.String()
+								functionResponseJSON, _ = sjson.Set(functionResponseJSON, "response.result", responseData)
+							} else if functionResponseResult.IsArray() {
+								frResults := functionResponseResult.Array()
+								if len(frResults) == 1 {
+									functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "response.result", frResults[0].Raw)
+								} else {
+									functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "response.result", functionResponseResult.Raw)
+								}
+
+							} else if functionResponseResult.IsObject() {
+								functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "response.result", functionResponseResult.Raw)
 							} else {
-								responseData = contentResult.Get("content").Raw
+								functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "response.result", functionResponseResult.Raw)
 							}
 
-							functionResponse := client.FunctionResponse{ID: toolCallID, Name: funcName, Response: map[string]interface{}{"result": responseData}}
-							clientContent.Parts = append(clientContent.Parts, client.Part{FunctionResponse: &functionResponse})
+							partJSON := `{}`
+							partJSON, _ = sjson.SetRaw(partJSON, "functionResponse", functionResponseJSON)
+							clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 						}
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "image" {
 						sourceResult := contentResult.Get("source")
 						if sourceResult.Get("type").String() == "base64" {
-							inlineData := &client.InlineData{
-								MimeType: sourceResult.Get("media_type").String(),
-								Data:     sourceResult.Get("data").String(),
+							inlineDataJSON := `{}`
+							if mimeType := sourceResult.Get("media_type").String(); mimeType != "" {
+								inlineDataJSON, _ = sjson.Set(inlineDataJSON, "mime_type", mimeType)
 							}
-							clientContent.Parts = append(clientContent.Parts, client.Part{InlineData: inlineData})
+							if data := sourceResult.Get("data").String(); data != "" {
+								inlineDataJSON, _ = sjson.Set(inlineDataJSON, "data", data)
+							}
+
+							partJSON := `{}`
+							partJSON, _ = sjson.SetRaw(partJSON, "inlineData", inlineDataJSON)
+							clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 						}
 					}
 				}
-				if len(clientContent.Parts) > 0 {
-					contents = append(contents, clientContent)
-				}
+				contentsJSON, _ = sjson.SetRaw(contentsJSON, "-1", clientContentJSON)
+				hasContents = true
 			} else if contentsResult.Type == gjson.String {
 				prompt := contentsResult.String()
-				contents = append(contents, client.Content{Role: role, Parts: []client.Part{{Text: prompt}}})
+				partJSON := `{}`
+				if prompt != "" {
+					partJSON, _ = sjson.Set(partJSON, "text", prompt)
+				}
+				clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
+				contentsJSON, _ = sjson.SetRaw(contentsJSON, "-1", clientContentJSON)
+				hasContents = true
 			}
 		}
 	}
 
 	// tools
-	var tools []client.ToolDeclaration
+	toolsJSON := ""
+	toolDeclCount := 0
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.IsArray() {
-		tools = make([]client.ToolDeclaration, 1)
-		tools[0].FunctionDeclarations = make([]any, 0)
+		toolsJSON = `[{"functionDeclarations":[]}]`
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
@@ -173,30 +211,23 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
 				tool, _ = sjson.Delete(tool, "strict")
 				tool, _ = sjson.Delete(tool, "input_examples")
-				var toolDeclaration any
-				if err := json.Unmarshal([]byte(tool), &toolDeclaration); err == nil {
-					tools[0].FunctionDeclarations = append(tools[0].FunctionDeclarations, toolDeclaration)
-				}
+				toolsJSON, _ = sjson.SetRaw(toolsJSON, "0.functionDeclarations.-1", tool)
+				toolDeclCount++
 			}
 		}
-	} else {
-		tools = make([]client.ToolDeclaration, 0)
 	}
 
 	// Build output Gemini CLI request JSON
 	out := `{"model":"","request":{"contents":[]}}`
 	out, _ = sjson.Set(out, "model", modelName)
-	if systemInstruction != nil {
-		b, _ := json.Marshal(systemInstruction)
-		out, _ = sjson.SetRaw(out, "request.systemInstruction", string(b))
+	if hasSystemInstruction {
+		out, _ = sjson.SetRaw(out, "request.systemInstruction", systemInstructionJSON)
 	}
-	if len(contents) > 0 {
-		b, _ := json.Marshal(contents)
-		out, _ = sjson.SetRaw(out, "request.contents", string(b))
+	if hasContents {
+		out, _ = sjson.SetRaw(out, "request.contents", contentsJSON)
 	}
-	if len(tools) > 0 && len(tools[0].FunctionDeclarations) > 0 {
-		b, _ := json.Marshal(tools)
-		out, _ = sjson.SetRaw(out, "request.tools", string(b))
+	if toolDeclCount > 0 {
+		out, _ = sjson.SetRaw(out, "request.tools", toolsJSON)
 	}
 
 	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled

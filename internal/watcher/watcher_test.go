@@ -15,6 +15,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"gopkg.in/yaml.v3"
 )
@@ -24,7 +25,7 @@ func TestApplyAuthExcludedModelsMeta_APIKey(t *testing.T) {
 	cfg := &config.Config{}
 	perKey := []string{" Model-1 ", "model-2"}
 
-	applyAuthExcludedModelsMeta(auth, cfg, perKey, "apikey")
+	synthesizer.ApplyAuthExcludedModelsMeta(auth, cfg, perKey, "apikey")
 
 	expected := diff.ComputeExcludedModelsHash([]string{"model-1", "model-2"})
 	if got := auth.Attributes["excluded_models_hash"]; got != expected {
@@ -46,7 +47,7 @@ func TestApplyAuthExcludedModelsMeta_OAuthProvider(t *testing.T) {
 		},
 	}
 
-	applyAuthExcludedModelsMeta(auth, cfg, nil, "oauth")
+	synthesizer.ApplyAuthExcludedModelsMeta(auth, cfg, nil, "oauth")
 
 	expected := diff.ComputeExcludedModelsHash([]string{"a", "b"})
 	if got := auth.Attributes["excluded_models_hash"]; got != expected {
@@ -368,15 +369,15 @@ func TestAddOrUpdateClientSkipsUnchanged(t *testing.T) {
 
 	var reloads int32
 	w := &Watcher{
-		authDir: tmpDir,
-		lastAuthHashes: map[string]string{
-			filepath.Clean(authFile): hexString(sum[:]),
-		},
+		authDir:        tmpDir,
+		lastAuthHashes: make(map[string]string),
 		reloadCallback: func(*config.Config) {
 			atomic.AddInt32(&reloads, 1)
 		},
 	}
 	w.SetConfig(&config.Config{AuthDir: tmpDir})
+	// Use normalizeAuthPath to match how addOrUpdateClient stores the key
+	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = hexString(sum[:])
 
 	w.addOrUpdateClient(authFile)
 	if got := atomic.LoadInt32(&reloads); got != 0 {
@@ -406,7 +407,8 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 	if got := atomic.LoadInt32(&reloads); got != 1 {
 		t.Fatalf("expected reload callback once, got %d", got)
 	}
-	normalized := filepath.Clean(authFile)
+	// Use normalizeAuthPath to match how addOrUpdateClient stores the key
+	normalized := w.normalizeAuthPath(authFile)
 	if _, ok := w.lastAuthHashes[normalized]; !ok {
 		t.Fatalf("expected hash to be stored for %s", normalized)
 	}
@@ -418,18 +420,18 @@ func TestRemoveClientRemovesHash(t *testing.T) {
 	var reloads int32
 
 	w := &Watcher{
-		authDir: tmpDir,
-		lastAuthHashes: map[string]string{
-			filepath.Clean(authFile): "hash",
-		},
+		authDir:        tmpDir,
+		lastAuthHashes: make(map[string]string),
 		reloadCallback: func(*config.Config) {
 			atomic.AddInt32(&reloads, 1)
 		},
 	}
 	w.SetConfig(&config.Config{AuthDir: tmpDir})
+	// Use normalizeAuthPath to set up the hash with the correct key format
+	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = "hash"
 
 	w.removeClient(authFile)
-	if _, ok := w.lastAuthHashes[filepath.Clean(authFile)]; ok {
+	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected hash to be removed after deletion")
 	}
 	if got := atomic.LoadInt32(&reloads); got != 1 {
@@ -475,7 +477,8 @@ func TestAuthFileUnchangedUsesHash(t *testing.T) {
 	}
 
 	sum := sha256.Sum256(content)
-	w.lastAuthHashes[filepath.Clean(authFile)] = hexString(sum[:])
+	// Use normalizeAuthPath to match how authFileUnchanged looks up the key
+	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = hexString(sum[:])
 
 	unchanged, err = w.authFileUnchanged(authFile)
 	if err != nil {
@@ -560,21 +563,22 @@ func TestHandleEventRemovesAuthFile(t *testing.T) {
 
 	var reloads int32
 	w := &Watcher{
-		authDir: tmpDir,
-		config:  &config.Config{AuthDir: tmpDir},
-		lastAuthHashes: map[string]string{
-			filepath.Clean(authFile): "hash",
-		},
+		authDir:        tmpDir,
+		config:         &config.Config{AuthDir: tmpDir},
+		lastAuthHashes: make(map[string]string),
 		reloadCallback: func(*config.Config) {
 			atomic.AddInt32(&reloads, 1)
 		},
 	}
+	// Use normalizeAuthPath to set up the hash with the correct key format
+	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = "hash"
+
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
 
 	if atomic.LoadInt32(&reloads) != 1 {
 		t.Fatalf("expected reload callback once, got %d", reloads)
 	}
-	if _, ok := w.lastAuthHashes[filepath.Clean(authFile)]; ok {
+	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected hash entry to be removed")
 	}
 }

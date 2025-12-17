@@ -8,14 +8,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,8 +21,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	"gopkg.in/yaml.v3"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -77,39 +75,6 @@ type Watcher struct {
 	storePersister    storePersister
 	mirroredAuthDir   string
 	oldConfigYaml     []byte
-}
-
-type stableIDGenerator struct {
-	counters map[string]int
-}
-
-func newStableIDGenerator() *stableIDGenerator {
-	return &stableIDGenerator{counters: make(map[string]int)}
-}
-
-func (g *stableIDGenerator) next(kind string, parts ...string) (string, string) {
-	if g == nil {
-		return kind + ":000000000000", "000000000000"
-	}
-	hasher := sha256.New()
-	hasher.Write([]byte(kind))
-	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		hasher.Write([]byte{0})
-		hasher.Write([]byte(trimmed))
-	}
-	digest := hex.EncodeToString(hasher.Sum(nil))
-	if len(digest) < 12 {
-		digest = fmt.Sprintf("%012s", digest)
-	}
-	short := digest[:12]
-	key := kind + ":" + short
-	index := g.counters[key]
-	g.counters[key] = index + 1
-	if index > 0 {
-		short = fmt.Sprintf("%s-%d", short, index)
-	}
-	return fmt.Sprintf("%s:%s", kind, short), short
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -513,46 +478,6 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 	clone.Runtime = nil
 	clone.Quota.NextRecoverAt = time.Time{}
 	return clone
-}
-
-func applyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey []string, authKind string) {
-	if auth == nil || cfg == nil {
-		return
-	}
-	authKindKey := strings.ToLower(strings.TrimSpace(authKind))
-	seen := make(map[string]struct{})
-	add := func(list []string) {
-		for _, entry := range list {
-			if trimmed := strings.TrimSpace(entry); trimmed != "" {
-				key := strings.ToLower(trimmed)
-				if _, exists := seen[key]; exists {
-					continue
-				}
-				seen[key] = struct{}{}
-			}
-		}
-	}
-	if authKindKey == "apikey" {
-		add(perKey)
-	} else if cfg.OAuthExcludedModels != nil {
-		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
-		add(cfg.OAuthExcludedModels[providerKey])
-	}
-	combined := make([]string, 0, len(seen))
-	for k := range seen {
-		combined = append(combined, k)
-	}
-	sort.Strings(combined)
-	hash := diff.ComputeExcludedModelsHash(combined)
-	if auth.Attributes == nil {
-		auth.Attributes = make(map[string]string)
-	}
-	if hash != "" {
-		auth.Attributes["excluded_models_hash"] = hash
-	}
-	if authKind != "" {
-		auth.Attributes["auth_kind"] = authKind
-	}
 }
 
 // SetClients sets the file-based clients.
@@ -1054,533 +979,32 @@ func (w *Watcher) removeClient(path string) {
 
 // SnapshotCoreAuths converts current clients snapshot into core auth entries.
 func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
-	out := make([]*coreauth.Auth, 0, 32)
-	now := time.Now()
-	idGen := newStableIDGenerator()
-	// Also synthesize auth entries for OpenAI-compatibility providers directly from config
 	w.clientsMutex.RLock()
 	cfg := w.config
 	w.clientsMutex.RUnlock()
-	if cfg != nil {
-		// Gemini official API keys -> synthesize auths
-		for i := range cfg.GeminiKey {
-			entry := cfg.GeminiKey[i]
-			key := strings.TrimSpace(entry.APIKey)
-			if key == "" {
-				continue
-			}
-			prefix := strings.TrimSpace(entry.Prefix)
-			base := strings.TrimSpace(entry.BaseURL)
-			proxyURL := strings.TrimSpace(entry.ProxyURL)
-			id, token := idGen.next("gemini:apikey", key, base)
-			attrs := map[string]string{
-				"source":  fmt.Sprintf("config:gemini[%s]", token),
-				"api_key": key,
-			}
-			if base != "" {
-				attrs["base_url"] = base
-			}
-			addConfigHeadersToAttrs(entry.Headers, attrs)
-			a := &coreauth.Auth{
-				ID:         id,
-				Provider:   "gemini",
-				Label:      "gemini-apikey",
-				Prefix:     prefix,
-				Status:     coreauth.StatusActive,
-				ProxyURL:   proxyURL,
-				Attributes: attrs,
-				CreatedAt:  now,
-				UpdatedAt:  now,
-			}
-			applyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
-			out = append(out, a)
-		}
 
-		// Claude API keys -> synthesize auths
-		for i := range cfg.ClaudeKey {
-			ck := cfg.ClaudeKey[i]
-			key := strings.TrimSpace(ck.APIKey)
-			if key == "" {
-				continue
-			}
-			prefix := strings.TrimSpace(ck.Prefix)
-			base := strings.TrimSpace(ck.BaseURL)
-			id, token := idGen.next("claude:apikey", key, base)
-			attrs := map[string]string{
-				"source":  fmt.Sprintf("config:claude[%s]", token),
-				"api_key": key,
-			}
-			if base != "" {
-				attrs["base_url"] = base
-			}
-			if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
-				attrs["models_hash"] = hash
-			}
-			addConfigHeadersToAttrs(ck.Headers, attrs)
-			proxyURL := strings.TrimSpace(ck.ProxyURL)
-			a := &coreauth.Auth{
-				ID:         id,
-				Provider:   "claude",
-				Label:      "claude-apikey",
-				Prefix:     prefix,
-				Status:     coreauth.StatusActive,
-				ProxyURL:   proxyURL,
-				Attributes: attrs,
-				CreatedAt:  now,
-				UpdatedAt:  now,
-			}
-			applyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
-			out = append(out, a)
-		}
-		// Codex API keys -> synthesize auths
-		for i := range cfg.CodexKey {
-			ck := cfg.CodexKey[i]
-			key := strings.TrimSpace(ck.APIKey)
-			if key == "" {
-				continue
-			}
-			prefix := strings.TrimSpace(ck.Prefix)
-			id, token := idGen.next("codex:apikey", key, ck.BaseURL)
-			attrs := map[string]string{
-				"source":  fmt.Sprintf("config:codex[%s]", token),
-				"api_key": key,
-			}
-			if ck.BaseURL != "" {
-				attrs["base_url"] = ck.BaseURL
-			}
-			addConfigHeadersToAttrs(ck.Headers, attrs)
-			proxyURL := strings.TrimSpace(ck.ProxyURL)
-			a := &coreauth.Auth{
-				ID:         id,
-				Provider:   "codex",
-				Label:      "codex-apikey",
-				Prefix:     prefix,
-				Status:     coreauth.StatusActive,
-				ProxyURL:   proxyURL,
-				Attributes: attrs,
-				CreatedAt:  now,
-				UpdatedAt:  now,
-			}
-			applyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
-			out = append(out, a)
-		}
-		// Kiro (AWS CodeWhisperer) -> synthesize auths
-		var kAuth *kiroauth.KiroAuth
-		if len(cfg.KiroKey) > 0 {
-			kAuth = kiroauth.NewKiroAuth(cfg)
-		}
-		for i := range cfg.KiroKey {
-			kk := cfg.KiroKey[i]
-			var accessToken, profileArn, refreshToken string
-
-			// Try to load from token file first
-			if kk.TokenFile != "" && kAuth != nil {
-				tokenData, err := kAuth.LoadTokenFromFile(kk.TokenFile)
-				if err != nil {
-					log.Warnf("failed to load kiro token file %s: %v", kk.TokenFile, err)
-				} else {
-					accessToken = tokenData.AccessToken
-					profileArn = tokenData.ProfileArn
-					refreshToken = tokenData.RefreshToken
-				}
-			}
-
-			// Override with direct config values if provided
-			if kk.AccessToken != "" {
-				accessToken = kk.AccessToken
-			}
-			if kk.ProfileArn != "" {
-				profileArn = kk.ProfileArn
-			}
-			if kk.RefreshToken != "" {
-				refreshToken = kk.RefreshToken
-			}
-
-			if accessToken == "" {
-				log.Warnf("kiro config[%d] missing access_token, skipping", i)
-				continue
-			}
-
-			// profileArn is optional for AWS Builder ID users
-			id, token := idGen.next("kiro:token", accessToken, profileArn)
-			attrs := map[string]string{
-				"source":       fmt.Sprintf("config:kiro[%s]", token),
-				"access_token": accessToken,
-			}
-			if profileArn != "" {
-				attrs["profile_arn"] = profileArn
-			}
-			if kk.Region != "" {
-				attrs["region"] = kk.Region
-			}
-			if kk.AgentTaskType != "" {
-				attrs["agent_task_type"] = kk.AgentTaskType
-			}
-			if kk.PreferredEndpoint != "" {
-				attrs["preferred_endpoint"] = kk.PreferredEndpoint
-			} else if cfg.KiroPreferredEndpoint != "" {
-				// Apply global default if not overridden by specific key
-				attrs["preferred_endpoint"] = cfg.KiroPreferredEndpoint
-			}
-			if refreshToken != "" {
-				attrs["refresh_token"] = refreshToken
-			}
-			proxyURL := strings.TrimSpace(kk.ProxyURL)
-			a := &coreauth.Auth{
-				ID:         id,
-				Provider:   "kiro",
-				Label:      "kiro-token",
-				Status:     coreauth.StatusActive,
-				ProxyURL:   proxyURL,
-				Attributes: attrs,
-				CreatedAt:  now,
-				UpdatedAt:  now,
-			}
-
-			if refreshToken != "" {
-				if a.Metadata == nil {
-					a.Metadata = make(map[string]any)
-				}
-				a.Metadata["refresh_token"] = refreshToken
-			}
-
-			out = append(out, a)
-		}
-		for i := range cfg.OpenAICompatibility {
-			compat := &cfg.OpenAICompatibility[i]
-			prefix := strings.TrimSpace(compat.Prefix)
-			providerName := strings.ToLower(strings.TrimSpace(compat.Name))
-			if providerName == "" {
-				providerName = "openai-compatibility"
-			}
-			base := strings.TrimSpace(compat.BaseURL)
-
-			// Handle new APIKeyEntries format (preferred)
-			createdEntries := 0
-			for j := range compat.APIKeyEntries {
-				entry := &compat.APIKeyEntries[j]
-				key := strings.TrimSpace(entry.APIKey)
-				proxyURL := strings.TrimSpace(entry.ProxyURL)
-				idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-				id, token := idGen.next(idKind, key, base, proxyURL)
-				attrs := map[string]string{
-					"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-					"base_url":     base,
-					"compat_name":  compat.Name,
-					"provider_key": providerName,
-				}
-				if key != "" {
-					attrs["api_key"] = key
-				}
-				if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
-					attrs["models_hash"] = hash
-				}
-				addConfigHeadersToAttrs(compat.Headers, attrs)
-				a := &coreauth.Auth{
-					ID:         id,
-					Provider:   providerName,
-					Label:      compat.Name,
-					Prefix:     prefix,
-					Status:     coreauth.StatusActive,
-					ProxyURL:   proxyURL,
-					Attributes: attrs,
-					CreatedAt:  now,
-					UpdatedAt:  now,
-				}
-				out = append(out, a)
-				createdEntries++
-			}
-			if createdEntries == 0 {
-				idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-				id, token := idGen.next(idKind, base)
-				attrs := map[string]string{
-					"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-					"base_url":     base,
-					"compat_name":  compat.Name,
-					"provider_key": providerName,
-				}
-				if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
-					attrs["models_hash"] = hash
-				}
-				addConfigHeadersToAttrs(compat.Headers, attrs)
-				a := &coreauth.Auth{
-					ID:         id,
-					Provider:   providerName,
-					Label:      compat.Name,
-					Prefix:     prefix,
-					Status:     coreauth.StatusActive,
-					Attributes: attrs,
-					CreatedAt:  now,
-					UpdatedAt:  now,
-				}
-				out = append(out, a)
-			}
-		}
+	ctx := &synthesizer.SynthesisContext{
+		Config:      cfg,
+		AuthDir:     w.authDir,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
 	}
 
-	// Process Vertex API key providers (Vertex-compatible endpoints)
-	for i := range cfg.VertexCompatAPIKey {
-		compat := &cfg.VertexCompatAPIKey[i]
-		providerName := "vertex"
-		base := strings.TrimSpace(compat.BaseURL)
+	var out []*coreauth.Auth
 
-		key := strings.TrimSpace(compat.APIKey)
-		prefix := strings.TrimSpace(compat.Prefix)
-		proxyURL := strings.TrimSpace(compat.ProxyURL)
-		idKind := "vertex:apikey"
-		id, token := idGen.next(idKind, key, base, proxyURL)
-		attrs := map[string]string{
-			"source":       fmt.Sprintf("config:vertex-apikey[%s]", token),
-			"base_url":     base,
-			"provider_key": providerName,
-		}
-		if key != "" {
-			attrs["api_key"] = key
-		}
-		if hash := diff.ComputeVertexCompatModelsHash(compat.Models); hash != "" {
-			attrs["models_hash"] = hash
-		}
-		addConfigHeadersToAttrs(compat.Headers, attrs)
-		a := &coreauth.Auth{
-			ID:         id,
-			Provider:   providerName,
-			Label:      "vertex-apikey",
-			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
-			ProxyURL:   proxyURL,
-			Attributes: attrs,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		applyAuthExcludedModelsMeta(a, cfg, nil, "apikey")
-		out = append(out, a)
+	// Use ConfigSynthesizer for API key auth entries
+	configSynth := synthesizer.NewConfigSynthesizer()
+	if auths, err := configSynth.Synthesize(ctx); err == nil {
+		out = append(out, auths...)
 	}
 
-	// Also synthesize auth entries directly from auth files (for OAuth/file-backed providers)
-	log.Debugf("SnapshotCoreAuths: scanning auth directory: %s", w.authDir)
-	entries, readErr := os.ReadDir(w.authDir)
-	if readErr != nil {
-		log.Errorf("SnapshotCoreAuths: failed to read auth directory %s: %v", w.authDir, readErr)
+	// Use FileSynthesizer for file-based OAuth auth entries
+	fileSynth := synthesizer.NewFileSynthesizer()
+	if auths, err := fileSynth.Synthesize(ctx); err == nil {
+		out = append(out, auths...)
 	}
-	log.Debugf("SnapshotCoreAuths: found %d entries in auth directory", len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			continue
-		}
-		full := filepath.Join(w.authDir, name)
-		data, err := os.ReadFile(full)
-		if err != nil || len(data) == 0 {
-			continue
-		}
-		var metadata map[string]any
-		if err = json.Unmarshal(data, &metadata); err != nil {
-			continue
-		}
-		t, _ := metadata["type"].(string)
 
-		// Detect Kiro auth files by auth_method field (they don't have "type" field)
-		if t == "" {
-			if authMethod, _ := metadata["auth_method"].(string); authMethod == "builder-id" || authMethod == "social" {
-				t = "kiro"
-				log.Debugf("SnapshotCoreAuths: detected Kiro auth by auth_method: %s", name)
-			}
-		}
-
-		if t == "" {
-			log.Debugf("SnapshotCoreAuths: skipping file without type: %s", name)
-			continue
-		}
-		log.Debugf("SnapshotCoreAuths: processing auth file: %s (type=%s)", name, t)
-		provider := strings.ToLower(t)
-		if provider == "gemini" {
-			provider = "gemini-cli"
-		}
-		label := provider
-		if email, _ := metadata["email"].(string); email != "" {
-			label = email
-		}
-		// For Kiro, use provider field as label if available
-		if provider == "kiro" {
-			if kiroProvider, _ := metadata["provider"].(string); kiroProvider != "" {
-				label = fmt.Sprintf("kiro-%s", strings.ToLower(kiroProvider))
-			}
-		}
-		// Use relative path under authDir as ID to stay consistent with the file-based token store
-		id := full
-		if rel, errRel := filepath.Rel(w.authDir, full); errRel == nil && rel != "" {
-			id = rel
-		}
-
-		proxyURL := ""
-		if p, ok := metadata["proxy_url"].(string); ok {
-			proxyURL = p
-		}
-
-		prefix := ""
-		if rawPrefix, ok := metadata["prefix"].(string); ok {
-			trimmed := strings.TrimSpace(rawPrefix)
-			trimmed = strings.Trim(trimmed, "/")
-			if trimmed != "" && !strings.Contains(trimmed, "/") {
-				prefix = trimmed
-			}
-		}
-
-		a := &coreauth.Auth{
-			ID:       id,
-			Provider: provider,
-			Label:    label,
-			Prefix:   prefix,
-			Status:   coreauth.StatusActive,
-			Attributes: map[string]string{
-				"source": full,
-				"path":   full,
-			},
-			ProxyURL:  proxyURL,
-			Metadata:  metadata,
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		// Set NextRefreshAfter for Kiro auth based on expires_at
-		if provider == "kiro" {
-			if expiresAtStr, ok := metadata["expires_at"].(string); ok && expiresAtStr != "" {
-				if expiresAt, parseErr := time.Parse(time.RFC3339, expiresAtStr); parseErr == nil {
-					// Refresh 30 minutes before expiry
-					a.NextRefreshAfter = expiresAt.Add(-30 * time.Minute)
-				}
-			}
-
-			// Apply global preferred endpoint setting if not present in metadata
-			if cfg.KiroPreferredEndpoint != "" {
-				// Check if already set in metadata (which takes precedence in executor)
-				if _, hasMeta := metadata["preferred_endpoint"]; !hasMeta {
-					if a.Attributes == nil {
-						a.Attributes = make(map[string]string)
-					}
-					a.Attributes["preferred_endpoint"] = cfg.KiroPreferredEndpoint
-				}
-			}
-		}
-
-		applyAuthExcludedModelsMeta(a, cfg, nil, "oauth")
-		if provider == "gemini-cli" {
-			if virtuals := synthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
-				for _, v := range virtuals {
-					applyAuthExcludedModelsMeta(v, cfg, nil, "oauth")
-				}
-				out = append(out, a)
-				out = append(out, virtuals...)
-				continue
-			}
-		}
-		out = append(out, a)
-	}
 	return out
-}
-
-func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]any, now time.Time) []*coreauth.Auth {
-	if primary == nil || metadata == nil {
-		return nil
-	}
-	projects := splitGeminiProjectIDs(metadata)
-	if len(projects) <= 1 {
-		return nil
-	}
-	email, _ := metadata["email"].(string)
-	shared := geminicli.NewSharedCredential(primary.ID, email, metadata, projects)
-	primary.Disabled = true
-	primary.Status = coreauth.StatusDisabled
-	primary.Runtime = shared
-	if primary.Attributes == nil {
-		primary.Attributes = make(map[string]string)
-	}
-	primary.Attributes["gemini_virtual_primary"] = "true"
-	primary.Attributes["virtual_children"] = strings.Join(projects, ",")
-	source := primary.Attributes["source"]
-	authPath := primary.Attributes["path"]
-	originalProvider := primary.Provider
-	if originalProvider == "" {
-		originalProvider = "gemini-cli"
-	}
-	label := primary.Label
-	if label == "" {
-		label = originalProvider
-	}
-	virtuals := make([]*coreauth.Auth, 0, len(projects))
-	for _, projectID := range projects {
-		attrs := map[string]string{
-			"runtime_only":           "true",
-			"gemini_virtual_parent":  primary.ID,
-			"gemini_virtual_project": projectID,
-		}
-		if source != "" {
-			attrs["source"] = source
-		}
-		if authPath != "" {
-			attrs["path"] = authPath
-		}
-		metadataCopy := map[string]any{
-			"email":             email,
-			"project_id":        projectID,
-			"virtual":           true,
-			"virtual_parent_id": primary.ID,
-			"type":              metadata["type"],
-		}
-		proxy := strings.TrimSpace(primary.ProxyURL)
-		if proxy != "" {
-			metadataCopy["proxy_url"] = proxy
-		}
-		virtual := &coreauth.Auth{
-			ID:         buildGeminiVirtualID(primary.ID, projectID),
-			Provider:   originalProvider,
-			Label:      fmt.Sprintf("%s [%s]", label, projectID),
-			Status:     coreauth.StatusActive,
-			Attributes: attrs,
-			Metadata:   metadataCopy,
-			ProxyURL:   primary.ProxyURL,
-			Prefix:     primary.Prefix,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-			Runtime:    geminicli.NewVirtualCredential(projectID, shared),
-		}
-		virtuals = append(virtuals, virtual)
-	}
-	return virtuals
-}
-
-func splitGeminiProjectIDs(metadata map[string]any) []string {
-	raw, _ := metadata["project_id"].(string)
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return nil
-	}
-	parts := strings.Split(trimmed, ",")
-	result := make([]string, 0, len(parts))
-	seen := make(map[string]struct{}, len(parts))
-	for _, part := range parts {
-		id := strings.TrimSpace(part)
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		result = append(result, id)
-	}
-	return result
-}
-
-func buildGeminiVirtualID(baseID, projectID string) string {
-	project := strings.TrimSpace(projectID)
-	if project == "" {
-		project = "project"
-	}
-	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_")
-	return fmt.Sprintf("%s::%s", baseID, replacer.Replace(project))
 }
 
 // buildCombinedClientMap merges file-based clients with API key clients from the cache.
@@ -1653,18 +1077,4 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 		}
 	}
 	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount
-}
-
-func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {
-	if len(headers) == 0 || attrs == nil {
-		return
-	}
-	for hk, hv := range headers {
-		key := strings.TrimSpace(hk)
-		val := strings.TrimSpace(hv)
-		if key == "" || val == "" {
-			continue
-		}
-		attrs["header:"+key] = val
-	}
 }

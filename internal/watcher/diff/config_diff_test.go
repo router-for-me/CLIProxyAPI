@@ -231,9 +231,10 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		AmpCode:                config.AmpCode{UpstreamAPIKey: "keep", RestrictManagementToLocalhost: false},
 		RemoteManagement:       config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
 		SDKConfig: sdkconfig.SDKConfig{
-			RequestLog: false,
-			ProxyURL:   "http://old-proxy",
-			APIKeys:    []string{"key-1"},
+			RequestLog:       false,
+			ProxyURL:         "http://old-proxy",
+			APIKeys:          []string{"key-1"},
+			ForceModelPrefix: false,
 		},
 	}
 	newCfg := &config.Config{
@@ -266,9 +267,10 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			SecretKey:             "",
 		},
 		SDKConfig: sdkconfig.SDKConfig{
-			RequestLog: true,
-			ProxyURL:   "http://new-proxy",
-			APIKeys:    []string{" key-1 ", "key-2"},
+			RequestLog:       true,
+			ProxyURL:         "http://new-proxy",
+			APIKeys:          []string{" key-1 ", "key-2"},
+			ForceModelPrefix: true,
 		},
 	}
 
@@ -282,6 +284,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "max-retry-interval: 1 -> 3")
 	expectContains(t, details, "proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, details, "ws-auth: false -> true")
+	expectContains(t, details, "force-model-prefix: false -> true")
 	expectContains(t, details, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, details, "quota-exceeded.switch-preview-model: false -> true")
 	expectContains(t, details, "api-keys count: 1 -> 2")
