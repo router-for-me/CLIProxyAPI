@@ -186,6 +186,16 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	ampAPI.Any("/provider/google/v1beta1/*path", func(c *gin.Context) {
 		if c.Request.Method == "POST" {
 			if path := c.Param("path"); strings.Contains(path, "/models/") {
+				// >>> LITELLM_HOOK_V1BETA1 - Check LiteLLM routing for Gemini v1beta1 models
+				if m.litellmConfig != nil && m.litellmProxy != nil {
+					model := extractModelFromPath(path)
+					if model != "" && m.litellmConfig.ShouldRouteToLiteLLM(model) {
+						log.Infof("litellm routing (v1beta1): %s -> LiteLLM", model)
+						m.litellmProxy.ServeHTTP(c.Writer, c.Request)
+						return
+					}
+				}
+				// <<< LITELLM_HOOK_V1BETA1
 				// POST with /models/ path -> use Gemini bridge with fallback handler
 				// FallbackHandler will check provider/mapping and proxy if needed
 				geminiV1Beta1Handler(c)
