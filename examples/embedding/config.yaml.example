@@ -77,6 +77,21 @@ claude-api-key:
 #         alias: "gpt-4"  # Optional alias for compatibility
 
 # =============================================================================
+# MODEL PREFIX / NAMESPACING (optional)
+# =============================================================================
+
+# When multiple accounts have the same models, use prefixes to target specific ones.
+# Example: With prefix "team-a", request "team-a/claude-sonnet-4" routes to that account.
+#
+# force-model-prefix: false  # When true, unprefixed requests only use unprefixed credentials
+#
+# claude-api-key:
+#   - api-key: "${CLAUDE_API_KEY_TEAM_A}"
+#     prefix: "team-a"
+#   - api-key: "${CLAUDE_API_KEY_TEAM_B}"
+#     prefix: "team-b"
+
+# =============================================================================
 # ADVANCED OPTIONS
 # =============================================================================
 
