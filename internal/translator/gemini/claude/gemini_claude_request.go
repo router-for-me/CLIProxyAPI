@@ -122,7 +122,9 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			toolResult := toolsResults[i]
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
-				inputSchema := inputSchemaResult.Raw
+				// Clean the schema to handle non-standard fields like "optional"
+				// and convert them to standard JSON Schema format for Gemini
+				inputSchema := util.CleanJSONSchemaForGemini(inputSchemaResult.Raw)
 				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
 				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
 				tool, _ = sjson.Delete(tool, "strict")

@@ -596,6 +596,119 @@ func TestCleanJSONSchemaForGemini_MultipleNonNullTypes(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForGemini_OptionalToRequired(t *testing.T) {
+	// Test case from GitHub issue #583: Factory Droid sends "optional" field
+	input := `{
+		"type": "object",
+		"properties": {
+			"param1": {"type": "string", "optional": false},
+			"param2": {"type": "number", "optional": true},
+			"param3": {"type": "boolean", "optional": false}
+		}
+	}`
+
+	expected := `{
+		"type": "object",
+		"properties": {
+			"param1": {"type": "string"},
+			"param2": {"type": "number"},
+			"param3": {"type": "boolean"}
+		},
+		"required": ["param1", "param3"]
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	compareJSON(t, expected, result)
+}
+
+func TestCleanJSONSchemaForGemini_OptionalToRequired_Nested(t *testing.T) {
+	// Test nested properties with optional fields
+	input := `{
+		"type": "object",
+		"properties": {
+			"outer": {
+				"type": "object",
+				"properties": {
+					"inner1": {"type": "string", "optional": false},
+					"inner2": {"type": "string", "optional": true}
+				}
+			},
+			"top": {"type": "string", "optional": false}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+
+	// Verify top-level required
+	if !strings.Contains(result, `"required"`) {
+		t.Errorf("Expected required array, got: %s", result)
+	}
+
+	// Verify optional fields are removed
+	if strings.Contains(result, `"optional"`) {
+		t.Errorf("Expected optional fields to be removed, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForGemini_OptionalToRequired_PreservesExistingRequired(t *testing.T) {
+	// Test that existing required array is preserved and extended
+	input := `{
+		"type": "object",
+		"properties": {
+			"existing": {"type": "string"},
+			"new": {"type": "string", "optional": false}
+		},
+		"required": ["existing"]
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+
+	// Both should be required
+	if !strings.Contains(result, `"existing"`) || !strings.Contains(result, `"new"`) {
+		t.Errorf("Expected both existing and new in required, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForGemini_OptionalToRequired_NoOptionalFields(t *testing.T) {
+	// Test that schemas without optional fields are unchanged
+	input := `{
+		"type": "object",
+		"properties": {
+			"name": {"type": "string"}
+		},
+		"required": ["name"]
+	}`
+
+	expected := `{
+		"type": "object",
+		"properties": {
+			"name": {"type": "string"}
+		},
+		"required": ["name"]
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	compareJSON(t, expected, result)
+}
+
+func TestCleanJSONSchemaForGemini_OptionalToRequired_AllOptionalTrue(t *testing.T) {
+	// Test that optional: true fields are not added to required
+	input := `{
+		"type": "object",
+		"properties": {
+			"opt1": {"type": "string", "optional": true},
+			"opt2": {"type": "number", "optional": true}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+
+	// Should not have a required array (or empty)
+	if strings.Contains(result, `"optional"`) {
+		t.Errorf("Expected optional fields to be removed, got: %s", result)
+	}
+}
+
 func compareJSON(t *testing.T, expectedJSON, actualJSON string) {
 	var expMap, actMap map[string]interface{}
 	errExp := json.Unmarshal([]byte(expectedJSON), &expMap)

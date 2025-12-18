@@ -17,6 +17,7 @@ var gjsonPathKeyReplacer = strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?
 // semantic information as description hints.
 func CleanJSONSchemaForGemini(jsonStr string) string {
 	// Phase 1: Convert and add hints
+	jsonStr = convertOptionalToRequired(jsonStr)
 	jsonStr = convertRefsToHints(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
 	jsonStr = addEnumHints(jsonStr)
@@ -31,6 +32,88 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr)
 	jsonStr = cleanupRequiredFields(jsonStr)
+
+	return jsonStr
+}
+
+// convertOptionalToRequired converts non-standard "optional" fields in properties to
+// standard JSON Schema "required" arrays. Properties with "optional": false are added
+// to the parent object's "required" array, and all "optional" fields are removed.
+// This handles schemas from clients like Factory Droid that use the non-standard format.
+func convertOptionalToRequired(jsonStr string) string {
+	// Find all "optional" fields
+	paths := findPaths(jsonStr, "optional")
+	if len(paths) == 0 {
+		return jsonStr
+	}
+
+	// Group properties by their parent object path
+	// Map: objectPath -> []propertyName (for properties with optional: false)
+	requiredByObject := make(map[string][]string)
+
+	for _, p := range paths {
+		// Expected path format: properties.propName.optional or nested like
+		// properties.foo.properties.bar.optional
+		parts := splitGJSONPath(p)
+		if len(parts) < 3 {
+			continue
+		}
+
+		// Check if the last part is "optional" and second-to-last is a property name
+		// under "properties"
+		if parts[len(parts)-1] != "optional" {
+			continue
+		}
+
+		// Find the "properties" parent
+		propIdx := -1
+		for i := len(parts) - 3; i >= 0; i-- {
+			if parts[i] == "properties" {
+				propIdx = i
+				break
+			}
+		}
+		if propIdx == -1 || propIdx+1 >= len(parts)-1 {
+			continue
+		}
+
+		// Get the property name (the element after "properties")
+		propNameEscaped := parts[propIdx+1]
+		propName := unescapeGJSONPathKey(propNameEscaped)
+
+		// Get the object path (everything before "properties")
+		objectPath := ""
+		if propIdx > 0 {
+			objectPath = strings.Join(parts[:propIdx], ".")
+		}
+
+		// Check if optional is false
+		optVal := gjson.Get(jsonStr, p)
+		if optVal.Type == gjson.False {
+			requiredByObject[objectPath] = append(requiredByObject[objectPath], propName)
+		}
+	}
+
+	// Add required fields to each object
+	for objectPath, propNames := range requiredByObject {
+		reqPath := joinPath(objectPath, "required")
+		existing := getStrings(jsonStr, reqPath)
+
+		for _, propName := range propNames {
+			if !contains(existing, propName) {
+				existing = append(existing, propName)
+			}
+		}
+
+		if len(existing) > 0 {
+			jsonStr, _ = sjson.Set(jsonStr, reqPath, existing)
+		}
+	}
+
+	// Remove all "optional" fields
+	for _, p := range paths {
+		jsonStr, _ = sjson.Delete(jsonStr, p)
+	}
 
 	return jsonStr
 }
@@ -295,7 +378,7 @@ func flattenTypeArrays(jsonStr string) string {
 
 func removeUnsupportedKeywords(jsonStr string) string {
 	keywords := append(unsupportedConstraints,
-		"$schema", "$defs", "definitions", "const", "$ref", "additionalProperties",
+		"$schema", "$defs", "definitions", "const", "$ref", "additionalProperties", "propertyNames",
 	)
 	for _, key := range keywords {
 		for _, p := range findPaths(jsonStr, key) {
