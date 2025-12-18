@@ -629,6 +629,9 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 	content.WriteString(fmt.Sprintf("URL: %s\n", url))
 	content.WriteString(fmt.Sprintf("Method: %s\n", method))
 	content.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
+	if correlationID := extractCorrelationID(headers); correlationID != "" {
+		content.WriteString(fmt.Sprintf("Correlation-ID: %s\n", correlationID))
+	}
 	content.WriteString("\n")
 
 	content.WriteString("=== HEADERS ===\n")
@@ -901,3 +904,13 @@ func (w *NoOpStreamingLogWriter) WriteAPIResponse(_ []byte) error {
 // Returns:
 //   - error: Always returns nil
 func (w *NoOpStreamingLogWriter) Close() error { return nil }
+
+func extractCorrelationID(headers map[string][]string) string {
+	if values, ok := headers["X-Correlation-ID"]; ok && len(values) > 0 {
+		return values[0]
+	}
+	if values, ok := headers["X-Request-ID"]; ok && len(values) > 0 {
+		return values[0]
+	}
+	return ""
+}

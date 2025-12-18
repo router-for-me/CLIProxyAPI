@@ -20,7 +20,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/access"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
+	v1Handlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/v1"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -150,6 +152,9 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
+	// v1 API handler for profiles, routing rules, and diagnostics
+	v1 *v1Handlers.Handler
+
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
@@ -262,6 +267,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	s.mgmt.SetLogDirectory(logDir)
 	s.localPassword = optionState.localPassword
+
+	// Initialize v1 API handler for profiles, routing rules, and diagnostics
+	routingCfg := routing.GetConfig()
+	s.v1 = v1Handlers.NewHandler(routingCfg)
 
 	// Setup routes
 	s.setupRoutes()
@@ -579,6 +588,45 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
+
+	// Register v1 API routes (GA-ready versioned API)
+	s.registerV1Routes()
+}
+
+func (s *Server) registerV1Routes() {
+	if s == nil || s.engine == nil || s.v1 == nil {
+		return
+	}
+
+	// Determine auth secret for v1 endpoints
+	authSecret := s.cfg.RemoteManagement.SecretKey
+	if envSecret, ok := os.LookupEnv("MANAGEMENT_PASSWORD"); ok && strings.TrimSpace(envSecret) != "" {
+		authSecret = strings.TrimSpace(envSecret)
+	}
+	if s.localPassword != "" && authSecret == "" {
+		authSecret = s.localPassword
+	}
+
+	v1 := s.engine.Group("/v1")
+	{
+		// Profile endpoints - read endpoints are public, write endpoints require auth
+		v1.GET("/profiles", s.v1.ListProfiles)
+		v1.POST("/profiles", v1Handlers.AuthRequired(authSecret), s.v1.CreateProfile)
+		v1.PUT("/profiles/:id", v1Handlers.AuthRequired(authSecret), s.v1.UpdateProfile)
+		v1.DELETE("/profiles/:id", v1Handlers.AuthRequired(authSecret), s.v1.DeleteProfile)
+
+		// Routing rule endpoints (provider groups)
+		v1.GET("/routing/rules", s.v1.ListRoutingRules)
+		v1.POST("/routing/rules", v1Handlers.AuthRequired(authSecret), s.v1.CreateRoutingRule)
+		v1.PUT("/routing/rules/:id", v1Handlers.AuthRequired(authSecret), s.v1.UpdateRoutingRule)
+		v1.DELETE("/routing/rules/:id", v1Handlers.AuthRequired(authSecret), s.v1.DeleteRoutingRule)
+
+		// Diagnostics endpoints - all public (read-only)
+		v1.GET("/diagnostics/bundle", s.v1.GetDiagnosticsBundle)
+		v1.GET("/diagnostics/health", s.v1.GetHealth)
+	}
+
+	log.Info("v1 API routes registered")
 }
 
 func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {

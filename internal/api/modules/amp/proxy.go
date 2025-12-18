@@ -76,9 +76,15 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		req.Header.Del("Authorization")
 		req.Header.Del("X-Api-Key")
 
-		// Preserve correlation headers for debugging
-		if req.Header.Get("X-Request-ID") == "" {
-			// Could generate one here if needed
+		// Propagate correlation ID to upstream provider for request tracing
+		// The middleware sets both X-Correlation-ID and X-Request-ID on the request
+		correlationID := req.Header.Get("X-Correlation-ID")
+		if correlationID == "" {
+			correlationID = req.Header.Get("X-Request-ID")
+		}
+		if correlationID != "" {
+			req.Header.Set("X-Correlation-ID", correlationID)
+			req.Header.Set("X-Request-ID", correlationID)
 		}
 
 		// Note: We do NOT filter Anthropic-Beta headers in the proxy path
