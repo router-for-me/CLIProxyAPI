@@ -222,20 +222,19 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	kiroTools := convertClaudeToolsToKiro(tools)
 
 	// Thinking mode implementation:
-	// Kiro API doesn't accept max_tokens for thinking. Instead, thinking mode is enabled
-	// by injecting <thinking_mode> and <max_thinking_length> tags into the system prompt.
-	// We use a fixed max_thinking_length value since Kiro handles the actual budget internally.
+	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
+	// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent
+	// rather than inline <thinking> tags in assistantResponseEvent.
+	// We use a high max_thinking_length to allow extensive reasoning.
 	if thinkingEnabled {
-		thinkingHint := `<thinking_mode>interleaved</thinking_mode>
-<max_thinking_length>200000</max_thinking_length>
-
-IMPORTANT: You MUST use <thinking>...</thinking> tags to show your reasoning process before providing your final response. Think step by step inside the thinking tags.`
+		thinkingHint := `<thinking_mode>enabled</thinking_mode>
+<max_thinking_length>200000</max_thinking_length>`
 		if systemPrompt != "" {
 			systemPrompt = thinkingHint + "\n\n" + systemPrompt
 		} else {
 			systemPrompt = thinkingHint
 		}
-		log.Infof("kiro: injected thinking prompt, has_tools: %v", len(kiroTools) > 0)
+		log.Infof("kiro: injected thinking prompt (official mode), has_tools: %v", len(kiroTools) > 0)
 	}
 
 	// Process messages and build history

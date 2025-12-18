@@ -163,6 +163,13 @@ func (o *KiroOAuth) LoginWithBuilderID(ctx context.Context) (*KiroTokenData, err
 	return ssoClient.LoginWithBuilderID(ctx)
 }
 
+// LoginWithBuilderIDAuthCode performs OAuth login with AWS Builder ID using authorization code flow.
+// This provides a better UX than device code flow as it uses automatic browser callback.
+func (o *KiroOAuth) LoginWithBuilderIDAuthCode(ctx context.Context) (*KiroTokenData, error) {
+	ssoClient := NewSSOOIDCClient(o.cfg)
+	return ssoClient.LoginWithBuilderIDAuthCode(ctx)
+}
+
 // exchangeCodeForToken exchanges the authorization code for tokens.
 func (o *KiroOAuth) exchangeCodeForToken(ctx context.Context, code, codeVerifier, redirectURI string) (*KiroTokenData, error) {
 	payload := map[string]string{
