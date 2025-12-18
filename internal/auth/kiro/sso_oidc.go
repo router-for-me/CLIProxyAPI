@@ -3,9 +3,14 @@ package kiro
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -25,6 +30,13 @@ const (
 	
 	// Polling interval
 	pollInterval = 5 * time.Second
+	
+	// Authorization code flow callback
+	authCodeCallbackPath = "/oauth/callback"
+	authCodeCallbackPort = 19877
+	
+	// User-Agent to match official Kiro IDE
+	kiroUserAgent = "KiroIDE"
 )
 
 // SSOOIDCClient handles AWS SSO OIDC authentication.
@@ -73,13 +85,11 @@ type CreateTokenResponse struct {
 
 // RegisterClient registers a new OIDC client with AWS.
 func (c *SSOOIDCClient) RegisterClient(ctx context.Context) (*RegisterClientResponse, error) {
-	// Generate unique client name for each registration to support multiple accounts
-	clientName := fmt.Sprintf("CLI-Proxy-API-%d", time.Now().UnixNano())
-	
 	payload := map[string]interface{}{
-		"clientName": clientName,
+		"clientName": "Kiro IDE",
 		"clientType": "public",
-		"scopes":     []string{"codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations"},
+		"scopes":     []string{"codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations", "codewhisperer:transformations", "codewhisperer:taskassist"},
+		"grantTypes": []string{"urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
 	}
 
 	body, err := json.Marshal(payload)
@@ -92,6 +102,7 @@ func (c *SSOOIDCClient) RegisterClient(ctx context.Context) (*RegisterClientResp
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kiroUserAgent)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -135,6 +146,7 @@ func (c *SSOOIDCClient) StartDeviceAuthorization(ctx context.Context, clientID, 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kiroUserAgent)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -179,6 +191,7 @@ func (c *SSOOIDCClient) CreateToken(ctx context.Context, clientID, clientSecret,
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kiroUserAgent)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -240,6 +253,7 @@ func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kiroUserAgent)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -370,8 +384,8 @@ func (c *SSOOIDCClient) LoginWithBuilderID(ctx context.Context) (*KiroTokenData,
 			fmt.Println("Fetching profile information...")
 			profileArn := c.fetchProfileArn(ctx, tokenResp.AccessToken)
 
-			// Extract email from JWT access token
-			email := ExtractEmailFromJWT(tokenResp.AccessToken)
+			// Fetch user email (tries CodeWhisperer API first, then userinfo endpoint, then JWT parsing)
+			email := FetchUserEmailWithFallback(ctx, c.cfg, tokenResp.AccessToken)
 			if email != "" {
 				fmt.Printf("  Logged in as: %s\n", email)
 			}
@@ -397,6 +411,68 @@ func (c *SSOOIDCClient) LoginWithBuilderID(ctx context.Context) (*KiroTokenData,
 		log.Debugf("Failed to close browser on timeout: %v", err)
 	}
 	return nil, fmt.Errorf("authorization timed out")
+}
+
+// FetchUserEmail retrieves the user's email from AWS SSO OIDC userinfo endpoint.
+// Falls back to JWT parsing if userinfo fails.
+func (c *SSOOIDCClient) FetchUserEmail(ctx context.Context, accessToken string) string {
+	// Method 1: Try userinfo endpoint (standard OIDC)
+	email := c.tryUserInfoEndpoint(ctx, accessToken)
+	if email != "" {
+		return email
+	}
+
+	// Method 2: Fallback to JWT parsing
+	return ExtractEmailFromJWT(accessToken)
+}
+
+// tryUserInfoEndpoint attempts to get user info from AWS SSO OIDC userinfo endpoint.
+func (c *SSOOIDCClient) tryUserInfoEndpoint(ctx context.Context, accessToken string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ssoOIDCEndpoint+"/userinfo", nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		log.Debugf("userinfo request failed: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		log.Debugf("userinfo endpoint returned status %d: %s", resp.StatusCode, string(respBody))
+		return ""
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+
+	log.Debugf("userinfo response: %s", string(respBody))
+
+	var userInfo struct {
+		Email             string `json:"email"`
+		Sub               string `json:"sub"`
+		PreferredUsername string `json:"preferred_username"`
+		Name              string `json:"name"`
+	}
+
+	if err := json.Unmarshal(respBody, &userInfo); err != nil {
+		return ""
+	}
+
+	if userInfo.Email != "" {
+		return userInfo.Email
+	}
+	if userInfo.PreferredUsername != "" && strings.Contains(userInfo.PreferredUsername, "@") {
+		return userInfo.PreferredUsername
+	}
+	return ""
 }
 
 // fetchProfileArn retrieves the profile ARN from CodeWhisperer API.
@@ -524,4 +600,324 @@ func (c *SSOOIDCClient) tryListCustomizations(ctx context.Context, accessToken s
 	}
 
 	return ""
+}
+
+// RegisterClientForAuthCode registers a new OIDC client for authorization code flow.
+func (c *SSOOIDCClient) RegisterClientForAuthCode(ctx context.Context, redirectURI string) (*RegisterClientResponse, error) {
+	payload := map[string]interface{}{
+		"clientName":   "Kiro IDE",
+		"clientType":   "public",
+		"scopes":       []string{"codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations", "codewhisperer:transformations", "codewhisperer:taskassist"},
+		"grantTypes":   []string{"authorization_code", "refresh_token"},
+		"redirectUris": []string{redirectURI},
+		"issuerUrl":    builderIDStartURL,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ssoOIDCEndpoint+"/client/register", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kiroUserAgent)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Debugf("register client for auth code failed (status %d): %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("register client failed (status %d)", resp.StatusCode)
+	}
+
+	var result RegisterClientResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// AuthCodeCallbackResult contains the result from authorization code callback.
+type AuthCodeCallbackResult struct {
+	Code  string
+	State string
+	Error string
+}
+
+// startAuthCodeCallbackServer starts a local HTTP server to receive the authorization code callback.
+func (c *SSOOIDCClient) startAuthCodeCallbackServer(ctx context.Context, expectedState string) (string, <-chan AuthCodeCallbackResult, error) {
+	// Try to find an available port
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", authCodeCallbackPort))
+	if err != nil {
+		// Try with dynamic port
+		log.Warnf("sso oidc: default port %d is busy, falling back to dynamic port", authCodeCallbackPort)
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to start callback server: %w", err)
+		}
+	}
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	redirectURI := fmt.Sprintf("http://127.0.0.1:%d%s", port, authCodeCallbackPath)
+	resultChan := make(chan AuthCodeCallbackResult, 1)
+
+	server := &http.Server{
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(authCodeCallbackPath, func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		state := r.URL.Query().Get("state")
+		errParam := r.URL.Query().Get("error")
+
+		// Send response to browser
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if errParam != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `<!DOCTYPE html>
+<html><head><title>Login Failed</title></head>
+<body><h1>Login Failed</h1><p>Error: %s</p><p>You can close this window.</p></body></html>`, html.EscapeString(errParam))
+			resultChan <- AuthCodeCallbackResult{Error: errParam}
+			return
+		}
+
+		if state != expectedState {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `<!DOCTYPE html>
+<html><head><title>Login Failed</title></head>
+<body><h1>Login Failed</h1><p>Invalid state parameter</p><p>You can close this window.</p></body></html>`)
+			resultChan <- AuthCodeCallbackResult{Error: "state mismatch"}
+			return
+		}
+
+		fmt.Fprint(w, `<!DOCTYPE html>
+<html><head><title>Login Successful</title></head>
+<body><h1>Login Successful!</h1><p>You can close this window and return to the terminal.</p>
+<script>window.close();</script></body></html>`)
+		resultChan <- AuthCodeCallbackResult{Code: code, State: state}
+	})
+
+	server.Handler = mux
+
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			log.Debugf("auth code callback server error: %v", err)
+		}
+	}()
+
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-time.After(10 * time.Minute):
+		case <-resultChan:
+		}
+		_ = server.Shutdown(context.Background())
+	}()
+
+	return redirectURI, resultChan, nil
+}
+
+// generatePKCEForAuthCode generates PKCE code verifier and challenge for authorization code flow.
+func generatePKCEForAuthCode() (verifier, challenge string, err error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", fmt.Errorf("failed to generate random bytes: %w", err)
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(b)
+	h := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(h[:])
+	return verifier, challenge, nil
+}
+
+// generateStateForAuthCode generates a random state parameter.
+func generateStateForAuthCode() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// CreateTokenWithAuthCode exchanges authorization code for tokens.
+func (c *SSOOIDCClient) CreateTokenWithAuthCode(ctx context.Context, clientID, clientSecret, code, codeVerifier, redirectURI string) (*CreateTokenResponse, error) {
+	payload := map[string]string{
+		"clientId":     clientID,
+		"clientSecret": clientSecret,
+		"code":         code,
+		"codeVerifier": codeVerifier,
+		"redirectUri":  redirectURI,
+		"grantType":    "authorization_code",
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ssoOIDCEndpoint+"/token", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kiroUserAgent)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Debugf("create token with auth code failed (status %d): %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("create token failed (status %d)", resp.StatusCode)
+	}
+
+	var result CreateTokenResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// LoginWithBuilderIDAuthCode performs the authorization code flow for AWS Builder ID.
+// This provides a better UX than device code flow as it uses automatic browser callback.
+func (c *SSOOIDCClient) LoginWithBuilderIDAuthCode(ctx context.Context) (*KiroTokenData, error) {
+	fmt.Println("\n╔══════════════════════════════════════════════════════════╗")
+	fmt.Println("║     Kiro Authentication (AWS Builder ID - Auth Code)      ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════╝")
+
+	// Step 1: Generate PKCE and state
+	codeVerifier, codeChallenge, err := generatePKCEForAuthCode()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate PKCE: %w", err)
+	}
+
+	state, err := generateStateForAuthCode()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate state: %w", err)
+	}
+
+	// Step 2: Start callback server
+	fmt.Println("\nStarting callback server...")
+	redirectURI, resultChan, err := c.startAuthCodeCallbackServer(ctx, state)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start callback server: %w", err)
+	}
+	log.Debugf("Callback server started, redirect URI: %s", redirectURI)
+
+	// Step 3: Register client with auth code grant type
+	fmt.Println("Registering client...")
+	regResp, err := c.RegisterClientForAuthCode(ctx, redirectURI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register client: %w", err)
+	}
+	log.Debugf("Client registered: %s", regResp.ClientID)
+
+	// Step 4: Build authorization URL
+	scopes := "codewhisperer:completions,codewhisperer:analysis,codewhisperer:conversations"
+	authURL := fmt.Sprintf("%s/authorize?response_type=code&client_id=%s&redirect_uri=%s&scopes=%s&state=%s&code_challenge=%s&code_challenge_method=S256",
+		ssoOIDCEndpoint,
+		regResp.ClientID,
+		redirectURI,
+		scopes,
+		state,
+		codeChallenge,
+	)
+
+	// Step 5: Open browser
+	fmt.Println("\n════════════════════════════════════════════════════════════")
+	fmt.Println("  Opening browser for authentication...")
+	fmt.Println("════════════════════════════════════════════════════════════")
+	fmt.Printf("\n  URL: %s\n\n", authURL)
+
+	// Set incognito mode
+	if c.cfg != nil {
+		browser.SetIncognitoMode(c.cfg.IncognitoBrowser)
+	} else {
+		browser.SetIncognitoMode(true)
+	}
+
+	if err := browser.OpenURL(authURL); err != nil {
+		log.Warnf("Could not open browser automatically: %v", err)
+		fmt.Println("  ⚠ Could not open browser automatically.")
+		fmt.Println("  Please open the URL above in your browser manually.")
+	} else {
+		fmt.Println("  (Browser opened automatically)")
+	}
+
+	fmt.Println("\n  Waiting for authorization callback...")
+
+	// Step 6: Wait for callback
+	select {
+	case <-ctx.Done():
+		browser.CloseBrowser()
+		return nil, ctx.Err()
+	case <-time.After(10 * time.Minute):
+		browser.CloseBrowser()
+		return nil, fmt.Errorf("authorization timed out")
+	case result := <-resultChan:
+		if result.Error != "" {
+			browser.CloseBrowser()
+			return nil, fmt.Errorf("authorization failed: %s", result.Error)
+		}
+
+		fmt.Println("\n✓ Authorization received!")
+
+		// Close browser
+		if err := browser.CloseBrowser(); err != nil {
+			log.Debugf("Failed to close browser: %v", err)
+		}
+
+		// Step 7: Exchange code for tokens
+		fmt.Println("Exchanging code for tokens...")
+		tokenResp, err := c.CreateTokenWithAuthCode(ctx, regResp.ClientID, regResp.ClientSecret, result.Code, codeVerifier, redirectURI)
+		if err != nil {
+			return nil, fmt.Errorf("failed to exchange code for tokens: %w", err)
+		}
+
+		fmt.Println("\n✓ Authentication successful!")
+
+		// Step 8: Get profile ARN
+		fmt.Println("Fetching profile information...")
+		profileArn := c.fetchProfileArn(ctx, tokenResp.AccessToken)
+
+		// Fetch user email (tries CodeWhisperer API first, then userinfo endpoint, then JWT parsing)
+		email := FetchUserEmailWithFallback(ctx, c.cfg, tokenResp.AccessToken)
+		if email != "" {
+			fmt.Printf("  Logged in as: %s\n", email)
+		}
+
+		expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+
+		return &KiroTokenData{
+			AccessToken:  tokenResp.AccessToken,
+			RefreshToken: tokenResp.RefreshToken,
+			ProfileArn:   profileArn,
+			ExpiresAt:    expiresAt.Format(time.RFC3339),
+			AuthMethod:   "builder-id",
+			Provider:     "AWS",
+			ClientID:     regResp.ClientID,
+			ClientSecret: regResp.ClientSecret,
+			Email:        email,
+		}, nil
+	}
 }

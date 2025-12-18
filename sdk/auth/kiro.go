@@ -117,6 +117,71 @@ func (a *KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	return record, nil
 }
 
+// LoginWithAuthCode performs OAuth login for Kiro with AWS Builder ID using authorization code flow.
+// This provides a better UX than device code flow as it uses automatic browser callback.
+func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("kiro auth: configuration is required")
+	}
+
+	oauth := kiroauth.NewKiroOAuth(cfg)
+
+	// Use AWS Builder ID authorization code flow
+	tokenData, err := oauth.LoginWithBuilderIDAuthCode(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("login failed: %w", err)
+	}
+
+	// Parse expires_at
+	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
+	if err != nil {
+		expiresAt = time.Now().Add(1 * time.Hour)
+	}
+
+	// Extract identifier for file naming
+	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
+
+	now := time.Now()
+	fileName := fmt.Sprintf("kiro-aws-%s.json", idPart)
+
+	record := &coreauth.Auth{
+		ID:        fileName,
+		Provider:  "kiro",
+		FileName:  fileName,
+		Label:     "kiro-aws",
+		Status:    coreauth.StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Metadata: map[string]any{
+			"type":          "kiro",
+			"access_token":  tokenData.AccessToken,
+			"refresh_token": tokenData.RefreshToken,
+			"profile_arn":   tokenData.ProfileArn,
+			"expires_at":    tokenData.ExpiresAt,
+			"auth_method":   tokenData.AuthMethod,
+			"provider":      tokenData.Provider,
+			"client_id":     tokenData.ClientID,
+			"client_secret": tokenData.ClientSecret,
+			"email":         tokenData.Email,
+		},
+		Attributes: map[string]string{
+			"profile_arn": tokenData.ProfileArn,
+			"source":      "aws-builder-id-authcode",
+			"email":       tokenData.Email,
+		},
+		// NextRefreshAfter is aligned with RefreshLead (5min)
+		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
+	}
+
+	if tokenData.Email != "" {
+		fmt.Printf("\n✓ Kiro authentication completed successfully! (Account: %s)\n", tokenData.Email)
+	} else {
+		fmt.Println("\n✓ Kiro authentication completed successfully!")
+	}
+
+	return record, nil
+}
+
 // LoginWithGoogle performs OAuth login for Kiro with Google.
 // This uses a custom protocol handler (kiro://) to receive the callback.
 func (a *KiroAuthenticator) LoginWithGoogle(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
