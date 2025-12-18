@@ -118,3 +118,83 @@ func IsOpenAICompatibilityModel(model string) bool {
 	}
 	return strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility")
 }
+
+// ThinkingEffortToBudget maps a reasoning effort level to a numeric thinking budget (tokens),
+// clamping the result to the model's supported range.
+//
+// Mappings (values are normalized to model's supported range):
+//   - "none"    -> 0
+//   - "auto"    -> -1
+//   - "minimal" -> 512
+//   - "low"     -> 1024
+//   - "medium"  -> 8192
+//   - "high"    -> 24576
+//   - "xhigh"   -> 32768
+//
+// Returns false when the effort level is empty or unsupported.
+func ThinkingEffortToBudget(model, effort string) (int, bool) {
+	if effort == "" {
+		return 0, false
+	}
+	normalized, ok := NormalizeReasoningEffortLevel(model, effort)
+	if !ok {
+		normalized = strings.ToLower(strings.TrimSpace(effort))
+	}
+	switch normalized {
+	case "none":
+		return 0, true
+	case "auto":
+		return NormalizeThinkingBudget(model, -1), true
+	case "minimal":
+		return NormalizeThinkingBudget(model, 512), true
+	case "low":
+		return NormalizeThinkingBudget(model, 1024), true
+	case "medium":
+		return NormalizeThinkingBudget(model, 8192), true
+	case "high":
+		return NormalizeThinkingBudget(model, 24576), true
+	case "xhigh":
+		return NormalizeThinkingBudget(model, 32768), true
+	default:
+		return 0, false
+	}
+}
+
+// ThinkingBudgetToEffort maps a numeric thinking budget (tokens)
+// to a reasoning effort level for level-based models.
+//
+// Mappings:
+//   - 0            -> "none" (or lowest supported level if model doesn't support "none")
+//   - -1           -> "auto"
+//   - 1..1024      -> "low"
+//   - 1025..8192   -> "medium"
+//   - 8193..24576  -> "high"
+//   - 24577..      -> highest supported level for the model (defaults to "xhigh")
+//
+// Returns false when the budget is unsupported (negative values other than -1).
+func ThinkingBudgetToEffort(model string, budget int) (string, bool) {
+	switch {
+	case budget == -1:
+		return "auto", true
+	case budget < -1:
+		return "", false
+	case budget == 0:
+		if levels := GetModelThinkingLevels(model); len(levels) > 0 {
+			return levels[0], true
+		}
+		return "none", true
+	case budget > 0 && budget <= 1024:
+		return "low", true
+	case budget <= 8192:
+		return "medium", true
+	case budget <= 24576:
+		return "high", true
+	case budget > 24576:
+		if levels := GetModelThinkingLevels(model); len(levels) > 0 {
+			return levels[len(levels)-1], true
+		}
+		return "xhigh", true
+	default:
+		return "", false
+	}
+}

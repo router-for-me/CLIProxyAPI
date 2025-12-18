@@ -146,6 +146,9 @@ func TestAmpModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
 	m := &AmpModule{enabled: true}
 	ms := NewMultiSourceSecretWithPath("", p, time.Minute)
 	m.secretSource = ms
+	m.lastConfig = &config.AmpCode{
+		UpstreamAPIKey: "old-key",
+	}
 
 	// Warm the cache
 	if _, err := ms.Get(context.Background()); err != nil {
@@ -157,7 +160,7 @@ func TestAmpModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
 	}
 
 	// Update config - should invalidate cache
-	if err := m.OnConfigUpdated(&config.Config{AmpCode: config.AmpCode{UpstreamURL: "http://x"}}); err != nil {
+	if err := m.OnConfigUpdated(&config.Config{AmpCode: config.AmpCode{UpstreamURL: "http://x", UpstreamAPIKey: "new-key"}}); err != nil {
 		t.Fatal(err)
 	}
 

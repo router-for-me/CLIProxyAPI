@@ -263,13 +263,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	envManagementSecret := envAdminPasswordSet && envAdminPassword != ""
 
 	// Create server instance
-	providerNames := make([]string, 0, len(cfg.OpenAICompatibility))
-	for _, p := range cfg.OpenAICompatibility {
-		providerNames = append(providerNames, p.Name)
-	}
 	s := &Server{
 		engine:              engine,
-		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager, providerNames),
+		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
 		cfg:                 cfg,
 		accessManager:       accessManager,
 		requestLogger:       requestLogger,
@@ -369,8 +365,8 @@ func (s *Server) setupRoutes() {
 	v1beta.Use(AuthMiddleware(s.accessManager))
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
-		v1beta.POST("/models/:action", geminiHandlers.GeminiHandler)
-		v1beta.GET("/models/:action", geminiHandlers.GeminiGetHandler)
+		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
+		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
 	}
 
 	// Root endpoint
@@ -921,7 +917,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
-			go managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL)
+			go managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
@@ -1232,17 +1228,11 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 
-	providerNames := make([]string, 0, len(cfg.OpenAICompatibility))
-	for _, p := range cfg.OpenAICompatibility {
-		providerNames = append(providerNames, p.Name)
-	}
-	s.handlers.OpenAICompatProviders = providerNames
-
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 
 	if !cfg.RemoteManagement.DisableControlPanel {
 		staticDir := managementasset.StaticDir(s.configFilePath)
-		go managementasset.EnsureLatestManagementHTML(context.Background(), staticDir, cfg.ProxyURL)
+		go managementasset.EnsureLatestManagementHTML(context.Background(), staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
 	}
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)

@@ -363,10 +363,11 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 	if provider == "" {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
 	}
+	routeModel := req.Model
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
-		auth, executor, errPick := m.pickNext(ctx, provider, req.Model, opts, tried)
+		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -396,8 +397,10 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		resp, errExec := executor.Execute(execCtx, auth, req, opts)
-		result := Result{AuthID: auth.ID, Provider: provider, Model: req.Model, Success: errExec == nil}
+		execReq := req
+		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
+		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
 			result.Error = &Error{Message: errExec.Error()}
 			var se cliproxyexecutor.StatusError
@@ -420,10 +423,11 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 	if provider == "" {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
 	}
+	routeModel := req.Model
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
-		auth, executor, errPick := m.pickNext(ctx, provider, req.Model, opts, tried)
+		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -453,8 +457,10 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		resp, errExec := executor.CountTokens(execCtx, auth, req, opts)
-		result := Result{AuthID: auth.ID, Provider: provider, Model: req.Model, Success: errExec == nil}
+		execReq := req
+		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
+		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
 			result.Error = &Error{Message: errExec.Error()}
 			var se cliproxyexecutor.StatusError
@@ -477,10 +483,11 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 	if provider == "" {
 		return nil, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
 	}
+	routeModel := req.Model
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
-		auth, executor, errPick := m.pickNext(ctx, provider, req.Model, opts, tried)
+		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
 				return nil, lastErr
@@ -510,14 +517,16 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		chunks, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
+		execReq := req
+		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
+		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
 			rerr := &Error{Message: errStream.Error()}
 			var se cliproxyexecutor.StatusError
 			if errors.As(errStream, &se) && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
-			result := Result{AuthID: auth.ID, Provider: provider, Model: req.Model, Success: false, Error: rerr}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
 			lastErr = errStream
@@ -535,16 +544,64 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 					if errors.As(chunk.Err, &se) && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
 					}
-					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: req.Model, Success: false, Error: rerr})
+					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
 				}
 				out <- chunk
 			}
 			if !failed {
-				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: req.Model, Success: true})
+				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
 		}(execCtx, auth.Clone(), provider, chunks)
 		return out, nil
 	}
+}
+
+func rewriteModelForAuth(model string, metadata map[string]any, auth *Auth) (string, map[string]any) {
+	if auth == nil || model == "" {
+		return model, metadata
+	}
+	prefix := strings.TrimSpace(auth.Prefix)
+	if prefix == "" {
+		return model, metadata
+	}
+	needle := prefix + "/"
+	if !strings.HasPrefix(model, needle) {
+		return model, metadata
+	}
+	rewritten := strings.TrimPrefix(model, needle)
+	return rewritten, stripPrefixFromMetadata(metadata, needle)
+}
+
+func stripPrefixFromMetadata(metadata map[string]any, needle string) map[string]any {
+	if len(metadata) == 0 || needle == "" {
+		return metadata
+	}
+	keys := []string{
+		util.ThinkingOriginalModelMetadataKey,
+		util.GeminiOriginalModelMetadataKey,
+	}
+	var out map[string]any
+	for _, key := range keys {
+		raw, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		value, okStr := raw.(string)
+		if !okStr || !strings.HasPrefix(value, needle) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]any, len(metadata))
+			for k, v := range metadata {
+				out[k] = v
+			}
+		}
+		out[key] = strings.TrimPrefix(value, needle)
+	}
+	if out == nil {
+		return metadata
+	}
+	return out
 }
 
 func (m *Manager) normalizeProviders(providers []string) []string {

@@ -32,6 +32,9 @@ GEMINI.md
 .claude/*
 .serena/*
 /cmd/server/server
+.agent/*
+.bmad/*
+_bmad/*
 
 # macOS
 .DS_Store

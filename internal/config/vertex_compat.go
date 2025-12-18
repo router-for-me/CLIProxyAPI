@@ -13,6 +13,9 @@ type VertexCompatKey struct {
 	// Maps to the x-goog-api-key header.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Prefix optionally namespaces model aliases for this credential (e.g., "teamA/vertex-pro").
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
 	// BaseURL is the base URL for the Vertex-compatible API endpoint.
 	// The executor will append "/v1/publishers/google/models/{model}:action" to this.
 	// Example: "https://zenmux.ai/api" becomes "https://zenmux.ai/api/v1/publishers/google/models/..."
@@ -53,6 +56,7 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 		if entry.APIKey == "" {
 			continue
 		}
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		if entry.BaseURL == "" {
 			// BaseURL is required for Vertex API key entries

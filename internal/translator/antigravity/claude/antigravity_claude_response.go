@@ -9,7 +9,6 @@ package claude
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -350,24 +349,25 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		}
 	}
 
-	response := map[string]interface{}{
-		"id":            root.Get("response.responseId").String(),
-		"type":          "message",
-		"role":          "assistant",
-		"model":         root.Get("response.modelVersion").String(),
-		"content":       []interface{}{},
-		"stop_reason":   nil,
-		"stop_sequence": nil,
-		"usage": map[string]interface{}{
-			"input_tokens":  promptTokens,
-			"output_tokens": outputTokens,
-		},
+	responseJSON := `{"id":"","type":"message","role":"assistant","model":"","content":null,"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
+	responseJSON, _ = sjson.Set(responseJSON, "id", root.Get("response.responseId").String())
+	responseJSON, _ = sjson.Set(responseJSON, "model", root.Get("response.modelVersion").String())
+	responseJSON, _ = sjson.Set(responseJSON, "usage.input_tokens", promptTokens)
+	responseJSON, _ = sjson.Set(responseJSON, "usage.output_tokens", outputTokens)
+
+	contentArrayInitialized := false
+	ensureContentArray := func() {
+		if contentArrayInitialized {
+			return
+		}
+		responseJSON, _ = sjson.SetRaw(responseJSON, "content", "[]")
+		contentArrayInitialized = true
 	}
 
 	parts := root.Get("response.candidates.0.content.parts")
-	var contentBlocks []interface{}
 	textBuilder := strings.Builder{}
 	thinkingBuilder := strings.Builder{}
+	thinkingSignature := ""
 	toolIDCounter := 0
 	hasToolCall := false
 
@@ -375,28 +375,43 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		if textBuilder.Len() == 0 {
 			return
 		}
-		contentBlocks = append(contentBlocks, map[string]interface{}{
-			"type": "text",
-			"text": textBuilder.String(),
-		})
+		ensureContentArray()
+		block := `{"type":"text","text":""}`
+		block, _ = sjson.Set(block, "text", textBuilder.String())
+		responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", block)
 		textBuilder.Reset()
 	}
 
 	flushThinking := func() {
-		if thinkingBuilder.Len() == 0 {
+		if thinkingBuilder.Len() == 0 && thinkingSignature == "" {
 			return
 		}
-		contentBlocks = append(contentBlocks, map[string]interface{}{
-			"type":     "thinking",
-			"thinking": thinkingBuilder.String(),
-		})
+		ensureContentArray()
+		block := `{"type":"thinking","thinking":""}`
+		block, _ = sjson.Set(block, "thinking", thinkingBuilder.String())
+		if thinkingSignature != "" {
+			block, _ = sjson.Set(block, "signature", thinkingSignature)
+		}
+		responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", block)
 		thinkingBuilder.Reset()
+		thinkingSignature = ""
 	}
 
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
+			isThought := part.Get("thought").Bool()
+			if isThought {
+				sig := part.Get("thoughtSignature")
+				if !sig.Exists() {
+					sig = part.Get("thought_signature")
+				}
+				if sig.Exists() && sig.String() != "" {
+					thinkingSignature = sig.String()
+				}
+			}
+
 			if text := part.Get("text"); text.Exists() && text.String() != "" {
-				if part.Get("thought").Bool() {
+				if isThought {
 					flushText()
 					thinkingBuilder.WriteString(text.String())
 					continue
@@ -413,21 +428,16 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 				name := functionCall.Get("name").String()
 				toolIDCounter++
-				toolBlock := map[string]interface{}{
-					"type":  "tool_use",
-					"id":    fmt.Sprintf("tool_%d", toolIDCounter),
-					"name":  name,
-					"input": map[string]interface{}{},
+				toolBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
+				toolBlock, _ = sjson.Set(toolBlock, "id", fmt.Sprintf("tool_%d", toolIDCounter))
+				toolBlock, _ = sjson.Set(toolBlock, "name", name)
+
+				if args := functionCall.Get("args"); args.Exists() && args.Raw != "" && gjson.Valid(args.Raw) {
+					toolBlock, _ = sjson.SetRaw(toolBlock, "input", args.Raw)
 				}
 
-				if args := functionCall.Get("args"); args.Exists() {
-					var parsed interface{}
-					if err := json.Unmarshal([]byte(args.Raw), &parsed); err == nil {
-						toolBlock["input"] = parsed
-					}
-				}
-
-				contentBlocks = append(contentBlocks, toolBlock)
+				ensureContentArray()
+				responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", toolBlock)
 				continue
 			}
 		}
@@ -435,8 +445,6 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 	flushThinking()
 	flushText()
-
-	response["content"] = contentBlocks
 
 	stopReason := "end_turn"
 	if hasToolCall {
@@ -453,19 +461,15 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 			}
 		}
 	}
-	response["stop_reason"] = stopReason
+	responseJSON, _ = sjson.Set(responseJSON, "stop_reason", stopReason)
 
-	if usage := response["usage"].(map[string]interface{}); usage["input_tokens"] == int64(0) && usage["output_tokens"] == int64(0) {
+	if promptTokens == 0 && outputTokens == 0 {
 		if usageMeta := root.Get("response.usageMetadata"); !usageMeta.Exists() {
-			delete(response, "usage")
+			responseJSON, _ = sjson.Delete(responseJSON, "usage")
 		}
 	}
 
-	encoded, err := json.Marshal(response)
-	if err != nil {
-		return ""
-	}
-	return string(encoded)
+	return responseJSON
 }
 
 func ClaudeTokenCount(ctx context.Context, count int64) string {

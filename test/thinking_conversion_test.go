@@ -295,7 +295,7 @@ func TestThinkingConversionsAcrossProtocolsAndModels(t *testing.T) {
 									}
 									// Check numeric budget fallback for allowCompat
 									if budget, _, _, matched := util.ThinkingFromMetadata(metadata); matched && budget != nil {
-										if mapped, okMap := util.OpenAIThinkingBudgetToEffort(normalizedModel, *budget); okMap && mapped != "" {
+										if mapped, okMap := util.ThinkingBudgetToEffort(normalizedModel, *budget); okMap && mapped != "" {
 											return true, mapped, false
 										}
 									}
@@ -308,7 +308,7 @@ func TestThinkingConversionsAcrossProtocolsAndModels(t *testing.T) {
 								effort, ok := util.ReasoningEffortFromMetadata(metadata)
 								if !ok || strings.TrimSpace(effort) == "" {
 									if budget, _, _, matched := util.ThinkingFromMetadata(metadata); matched && budget != nil {
-										if mapped, okMap := util.OpenAIThinkingBudgetToEffort(normalizedModel, *budget); okMap {
+										if mapped, okMap := util.ThinkingBudgetToEffort(normalizedModel, *budget); okMap {
 											effort = mapped
 											ok = true
 										}
@@ -336,7 +336,7 @@ func TestThinkingConversionsAcrossProtocolsAndModels(t *testing.T) {
 									return false, "", true
 								}
 								if budget, _, _, matched := util.ThinkingFromMetadata(metadata); matched && budget != nil {
-									if mapped, okMap := util.OpenAIThinkingBudgetToEffort(normalizedModel, *budget); okMap && mapped != "" {
+									if mapped, okMap := util.ThinkingBudgetToEffort(normalizedModel, *budget); okMap && mapped != "" {
 										mapped = strings.ToLower(strings.TrimSpace(mapped))
 										if normalized, okLevel := util.NormalizeReasoningEffortLevel(normalizedModel, mapped); okLevel {
 											return true, normalized, false
@@ -609,7 +609,7 @@ func TestRawPayloadThinkingConversions(t *testing.T) {
 										return true, normalized, false
 									}
 									if budget, ok := cs.thinkingParam.(int); ok {
-										if mapped, okM := util.OpenAIThinkingBudgetToEffort(model, budget); okM && mapped != "" {
+										if mapped, okM := util.ThinkingBudgetToEffort(model, budget); okM && mapped != "" {
 											return true, mapped, false
 										}
 									}
@@ -625,7 +625,7 @@ func TestRawPayloadThinkingConversions(t *testing.T) {
 									return false, "", true // invalid level
 								}
 								if budget, ok := cs.thinkingParam.(int); ok {
-									if mapped, okM := util.OpenAIThinkingBudgetToEffort(model, budget); okM && mapped != "" {
+									if mapped, okM := util.ThinkingBudgetToEffort(model, budget); okM && mapped != "" {
 										// Check if the mapped effort is valid for this model
 										if _, validLevel := util.NormalizeReasoningEffortLevel(model, mapped); !validLevel {
 											return true, mapped, true // expect validation error
@@ -646,7 +646,7 @@ func TestRawPayloadThinkingConversions(t *testing.T) {
 									return false, "", true
 								}
 								if budget, ok := cs.thinkingParam.(int); ok {
-									if mapped, okM := util.OpenAIThinkingBudgetToEffort(model, budget); okM && mapped != "" {
+									if mapped, okM := util.ThinkingBudgetToEffort(model, budget); okM && mapped != "" {
 										// Check if the mapped effort is valid for this model
 										if _, validLevel := util.NormalizeReasoningEffortLevel(model, mapped); !validLevel {
 											return true, mapped, true // expect validation error
@@ -721,7 +721,7 @@ func TestRawPayloadThinkingConversions(t *testing.T) {
 	}
 }
 
-func TestOpenAIThinkingBudgetToEffortRanges(t *testing.T) {
+func TestThinkingBudgetToEffort(t *testing.T) {
 	cleanup := registerCoreModels(t)
 	defer cleanup()
 
@@ -733,7 +733,7 @@ func TestOpenAIThinkingBudgetToEffortRanges(t *testing.T) {
 		ok     bool
 	}{
 		{name: "dynamic-auto", model: "gpt-5", budget: -1, want: "auto", ok: true},
-		{name: "zero-none", model: "gpt-5", budget: 0, want: "none", ok: true},
+		{name: "zero-none", model: "gpt-5", budget: 0, want: "minimal", ok: true},
 		{name: "low-min", model: "gpt-5", budget: 1, want: "low", ok: true},
 		{name: "low-max", model: "gpt-5", budget: 1024, want: "low", ok: true},
 		{name: "medium-min", model: "gpt-5", budget: 1025, want: "medium", ok: true},
@@ -741,19 +741,57 @@ func TestOpenAIThinkingBudgetToEffortRanges(t *testing.T) {
 		{name: "high-min", model: "gpt-5", budget: 8193, want: "high", ok: true},
 		{name: "high-max", model: "gpt-5", budget: 24576, want: "high", ok: true},
 		{name: "over-max-clamps-to-highest", model: "gpt-5", budget: 64000, want: "high", ok: true},
-		{name: "over-max-xhigh-model", model: "gpt-5.2", budget: 50000, want: "xhigh", ok: true},
+		{name: "over-max-xhigh-model", model: "gpt-5.2", budget: 64000, want: "xhigh", ok: true},
 		{name: "negative-unsupported", model: "gpt-5", budget: -5, want: "", ok: false},
 	}
 
 	for _, cs := range cases {
 		cs := cs
 		t.Run(cs.name, func(t *testing.T) {
-			got, ok := util.OpenAIThinkingBudgetToEffort(cs.model, cs.budget)
+			got, ok := util.ThinkingBudgetToEffort(cs.model, cs.budget)
 			if ok != cs.ok {
 				t.Fatalf("ok mismatch for model=%s budget=%d: expect %v got %v", cs.model, cs.budget, cs.ok, ok)
 			}
 			if got != cs.want {
 				t.Fatalf("value mismatch for model=%s budget=%d: expect %q got %q", cs.model, cs.budget, cs.want, got)
+			}
+		})
+	}
+}
+
+func TestThinkingEffortToBudget(t *testing.T) {
+	cleanup := registerCoreModels(t)
+	defer cleanup()
+
+	cases := []struct {
+		name   string
+		model  string
+		effort string
+		want   int
+		ok     bool
+	}{
+		{name: "none", model: "gemini-2.5-pro", effort: "none", want: 0, ok: true},
+		{name: "auto", model: "gemini-2.5-pro", effort: "auto", want: -1, ok: true},
+		{name: "minimal", model: "gemini-2.5-pro", effort: "minimal", want: 512, ok: true},
+		{name: "low", model: "gemini-2.5-pro", effort: "low", want: 1024, ok: true},
+		{name: "medium", model: "gemini-2.5-pro", effort: "medium", want: 8192, ok: true},
+		{name: "high", model: "gemini-2.5-pro", effort: "high", want: 24576, ok: true},
+		{name: "xhigh", model: "gemini-2.5-pro", effort: "xhigh", want: 32768, ok: true},
+		{name: "empty-unsupported", model: "gemini-2.5-pro", effort: "", want: 0, ok: false},
+		{name: "invalid-unsupported", model: "gemini-2.5-pro", effort: "ultra", want: 0, ok: false},
+		{name: "case-insensitive", model: "gemini-2.5-pro", effort: "LOW", want: 1024, ok: true},
+		{name: "case-insensitive-medium", model: "gemini-2.5-pro", effort: "MEDIUM", want: 8192, ok: true},
+	}
+
+	for _, cs := range cases {
+		cs := cs
+		t.Run(cs.name, func(t *testing.T) {
+			got, ok := util.ThinkingEffortToBudget(cs.model, cs.effort)
+			if ok != cs.ok {
+				t.Fatalf("ok mismatch for model=%s effort=%s: expect %v got %v", cs.model, cs.effort, cs.ok, ok)
+			}
+			if got != cs.want {
+				t.Fatalf("value mismatch for model=%s effort=%s: expect %d got %d", cs.model, cs.effort, cs.want, got)
 			}
 		})
 	}

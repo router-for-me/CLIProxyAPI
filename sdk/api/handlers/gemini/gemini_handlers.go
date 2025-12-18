@@ -84,7 +84,8 @@ func (h *GeminiAPIHandler) GeminiGetHandler(c *gin.Context) {
 		})
 		return
 	}
-	switch request.Action {
+	action := strings.TrimPrefix(request.Action, "/")
+	switch action {
 	case "gemini-3-pro-preview":
 		c.JSON(http.StatusOK, gin.H{
 			"name":             "models/gemini-3-pro-preview",
@@ -189,7 +190,7 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 		})
 		return
 	}
-	action := strings.Split(request.Action, ":")
+	action := strings.Split(strings.TrimPrefix(request.Action, "/"), ":")
 	if len(action) != 2 {
 		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{

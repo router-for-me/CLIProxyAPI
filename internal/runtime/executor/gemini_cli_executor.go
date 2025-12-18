@@ -79,6 +79,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	to := sdktranslator.FromString("gemini-cli")
 	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 	basePayload = applyThinkingMetadataCLI(basePayload, req.Metadata, req.Model)
+	basePayload = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, basePayload)
 	basePayload = util.ApplyDefaultThinkingIfNeededCLI(req.Model, basePayload)
 	basePayload = util.NormalizeGeminiCLIThinkingBudget(req.Model, basePayload)
 	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
@@ -217,6 +218,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	to := sdktranslator.FromString("gemini-cli")
 	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	basePayload = applyThinkingMetadataCLI(basePayload, req.Metadata, req.Model)
+	basePayload = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, basePayload)
 	basePayload = util.ApplyDefaultThinkingIfNeededCLI(req.Model, basePayload)
 	basePayload = util.NormalizeGeminiCLIThinkingBudget(req.Model, basePayload)
 	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
@@ -418,6 +420,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	for _, attemptModel := range models {
 		payload := sdktranslator.TranslateRequest(from, to, attemptModel, bytes.Clone(req.Payload), false)
 		payload = applyThinkingMetadataCLI(payload, req.Metadata, req.Model)
+		payload = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, payload)
 		payload = deleteJSONField(payload, "project")
 		payload = deleteJSONField(payload, "model")
 		payload = deleteJSONField(payload, "request.safetySettings")

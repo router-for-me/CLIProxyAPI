@@ -253,7 +253,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			if util.ModelUsesThinkingLevels(modelName) {
 				if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
 					budget := int(thinkingBudget.Int())
-					if effort, ok := util.OpenAIThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
+					if effort, ok := util.ThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
 						reasoningEffort = effort
 					}
 				}
