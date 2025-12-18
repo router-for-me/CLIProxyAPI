@@ -183,7 +183,11 @@ embedCfg := &cliproxy.EmbedConfig{
 **Connecting via Unix Socket:**
 
 ```go
-import "net/http"
+import (
+    "context"
+    "net"
+    "net/http"
+)
 
 // Create HTTP client for Unix socket
 client := &http.Client{
@@ -197,7 +201,6 @@ client := &http.Client{
 
 // Use with any HTTP request (hostname is ignored)
 resp, err := client.Post("http://localhost/v1/chat/completions", ...)
-```
 
 ## OAuth Authentication
 
