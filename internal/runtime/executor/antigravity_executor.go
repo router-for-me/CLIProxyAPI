@@ -1240,8 +1240,6 @@ func modelName2Alias(modelName string) string {
 		return "gemini-3-pro-image-preview"
 	case "gemini-3-pro-high":
 		return "gemini-3-pro-preview"
-	case "gemini-3-flash":
-		return "gemini-3-flash"
 	case "claude-sonnet-4-5":
 		return "gemini-claude-sonnet-4-5"
 	case "claude-sonnet-4-5-thinking":
