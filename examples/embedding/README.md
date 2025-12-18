@@ -468,6 +468,62 @@ go run main.go -chat -timeout 30
 - **Visual Separation**: Yellow header distinguishes verification from Claude's response
 - **Shared Auth**: Use `--auth-dir` to share tokens with main CLIProxyAPI server
 
+### Example Output
+
+Here's what a typical verification session looks like:
+
+```
+╭─────────────────────────────────────────────────────────────────╮
+│  CLIProxyAPI Interactive Chat                                   │
+│  Model: claude-opus-4-5-20251101                                │
+│  🔍 Response Verification: Enabled (using gemini-2.5-flash)     │
+╰─────────────────────────────────────────────────────────────────╯
+
+You: When was Python first released?
+
+Claude: Python was first released in 1991 by Guido van Rossum. The first
+version, Python 0.9.0, was released in February 1991. Python 1.0 followed
+in January 1994, and Python 2.0 was released in October 2000.
+
+────────────────────────────────────────────────────────────────
+🔍 Verification (gemini-2.5-flash)
+────────────────────────────────────────────────────────────────
+✅ Verified - The dates mentioned are accurate. Python 0.9.0 was indeed
+released in February 1991, Python 1.0 in January 1994, and Python 2.0
+in October 2000.
+
+You: What's the population of Mars?
+
+Claude: Mars has no permanent human population. It's an uninhabited
+planet with about 50 billion inhabitants.
+
+────────────────────────────────────────────────────────────────
+🔍 Verification (gemini-2.5-flash)
+────────────────────────────────────────────────────────────────
+❌ Inaccurate - Mars has zero human inhabitants. The claim of "50 billion"
+is completely false. Mars is uninhabited.
+
+🔄 Requesting correction from Claude... (attempt 1/3)
+
+Claude: I apologize for the error. Mars has no human inhabitants. It is
+an uninhabited planet. While there have been robotic missions, no humans
+have ever lived on Mars.
+
+────────────────────────────────────────────────────────────────
+🔍 Verification (gemini-2.5-flash)
+────────────────────────────────────────────────────────────────
+✅ Verified - Correct. Mars has no human population and remains uninhabited.
+
+You: verify
+ℹ️  Verification is currently: Enabled (using gemini-2.5-flash)
+
+You: verify off
+ℹ️  Verification disabled
+
+You: exit
+👋 Goodbye!
+```
+
 ### Custom SDK Client Code
 
 Here's how to create your own test client:

@@ -80,6 +80,77 @@ Expected response:
 }
 ```
 
+## Testing Response Verification
+
+The embedding example includes a Gemini-powered verification feature that fact-checks Claude's responses.
+
+### 1. Set Up Gemini Authentication
+
+```bash
+# Run Gemini OAuth login (requires a Google Cloud project)
+go run main.go -gemini-login -project_id YOUR_PROJECT_ID
+```
+
+This saves credentials to `./auth/gemini-*.json`.
+
+### 2. Test Verification in Chat Mode
+
+```bash
+go run main.go -chat
+```
+
+With Gemini configured, you'll see:
+```
+🔍 Response Verification: Enabled (using gemini-2.5-flash)
+```
+
+### 3. Verification Commands
+
+In the chat, use these commands:
+- `verify` - Check current verification status
+- `verify on` - Enable verification
+- `verify off` - Disable verification
+
+### 4. Test Scenarios
+
+**Test with verification enabled:**
+```
+You: What year was Python created?
+```
+Expected: Claude responds, then Gemini verifies with ✅, ⚠️, ❌, or ℹ️ status.
+
+**Test verification toggle:**
+```
+You: verify off
+You: What is 2+2?
+```
+Expected: No verification displayed.
+
+**Test without Gemini auth:**
+```bash
+# Remove or rename auth/gemini-*.json
+go run main.go -chat
+```
+Expected: Chat works, verification shows as disabled.
+
+**Test rate limit handling:**
+Make many rapid requests. Expected: "⏳ Verification paused (rate limit cooldown)" message.
+
+**Test cache behavior:**
+Ask the same question twice. Expected: Second response shows "📋 Cached" indicator.
+
+### 5. Verification Testing Checklist
+
+- [ ] Gemini OAuth login succeeds
+- [ ] Verification enabled by default when Gemini auth exists
+- [ ] `verify on/off` commands work
+- [ ] Verification shows status emoji (✅ ⚠️ ❌ ℹ️)
+- [ ] Cache returns "📋 Cached" for repeated responses
+- [ ] Rate limit cooldown displays correctly
+- [ ] Chat works without Gemini auth (verification disabled)
+- [ ] `-verify=false` flag disables verification
+- [ ] `-verify-model` flag changes the verification model
+
 ## Alternative: Browserless OAuth Flow
 
 If you don't have a token yet:
