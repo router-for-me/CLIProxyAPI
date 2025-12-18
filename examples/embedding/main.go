@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -273,17 +274,29 @@ func hasGeminiAuth(authDir string) bool {
 
 // initVerificationState sets up verification state for the chat session.
 // Verification is enabled if Gemini auth exists and verifyFlag is true.
-func initVerificationState(authDir string, host string, port int, verifyFlag bool, verifyModel string) *verificationState {
+// When unixSocketPath is provided, verification requests use Unix socket.
+func initVerificationState(authDir string, host string, port int, verifyFlag bool, verifyModel string, unixSocketPath string) *verificationState {
 	// Use default model if not specified
 	if verifyModel == "" {
 		verifyModel = defaultVerificationModel
 	}
 
+	// Create HTTP client (Unix socket or TCP)
+	var httpClient *http.Client
+	var proxyURL string
+	if unixSocketPath != "" {
+		httpClient = NewUnixSocketClient(unixSocketPath)
+		proxyURL = "http://localhost" // Hostname ignored for Unix socket
+	} else {
+		httpClient = &http.Client{Timeout: defaultVerificationTimeout}
+		proxyURL = fmt.Sprintf("http://%s:%d", host, port)
+	}
+
 	state := &verificationState{
 		enabled:     false,
-		proxyURL:    fmt.Sprintf("http://%s:%d", host, port),
+		proxyURL:    proxyURL,
 		model:       verifyModel,
-		httpClient:  &http.Client{Timeout: defaultVerificationTimeout},
+		httpClient:  httpClient,
 		cache:       newVerificationCache(defaultCacheTTL),
 		rateLimiter: newRateLimiter(),
 		timeout:     defaultVerificationTimeout,
@@ -601,6 +614,37 @@ func suppressServerLogging() (*os.File, error) {
 	return logFile, nil
 }
 
+// NewUnixSocketClient creates an HTTP client that connects via Unix domain socket.
+// The returned client can be used with standard HTTP requests; the URL hostname
+// is ignored and all connections go through the socket.
+//
+// Example:
+//
+//	client := NewUnixSocketClient("./auth/cliproxy.sock")
+//	resp, err := client.Post("http://localhost/v1/chat/completions", ...)
+func NewUnixSocketClient(socketPath string) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", socketPath)
+			},
+		},
+		Timeout: 120 * time.Second,
+	}
+}
+
+// NewUnixSocketAnthropicClient creates an Anthropic SDK client that connects via Unix socket.
+// The socket path is used for all HTTP requests to the local proxy.
+func NewUnixSocketAnthropicClient(socketPath string, apiKey string) *anthropic.Client {
+	httpClient := NewUnixSocketClient(socketPath)
+	return anthropic.NewClient(
+		option.WithAPIKey(apiKey),
+		option.WithBaseURL("http://localhost"), // Hostname ignored for Unix socket
+		option.WithHTTPClient(httpClient),
+	)
+}
+
 // expandConfigEnvVars reads a config file and expands environment variables in ${VAR} syntax.
 // Returns the path to a temporary file with expanded variables.
 func expandConfigEnvVars(configPath string, quiet bool) (string, error) {
@@ -634,12 +678,9 @@ func expandConfigEnvVars(configPath string, quiet bool) (string, error) {
 
 // createEmbedConfig creates and returns the EmbedConfig with all essential settings.
 // When chatMode is true, logging is minimized to keep the chat UI clean.
-func createEmbedConfig(chatMode bool, authDir string) *cliproxy.EmbedConfig {
-	return &cliproxy.EmbedConfig{
-		// Server host and port
-		Host: "127.0.0.1", // Localhost-only for security
-		Port: 8317,        // Default port
-
+// When unixSocketPath is provided, the server uses Unix socket instead of TCP.
+func createEmbedConfig(chatMode bool, authDir string, unixSocketPath string) *cliproxy.EmbedConfig {
+	cfg := &cliproxy.EmbedConfig{
 		// Authentication directory for OAuth tokens
 		AuthDir: authDir,
 
@@ -673,6 +714,20 @@ func createEmbedConfig(chatMode bool, authDir string) *cliproxy.EmbedConfig {
 			SwitchPreviewModel: false, // Auto-switch to preview models
 		},
 	}
+
+	// Configure transport mode: Unix socket or TCP
+	if unixSocketPath != "" {
+		// Unix socket-only mode: no TCP listener
+		cfg.Host = ""
+		cfg.Port = 0
+		cfg.UnixSocket = unixSocketPath
+	} else {
+		// TCP mode (default)
+		cfg.Host = "127.0.0.1" // Localhost-only for security
+		cfg.Port = 8317        // Default port
+	}
+
+	return cfg
 }
 
 // doGeminiLogin performs the Gemini OAuth authentication flow.
@@ -751,7 +806,8 @@ func doClaudeLogin(noBrowser bool, authDir string) error {
 }
 
 // sendTestMessage sends a test message to Claude via the local proxy to verify authentication.
-func sendTestMessage(host string, port int) {
+// When unixSocketPath is provided, it uses Unix socket instead of TCP.
+func sendTestMessage(host string, port int, unixSocketPath string) {
 	// Wait for server to be fully started
 	time.Sleep(2 * time.Second)
 
@@ -759,10 +815,17 @@ func sendTestMessage(host string, port int) {
 
 	// Create Anthropic SDK client pointing to our local proxy
 	// The API key must match one in config.yaml's api-keys list
-	client := anthropic.NewClient(
-		option.WithAPIKey("test-key"), // Must match api-keys in config.yaml
-		option.WithBaseURL(fmt.Sprintf("http://%s:%d", host, port)),
-	)
+	var client *anthropic.Client
+	if unixSocketPath != "" {
+		// Use Unix socket client
+		client = NewUnixSocketAnthropicClient(unixSocketPath, "test-key")
+	} else {
+		// Use TCP client
+		client = anthropic.NewClient(
+			option.WithAPIKey("test-key"), // Must match api-keys in config.yaml
+			option.WithBaseURL(fmt.Sprintf("http://%s:%d", host, port)),
+		)
+	}
 
 	// Send a simple test message
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -795,7 +858,8 @@ func sendTestMessage(host string, port int) {
 // runInteractiveChat starts an interactive streaming chat session with Claude.
 // It maintains conversation history across turns and streams responses in real-time.
 // If verification is enabled, Claude's responses are verified using Gemini.
-func runInteractiveChat(host string, port int, model string, activity *activityTracker, vs *verificationState) {
+// When unixSocketPath is provided, it uses Unix socket instead of TCP.
+func runInteractiveChat(host string, port int, model string, activity *activityTracker, vs *verificationState, unixSocketPath string) {
 	// Wait for server to be fully started
 	time.Sleep(2 * time.Second)
 
@@ -812,6 +876,12 @@ func runInteractiveChat(host string, port int, model string, activity *activityT
 		verifyModel = vs.model
 	}
 
+	// Format transport info
+	transportInfo := fmt.Sprintf("%s:%d", host, port)
+	if unixSocketPath != "" {
+		transportInfo = fmt.Sprintf("unix://%s", unixSocketPath)
+	}
+
 	fmt.Println()
 	fmt.Printf("%s╭─────────────────────────────────────────────────────────╮%s\n", colorCyan, colorReset)
 	fmt.Printf("%s│%s   🤖 Interactive Chat                                   %s│%s\n", colorCyan, colorReset, colorCyan, colorReset)
@@ -821,15 +891,26 @@ func runInteractiveChat(host string, port int, model string, activity *activityT
 	} else {
 		fmt.Printf("%s│%s   Verify: %-45s %s│%s\n", colorCyan, colorGray, verifyStatus, colorCyan, colorReset)
 	}
+	if unixSocketPath != "" {
+		fmt.Printf("%s│%s   Socket: %-45s %s│%s\n", colorCyan, colorGray, unixSocketPath, colorCyan, colorReset)
+	}
 	fmt.Printf("%s│%s   Type 'help' for commands, 'quit' to exit              %s│%s\n", colorCyan, colorGray, colorCyan, colorReset)
 	fmt.Printf("%s╰─────────────────────────────────────────────────────────╯%s\n", colorCyan, colorReset)
 	fmt.Println()
 
+	// Log transport info (only visible in debug/non-chat mode)
+	_ = transportInfo // Used for potential future logging
+
 	// Create Anthropic SDK client pointing to our local proxy
-	client := anthropic.NewClient(
-		option.WithAPIKey("test-key"),
-		option.WithBaseURL(fmt.Sprintf("http://%s:%d", host, port)),
-	)
+	var client *anthropic.Client
+	if unixSocketPath != "" {
+		client = NewUnixSocketAnthropicClient(unixSocketPath, "test-key")
+	} else {
+		client = anthropic.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(fmt.Sprintf("http://%s:%d", host, port)),
+		)
+	}
 
 	// Maintain conversation history for multi-turn chat
 	var conversationHistory []anthropic.MessageParam
@@ -1101,6 +1182,8 @@ func main() {
 	var verifyEnabled bool
 	var projectID string
 	var authDir string
+	var useUnixSocket bool
+	var unixSocketDir string
 
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&geminiLogin, "gemini-login", false, "Login to Gemini using OAuth (enables response verification)")
@@ -1111,6 +1194,8 @@ func main() {
 	flag.IntVar(&timeoutMinutes, "timeout", 15, "Inactivity timeout in minutes before auto-shutdown (0 to disable)")
 	flag.BoolVar(&verifyEnabled, "verify", true, "Enable response verification with Gemini (requires -gemini-login)")
 	flag.StringVar(&authDir, "auth-dir", defaultAuthDir(), "Directory for OAuth tokens (default: ./.cli-proxy-api or ~/.cli-proxy-api)")
+	flag.BoolVar(&useUnixSocket, "unix-socket", false, "Enable Unix socket mode (socket file: {auth-dir}/cliproxy.sock)")
+	flag.StringVar(&unixSocketDir, "socket-dir", "", "Custom directory for Unix socket (default: auth dir). Requires -unix-socket")
 	var verifyModel string
 	flag.StringVar(&verifyModel, "verify-model", "", "Gemini model for verification (default: gemini-2.5-flash)")
 	flag.Parse()
@@ -1118,6 +1203,19 @@ func main() {
 	// Ensure auth directory exists
 	if err := os.MkdirAll(authDir, 0700); err != nil {
 		log.Fatalf("Failed to create auth directory %s: %v", authDir, err)
+	}
+
+	// Handle Unix socket flag
+	var unixSocketPath string
+	if useUnixSocket {
+		// Determine socket directory
+		socketDir := unixSocketDir
+		if socketDir == "" {
+			// Default to auth directory if no directory specified
+			socketDir = authDir
+		}
+		// Always use fixed filename cliproxy.sock
+		unixSocketPath = filepath.Join(socketDir, "cliproxy.sock")
 	}
 
 	// If login mode, perform OAuth and exit
@@ -1158,7 +1256,7 @@ func main() {
 	}
 
 	// Get the embed configuration (pass chatMode to suppress logging in chat)
-	embedCfg := createEmbedConfig(chatMode, authDir)
+	embedCfg := createEmbedConfig(chatMode, authDir, unixSocketPath)
 
 	// Get absolute path to config file
 	configPath := "./config.yaml"
@@ -1183,8 +1281,12 @@ func main() {
 	if !chatMode {
 		fmt.Println("Building CLIProxyAPI service...")
 		fmt.Printf("Server configuration:\n")
-		fmt.Printf("  Host: %s\n", embedCfg.Host)
-		fmt.Printf("  Port: %d\n", embedCfg.Port)
+		if embedCfg.UnixSocket != "" {
+			fmt.Printf("  Unix Socket: %s\n", embedCfg.UnixSocket)
+		} else {
+			fmt.Printf("  Host: %s\n", embedCfg.Host)
+			fmt.Printf("  Port: %d\n", embedCfg.Port)
+		}
 		fmt.Printf("  Auth Directory: %s\n", embedCfg.AuthDir)
 		fmt.Printf("  Config File: %s\n", absConfigPath)
 		fmt.Println()
@@ -1213,9 +1315,14 @@ func main() {
 	errChan := make(chan error, 1)
 	go func() {
 		if !chatMode {
-			fmt.Printf("Starting CLIProxyAPI on %s:%d\n", embedCfg.Host, embedCfg.Port)
-			fmt.Printf("Management UI: http://%s:%d/\n", embedCfg.Host, embedCfg.Port)
-			fmt.Printf("API Endpoint: http://%s:%d/v1\n", embedCfg.Host, embedCfg.Port)
+			if embedCfg.UnixSocket != "" {
+				fmt.Printf("Starting CLIProxyAPI on Unix socket: %s\n", embedCfg.UnixSocket)
+				fmt.Printf("API Endpoint: unix://%s (use NewUnixSocketClient to connect)\n", embedCfg.UnixSocket)
+			} else {
+				fmt.Printf("Starting CLIProxyAPI on %s:%d\n", embedCfg.Host, embedCfg.Port)
+				fmt.Printf("Management UI: http://%s:%d/\n", embedCfg.Host, embedCfg.Port)
+				fmt.Printf("API Endpoint: http://%s:%d/v1\n", embedCfg.Host, embedCfg.Port)
+			}
 			fmt.Printf("Press Ctrl+C to shutdown\n\n")
 		}
 
@@ -1269,7 +1376,7 @@ func main() {
 	// Initialize verification state for chat mode
 	var vs *verificationState
 	if chatMode {
-		vs = initVerificationState(embedCfg.AuthDir, embedCfg.Host, embedCfg.Port, verifyEnabled, verifyModel)
+		vs = initVerificationState(embedCfg.AuthDir, embedCfg.Host, embedCfg.Port, verifyEnabled, verifyModel, unixSocketPath)
 		if vs.enabled {
 			// Show a message that verification is enabled
 			fmt.Printf("%s🔍 Gemini verification enabled%s\n", colorGreen, colorReset)
@@ -1284,7 +1391,7 @@ func main() {
 		// Run interactive chat in a goroutine
 		chatDone := make(chan struct{})
 		go func() {
-			runInteractiveChat(embedCfg.Host, embedCfg.Port, model, activity, vs)
+			runInteractiveChat(embedCfg.Host, embedCfg.Port, model, activity, vs, unixSocketPath)
 			close(chatDone)
 		}()
 
@@ -1310,7 +1417,7 @@ func main() {
 	} else {
 		// Send a test message after server starts (in a goroutine)
 		// This verifies that OAuth authentication is working correctly
-		go sendTestMessage(embedCfg.Host, embedCfg.Port)
+		go sendTestMessage(embedCfg.Host, embedCfg.Port, unixSocketPath)
 
 		// Record activity after test message
 		if activity != nil {

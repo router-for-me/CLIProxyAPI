@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -168,6 +169,11 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	// unixListener holds the Unix socket listener when configured.
+	unixListener net.Listener
+	// unixSocketPath stores the path for cleanup on shutdown.
+	unixSocketPath string
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -716,6 +722,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.
+// When Unix socket is configured, the server also listens on the socket.
 // It's a blocking call and will only return on an unrecoverable error.
 //
 // Returns:
@@ -723,6 +730,23 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 func (s *Server) Start() error {
 	if s == nil || s.server == nil {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
+	}
+
+	// Handle Unix socket if configured
+	if s.cfg != nil && s.cfg.UnixSocket != "" {
+		if err := s.startUnixSocket(); err != nil {
+			return err
+		}
+	}
+
+	// If Port is 0, we're in Unix socket-only mode
+	if s.cfg != nil && s.cfg.Port == 0 {
+		if s.unixListener == nil {
+			return fmt.Errorf("failed to start server: no listener configured (Port=0 and no Unix socket)")
+		}
+		log.Info("Server running in Unix socket-only mode")
+		// Block until shutdown (Unix socket is served in a goroutine)
+		select {}
 	}
 
 	useTLS := s.cfg != nil && s.cfg.TLS.Enable
@@ -747,8 +771,72 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// startUnixSocket initializes the Unix domain socket listener.
+// It cleans up stale sockets, creates parent directories, and starts serving.
+func (s *Server) startUnixSocket() error {
+	socketPath := s.cfg.UnixSocket
+
+	// Auto-create parent directories if they don't exist
+	socketDir := filepath.Dir(socketPath)
+	if socketDir != "" && socketDir != "." {
+		if err := os.MkdirAll(socketDir, 0755); err != nil {
+			return fmt.Errorf("failed to create socket directory %s: %w", socketDir, err)
+		}
+	}
+
+	// Clean up stale socket file
+	if err := s.cleanupStaleSocket(socketPath); err != nil {
+		return err
+	}
+
+	// Create Unix socket listener
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("failed to create Unix socket at %s: %w", socketPath, err)
+	}
+
+	s.unixListener = listener
+	s.unixSocketPath = socketPath
+
+	log.Infof("Unix socket listening on %s", socketPath)
+
+	// Start serving on Unix socket in a goroutine
+	go func() {
+		if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Errorf("Unix socket server error: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+// cleanupStaleSocket removes a stale socket file from a previous crash.
+// If the socket is actively in use (another instance running), it returns an error.
+func (s *Server) cleanupStaleSocket(socketPath string) error {
+	// Check if socket file exists
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		return nil // No existing socket, nothing to clean up
+	}
+
+	// Try to connect to see if it's a live socket
+	conn, err := net.DialTimeout("unix", socketPath, time.Second)
+	if err == nil {
+		// Socket is alive - another instance is running
+		conn.Close()
+		return fmt.Errorf("socket already in use: %s (another instance may be running)", socketPath)
+	}
+
+	// Socket exists but not responding - it's stale, remove it
+	log.Debugf("Removing stale Unix socket: %s", socketPath)
+	if err := os.Remove(socketPath); err != nil {
+		return fmt.Errorf("failed to remove stale socket %s: %w", socketPath, err)
+	}
+
+	return nil
+}
+
 // Stop gracefully shuts down the API server without interrupting any
-// active connections.
+// active connections. It also cleans up the Unix socket file if one was created.
 //
 // Parameters:
 //   - ctx: The context for graceful shutdown
@@ -765,9 +853,24 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Shutdown the HTTP server.
+	// Shutdown the HTTP server first. This gracefully stops serving on all listeners
+	// (both TCP and Unix socket). We must do this BEFORE closing the Unix listener
+	// to avoid "use of closed network connection" errors.
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+	}
+
+	// Clear the Unix listener reference (server.Shutdown already closed it)
+	s.unixListener = nil
+
+	// Clean up Unix socket file
+	if s.unixSocketPath != "" {
+		if err := os.Remove(s.unixSocketPath); err != nil && !os.IsNotExist(err) {
+			log.Warnf("Failed to remove Unix socket file %s: %v", s.unixSocketPath, err)
+		} else if err == nil {
+			log.Debugf("Removed Unix socket file: %s", s.unixSocketPath)
+		}
+		s.unixSocketPath = ""
 	}
 
 	log.Debug("API server stopped")

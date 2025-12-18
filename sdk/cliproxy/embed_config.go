@@ -4,6 +4,8 @@ package cliproxy
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -35,8 +37,20 @@ type EmbedConfig struct {
 	Host string
 
 	// Port is the network port on which the API server will listen.
-	// Valid range: 1-65535. Required field.
+	// Valid range: 1-65535. When UnixSocket is set and Port is 0, the server
+	// runs in Unix socket-only mode.
 	Port int
+
+	// UnixSocket specifies the path for a Unix domain socket.
+	// When set, the server listens on this socket for local IPC.
+	// If both UnixSocket and Port are set, the server runs in dual mode
+	// (listening on both Unix socket AND TCP).
+	// If only UnixSocket is set (Port is 0), the server runs socket-only.
+	// Unix sockets are only supported on Linux and macOS; on Windows,
+	// the server falls back to TCP-only mode with a warning.
+	// Default: empty (TCP only, no Unix socket).
+	// Example: "./auth/cliproxy.sock"
+	UnixSocket string
 
 	// AuthDir is the directory where authentication token files are stored.
 	// Default is "./auth" if not specified.
@@ -136,7 +150,9 @@ type QuotaExceeded struct {
 // required fields are missing or invalid values are detected.
 //
 // Validation rules:
-//   - Port must be in range 1-65535
+//   - Port must be in range 0-65535 (0 is valid when UnixSocket is set)
+//   - UnixSocket: If set, path must not be a directory
+//   - At least one of Port or UnixSocket must be configured
 //   - TLS: If enabled, both Cert and Key must be provided and files must exist
 //   - RemoteManagement: If AllowRemote is true, SecretKey must be provided
 //
@@ -147,10 +163,30 @@ func (c *EmbedConfig) Validate() error {
 		return fmt.Errorf("config cannot be nil")
 	}
 
-	// Validate Port
-	if c.Port < 1 || c.Port > 65535 {
-		return fmt.Errorf("port must be in range 1-65535, got %d", c.Port)
+	// Validate Port (0 is valid when UnixSocket is set)
+	if c.Port < 0 || c.Port > 65535 {
+		return fmt.Errorf("port must be in range 0-65535, got %d", c.Port)
 	}
+
+	// Validate UnixSocket path if provided
+	if c.UnixSocket != "" {
+		// Check if path is a directory (invalid)
+		if info, err := os.Stat(c.UnixSocket); err == nil && info.IsDir() {
+			return fmt.Errorf("unix socket path cannot be a directory: %s", c.UnixSocket)
+		}
+		// Validate path has a filename component
+		if filepath.Base(c.UnixSocket) == "." || filepath.Base(c.UnixSocket) == ".." {
+			return fmt.Errorf("unix socket path must include a filename: %s", c.UnixSocket)
+		}
+	}
+
+	// At least one listener must be configured
+	if c.Port == 0 && c.UnixSocket == "" {
+		return fmt.Errorf("at least one of Port or UnixSocket must be configured")
+	}
+
+	// Warn about Windows incompatibility (validation passes, but warn at runtime)
+	// This is handled at server startup, not validation
 
 	// Validate TLS configuration
 	if c.TLS.Enable {
@@ -213,10 +249,19 @@ func convertToInternalConfig(embedCfg *EmbedConfig) *config.Config {
 		maxRetryInterval = 300
 	}
 
+	// Handle Unix socket on Windows (fall back to empty, handled at server startup)
+	unixSocket := embedCfg.UnixSocket
+	if runtime.GOOS == "windows" && unixSocket != "" {
+		// Windows doesn't support Unix sockets; clear the path.
+		// Server will log a warning and fall back to TCP-only.
+		unixSocket = ""
+	}
+
 	// Create internal config with field mapping
 	cfg := &config.Config{
 		Host:                   embedCfg.Host,
 		Port:                   embedCfg.Port,
+		UnixSocket:             unixSocket,
 		AuthDir:                authDir,
 		Debug:                  embedCfg.Debug,
 		LoggingToFile:          embedCfg.LoggingToFile,

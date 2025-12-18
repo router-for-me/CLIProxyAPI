@@ -27,6 +27,11 @@ type Config struct {
 	Host string `yaml:"host" json:"-"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
+	// UnixSocket is the path for a Unix domain socket.
+	// When set, the server listens on this socket for local IPC.
+	// If both UnixSocket and Port are set, the server runs in dual mode.
+	// If only UnixSocket is set (Port is 0), the server runs socket-only.
+	UnixSocket string `yaml:"unix-socket" json:"-"`
 
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`

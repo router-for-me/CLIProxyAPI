@@ -67,12 +67,12 @@ func TestEmbedConfig_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "invalid port - too low",
+			name: "no listener configured - port 0 without unix socket",
 			config: &EmbedConfig{
 				Port: 0,
 			},
 			wantErr: true,
-			errMsg:  "port must be in range 1-65535",
+			errMsg:  "at least one of Port or UnixSocket must be configured",
 		},
 		{
 			name: "invalid port - too high",
@@ -80,7 +80,7 @@ func TestEmbedConfig_Validate(t *testing.T) {
 				Port: 65536,
 			},
 			wantErr: true,
-			errMsg:  "port must be in range 1-65535",
+			errMsg:  "port must be in range 0-65535",
 		},
 		{
 			name: "invalid port - negative",
@@ -88,7 +88,39 @@ func TestEmbedConfig_Validate(t *testing.T) {
 				Port: -1,
 			},
 			wantErr: true,
-			errMsg:  "port must be in range 1-65535",
+			errMsg:  "port must be in range 0-65535",
+		},
+		{
+			name: "valid unix socket only mode",
+			config: &EmbedConfig{
+				Port:       0,
+				UnixSocket: "/tmp/test.sock",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid dual mode - both tcp and unix socket",
+			config: &EmbedConfig{
+				Port:       8080,
+				UnixSocket: "/tmp/test.sock",
+			},
+			wantErr: false,
+		},
+		{
+			name: "unix socket path with relative path",
+			config: &EmbedConfig{
+				Port:       0,
+				UnixSocket: "./auth/cliproxy.sock",
+			},
+			wantErr: false,
+		},
+		{
+			name: "unix socket path with just filename",
+			config: &EmbedConfig{
+				Port:       0,
+				UnixSocket: "cliproxy.sock",
+			},
+			wantErr: false,
 		},
 		{
 			name: "TLS enabled but missing cert",
@@ -364,12 +396,21 @@ func TestBuilder_WithEmbedConfig(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "invalid port",
+			name: "no listener configured",
 			config: &EmbedConfig{
 				Port: 0,
+				// No UnixSocket set - must fail
 			},
 			wantErr: true,
 			errMsg:  "embed config validation failed",
+		},
+		{
+			name: "valid unix socket config",
+			config: &EmbedConfig{
+				Port:       0,
+				UnixSocket: "/tmp/test.sock",
+			},
+			wantErr: false,
 		},
 		{
 			name: "remote management without secret key",
@@ -438,5 +479,140 @@ func TestBuilder_WithEmbedConfig_MethodChaining(t *testing.T) {
 
 	if svc == nil {
 		t.Error("expected non-nil service")
+	}
+}
+
+// TestEmbedConfig_UnixSocketValidation tests Unix socket path validation edge cases
+func TestEmbedConfig_UnixSocketValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a directory to test "path is directory" validation
+	existingDir := filepath.Join(tmpDir, "existing_dir")
+	if err := os.MkdirAll(existingDir, 0755); err != nil {
+		t.Fatalf("failed to create test directory: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		config  *EmbedConfig
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "unix socket path is existing directory - should fail",
+			config: &EmbedConfig{
+				Port:       0,
+				UnixSocket: existingDir,
+			},
+			wantErr: true,
+			errMsg:  "unix socket path cannot be a directory",
+		},
+		{
+			name: "unix socket path is dot - should fail",
+			config: &EmbedConfig{
+				Port:       0,
+				UnixSocket: ".",
+			},
+			wantErr: true,
+			errMsg:  "unix socket path cannot be a directory",
+		},
+		{
+			name: "unix socket path is dot-dot - should fail",
+			config: &EmbedConfig{
+				Port:       0,
+				UnixSocket: "..",
+			},
+			wantErr: true,
+			errMsg:  "unix socket path cannot be a directory",
+		},
+		{
+			name: "valid unix socket with deep nested path",
+			config: &EmbedConfig{
+				Port:       0,
+				UnixSocket: "/var/run/myapp/sockets/cliproxy.sock",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid unix socket with home directory",
+			config: &EmbedConfig{
+				Port:       0,
+				UnixSocket: "~/.cli-proxy-api/cliproxy.sock",
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("EmbedConfig.Validate() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr && err != nil && tt.errMsg != "" {
+				if !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("EmbedConfig.Validate() error = %v, want error containing %q", err, tt.errMsg)
+				}
+			}
+		})
+	}
+}
+
+// TestConvertToInternalConfig_UnixSocket tests Unix socket field mapping during conversion
+func TestConvertToInternalConfig_UnixSocket(t *testing.T) {
+	tests := []struct {
+		name              string
+		embedCfg          *EmbedConfig
+		wantUnixSocket    string
+		wantPort          int
+	}{
+		{
+			name: "unix socket only mode",
+			embedCfg: &EmbedConfig{
+				Port:       0,
+				UnixSocket: "/tmp/test.sock",
+				AuthDir:    "./auth",
+			},
+			wantUnixSocket: "/tmp/test.sock",
+			wantPort:       0,
+		},
+		{
+			name: "dual mode - both tcp and unix socket",
+			embedCfg: &EmbedConfig{
+				Port:       8080,
+				UnixSocket: "/tmp/dual.sock",
+				AuthDir:    "./auth",
+			},
+			wantUnixSocket: "/tmp/dual.sock",
+			wantPort:       8080,
+		},
+		{
+			name: "tcp only mode - no unix socket",
+			embedCfg: &EmbedConfig{
+				Port:       8080,
+				UnixSocket: "",
+				AuthDir:    "./auth",
+			},
+			wantUnixSocket: "",
+			wantPort:       8080,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := convertToInternalConfig(tt.embedCfg)
+			if result == nil {
+				t.Fatal("expected non-nil result")
+			}
+
+			// Access the UnixSocket field through the result
+			if result.UnixSocket != tt.wantUnixSocket {
+				t.Errorf("UnixSocket = %q, want %q", result.UnixSocket, tt.wantUnixSocket)
+			}
+			if result.Port != tt.wantPort {
+				t.Errorf("Port = %d, want %d", result.Port, tt.wantPort)
+			}
+		})
 	}
 }

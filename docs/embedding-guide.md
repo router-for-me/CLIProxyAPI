@@ -100,10 +100,13 @@ go run main.go
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `Host` | `string` | `""` | Network interface (`127.0.0.1` for localhost-only) |
-| `Port` | `int` | **Required** | Server port (1-65535) |
+| `Port` | `int` | **Required*** | Server port (1-65535). Set to 0 for Unix socket-only mode |
+| `UnixSocket` | `string` | `""` | Path to Unix domain socket (e.g., `./auth/cliproxy.sock`) |
 | `AuthDir` | `string` | `"./auth"` | OAuth token storage directory |
 | `Debug` | `bool` | `false` | Enable debug logging |
 | `LoggingToFile` | `bool` | `false` | Write logs to file |
+
+*At least one of `Port` or `UnixSocket` must be configured.
 
 ### Resilience Fields
 
@@ -141,6 +144,59 @@ QuotaExceeded: cliproxy.QuotaExceeded{
     SwitchProject:      false,
     SwitchPreviewModel: false,
 }
+```
+
+### Unix Socket Mode
+
+Unix domain sockets provide a secure, high-performance alternative to TCP for local IPC:
+
+```go
+// Socket-only mode (no TCP listener)
+embedCfg := &cliproxy.EmbedConfig{
+    Port:       0,                          // Disable TCP
+    UnixSocket: "./auth/cliproxy.sock",     // Enable Unix socket
+    AuthDir:    "./auth",
+}
+
+// Dual mode (both TCP and Unix socket)
+embedCfg := &cliproxy.EmbedConfig{
+    Host:       "127.0.0.1",
+    Port:       8317,                       // TCP listener
+    UnixSocket: "./auth/cliproxy.sock",     // Unix socket listener
+    AuthDir:    "./auth",
+}
+```
+
+**Benefits:**
+- **Security**: File permissions control access, no network exposure
+- **Performance**: ~30% lower latency than TCP for local communication
+- **Simplicity**: No port conflicts or firewall considerations
+
+**Platform Support:**
+
+| Platform | Unix Socket | TCP |
+|----------|-------------|-----|
+| Linux    | ✅ | ✅ |
+| macOS    | ✅ | ✅ |
+| Windows  | ❌ (falls back to TCP) | ✅ |
+
+**Connecting via Unix Socket:**
+
+```go
+import "net/http"
+
+// Create HTTP client for Unix socket
+client := &http.Client{
+    Transport: &http.Transport{
+        DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+            var d net.Dialer
+            return d.DialContext(ctx, "unix", "./auth/cliproxy.sock")
+        },
+    },
+}
+
+// Use with any HTTP request (hostname is ignored)
+resp, err := client.Post("http://localhost/v1/chat/completions", ...)
 ```
 
 ## OAuth Authentication
@@ -343,6 +399,7 @@ See `examples/embedding/` for a full working example that includes:
 
 - OAuth authentication flow (`-claude-login` flag)
 - Interactive chat mode with streaming (`-chat` flag)
+- Unix socket support (`-unix-socket` flag)
 - Inactivity timeout and auto-shutdown (`-timeout` flag)
 - Model selection (`-model` flag)
 - Environment variable support via `.env`
@@ -359,18 +416,33 @@ go run main.go -chat
 # Chat with specific model
 go run main.go -chat -model claude-opus-4-5-20251101
 
+# Unix socket mode (no TCP, socket only)
+go run main.go -unix-socket -chat
+
+# Unix socket with custom directory
+go run main.go -unix-socket -socket-dir /tmp/myproxy -chat
+
 # Server mode with 30-minute timeout
 go run main.go -timeout 30
 ```
 
 ## Troubleshooting
 
-### "Port must be in range 1-65535"
+### "Port must be in range 1-65535" or "at least one of Port or UnixSocket must be configured"
 
-Set a valid port in EmbedConfig:
+Set a valid port or Unix socket path:
 
 ```go
-Port: 8317,  // Required, range 1-65535
+// Option 1: TCP mode
+Port: 8317,  // Range 1-65535
+
+// Option 2: Unix socket-only mode
+Port:       0,
+UnixSocket: "./auth/cliproxy.sock",
+
+// Option 3: Dual mode (both)
+Port:       8317,
+UnixSocket: "./auth/cliproxy.sock",
 ```
 
 ### "TLS cert file not found"
@@ -402,6 +474,28 @@ Ensure `AuthDir` points to the correct directory:
 
 ```go
 AuthDir: "./auth",  // Must match where tokens were created
+```
+
+### "socket already in use" or Unix socket connection refused
+
+If the socket file exists from a previous crash:
+
+```bash
+# Remove stale socket file
+rm ./auth/cliproxy.sock
+
+# Or let the server clean it up automatically (it detects stale sockets)
+```
+
+If another instance is running, stop it first or use a different socket path.
+
+### Unix socket not working on Windows
+
+Unix sockets are not supported on Windows. The server automatically falls back to TCP-only mode. Use `Port` instead:
+
+```go
+// This works on all platforms
+Port: 8317,
 ```
 
 ## Related Documentation

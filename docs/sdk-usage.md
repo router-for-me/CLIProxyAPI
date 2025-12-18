@@ -19,6 +19,18 @@ The `sdk/cliproxy` module exposes the proxy as a reusable Go library so external
 >     WithConfigPath("./config.yaml").
 >     Build()
 > ```
+>
+> **Unix Socket Mode** (Linux/macOS only):
+> ```go
+> svc, err := cliproxy.NewBuilder().
+>     WithEmbedConfig(&cliproxy.EmbedConfig{
+>         Port:       0,                          // Disable TCP
+>         UnixSocket: "./auth/cliproxy.sock",     // Enable Unix socket
+>         AuthDir:    "./auth",
+>     }).
+>     WithConfigPath("./config.yaml").
+>     Build()
+> ```
 
 The remainder of this guide covers the internal API using `internal/config.Config`, which is only available within the CLIProxyAPI repository.
 

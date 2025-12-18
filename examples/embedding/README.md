@@ -9,6 +9,7 @@ The example shows:
 - ✅ Using `EmbedConfig` without internal package dependencies
 - ✅ **Built-in OAuth authentication** for Claude and Gemini (no main CLI required!)
 - ✅ Configuring essential server options (host, port, TLS, management API)
+- ✅ **Unix socket support** for secure local IPC (alternative to TCP)
 - ✅ Loading provider configurations from YAML
 - ✅ **Response verification** using Gemini to fact-check Claude's responses
 - ✅ **Auto-correction**: Failed verifications are fed back to Claude for correction
@@ -159,7 +160,8 @@ Essential server options are set via `EmbedConfig` in `main.go`:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `Host` | `string` | `""` (all interfaces) | Network interface to bind (use `127.0.0.1` for localhost-only) |
-| `Port` | `int` | **Required** | Server port (1-65535) |
+| `Port` | `int` | **Required** | Server port (1-65535). Set to 0 for Unix socket-only mode |
+| `UnixSocket` | `string` | `""` (disabled) | Path to Unix domain socket (e.g., `./auth/cliproxy.sock`). When set with Port=0, runs socket-only |
 | `AuthDir` | `string` | `./.cli-proxy-api` or `~/.cli-proxy-api` | Directory for OAuth token storage |
 | `Debug` | `bool` | `false` | Enable debug-level logging |
 | `LoggingToFile` | `bool` | `false` | Write logs to files (vs. stdout) |
@@ -196,6 +198,59 @@ QuotaExceeded: cliproxy.QuotaExceeded{
     SwitchPreviewModel: false,  // Auto-switch to preview models
 }
 ```
+
+#### Unix Socket Mode
+
+Unix domain sockets provide a secure, high-performance alternative to TCP for local IPC:
+
+```go
+// Socket-only mode (no TCP listener)
+embedCfg := &cliproxy.EmbedConfig{
+    Port:       0,                          // Disable TCP
+    UnixSocket: "./auth/cliproxy.sock",     // Enable Unix socket
+    AuthDir:    "./auth",
+}
+```
+
+**Command-line usage:**
+
+```bash
+# Enable Unix socket (default path: {auth-dir}/cliproxy.sock)
+go run main.go -unix-socket
+
+# Custom socket directory
+go run main.go -unix-socket -socket-dir /tmp/my-sockets/
+
+# Combine with chat mode
+go run main.go -unix-socket -chat
+```
+
+**Client connection:**
+
+```go
+// Helper function provided in main.go
+client := NewUnixSocketClient("./auth/cliproxy.sock")
+resp, err := client.Post("http://localhost/v1/chat/completions", ...)
+// Note: hostname is ignored for Unix socket connections
+
+// For Anthropic SDK
+client := NewUnixSocketAnthropicClient("./auth/cliproxy.sock", "test-key")
+message, err := client.Messages.New(ctx, params)
+```
+
+**Benefits:**
+
+- **Security**: File permissions control access, no network exposure
+- **Performance**: ~30% lower latency than TCP for local communication
+- **Simplicity**: No port conflicts or firewall considerations
+
+**Platform Support:**
+
+| Platform | Unix Socket | TCP |
+|----------|-------------|-----|
+| Linux    | ✅ | ✅ |
+| macOS    | ✅ | ✅ |
+| Windows  | ❌ (falls back to TCP) | ✅ |
 
 ### Provider Configuration (config.yaml)
 
@@ -456,6 +511,11 @@ go run main.go -chat -auth-dir ~/.my-auth
 
 # Set inactivity timeout (default: 15 minutes, 0 to disable)
 go run main.go -chat -timeout 30
+
+# Use Unix socket instead of TCP (Linux/macOS only)
+go run main.go -unix-socket
+go run main.go -unix-socket -socket-dir /custom/socket/dir/
+go run main.go -unix-socket -chat  # Socket mode with interactive chat
 ```
 
 ### Features
