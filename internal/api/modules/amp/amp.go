@@ -218,14 +218,21 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 		// Check upstream URL change - now supports hot-reload
 		if newUpstreamURL == "" && oldUpstreamURL != "" {
 			m.setProxy(nil)
+			m.setManagementProxy(nil)
 			m.enabled = false
 		} else if oldUpstreamURL != "" && newUpstreamURL != oldUpstreamURL && newUpstreamURL != "" {
-			// Recreate proxy with new URL
+			// Recreate both proxies with new URL
 			proxy, err := createReverseProxy(newUpstreamURL, m.secretSource)
 			if err != nil {
 				log.Errorf("amp config: failed to create proxy for new upstream URL %s: %v", newUpstreamURL, err)
 			} else {
 				m.setProxy(proxy)
+			}
+			mgmtProxy, err := createManagementProxy(newUpstreamURL, m.secretSource)
+			if err != nil {
+				log.Errorf("amp config: failed to create management proxy for new upstream URL %s: %v", newUpstreamURL, err)
+			} else {
+				m.setManagementProxy(mgmtProxy)
 			}
 		}
 
@@ -265,8 +272,8 @@ func (m *AmpModule) enableUpstreamProxy(upstreamURL string, settings *config.Amp
 		return err
 	}
 
-	// Create management proxy (preserves client auth/Amp token)
-	mgmtProxy, err := createManagementProxy(upstreamURL)
+	// Create management proxy (injects server's Amp token for auth)
+	mgmtProxy, err := createManagementProxy(upstreamURL, m.secretSource)
 	if err != nil {
 		return err
 	}

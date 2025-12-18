@@ -438,6 +438,277 @@ func TestIsStreamingResponse(t *testing.T) {
 	}
 }
 
+// Management Proxy Tests
+
+func TestCreateManagementProxy_InjectsToken(t *testing.T) {
+	gotHeaders := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders <- r.Header.Clone()
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	proxy, err := createManagementProxy(upstream.URL, NewStaticSecretSource("amp-token-123"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	res, err := http.Get(srv.URL + "/api/threads/T-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	hdr := <-gotHeaders
+	if hdr.Get("X-Api-Key") != "amp-token-123" {
+		t.Fatalf("X-Api-Key should be injected, got: %q", hdr.Get("X-Api-Key"))
+	}
+	if hdr.Get("Authorization") != "Bearer amp-token-123" {
+		t.Fatalf("Authorization should be injected, got: %q", hdr.Get("Authorization"))
+	}
+}
+
+func TestCreateManagementProxy_StripsClientAuth(t *testing.T) {
+	gotHeaders := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders <- r.Header.Clone()
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	proxy, err := createManagementProxy(upstream.URL, NewStaticSecretSource("server-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	// Client sends their own auth headers (KorProxy API key)
+	req, _ := http.NewRequest("GET", srv.URL+"/api/threads", nil)
+	req.Header.Set("Authorization", "Bearer client-korproxy-key")
+	req.Header.Set("X-Api-Key", "client-korproxy-key")
+
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	hdr := <-gotHeaders
+	// Client auth should be stripped and replaced with server token
+	if hdr.Get("Authorization") == "Bearer client-korproxy-key" {
+		t.Fatal("Client Authorization should be stripped, not preserved")
+	}
+	if hdr.Get("X-Api-Key") == "client-korproxy-key" {
+		t.Fatal("Client X-Api-Key should be stripped, not preserved")
+	}
+	// Server token should be injected
+	if hdr.Get("Authorization") != "Bearer server-token" {
+		t.Fatalf("Server Authorization should be injected, got: %q", hdr.Get("Authorization"))
+	}
+	if hdr.Get("X-Api-Key") != "server-token" {
+		t.Fatalf("Server X-Api-Key should be injected, got: %q", hdr.Get("X-Api-Key"))
+	}
+}
+
+func TestCreateManagementProxy_NoTokenContinues(t *testing.T) {
+	gotHeaders := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders <- r.Header.Clone()
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	// Empty secret source - no token available
+	proxy, err := createManagementProxy(upstream.URL, NewStaticSecretSource(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	res, err := http.Get(srv.URL + "/api/threads")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	hdr := <-gotHeaders
+	// No auth headers should be set when no token available
+	if hdr.Get("Authorization") != "" {
+		t.Fatalf("Authorization should not be set when no token, got: %q", hdr.Get("Authorization"))
+	}
+	if hdr.Get("X-Api-Key") != "" {
+		t.Fatalf("X-Api-Key should not be set when no token, got: %q", hdr.Get("X-Api-Key"))
+	}
+}
+
+func TestCreateManagementProxy_PreservesOtherHeaders(t *testing.T) {
+	gotHeaders := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders <- r.Header.Clone()
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	proxy, err := createManagementProxy(upstream.URL, NewStaticSecretSource("token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/api/threads", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Custom-Header", "custom-value")
+	req.Header.Set("X-Correlation-ID", "corr-123")
+
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	hdr := <-gotHeaders
+	// Non-auth headers should be preserved
+	if hdr.Get("Content-Type") != "application/json" {
+		t.Fatalf("Content-Type should be preserved, got: %q", hdr.Get("Content-Type"))
+	}
+	if hdr.Get("X-Custom-Header") != "custom-value" {
+		t.Fatalf("X-Custom-Header should be preserved, got: %q", hdr.Get("X-Custom-Header"))
+	}
+	if hdr.Get("X-Correlation-ID") != "corr-123" {
+		t.Fatalf("X-Correlation-ID should be preserved, got: %q", hdr.Get("X-Correlation-ID"))
+	}
+}
+
+func TestCreateManagementProxy_NilSecretSource(t *testing.T) {
+	gotHeaders := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders <- r.Header.Clone()
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	// Nil secret source
+	proxy, err := createManagementProxy(upstream.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	res, err := http.Get(srv.URL + "/api/threads")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	hdr := <-gotHeaders
+	// Should not panic, no auth headers set
+	if hdr.Get("Authorization") != "" {
+		t.Fatalf("Authorization should not be set with nil secret source, got: %q", hdr.Get("Authorization"))
+	}
+}
+
+func TestIs1MContextModel(t *testing.T) {
+	tests := []struct {
+		name      string
+		modelName string
+		want      bool
+	}{
+		// 1M context models (should return true)
+		{
+			name:      "sonnet with 1m suffix",
+			modelName: "claude-sonnet-4-5-20250929[1m]",
+			want:      true,
+		},
+		{
+			name:      "alias with 1m suffix",
+			modelName: "sonnet[1m]",
+			want:      true,
+		},
+		{
+			name:      "bedrock format with 1m suffix",
+			modelName: "anthropic.claude-sonnet-4-5-20250929-v1:0[1m]",
+			want:      true,
+		},
+		{
+			name:      "uppercase 1M suffix",
+			modelName: "claude-sonnet-4-5-20250929[1M]",
+			want:      true,
+		},
+		// Regular models (should return false)
+		{
+			name:      "regular sonnet model",
+			modelName: "claude-sonnet-4-5-20250929",
+			want:      false,
+		},
+		{
+			name:      "model alias",
+			modelName: "sonnet",
+			want:      false,
+		},
+		{
+			name:      "model with thinking suffix",
+			modelName: "claude-sonnet-4-5-20250929(16384)",
+			want:      false,
+		},
+		{
+			name:      "haiku model",
+			modelName: "claude-haiku-4-5-20251001",
+			want:      false,
+		},
+		{
+			name:      "opus model",
+			modelName: "claude-opus-4-5-20251101",
+			want:      false,
+		},
+		{
+			name:      "empty string",
+			modelName: "",
+			want:      false,
+		},
+		{
+			name:      "partial 1m in name",
+			modelName: "claude-1m-sonnet",
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := is1MContextModel(tt.modelName); got != tt.want {
+				t.Errorf("is1MContextModel(%q) = %v, want %v", tt.modelName, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFilterBetaFeatures(t *testing.T) {
 	tests := []struct {
 		name            string

@@ -26,10 +26,11 @@ func (rc *readCloser) Read(p []byte) (int, error) { return rc.r.Read(p) }
 func (rc *readCloser) Close() error               { return rc.c.Close() }
 
 // createManagementProxy creates a reverse proxy for Amp management routes
-// that preserves the client's Authorization header (Amp tokens).
-// This is used for /api/user, /api/auth, etc. where the client authenticates
-// directly with ampcode.com using their Amp token.
-func createManagementProxy(upstreamURL string) (*httputil.ReverseProxy, error) {
+// that injects the server's Amp token for authentication with ampcode.com.
+// This is used for /api/user, /api/auth, /api/threads, etc.
+// The client's auth headers are stripped and replaced with the server's Amp token
+// from the SecretSource (config > env > file precedence).
+func createManagementProxy(upstreamURL string, secretSource SecretSource) (*httputil.ReverseProxy, error) {
 	parsed, err := url.Parse(upstreamURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid amp upstream url: %w", err)
@@ -41,8 +42,33 @@ func createManagementProxy(upstreamURL string) (*httputil.ReverseProxy, error) {
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		req.Host = parsed.Host
-		// Preserve client's Authorization header - it contains the Amp token
-		// Do NOT strip or replace it
+
+		// Strip client's auth headers - they contain KorProxy credentials, not Amp tokens
+		req.Header.Del("Authorization")
+		req.Header.Del("X-Api-Key")
+
+		// Propagate correlation ID to upstream for request tracing
+		correlationID := req.Header.Get("X-Correlation-ID")
+		if correlationID == "" {
+			correlationID = req.Header.Get("X-Request-ID")
+		}
+		if correlationID != "" {
+			req.Header.Set("X-Correlation-ID", correlationID)
+			req.Header.Set("X-Request-ID", correlationID)
+		}
+
+		// Inject Amp token from secret source (config > env > file)
+		if secretSource != nil {
+			if key, err := secretSource.Get(req.Context()); err == nil && key != "" {
+				req.Header.Set("X-Api-Key", key)
+				req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
+				log.Debugf("amp management proxy: injected auth for %s %s", req.Method, req.URL.Path)
+			} else if err != nil {
+				log.Warnf("amp management proxy: secret source error (continuing without auth): %v", err)
+			} else {
+				log.Debugf("amp management proxy: no amp token available for %s %s", req.Method, req.URL.Path)
+			}
+		}
 	}
 
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {

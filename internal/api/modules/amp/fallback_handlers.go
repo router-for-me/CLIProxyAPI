@@ -224,8 +224,9 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
 			rewriter := NewResponseRewriter(c.Writer, normalizedModel)
 			c.Writer = rewriter
-			// Filter Anthropic-Beta header only for local handling paths
-			filterAntropicBetaHeader(c)
+			// Filter Anthropic-Beta header only for 1M context models on local providers
+			// Non-1M models pass all betas through to support web_search, tool streaming, etc.
+			filterAntropicBetaHeaderForModel(c, modelName)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			handler(c)
 			rewriter.Flush()
@@ -233,8 +234,9 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		} else if len(providers) > 0 {
 			// Log: Using local provider (free)
 			logAmpRouting(RouteTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)
-			// Filter Anthropic-Beta header only for local handling paths
-			filterAntropicBetaHeader(c)
+			// Filter Anthropic-Beta header only for 1M context models on local providers
+			// Non-1M models pass all betas through to support web_search, tool streaming, etc.
+			filterAntropicBetaHeaderForModel(c, modelName)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			handler(c)
 		} else {
@@ -245,15 +247,38 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 	}
 }
 
-// filterAntropicBetaHeader filters Anthropic-Beta header to remove features requiring special subscription
-// This is needed when using local providers (bypassing the Amp proxy)
-func filterAntropicBetaHeader(c *gin.Context) {
+// is1MContextModel checks if the model name indicates a 1M context model.
+// Amp/Claude Code uses the [1m] suffix to indicate 1M context models, e.g.:
+//   - claude-sonnet-4-5-20250929[1m]
+//   - sonnet[1m]
+//   - anthropic.claude-sonnet-4-5-20250929-v1:0[1m]
+func is1MContextModel(modelName string) bool {
+	return strings.HasSuffix(strings.ToLower(modelName), "[1m]")
+}
+
+// filterAntropicBetaHeaderForModel filters Anthropic-Beta header based on model type.
+// The context-1m-2025-08-07 beta is only filtered when:
+//   - The model is a 1M context model (has [1m] suffix) being routed to a local provider
+//
+// For all other models, the Anthropic-Beta header is passed through untouched,
+// preserving features like web_search, fine-grained-tool-streaming, etc.
+func filterAntropicBetaHeaderForModel(c *gin.Context, modelName string) {
+	// Only filter context-1m beta for actual 1M context models
+	// Non-1M models should pass all betas through to support features like web_search
+	if !is1MContextModel(modelName) {
+		// Not a 1M model - don't filter any betas
+		return
+	}
+
+	// This is a 1M context model being routed locally - filter the context-1m beta
+	// since local providers may not support 1M context
 	if betaHeader := c.Request.Header.Get("Anthropic-Beta"); betaHeader != "" {
 		if filtered := filterBetaFeatures(betaHeader, "context-1m-2025-08-07"); filtered != "" {
 			c.Request.Header.Set("Anthropic-Beta", filtered)
 		} else {
 			c.Request.Header.Del("Anthropic-Beta")
 		}
+		log.Debugf("amp: filtered context-1m beta for 1M model %s on local provider", modelName)
 	}
 }
 
