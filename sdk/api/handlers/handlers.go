@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
@@ -50,27 +49,6 @@ type BaseAPIHandler struct {
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
-
-	// OpenAICompatProviders is a list of provider names for OpenAI compatibility.
-	openAICompatProviders []string
-	openAICompatMutex     sync.RWMutex
-}
-
-// GetOpenAICompatProviders safely returns a copy of the provider names
-func (h *BaseAPIHandler) GetOpenAICompatProviders() []string {
-	h.openAICompatMutex.RLock()
-	defer h.openAICompatMutex.RUnlock()
-	result := make([]string, len(h.openAICompatProviders))
-	copy(result, h.openAICompatProviders)
-	return result
-}
-
-// SetOpenAICompatProviders safely sets the provider names
-func (h *BaseAPIHandler) SetOpenAICompatProviders(providers []string) {
-	h.openAICompatMutex.Lock()
-	defer h.openAICompatMutex.Unlock()
-	h.openAICompatProviders = make([]string, len(providers))
-	copy(h.openAICompatProviders, providers)
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -82,13 +60,11 @@ func (h *BaseAPIHandler) SetOpenAICompatProviders(providers []string) {
 //
 // Returns:
 //   - *BaseAPIHandler: A new API handlers instance
-func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager, openAICompatProviders []string) *BaseAPIHandler {
-	h := &BaseAPIHandler{
+func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *BaseAPIHandler {
+	return &BaseAPIHandler{
 		Cfg:         cfg,
 		AuthManager: authManager,
 	}
-	h.SetOpenAICompatProviders(openAICompatProviders)
-	return h
 }
 
 // UpdateClients updates the handlers' client list and configuration.
@@ -366,22 +342,13 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	specifiedProvider := util.ExtractProviderFromPrefixedModelID(resolvedModelName)
 
 	// Normalize model ID - this is the single point of model ID normalization for all requests
+	// This removes provider prefixes like "[Kiro]", "[Gemini]", etc.
 	cleanModelName := util.NormalizeIncomingModelID(resolvedModelName)
 
-	providerName, extractedModelName, isDynamic := h.parseDynamicModel(cleanModelName)
-
-	// Determine target model name for normalization
-	targetModelName := cleanModelName
-	if isDynamic {
-		targetModelName = extractedModelName
-	}
-
 	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
-	normalizedModel, metadata = normalizeModelMetadata(targetModelName)
+	normalizedModel, metadata = normalizeModelMetadata(cleanModelName)
 
-	if isDynamic {
-		providers = []string{providerName}
-	} else if specifiedProvider != "" {
+	if specifiedProvider != "" {
 		// User specified a specific provider via prefix - use ONLY that provider
 		providers = []string{specifiedProvider}
 	} else {
@@ -407,30 +374,6 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	}
 
 	return providers, normalizedModel, metadata, nil
-}
-
-func (h *BaseAPIHandler) parseDynamicModel(modelName string) (providerName, model string, isDynamic bool) {
-	var providerPart, modelPart string
-	for _, sep := range []string{"://"} {
-		if parts := strings.SplitN(modelName, sep, 2); len(parts) == 2 {
-			providerPart = parts[0]
-			modelPart = parts[1]
-			break
-		}
-	}
-
-	if providerPart == "" {
-		return "", modelName, false
-	}
-
-	// Check if the provider is a configured openai-compatibility provider
-	for _, pName := range h.GetOpenAICompatProviders() {
-		if pName == providerPart {
-			return providerPart, modelPart, true
-		}
-	}
-
-	return "", modelName, false
 }
 
 func cloneBytes(src []byte) []byte {

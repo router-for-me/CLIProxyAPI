@@ -518,7 +518,13 @@ func parseOpenAIMessage(m gjson.Result) ir.Message {
 
 	content := m.Get("content")
 	if content.Type == gjson.String && roleStr != "tool" {
-		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: content.String()})
+		// Skip empty content strings for assistant messages with tool_calls
+		// (Gemini 3 API rejects empty text parts)
+		text := content.String()
+		hasToolCalls := m.Get("tool_calls").IsArray() && len(m.Get("tool_calls").Array()) > 0
+		if text != "" || (roleStr != "assistant" || !hasToolCalls) {
+			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: text})
+		}
 	} else if content.IsArray() {
 		for _, item := range content.Array() {
 			if part := parseOpenAIContentPart(item, &msg); part != nil {

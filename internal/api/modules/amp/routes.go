@@ -267,7 +267,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	v1betaAmp := provider.Group("/v1beta")
 	{
 		v1betaAmp.GET("/models", geminiHandlers.GeminiModels)
-		v1betaAmp.POST("/models/:action", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
-		v1betaAmp.GET("/models/:action", geminiHandlers.GeminiGetHandler)
+		v1betaAmp.POST("/models/*action", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
+		v1betaAmp.GET("/models/*action", geminiHandlers.GeminiGetHandler)
 	}
 }

@@ -5,7 +5,6 @@ package from_ir
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -68,24 +67,47 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req 
 	}
 
 	// Thinking Config
-	// Check if model is Gemini 3 family (gemini-3-pro-preview, gemini-3-pro-high, etc.)
-	isGemini3 := strings.HasPrefix(req.Model, "gemini-3")
+	// Check if model is Gemini 3 family using util function for consistent detection
+	isGemini3 := util.IsGemini3Model(req.Model)
+	isGemini3Flash := util.IsGemini3FlashModel(req.Model)
 	if util.ModelSupportsThinking(req.Model) || isGemini3 {
 		if req.Thinking != nil {
-			// Gemini 3 Pro uses thinking_level
+			// Gemini 3 uses thinkingLevel instead of thinkingBudget
 			if isGemini3 {
 				tc := map[string]interface{}{
 					// Always include_thoughts=true to get readable thinking text
 					// Without this, Gemini only returns encrypted thoughtSignature
-					"include_thoughts": true,
+					"includeThoughts": true,
 				}
+				// Gemini 3 Pro: "low", "high" (default: "high")
+				// Gemini 3 Flash: "minimal", "low", "medium", "high" (default: "high")
 				switch req.Thinking.Effort {
+				case "minimal":
+					if isGemini3Flash {
+						tc["thinkingLevel"] = "minimal"
+					} else {
+						tc["thinkingLevel"] = "low" // Pro doesn't have minimal, use low
+					}
 				case "low":
-					tc["thinking_level"] = "LOW"
+					tc["thinkingLevel"] = "low"
+				case "medium":
+					if isGemini3Flash {
+						tc["thinkingLevel"] = "medium"
+					} else {
+						tc["thinkingLevel"] = "low" // Pro doesn't have medium, use low
+					}
 				case "high":
-					tc["thinking_level"] = "HIGH"
+					tc["thinkingLevel"] = "high"
+				default:
+					// If effort not specified but thinking enabled, use high (API default)
+					tc["thinkingLevel"] = "high"
 				}
-				// If budget is set but not effort, ignore budget for Gemini 3 as per docs
+				// If budget is set but not effort, convert budget to level
+				if req.Thinking.Effort == "" && req.Thinking.Budget > 0 {
+					if level, ok := util.ThinkingBudgetToGemini3Level(req.Model, req.Thinking.Budget); ok {
+						tc["thinkingLevel"] = level
+					}
+				}
 				genConfig["thinkingConfig"] = tc
 			} else {
 				// Gemini 2.5 and others use thinking_budget
@@ -101,9 +123,9 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req 
 			}
 		} else if isGemini3 {
 			// Default for Gemini 3 models - always include thoughts to get readable text
-			// Gemini 3 doesn't require thinkingBudget, just include_thoughts
+			// Don't set thinkingLevel - let API use its dynamic default ("high")
 			genConfig["thinkingConfig"] = map[string]interface{}{
-				"include_thoughts": true,
+				"includeThoughts": true,
 			}
 		}
 		// For Gemini 2.5 without explicit thinking config - don't send thinkingConfig at all

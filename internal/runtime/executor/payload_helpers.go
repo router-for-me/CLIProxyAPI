@@ -72,13 +72,7 @@ func ApplyReasoningEffortMetadata(payload []byte, metadata map[string]any, model
 	// Fallback: numeric thinking_budget suffix for level-based (OpenAI-style) models.
 	if util.ModelUsesThinkingLevels(baseModel) || allowCompat {
 		if budget, _, _, matched := util.ThinkingFromMetadata(metadata); matched && budget != nil {
-			if effort, ok := util.OpenAIThinkingBudgetToEffort(baseModel, *budget); ok && effort != "" {
-				if *budget == 0 && effort == "none" && util.ModelUsesThinkingLevels(baseModel) {
-					if _, supported := util.NormalizeReasoningEffortLevel(baseModel, effort); !supported {
-						return StripThinkingFields(payload, false)
-					}
-				}
-
+			if effort, ok := util.ThinkingBudgetToEffort(baseModel, *budget); ok && effort != "" {
 				if updated, err := sjson.SetBytes(payload, field, effort); err == nil {
 					return updated
 				}
@@ -273,7 +267,7 @@ func StripThinkingFields(payload []byte, effortOnly bool) []byte {
 		"reasoning.effort",
 	}
 	if !effortOnly {
-		fieldsToRemove = append([]string{"reasoning"}, fieldsToRemove...)
+		fieldsToRemove = append([]string{"reasoning", "thinking"}, fieldsToRemove...)
 	}
 	out := payload
 	for _, field := range fieldsToRemove {

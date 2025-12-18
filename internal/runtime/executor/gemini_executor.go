@@ -83,18 +83,8 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Official Gemini API via API key or OAuth bearer
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	body, err := TranslateToGemini(e.cfg, from, req.Model, bytes.Clone(req.Payload), false, req.Metadata)
-	if err != nil {
-		return resp, fmt.Errorf("translate request: %w", err)
-	}
-	if budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(req.Model, req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
-		if budgetOverride != nil {
-			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
-			budgetOverride = &norm
-		}
-		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
-	}
-	// Apply default thinking for models that require it (e.g., gemini-3-pro-preview)
+	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	body = ApplyThinkingMetadata(body, req.Metadata, req.Model)
 	body = util.ApplyDefaultThinkingIfNeeded(req.Model, body)
 	body = util.NormalizeGeminiThinkingBudget(req.Model, body)
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
@@ -199,18 +189,8 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	body, err := TranslateToGemini(e.cfg, from, req.Model, bytes.Clone(req.Payload), true, req.Metadata)
-	if err != nil {
-		return nil, fmt.Errorf("translate request: %w", err)
-	}
-	if budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(req.Model, req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
-		if budgetOverride != nil {
-			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
-			budgetOverride = &norm
-		}
-		body = util.ApplyGeminiThinkingConfig(body, budgetOverride, includeOverride)
-	}
-	// Apply default thinking for models that require it (e.g., gemini-3-pro-preview)
+	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	body = ApplyThinkingMetadata(body, req.Metadata, req.Model)
 	body = util.ApplyDefaultThinkingIfNeeded(req.Model, body)
 	body = util.NormalizeGeminiThinkingBudget(req.Model, body)
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
@@ -340,17 +320,8 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	translatedReq, err := TranslateToGemini(e.cfg, from, req.Model, bytes.Clone(req.Payload), false, req.Metadata)
-	if err != nil {
-		return cliproxyexecutor.Response{}, fmt.Errorf("translate request: %w", err)
-	}
-	if budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(req.Model, req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
-		if budgetOverride != nil {
-			norm := util.NormalizeThinkingBudget(req.Model, *budgetOverride)
-			budgetOverride = &norm
-		}
-		translatedReq = util.ApplyGeminiThinkingConfig(translatedReq, budgetOverride, includeOverride)
-	}
+	translatedReq := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	translatedReq = ApplyThinkingMetadata(translatedReq, req.Metadata, req.Model)
 	translatedReq = util.StripThinkingConfigIfUnsupported(req.Model, translatedReq)
 	// Only apply fixGeminiImageAspectRatio if new translator is disabled (new translator handles it internally)
 	if e.cfg == nil || !e.cfg.UseCanonicalTranslator {

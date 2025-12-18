@@ -122,15 +122,68 @@ func DefaultGeminiSafetySettings() []map[string]string {
 }
 
 // CleanJsonSchema removes fields not supported by Gemini from JSON Schema.
+// This is a simplified version - for more advanced cleaning (handling $ref, allOf, anyOf, etc.)
+// use util.CleanJSONSchemaForGemini() on the JSON string.
 func CleanJsonSchema(schema map[string]interface{}) map[string]interface{} {
 	if schema == nil {
 		return nil
 	}
-	delete(schema, "strict")
-	delete(schema, "input_examples")
-	delete(schema, "$schema")
-	delete(schema, "additionalProperties")
+	// Remove unsupported top-level keywords
+	unsupportedKeywords := []string{
+		"strict", "input_examples", "$schema", "$id", "$defs", "definitions",
+		"additionalProperties", "patternProperties", "unevaluatedProperties",
+		"minProperties", "maxProperties", "dependentRequired", "dependentSchemas",
+		"if", "then", "else", "not", "contentEncoding", "contentMediaType",
+		"deprecated", "readOnly", "writeOnly", "examples", "$comment",
+		"$vocabulary", "$anchor", "$dynamicRef", "$dynamicAnchor",
+	}
+	for _, kw := range unsupportedKeywords {
+		delete(schema, kw)
+	}
+
+	// Recursively clean nested schemas
+	cleanNestedSchemas(schema)
+
 	return schema
+}
+
+// cleanNestedSchemas recursively cleans nested schema objects.
+func cleanNestedSchemas(schema map[string]interface{}) {
+	// Clean properties
+	if props, ok := schema["properties"].(map[string]interface{}); ok {
+		for _, v := range props {
+			if propSchema, ok := v.(map[string]interface{}); ok {
+				CleanJsonSchema(propSchema)
+			}
+		}
+	}
+
+	// Clean items (for arrays)
+	if items, ok := schema["items"].(map[string]interface{}); ok {
+		CleanJsonSchema(items)
+	}
+
+	// Clean allOf, anyOf, oneOf
+	for _, key := range []string{"allOf", "anyOf", "oneOf"} {
+		if arr, ok := schema[key].([]interface{}); ok {
+			for _, item := range arr {
+				if itemSchema, ok := item.(map[string]interface{}); ok {
+					CleanJsonSchema(itemSchema)
+				}
+			}
+		}
+	}
+
+	// Flatten type arrays like ["string", "null"] to just "string"
+	if typeVal, ok := schema["type"].([]interface{}); ok && len(typeVal) > 0 {
+		// Find first non-null type
+		for _, t := range typeVal {
+			if tStr, ok := t.(string); ok && tStr != "null" {
+				schema["type"] = tStr
+				break
+			}
+		}
+	}
 }
 
 // GenToolCallID generates a unique tool call ID.

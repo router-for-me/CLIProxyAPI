@@ -81,6 +81,15 @@ type KiroModel struct {
 // KiroIDETokenFile is the default path to Kiro IDE's token file
 const KiroIDETokenFile = ".aws/sso/cache/kiro-auth-token.json"
 
+// GetKiroIDETokenPath returns the full path to Kiro IDE's token file.
+func GetKiroIDETokenPath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(homeDir, KiroIDETokenFile)
+}
+
 // LoadKiroIDEToken loads token data from Kiro IDE's token file.
 func LoadKiroIDEToken() (*KiroTokenData, error) {
 	homeDir, err := os.UserHomeDir()

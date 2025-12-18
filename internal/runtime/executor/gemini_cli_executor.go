@@ -37,11 +37,6 @@ const (
 	codeAssistVersion       = "v1internal"
 	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
 	geminiOAuthClientSecret = "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"
-
-	// Rate limit retry settings: 5 retries with exponential backoff up to ~60 seconds total
-	rateLimitMaxRetries = 5
-	rateLimitBaseDelay  = 1 * time.Second  // 1s, 2s, 4s, 8s, 16s = ~31s total with exponential backoff
-	rateLimitMaxDelay   = 20 * time.Second // Cap individual delay at 20s
 )
 
 var geminiOAuthScopes = []string{
@@ -113,10 +108,8 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	var lastStatus int
 	var lastBody []byte
-	retrier := &rateLimitRetrier{}
 
-	for idx := 0; idx < len(models); idx++ {
-		attemptModel := models[idx]
+	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
 		if action == "countTokens" {
 			payload = deleteJSONField(payload, "project")
@@ -197,23 +190,12 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		lastBody = append([]byte(nil), data...)
 		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		if httpResp.StatusCode == 429 {
-			hasNextModel := idx+1 < len(models)
-			if hasNextModel {
+			if idx+1 < len(models) {
 				log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
+			} else {
+				log.Debug("gemini cli executor: rate limited, no additional fallback model")
 			}
-			action, ctxErr := retrier.handleRateLimit(ctx, hasNextModel, data)
-			if ctxErr != nil {
-				err = ctxErr
-				return resp, err
-			}
-			switch action {
-			case rateLimitActionContinue:
-				continue
-			case rateLimitActionRetry:
-				idx--
-				continue
-			}
-			// rateLimitActionMaxExceeded - fall through to error
+			continue
 		}
 
 		err = newGeminiStatusErr(httpResp.StatusCode, data)
@@ -265,7 +247,6 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 	var lastStatus int
 	var lastBody []byte
-	retrier := &rateLimitRetrier{}
 
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
@@ -329,23 +310,12 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			lastBody = append([]byte(nil), data...)
 			log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 			if httpResp.StatusCode == 429 {
-				hasNextModel := idx+1 < len(models)
-				if hasNextModel {
+				if idx+1 < len(models) {
 					log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
+				} else {
+					log.Debug("gemini cli executor: rate limited, no additional fallback model")
 				}
-				action, ctxErr := retrier.handleRateLimit(ctx, hasNextModel, data)
-				if ctxErr != nil {
-					err = ctxErr
-					return nil, err
-				}
-				switch action {
-				case rateLimitActionContinue:
-					continue
-				case rateLimitActionRetry:
-					idx--
-					continue
-				}
-				// rateLimitActionMaxExceeded - fall through to error
+				continue
 			}
 			err = newGeminiStatusErr(httpResp.StatusCode, data)
 			return nil, err
@@ -467,9 +437,8 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 
 	var lastStatus int
 	var lastBody []byte
-	retrier := &rateLimitRetrier{}
 
-	for idx, attemptModel := range models {
+	for _, attemptModel := range models {
 		// Translate request through canonical IR
 		payload, errTranslate := TranslateToGeminiCLI(e.cfg, from, attemptModel, bytes.Clone(req.Payload), false, req.Metadata)
 		if errTranslate != nil {
@@ -533,22 +502,8 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		lastStatus = resp.StatusCode
 		lastBody = append([]byte(nil), data...)
 		if resp.StatusCode == 429 {
-			hasNextModel := idx+1 < len(models)
-			if hasNextModel {
-				log.Debugf("gemini cli executor: rate limited, retrying with next model")
-			}
-			action, ctxErr := retrier.handleRateLimit(ctx, hasNextModel, data)
-			if ctxErr != nil {
-				return cliproxyexecutor.Response{}, ctxErr
-			}
-			switch action {
-			case rateLimitActionContinue:
-				continue
-			case rateLimitActionRetry:
-				idx--
-				continue
-			}
-			// rateLimitActionMaxExceeded - fall through to break
+			log.Debugf("gemini cli executor: rate limited, retrying with next model")
+			continue
 		}
 		break
 	}
@@ -848,71 +803,6 @@ func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 		}
 	}
 	return err
-}
-
-// rateLimitRetrier handles rate limit (429) errors with exponential backoff retry logic.
-type rateLimitRetrier struct {
-	retryCount int
-}
-
-// rateLimitAction represents the action to take after handling a rate limit error.
-type rateLimitAction int
-
-const (
-	rateLimitActionContinue    rateLimitAction = iota // Continue to next model
-	rateLimitActionRetry                              // Retry same model after delay
-	rateLimitActionMaxExceeded                        // Max retries exceeded, stop
-)
-
-// handleRateLimit processes a 429 rate limit error and returns the appropriate action.
-// It handles model fallback first, then applies exponential backoff with retries.
-// Returns the action to take and waits if necessary (respecting context cancellation).
-func (r *rateLimitRetrier) handleRateLimit(ctx context.Context, hasNextModel bool, errorBody []byte) (rateLimitAction, error) {
-	// Try next model first if available
-	if hasNextModel {
-		return rateLimitActionContinue, nil
-	}
-
-	// No more models - apply exponential backoff with retries
-	if r.retryCount >= rateLimitMaxRetries {
-		log.Debug("gemini cli executor: rate limited, max retries exceeded")
-		return rateLimitActionMaxExceeded, nil
-	}
-
-	delay := r.calculateDelay(errorBody)
-	r.retryCount++
-	log.Debugf("gemini cli executor: rate limited, waiting %v before retry %d/%d", delay, r.retryCount, rateLimitMaxRetries)
-
-	select {
-	case <-ctx.Done():
-		return rateLimitActionMaxExceeded, ctx.Err()
-	case <-time.After(delay):
-	}
-
-	return rateLimitActionRetry, nil
-}
-
-// calculateDelay calculates the delay for rate limit retry with exponential backoff.
-// It first tries to use the server-provided retry delay from the error response,
-// then falls back to exponential backoff: 1s, 2s, 4s, 8s, 16s (capped at 20s).
-func (r *rateLimitRetrier) calculateDelay(errorBody []byte) time.Duration {
-	// First, try to use server-provided retry delay
-	if serverDelay, err := parseRetryDelay(errorBody); err == nil && serverDelay != nil {
-		delay := *serverDelay
-		// Add a small buffer to the server-provided delay
-		delay += 500 * time.Millisecond
-		if delay > rateLimitMaxDelay {
-			delay = rateLimitMaxDelay
-		}
-		return delay
-	}
-
-	// Fall back to exponential backoff: baseDelay * 2^retryCount
-	delay := rateLimitBaseDelay * time.Duration(1<<r.retryCount)
-	if delay > rateLimitMaxDelay {
-		delay = rateLimitMaxDelay
-	}
-	return delay
 }
 
 // parseRetryDelay extracts the retry delay from a Google API 429 error response.
