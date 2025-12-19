@@ -635,11 +635,11 @@ func GetOpenAIModels() []*ModelInfo {
 			Type:                "openai",
 			Version:             "gpt-5.2",
 			DisplayName:         "GPT 5.2 Codex",
-			Description:         "Latest frontier agentic coding model.",
+			Description:         "Stable version of GPT 5.2 Codex, The best model for coding and agentic tasks across domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
-			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
 	}
 }
