@@ -2,9 +2,15 @@
 // It handles loading and parsing YAML configuration files, and provides structured
 // access to application settings including server port, authentication directory,
 // debug settings, proxy configuration, and API keys.
+//
+// Note: The full Config type is defined in internal/config. This package provides
+// SDKConfig which is the base configuration embedded by internal/config.Config.
+// SDK consumers who need the full Config should import internal/config directly
+// until a future version moves all types to SDK packages.
 package config
 
-// SDKConfig represents the application's configuration, loaded from a YAML file.
+// SDKConfig represents the base SDK configuration, loaded from a YAML file.
+// This is embedded by the full Config type in internal/config.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
@@ -48,6 +54,7 @@ type AccessProvider struct {
 	Config map[string]any `yaml:"config,omitempty" json:"config,omitempty"`
 }
 
+// Constants for access provider configuration.
 const (
 	// AccessProviderTypeConfigAPIKey is the built-in provider validating inline API keys.
 	AccessProviderTypeConfigAPIKey = "config-api-key"

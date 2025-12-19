@@ -23,13 +23,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	sdkapi "github.com/router-for-me/CLIProxyAPI/v6/sdk/api"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	clipexec "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/configloader"
+	sdklogging "github.com/router-for-me/CLIProxyAPI/v6/sdk/logging"
 	sdktr "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
@@ -155,7 +155,7 @@ func (MyExecutor) Refresh(ctx context.Context, a *coreauth.Auth) (*coreauth.Auth
 }
 
 func main() {
-	cfg, err := config.LoadConfig("config.yaml")
+	cfg, err := configloader.LoadConfig("config.yaml")
 	if err != nil {
 		panic(err)
 	}
@@ -185,9 +185,9 @@ func main() {
 		WithCoreAuthManager(core).
 		WithServerOptions(
 			// Optional: add a simple middleware + custom request logger
-			api.WithMiddleware(func(c *gin.Context) { c.Header("X-Example", "custom-provider"); c.Next() }),
-			api.WithRequestLoggerFactory(func(cfg *config.Config, cfgPath string) logging.RequestLogger {
-				return logging.NewFileRequestLogger(true, "logs", filepath.Dir(cfgPath))
+			sdkapi.WithMiddleware(func(c *gin.Context) { c.Header("X-Example", "custom-provider"); c.Next() }),
+			sdkapi.WithRequestLoggerFactory(func(cfg *configloader.Config, cfgPath string) sdklogging.RequestLogger {
+				return sdklogging.NewFileRequestLogger(true, "logs", filepath.Dir(cfgPath))
 			}),
 		).
 		WithHooks(hooks).
