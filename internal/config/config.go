@@ -6,6 +6,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -128,9 +129,42 @@ type AmpModelMapping struct {
 	// From is the model name that Amp CLI requests (e.g., "claude-opus-4.5").
 	From string `yaml:"from" json:"from"`
 
-	// To is the target model name to route to (e.g., "claude-sonnet-4").
+	// To is the target model name(s).
 	// The target model must have available providers in the registry.
-	To string `yaml:"to" json:"to"`
+	To StringOrSlice `yaml:"to" json:"to"`
+}
+
+// StringOrSlice allows a YAML field to be either a single string or a list of strings.
+type StringOrSlice []string
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (s *StringOrSlice) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var single string
+	if err := unmarshal(&single); err == nil {
+		*s = []string{single}
+		return nil
+	}
+	var slice []string
+	if err := unmarshal(&slice); err != nil {
+		return err
+	}
+	*s = slice
+	return nil
+}
+
+// UnmarshalJSON implements the json.Unmarshaler interface.
+func (s *StringOrSlice) UnmarshalJSON(data []byte) error {
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		*s = []string{single}
+		return nil
+	}
+	var slice []string
+	if err := json.Unmarshal(data, &slice); err != nil {
+		return err
+	}
+	*s = slice
+	return nil
 }
 
 // AmpCode groups Amp CLI integration settings including upstream routing,

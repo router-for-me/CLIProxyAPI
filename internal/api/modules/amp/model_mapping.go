@@ -21,26 +21,30 @@ type ModelMapper interface {
 
 	// UpdateMappings refreshes the mapping configuration (for hot-reload).
 	UpdateMappings(mappings []config.AmpModelMapping)
+
+	// GetFallbacks returns the list of fallback models for a requested model.
+	GetFallbacks(requestedModel string) []string
 }
 
 // DefaultModelMapper implements ModelMapper with thread-safe mapping storage.
 type DefaultModelMapper struct {
 	mu       sync.RWMutex
-	mappings map[string]string // from -> to (normalized lowercase keys)
+	mappings map[string][]string // from -> [to1, to2, ...] (normalized lowercase keys)
 }
 
 // NewModelMapper creates a new model mapper with the given initial mappings.
 func NewModelMapper(mappings []config.AmpModelMapping) *DefaultModelMapper {
 	m := &DefaultModelMapper{
-		mappings: make(map[string]string),
+		mappings: make(map[string][]string),
 	}
 	m.UpdateMappings(mappings)
 	return m
 }
 
-// MapModel checks if a mapping exists for the requested model and if the
-// target model has available local providers. Returns the mapped model name
-// or empty string if no valid mapping exists.
+// MapModel checks if a mapping exists for the requested model and returns
+// the first target model that has available local providers.
+// It supports recursive resolution (alias -> alias -> target) and detects cycles.
+// Returns empty string if no valid mapping exists or no targets have providers.
 func (m *DefaultModelMapper) MapModel(requestedModel string) string {
 	if requestedModel == "" {
 		return ""
@@ -49,24 +53,70 @@ func (m *DefaultModelMapper) MapModel(requestedModel string) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Normalize the requested model for lookup
+	return m.resolveModel(requestedModel, nil)
+}
+
+// resolveModel performs the recursive resolution of model mappings.
+// visited keeps track of visited models in the recursion stack to detect cycles.
+func (m *DefaultModelMapper) resolveModel(model string, visited map[string]struct{}) string {
+	normalizedRequest := strings.ToLower(strings.TrimSpace(model))
+
+	// Cycle detection
+	if visited == nil {
+		visited = make(map[string]struct{})
+	}
+	if _, ok := visited[normalizedRequest]; ok {
+		log.Warnf("amp model mapping: detected cycle for model %q, stopping recursion", model)
+		return ""
+	}
+	visited[normalizedRequest] = struct{}{}
+
+	// Check for mapping
+	targets, exists := m.mappings[normalizedRequest]
+	if !exists || len(targets) == 0 {
+		// No mapping found.
+		return ""
+	}
+
+	// Iterate through targets (fallbacks)
+	for _, target := range targets {
+		// 1. Check if this target is a real provider
+		providers := util.GetProviderName(target)
+		if len(providers) > 0 {
+			log.Debugf("amp model mapping: resolved %s -> %s (provider found)", model, target)
+			return target
+		}
+
+		// 2. If no provider, try to resolve recursively (if this target is also an alias)
+		// We only continue recursion if this target is DEFINED in our mappings.
+		normalizedTarget := strings.ToLower(strings.TrimSpace(target))
+		if _, isAlias := m.mappings[normalizedTarget]; isAlias {
+			resolved := m.resolveModel(target, visited)
+			if resolved != "" {
+				log.Debugf("amp model mapping: recursive resolution %s -> %s -> %s", model, target, resolved)
+				return resolved
+			}
+		} else {
+			log.Debugf("amp model mapping: target model %s has no available providers and is not an alias", target)
+		}
+	}
+
+	return ""
+}
+
+// GetFallbacks returns the configured fallback list for a model, specifically for debugging or info.
+func (m *DefaultModelMapper) GetFallbacks(requestedModel string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	normalizedRequest := strings.ToLower(strings.TrimSpace(requestedModel))
-
-	// Check for direct mapping
-	targetModel, exists := m.mappings[normalizedRequest]
-	if !exists {
-		return ""
+	if targets, exists := m.mappings[normalizedRequest]; exists {
+		// Return a copy
+		copied := make([]string, len(targets))
+		copy(copied, targets)
+		return copied
 	}
-
-	// Verify target model has available providers
-	providers := util.GetProviderName(targetModel)
-	if len(providers) == 0 {
-		log.Debugf("amp model mapping: target model %s has no available providers, skipping mapping", targetModel)
-		return ""
-	}
-
-	// Note: Detailed routing log is handled by logAmpRouting in fallback_handlers.go
-	return targetModel
+	return nil
 }
 
 // UpdateMappings refreshes the mapping configuration from config.
@@ -76,22 +126,38 @@ func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
 	defer m.mu.Unlock()
 
 	// Clear and rebuild mappings
-	m.mappings = make(map[string]string, len(mappings))
+	m.mappings = make(map[string][]string, len(mappings))
 
 	for _, mapping := range mappings {
 		from := strings.TrimSpace(mapping.From)
-		to := strings.TrimSpace(mapping.To)
+		if from == "" {
+			log.Warnf("amp model mapping: skipping mapping with empty 'from' field")
+			continue
+		}
 
-		if from == "" || to == "" {
-			log.Warnf("amp model mapping: skipping invalid mapping (from=%q, to=%q)", from, to)
+		// Handle StringOrSlice for 'To' field
+		var targets []string
+		for _, t := range mapping.To {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				targets = append(targets, t)
+			}
+		}
+
+		if len(targets) == 0 {
+			log.Warnf("amp model mapping: skipping mapping for %q with no valid 'to' targets", from)
 			continue
 		}
 
 		// Store with normalized lowercase key for case-insensitive lookup
 		normalizedFrom := strings.ToLower(from)
-		m.mappings[normalizedFrom] = to
+		m.mappings[normalizedFrom] = targets
 
-		log.Debugf("amp model mapping registered: %s -> %s", from, to)
+		if len(targets) == 1 {
+			log.Debugf("amp model mapping registered: %s -> %s", from, targets[0])
+		} else {
+			log.Debugf("amp model mapping registered: %s -> %v (fallback chain)", from, targets)
+		}
 	}
 
 	if len(m.mappings) > 0 {
@@ -106,7 +172,9 @@ func (m *DefaultModelMapper) GetMappings() map[string]string {
 
 	result := make(map[string]string, len(m.mappings))
 	for k, v := range m.mappings {
-		result[k] = v
+		if len(v) > 0 {
+			result[k] = v[0] // Return primary mapping for backward compatibility
+		}
 	}
 	return result
 }

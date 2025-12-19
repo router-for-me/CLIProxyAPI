@@ -282,12 +282,26 @@ func (m *AmpModule) hasModelMappingsChanged(old *config.AmpCode, new *config.Amp
 	// Build map for efficient comparison
 	oldMap := make(map[string]string, len(old.ModelMappings))
 	for _, mapping := range old.ModelMappings {
-		oldMap[strings.TrimSpace(mapping.From)] = strings.TrimSpace(mapping.To)
+		from := strings.TrimSpace(mapping.From)
+		var targets []string
+		for _, t := range mapping.To {
+			if trimmed := strings.TrimSpace(t); trimmed != "" {
+				targets = append(targets, trimmed)
+			}
+		}
+		oldMap[from] = strings.Join(targets, ",")
 	}
 
 	for _, mapping := range new.ModelMappings {
 		from := strings.TrimSpace(mapping.From)
-		to := strings.TrimSpace(mapping.To)
+		var targets []string
+		for _, t := range mapping.To {
+			if trimmed := strings.TrimSpace(t); trimmed != "" {
+				targets = append(targets, trimmed)
+			}
+		}
+		to := strings.Join(targets, ",")
+
 		if oldTo, exists := oldMap[from]; !exists || oldTo != to {
 			return true
 		}

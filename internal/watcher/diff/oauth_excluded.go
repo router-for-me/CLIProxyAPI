@@ -100,11 +100,16 @@ func SummarizeAmpModelMappings(mappings []config.AmpModelMapping) AmpModelMappin
 	entries := make([]string, 0, len(mappings))
 	for _, mapping := range mappings {
 		from := strings.TrimSpace(mapping.From)
-		to := strings.TrimSpace(mapping.To)
-		if from == "" && to == "" {
+		var targets []string
+		for _, t := range mapping.To {
+			if trimmed := strings.TrimSpace(t); trimmed != "" {
+				targets = append(targets, trimmed)
+			}
+		}
+		if from == "" && len(targets) == 0 {
 			continue
 		}
-		entries = append(entries, from+"->"+to)
+		entries = append(entries, from+"->"+strings.Join(targets, ","))
 	}
 	if len(entries) == 0 {
 		return AmpModelMappingsSummary{}

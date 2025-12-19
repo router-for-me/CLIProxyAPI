@@ -31,7 +31,7 @@ func newAmpTestHandler(t *testing.T) (*management.Handler, string) {
 			RestrictManagementToLocalhost: true,
 			ForceModelMappings:            false,
 			ModelMappings: []config.AmpModelMapping{
-				{From: "gpt-4", To: "gemini-pro"},
+				{From: "gpt-4", To: config.StringOrSlice{"gemini-pro"}},
 			},
 		},
 	}
@@ -263,7 +263,7 @@ func TestGetAmpModelMappings(t *testing.T) {
 	if len(mappings) != 1 {
 		t.Fatalf("expected 1 mapping, got %d", len(mappings))
 	}
-	if mappings[0].From != "gpt-4" || mappings[0].To != "gemini-pro" {
+	if mappings[0].From != "gpt-4" || len(mappings[0].To) == 0 || mappings[0].To[0] != "gemini-pro" {
 		t.Errorf("unexpected mapping: %+v", mappings[0])
 	}
 }
@@ -400,8 +400,8 @@ func TestPutAmpModelMappings_VerifyState(t *testing.T) {
 
 	expected := map[string]string{"model-a": "model-b", "model-c": "model-d", "model-e": "model-f"}
 	for _, m := range mappings {
-		if expected[m.From] != m.To {
-			t.Errorf("mapping %q -> expected %q, got %q", m.From, expected[m.From], m.To)
+		if len(m.To) == 0 || expected[m.From] != m.To[0] {
+			t.Errorf("mapping %q -> expected %q, got %v", m.From, expected[m.From], m.To)
 		}
 	}
 }
@@ -437,7 +437,9 @@ func TestPatchAmpModelMappings_VerifyState(t *testing.T) {
 
 	found := make(map[string]string)
 	for _, m := range mappings {
-		found[m.From] = m.To
+		if len(m.To) > 0 {
+			found[m.From] = m.To[0]
+		}
 	}
 
 	if found["gpt-4"] != "updated-target" {
@@ -482,8 +484,8 @@ func TestDeleteAmpModelMappings_VerifyState(t *testing.T) {
 	if len(mappings) != 1 {
 		t.Fatalf("expected 1 mapping remaining, got %d", len(mappings))
 	}
-	if mappings[0].From != "b" || mappings[0].To != "2" {
-		t.Errorf("expected b->2, got %s->%s", mappings[0].From, mappings[0].To)
+	if mappings[0].From != "b" || len(mappings[0].To) == 0 || mappings[0].To[0] != "2" {
+		t.Errorf("expected b->2, got %s->%v", mappings[0].From, mappings[0].To)
 	}
 }
 
@@ -771,7 +773,9 @@ func TestComplexMappingsWorkflow(t *testing.T) {
 	expected := map[string]string{"m2": "t2-updated", "m4": "t4", "m5": "t5"}
 	found := make(map[string]string)
 	for _, m := range mappings {
-		found[m.From] = m.To
+		if len(m.To) > 0 {
+			found[m.From] = m.To[0]
+		}
 	}
 
 	for from, to := range expected {

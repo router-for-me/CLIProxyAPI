@@ -16,7 +16,7 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 		},
 		AmpCode: config.AmpCode{
 			UpstreamURL:                   "http://old-upstream",
-			ModelMappings:                 []config.AmpModelMapping{{From: "from-old", To: "to-old"}},
+			ModelMappings:                 []config.AmpModelMapping{{From: "from-old", To: config.StringOrSlice{"to-old"}}},
 			RestrictManagementToLocalhost: false,
 		},
 		RemoteManagement: config.RemoteManagement{
@@ -49,8 +49,8 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 			UpstreamURL:                   "http://new-upstream",
 			RestrictManagementToLocalhost: true,
 			ModelMappings: []config.AmpModelMapping{
-				{From: "from-old", To: "to-old"},
-				{From: "from-new", To: "to-new"},
+				{From: "from-old", To: config.StringOrSlice{"to-old"}},
+				{From: "from-new", To: config.StringOrSlice{"to-new"}},
 			},
 		},
 		RemoteManagement: config.RemoteManagement{
@@ -114,7 +114,7 @@ func TestBuildConfigChangeDetails_GeminiVertexHeadersAndForceMappings(t *testing
 			{APIKey: "v1", BaseURL: "http://v-old", Models: []config.VertexCompatModel{{Name: "m1"}}},
 		},
 		AmpCode: config.AmpCode{
-			ModelMappings:      []config.AmpModelMapping{{From: "a", To: "b"}},
+			ModelMappings:      []config.AmpModelMapping{{From: "a", To: config.StringOrSlice{"b"}}},
 			ForceModelMappings: false,
 		},
 	}
@@ -126,7 +126,7 @@ func TestBuildConfigChangeDetails_GeminiVertexHeadersAndForceMappings(t *testing
 			{APIKey: "v1", BaseURL: "http://v-new", Models: []config.VertexCompatModel{{Name: "m1"}, {Name: "m2"}}},
 		},
 		AmpCode: config.AmpCode{
-			ModelMappings:      []config.AmpModelMapping{{From: "a", To: "c"}},
+			ModelMappings:      []config.AmpModelMapping{{From: "a", To: config.StringOrSlice{"c"}}},
 			ForceModelMappings: true,
 		},
 	}
@@ -259,7 +259,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		AmpCode: config.AmpCode{
 			UpstreamAPIKey:                "",
 			RestrictManagementToLocalhost: true,
-			ModelMappings:                 []config.AmpModelMapping{{From: "a", To: "b"}},
+			ModelMappings:                 []config.AmpModelMapping{{From: "a", To: config.StringOrSlice{"b"}}},
 		},
 		RemoteManagement: config.RemoteManagement{
 			DisableControlPanel:   true,
@@ -325,7 +325,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			UpstreamURL:                   "http://amp-old",
 			UpstreamAPIKey:                "old-key",
 			RestrictManagementToLocalhost: false,
-			ModelMappings:                 []config.AmpModelMapping{{From: "a", To: "b"}},
+			ModelMappings:                 []config.AmpModelMapping{{From: "a", To: config.StringOrSlice{"b"}}},
 			ForceModelMappings:            false,
 		},
 		RemoteManagement: config.RemoteManagement{
@@ -377,7 +377,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			UpstreamURL:                   "http://amp-new",
 			UpstreamAPIKey:                "",
 			RestrictManagementToLocalhost: true,
-			ModelMappings:                 []config.AmpModelMapping{{From: "a", To: "c"}},
+			ModelMappings:                 []config.AmpModelMapping{{From: "a", To: config.StringOrSlice{"c"}}},
 			ForceModelMappings:            true,
 		},
 		RemoteManagement: config.RemoteManagement{
