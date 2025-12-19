@@ -279,29 +279,27 @@ func (m *AmpModule) hasModelMappingsChanged(old *config.AmpCode, new *config.Amp
 		return true
 	}
 
+	// Helper to process targets into comparable string
+	processTargets := func(targetsIn config.StringOrSlice) string {
+		targetsOut := make([]string, 0, len(targetsIn))
+		for _, t := range targetsIn {
+			if trimmed := strings.TrimSpace(t); trimmed != "" {
+				targetsOut = append(targetsOut, trimmed)
+			}
+		}
+		return strings.Join(targetsOut, ",")
+	}
+
 	// Build map for efficient comparison
 	oldMap := make(map[string]string, len(old.ModelMappings))
 	for _, mapping := range old.ModelMappings {
 		from := strings.TrimSpace(mapping.From)
-		var targets []string
-		for _, t := range mapping.To {
-			if trimmed := strings.TrimSpace(t); trimmed != "" {
-				targets = append(targets, trimmed)
-			}
-		}
-		oldMap[from] = strings.Join(targets, ",")
+		oldMap[from] = processTargets(mapping.To)
 	}
 
 	for _, mapping := range new.ModelMappings {
 		from := strings.TrimSpace(mapping.From)
-		var targets []string
-		for _, t := range mapping.To {
-			if trimmed := strings.TrimSpace(t); trimmed != "" {
-				targets = append(targets, trimmed)
-			}
-		}
-		to := strings.Join(targets, ",")
-
+		to := processTargets(mapping.To)
 		if oldTo, exists := oldMap[from]; !exists || oldTo != to {
 			return true
 		}

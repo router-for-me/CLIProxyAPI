@@ -155,9 +155,20 @@ ws-auth: false
 #   # Route unavailable Amp models to alternative models available in your local proxy.
 #   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
 #   # but you have a similar model available (e.g., Claude Sonnet 4).
+#   #
+#   # Supports both single target (backward compatible) and multiple targets (fallback chain).
+#   # When multiple targets are specified, they are tried in order until one succeeds.
 #   model-mappings:
+#     # Single target (backward compatible)
 #     - from: "claude-opus-4.5"       # Model requested by Amp CLI
 #       to: "claude-sonnet-4"         # Route to this available model instead
+#
+#     # Multiple targets (fallback chain) - tried in order
+#     - from: "claude-4-5-opus"
+#       to:                            # First available model is used; on error, try next
+#         - "gemini-claude-4-5-opus"          # 1st priority
+#         - "gemini-claude-4-5-opus-thinking" # 2nd priority (fallback)
+#
 #     - from: "gpt-5"
 #       to: "gemini-2.5-pro"
 #     - from: "claude-3-opus-20240229"

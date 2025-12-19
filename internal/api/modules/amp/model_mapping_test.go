@@ -237,3 +237,64 @@ func TestStringOrSlice_UnmarshalYAML(t *testing.T) {
 		})
 	}
 }
+
+// Test multiple fallback targets
+func TestModelMapper_MultipleFallbackTargets(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	// Only register the second target, not the first
+	reg.RegisterClient("test-fallback", "gemini", []*registry.ModelInfo{
+		{ID: "gemini-model-2", OwnedBy: "google", Type: "gemini"},
+	})
+	defer reg.UnregisterClient("test-fallback")
+
+	mappings := []config.AmpModelMapping{
+		{
+			From: "claude-4-5-opus",
+			To:   config.StringOrSlice{"gemini-model-1", "gemini-model-2", "gemini-model-3"},
+		},
+	}
+
+	mapper := NewModelMapper(mappings)
+
+	// Should skip first (no provider) and return second
+	result := mapper.MapModel("claude-4-5-opus")
+	if result != "gemini-model-2" {
+		t.Errorf("Expected gemini-model-2 (fallback), got %s", result)
+	}
+}
+
+func TestModelMapper_GetFallbacks_ReturnsCopy(t *testing.T) {
+	mappings := []config.AmpModelMapping{
+		{From: "model-a", To: config.StringOrSlice{"target-1", "target-2"}},
+	}
+
+	mapper := NewModelMapper(mappings)
+
+	// Get fallbacks and modify
+	fallbacks := mapper.GetFallbacks("model-a")
+	fallbacks[0] = "modified"
+
+	// Original should be unchanged
+	original := mapper.GetFallbacks("model-a")
+	if original[0] != "target-1" {
+		t.Error("Original slice was modified")
+	}
+}
+
+func TestModelMapper_AllTargetsNoProvider(t *testing.T) {
+	// No providers registered
+	mappings := []config.AmpModelMapping{
+		{
+			From: "claude-4-5-opus",
+			To:   config.StringOrSlice{"no-provider-1", "no-provider-2"},
+		},
+	}
+
+	mapper := NewModelMapper(mappings)
+
+	// All targets have no provider, should return empty
+	result := mapper.MapModel("claude-4-5-opus")
+	if result != "" {
+		t.Errorf("Expected empty when all targets have no provider, got %s", result)
+	}
+}

@@ -2,9 +2,12 @@ package amp
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"net/http"
 	"net/http/httputil"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -30,6 +33,95 @@ const (
 
 // MappedModelContextKey is the Gin context key for passing mapped model names.
 const MappedModelContextKey = "mapped_model"
+
+// FallbackTargetsContextKey is the Gin context key for passing remaining fallback targets.
+const FallbackTargetsContextKey = "fallback_targets"
+
+// OriginalModelContextKey stores the original requested model before any mapping.
+const OriginalModelContextKey = "original_model"
+
+// ResponseCaptureWriter captures HTTP response for retry decision.
+// It buffers both headers and body to allow inspection before committing.
+type ResponseCaptureWriter struct {
+	gin.ResponseWriter
+	body       *bytes.Buffer
+	statusCode int
+	headers    http.Header
+	committed  bool
+	mu         sync.Mutex
+}
+
+// NewResponseCaptureWriter creates a new response capture writer.
+func NewResponseCaptureWriter(w gin.ResponseWriter) *ResponseCaptureWriter {
+	return &ResponseCaptureWriter{
+		ResponseWriter: w,
+		body:           &bytes.Buffer{},
+		statusCode:     http.StatusOK,
+		headers:        make(http.Header),
+	}
+}
+
+func (w *ResponseCaptureWriter) WriteHeader(code int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.statusCode = code
+}
+
+func (w *ResponseCaptureWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.Write(data)
+}
+
+func (w *ResponseCaptureWriter) Header() http.Header {
+	return w.headers
+}
+
+func (w *ResponseCaptureWriter) Status() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.statusCode
+}
+
+func (w *ResponseCaptureWriter) Body() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.Bytes()
+}
+
+// Reset clears the captured response for retry.
+func (w *ResponseCaptureWriter) Reset() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.body.Reset()
+	w.statusCode = http.StatusOK
+	w.headers = make(http.Header)
+}
+
+// FlushTo writes the captured response to the original writer.
+func (w *ResponseCaptureWriter) FlushTo(original gin.ResponseWriter) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.committed {
+		return
+	}
+	w.committed = true
+
+	for key, values := range w.headers {
+		for _, value := range values {
+			original.Header().Add(key, value)
+		}
+	}
+	original.WriteHeader(w.statusCode)
+	original.Write(w.body.Bytes())
+}
+
+// isRetryableStatusCode returns true if the status code indicates a retryable error.
+// Based on opencode-antigravity-auth patterns: 429 (rate limit), 5xx (server errors).
+func isRetryableStatusCode(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || // 429
+		(statusCode >= 500 && statusCode < 600) // 5xx
+}
 
 // logAmpRouting logs the routing decision for an Amp request with structured fields
 func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provider, path string) {
@@ -110,6 +202,7 @@ func (fh *FallbackHandler) SetModelMapper(mapper ModelMapper) {
 
 // WrapHandler wraps a gin.HandlerFunc with fallback logic
 // If the model's provider is not configured in CLIProxyAPI, it forwards to ampcode.com
+// Supports model mapping with multiple fallback targets (tried in order on error).
 func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
@@ -136,10 +229,14 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		// Normalize model (handles dynamic thinking suffixes)
 		normalizedModel, _ := util.NormalizeThinkingModel(modelName)
 
+		// Store original model for potential fallback chain
+		c.Set(OriginalModelContextKey, normalizedModel)
+
 		// Track resolved model for logging (may change if mapping is applied)
 		resolvedModel := normalizedModel
 		usedMapping := false
 		var providers []string
+		var fallbackTargets []string
 
 		// Check if model mappings should be forced ahead of local API keys
 		forceMappings := fh.forceModelMappings != nil && fh.forceModelMappings()
@@ -148,18 +245,25 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			// FORCE MODE: Check model mappings FIRST (takes precedence over local API keys)
 			// This allows users to route Amp requests to their preferred OAuth providers
 			if fh.modelMapper != nil {
-				if mappedModel := fh.modelMapper.MapModel(normalizedModel); mappedModel != "" {
-					// Mapping found - check if we have a provider for the mapped model
-					mappedProviders := util.GetProviderName(mappedModel)
-					if len(mappedProviders) > 0 {
-						// Mapping found and provider available - rewrite the model in request body
-						bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
-						c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-						// Store mapped model in context for handlers that check it (like gemini bridge)
-						c.Set(MappedModelContextKey, mappedModel)
-						resolvedModel = mappedModel
-						usedMapping = true
-						providers = mappedProviders
+				allTargets := fh.modelMapper.GetFallbacks(normalizedModel)
+				if len(allTargets) > 0 {
+					// Try each target in order until we find one with available providers
+					for i, target := range allTargets {
+						mappedProviders := util.GetProviderName(target)
+						if len(mappedProviders) > 0 {
+							bodyBytes = rewriteModelInRequest(bodyBytes, target)
+							c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+							c.Set(MappedModelContextKey, target)
+							resolvedModel = target
+							usedMapping = true
+							providers = mappedProviders
+							// Store remaining targets for potential retry on error
+							if i+1 < len(allTargets) {
+								fallbackTargets = allTargets[i+1:]
+							}
+							break
+						}
+						log.Debugf("amp model mapping: target %s has no providers, trying next", target)
 					}
 				}
 			}
@@ -175,22 +279,32 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			if len(providers) == 0 {
 				// No providers configured - check if we have a model mapping
 				if fh.modelMapper != nil {
-					if mappedModel := fh.modelMapper.MapModel(normalizedModel); mappedModel != "" {
-						// Mapping found - check if we have a provider for the mapped model
-						mappedProviders := util.GetProviderName(mappedModel)
-						if len(mappedProviders) > 0 {
-							// Mapping found and provider available - rewrite the model in request body
-							bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
-							c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-							// Store mapped model in context for handlers that check it (like gemini bridge)
-							c.Set(MappedModelContextKey, mappedModel)
-							resolvedModel = mappedModel
-							usedMapping = true
-							providers = mappedProviders
+					allTargets := fh.modelMapper.GetFallbacks(normalizedModel)
+					if len(allTargets) > 0 {
+						for i, target := range allTargets {
+							mappedProviders := util.GetProviderName(target)
+							if len(mappedProviders) > 0 {
+								bodyBytes = rewriteModelInRequest(bodyBytes, target)
+								c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+								c.Set(MappedModelContextKey, target)
+								resolvedModel = target
+								usedMapping = true
+								providers = mappedProviders
+								if i+1 < len(allTargets) {
+									fallbackTargets = allTargets[i+1:]
+								}
+								break
+							}
+							log.Debugf("amp model mapping: target %s has no providers, trying next", target)
 						}
 					}
 				}
 			}
+		}
+
+		// Store fallback targets in context for potential retry on error
+		if len(fallbackTargets) > 0 {
+			c.Set(FallbackTargetsContextKey, fallbackTargets)
 		}
 
 		// If no providers available, fallback to ampcode.com
@@ -219,17 +333,8 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		}
 
 		if usedMapping {
-			// Log: Model was mapped to another model
-			log.Debugf("amp model mapping: request %s -> %s", normalizedModel, resolvedModel)
-			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
-			rewriter := NewResponseRewriter(c.Writer, normalizedModel)
-			c.Writer = rewriter
-			// Filter Anthropic-Beta header only for local handling paths
-			filterAntropicBetaHeader(c)
-			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			handler(c)
-			rewriter.Flush()
-			log.Debugf("amp model mapping: response %s -> %s", resolvedModel, normalizedModel)
+			// Model mapping with fallback retry support
+			fh.executeWithFallbackRetry(c, handler, bodyBytes, normalizedModel, resolvedModel, fallbackTargets, modelName, providerName, requestPath)
 		} else if len(providers) > 0 {
 			// Log: Using local provider (free)
 			logAmpRouting(RouteTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)
@@ -253,6 +358,77 @@ func filterAntropicBetaHeader(c *gin.Context) {
 			c.Request.Header.Set("Anthropic-Beta", filtered)
 		} else {
 			c.Request.Header.Del("Anthropic-Beta")
+		}
+	}
+}
+
+// executeWithFallbackRetry executes the handler with fallback retry on retryable errors.
+// If the first model fails with a retryable error (429, 500, etc.), it tries the next fallback target.
+// Based on patterns from opencode-antigravity-auth and opencode-google-antigravity-auth.
+func (fh *FallbackHandler) executeWithFallbackRetry(
+	c *gin.Context,
+	handler gin.HandlerFunc,
+	originalBody []byte,
+	originalModel string,
+	currentTarget string,
+	fallbackTargets []string,
+	requestedModel string,
+	providerName string,
+	requestPath string,
+) {
+	allTargets := append([]string{currentTarget}, fallbackTargets...)
+	originalWriter := c.Writer
+
+	var lastCapture *ResponseCaptureWriter
+	var successfulTarget string
+
+	for i, target := range allTargets {
+		bodyBytes := rewriteModelInRequest(originalBody, target)
+		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+		c.Set(MappedModelContextKey, target)
+
+		capture := NewResponseCaptureWriter(originalWriter)
+		rewriter := NewResponseRewriter(capture, originalModel)
+		c.Writer = rewriter
+
+		filterAntropicBetaHeader(c)
+
+		if i == 0 {
+			fallbackInfo := ""
+			if len(fallbackTargets) > 0 {
+				fallbackInfo = fmt.Sprintf(" (fallbacks: %v)", fallbackTargets)
+			}
+			log.Debugf("amp model mapping: request %s -> %s%s", originalModel, target, fallbackInfo)
+			logAmpRouting(RouteTypeModelMapping, requestedModel, target, providerName, requestPath)
+		} else {
+			log.Infof("amp fallback retry: trying model %s (%d/%d)", target, i+1, len(allTargets))
+		}
+
+		handler(c)
+		rewriter.Flush()
+
+		lastCapture = capture
+
+		if !isRetryableStatusCode(capture.Status()) {
+			successfulTarget = target
+			log.Debugf("amp model mapping: response %s -> %s (status: %d)", target, originalModel, capture.Status())
+			break
+		}
+
+		if i+1 < len(allTargets) {
+			log.Warnf("amp fallback: model %s returned %d, trying next fallback", target, capture.Status())
+			capture.Reset()
+		} else {
+			log.Warnf("amp fallback: model %s returned %d, no more fallbacks available", target, capture.Status())
+		}
+	}
+
+	if lastCapture != nil {
+		lastCapture.FlushTo(originalWriter)
+
+		if successfulTarget != "" && successfulTarget != currentTarget {
+			log.Infof("amp fallback: successfully used fallback model %s", successfulTarget)
 		}
 	}
 }

@@ -70,6 +70,7 @@ func (m *DefaultModelMapper) resolveModel(model string, visited map[string]struc
 		return ""
 	}
 	visited[normalizedRequest] = struct{}{}
+	defer delete(visited, normalizedRequest)
 
 	// Check for mapping
 	targets, exists := m.mappings[normalizedRequest]
