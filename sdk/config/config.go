@@ -3,10 +3,9 @@
 // access to application settings including server port, authentication directory,
 // debug settings, proxy configuration, and API keys.
 //
-// Note: The full Config type is defined in internal/config. This package provides
-// SDKConfig which is the base configuration embedded by internal/config.Config.
-// SDK consumers who need the full Config should import internal/config directly
-// until a future version moves all types to SDK packages.
+// Note: This package provides SDKConfig which is the base configuration embedded
+// by the full Config type. SDK consumers who need the full Config should use the
+// configloader package (github.com/router-for-me/CLIProxyAPI/v6/sdk/configloader).
 package config
 
 // SDKConfig represents the base SDK configuration, loaded from a YAML file.

@@ -1,21 +1,17 @@
 package cliproxy
 
-import "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+import "github.com/router-for-me/CLIProxyAPI/v6/sdk/registry"
 
 // ModelInfo re-exports the registry model info structure.
+// This is a type alias to sdk/registry.ModelInfo.
 type ModelInfo = registry.ModelInfo
 
-// ModelRegistry describes registry operations consumed by external callers.
-type ModelRegistry interface {
-	RegisterClient(clientID, clientProvider string, models []*ModelInfo)
-	UnregisterClient(clientID string)
-	SetModelQuotaExceeded(clientID, modelID string)
-	ClearModelQuotaExceeded(clientID, modelID string)
-	ClientSupportsModel(clientID, modelID string) bool
-	GetAvailableModels(handlerType string) []map[string]any
-}
+// ModelRegistry re-exports the registry type.
+// This is a type alias to sdk/registry.ModelRegistry.
+type ModelRegistry = registry.ModelRegistry
 
 // GlobalModelRegistry returns the shared registry instance.
-func GlobalModelRegistry() ModelRegistry {
+// This delegates to sdk/registry.GetGlobalRegistry.
+func GlobalModelRegistry() *ModelRegistry {
 	return registry.GetGlobalRegistry()
 }

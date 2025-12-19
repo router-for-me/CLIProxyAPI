@@ -6,8 +6,8 @@ package api
 import (
 	"github.com/gin-gonic/gin"
 	internalapi "github.com/router-for-me/CLIProxyAPI/v6/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/configloader"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/logging"
 )
 
 // ServerOption customises HTTP server construction.
@@ -34,6 +34,6 @@ func WithLocalManagementPassword(password string) ServerOption {
 
 // WithRequestLoggerFactory customises request logger creation.
 // This delegates to internal/api.WithRequestLoggerFactory.
-func WithRequestLoggerFactory(factory func(*config.Config, string) logging.RequestLogger) ServerOption {
+func WithRequestLoggerFactory(factory func(*configloader.Config, string) logging.RequestLogger) ServerOption {
 	return internalapi.WithRequestLoggerFactory(factory)
 }
