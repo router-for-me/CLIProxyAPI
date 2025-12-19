@@ -12,7 +12,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -21,7 +20,7 @@ const DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
-	config.SDKConfig `yaml:",inline"`
+	SDKConfig `yaml:",inline"`
 	// Host is the network host/interface on which the API server will bind.
 	// Default is empty ("") to bind all interfaces (IPv4 + IPv6). Use "127.0.0.1" or "localhost" for local-only access.
 	Host string `yaml:"host" json:"-"`
@@ -754,7 +753,7 @@ func sanitizeConfigForPersist(cfg *Config) *Config {
 	}
 	clone := *cfg
 	clone.SDKConfig = cfg.SDKConfig
-	clone.SDKConfig.Access = config.AccessConfig{}
+	clone.SDKConfig.Access = AccessConfig{}
 	return &clone
 }
 
