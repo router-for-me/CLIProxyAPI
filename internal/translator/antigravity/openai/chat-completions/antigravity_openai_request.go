@@ -39,8 +39,23 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// Note: OpenAI official fields take precedence over extra_body.google.thinking_config
 	re := gjson.GetBytes(rawJSON, "reasoning_effort")
 	hasOfficialThinking := re.Exists()
-	if hasOfficialThinking && util.ModelSupportsThinking(modelName) && !util.ModelUsesThinkingLevels(modelName) {
-		out = util.ApplyReasoningEffortToGeminiCLI(out, re.String())
+	if hasOfficialThinking && util.ModelSupportsThinking(modelName) {
+		effort := strings.ToLower(strings.TrimSpace(re.String()))
+		if util.IsGemini3Model(modelName) {
+			switch effort {
+			case "none":
+				out, _ = sjson.DeleteBytes(out, "request.generationConfig.thinkingConfig")
+			case "auto":
+				includeThoughts := true
+				out = util.ApplyGeminiCLIThinkingLevel(out, "", &includeThoughts)
+			default:
+				if level, ok := util.ValidateGemini3ThinkingLevel(modelName, effort); ok {
+					out = util.ApplyGeminiCLIThinkingLevel(out, level, nil)
+				}
+			}
+		} else if !util.ModelUsesThinkingLevels(modelName) {
+			out = util.ApplyReasoningEffortToGeminiCLI(out, effort)
+		}
 	}
 
 	// Cherry Studio extension extra_body.google.thinking_config (effective only when official fields are absent)
