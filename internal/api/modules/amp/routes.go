@@ -193,7 +193,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	geminiBridge := createGeminiBridgeHandler(geminiHandlers.GeminiHandler)
 	geminiV1Beta1Fallback := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
 		return m.getProxy()
-	}, m.modelMapper, m.forceModelMappings)
+	}, m.modelMapper, m.forceModelMappings, m.ampCreditsFallback)
 	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
 
 	// Route POST model calls through Gemini bridge with FallbackHandler.
@@ -231,7 +231,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	// Also includes model mapping support for routing unavailable models to alternatives
 	fallbackHandler := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
 		return m.getProxy()
-	}, m.modelMapper, m.forceModelMappings)
+	}, m.modelMapper, m.forceModelMappings, m.ampCreditsFallback)
 
 	// Provider-specific routes under /api/provider/:provider
 	ampProviders := engine.Group("/api/provider")

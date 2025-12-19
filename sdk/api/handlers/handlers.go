@@ -20,6 +20,11 @@ import (
 	"golang.org/x/net/context"
 )
 
+// ProvidersOverrideContextKey is the Gin context key for overriding provider resolution.
+// When set, getRequestDetails() uses the provided []string directly instead of calling GetProviderName().
+// This allows route modules (like Amp) to pre-compute the providers list and avoid duplicate work.
+const ProvidersOverrideContextKey = "providers_override"
+
 // ErrorResponse represents a standard error response format for the API.
 // It contains a single ErrorDetail field.
 type ErrorResponse struct {
@@ -178,7 +183,7 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	providers, normalizedModel, metadata, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, metadata, errMsg := h.getRequestDetails(ctx, modelName)
 	if errMsg != nil {
 		return nil, errMsg
 	}
@@ -220,7 +225,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	providers, normalizedModel, metadata, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, metadata, errMsg := h.getRequestDetails(ctx, modelName)
 	if errMsg != nil {
 		return nil, errMsg
 	}
@@ -262,7 +267,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, metadata, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, metadata, errMsg := h.getRequestDetails(ctx, modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -334,12 +339,22 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	return dataChan, errChan
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, metadata map[string]any, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) getRequestDetails(ctx context.Context, modelName string) (providers []string, normalizedModel string, metadata map[string]any, err *interfaces.ErrorMessage) {
 	// Resolve "auto" model to an actual available model first
 	resolvedModelName := util.ResolveAutoModel(modelName)
 
 	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
 	normalizedModel, metadata = normalizeModelMetadata(resolvedModelName)
+
+	// Check for providers override from route modules
+	// This allows modules to set their own providers list
+	if ginCtx, _ := ctx.Value("gin").(*gin.Context); ginCtx != nil {
+		if override, exists := ginCtx.Get(ProvidersOverrideContextKey); exists {
+			if overrideProviders, ok := override.([]string); ok {
+				return overrideProviders, normalizedModel, metadata, nil
+			}
+		}
+	}
 
 	// Use the normalizedModel to get the provider name.
 	providers = util.GetProviderName(normalizedModel)
@@ -360,10 +375,6 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	if len(providers) == 0 {
 		return nil, "", nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
-
-	// If it's a dynamic model, the normalizedModel was already set to extractedModelName.
-	// If it's a non-dynamic model, normalizedModel was set by normalizeModelMetadata.
-	// So, normalizedModel is already correctly set at this point.
 
 	return providers, normalizedModel, metadata, nil
 }

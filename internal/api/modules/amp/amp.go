@@ -338,3 +338,13 @@ func (m *AmpModule) setRestrictToLocalhost(restrict bool) {
 	defer m.restrictMu.Unlock()
 	m.restrictToLocalhost = restrict
 }
+
+// ampCreditsFallback returns whether amp credits fallback is enabled (hot-reloadable).
+func (m *AmpModule) ampCreditsFallback() bool {
+	m.configMu.RLock()
+	defer m.configMu.RUnlock()
+	if m.lastConfig == nil {
+		return false
+	}
+	return m.lastConfig.AmpCreditsFallback
+}

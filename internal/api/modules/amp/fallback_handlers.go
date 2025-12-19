@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -80,6 +81,7 @@ type FallbackHandler struct {
 	getProxy           func() *httputil.ReverseProxy
 	modelMapper        ModelMapper
 	forceModelMappings func() bool
+	ampCreditsFallback func() bool
 }
 
 // NewFallbackHandler creates a new fallback handler wrapper
@@ -88,18 +90,23 @@ func NewFallbackHandler(getProxy func() *httputil.ReverseProxy) *FallbackHandler
 	return &FallbackHandler{
 		getProxy:           getProxy,
 		forceModelMappings: func() bool { return false },
+		ampCreditsFallback: func() bool { return false },
 	}
 }
 
 // NewFallbackHandlerWithMapper creates a new fallback handler with model mapping support
-func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper, forceModelMappings func() bool) *FallbackHandler {
+func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper, forceModelMappings, ampCreditsFallback func() bool) *FallbackHandler {
 	if forceModelMappings == nil {
 		forceModelMappings = func() bool { return false }
+	}
+	if ampCreditsFallback == nil {
+		ampCreditsFallback = func() bool { return false }
 	}
 	return &FallbackHandler{
 		getProxy:           getProxy,
 		modelMapper:        mapper,
 		forceModelMappings: forceModelMappings,
+		ampCreditsFallback: ampCreditsFallback,
 	}
 }
 
@@ -193,61 +200,57 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			}
 		}
 
-		// If no providers available, fallback to ampcode.com
-		if len(providers) == 0 {
-			proxy := fh.getProxy()
-			if proxy != nil {
-				// Log: Forwarding to ampcode.com (uses Amp credits)
-				logAmpRouting(RouteTypeAmpCredits, modelName, "", "", requestPath)
+		ampFallbackEnabled := fh.ampCreditsFallback != nil && fh.ampCreditsFallback()
 
-				// Restore body again for the proxy
-				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		// Track count of local providers before injecting amp
+		localProviderCount := len(providers)
 
-				// Forward to ampcode.com
-				proxy.ServeHTTP(c.Writer, c.Request)
-				return
-			}
-
-			// No proxy available, let the normal handler return the error
-			logAmpRouting(RouteTypeNoProvider, modelName, "", "", requestPath)
+		// Inject "amp" as last-resort fallback provider when enabled
+		if ampFallbackEnabled {
+			providers = append(providers, "amp")
 		}
 
-		// Log the routing decision
+		// Set providers override in context for getRequestDetails() to use
+		// This avoids duplicate GetProviderName() calls and keeps amp-specific logic here
+		c.Set(handlers.ProvidersOverrideContextKey, providers)
+
+		// Get first provider name for logging
 		providerName := ""
 		if len(providers) > 0 {
 			providerName = providers[0]
 		}
 
-		if usedMapping {
-			// Log: Model was mapped to another model
+		// Route, log, and execute based on provider resolution
+		switch {
+		case usedMapping:
 			log.Debugf("amp model mapping: request %s -> %s", normalizedModel, resolvedModel)
 			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
 			rewriter := NewResponseRewriter(c.Writer, normalizedModel)
 			c.Writer = rewriter
-			// Filter Anthropic-Beta header only for local handling paths
-			filterAntropicBetaHeader(c)
-			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			filterAnthropicBetaHeader(c)
 			handler(c)
 			rewriter.Flush()
 			log.Debugf("amp model mapping: response %s -> %s", resolvedModel, normalizedModel)
-		} else if len(providers) > 0 {
-			// Log: Using local provider (free)
+
+		case localProviderCount > 0:
 			logAmpRouting(RouteTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)
-			// Filter Anthropic-Beta header only for local handling paths
-			filterAntropicBetaHeader(c)
-			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			filterAnthropicBetaHeader(c)
 			handler(c)
-		} else {
-			// No provider, no mapping, no proxy: fall back to the wrapped handler so it can return an error response
-			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+		case ampFallbackEnabled:
+			logAmpRouting(RouteTypeAmpCredits, modelName, resolvedModel, providerName, requestPath)
+			handler(c)
+
+		default:
+			logAmpRouting(RouteTypeNoProvider, modelName, "", "", requestPath)
 			handler(c)
 		}
 	}
 }
 
-// filterAntropicBetaHeader filters Anthropic-Beta header to remove features requiring special subscription
+// filterAnthropicBetaHeader filters Anthropic-Beta header to remove features requiring special subscription
 // This is needed when using local providers (bypassing the Amp proxy)
-func filterAntropicBetaHeader(c *gin.Context) {
+func filterAnthropicBetaHeader(c *gin.Context) {
 	if betaHeader := c.Request.Header.Get("Anthropic-Beta"); betaHeader != "" {
 		if filtered := filterBetaFeatures(betaHeader, "context-1m-2025-08-07"); filtered != "" {
 			c.Request.Header.Set("Anthropic-Beta", filtered)
@@ -279,8 +282,10 @@ func extractModelFromRequest(body []byte, c *gin.Context) string {
 	}
 
 	// For Gemini requests, model is in the URL path
-	// Standard format: /models/{model}:generateContent -> :action parameter
+	// Standard format: /models/{model}:generateContent -> *action parameter
+	// Note: Gin's wildcard captures with leading slash (e.g., "/gemini-pro:generateContent")
 	if action := c.Param("action"); action != "" {
+		action = strings.TrimPrefix(action, "/")
 		// Split by colon to get model name (e.g., "gemini-pro:generateContent" -> "gemini-pro")
 		parts := strings.Split(action, ":")
 		if len(parts) > 0 && parts[0] != "" {
