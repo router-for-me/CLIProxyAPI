@@ -1,10 +1,14 @@
 package amp
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +19,16 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	log "github.com/sirupsen/logrus"
 )
+
+// Constants for free tier request interception
+const (
+	internalAPIPath            = "/api/internal"
+	webSearchQuery             = "webSearch2"
+	extractWebPageContentQuery = "extractWebPageContent"
+)
+
+// Pre-compiled regex for matching isFreeTierRequest field
+var isFreeTierRequestRegex = regexp.MustCompile(`"isFreeTierRequest"\s*:\s*false`)
 
 // localhostOnlyMiddleware returns a middleware that dynamically checks the module's
 // localhost restriction setting. This allows hot-reload of the restriction without restarting.
@@ -125,6 +139,28 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 				panic(rec)
 			}
 		}()
+
+		// Force webSearch2 and extractWebPageContent requests to use free tier
+		query := c.Request.URL.RawQuery
+		path := c.Request.URL.Path
+		if path == internalAPIPath && (query == webSearchQuery || query == extractWebPageContentQuery) && c.Request.Body != nil {
+			bodyBytes, err := io.ReadAll(c.Request.Body)
+			if err != nil {
+				log.Warnf("amp: could not read request body for %s, proxying as-is: %v", query, err)
+				// Restore whatever we read to prevent empty body
+				c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			} else if isFreeTierRequestRegex.Match(bodyBytes) {
+				modifiedBody := isFreeTierRequestRegex.ReplaceAll(bodyBytes, []byte(`"isFreeTierRequest":true`))
+				// Update Content-Length and restore body
+				c.Request.ContentLength = int64(len(modifiedBody))
+				c.Request.Header.Set("Content-Length", strconv.Itoa(len(modifiedBody)))
+				c.Request.Body = io.NopCloser(bytes.NewBuffer(modifiedBody))
+				log.Debugf("amp: %s request modified to use free tier", query)
+			} else {
+				// Restore body if not modified
+				c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			}
+		}
 
 		proxy := m.getProxy()
 		if proxy == nil {
