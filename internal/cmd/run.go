@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,6 +26,17 @@ import (
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
+	// Enable usage statistics persistence
+	if cfg.AuthDir != "" {
+		if err := usage.EnablePersistence(cfg.AuthDir); err != nil {
+			log.WithError(err).Warn("failed to enable usage statistics persistence")
+		} else {
+			if err := usage.LoadStatistics(); err != nil {
+				log.WithError(err).Warn("failed to load usage statistics")
+			}
+		}
+	}
+
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
@@ -32,6 +44,9 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Start auto-save for usage statistics
+	usage.StartAutoSave(ctxSignal)
 
 	runCtx := ctxSignal
 	if localPassword != "" {
@@ -46,10 +61,15 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	service, err := builder.Build()
 	if err != nil {
 		log.Errorf("failed to build proxy service: %v", err)
+		usage.StopAutoSave()
 		return
 	}
 
 	err = service.Run(runCtx)
+
+	// Save statistics on shutdown
+	usage.StopAutoSave()
+
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Errorf("proxy service exited with error: %v", err)
 	}
