@@ -31,6 +31,7 @@ GEMINI.md
 # Tooling metadata
 .vscode/*
 .claude/*
+.gemini/*
 .serena/*
 .agent/*
 .bmad/*

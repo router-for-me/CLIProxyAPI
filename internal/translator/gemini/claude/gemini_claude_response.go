@@ -25,7 +25,7 @@ type Params struct {
 	HasFirstResponse bool
 	ResponseType     int
 	ResponseIndex    int
-	HasContent bool // Tracks whether any content (text, thinking, or tool use) has been output
+	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
