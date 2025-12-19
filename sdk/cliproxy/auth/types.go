@@ -177,6 +177,14 @@ func (a *Auth) AccountInfo() (string, string) {
 	if a == nil {
 		return "", ""
 	}
+	// Proxy auths are transparent pass-through providers (e.g., amp credits fallback)
+	if a.Attributes != nil && a.Attributes["auth_kind"] == "proxy" {
+		label := a.Label
+		if label == "" {
+			label = a.ID
+		}
+		return "proxy", label
+	}
 	// For Gemini CLI, include project ID in the OAuth account info if present.
 	if strings.ToLower(a.Provider) == "gemini-cli" {
 		if a.Metadata != nil {

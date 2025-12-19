@@ -377,18 +377,21 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 
 		accountType, accountInfo := auth.AccountInfo()
 		proxyInfo := auth.ProxyInfo()
-		if accountType == "api_key" {
+		switch accountType {
+		case "api_key":
 			if proxyInfo != "" {
 				log.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
 			} else {
 				log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
 			}
-		} else if accountType == "oauth" {
+		case "oauth":
 			if proxyInfo != "" {
 				log.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
 			} else {
 				log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
 			}
+		case "proxy":
+			log.Debugf("Use %s for model %s", accountInfo, req.Model)
 		}
 
 		tried[auth.ID] = struct{}{}
@@ -437,18 +440,21 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 
 		accountType, accountInfo := auth.AccountInfo()
 		proxyInfo := auth.ProxyInfo()
-		if accountType == "api_key" {
+		switch accountType {
+		case "api_key":
 			if proxyInfo != "" {
 				log.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
 			} else {
 				log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
 			}
-		} else if accountType == "oauth" {
+		case "oauth":
 			if proxyInfo != "" {
 				log.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
 			} else {
 				log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
 			}
+		case "proxy":
+			log.Debugf("Use %s for model %s", accountInfo, req.Model)
 		}
 
 		tried[auth.ID] = struct{}{}
@@ -497,18 +503,21 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 
 		accountType, accountInfo := auth.AccountInfo()
 		proxyInfo := auth.ProxyInfo()
-		if accountType == "api_key" {
+		switch accountType {
+		case "api_key":
 			if proxyInfo != "" {
 				log.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
 			} else {
 				log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
 			}
-		} else if accountType == "oauth" {
+		case "oauth":
 			if proxyInfo != "" {
 				log.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
 			} else {
 				log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
 			}
+		case "proxy":
+			log.Debugf("Use %s for model %s", accountInfo, req.Model)
 		}
 
 		tried[auth.ID] = struct{}{}
@@ -1182,7 +1191,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+		// Proxy auths (e.g., amp) bypass model registry - they forward any model to upstream
+		accountType, _ := candidate.AccountInfo()
+		if accountType != "proxy" && modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
 			continue
 		}
 		candidates = append(candidates, candidate)
