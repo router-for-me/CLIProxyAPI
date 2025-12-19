@@ -160,6 +160,34 @@ func ThinkingEffortToBudget(model, effort string) (int, bool) {
 	}
 }
 
+// ThinkingLevelToBudget maps a Gemini thinkingLevel to a numeric thinking budget (tokens).
+//
+// Mappings:
+//   - "minimal" -> 512
+//   - "low"     -> 1024
+//   - "medium"  -> 8192
+//   - "high"    -> 32768
+//
+// Returns false when the level is empty or unsupported.
+func ThinkingLevelToBudget(level string) (int, bool) {
+	if level == "" {
+		return 0, false
+	}
+	normalized := strings.ToLower(strings.TrimSpace(level))
+	switch normalized {
+	case "minimal":
+		return 512, true
+	case "low":
+		return 1024, true
+	case "medium":
+		return 8192, true
+	case "high":
+		return 32768, true
+	default:
+		return 0, false
+	}
+}
+
 // ThinkingBudgetToEffort maps a numeric thinking budget (tokens)
 // to a reasoning effort level for level-based models.
 //

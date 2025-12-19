@@ -352,8 +352,9 @@ func StripThinkingConfigIfUnsupported(model string, body []byte) []byte {
 
 // NormalizeGeminiThinkingBudget normalizes the thinkingBudget value in a standard Gemini
 // request body (generationConfig.thinkingConfig.thinkingBudget path).
-// For Gemini 3 models, converts thinkingBudget to thinkingLevel per Google's documentation.
-func NormalizeGeminiThinkingBudget(model string, body []byte) []byte {
+// For Gemini 3 models, converts thinkingBudget to thinkingLevel per Google's documentation,
+// unless skipGemini3Check is provided and true.
+func NormalizeGeminiThinkingBudget(model string, body []byte, skipGemini3Check ...bool) []byte {
 	const budgetPath = "generationConfig.thinkingConfig.thinkingBudget"
 	const levelPath = "generationConfig.thinkingConfig.thinkingLevel"
 
@@ -363,7 +364,8 @@ func NormalizeGeminiThinkingBudget(model string, body []byte) []byte {
 	}
 
 	// For Gemini 3 models, convert thinkingBudget to thinkingLevel
-	if IsGemini3Model(model) {
+	skipGemini3 := len(skipGemini3Check) > 0 && skipGemini3Check[0]
+	if IsGemini3Model(model) && !skipGemini3 {
 		if level, ok := ThinkingBudgetToGemini3Level(model, int(budget.Int())); ok {
 			updated, _ := sjson.SetBytes(body, levelPath, level)
 			updated, _ = sjson.DeleteBytes(updated, budgetPath)
@@ -382,8 +384,9 @@ func NormalizeGeminiThinkingBudget(model string, body []byte) []byte {
 
 // NormalizeGeminiCLIThinkingBudget normalizes the thinkingBudget value in a Gemini CLI
 // request body (request.generationConfig.thinkingConfig.thinkingBudget path).
-// For Gemini 3 models, converts thinkingBudget to thinkingLevel per Google's documentation.
-func NormalizeGeminiCLIThinkingBudget(model string, body []byte) []byte {
+// For Gemini 3 models, converts thinkingBudget to thinkingLevel per Google's documentation,
+// unless skipGemini3Check is provided and true.
+func NormalizeGeminiCLIThinkingBudget(model string, body []byte, skipGemini3Check ...bool) []byte {
 	const budgetPath = "request.generationConfig.thinkingConfig.thinkingBudget"
 	const levelPath = "request.generationConfig.thinkingConfig.thinkingLevel"
 
@@ -393,7 +396,8 @@ func NormalizeGeminiCLIThinkingBudget(model string, body []byte) []byte {
 	}
 
 	// For Gemini 3 models, convert thinkingBudget to thinkingLevel
-	if IsGemini3Model(model) {
+	skipGemini3 := len(skipGemini3Check) > 0 && skipGemini3Check[0]
+	if IsGemini3Model(model) && !skipGemini3 {
 		if level, ok := ThinkingBudgetToGemini3Level(model, int(budget.Int())); ok {
 			updated, _ := sjson.SetBytes(body, levelPath, level)
 			updated, _ = sjson.DeleteBytes(updated, budgetPath)
@@ -477,7 +481,7 @@ func ApplyReasoningEffortToGeminiCLI(body []byte, effort string) []byte {
 
 // ConvertThinkingLevelToBudget checks for "generationConfig.thinkingConfig.thinkingLevel"
 // and converts it to "thinkingBudget" for Gemini 2.5 models.
-// For Gemini 3 models, preserves thinkingLevel as-is (does not convert).
+// For Gemini 3 models, preserves thinkingLevel unless skipGemini3Check is provided and true.
 // Mappings for Gemini 2.5:
 //   - "high" -> 32768
 //   - "medium" -> 8192
@@ -485,43 +489,31 @@ func ApplyReasoningEffortToGeminiCLI(body []byte, effort string) []byte {
 //   - "minimal" -> 512
 //
 // It removes "thinkingLevel" after conversion (for Gemini 2.5 only).
-func ConvertThinkingLevelToBudget(body []byte, model string) []byte {
+func ConvertThinkingLevelToBudget(body []byte, model string, skipGemini3Check ...bool) []byte {
 	levelPath := "generationConfig.thinkingConfig.thinkingLevel"
 	res := gjson.GetBytes(body, levelPath)
 	if !res.Exists() {
 		return body
 	}
 
-	// For Gemini 3 models, preserve thinkingLevel - don't convert to budget
-	if IsGemini3Model(model) {
+	// For Gemini 3 models, preserve thinkingLevel unless explicitly skipped
+	skipGemini3 := len(skipGemini3Check) > 0 && skipGemini3Check[0]
+	if IsGemini3Model(model) && !skipGemini3 {
 		return body
 	}
 
-	level := strings.ToLower(res.String())
-	var budget int
-	switch level {
-	case "high":
-		budget = 32768
-	case "medium":
-		budget = 8192
-	case "low":
-		budget = 1024
-	case "minimal":
-		budget = 512
-	default:
-		// Unknown level - remove it and let the API use defaults
+	budget, ok := ThinkingLevelToBudget(res.String())
+	if !ok {
 		updated, _ := sjson.DeleteBytes(body, levelPath)
 		return updated
 	}
 
-	// Set budget
 	budgetPath := "generationConfig.thinkingConfig.thinkingBudget"
 	updated, err := sjson.SetBytes(body, budgetPath, budget)
 	if err != nil {
 		return body
 	}
 
-	// Remove level
 	updated, err = sjson.DeleteBytes(updated, levelPath)
 	if err != nil {
 		return body
@@ -544,31 +536,18 @@ func ConvertThinkingLevelToBudgetCLI(body []byte, model string) []byte {
 		return body
 	}
 
-	level := strings.ToLower(res.String())
-	var budget int
-	switch level {
-	case "high":
-		budget = 32768
-	case "medium":
-		budget = 8192
-	case "low":
-		budget = 1024
-	case "minimal":
-		budget = 512
-	default:
-		// Unknown level - remove it and let the API use defaults
+	budget, ok := ThinkingLevelToBudget(res.String())
+	if !ok {
 		updated, _ := sjson.DeleteBytes(body, levelPath)
 		return updated
 	}
 
-	// Set budget
 	budgetPath := "request.generationConfig.thinkingConfig.thinkingBudget"
 	updated, err := sjson.SetBytes(body, budgetPath, budget)
 	if err != nil {
 		return body
 	}
 
-	// Remove level
 	updated, err = sjson.DeleteBytes(updated, levelPath)
 	if err != nil {
 		return body
