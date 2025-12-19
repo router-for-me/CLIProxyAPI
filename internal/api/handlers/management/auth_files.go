@@ -40,33 +40,6 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-var (
-	oauthStatus      = make(map[string]string)
-	oauthStatusMutex sync.RWMutex
-)
-
-// getOAuthStatus safely retrieves an OAuth status
-func getOAuthStatus(key string) (string, bool) {
-	oauthStatusMutex.RLock()
-	defer oauthStatusMutex.RUnlock()
-	status, ok := oauthStatus[key]
-	return status, ok
-}
-
-// setOAuthStatus safely sets an OAuth status
-func setOAuthStatus(key string, status string) {
-	oauthStatusMutex.Lock()
-	defer oauthStatusMutex.Unlock()
-	oauthStatus[key] = status
-}
-
-// deleteOAuthStatus safely deletes an OAuth status
-func deleteOAuthStatus(key string) {
-	oauthStatusMutex.Lock()
-	defer oauthStatusMutex.Unlock()
-	delete(oauthStatus, key)
-}
-
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
@@ -813,6 +786,8 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
+	RegisterOAuthSession(state, "anthropic")
+
 	isWebUI := isWebUIRequest(c)
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/anthropic/callback")
@@ -839,7 +814,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			deadline := time.Now().Add(timeout)
 			for {
 				if time.Now().After(deadline) {
-					setOAuthStatus(state, "Timeout waiting for OAuth callback")
+					SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
 					return nil, fmt.Errorf("timeout waiting for OAuth callback")
 				}
 				data, errRead := os.ReadFile(path)
@@ -864,13 +839,13 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		if errStr := resultMap["error"]; errStr != "" {
 			oauthErr := claude.NewOAuthError(errStr, "", http.StatusBadRequest)
 			log.Error(claude.GetUserFriendlyMessage(oauthErr))
-			setOAuthStatus(state, "Bad request")
+			SetOAuthSessionError(state, "Bad request")
 			return
 		}
 		if resultMap["state"] != state {
 			authErr := claude.NewAuthenticationError(claude.ErrInvalidState, fmt.Errorf("expected %s, got %s", state, resultMap["state"]))
 			log.Error(claude.GetUserFriendlyMessage(authErr))
-			setOAuthStatus(state, "State code error")
+			SetOAuthSessionError(state, "State code error")
 			return
 		}
 
@@ -903,7 +878,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		if errDo != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errDo)
 			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
-			setOAuthStatus(state, "Failed to exchange authorization code for tokens")
+			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
 			return
 		}
 		defer func() {
@@ -914,7 +889,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		respBody, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
 			log.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(respBody))
-			setOAuthStatus(state, fmt.Sprintf("token exchange failed with status %d", resp.StatusCode))
+			SetOAuthSessionError(state, fmt.Sprintf("token exchange failed with status %d", resp.StatusCode))
 			return
 		}
 		var tResp struct {
@@ -927,7 +902,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 		if errU := json.Unmarshal(respBody, &tResp); errU != nil {
 			log.Errorf("failed to parse token response: %v", errU)
-			setOAuthStatus(state, "Failed to parse token response")
+			SetOAuthSessionError(state, "Failed to parse token response")
 			return
 		}
 		bundle := &claude.ClaudeAuthBundle{
@@ -952,7 +927,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			setOAuthStatus(state, "Failed to save authentication tokens")
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			return
 		}
 
@@ -961,10 +936,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			fmt.Println("API key obtained and saved")
 		}
 		fmt.Println("You can now use Claude services through this CLI")
-		deleteOAuthStatus(state)
+		CompleteOAuthSession(state)
 	}()
 
-	setOAuthStatus(state, "")
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -995,6 +969,8 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	state := fmt.Sprintf("gem-%d", time.Now().UnixNano())
 	authURL := conf.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 
+	RegisterOAuthSession(state, "gemini")
+
 	isWebUI := isWebUIRequest(c)
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/google/callback")
@@ -1023,7 +999,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		for {
 			if time.Now().After(deadline) {
 				log.Error("oauth flow timed out")
-				setOAuthStatus(state, "OAuth flow timed out")
+				SetOAuthSessionError(state, "OAuth flow timed out")
 				return
 			}
 			if data, errR := os.ReadFile(waitFile); errR == nil {
@@ -1032,13 +1008,13 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 				_ = os.Remove(waitFile)
 				if errStr := m["error"]; errStr != "" {
 					log.Errorf("Authentication failed: %s", errStr)
-					setOAuthStatus(state, "Authentication failed")
+					SetOAuthSessionError(state, "Authentication failed")
 					return
 				}
 				authCode = m["code"]
 				if authCode == "" {
 					log.Errorf("Authentication failed: code not found")
-					setOAuthStatus(state, "Authentication failed: code not found")
+					SetOAuthSessionError(state, "Authentication failed: code not found")
 					return
 				}
 				break
@@ -1050,7 +1026,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		token, err := conf.Exchange(ctx, authCode)
 		if err != nil {
 			log.Errorf("Failed to exchange token: %v", err)
-			setOAuthStatus(state, "Failed to exchange token")
+			SetOAuthSessionError(state, "Failed to exchange token")
 			return
 		}
 
@@ -1061,7 +1037,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		req, errNewRequest := http.NewRequestWithContext(ctx, "GET", "https://www.googleapis.com/oauth2/v1/userinfo?alt=json", nil)
 		if errNewRequest != nil {
 			log.Errorf("Could not get user info: %v", errNewRequest)
-			setOAuthStatus(state, "Could not get user info")
+			SetOAuthSessionError(state, "Could not get user info")
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -1070,7 +1046,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		resp, errDo := authHTTPClient.Do(req)
 		if errDo != nil {
 			log.Errorf("Failed to execute request: %v", errDo)
-			setOAuthStatus(state, "Failed to execute request")
+			SetOAuthSessionError(state, "Failed to execute request")
 			return
 		}
 		defer func() {
@@ -1082,7 +1058,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			log.Errorf("Get user info request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
-			setOAuthStatus(state, fmt.Sprintf("Get user info request failed with status %d", resp.StatusCode))
+			SetOAuthSessionError(state, fmt.Sprintf("Get user info request failed with status %d", resp.StatusCode))
 			return
 		}
 
@@ -1091,7 +1067,6 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			fmt.Printf("Authenticated user email: %s\n", email)
 		} else {
 			fmt.Println("Failed to get user email from token")
-			setOAuthStatus(state, "Failed to get user email from token")
 		}
 
 		// Marshal/unmarshal oauth2.Token to generic map and enrich fields
@@ -1099,7 +1074,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		jsonData, _ := json.Marshal(token)
 		if errUnmarshal := json.Unmarshal(jsonData, &ifToken); errUnmarshal != nil {
 			log.Errorf("Failed to unmarshal token: %v", errUnmarshal)
-			setOAuthStatus(state, "Failed to unmarshal token")
+			SetOAuthSessionError(state, "Failed to unmarshal token")
 			return
 		}
 
@@ -1125,7 +1100,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		gemClient, errGetClient := gemAuth.GetAuthenticatedClient(ctx, &ts, h.cfg, true)
 		if errGetClient != nil {
 			log.Errorf("failed to get authenticated client: %v", errGetClient)
-			setOAuthStatus(state, "Failed to get authenticated client")
+			SetOAuthSessionError(state, "Failed to get authenticated client")
 			return
 		}
 		fmt.Println("Authentication successful.")
@@ -1135,12 +1110,12 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			projects, errAll := onboardAllGeminiProjects(ctx, gemClient, &ts)
 			if errAll != nil {
 				log.Errorf("Failed to complete Gemini CLI onboarding: %v", errAll)
-				setOAuthStatus(state, "Failed to complete Gemini CLI onboarding")
+				SetOAuthSessionError(state, "Failed to complete Gemini CLI onboarding")
 				return
 			}
 			if errVerify := ensureGeminiProjectsEnabled(ctx, gemClient, projects); errVerify != nil {
 				log.Errorf("Failed to verify Cloud AI API status: %v", errVerify)
-				setOAuthStatus(state, "Failed to verify Cloud AI API status")
+				SetOAuthSessionError(state, "Failed to verify Cloud AI API status")
 				return
 			}
 			ts.ProjectID = strings.Join(projects, ",")
@@ -1148,26 +1123,26 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		} else {
 			if errEnsure := ensureGeminiProjectAndOnboard(ctx, gemClient, &ts, requestedProjectID); errEnsure != nil {
 				log.Errorf("Failed to complete Gemini CLI onboarding: %v", errEnsure)
-				setOAuthStatus(state, "Failed to complete Gemini CLI onboarding")
+				SetOAuthSessionError(state, "Failed to complete Gemini CLI onboarding")
 				return
 			}
 
 			if strings.TrimSpace(ts.ProjectID) == "" {
 				log.Error("Onboarding did not return a project ID")
-				setOAuthStatus(state, "Failed to resolve project ID")
+				SetOAuthSessionError(state, "Failed to resolve project ID")
 				return
 			}
 
 			isChecked, errCheck := checkCloudAPIIsEnabled(ctx, gemClient, ts.ProjectID)
 			if errCheck != nil {
 				log.Errorf("Failed to verify Cloud AI API status: %v", errCheck)
-				setOAuthStatus(state, "Failed to verify Cloud AI API status")
+				SetOAuthSessionError(state, "Failed to verify Cloud AI API status")
 				return
 			}
 			ts.Checked = isChecked
 			if !isChecked {
 				log.Error("Cloud AI API is not enabled for the selected project")
-				setOAuthStatus(state, "Cloud AI API not enabled")
+				SetOAuthSessionError(state, "Cloud AI API not enabled")
 				return
 			}
 		}
@@ -1190,15 +1165,14 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save token to file: %v", errSave)
-			setOAuthStatus(state, "Failed to save token to file")
+			SetOAuthSessionError(state, "Failed to save token to file")
 			return
 		}
 
-		deleteOAuthStatus(state)
+		CompleteOAuthSession(state)
 		fmt.Printf("You can now use Gemini CLI services through this CLI; token saved to %s\n", savedPath)
 	}()
 
-	setOAuthStatus(state, "")
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -1234,6 +1208,8 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
+	RegisterOAuthSession(state, "codex")
+
 	isWebUI := isWebUIRequest(c)
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
@@ -1262,7 +1238,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			if time.Now().After(deadline) {
 				authErr := codex.NewAuthenticationError(codex.ErrCallbackTimeout, fmt.Errorf("timeout waiting for OAuth callback"))
 				log.Error(codex.GetUserFriendlyMessage(authErr))
-				setOAuthStatus(state, "Timeout waiting for OAuth callback")
+				SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
 				return
 			}
 			if data, errR := os.ReadFile(waitFile); errR == nil {
@@ -1272,12 +1248,12 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				if errStr := m["error"]; errStr != "" {
 					oauthErr := codex.NewOAuthError(errStr, "", http.StatusBadRequest)
 					log.Error(codex.GetUserFriendlyMessage(oauthErr))
-					setOAuthStatus(state, "Bad Request")
+					SetOAuthSessionError(state, "Bad Request")
 					return
 				}
 				if m["state"] != state {
 					authErr := codex.NewAuthenticationError(codex.ErrInvalidState, fmt.Errorf("expected %s, got %s", state, m["state"]))
-					setOAuthStatus(state, "State code error")
+					SetOAuthSessionError(state, "State code error")
 					log.Error(codex.GetUserFriendlyMessage(authErr))
 					return
 				}
@@ -1308,14 +1284,14 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		resp, errDo := httpClient.Do(req)
 		if errDo != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errDo)
-			setOAuthStatus(state, "Failed to exchange authorization code for tokens")
+			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
 			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
 			return
 		}
 		defer func() { _ = resp.Body.Close() }()
 		respBody, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			setOAuthStatus(state, fmt.Sprintf("Token exchange failed with status %d", resp.StatusCode))
+			SetOAuthSessionError(state, fmt.Sprintf("Token exchange failed with status %d", resp.StatusCode))
 			log.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(respBody))
 			return
 		}
@@ -1326,7 +1302,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			ExpiresIn    int    `json:"expires_in"`
 		}
 		if errU := json.Unmarshal(respBody, &tokenResp); errU != nil {
-			setOAuthStatus(state, "Failed to parse token response")
+			SetOAuthSessionError(state, "Failed to parse token response")
 			log.Errorf("failed to parse token response: %v", errU)
 			return
 		}
@@ -1364,8 +1340,8 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			setOAuthStatus(state, "Failed to save authentication tokens")
 			return
 		}
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
@@ -1373,10 +1349,9 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			fmt.Println("API key obtained and saved")
 		}
 		fmt.Println("You can now use Codex services through this CLI")
-		deleteOAuthStatus(state)
+		CompleteOAuthSession(state)
 	}()
 
-	setOAuthStatus(state, "")
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -1417,6 +1392,8 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	params.Set("state", state)
 	authURL := "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
 
+	RegisterOAuthSession(state, "antigravity")
+
 	isWebUI := isWebUIRequest(c)
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/antigravity/callback")
@@ -1443,7 +1420,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		for {
 			if time.Now().After(deadline) {
 				log.Error("oauth flow timed out")
-				setOAuthStatus(state, "OAuth flow timed out")
+				SetOAuthSessionError(state, "OAuth flow timed out")
 				return
 			}
 			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
@@ -1452,18 +1429,18 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 				_ = os.Remove(waitFile)
 				if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
 					log.Errorf("Authentication failed: %s", errStr)
-					setOAuthStatus(state, "Authentication failed")
+					SetOAuthSessionError(state, "Authentication failed")
 					return
 				}
 				if payloadState := strings.TrimSpace(payload["state"]); payloadState != "" && payloadState != state {
 					log.Errorf("Authentication failed: state mismatch")
-					setOAuthStatus(state, "Authentication failed: state mismatch")
+					SetOAuthSessionError(state, "Authentication failed: state mismatch")
 					return
 				}
 				authCode = strings.TrimSpace(payload["code"])
 				if authCode == "" {
 					log.Error("Authentication failed: code not found")
-					setOAuthStatus(state, "Authentication failed: code not found")
+					SetOAuthSessionError(state, "Authentication failed: code not found")
 					return
 				}
 				break
@@ -1482,7 +1459,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		req, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
 		if errNewRequest != nil {
 			log.Errorf("Failed to build token request: %v", errNewRequest)
-			setOAuthStatus(state, "Failed to build token request")
+			SetOAuthSessionError(state, "Failed to build token request")
 			return
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1490,7 +1467,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		resp, errDo := httpClient.Do(req)
 		if errDo != nil {
 			log.Errorf("Failed to execute token request: %v", errDo)
-			setOAuthStatus(state, "Failed to exchange token")
+			SetOAuthSessionError(state, "Failed to exchange token")
 			return
 		}
 		defer func() {
@@ -1502,7 +1479,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 			bodyBytes, _ := io.ReadAll(resp.Body)
 			log.Errorf("Antigravity token exchange failed with status %d: %s", resp.StatusCode, string(bodyBytes))
-			setOAuthStatus(state, fmt.Sprintf("Token exchange failed: %d", resp.StatusCode))
+			SetOAuthSessionError(state, fmt.Sprintf("Token exchange failed: %d", resp.StatusCode))
 			return
 		}
 
@@ -1514,7 +1491,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		}
 		if errDecode := json.NewDecoder(resp.Body).Decode(&tokenResp); errDecode != nil {
 			log.Errorf("Failed to parse token response: %v", errDecode)
-			setOAuthStatus(state, "Failed to parse token response")
+			SetOAuthSessionError(state, "Failed to parse token response")
 			return
 		}
 
@@ -1523,7 +1500,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			infoReq, errInfoReq := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.googleapis.com/oauth2/v1/userinfo?alt=json", nil)
 			if errInfoReq != nil {
 				log.Errorf("Failed to build user info request: %v", errInfoReq)
-				setOAuthStatus(state, "Failed to build user info request")
+				SetOAuthSessionError(state, "Failed to build user info request")
 				return
 			}
 			infoReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
@@ -1531,7 +1508,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			infoResp, errInfo := httpClient.Do(infoReq)
 			if errInfo != nil {
 				log.Errorf("Failed to execute user info request: %v", errInfo)
-				setOAuthStatus(state, "Failed to execute user info request")
+				SetOAuthSessionError(state, "Failed to execute user info request")
 				return
 			}
 			defer func() {
@@ -1550,7 +1527,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			} else {
 				bodyBytes, _ := io.ReadAll(infoResp.Body)
 				log.Errorf("User info request failed with status %d: %s", infoResp.StatusCode, string(bodyBytes))
-				setOAuthStatus(state, fmt.Sprintf("User info request failed: %d", infoResp.StatusCode))
+				SetOAuthSessionError(state, fmt.Sprintf("User info request failed: %d", infoResp.StatusCode))
 				return
 			}
 		}
@@ -1598,11 +1575,11 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save token to file: %v", errSave)
-			setOAuthStatus(state, "Failed to save token to file")
+			SetOAuthSessionError(state, "Failed to save token to file")
 			return
 		}
 
-		deleteOAuthStatus(state)
+		CompleteOAuthSession(state)
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		if projectID != "" {
 			fmt.Printf("Using GCP project: %s\n", projectID)
@@ -1610,7 +1587,6 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		fmt.Println("You can now use Antigravity services through this CLI")
 	}()
 
-	setOAuthStatus(state, "")
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -1632,11 +1608,13 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 	}
 	authURL := deviceFlow.VerificationURIComplete
 
+	RegisterOAuthSession(state, "qwen")
+
 	go func() {
 		fmt.Println("Waiting for authentication...")
 		tokenData, errPollForToken := qwenAuth.PollForToken(deviceFlow.DeviceCode, deviceFlow.CodeVerifier)
 		if errPollForToken != nil {
-			setOAuthStatus(state, "Authentication failed")
+			SetOAuthSessionError(state, "Authentication failed")
 			fmt.Printf("Authentication failed: %v\n", errPollForToken)
 			return
 		}
@@ -1655,16 +1633,15 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			setOAuthStatus(state, "Failed to save authentication tokens")
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			return
 		}
 
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use Qwen services through this CLI")
-		deleteOAuthStatus(state)
+		CompleteOAuthSession(state)
 	}()
 
-	setOAuthStatus(state, "")
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -1676,6 +1653,8 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	state := fmt.Sprintf("ifl-%d", time.Now().UnixNano())
 	authSvc := iflowauth.NewIFlowAuth(h.cfg)
 	authURL, redirectURI := authSvc.AuthorizationURL(state, iflowauth.CallbackPort)
+
+	RegisterOAuthSession(state, "iflow")
 
 	isWebUI := isWebUIRequest(c)
 	if isWebUI {
@@ -1703,7 +1682,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		var resultMap map[string]string
 		for {
 			if time.Now().After(deadline) {
-				setOAuthStatus(state, "Authentication failed")
+				SetOAuthSessionError(state, "Authentication failed")
 				fmt.Println("Authentication failed: timeout waiting for callback")
 				return
 			}
@@ -1716,26 +1695,26 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		}
 
 		if errStr := strings.TrimSpace(resultMap["error"]); errStr != "" {
-			setOAuthStatus(state, "Authentication failed")
+			SetOAuthSessionError(state, "Authentication failed")
 			fmt.Printf("Authentication failed: %s\n", errStr)
 			return
 		}
 		if resultState := strings.TrimSpace(resultMap["state"]); resultState != state {
-			setOAuthStatus(state, "Authentication failed")
+			SetOAuthSessionError(state, "Authentication failed")
 			fmt.Println("Authentication failed: state mismatch")
 			return
 		}
 
 		code := strings.TrimSpace(resultMap["code"])
 		if code == "" {
-			setOAuthStatus(state, "Authentication failed")
+			SetOAuthSessionError(state, "Authentication failed")
 			fmt.Println("Authentication failed: code missing")
 			return
 		}
 
 		tokenData, errExchange := authSvc.ExchangeCodeForTokens(ctx, code, redirectURI)
 		if errExchange != nil {
-			setOAuthStatus(state, "Authentication failed")
+			SetOAuthSessionError(state, "Authentication failed")
 			fmt.Printf("Authentication failed: %v\n", errExchange)
 			return
 		}
@@ -1757,8 +1736,8 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			setOAuthStatus(state, "Failed to save authentication tokens")
 			return
 		}
 
@@ -1767,10 +1746,9 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 			fmt.Println("API key obtained and saved")
 		}
 		fmt.Println("You can now use iFlow services through this CLI")
-		deleteOAuthStatus(state)
+		CompleteOAuthSession(state)
 	}()
 
-	setOAuthStatus(state, "")
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
@@ -2206,44 +2184,45 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 }
 
 func (h *Handler) GetAuthStatus(c *gin.Context) {
-	state := c.Query("state")
-	if statusValue, ok := getOAuthStatus(state); ok {
-		if statusValue != "" {
-			// Check for device_code prefix (Kiro AWS Builder ID flow)
-			// Format: "device_code|verification_url|user_code"
-			// Using "|" as separator because URLs contain ":"
-			if strings.HasPrefix(statusValue, "device_code|") {
-				parts := strings.SplitN(statusValue, "|", 3)
-				if len(parts) == 3 {
-					c.JSON(200, gin.H{
-						"status":           "device_code",
-						"verification_url": parts[1],
-						"user_code":        parts[2],
-					})
-					return
-				}
-			}
-			// Check for auth_url prefix (Kiro social auth flow)
-			// Format: "auth_url|url"
-			// Using "|" as separator because URLs contain ":"
-			if strings.HasPrefix(statusValue, "auth_url|") {
-				authURL := strings.TrimPrefix(statusValue, "auth_url|")
-				c.JSON(200, gin.H{
-					"status": "auth_url",
-					"url":    authURL,
+	state := strings.TrimSpace(c.Query("state"))
+	if state == "" {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+	if err := ValidateOAuthState(state); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
+		return
+	}
+
+	_, status, ok := GetOAuthSession(state)
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+	if status != "" {
+		if strings.HasPrefix(status, "device_code|") {
+			parts := strings.SplitN(status, "|", 3)
+			if len(parts) == 3 {
+				c.JSON(http.StatusOK, gin.H{
+					"status":           "device_code",
+					"verification_url": parts[1],
+					"user_code":        parts[2],
 				})
 				return
 			}
-			// Otherwise treat as error
-			c.JSON(200, gin.H{"status": "error", "error": statusValue})
-		} else {
-			c.JSON(200, gin.H{"status": "wait"})
+		}
+		if strings.HasPrefix(status, "auth_url|") {
+			authURL := strings.TrimPrefix(status, "auth_url|")
+			c.JSON(http.StatusOK, gin.H{
+				"status": "auth_url",
+				"url":    authURL,
+			})
 			return
 		}
-	} else {
-		c.JSON(200, gin.H{"status": "ok"})
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": status})
+		return
 	}
-	deleteOAuthStatus(state)
+	c.JSON(http.StatusOK, gin.H{"status": "wait"})
 }
 
 const kiroCallbackPort = 9876
@@ -2263,31 +2242,33 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 
 	switch method {
 	case "aws", "builder-id":
+		RegisterOAuthSession(state, "kiro")
+
 		// AWS Builder ID uses device code flow (no callback needed)
 		go func() {
 			ssoClient := kiroauth.NewSSOOIDCClient(h.cfg)
 
 			// Step 1: Register client
 			fmt.Println("Registering client...")
-			regResp, err := ssoClient.RegisterClient(ctx)
-			if err != nil {
-				log.Errorf("Failed to register client: %v", err)
-				setOAuthStatus(state, "Failed to register client")
+			regResp, errRegister := ssoClient.RegisterClient(ctx)
+			if errRegister != nil {
+				log.Errorf("Failed to register client: %v", errRegister)
+				SetOAuthSessionError(state, "Failed to register client")
 				return
 			}
 
 			// Step 2: Start device authorization
 			fmt.Println("Starting device authorization...")
-			authResp, err := ssoClient.StartDeviceAuthorization(ctx, regResp.ClientID, regResp.ClientSecret)
-			if err != nil {
-				log.Errorf("Failed to start device auth: %v", err)
-				setOAuthStatus(state, "Failed to start device authorization")
+			authResp, errAuth := ssoClient.StartDeviceAuthorization(ctx, regResp.ClientID, regResp.ClientSecret)
+			if errAuth != nil {
+				log.Errorf("Failed to start device auth: %v", errAuth)
+				SetOAuthSessionError(state, "Failed to start device authorization")
 				return
 			}
 
-			// Store the verification URL for the frontend to display
-			// Using "|" as separator because URLs contain ":"
-			setOAuthStatus(state, "device_code|"+authResp.VerificationURIComplete+"|"+authResp.UserCode)
+			// Store the verification URL for the frontend to display.
+			// Using "|" as separator because URLs contain ":".
+			SetOAuthSessionError(state, "device_code|"+authResp.VerificationURIComplete+"|"+authResp.UserCode)
 
 			// Step 3: Poll for token
 			fmt.Println("Waiting for authorization...")
@@ -2300,12 +2281,12 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 			for time.Now().Before(deadline) {
 				select {
 				case <-ctx.Done():
-					setOAuthStatus(state, "Authorization cancelled")
+					SetOAuthSessionError(state, "Authorization cancelled")
 					return
 				case <-time.After(interval):
-					tokenResp, err := ssoClient.CreateToken(ctx, regResp.ClientID, regResp.ClientSecret, authResp.DeviceCode)
-					if err != nil {
-						errStr := err.Error()
+					tokenResp, errToken := ssoClient.CreateToken(ctx, regResp.ClientID, regResp.ClientSecret, authResp.DeviceCode)
+					if errToken != nil {
+						errStr := errToken.Error()
 						if strings.Contains(errStr, "authorization_pending") {
 							continue
 						}
@@ -2313,8 +2294,8 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 							interval += 5 * time.Second
 							continue
 						}
-						log.Errorf("Token creation failed: %v", err)
-						setOAuthStatus(state, "Token creation failed")
+						log.Errorf("Token creation failed: %v", errToken)
+						SetOAuthSessionError(state, "Token creation failed")
 						return
 					}
 
@@ -2351,7 +2332,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 					savedPath, errSave := h.saveTokenRecord(ctx, record)
 					if errSave != nil {
 						log.Errorf("Failed to save authentication tokens: %v", errSave)
-						setOAuthStatus(state, "Failed to save authentication tokens")
+						SetOAuthSessionError(state, "Failed to save authentication tokens")
 						return
 					}
 
@@ -2359,18 +2340,20 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 					if email != "" {
 						fmt.Printf("Authenticated as: %s\n", email)
 					}
-					deleteOAuthStatus(state)
+					CompleteOAuthSession(state)
 					return
 				}
 			}
 
-			setOAuthStatus(state, "Authorization timed out")
+			SetOAuthSessionError(state, "Authorization timed out")
 		}()
 
 		// Return immediately with the state for polling
-		c.JSON(200, gin.H{"status": "ok", "state": state, "method": "device_code"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "state": state, "method": "device_code"})
 
 	case "google", "github":
+		RegisterOAuthSession(state, "kiro")
+
 		// Social auth uses protocol handler - for WEB UI we use a callback forwarder
 		provider := "Google"
 		if method == "github" {
@@ -2400,10 +2383,10 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 			socialClient := kiroauth.NewSocialAuthClient(h.cfg)
 
 			// Generate PKCE codes
-			codeVerifier, codeChallenge, err := generateKiroPKCE()
-			if err != nil {
-				log.Errorf("Failed to generate PKCE: %v", err)
-				setOAuthStatus(state, "Failed to generate PKCE")
+			codeVerifier, codeChallenge, errPKCE := generateKiroPKCE()
+			if errPKCE != nil {
+				log.Errorf("Failed to generate PKCE: %v", errPKCE)
+				SetOAuthSessionError(state, "Failed to generate PKCE")
 				return
 			}
 
@@ -2416,9 +2399,9 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 				state,
 			)
 
-			// Store auth URL for frontend
-			// Using "|" as separator because URLs contain ":"
-			setOAuthStatus(state, "auth_url|"+authURL)
+			// Store auth URL for frontend.
+			// Using "|" as separator because URLs contain ":".
+			SetOAuthSessionError(state, "auth_url|"+authURL)
 
 			// Wait for callback file
 			waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-kiro-%s.oauth", state))
@@ -2427,27 +2410,27 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 			for {
 				if time.Now().After(deadline) {
 					log.Error("oauth flow timed out")
-					setOAuthStatus(state, "OAuth flow timed out")
+					SetOAuthSessionError(state, "OAuth flow timed out")
 					return
 				}
-				if data, errR := os.ReadFile(waitFile); errR == nil {
+				if data, errRead := os.ReadFile(waitFile); errRead == nil {
 					var m map[string]string
 					_ = json.Unmarshal(data, &m)
 					_ = os.Remove(waitFile)
 					if errStr := m["error"]; errStr != "" {
 						log.Errorf("Authentication failed: %s", errStr)
-						setOAuthStatus(state, "Authentication failed")
+						SetOAuthSessionError(state, "Authentication failed")
 						return
 					}
 					if m["state"] != state {
 						log.Errorf("State mismatch")
-						setOAuthStatus(state, "State mismatch")
+						SetOAuthSessionError(state, "State mismatch")
 						return
 					}
 					code := m["code"]
 					if code == "" {
 						log.Error("No authorization code received")
-						setOAuthStatus(state, "No authorization code received")
+						SetOAuthSessionError(state, "No authorization code received")
 						return
 					}
 
@@ -2461,7 +2444,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 					tokenResp, errToken := socialClient.CreateToken(ctx, tokenReq)
 					if errToken != nil {
 						log.Errorf("Failed to exchange code for tokens: %v", errToken)
-						setOAuthStatus(state, "Failed to exchange code for tokens")
+						SetOAuthSessionError(state, "Failed to exchange code for tokens")
 						return
 					}
 
@@ -2501,7 +2484,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 					savedPath, errSave := h.saveTokenRecord(ctx, record)
 					if errSave != nil {
 						log.Errorf("Failed to save authentication tokens: %v", errSave)
-						setOAuthStatus(state, "Failed to save authentication tokens")
+						SetOAuthSessionError(state, "Failed to save authentication tokens")
 						return
 					}
 
@@ -2509,15 +2492,14 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 					if email != "" {
 						fmt.Printf("Authenticated as: %s\n", email)
 					}
-					deleteOAuthStatus(state)
+					CompleteOAuthSession(state)
 					return
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
 		}()
 
-		setOAuthStatus(state, "")
-		c.JSON(200, gin.H{"status": "ok", "state": state, "method": "social"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "state": state, "method": "social"})
 
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid method, use 'aws', 'google', or 'github'"})
@@ -2527,8 +2509,8 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 // generateKiroPKCE generates PKCE code verifier and challenge for Kiro OAuth.
 func generateKiroPKCE() (verifier, challenge string, err error) {
 	b := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
-		return "", "", fmt.Errorf("failed to generate random bytes: %w", err)
+	if _, errRead := io.ReadFull(rand.Reader, b); errRead != nil {
+		return "", "", fmt.Errorf("failed to generate random bytes: %w", errRead)
 	}
 	verifier = base64.RawURLEncoding.EncodeToString(b)
 
