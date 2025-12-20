@@ -42,6 +42,10 @@ type Config struct {
 	// LoggingToFile controls whether application logs are written to rotating files or stdout.
 	LoggingToFile bool `yaml:"logging-to-file" json:"logging-to-file"`
 
+	// LogsMaxTotalSizeMB limits the total size (in MB) of log files under the logs directory.
+	// When exceeded, the oldest log files are deleted until within the limit. Set to 0 to disable.
+	LogsMaxTotalSizeMB int `yaml:"logs-max-total-size-mb" json:"logs-max-total-size-mb"`
+
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
@@ -382,6 +386,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Set defaults before unmarshal so that absent keys keep defaults.
 	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
 	cfg.LoggingToFile = false
+	cfg.LogsMaxTotalSizeMB = 0
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
@@ -425,6 +430,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
 	if cfg.RemoteManagement.PanelGitHubRepository == "" {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	}
+
+	if cfg.LogsMaxTotalSizeMB < 0 {
+		cfg.LogsMaxTotalSizeMB = 0
 	}
 
 	// Sync request authentication providers with inline API keys for backwards compatibility.

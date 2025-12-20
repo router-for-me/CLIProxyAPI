@@ -865,11 +865,20 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
-	if oldCfg != nil && oldCfg.LoggingToFile != cfg.LoggingToFile {
-		if err := logging.ConfigureLogOutput(cfg.LoggingToFile); err != nil {
+	if oldCfg == nil || oldCfg.LoggingToFile != cfg.LoggingToFile || oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
+		if err := logging.ConfigureLogOutput(cfg.LoggingToFile, cfg.LogsMaxTotalSizeMB); err != nil {
 			log.Errorf("failed to reconfigure log output: %v", err)
 		} else {
-			log.Debugf("logging_to_file updated from %t to %t", oldCfg.LoggingToFile, cfg.LoggingToFile)
+			if oldCfg == nil {
+				log.Debug("log output configuration refreshed")
+			} else {
+				if oldCfg.LoggingToFile != cfg.LoggingToFile {
+					log.Debugf("logging_to_file updated from %t to %t", oldCfg.LoggingToFile, cfg.LoggingToFile)
+				}
+				if oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
+					log.Debugf("logs_max_total_size_mb updated from %d to %d", oldCfg.LogsMaxTotalSizeMB, cfg.LogsMaxTotalSizeMB)
+				}
+			}
 		}
 	}
 

@@ -126,7 +126,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	var authWithBypass gin.HandlerFunc
 	if auth != nil {
 		ampAPI.Use(auth)
-		authWithBypass = wrapManagementAuth(auth, "/threads", "/auth")
+		authWithBypass = wrapManagementAuth(auth, "/threads", "/auth", "/docs")
 	}
 
 	// Dynamic proxy handler that uses m.getProxy() for hot-reload support
@@ -175,7 +175,11 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	if authWithBypass != nil {
 		rootMiddleware = append(rootMiddleware, authWithBypass)
 	}
+	engine.GET("/threads", append(rootMiddleware, proxyHandler)...)
 	engine.GET("/threads/*path", append(rootMiddleware, proxyHandler)...)
+	engine.GET("/docs", append(rootMiddleware, proxyHandler)...)
+	engine.GET("/docs/*path", append(rootMiddleware, proxyHandler)...)
+
 	engine.GET("/threads.rss", append(rootMiddleware, proxyHandler)...)
 	engine.GET("/news.rss", append(rootMiddleware, proxyHandler)...)
 

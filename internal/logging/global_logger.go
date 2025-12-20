@@ -76,45 +76,53 @@ func SetupBaseLogger() {
 }
 
 // ConfigureLogOutput switches the global log destination between rotating files and stdout.
-func ConfigureLogOutput(loggingToFile bool) error {
+// When logsMaxTotalSizeMB > 0, a background cleaner removes the oldest log files in the logs directory
+// until the total size is within the limit.
+func ConfigureLogOutput(loggingToFile bool, logsMaxTotalSizeMB int) error {
 	SetupBaseLogger()
 
 	writerMu.Lock()
 	defer writerMu.Unlock()
 
+	logDir := "logs"
+	if base := util.WritablePath(); base != "" {
+		logDir = filepath.Join(base, "logs")
+	}
+
+	protectedPath := ""
 	if loggingToFile {
-		logDir := "logs"
-		if base := util.WritablePath(); base != "" {
-			logDir = filepath.Join(base, "logs")
-		}
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			return fmt.Errorf("logging: failed to create log directory: %w", err)
 		}
 		if logWriter != nil {
 			_ = logWriter.Close()
 		}
+		protectedPath = filepath.Join(logDir, "main.log")
 		logWriter = &lumberjack.Logger{
-			Filename:   filepath.Join(logDir, "main.log"),
+			Filename:   protectedPath,
 			MaxSize:    10,
 			MaxBackups: 0,
 			MaxAge:     0,
 			Compress:   false,
 		}
 		log.SetOutput(logWriter)
-		return nil
+	} else {
+		if logWriter != nil {
+			_ = logWriter.Close()
+			logWriter = nil
+		}
+		log.SetOutput(os.Stdout)
 	}
 
-	if logWriter != nil {
-		_ = logWriter.Close()
-		logWriter = nil
-	}
-	log.SetOutput(os.Stdout)
+	configureLogDirCleanerLocked(logDir, logsMaxTotalSizeMB, protectedPath)
 	return nil
 }
 
 func closeLogOutputs() {
 	writerMu.Lock()
 	defer writerMu.Unlock()
+
+	stopLogDirCleanerLocked()
 
 	if logWriter != nil {
 		_ = logWriter.Close()

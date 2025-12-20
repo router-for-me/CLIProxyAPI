@@ -267,7 +267,7 @@ func (s *FileTokenStore) baseDirSnapshot() string {
 }
 
 // DEPRECATED: Use metadataEqualIgnoringTimestamps for comparing auth metadata.
-// This function is kept for backward compatibility but can cause refresh loops. 
+// This function is kept for backward compatibility but can cause refresh loops.
 func jsonEqual(a, b []byte) bool {
 	var objA any
 	var objB any
