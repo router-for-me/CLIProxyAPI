@@ -57,6 +57,12 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		template = `{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"claude-opus-4-1-20250805","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0},"content":[],"stop_reason":null}}`
 		template, _ = sjson.Set(template, "message.model", rootResult.Get("response.model").String())
 		template, _ = sjson.Set(template, "message.id", rootResult.Get("response.id").String())
+		// IMPORTANT: Set input_tokens from response usage in message_start event
+		// This is critical for clients like Droid that use this value to determine
+		// when to trigger context compression. Without this, compression won't trigger.
+		if inputTokens := rootResult.Get("response.usage.input_tokens").Int(); inputTokens > 0 {
+			template, _ = sjson.Set(template, "message.usage.input_tokens", inputTokens)
+		}
 
 		output = "event: message_start\n"
 		output += fmt.Sprintf("data: %s\n\n", template)

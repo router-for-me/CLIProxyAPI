@@ -86,6 +86,14 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		if responseIDResult := gjson.GetBytes(rawJSON, "responseId"); responseIDResult.Exists() {
 			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.id", responseIDResult.String())
 		}
+		// IMPORTANT: Set input_tokens from usageMetadata in message_start event
+		// This is critical for clients like Droid that use this value to determine
+		// when to trigger context compression. Without this, compression won't trigger.
+		if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
+			if promptTokenCount := usageResult.Get("promptTokenCount").Int(); promptTokenCount > 0 {
+				messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.usage.input_tokens", promptTokenCount)
+			}
+		}
 		output = output + fmt.Sprintf("data: %s\n\n\n", messageStartTemplate)
 
 		(*param).(*Params).HasFirstResponse = true
