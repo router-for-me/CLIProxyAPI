@@ -424,6 +424,10 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 			}
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
+			// Don't retry with different auth for client errors (4xx except 429)
+			if !shouldRetryWithDifferentAuth(errExec) {
+				return cliproxyexecutor.Response{}, lastErr
+			}
 			continue
 		}
 		m.MarkResult(execCtx, result)
@@ -484,6 +488,10 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 			}
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
+			// Don't retry with different auth for client errors (4xx except 429)
+			if !shouldRetryWithDifferentAuth(errExec) {
+				return cliproxyexecutor.Response{}, lastErr
+			}
 			continue
 		}
 		m.MarkResult(execCtx, result)
@@ -542,6 +550,11 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
 			lastErr = errStream
+			// Don't retry with different auth for client errors (4xx except 429)
+			// These errors indicate problems with the request itself
+			if !shouldRetryWithDifferentAuth(errStream) {
+				return nil, lastErr
+			}
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
@@ -1055,6 +1068,35 @@ func statusCodeFromError(err error) int {
 		return sc.StatusCode()
 	}
 	return 0
+}
+
+// shouldRetryWithDifferentAuth determines if an error can potentially be resolved
+// by trying a different auth account. Client errors (4xx except 429) indicate
+// problems with the request itself and won't be resolved by switching accounts.
+func shouldRetryWithDifferentAuth(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status == 0 {
+		// Network errors or unknown errors - worth retrying
+		return true
+	}
+	// 429 Too Many Requests - can be resolved by switching accounts
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	// 5xx Server errors - may be resolved by switching accounts (different backend routing)
+	if status >= 500 && status < 600 {
+		return true
+	}
+	// 4xx Client errors (except 429) - switching accounts won't help
+	// This includes 400 Bad Request (e.g., "Prompt is too long")
+	if status >= 400 && status < 500 {
+		return false
+	}
+	// Other status codes - default to retry
+	return true
 }
 
 func retryAfterFromError(err error) *time.Duration {
