@@ -30,6 +30,7 @@ GEMINI.md
 # Tooling metadata
 .vscode/*
 .claude/*
+.gemini/*
 .serena/*
 /cmd/server/server
 .agent/*

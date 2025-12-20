@@ -296,6 +296,7 @@ func flattenTypeArrays(jsonStr string) string {
 func removeUnsupportedKeywords(jsonStr string) string {
 	keywords := append(unsupportedConstraints,
 		"$schema", "$defs", "definitions", "const", "$ref", "additionalProperties",
+		"propertyNames", // Gemini doesn't support property name validation
 	)
 	for _, key := range keywords {
 		for _, p := range findPaths(jsonStr, key) {

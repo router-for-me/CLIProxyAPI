@@ -596,6 +596,71 @@ func TestCleanJSONSchemaForGemini_MultipleNonNullTypes(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForGemini_PropertyNamesRemoval(t *testing.T) {
+	// propertyNames is used to validate object property names (e.g., must match a pattern)
+	// Gemini doesn't support this keyword and will reject requests containing it
+	input := `{
+		"type": "object",
+		"properties": {
+			"metadata": {
+				"type": "object",
+				"propertyNames": {
+					"pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+				},
+				"additionalProperties": {
+					"type": "string"
+				}
+			}
+		}
+	}`
+
+	expected := `{
+		"type": "object",
+		"properties": {
+			"metadata": {
+				"type": "object"
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	compareJSON(t, expected, result)
+
+	// Verify propertyNames is completely removed
+	if strings.Contains(result, "propertyNames") {
+		t.Errorf("propertyNames keyword should be removed, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForGemini_PropertyNamesRemoval_Nested(t *testing.T) {
+	// Test deeply nested propertyNames (as seen in real Claude tool schemas)
+	input := `{
+		"type": "object",
+		"properties": {
+			"items": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"properties": {
+						"config": {
+							"type": "object",
+							"propertyNames": {
+								"type": "string"
+							}
+						}
+					}
+				}
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+
+	if strings.Contains(result, "propertyNames") {
+		t.Errorf("Nested propertyNames should be removed, got: %s", result)
+	}
+}
+
 func compareJSON(t *testing.T, expectedJSON, actualJSON string) {
 	var expMap, actMap map[string]interface{}
 	errExp := json.Unmarshal([]byte(expectedJSON), &expMap)

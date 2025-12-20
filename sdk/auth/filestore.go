@@ -72,7 +72,9 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
 		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
+			// Use metadataEqualIgnoringTimestamps to skip writes when only timestamp fields change.
+			// This prevents the token refresh loop caused by timestamp/expired/expires_in changes.
+			if metadataEqualIgnoringTimestamps(existing, raw) {
 				return path, nil
 			}
 		} else if errRead != nil && !os.IsNotExist(errRead) {
@@ -264,6 +266,8 @@ func (s *FileTokenStore) baseDirSnapshot() string {
 	return s.baseDir
 }
 
+// DEPRECATED: Use metadataEqualIgnoringTimestamps for comparing auth metadata.
+// This function is kept for backward compatibility but can cause refresh loops.
 func jsonEqual(a, b []byte) bool {
 	var objA any
 	var objB any
@@ -273,6 +277,32 @@ func jsonEqual(a, b []byte) bool {
 	if err := json.Unmarshal(b, &objB); err != nil {
 		return false
 	}
+	return deepEqualJSON(objA, objB)
+}
+
+// metadataEqualIgnoringTimestamps compares two metadata JSON blobs,
+// ignoring fields that change on every refresh but don't affect functionality.
+// This prevents unnecessary file writes that would trigger watcher events and
+// create refresh loops.
+func metadataEqualIgnoringTimestamps(a, b []byte) bool {
+	var objA, objB map[string]any
+	if err := json.Unmarshal(a, &objA); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(b, &objB); err != nil {
+		return false
+	}
+
+	// Fields to ignore: these change on every refresh but don't affect authentication logic.
+	// - timestamp, expired, expires_in, last_refresh: time-related fields that change on refresh
+	// - access_token: Google OAuth returns a new access_token on each refresh, this is expected
+	//   and shouldn't trigger file writes (the new token will be fetched again when needed)
+	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh", "access_token"}
+	for _, field := range ignoredFields {
+		delete(objA, field)
+		delete(objB, field)
+	}
+
 	return deepEqualJSON(objA, objB)
 }
 
