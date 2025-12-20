@@ -276,11 +276,77 @@ type claudeErrorResponse struct {
 }
 
 func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
+	errMsg := msg.Error.Error()
+	errType := "api_error"
+
+	// Try to extract meaningful error message from nested JSON structures
+	// This handles errors from various upstream providers (Antigravity, Gemini, etc.)
+	extractedMsg, extractedType := extractErrorFromJSON(errMsg)
+	if extractedMsg != "" {
+		errMsg = extractedMsg
+	}
+	if extractedType != "" {
+		errType = extractedType
+	}
+
 	return claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
-			Type:    "api_error",
-			Message: msg.Error.Error(),
+			Type:    errType,
+			Message: errMsg,
 		},
 	}
+}
+
+// extractErrorFromJSON attempts to extract a clean error message and type from potentially nested JSON error structures
+func extractErrorFromJSON(rawError string) (message string, errType string) {
+	// Try to find the innermost error message
+	// Common patterns:
+	// 1. {"error": {"code": 400, "message": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Prompt is too long\"}}"}}
+	// 2. {"type":"error","error":{"type":"invalid_request_error","message":"Prompt is too long"}}
+
+	currentJSON := rawError
+
+	// Attempt up to 3 levels of JSON unwrapping
+	for i := 0; i < 3; i++ {
+		// Try pattern: {"error": {"message": "..."}}
+		if gjson.Valid(currentJSON) {
+			result := gjson.Parse(currentJSON)
+
+			// Check for Claude-style error: error.message or error.error.message
+			if innerMsg := result.Get("error.error.message"); innerMsg.Exists() && innerMsg.String() != "" {
+				message = innerMsg.String()
+				if innerType := result.Get("error.error.type"); innerType.Exists() {
+					errType = innerType.String()
+				}
+				return
+			}
+
+			if innerMsg := result.Get("error.message"); innerMsg.Exists() && innerMsg.String() != "" {
+				// The message might be another JSON string
+				innerMsgStr := innerMsg.String()
+				if gjson.Valid(innerMsgStr) {
+					currentJSON = innerMsgStr
+					continue
+				}
+				message = innerMsgStr
+				if innerType := result.Get("error.type"); innerType.Exists() {
+					errType = innerType.String()
+				}
+				return
+			}
+
+			// Check for direct message field
+			if directMsg := result.Get("message"); directMsg.Exists() && directMsg.String() != "" {
+				message = directMsg.String()
+				if directType := result.Get("type"); directType.Exists() {
+					errType = directType.String()
+				}
+				return
+			}
+		}
+		break
+	}
+
+	return "", ""
 }
