@@ -143,7 +143,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.ReasoningTokens = 0
 		st.UsageSeen = false
 		// response.created
-		created := `{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null}}`
+		created := `{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`
 		created, _ = sjson.Set(created, "sequence_number", nextSeq())
 		created, _ = sjson.Set(created, "response.id", st.ResponseID)
 		created, _ = sjson.Set(created, "response.created_at", st.Created)
@@ -216,11 +216,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					}
 					// Append incremental text to reasoning buffer
 					st.ReasoningBuf.WriteString(rc.String())
-					msg := `{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`
+					msg := `{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`
 					msg, _ = sjson.Set(msg, "sequence_number", nextSeq())
 					msg, _ = sjson.Set(msg, "item_id", st.ReasoningID)
 					msg, _ = sjson.Set(msg, "output_index", st.ReasoningIndex)
-					msg, _ = sjson.Set(msg, "text", rc.String())
+					msg, _ = sjson.Set(msg, "delta", rc.String())
 					out = append(out, emitRespEvent("response.reasoning_summary_text.delta", msg))
 				}
 

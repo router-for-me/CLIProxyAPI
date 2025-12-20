@@ -95,7 +95,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				}
 			}
 			// response.created
-			created := `{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"instructions":""}}`
+			created := `{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`
 			created, _ = sjson.Set(created, "sequence_number", nextSeq())
 			created, _ = sjson.Set(created, "response.id", st.ResponseID)
 			created, _ = sjson.Set(created, "response.created_at", st.CreatedAt)
@@ -197,11 +197,11 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			if st.ReasoningActive {
 				if t := d.Get("thinking"); t.Exists() {
 					st.ReasoningBuf.WriteString(t.String())
-					msg := `{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`
+					msg := `{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`
 					msg, _ = sjson.Set(msg, "sequence_number", nextSeq())
 					msg, _ = sjson.Set(msg, "item_id", st.ReasoningItemID)
 					msg, _ = sjson.Set(msg, "output_index", st.ReasoningIndex)
-					msg, _ = sjson.Set(msg, "text", t.String())
+					msg, _ = sjson.Set(msg, "delta", t.String())
 					out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
 				}
 			}
