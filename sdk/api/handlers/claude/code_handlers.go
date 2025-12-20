@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -242,14 +243,12 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 				continue
 			}
 			if errMsg != nil {
-				status := http.StatusInternalServerError
-				if errMsg.StatusCode > 0 {
-					status = errMsg.StatusCode
-				}
+				// Convert error to Claude API format and get the appropriate status code
+				claudeErr, status := h.toClaudeError(errMsg)
 				c.Status(status)
 
 				// An error occurred: emit as a proper SSE error event
-				errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+				errorBytes, _ := json.Marshal(claudeErr)
 				_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 				flusher.Flush()
 			}
@@ -275,9 +274,10 @@ type claudeErrorResponse struct {
 	Error claudeErrorDetail `json:"error"`
 }
 
-func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
+func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) (claudeErrorResponse, int) {
 	errMsg := msg.Error.Error()
 	errType := "api_error"
+	statusCode := msg.StatusCode
 
 	// Try to extract meaningful error message from nested JSON structures
 	// This handles errors from various upstream providers (Antigravity, Gemini, etc.)
@@ -289,13 +289,43 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 		errType = extractedType
 	}
 
+	// Map specific error messages to appropriate Claude API error types
+	// This ensures Droid and other clients handle errors correctly
+	errMsg, errType, statusCode = mapToClaudeErrorType(errMsg, errType, statusCode)
+
 	return claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
 			Type:    errType,
 			Message: errMsg,
 		},
+	}, statusCode
+}
+
+// mapToClaudeErrorType maps specific error messages to the correct Claude API error types
+// Reference: https://docs.anthropic.com/en/api/errors
+func mapToClaudeErrorType(message, errType string, statusCode int) (string, string, int) {
+	// "Prompt is too long" should be request_too_large (413) not invalid_request_error (400)
+	// This tells Droid that compressing history won't help - the request itself is too large
+	if strings.Contains(strings.ToLower(message), "prompt is too long") ||
+		strings.Contains(strings.ToLower(message), "request too large") ||
+		strings.Contains(strings.ToLower(message), "exceeds maximum") {
+		return message, "request_too_large", http.StatusRequestEntityTooLarge // 413
 	}
+
+	// Rate limit errors
+	if strings.Contains(strings.ToLower(message), "rate limit") ||
+		strings.Contains(strings.ToLower(message), "too many requests") {
+		return message, "rate_limit_error", http.StatusTooManyRequests // 429
+	}
+
+	// Overloaded errors
+	if strings.Contains(strings.ToLower(message), "overloaded") ||
+		strings.Contains(strings.ToLower(message), "temporarily unavailable") {
+		return message, "overloaded_error", 529
+	}
+
+	return message, errType, statusCode
 }
 
 // extractErrorFromJSON attempts to extract a clean error message and type from potentially nested JSON error structures
