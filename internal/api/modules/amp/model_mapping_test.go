@@ -71,6 +71,25 @@ func TestModelMapper_MapModel_WithProvider(t *testing.T) {
 	}
 }
 
+func TestModelMapper_MapModel_TargetWithThinkingSuffix(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-client-thinking", "codex", []*registry.ModelInfo{
+		{ID: "gpt-5.2", OwnedBy: "openai", Type: "codex"},
+	})
+	defer reg.UnregisterClient("test-client-thinking")
+
+	mappings := []config.AmpModelMapping{
+		{From: "gpt-5.2-alias", To: "gpt-5.2(xhigh)"},
+	}
+
+	mapper := NewModelMapper(mappings)
+
+	result := mapper.MapModel("gpt-5.2-alias")
+	if result != "gpt-5.2(xhigh)" {
+		t.Errorf("Expected gpt-5.2(xhigh), got %s", result)
+	}
+}
+
 func TestModelMapper_MapModel_CaseInsensitive(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-client2", "claude", []*registry.ModelInfo{

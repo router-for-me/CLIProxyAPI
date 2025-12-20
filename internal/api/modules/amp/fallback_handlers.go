@@ -134,7 +134,43 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		}
 
 		// Normalize model (handles dynamic thinking suffixes)
-		normalizedModel, _ := util.NormalizeThinkingModel(modelName)
+		normalizedModel, thinkingMetadata := util.NormalizeThinkingModel(modelName)
+		thinkingSuffix := ""
+		if thinkingMetadata != nil && strings.HasPrefix(modelName, normalizedModel) {
+			thinkingSuffix = modelName[len(normalizedModel):]
+		}
+
+		resolveMappedModel := func() (string, []string) {
+			if fh.modelMapper == nil {
+				return "", nil
+			}
+
+			mappedModel := fh.modelMapper.MapModel(modelName)
+			if mappedModel == "" {
+				mappedModel = fh.modelMapper.MapModel(normalizedModel)
+			}
+			mappedModel = strings.TrimSpace(mappedModel)
+			if mappedModel == "" {
+				return "", nil
+			}
+
+			// Preserve dynamic thinking suffix (e.g. "(xhigh)") when mapping applies, unless the target
+			// already specifies its own thinking suffix.
+			if thinkingSuffix != "" {
+				_, mappedThinkingMetadata := util.NormalizeThinkingModel(mappedModel)
+				if mappedThinkingMetadata == nil {
+					mappedModel += thinkingSuffix
+				}
+			}
+
+			mappedBaseModel, _ := util.NormalizeThinkingModel(mappedModel)
+			mappedProviders := util.GetProviderName(mappedBaseModel)
+			if len(mappedProviders) == 0 {
+				return "", nil
+			}
+
+			return mappedModel, mappedProviders
+		}
 
 		// Track resolved model for logging (may change if mapping is applied)
 		resolvedModel := normalizedModel
@@ -147,21 +183,15 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		if forceMappings {
 			// FORCE MODE: Check model mappings FIRST (takes precedence over local API keys)
 			// This allows users to route Amp requests to their preferred OAuth providers
-			if fh.modelMapper != nil {
-				if mappedModel := fh.modelMapper.MapModel(normalizedModel); mappedModel != "" {
-					// Mapping found - check if we have a provider for the mapped model
-					mappedProviders := util.GetProviderName(mappedModel)
-					if len(mappedProviders) > 0 {
-						// Mapping found and provider available - rewrite the model in request body
-						bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
-						c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-						// Store mapped model in context for handlers that check it (like gemini bridge)
-						c.Set(MappedModelContextKey, mappedModel)
-						resolvedModel = mappedModel
-						usedMapping = true
-						providers = mappedProviders
-					}
-				}
+			if mappedModel, mappedProviders := resolveMappedModel(); mappedModel != "" {
+				// Mapping found and provider available - rewrite the model in request body
+				bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
+				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				// Store mapped model in context for handlers that check it (like gemini bridge)
+				c.Set(MappedModelContextKey, mappedModel)
+				resolvedModel = mappedModel
+				usedMapping = true
+				providers = mappedProviders
 			}
 
 			// If no mapping applied, check for local providers
@@ -174,21 +204,15 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 
 			if len(providers) == 0 {
 				// No providers configured - check if we have a model mapping
-				if fh.modelMapper != nil {
-					if mappedModel := fh.modelMapper.MapModel(normalizedModel); mappedModel != "" {
-						// Mapping found - check if we have a provider for the mapped model
-						mappedProviders := util.GetProviderName(mappedModel)
-						if len(mappedProviders) > 0 {
-							// Mapping found and provider available - rewrite the model in request body
-							bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
-							c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-							// Store mapped model in context for handlers that check it (like gemini bridge)
-							c.Set(MappedModelContextKey, mappedModel)
-							resolvedModel = mappedModel
-							usedMapping = true
-							providers = mappedProviders
-						}
-					}
+				if mappedModel, mappedProviders := resolveMappedModel(); mappedModel != "" {
+					// Mapping found and provider available - rewrite the model in request body
+					bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
+					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+					// Store mapped model in context for handlers that check it (like gemini bridge)
+					c.Set(MappedModelContextKey, mappedModel)
+					resolvedModel = mappedModel
+					usedMapping = true
+					providers = mappedProviders
 				}
 			}
 		}
@@ -222,14 +246,14 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			// Log: Model was mapped to another model
 			log.Debugf("amp model mapping: request %s -> %s", normalizedModel, resolvedModel)
 			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
-			rewriter := NewResponseRewriter(c.Writer, normalizedModel)
+			rewriter := NewResponseRewriter(c.Writer, modelName)
 			c.Writer = rewriter
 			// Filter Anthropic-Beta header only for local handling paths
 			filterAntropicBetaHeader(c)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			handler(c)
 			rewriter.Flush()
-			log.Debugf("amp model mapping: response %s -> %s", resolvedModel, normalizedModel)
+			log.Debugf("amp model mapping: response %s -> %s", resolvedModel, modelName)
 		} else if len(providers) > 0 {
 			// Log: Using local provider (free)
 			logAmpRouting(RouteTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)

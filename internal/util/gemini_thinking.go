@@ -136,6 +136,12 @@ func ApplyGeminiThinkingLevel(body []byte, level string, includeThoughts *bool) 
 			updated = rewritten
 		}
 	}
+	if it := gjson.GetBytes(body, "generationConfig.thinkingConfig.include_thoughts"); it.Exists() {
+		updated, _ = sjson.DeleteBytes(updated, "generationConfig.thinkingConfig.include_thoughts")
+	}
+	if tb := gjson.GetBytes(body, "generationConfig.thinkingConfig.thinkingBudget"); tb.Exists() {
+		updated, _ = sjson.DeleteBytes(updated, "generationConfig.thinkingConfig.thinkingBudget")
+	}
 	return updated
 }
 
@@ -166,6 +172,12 @@ func ApplyGeminiCLIThinkingLevel(body []byte, level string, includeThoughts *boo
 		if err == nil {
 			updated = rewritten
 		}
+	}
+	if it := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); it.Exists() {
+		updated, _ = sjson.DeleteBytes(updated, "request.generationConfig.thinkingConfig.include_thoughts")
+	}
+	if tb := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.thinkingBudget"); tb.Exists() {
+		updated, _ = sjson.DeleteBytes(updated, "request.generationConfig.thinkingConfig.thinkingBudget")
 	}
 	return updated
 }
