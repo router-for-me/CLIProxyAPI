@@ -71,9 +71,7 @@ func convertRequestToIR(from sdktranslator.Format, model string, payload []byte,
 // metadata contains additional context like thinking overrides from request metadata.
 // Note: Antigravity uses the same format as Gemini CLI, so this function works for both.
 func TranslateToGeminiCLI(cfg *config.Config, from sdktranslator.Format, model string, payload []byte, streaming bool, metadata map[string]any) ([]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		to := sdktranslator.FromString("gemini-cli")
 		return sdktranslator.TranslateRequest(from, to, model, payload, streaming), nil
 	}
@@ -189,9 +187,7 @@ func matchesPattern(pattern, name string) bool {
 // Uses new translator if feature flag is enabled in config, otherwise uses old translator.
 // metadata contains additional context like thinking overrides from request metadata.
 func TranslateToGemini(cfg *config.Config, from sdktranslator.Format, model string, payload []byte, streaming bool, metadata map[string]any) ([]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		to := sdktranslator.FromString("gemini")
 		return sdktranslator.TranslateRequest(from, to, model, payload, streaming), nil
 	}
@@ -224,9 +220,7 @@ func TranslateToGemini(cfg *config.Config, from sdktranslator.Format, model stri
 // TranslateGeminiCLIResponseNonStream converts Gemini CLI non-streaming response to target format using new translator.
 // Returns nil if new translator is disabled (caller should use old translator as fallback).
 func TranslateGeminiCLIResponseNonStream(cfg *config.Config, to sdktranslator.Format, geminiResponse []byte, model string) ([]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		return nil, nil // Caller should use old translator
 	}
 
@@ -236,22 +230,7 @@ func TranslateGeminiCLIResponseNonStream(cfg *config.Config, to sdktranslator.Fo
 		return nil, err
 	}
 
-	// Step 2: Convert IR to target format
-	toStr := to.String()
-	messageID := "chatcmpl-" + model // Simple ID generation
-
-	switch toStr {
-	case "openai", "cline":
-		return from_ir.ToOpenAIChatCompletion(messages, usage, model, messageID)
-	case "claude":
-		return from_ir.ToClaudeResponse(messages, usage, model, messageID)
-	case "ollama":
-		// Ollama has two formats: chat and generate. Default to chat for compatibility.
-		return from_ir.ToOllamaChatResponse(messages, usage, model)
-	default:
-		// Unsupported target format, return nil to trigger fallback
-		return nil, nil
-	}
+	return convertIRToNonStreamResponse(to, messages, usage, model, "chatcmpl-"+model)
 }
 
 // GeminiCLIStreamState maintains state for stateful streaming conversions (e.g., Claude tool calls).
@@ -263,6 +242,7 @@ type GeminiCLIStreamState struct {
 	ToolSchemaCtx        *ir.ToolSchemaContext // Schema context for normalizing tool call parameters
 	FinishSent           bool                  // Track if finish event was already sent (prevent duplicates)
 	ToolCallSentHeader   map[int]bool          // Track which tool call indices have sent their header (ID/Name/Type)
+	HasContent           bool                  // Track if any actual content was output (text, reasoning, or tool calls)
 }
 
 // NewAntigravityStreamState creates a new stream state with tool schema context for Antigravity provider.
@@ -292,9 +272,7 @@ func NewAntigravityStreamState(originalRequest []byte) *GeminiCLIStreamState {
 // Returns nil if new translator is disabled (caller should use old translator as fallback).
 // state parameter is optional but recommended for stateful conversions (e.g., Claude tool calls).
 func TranslateGeminiCLIResponseStream(cfg *config.Config, to sdktranslator.Format, geminiChunk []byte, model string, messageID string, state *GeminiCLIStreamState) ([][]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		return nil, nil // Caller should use old translator
 	}
 
@@ -310,116 +288,13 @@ func TranslateGeminiCLIResponseStream(cfg *config.Config, to sdktranslator.Forma
 		return nil, err
 	}
 
-	if len(events) == 0 {
-		return nil, nil
-	}
-
-	// Step 2: Convert IR events to target format chunks
-	toStr := to.String()
-
-	// Initialize as empty slice (not nil) so that even when all events are skipped,
-	// we return non-nil to prevent fallback to old translator
-	chunks := make([][]byte, 0)
-
-	switch toStr {
-	case "openai", "cline":
-		if state == nil {
-			state = &GeminiCLIStreamState{ToolCallSentHeader: make(map[int]bool)}
-		}
-		if state.ToolCallSentHeader == nil {
-			state.ToolCallSentHeader = make(map[int]bool)
-		}
-		for i := range events {
-			event := &events[i]
-
-			// Skip duplicate finish events - Gemini sends finishReason in multiple chunks
-			// but OpenAI clients expect only one finish_reason per stream
-			if event.Type == ir.EventTypeFinish {
-				if state.FinishSent {
-					continue // Skip duplicate finish
-				}
-				state.FinishSent = true
-				// On finish, ensure reasoning_tokens is set if we had reasoning content
-				if state.ReasoningCharsAccum > 0 {
-					if event.Usage == nil {
-						event.Usage = &ir.Usage{}
-					}
-					if event.Usage.ThoughtsTokenCount == 0 {
-						// Estimate: ~3 chars per token (conservative for mixed languages)
-						event.Usage.ThoughtsTokenCount = (state.ReasoningCharsAccum + 2) / 3
-					}
-				}
-			}
-
-			idx := 0
-			if event.Type == ir.EventTypeToolCall {
-				idx = state.ToolCallIndex
-				state.ToolCallIndex++
-			}
-
-			// Set correct tool call index and ensure ID/Name sent only once per tool
-			if event.ToolCall != nil {
-				event.ToolCallIndex = idx
-				if state.ToolCallSentHeader[idx] {
-					event.ToolCall.ID = ""
-					event.ToolCall.Name = ""
-				} else {
-					state.ToolCallSentHeader[idx] = true
-				}
-			}
-
-			// Track reasoning tokens for final usage
-			if event.Type == ir.EventTypeReasoning && event.Reasoning != "" {
-				state.ReasoningCharsAccum += len(event.Reasoning)
-			}
-			chunk, err := from_ir.ToOpenAIChunk(*event, model, messageID, idx)
-			if err != nil {
-				return nil, err
-			}
-			if chunk != nil {
-				chunks = append(chunks, chunk)
-			}
-		}
-	case "claude":
-		if state == nil {
-			state = &GeminiCLIStreamState{ClaudeState: &from_ir.ClaudeStreamState{}}
-		}
-		if state.ClaudeState == nil {
-			state.ClaudeState = &from_ir.ClaudeStreamState{}
-		}
-		for _, event := range events {
-			claudeChunks, err := from_ir.ToClaudeSSE(event, model, messageID, state.ClaudeState)
-			if err != nil {
-				return nil, err
-			}
-			if claudeChunks != nil {
-				chunks = append(chunks, claudeChunks)
-			}
-		}
-	case "ollama":
-		for _, event := range events {
-			chunk, err := from_ir.ToOllamaChatChunk(event, model)
-			if err != nil {
-				return nil, err
-			}
-			if chunk != nil {
-				chunks = append(chunks, chunk)
-			}
-		}
-	default:
-		// Unsupported target format, return nil to trigger fallback
-		return nil, nil
-	}
-
-	return chunks, nil
+	return convertGeminiEventsToChunks(events, to, model, messageID, state)
 }
 
 // TranslateGeminiResponseNonStream converts Gemini (AI Studio) non-streaming response to target format using new translator.
 // Returns nil if new translator is disabled (caller should use old translator as fallback).
 func TranslateGeminiResponseNonStream(cfg *config.Config, to sdktranslator.Format, geminiResponse []byte, model string) ([]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		return nil, nil // Caller should use old translator
 	}
 
@@ -438,8 +313,7 @@ func TranslateGeminiResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 		messageID = meta.ResponseID
 	}
 
-	switch toStr {
-	case "openai", "cline":
+	if toStr == "openai" || toStr == "cline" {
 		// Build OpenAI metadata from Gemini response metadata
 		var openaiMeta *ir.OpenAIMeta
 		if meta != nil {
@@ -453,21 +327,15 @@ func TranslateGeminiResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 			}
 		}
 		return from_ir.ToOpenAIChatCompletionMeta(messages, usage, model, messageID, openaiMeta)
-	case "claude":
-		return from_ir.ToClaudeResponse(messages, usage, model, messageID)
-	case "ollama":
-		return from_ir.ToOllamaChatResponse(messages, usage, model)
-	default:
-		return nil, nil
 	}
+
+	return convertIRToNonStreamResponse(to, messages, usage, model, messageID)
 }
 
 // TranslateGeminiResponseStream converts Gemini (AI Studio) streaming chunk to target format using new translator.
 // Returns nil if new translator is disabled (caller should use old translator as fallback).
 func TranslateGeminiResponseStream(cfg *config.Config, to sdktranslator.Format, geminiChunk []byte, model string, messageID string, state *GeminiCLIStreamState) ([][]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		return nil, nil
 	}
 
@@ -483,40 +351,89 @@ func TranslateGeminiResponseStream(cfg *config.Config, to sdktranslator.Format, 
 		return nil, err
 	}
 
+	return convertGeminiEventsToChunks(events, to, model, messageID, state)
+}
+
+// Shared helper to convert IR events to chunks for Gemini providers (CLI and API)
+func convertGeminiEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.Format, model, messageID string, state *GeminiCLIStreamState) ([][]byte, error) {
 	if len(events) == 0 {
 		return nil, nil
 	}
 
-	// Step 2: Convert IR events to target format chunks
-	toStr := to.String()
 	var chunks [][]byte
+	toStr := to.String()
 
 	switch toStr {
 	case "openai", "cline":
 		if state == nil {
-			state = &GeminiCLIStreamState{}
+			state = &GeminiCLIStreamState{ToolCallSentHeader: make(map[int]bool)}
 		}
+		if state.ToolCallSentHeader == nil {
+			state.ToolCallSentHeader = make(map[int]bool)
+		}
+
 		for i := range events {
 			event := &events[i]
+
+			// Track content
+			switch event.Type {
+			case ir.EventTypeToken:
+				if event.Content != "" {
+					state.HasContent = true
+				}
+			case ir.EventTypeReasoning:
+				if event.Reasoning != "" {
+					state.HasContent = true
+					state.ReasoningCharsAccum += len(event.Reasoning)
+				}
+			case ir.EventTypeToolCall:
+				state.HasContent = true
+			}
+
+			// Handle finish event logic
+			if event.Type == ir.EventTypeFinish {
+				if state.FinishSent {
+					continue // Skip duplicate finish
+				}
+				// CRITICAL: Prevent empty STOP events
+				if !state.HasContent {
+					continue
+				}
+				state.FinishSent = true
+
+				// Override finish reason if we have tools
+				if state.ToolCallIndex > 0 {
+					event.FinishReason = ir.FinishReasonToolCalls
+				}
+
+				// Estimate reasoning tokens if needed
+				if state.ReasoningCharsAccum > 0 {
+					if event.Usage == nil {
+						event.Usage = &ir.Usage{}
+					}
+					if event.Usage.ThoughtsTokenCount == 0 {
+						event.Usage.ThoughtsTokenCount = (state.ReasoningCharsAccum + 2) / 3
+					}
+				}
+			}
+
+			// Handle Tool Call Indexing
 			idx := 0
 			if event.Type == ir.EventTypeToolCall {
 				idx = state.ToolCallIndex
 				state.ToolCallIndex++
 			}
-			// Track reasoning tokens for final usage
-			if event.Type == ir.EventTypeReasoning && event.Reasoning != "" {
-				state.ReasoningCharsAccum += len(event.Reasoning)
-			}
-			// On finish, ensure reasoning_tokens is set if we had reasoning content
-			if event.Type == ir.EventTypeFinish && state.ReasoningCharsAccum > 0 {
-				if event.Usage == nil {
-					event.Usage = &ir.Usage{}
-				}
-				if event.Usage.ThoughtsTokenCount == 0 {
-					// Estimate: ~3 chars per token (conservative for mixed languages)
-					event.Usage.ThoughtsTokenCount = (state.ReasoningCharsAccum + 2) / 3
+
+			if event.ToolCall != nil {
+				event.ToolCallIndex = idx
+				if state.ToolCallSentHeader[idx] {
+					event.ToolCall.ID = ""
+					event.ToolCall.Name = ""
+				} else {
+					state.ToolCallSentHeader[idx] = true
 				}
 			}
+
 			chunk, err := from_ir.ToOpenAIChunk(*event, model, messageID, idx)
 			if err != nil {
 				return nil, err
@@ -525,6 +442,7 @@ func TranslateGeminiResponseStream(cfg *config.Config, to sdktranslator.Format, 
 				chunks = append(chunks, chunk)
 			}
 		}
+
 	case "claude":
 		if state == nil {
 			state = &GeminiCLIStreamState{ClaudeState: from_ir.NewClaudeStreamState()}
@@ -541,6 +459,7 @@ func TranslateGeminiResponseStream(cfg *config.Config, to sdktranslator.Format, 
 				chunks = append(chunks, claudeChunks)
 			}
 		}
+
 	case "ollama":
 		for _, event := range events {
 			chunk, err := from_ir.ToOllamaChatChunk(event, model)
@@ -551,6 +470,7 @@ func TranslateGeminiResponseStream(cfg *config.Config, to sdktranslator.Format, 
 				chunks = append(chunks, chunk)
 			}
 		}
+
 	default:
 		return nil, nil
 	}
@@ -558,12 +478,25 @@ func TranslateGeminiResponseStream(cfg *config.Config, to sdktranslator.Format, 
 	return chunks, nil
 }
 
+// Shared helper to convert IR to non-stream response for common formats
+func convertIRToNonStreamResponse(to sdktranslator.Format, messages []ir.Message, usage *ir.Usage, model, messageID string) ([]byte, error) {
+	switch to.String() {
+	case "openai", "cline":
+		return from_ir.ToOpenAIChatCompletion(messages, usage, model, messageID)
+	case "claude":
+		return from_ir.ToClaudeResponse(messages, usage, model, messageID)
+	case "ollama":
+		// Ollama has two formats: chat and generate. Default to chat for compatibility.
+		return from_ir.ToOllamaChatResponse(messages, usage, model)
+	default:
+		return nil, nil
+	}
+}
+
 // TranslateClaudeResponseNonStream converts Claude non-streaming response to target format using new translator.
 // Returns nil if new translator is disabled (caller should use old translator as fallback).
 func TranslateClaudeResponseNonStream(cfg *config.Config, to sdktranslator.Format, claudeResponse []byte, model string) ([]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		return nil, nil // Caller should use old translator
 	}
 
@@ -574,29 +507,16 @@ func TranslateClaudeResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 	}
 
 	// Step 2: Convert IR to target format
-	toStr := to.String()
-	messageID := "msg-" + model // Simple ID generation
-
-	switch toStr {
-	case "openai", "cline":
-		return from_ir.ToOpenAIChatCompletion(messages, usage, model, messageID)
-	case "ollama":
-		return from_ir.ToOllamaChatResponse(messages, usage, model)
-	case "claude":
-		// Passthrough - already in Claude format
+	if to.String() == "claude" {
 		return claudeResponse, nil
-	default:
-		// Unsupported target format, return nil to trigger fallback
-		return nil, nil
 	}
+	return convertIRToNonStreamResponse(to, messages, usage, model, "msg-"+model)
 }
 
 // TranslateClaudeResponseStream converts Claude streaming chunk to target format using new translator.
 // Returns nil if new translator is disabled or conversion not applicable (caller should use old translator as fallback).
 func TranslateClaudeResponseStream(cfg *config.Config, to sdktranslator.Format, claudeChunk []byte, model string, messageID string, state *from_ir.ClaudeStreamState) ([][]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		return nil, nil // Caller should use old translator
 	}
 
@@ -657,9 +577,7 @@ type OpenAIStreamState struct {
 // Uses new translator if feature flag is enabled in config, otherwise uses old translator.
 // metadata contains additional context like thinking overrides from request metadata.
 func TranslateToClaude(cfg *config.Config, from sdktranslator.Format, model string, payload []byte, streaming bool, metadata map[string]any) ([]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		to := sdktranslator.FromString("claude")
 		return sdktranslator.TranslateRequest(from, to, model, payload, streaming), nil
 	}
@@ -693,9 +611,7 @@ func TranslateToClaude(cfg *config.Config, from sdktranslator.Format, model stri
 // This is used for OpenAI-compatible providers (like Ollama) to ensure reasoning_tokens is properly set.
 // Returns nil if new translator is disabled (caller should use old translator as fallback).
 func TranslateOpenAIResponseStream(cfg *config.Config, to sdktranslator.Format, openaiChunk []byte, model string, messageID string, state *OpenAIStreamState) ([][]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		return nil, nil // Caller should use old translator
 	}
 
@@ -768,9 +684,7 @@ func TranslateOpenAIResponseStream(cfg *config.Config, to sdktranslator.Format, 
 // TranslateOpenAIResponseNonStream converts OpenAI non-streaming response to target format using new translator.
 // Returns nil if new translator is disabled (caller should use old translator as fallback).
 func TranslateOpenAIResponseNonStream(cfg *config.Config, to sdktranslator.Format, openaiResponse []byte, model string) ([]byte, error) {
-	useCanonical := cfg != nil && cfg.UseCanonicalTranslator
-
-	if !useCanonical {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
 		return nil, nil // Caller should use old translator
 	}
 
@@ -781,16 +695,5 @@ func TranslateOpenAIResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 	}
 
 	// Step 2: Convert IR to target format
-	toStr := to.String()
-	messageID := "chatcmpl-" + model // Simple ID generation
-
-	switch toStr {
-	case "openai", "cline":
-		return from_ir.ToOpenAIChatCompletion(messages, usage, model, messageID)
-	case "ollama":
-		return from_ir.ToOllamaChatResponse(messages, usage, model)
-	default:
-		// Unsupported target format, return nil to trigger fallback
-		return nil, nil
-	}
+	return convertIRToNonStreamResponse(to, messages, usage, model, "chatcmpl-"+model)
 }
