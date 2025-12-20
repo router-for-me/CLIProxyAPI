@@ -595,9 +595,17 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			scanner := bufio.NewScanner(resp.Body)
 			scanner.Buffer(nil, streamScannerBuffer)
 			var param any
+			isFirstChunk := true
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				appendAPIResponseChunk(ctx, e.cfg, line)
+
+				// For the first chunk, extract usage metadata before filtering
+				// This is needed for message_start event to report input_tokens
+				var firstChunkPayload []byte
+				if isFirstChunk {
+					firstChunkPayload = jsonPayload(bytes.Clone(line))
+				}
 
 				// Filter usage metadata for all models
 				// Only retain usage statistics in the terminal chunk
@@ -612,7 +620,15 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					reporter.publish(ctx, detail)
 				}
 
-				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bytes.Clone(payload), &param)
+				// For the first chunk, use the unfiltered payload to get usage metadata
+				// This allows the translator to extract input_tokens for message_start
+				chunkToTranslate := payload
+				if isFirstChunk && firstChunkPayload != nil {
+					chunkToTranslate = firstChunkPayload
+					isFirstChunk = false
+				}
+
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bytes.Clone(chunkToTranslate), &param)
 				for i := range chunks {
 					out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 				}
