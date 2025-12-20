@@ -211,6 +211,8 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
 				tool, _ = sjson.Delete(tool, "strict")
 				tool, _ = sjson.Delete(tool, "input_examples")
+				tool, _ = sjson.Delete(tool, "type")
+				tool, _ = sjson.Delete(tool, "cache_control")
 				toolsJSON, _ = sjson.SetRaw(toolsJSON, "0.functionDeclarations.-1", tool)
 				toolDeclCount++
 			}

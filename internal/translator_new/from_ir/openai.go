@@ -652,6 +652,7 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 				"type": t, "sequence_number": nextSeq(),
 				"response": map[string]interface{}{
 					"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": "in_progress",
+					"output": []interface{}{},
 				},
 			})
 			out = append(out, fmt.Sprintf("event: %s\ndata: %s\n\n", t, string(b)))

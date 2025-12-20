@@ -72,43 +72,61 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req 
 	isGemini3Flash := util.IsGemini3FlashModel(req.Model)
 	if util.ModelSupportsThinking(req.Model) || isGemini3 {
 		if req.Thinking != nil {
-			// Gemini 3 uses thinkingLevel instead of thinkingBudget
-			if isGemini3 {
-				tc := map[string]interface{}{
-					// Always include_thoughts=true to get readable thinking text
-					// Without this, Gemini only returns encrypted thoughtSignature
-					"includeThoughts": true,
-				}
-				// Gemini 3 Pro: "low", "high" (default: "high")
-				// Gemini 3 Flash: "minimal", "low", "medium", "high" (default: "high")
+			// Check if thinking is explicitly disabled (IncludeThoughts=false with Budget=0)
+			// This happens when reasoning_effort="none" or thinking.type="disabled"
+			if !req.Thinking.IncludeThoughts && req.Thinking.Budget == 0 && req.Thinking.Effort != "auto" {
+				// Thinking disabled - don't add thinkingConfig at all
+				// Skip to end of thinking config block
+			} else if isGemini3 {
+				// Gemini 3 uses thinkingLevel instead of thinkingBudget
+				// Handle special effort values for Gemini 3
 				switch req.Thinking.Effort {
-				case "minimal":
-					if isGemini3Flash {
-						tc["thinkingLevel"] = "minimal"
-					} else {
-						tc["thinkingLevel"] = "low" // Pro doesn't have minimal, use low
+				case "none":
+					// "none" = disable thinking entirely, don't add thinkingConfig
+					// This is different from other levels - we skip adding the config
+				case "auto":
+					// "auto" = enable thinking with dynamic default (no explicit level)
+					genConfig["thinkingConfig"] = map[string]interface{}{
+						"includeThoughts": true,
 					}
-				case "low":
-					tc["thinkingLevel"] = "low"
-				case "medium":
-					if isGemini3Flash {
-						tc["thinkingLevel"] = "medium"
-					} else {
-						tc["thinkingLevel"] = "low" // Pro doesn't have medium, use low
-					}
-				case "high":
-					tc["thinkingLevel"] = "high"
 				default:
-					// If effort not specified but thinking enabled, use high (API default)
-					tc["thinkingLevel"] = "high"
-				}
-				// If budget is set but not effort, convert budget to level
-				if req.Thinking.Effort == "" && req.Thinking.Budget > 0 {
-					if level, ok := util.ThinkingBudgetToGemini3Level(req.Model, req.Thinking.Budget); ok {
-						tc["thinkingLevel"] = level
+					// Standard thinking levels
+					tc := map[string]interface{}{
+						// Always include_thoughts=true to get readable thinking text
+						// Without this, Gemini only returns encrypted thoughtSignature
+						"includeThoughts": true,
 					}
+					// Gemini 3 Pro: "low", "high" (default: "high")
+					// Gemini 3 Flash: "minimal", "low", "medium", "high" (default: "high")
+					switch req.Thinking.Effort {
+					case "minimal":
+						if isGemini3Flash {
+							tc["thinkingLevel"] = "minimal"
+						} else {
+							tc["thinkingLevel"] = "low" // Pro doesn't have minimal, use low
+						}
+					case "low":
+						tc["thinkingLevel"] = "low"
+					case "medium":
+						if isGemini3Flash {
+							tc["thinkingLevel"] = "medium"
+						} else {
+							tc["thinkingLevel"] = "low" // Pro doesn't have medium, use low
+						}
+					case "high":
+						tc["thinkingLevel"] = "high"
+					default:
+						// If effort not specified but thinking enabled, use high (API default)
+						tc["thinkingLevel"] = "high"
+					}
+					// If budget is set but not effort, convert budget to level
+					if req.Thinking.Effort == "" && req.Thinking.Budget > 0 {
+						if level, ok := util.ThinkingBudgetToGemini3Level(req.Model, req.Thinking.Budget); ok {
+							tc["thinkingLevel"] = level
+						}
+					}
+					genConfig["thinkingConfig"] = tc
 				}
-				genConfig["thinkingConfig"] = tc
 			} else {
 				// Gemini 2.5 and others use thinking_budget
 				budget := req.Thinking.Budget

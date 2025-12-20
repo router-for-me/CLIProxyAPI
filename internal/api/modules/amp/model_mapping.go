@@ -59,7 +59,8 @@ func (m *DefaultModelMapper) MapModel(requestedModel string) string {
 	}
 
 	// Verify target model has available providers
-	providers := util.GetProviderName(targetModel)
+	normalizedTarget, _ := util.NormalizeThinkingModel(targetModel)
+	providers := util.GetProviderName(normalizedTarget)
 	if len(providers) == 0 {
 		log.Debugf("amp model mapping: target model %s has no available providers, skipping mapping", targetModel)
 		return ""

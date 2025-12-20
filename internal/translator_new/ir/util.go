@@ -136,6 +136,7 @@ func CleanJsonSchema(schema map[string]interface{}) map[string]interface{} {
 		"if", "then", "else", "not", "contentEncoding", "contentMediaType",
 		"deprecated", "readOnly", "writeOnly", "examples", "$comment",
 		"$vocabulary", "$anchor", "$dynamicRef", "$dynamicAnchor",
+		"propertyNames", // Gemini doesn't support property name validation
 	}
 	for _, kw := range unsupportedKeywords {
 		delete(schema, kw)

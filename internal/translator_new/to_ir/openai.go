@@ -462,7 +462,10 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: delta.String()})
 		}
 	case "response.reasoning_summary_text.delta":
-		if text := root.Get("text"); text.Exists() && text.String() != "" {
+		// Try "delta" first (correct field per OpenAI spec), fallback to "text" for compatibility
+		if delta := root.Get("delta"); delta.Exists() && delta.String() != "" {
+			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoningSummary, ReasoningSummary: delta.String()})
+		} else if text := root.Get("text"); text.Exists() && text.String() != "" {
 			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoningSummary, ReasoningSummary: text.String()})
 		}
 	case "response.function_call_arguments.delta":

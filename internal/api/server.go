@@ -383,10 +383,11 @@ func (s *Server) setupRoutes() {
 		code := c.Query("code")
 		state := c.Query("state")
 		errStr := c.Query("error")
-		// Persist to a temporary file keyed by state
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
 		if state != "" {
-			file := fmt.Sprintf("%s/.oauth-anthropic-%s.oauth", s.cfg.AuthDir, state)
-			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -396,9 +397,11 @@ func (s *Server) setupRoutes() {
 		code := c.Query("code")
 		state := c.Query("state")
 		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
 		if state != "" {
-			file := fmt.Sprintf("%s/.oauth-codex-%s.oauth", s.cfg.AuthDir, state)
-			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -408,9 +411,11 @@ func (s *Server) setupRoutes() {
 		code := c.Query("code")
 		state := c.Query("state")
 		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
 		if state != "" {
-			file := fmt.Sprintf("%s/.oauth-gemini-%s.oauth", s.cfg.AuthDir, state)
-			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -420,9 +425,11 @@ func (s *Server) setupRoutes() {
 		code := c.Query("code")
 		state := c.Query("state")
 		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
 		if state != "" {
-			file := fmt.Sprintf("%s/.oauth-iflow-%s.oauth", s.cfg.AuthDir, state)
-			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "iflow", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -432,9 +439,11 @@ func (s *Server) setupRoutes() {
 		code := c.Query("code")
 		state := c.Query("state")
 		errStr := c.Query("error")
+		if errStr == "" {
+			errStr = c.Query("error_description")
+		}
 		if state != "" {
-			file := fmt.Sprintf("%s/.oauth-antigravity-%s.oauth", s.cfg.AuthDir, state)
-			_ = os.WriteFile(file, []byte(fmt.Sprintf(`{"code":"%s","state":"%s","error":"%s"}`, code, state, errStr)), 0o600)
+			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -606,6 +615,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/qwen-auth-url", s.mgmt.RequestQwenToken)
 		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
+		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
 }
@@ -863,11 +873,20 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
-	if oldCfg != nil && oldCfg.LoggingToFile != cfg.LoggingToFile {
-		if err := logging.ConfigureLogOutput(cfg.LoggingToFile); err != nil {
+	if oldCfg == nil || oldCfg.LoggingToFile != cfg.LoggingToFile || oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
+		if err := logging.ConfigureLogOutput(cfg.LoggingToFile, cfg.LogsMaxTotalSizeMB); err != nil {
 			log.Errorf("failed to reconfigure log output: %v", err)
 		} else {
-			log.Debugf("logging_to_file updated from %t to %t", oldCfg.LoggingToFile, cfg.LoggingToFile)
+			if oldCfg == nil {
+				log.Debug("log output configuration refreshed")
+			} else {
+				if oldCfg.LoggingToFile != cfg.LoggingToFile {
+					log.Debugf("logging_to_file updated from %t to %t", oldCfg.LoggingToFile, cfg.LoggingToFile)
+				}
+				if oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
+					log.Debugf("logs_max_total_size_mb updated from %d to %d", oldCfg.LogsMaxTotalSizeMB, cfg.LogsMaxTotalSizeMB)
+				}
+			}
 		}
 	}
 
