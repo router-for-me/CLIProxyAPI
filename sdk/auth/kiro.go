@@ -53,20 +53,8 @@ func (a *KiroAuthenticator) RefreshLead() *time.Duration {
 	return &d
 }
 
-// Login performs OAuth login for Kiro with AWS Builder ID.
-func (a *KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("kiro auth: configuration is required")
-	}
-
-	oauth := kiroauth.NewKiroOAuth(cfg)
-
-	// Use AWS Builder ID device code flow
-	tokenData, err := oauth.LoginWithBuilderID(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("login failed: %w", err)
-	}
-
+// createAuthRecord creates an auth record from token data.
+func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, source string) (*coreauth.Auth, error) {
 	// Parse expires_at
 	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
 	if err != nil {
@@ -76,34 +64,63 @@ func (a *KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	// Extract identifier for file naming
 	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
 
+	// Determine label based on auth method
+	label := fmt.Sprintf("kiro-%s", source)
+	if tokenData.AuthMethod == "idc" {
+		label = "kiro-idc"
+	}
+
 	now := time.Now()
-	fileName := fmt.Sprintf("kiro-aws-%s.json", idPart)
+	fileName := fmt.Sprintf("%s-%s.json", label, idPart)
+
+	metadata := map[string]any{
+		"type":          "kiro",
+		"access_token":  tokenData.AccessToken,
+		"refresh_token": tokenData.RefreshToken,
+		"profile_arn":   tokenData.ProfileArn,
+		"expires_at":    tokenData.ExpiresAt,
+		"auth_method":   tokenData.AuthMethod,
+		"provider":      tokenData.Provider,
+		"client_id":     tokenData.ClientID,
+		"client_secret": tokenData.ClientSecret,
+		"email":         tokenData.Email,
+	}
+
+	// Add IDC-specific fields if present
+	if tokenData.StartURL != "" {
+		metadata["start_url"] = tokenData.StartURL
+	}
+	if tokenData.Region != "" {
+		metadata["region"] = tokenData.Region
+	}
+
+	attributes := map[string]string{
+		"profile_arn": tokenData.ProfileArn,
+		"source":      source,
+		"email":       tokenData.Email,
+	}
+
+	// Add IDC-specific attributes if present
+	if tokenData.AuthMethod == "idc" {
+		attributes["source"] = "aws-idc"
+		if tokenData.StartURL != "" {
+			attributes["start_url"] = tokenData.StartURL
+		}
+		if tokenData.Region != "" {
+			attributes["region"] = tokenData.Region
+		}
+	}
 
 	record := &coreauth.Auth{
 		ID:        fileName,
 		Provider:  "kiro",
 		FileName:  fileName,
-		Label:     "kiro-aws",
+		Label:     label,
 		Status:    coreauth.StatusActive,
 		CreatedAt: now,
 		UpdatedAt: now,
-		Metadata: map[string]any{
-			"type":          "kiro",
-			"access_token":  tokenData.AccessToken,
-			"refresh_token": tokenData.RefreshToken,
-			"profile_arn":   tokenData.ProfileArn,
-			"expires_at":    tokenData.ExpiresAt,
-			"auth_method":   tokenData.AuthMethod,
-			"provider":      tokenData.Provider,
-			"client_id":     tokenData.ClientID,
-			"client_secret": tokenData.ClientSecret,
-			"email":         tokenData.Email,
-		},
-		Attributes: map[string]string{
-			"profile_arn": tokenData.ProfileArn,
-			"source":      "aws-builder-id",
-			"email":       tokenData.Email,
-		},
+		Metadata:  metadata,
+		Attributes: attributes,
 		// NextRefreshAfter is aligned with RefreshLead (5min)
 		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
 	}
@@ -115,6 +132,23 @@ func (a *KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	}
 
 	return record, nil
+}
+
+// Login performs OAuth login for Kiro with AWS (Builder ID or IDC).
+// This shows a method selection prompt and handles both flows.
+func (a *KiroAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("kiro auth: configuration is required")
+	}
+
+	// Use the unified method selection flow (Builder ID or IDC)
+	ssoClient := kiroauth.NewSSOOIDCClient(cfg)
+	tokenData, err := ssoClient.LoginWithMethodSelection(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("login failed: %w", err)
+	}
+
+	return a.createAuthRecord(tokenData, "aws")
 }
 
 // LoginWithAuthCode performs OAuth login for Kiro with AWS Builder ID using authorization code flow.
@@ -388,15 +422,23 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 	clientID, _ := auth.Metadata["client_id"].(string)
 	clientSecret, _ := auth.Metadata["client_secret"].(string)
 	authMethod, _ := auth.Metadata["auth_method"].(string)
+	startURL, _ := auth.Metadata["start_url"].(string)
+	region, _ := auth.Metadata["region"].(string)
 
 	var tokenData *kiroauth.KiroTokenData
 	var err error
 
-	// Use SSO OIDC refresh for AWS Builder ID, otherwise use Kiro's OAuth refresh endpoint
-	if clientID != "" && clientSecret != "" && authMethod == "builder-id" {
-		ssoClient := kiroauth.NewSSOOIDCClient(cfg)
+	ssoClient := kiroauth.NewSSOOIDCClient(cfg)
+
+	// Use SSO OIDC refresh for AWS Builder ID or IDC, otherwise use Kiro's OAuth refresh endpoint
+	switch {
+	case clientID != "" && clientSecret != "" && authMethod == "idc" && region != "":
+		// IDC refresh with region-specific endpoint
+		tokenData, err = ssoClient.RefreshTokenWithRegion(ctx, clientID, clientSecret, refreshToken, region, startURL)
+	case clientID != "" && clientSecret != "" && authMethod == "builder-id":
+		// Builder ID refresh with default endpoint
 		tokenData, err = ssoClient.RefreshToken(ctx, clientID, clientSecret, refreshToken)
-	} else {
+	default:
 		// Fallback to Kiro's refresh endpoint (for social auth: Google/GitHub)
 		oauth := kiroauth.NewKiroOAuth(cfg)
 		tokenData, err = oauth.RefreshToken(ctx, refreshToken)

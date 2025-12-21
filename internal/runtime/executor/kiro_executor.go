@@ -43,10 +43,15 @@ const (
 	// Event Stream error type constants
 	ErrStreamFatal     = "fatal"     // Connection/authentication errors, not recoverable
 	ErrStreamMalformed = "malformed" // Format errors, data cannot be parsed
-	// kiroUserAgent matches amq2api format for User-Agent header
+	// kiroUserAgent matches amq2api format for User-Agent header (Amazon Q CLI style)
 	kiroUserAgent = "aws-sdk-rust/1.3.9 os/macos lang/rust/1.87.0"
-	// kiroFullUserAgent is the complete x-amz-user-agent header matching amq2api
+	// kiroFullUserAgent is the complete x-amz-user-agent header matching amq2api (Amazon Q CLI style)
 	kiroFullUserAgent = "aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.88.0 os/macos lang/rust/1.87.0 m/E app/AmazonQ-For-CLI"
+
+	// Kiro IDE style headers (from kiro2api - for IDC auth)
+	kiroIDEUserAgent     = "aws-sdk-js/1.0.18 ua/2.1 os/darwin#25.0.0 lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1"
+	kiroIDEAmzUserAgent  = "aws-sdk-js/1.0.18 KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1"
+	kiroIDEAgentModeSpec = "spec"
 )
 
 // Real-time usage estimation configuration
@@ -101,9 +106,22 @@ var kiroEndpointConfigs = []kiroEndpointConfig{
 
 // getKiroEndpointConfigs returns the list of Kiro API endpoint configurations to try in order.
 // Supports reordering based on "preferred_endpoint" in auth metadata/attributes.
+// For IDC auth method, automatically uses CodeWhisperer endpoint with CLI origin.
 func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	if auth == nil {
 		return kiroEndpointConfigs
+	}
+
+	// For IDC auth, use CodeWhisperer endpoint with AI_EDITOR origin (same as Social auth)
+	// Based on kiro2api analysis: IDC tokens work with CodeWhisperer endpoint using Bearer auth
+	// The difference is only in how tokens are refreshed (OIDC with clientId/clientSecret for IDC)
+	// NOT in how API calls are made - both Social and IDC use the same endpoint/origin
+	if auth.Metadata != nil {
+		authMethod, _ := auth.Metadata["auth_method"].(string)
+		if authMethod == "idc" {
+			log.Debugf("kiro: IDC auth, using CodeWhisperer endpoint")
+			return kiroEndpointConfigs
+		}
 	}
 
 	// Check for preference
@@ -160,6 +178,79 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 type KiroExecutor struct {
 	cfg       *config.Config
 	refreshMu sync.Mutex // Serializes token refresh operations to prevent race conditions
+
+	// cognitoCredsCache caches Cognito credentials per auth ID for IDC authentication
+	// Key: auth.ID, Value: *kiroauth.CognitoCredentials
+	cognitoCredsCache sync.Map
+}
+
+// getCachedCognitoCredentials retrieves cached Cognito credentials if they are still valid.
+func (e *KiroExecutor) getCachedCognitoCredentials(authID string) *kiroauth.CognitoCredentials {
+	if cached, ok := e.cognitoCredsCache.Load(authID); ok {
+		creds := cached.(*kiroauth.CognitoCredentials)
+		if !creds.IsExpired() {
+			return creds
+		}
+		// Credentials expired, remove from cache
+		e.cognitoCredsCache.Delete(authID)
+	}
+	return nil
+}
+
+// cacheCognitoCredentials stores Cognito credentials in the cache.
+func (e *KiroExecutor) cacheCognitoCredentials(authID string, creds *kiroauth.CognitoCredentials) {
+	e.cognitoCredsCache.Store(authID, creds)
+}
+
+// getOrExchangeCognitoCredentials retrieves cached Cognito credentials or exchanges the SSO token for new ones.
+func (e *KiroExecutor) getOrExchangeCognitoCredentials(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) (*kiroauth.CognitoCredentials, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("auth is nil")
+	}
+
+	// Check cache first
+	if creds := e.getCachedCognitoCredentials(auth.ID); creds != nil {
+		log.Debugf("kiro: using cached Cognito credentials for auth %s (expires: %s)", auth.ID, creds.Expiration.Format(time.RFC3339))
+		return creds, nil
+	}
+
+	// Get region from auth metadata
+	region := "us-east-1"
+	if auth.Metadata != nil {
+		if r, ok := auth.Metadata["region"].(string); ok && r != "" {
+			region = r
+		}
+	}
+
+	log.Infof("kiro: exchanging SSO token for Cognito credentials (region: %s)", region)
+
+	// Exchange SSO token for Cognito credentials
+	cognitoClient := kiroauth.NewCognitoIdentityClient(e.cfg)
+	creds, err := cognitoClient.ExchangeSSOTokenForCredentials(ctx, accessToken, region)
+	if err != nil {
+		return nil, fmt.Errorf("failed to exchange SSO token for Cognito credentials: %w", err)
+	}
+
+	// Cache the credentials
+	e.cacheCognitoCredentials(auth.ID, creds)
+	log.Infof("kiro: Cognito credentials obtained and cached (expires: %s)", creds.Expiration.Format(time.RFC3339))
+
+	return creds, nil
+}
+
+// isIDCAuth checks if the auth uses IDC (Identity Center) authentication method.
+func isIDCAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	authMethod, _ := auth.Metadata["auth_method"].(string)
+	return authMethod == "idc"
+}
+
+// signRequestWithSigV4 signs an HTTP request with AWS SigV4 using Cognito credentials.
+func signRequestWithSigV4(req *http.Request, payload []byte, creds *kiroauth.CognitoCredentials, region, service string) error {
+	signer := kiroauth.NewSigV4Signer(creds, region, service)
+	return signer.SignRequest(req, payload)
 }
 
 // buildKiroPayloadForFormat builds the Kiro API payload based on the source format.
@@ -262,14 +353,59 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			}
 
 			httpReq.Header.Set("Content-Type", kiroContentType)
-			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 			httpReq.Header.Set("Accept", kiroAcceptStream)
 			// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
 			httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
-			httpReq.Header.Set("User-Agent", kiroUserAgent)
-			httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+
+			// Use different headers based on auth type
+			// IDC auth uses Kiro IDE style headers (from kiro2api)
+			// Other auth types use Amazon Q CLI style headers
+			if isIDCAuth(auth) {
+				httpReq.Header.Set("User-Agent", kiroIDEUserAgent)
+				httpReq.Header.Set("X-Amz-User-Agent", kiroIDEAmzUserAgent)
+				httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
+				log.Debugf("kiro: using Kiro IDE headers for IDC auth")
+			} else {
+				httpReq.Header.Set("User-Agent", kiroUserAgent)
+				httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+			}
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
+
+			// Choose auth method: SigV4 for IDC, Bearer token for others
+			// NOTE: Cognito credential exchange disabled for now - testing Bearer token first
+			if false && isIDCAuth(auth) {
+				// IDC auth requires SigV4 signing with Cognito-exchanged credentials
+				cognitoCreds, err := e.getOrExchangeCognitoCredentials(ctx, auth, accessToken)
+				if err != nil {
+					log.Warnf("kiro: failed to get Cognito credentials for IDC auth: %v", err)
+					return resp, fmt.Errorf("IDC auth requires Cognito credentials: %w", err)
+				}
+
+				// Get region from auth metadata
+				region := "us-east-1"
+				if auth.Metadata != nil {
+					if r, ok := auth.Metadata["region"].(string); ok && r != "" {
+						region = r
+					}
+				}
+
+				// Determine service from URL
+				service := "codewhisperer"
+				if strings.Contains(url, "q.us-east-1.amazonaws.com") {
+					service = "qdeveloper"
+				}
+
+				// Sign the request with SigV4
+				if err := signRequestWithSigV4(httpReq, kiroPayload, cognitoCreds, region, service); err != nil {
+					log.Warnf("kiro: failed to sign request with SigV4: %v", err)
+					return resp, fmt.Errorf("SigV4 signing failed: %w", err)
+				}
+				log.Debugf("kiro: request signed with SigV4 for IDC auth (service: %s, region: %s)", service, region)
+			} else {
+				// Standard Bearer token authentication for Builder ID, social auth, etc.
+				httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+			}
 
 			var attrs map[string]string
 			if auth != nil {
@@ -568,14 +704,59 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			}
 
 			httpReq.Header.Set("Content-Type", kiroContentType)
-			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 			httpReq.Header.Set("Accept", kiroAcceptStream)
 			// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
 			httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
-			httpReq.Header.Set("User-Agent", kiroUserAgent)
-			httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+
+			// Use different headers based on auth type
+			// IDC auth uses Kiro IDE style headers (from kiro2api)
+			// Other auth types use Amazon Q CLI style headers
+			if isIDCAuth(auth) {
+				httpReq.Header.Set("User-Agent", kiroIDEUserAgent)
+				httpReq.Header.Set("X-Amz-User-Agent", kiroIDEAmzUserAgent)
+				httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
+				log.Debugf("kiro: using Kiro IDE headers for IDC auth")
+			} else {
+				httpReq.Header.Set("User-Agent", kiroUserAgent)
+				httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+			}
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
+
+			// Choose auth method: SigV4 for IDC, Bearer token for others
+			// NOTE: Cognito credential exchange disabled for now - testing Bearer token first
+			if false && isIDCAuth(auth) {
+				// IDC auth requires SigV4 signing with Cognito-exchanged credentials
+				cognitoCreds, err := e.getOrExchangeCognitoCredentials(ctx, auth, accessToken)
+				if err != nil {
+					log.Warnf("kiro: failed to get Cognito credentials for IDC auth: %v", err)
+					return nil, fmt.Errorf("IDC auth requires Cognito credentials: %w", err)
+				}
+
+				// Get region from auth metadata
+				region := "us-east-1"
+				if auth.Metadata != nil {
+					if r, ok := auth.Metadata["region"].(string); ok && r != "" {
+						region = r
+					}
+				}
+
+				// Determine service from URL
+				service := "codewhisperer"
+				if strings.Contains(url, "q.us-east-1.amazonaws.com") {
+					service = "qdeveloper"
+				}
+
+				// Sign the request with SigV4
+				if err := signRequestWithSigV4(httpReq, kiroPayload, cognitoCreds, region, service); err != nil {
+					log.Warnf("kiro: failed to sign request with SigV4: %v", err)
+					return nil, fmt.Errorf("SigV4 signing failed: %w", err)
+				}
+				log.Debugf("kiro: stream request signed with SigV4 for IDC auth (service: %s, region: %s)", service, region)
+			} else {
+				// Standard Bearer token authentication for Builder ID, social auth, etc.
+				httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+			}
 
 			var attrs map[string]string
 			if auth != nil {
@@ -1001,12 +1182,12 @@ func getEffectiveProfileArn(auth *cliproxyauth.Auth, profileArn string) string {
 // This consolidates the auth_method check that was previously done separately.
 func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn string) string {
 	if auth != nil && auth.Metadata != nil {
-		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && authMethod == "builder-id" {
-			// builder-id auth doesn't need profileArn
+		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && (authMethod == "builder-id" || authMethod == "idc") {
+			// builder-id and idc auth don't need profileArn
 			return ""
 		}
 	}
-	// For non-builder-id auth (social auth), profileArn is required
+	// For non-builder-id/idc auth (social auth), profileArn is required
 	if profileArn == "" {
 		log.Warnf("kiro: profile ARN not found in auth, API calls may fail")
 	}
