@@ -97,6 +97,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	hasContents := false
 
 	messagesResult := gjson.GetBytes(rawJSON, "messages")
+	// Also support OpenAI Responses format "input" field
+	if !messagesResult.IsArray() {
+		messagesResult = gjson.GetBytes(rawJSON, "input")
+	}
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
 		numMessages := len(messageResults)
@@ -174,6 +178,14 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
+						prompt := contentResult.Get("text").String()
+						partJSON := `{}`
+						if prompt != "" {
+							partJSON, _ = sjson.Set(partJSON, "text", prompt)
+						}
+						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
+					} else if contentTypeResult.Type == gjson.String && (contentTypeResult.String() == "output_text" || contentTypeResult.String() == "input_text") {
+						// Handle OpenAI Responses format text types
 						prompt := contentResult.Get("text").String()
 						partJSON := `{}`
 						if prompt != "" {
