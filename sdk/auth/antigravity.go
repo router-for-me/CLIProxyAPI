@@ -99,11 +99,54 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	fmt.Println("Waiting for antigravity authentication callback...")
 
 	var cbRes callbackResult
-	select {
-	case res := <-cbChan:
-		cbRes = res
-	case <-time.After(5 * time.Minute):
-		return nil, fmt.Errorf("antigravity: authentication timed out")
+	timeoutTimer := time.NewTimer(5 * time.Minute)
+	defer timeoutTimer.Stop()
+
+	var manualPromptTimer *time.Timer
+	var manualPromptC <-chan time.Time
+	if opts.Prompt != nil {
+		manualPromptTimer = time.NewTimer(15 * time.Second)
+		manualPromptC = manualPromptTimer.C
+		defer manualPromptTimer.Stop()
+	}
+
+waitForCallback:
+	for {
+		select {
+		case res := <-cbChan:
+			cbRes = res
+			break waitForCallback
+		case <-manualPromptC:
+			manualPromptC = nil
+			if manualPromptTimer != nil {
+				manualPromptTimer.Stop()
+			}
+			select {
+			case res := <-cbChan:
+				cbRes = res
+				break waitForCallback
+			default:
+			}
+			input, errPrompt := opts.Prompt("Paste the antigravity callback URL (or press Enter to keep waiting): ")
+			if errPrompt != nil {
+				return nil, errPrompt
+			}
+			parsed, errParse := misc.ParseOAuthCallback(input)
+			if errParse != nil {
+				return nil, errParse
+			}
+			if parsed == nil {
+				continue
+			}
+			cbRes = callbackResult{
+				Code:  parsed.Code,
+				State: parsed.State,
+				Error: parsed.Error,
+			}
+			break waitForCallback
+		case <-timeoutTimer.C:
+			return nil, fmt.Errorf("antigravity: authentication timed out")
+		}
 	}
 
 	if cbRes.Error != "" {

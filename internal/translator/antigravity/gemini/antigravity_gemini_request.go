@@ -98,16 +98,34 @@ func ConvertGeminiRequestToAntigravity(_ string, inputRawJSON []byte, _ bool) []
 		}
 	}
 
-	gjson.GetBytes(rawJSON, "request.contents").ForEach(func(key, content gjson.Result) bool {
+	// Gemini-specific handling: add skip_thought_signature_validator to functionCall parts
+	// and remove thinking blocks entirely (Gemini doesn't need to preserve them)
+	const skipSentinel = "skip_thought_signature_validator"
+
+	gjson.GetBytes(rawJSON, "request.contents").ForEach(func(contentIdx, content gjson.Result) bool {
 		if content.Get("role").String() == "model" {
-			content.Get("parts").ForEach(func(partKey, part gjson.Result) bool {
+			// First pass: collect indices of thinking parts to remove
+			var thinkingIndicesToRemove []int64
+			content.Get("parts").ForEach(func(partIdx, part gjson.Result) bool {
+				// Mark thinking blocks for removal
+				if part.Get("thought").Bool() {
+					thinkingIndicesToRemove = append(thinkingIndicesToRemove, partIdx.Int())
+				}
+				// Add skip sentinel to functionCall parts
 				if part.Get("functionCall").Exists() {
-					rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()), "skip_thought_signature_validator")
-				} else if part.Get("thoughtSignature").Exists() {
-					rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()), "skip_thought_signature_validator")
+					existingSig := part.Get("thoughtSignature").String()
+					if existingSig == "" || len(existingSig) < 50 {
+						rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), partIdx.Int()), skipSentinel)
+					}
 				}
 				return true
 			})
+
+			// Remove thinking blocks in reverse order to preserve indices
+			for i := len(thinkingIndicesToRemove) - 1; i >= 0; i-- {
+				idx := thinkingIndicesToRemove[i]
+				rawJSON, _ = sjson.DeleteBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d", contentIdx.Int(), idx))
+			}
 		}
 		return true
 	})

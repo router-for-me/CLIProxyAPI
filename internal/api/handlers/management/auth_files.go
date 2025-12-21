@@ -201,6 +201,19 @@ func stopCallbackForwarder(port int) {
 	stopForwarderInstance(port, forwarder)
 }
 
+func stopCallbackForwarderInstance(port int, forwarder *callbackForwarder) {
+	if forwarder == nil {
+		return
+	}
+	callbackForwardersMu.Lock()
+	if current := callbackForwarders[port]; current == forwarder {
+		delete(callbackForwarders, port)
+	}
+	callbackForwardersMu.Unlock()
+
+	stopForwarderInstance(port, forwarder)
+}
+
 func stopForwarderInstance(port int, forwarder *callbackForwarder) {
 	if forwarder == nil || forwarder.server == nil {
 		return
@@ -789,6 +802,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	RegisterOAuthSession(state, "anthropic")
 
 	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/anthropic/callback")
 		if errTarget != nil {
@@ -796,7 +810,8 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 			return
 		}
-		if _, errStart := startCallbackForwarder(anthropicCallbackPort, "anthropic", targetURL); errStart != nil {
+		var errStart error
+		if forwarder, errStart = startCallbackForwarder(anthropicCallbackPort, "anthropic", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start anthropic callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -805,7 +820,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarder(anthropicCallbackPort)
+			defer stopCallbackForwarderInstance(anthropicCallbackPort, forwarder)
 		}
 
 		// Helper: wait for callback file
@@ -813,6 +828,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		waitForFile := func(path string, timeout time.Duration) (map[string]string, error) {
 			deadline := time.Now().Add(timeout)
 			for {
+				if !IsOAuthSessionPending(state, "anthropic") {
+					return nil, errOAuthSessionNotPending
+				}
 				if time.Now().After(deadline) {
 					SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
 					return nil, fmt.Errorf("timeout waiting for OAuth callback")
@@ -832,6 +850,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		// Wait up to 5 minutes
 		resultMap, errWait := waitForFile(waitFile, 5*time.Minute)
 		if errWait != nil {
+			if errors.Is(errWait, errOAuthSessionNotPending) {
+				return
+			}
 			authErr := claude.NewAuthenticationError(claude.ErrCallbackTimeout, errWait)
 			log.Error(claude.GetUserFriendlyMessage(authErr))
 			return
@@ -937,6 +958,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 		fmt.Println("You can now use Claude services through this CLI")
 		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("anthropic")
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
@@ -972,6 +994,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	RegisterOAuthSession(state, "gemini")
 
 	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/google/callback")
 		if errTarget != nil {
@@ -979,7 +1002,8 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 			return
 		}
-		if _, errStart := startCallbackForwarder(geminiCallbackPort, "gemini", targetURL); errStart != nil {
+		var errStart error
+		if forwarder, errStart = startCallbackForwarder(geminiCallbackPort, "gemini", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start gemini callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -988,7 +1012,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarder(geminiCallbackPort)
+			defer stopCallbackForwarderInstance(geminiCallbackPort, forwarder)
 		}
 
 		// Wait for callback file written by server route
@@ -997,6 +1021,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
 		for {
+			if !IsOAuthSessionPending(state, "gemini") {
+				return
+			}
 			if time.Now().After(deadline) {
 				log.Error("oauth flow timed out")
 				SetOAuthSessionError(state, "OAuth flow timed out")
@@ -1097,7 +1124,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 		// Initialize authenticated HTTP client via GeminiAuth to honor proxy settings
 		gemAuth := geminiAuth.NewGeminiAuth()
-		gemClient, errGetClient := gemAuth.GetAuthenticatedClient(ctx, &ts, h.cfg, true)
+		gemClient, errGetClient := gemAuth.GetAuthenticatedClient(ctx, &ts, h.cfg, &geminiAuth.WebLoginOptions{
+			NoBrowser: true,
+		})
 		if errGetClient != nil {
 			log.Errorf("failed to get authenticated client: %v", errGetClient)
 			SetOAuthSessionError(state, "Failed to get authenticated client")
@@ -1170,6 +1199,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		}
 
 		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("gemini")
 		fmt.Printf("You can now use Gemini CLI services through this CLI; token saved to %s\n", savedPath)
 	}()
 
@@ -1211,6 +1241,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	RegisterOAuthSession(state, "codex")
 
 	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
 		if errTarget != nil {
@@ -1218,7 +1249,8 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 			return
 		}
-		if _, errStart := startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
+		var errStart error
+		if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start codex callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -1227,7 +1259,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarder(codexCallbackPort)
+			defer stopCallbackForwarderInstance(codexCallbackPort, forwarder)
 		}
 
 		// Wait for callback file
@@ -1235,6 +1267,9 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		deadline := time.Now().Add(5 * time.Minute)
 		var code string
 		for {
+			if !IsOAuthSessionPending(state, "codex") {
+				return
+			}
 			if time.Now().After(deadline) {
 				authErr := codex.NewAuthenticationError(codex.ErrCallbackTimeout, fmt.Errorf("timeout waiting for OAuth callback"))
 				log.Error(codex.GetUserFriendlyMessage(authErr))
@@ -1350,6 +1385,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 		fmt.Println("You can now use Codex services through this CLI")
 		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("codex")
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
@@ -1395,6 +1431,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	RegisterOAuthSession(state, "antigravity")
 
 	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/antigravity/callback")
 		if errTarget != nil {
@@ -1402,7 +1439,8 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 			return
 		}
-		if _, errStart := startCallbackForwarder(antigravityCallbackPort, "antigravity", targetURL); errStart != nil {
+		var errStart error
+		if forwarder, errStart = startCallbackForwarder(antigravityCallbackPort, "antigravity", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start antigravity callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -1411,13 +1449,16 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarder(antigravityCallbackPort)
+			defer stopCallbackForwarderInstance(antigravityCallbackPort, forwarder)
 		}
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
 		for {
+			if !IsOAuthSessionPending(state, "antigravity") {
+				return
+			}
 			if time.Now().After(deadline) {
 				log.Error("oauth flow timed out")
 				SetOAuthSessionError(state, "OAuth flow timed out")
@@ -1580,6 +1621,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		}
 
 		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("antigravity")
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		if projectID != "" {
 			fmt.Printf("Using GCP project: %s\n", projectID)
@@ -1657,6 +1699,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	RegisterOAuthSession(state, "iflow")
 
 	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/iflow/callback")
 		if errTarget != nil {
@@ -1664,7 +1707,8 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "callback server unavailable"})
 			return
 		}
-		if _, errStart := startCallbackForwarder(iflowauth.CallbackPort, "iflow", targetURL); errStart != nil {
+		var errStart error
+		if forwarder, errStart = startCallbackForwarder(iflowauth.CallbackPort, "iflow", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start iflow callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to start callback server"})
 			return
@@ -1673,7 +1717,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarder(iflowauth.CallbackPort)
+			defer stopCallbackForwarderInstance(iflowauth.CallbackPort, forwarder)
 		}
 		fmt.Println("Waiting for authentication...")
 
@@ -1681,6 +1725,9 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		deadline := time.Now().Add(5 * time.Minute)
 		var resultMap map[string]string
 		for {
+			if !IsOAuthSessionPending(state, "iflow") {
+				return
+			}
 			if time.Now().After(deadline) {
 				SetOAuthSessionError(state, "Authentication failed")
 				fmt.Println("Authentication failed: timeout waiting for callback")
@@ -1747,6 +1794,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		}
 		fmt.Println("You can now use iFlow services through this CLI")
 		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("iflow")
 	}()
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})

@@ -20,13 +20,7 @@ func DoIFlowLogin(cfg *config.Config, options *LoginOptions) {
 
 	promptFn := options.Prompt
 	if promptFn == nil {
-		promptFn = func(prompt string) (string, error) {
-			fmt.Println()
-			fmt.Println(prompt)
-			var value string
-			_, err := fmt.Scanln(&value)
-			return value, err
-		}
+		promptFn = defaultProjectPrompt()
 	}
 
 	authOpts := &sdkAuth.LoginOptions{

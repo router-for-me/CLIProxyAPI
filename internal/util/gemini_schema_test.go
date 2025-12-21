@@ -5,9 +5,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
-func TestCleanJSONSchemaForGemini_ConstToEnum(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_ConstToEnum(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -28,11 +30,11 @@ func TestCleanJSONSchemaForGemini_ConstToEnum(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_TypeFlattening_Nullable(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_TypeFlattening_Nullable(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -60,11 +62,11 @@ func TestCleanJSONSchemaForGemini_TypeFlattening_Nullable(t *testing.T) {
 		"required": ["other"]
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_ConstraintsToDescription(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_ConstraintsToDescription(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -81,7 +83,7 @@ func TestCleanJSONSchemaForGemini_ConstraintsToDescription(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 
 	// minItems should be REMOVED and moved to description
 	if strings.Contains(result, `"minItems"`) {
@@ -100,7 +102,7 @@ func TestCleanJSONSchemaForGemini_ConstraintsToDescription(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForGemini_AnyOfFlattening_SmartSelection(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_SmartSelection(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -131,11 +133,11 @@ func TestCleanJSONSchemaForGemini_AnyOfFlattening_SmartSelection(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_OneOfFlattening(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_OneOfFlattening(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -158,11 +160,11 @@ func TestCleanJSONSchemaForGemini_OneOfFlattening(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_AllOfMerging(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_AllOfMerging(t *testing.T) {
 	input := `{
 		"type": "object",
 		"allOf": [
@@ -190,11 +192,11 @@ func TestCleanJSONSchemaForGemini_AllOfMerging(t *testing.T) {
 		"required": ["a", "b"]
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_RefHandling(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_RefHandling(t *testing.T) {
 	input := `{
 		"definitions": {
 			"User": {
@@ -210,21 +212,29 @@ func TestCleanJSONSchemaForGemini_RefHandling(t *testing.T) {
 		}
 	}`
 
+	// After $ref is converted to placeholder object, empty schema placeholder is also added
 	expected := `{
 		"type": "object",
 		"properties": {
 			"customer": {
 				"type": "object",
-				"description": "See: User"
+				"description": "See: User",
+				"properties": {
+					"reason": {
+						"type": "string",
+						"description": "Brief explanation of why you are calling this tool"
+					}
+				},
+				"required": ["reason"]
 			}
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_RefHandling_DescriptionEscaping(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_RefHandling_DescriptionEscaping(t *testing.T) {
 	input := `{
 		"definitions": {
 			"User": {
@@ -243,21 +253,29 @@ func TestCleanJSONSchemaForGemini_RefHandling_DescriptionEscaping(t *testing.T) 
 		}
 	}`
 
+	// After $ref is converted, empty schema placeholder is also added
 	expected := `{
 		"type": "object",
 		"properties": {
 			"customer": {
 				"type": "object",
-				"description": "He said \"hi\"\\nsecond line (See: User)"
+				"description": "He said \"hi\"\\nsecond line (See: User)",
+				"properties": {
+					"reason": {
+						"type": "string",
+						"description": "Brief explanation of why you are calling this tool"
+					}
+				},
+				"required": ["reason"]
 			}
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_CyclicRefDefaults(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_CyclicRefDefaults(t *testing.T) {
 	input := `{
 		"definitions": {
 			"Node": {
@@ -270,7 +288,7 @@ func TestCleanJSONSchemaForGemini_CyclicRefDefaults(t *testing.T) {
 		"$ref": "#/definitions/Node"
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 
 	var resMap map[string]interface{}
 	json.Unmarshal([]byte(result), &resMap)
@@ -285,7 +303,7 @@ func TestCleanJSONSchemaForGemini_CyclicRefDefaults(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForGemini_RequiredCleanup(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_RequiredCleanup(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -304,11 +322,11 @@ func TestCleanJSONSchemaForGemini_RequiredCleanup(t *testing.T) {
 		"required": ["a", "b"]
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_AllOfMerging_DotKeys(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_AllOfMerging_DotKeys(t *testing.T) {
 	input := `{
 		"type": "object",
 		"allOf": [
@@ -336,11 +354,11 @@ func TestCleanJSONSchemaForGemini_AllOfMerging_DotKeys(t *testing.T) {
 		"required": ["my.param", "b"]
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_PropertyNameCollision(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_PropertyNameCollision(t *testing.T) {
 	// A tool has an argument named "pattern" - should NOT be treated as a constraint
 	input := `{
 		"type": "object",
@@ -364,7 +382,7 @@ func TestCleanJSONSchemaForGemini_PropertyNameCollision(t *testing.T) {
 		"required": ["pattern"]
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 
 	var resMap map[string]interface{}
@@ -375,7 +393,7 @@ func TestCleanJSONSchemaForGemini_PropertyNameCollision(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForGemini_DotKeys(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_DotKeys(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -389,7 +407,7 @@ func TestCleanJSONSchemaForGemini_DotKeys(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 
 	var resMap map[string]interface{}
 	if err := json.Unmarshal([]byte(result), &resMap); err != nil {
@@ -414,7 +432,7 @@ func TestCleanJSONSchemaForGemini_DotKeys(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForGemini_AnyOfAlternativeHints(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_AnyOfAlternativeHints(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -428,7 +446,7 @@ func TestCleanJSONSchemaForGemini_AnyOfAlternativeHints(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 
 	if !strings.Contains(result, "Accepts:") {
 		t.Errorf("Expected alternative types hint, got: %s", result)
@@ -438,7 +456,7 @@ func TestCleanJSONSchemaForGemini_AnyOfAlternativeHints(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForGemini_NullableHint(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_NullableHint(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -450,7 +468,7 @@ func TestCleanJSONSchemaForGemini_NullableHint(t *testing.T) {
 		"required": ["name"]
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 
 	if !strings.Contains(result, "(nullable)") {
 		t.Errorf("Expected nullable hint, got: %s", result)
@@ -460,7 +478,7 @@ func TestCleanJSONSchemaForGemini_NullableHint(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForGemini_TypeFlattening_Nullable_DotKey(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_TypeFlattening_Nullable_DotKey(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -488,11 +506,11 @@ func TestCleanJSONSchemaForGemini_TypeFlattening_Nullable_DotKey(t *testing.T) {
 		"required": ["other"]
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_EnumHint(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_EnumHint(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -504,7 +522,7 @@ func TestCleanJSONSchemaForGemini_EnumHint(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 
 	if !strings.Contains(result, "Allowed:") {
 		t.Errorf("Expected enum values hint, got: %s", result)
@@ -514,7 +532,7 @@ func TestCleanJSONSchemaForGemini_EnumHint(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForGemini_AdditionalPropertiesHint(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_AdditionalPropertiesHint(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -523,14 +541,14 @@ func TestCleanJSONSchemaForGemini_AdditionalPropertiesHint(t *testing.T) {
 		"additionalProperties": false
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 
 	if !strings.Contains(result, "No extra properties allowed") {
 		t.Errorf("Expected additionalProperties hint, got: %s", result)
 	}
 }
 
-func TestCleanJSONSchemaForGemini_AnyOfFlattening_PreservesDescription(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_PreservesDescription(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -554,11 +572,11 @@ func TestCleanJSONSchemaForGemini_AnyOfFlattening_PreservesDescription(t *testin
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 }
 
-func TestCleanJSONSchemaForGemini_SingleEnumNoHint(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_SingleEnumNoHint(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -569,14 +587,14 @@ func TestCleanJSONSchemaForGemini_SingleEnumNoHint(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 
 	if strings.Contains(result, "Allowed:") {
 		t.Errorf("Single value enum should not add Allowed hint, got: %s", result)
 	}
 }
 
-func TestCleanJSONSchemaForGemini_MultipleNonNullTypes(t *testing.T) {
+func TestCleanJSONSchemaForAntigravity_MultipleNonNullTypes(t *testing.T) {
 	input := `{
 		"type": "object",
 		"properties": {
@@ -586,7 +604,7 @@ func TestCleanJSONSchemaForGemini_MultipleNonNullTypes(t *testing.T) {
 		}
 	}`
 
-	result := CleanJSONSchemaForGemini(input)
+	result := CleanJSONSchemaForAntigravity(input)
 
 	if !strings.Contains(result, "Accepts:") {
 		t.Errorf("Expected multiple types hint, got: %s", result)
@@ -674,5 +692,192 @@ func compareJSON(t *testing.T, expectedJSON, actualJSON string) {
 		expBytes, _ := json.MarshalIndent(expMap, "", "  ")
 		actBytes, _ := json.MarshalIndent(actMap, "", "  ")
 		t.Errorf("JSON mismatch:\nExpected:\n%s\n\nActual:\n%s", string(expBytes), string(actBytes))
+	}
+}
+
+// ============================================================================
+// Empty Schema Placeholder Tests
+// ============================================================================
+
+func TestCleanJSONSchemaForAntigravity_EmptySchemaPlaceholder(t *testing.T) {
+	// Empty object schema with no properties should get a placeholder
+	input := `{
+		"type": "object"
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// Should have placeholder property added
+	if !strings.Contains(result, `"reason"`) {
+		t.Errorf("Empty schema should have 'reason' placeholder property, got: %s", result)
+	}
+	if !strings.Contains(result, `"required"`) {
+		t.Errorf("Empty schema should have 'required' with 'reason', got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_EmptyPropertiesPlaceholder(t *testing.T) {
+	// Object with empty properties object
+	input := `{
+		"type": "object",
+		"properties": {}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// Should have placeholder property added
+	if !strings.Contains(result, `"reason"`) {
+		t.Errorf("Empty properties should have 'reason' placeholder, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_NonEmptySchemaUnchanged(t *testing.T) {
+	// Schema with properties should NOT get placeholder
+	input := `{
+		"type": "object",
+		"properties": {
+			"name": {"type": "string"}
+		},
+		"required": ["name"]
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// Should NOT have placeholder property
+	if strings.Contains(result, `"reason"`) {
+		t.Errorf("Non-empty schema should NOT have 'reason' placeholder, got: %s", result)
+	}
+	// Original properties should be preserved
+	if !strings.Contains(result, `"name"`) {
+		t.Errorf("Original property 'name' should be preserved, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_NestedEmptySchema(t *testing.T) {
+	// Nested empty object in items should also get placeholder
+	input := `{
+		"type": "object",
+		"properties": {
+			"items": {
+				"type": "array",
+				"items": {
+					"type": "object"
+				}
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// Nested empty object should also get placeholder
+	// Check that the nested object has a reason property
+	parsed := gjson.Parse(result)
+	nestedProps := parsed.Get("properties.items.items.properties")
+	if !nestedProps.Exists() || !nestedProps.Get("reason").Exists() {
+		t.Errorf("Nested empty object should have 'reason' placeholder, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_EmptySchemaWithDescription(t *testing.T) {
+	// Empty schema with description should preserve description and add placeholder
+	input := `{
+		"type": "object",
+		"description": "An empty object"
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// Should have both description and placeholder
+	if !strings.Contains(result, `"An empty object"`) {
+		t.Errorf("Description should be preserved, got: %s", result)
+	}
+	if !strings.Contains(result, `"reason"`) {
+		t.Errorf("Empty schema should have 'reason' placeholder, got: %s", result)
+	}
+}
+
+// ============================================================================
+// Format field handling (ad-hoc patch removal)
+// ============================================================================
+
+func TestCleanJSONSchemaForAntigravity_FormatFieldRemoval(t *testing.T) {
+	// format:"uri" should be removed and added as hint
+	input := `{
+		"type": "object",
+		"properties": {
+			"url": {
+				"type": "string",
+				"format": "uri",
+				"description": "A URL"
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// format should be removed
+	if strings.Contains(result, `"format"`) {
+		t.Errorf("format field should be removed, got: %s", result)
+	}
+	// hint should be added to description
+	if !strings.Contains(result, "format: uri") {
+		t.Errorf("format hint should be added to description, got: %s", result)
+	}
+	// original description should be preserved
+	if !strings.Contains(result, "A URL") {
+		t.Errorf("Original description should be preserved, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_FormatFieldNoDescription(t *testing.T) {
+	// format without description should create description with hint
+	input := `{
+		"type": "object",
+		"properties": {
+			"email": {
+				"type": "string",
+				"format": "email"
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// format should be removed
+	if strings.Contains(result, `"format"`) {
+		t.Errorf("format field should be removed, got: %s", result)
+	}
+	// hint should be added
+	if !strings.Contains(result, "format: email") {
+		t.Errorf("format hint should be added, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_MultipleFormats(t *testing.T) {
+	// Multiple format fields should all be handled
+	input := `{
+		"type": "object",
+		"properties": {
+			"url": {"type": "string", "format": "uri"},
+			"email": {"type": "string", "format": "email"},
+			"date": {"type": "string", "format": "date-time"}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// All format fields should be removed
+	if strings.Contains(result, `"format"`) {
+		t.Errorf("All format fields should be removed, got: %s", result)
+	}
+	// All hints should be added
+	if !strings.Contains(result, "format: uri") {
+		t.Errorf("uri format hint should be added, got: %s", result)
+	}
+	if !strings.Contains(result, "format: email") {
+		t.Errorf("email format hint should be added, got: %s", result)
+	}
+	if !strings.Contains(result, "format: date-time") {
+		t.Errorf("date-time format hint should be added, got: %s", result)
 	}
 }
