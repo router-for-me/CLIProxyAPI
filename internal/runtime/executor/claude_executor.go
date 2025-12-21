@@ -662,7 +662,19 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 }
 
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string) {
-	r.Header.Set("x-api-key", apiKey)
+	// Use x-api-key for static API keys, and Authorization: Bearer for OAuth access tokens.
+	isStaticAPIKey := false
+	if auth != nil && auth.Attributes != nil {
+		if auth.Attributes["api_key"] != "" {
+			isStaticAPIKey = true
+		}
+	}
+
+	if isStaticAPIKey {
+		r.Header.Set("x-api-key", apiKey)
+	} else if apiKey != "" {
+		r.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	r.Header.Set("Content-Type", "application/json")
 
 	var ginHeaders http.Header
