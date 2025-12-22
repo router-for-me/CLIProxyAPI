@@ -128,7 +128,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	}
 
 	// Emit message_start on the very first chunk, regardless of whether it has a role field.
-	// Some providers (like Copilot) may send tool_calls in the first chunk without a role field.
+	// Some providers may send tool_calls in the first chunk without a role field.
 	if delta := root.Get("choices.0.delta"); delta.Exists() {
 		if !param.MessageStarted {
 			// Send message_start event
