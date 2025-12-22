@@ -71,6 +71,10 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
 
+# Routing strategy for selecting credentials when multiple match.
+routing:
+  strategy: "round-robin" # round-robin (default), fill-first
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 

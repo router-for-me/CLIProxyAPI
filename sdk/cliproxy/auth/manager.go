@@ -135,6 +135,18 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 }
 
+func (m *Manager) SetSelector(selector Selector) {
+	if m == nil {
+		return
+	}
+	if selector == nil {
+		selector = &RoundRobinSelector{}
+	}
+	m.mu.Lock()
+	m.selector = selector
+	m.mu.Unlock()
+}
+
 // SetStore swaps the underlying persistence store.
 func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()

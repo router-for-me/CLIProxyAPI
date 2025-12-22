@@ -60,6 +60,9 @@ type Config struct {
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
+	// Routing controls credential selection behavior.
+	Routing RoutingConfig `yaml:"routing" json:"routing"`
+
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
@@ -134,6 +137,13 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+}
+
+// RoutingConfig configures how credentials are selected for requests.
+type RoutingConfig struct {
+	// Strategy selects the credential selection strategy.
+	// Supported values: "round-robin" (default), "fill-first".
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
