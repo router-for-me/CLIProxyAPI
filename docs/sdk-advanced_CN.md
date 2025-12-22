@@ -55,6 +55,7 @@ func (Executor) Refresh(ctx context.Context, a *coreauth.Auth) (*coreauth.Auth, 
 在启动服务前将执行器注册到核心管理器：
 
 ```go
+// selector 传 nil 时默认使用 "fill-first" 选择策略。
 core := coreauth.NewManager(coreauth.NewFileStore(cfg.AuthDir), nil, nil)
 core.RegisterExecutor(myprov.Executor{})
 svc, _ := cliproxy.NewBuilder().WithConfig(cfg).WithConfigPath(cfgPath).WithCoreAuthManager(core).Build()
@@ -128,4 +129,3 @@ cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 - 启用请求日志：管理 API GET/PUT `/v0/management/request-log`
 - 切换调试日志：管理 API GET/PUT `/v0/management/debug`
 - 热更新：`config.yaml` 与 `auths/` 变化会自动被侦测并应用
-

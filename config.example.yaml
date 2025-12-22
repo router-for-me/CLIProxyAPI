@@ -1,3 +1,15 @@
+# Server host/interface. Use "127.0.0.1" or "localhost" to restrict access to local machine only.
+host: ""
+
+# Any string value can be sourced from an environment variable by using:
+#   os.environ/ENV_VAR_NAME
+# Example:
+#   remote-management:
+#     secret-key: os.environ/MANAGEMENT_PASSWORD
+
+# Strict YAML parsing (reject unknown fields). Useful to catch typos.
+# strict-config: true
+
 # Server port
 port: 8317
 
@@ -21,8 +33,24 @@ remote-management:
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
 
+  # Allow downloading auth JSON files via management endpoints from non-localhost clients.
+  # Disabled by default to reduce the risk of credential exfiltration.
+  allow-auth-file-download: false
+
+  # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
+  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
+
+# Auth file storage settings (credentials saved under auth-dir as *.json)
+auth-storage:
+  # Encrypt auth JSON at rest. If omitted, encryption is auto-enabled when an encryption key is present.
+  # encrypt: true
+  # Encryption key secret. Prefer setting via env (CLIPROXY_AUTH_ENCRYPTION_KEY) and referencing it:
+  # encryption-key: os.environ/CLIPROXY_AUTH_ENCRYPTION_KEY
+  # Allow reading legacy plaintext auth JSON when encryption is enabled (best-effort migrates to encrypted).
+  # allow-plaintext-fallback: true
 
 # API keys for authentication
 api-keys:
@@ -41,11 +69,23 @@ usage-statistics-enabled: false
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 
+# Security guardrails. When disabled (default), requests containing api_base/base_url fields are rejected.
+# security:
+#   allow-client-side-credentials: false
+
+# Request/response size limits (max_request_size_mb/max_response_size_mb).
+# limits:
+#   max-request-size-mb: 10
+#   max-response-size-mb: 50
+
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
 
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
+
+# When true, disable quota backoff cooldown scheduling for 429 errors (not recommended).
+disable-cooling: false
 
 # Quota exceeded behavior
 quota-exceeded:
@@ -54,6 +94,116 @@ quota-exceeded:
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
+
+# Response caching configuration
+# cache:
+#   enable: true           # Enable response caching
+#   max-size: 1000         # Maximum number of cached responses
+#   ttl: 300               # Cache TTL in seconds (default: 5 minutes)
+
+# Rate limiting configuration
+# rate-limits:
+#   enable: true                  # Enable rate limiting
+#   max-parallel-requests: 100    # Maximum concurrent requests globally
+#   max-per-key: 10               # Maximum concurrent requests per API key
+#   max-rpm: 60                   # Maximum requests per minute per key
+#   max-tpm: 120000               # Maximum tokens per minute per API key
+
+# Prometheus metrics configuration
+# metrics:
+#   enable: true           # Enable metrics endpoint
+#   endpoint: "/metrics"   # HTTP path for metrics
+#   require-auth: false    # When true, /metrics requires normal API auth
+
+# Credential cooldown configuration
+# cooldown:
+#   enable: true           # Enable automatic cooldown on errors
+#   duration: 60           # Cooldown duration in seconds
+#   trigger-on:            # HTTP status codes that trigger cooldown
+#     - 429
+#     - 500
+#     - 502
+#     - 503
+#     - 504
+
+# Routing / selection strategy when multiple credentials match.
+# routing:
+#   strategy: "fill-first"    # fill-first (default), round-robin, random, least-busy, lowest-latency
+#   health-aware: true        # Filter unhealthy credentials (COOLDOWN, ERROR)
+#   prefer-healthy: true      # Prefer HEALTHY over DEGRADED when health-aware
+#   fill-first-max-inflight-per-auth: 4  # Default: 4 (nil). 0 = unlimited
+#   fill-first-spillover: "next-auth"   # next-auth (default), least-busy
+
+# Health tracking (feeds health-aware routing + readiness checks).
+# health-tracking:
+#   enable: true
+#   window-seconds: 60
+#   failure-threshold: 0.5
+#   degraded-threshold: 0.1
+#   min-requests: 5
+#   cleanup-interval: 300
+
+# Fallback chains (model/provider failover).
+# Fallbacks are attempted on transient failures (network, 408, 429, 5xx).
+# fallback-chains:
+#   enable: true
+#   chains:
+#     - primary-model: "gpt-4o"
+#       primary-provider: "openai"   # optional
+#       fallbacks:
+#         - model: "claude-3-5-sonnet-20241022"
+#           provider: "claude"
+#         - model: "gemini-2.0-flash-exp"
+#           provider: "gemini"
+
+# Retry policy (exponential backoff).
+# Applies to transient failures (network, 408, 5xx). 429 relies on cooldown/Retry-After instead.
+# retry-policy:
+#   enable: true
+#   max-retries: 3
+#   initial-delay-ms: 1000
+#   max-delay-ms: 30000
+#   multiplier: 2.0
+#   jitter: 0.1
+
+# Streaming behavior (SSE keep-alives + safe stream bootstrap retries).
+# streaming:
+#   keepalive-seconds: 15     # Default: 15 (nil). <= 0 disables keep-alives
+#   bootstrap-retries: 2      # Default: 2 (nil). 0 disables bootstrap retries
+
+# Virtual keys (managed client keys).
+# virtual-keys:
+#   enable: true
+#   store-file: ""          # default: <auth-dir>/virtual_keys.json
+#   flush-interval: 5       # seconds
+
+# Pricing table (for spend/budget enforcement on virtual keys).
+# pricing:
+#   enable: true
+#   default:
+#     input-per-1k: 0.0
+#     output-per-1k: 0.0
+#   models:
+#     - match: "gpt-4o*"
+#       input-per-1k: 5.0
+#       output-per-1k: 15.0
+
+# Pass-through endpoints (forward unimplemented routes upstream).
+# pass-through:
+#   enable: true
+#   endpoints:
+#     - path: "/v1/rerank"
+#       method: "POST"
+#       base-url: "https://api.openai.com" # note: do not include /v1 to avoid double /v1/v1
+#       timeout: 60
+#       headers:
+#         Authorization: "Bearer os.environ/OPENAI_API_KEY"
+
+# Health endpoints + optional background probes (lightweight TCP dials).
+# health:
+#   background-checks:
+#     enable: true
+#     interval: 300         # seconds
 
 # Gemini API keys
 # gemini-api-key:

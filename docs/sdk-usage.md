@@ -81,6 +81,7 @@ These options mirror the internals used by the CLI server.
 The service uses a core `auth.Manager` for selection, execution, and auto‑refresh. When embedding, you can provide your own manager to customize transports or hooks:
 
 ```go
+// nil selector uses the default "fill-first" selection strategy.
 core := coreauth.NewManager(coreauth.NewFileStore(cfg.AuthDir), nil, nil)
 core.SetRoundTripperProvider(myRTProvider) // per‑auth *http.Transport
 
