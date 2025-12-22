@@ -75,7 +75,7 @@ CLIProxyAPIPlus now includes intelligent routing and health tracking based on pr
 - Automatic cooldown integration
 
 **Advanced Routing Strategies**
-- **`fill-first`**: Drain one credential before moving to the next
+- **`fill-first`**: Drain one credential to rate limit/cooldown before moving to the next to stagger rolling windows
 - **`round-robin`**: Sequential credential rotation (default)
 - **`random`**: Random credential selection
 - **`least-busy`**: Select credential with fewest active requests (load balancing)
@@ -109,7 +109,7 @@ routing:
 
 | Strategy | Best For | How It Works |
 |----------|----------|--------------|
-| `fill-first` | Staggering rolling caps | Uses the first available credential (by ID) until it cools down |
+| `fill-first` | Staggering rolling caps | Uses the first available credential (by ID) until it hits rate limit/cooldown, then moves to the next |
 | `round-robin` | Even distribution, predictable | Cycles through credentials sequentially |
 | `random` | Simple load balancing | Randomly selects from available credentials |
 | `least-busy` | Optimal load distribution | Selects credential with fewest active requests |

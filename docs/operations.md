@@ -208,12 +208,12 @@ routing:
 
 Notes:
 - `least-busy` uses in-flight request counts; `lowest-latency` requires `health-tracking.enable: true`.
-- `fill-first` “burns” one account first; spillover prevents overload under bursty concurrency.
+- `fill-first` drains one account to rate limit/cooldown, then moves to the next to stagger rolling windows; spillover prevents overload under bursty concurrency.
 - `next-auth` preserves deterministic “drain first”; `least-busy` maximizes throughput.
 
 ### Fill-first spillover (recommended for “many creds”)
 
-`fill-first` intentionally “burns” one account first (to stagger rolling-window subscription caps), but with many concurrent terminals it can also overload a single credential, leading to avoidable `429` errors. Use `fill-first-max-inflight-per-auth` and `fill-first-spillover` to keep the intent while enabling safe spillover.
+`fill-first` intentionally drains one account to its rate limit/cooldown, then moves to the next to keep throughput going by staggering rolling windows across accounts. With many concurrent terminals it can also overload a single credential, leading to avoidable `429` errors. Use `fill-first-max-inflight-per-auth` and `fill-first-spillover` to keep the intent while enabling safe spillover.
 
 - When the preferred credential is at capacity (`max-inflight`), selection spills over to another credential instead of overloading one.
 - `next-auth` preserves deterministic “drain first”; `least-busy` maximizes throughput under bursty load.
