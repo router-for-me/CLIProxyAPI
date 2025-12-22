@@ -199,7 +199,7 @@ When multiple credentials match, you can choose a selection strategy:
 
 ```yaml
 routing:
-  strategy: "fill-first"    # fill-first (default), round-robin, random, least-busy, lowest-latency
+  strategy: "fill-first"    # fill-first, round-robin (default), random, least-busy, lowest-latency
   health-aware: true        # Filter unhealthy credentials (COOLDOWN, ERROR)
   prefer-healthy: true      # Prefer HEALTHY over DEGRADED when health-aware
   fill-first-max-inflight-per-auth: 4  # 0 = unlimited

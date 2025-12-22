@@ -81,7 +81,7 @@ svc, _ := cliproxy.NewBuilder().
 服务内部使用核心 `auth.Manager` 负责选择、执行、自动刷新。内嵌时可自定义其传输或钩子：
 
 ```go
-// selector 传 nil 时默认使用 "fill-first" 选择策略。
+// selector 传 nil 时默认使用 "round-robin" 选择策略。
 core := coreauth.NewManager(coreauth.NewFileStore(cfg.AuthDir), nil, nil)
 core.SetRoundTripperProvider(myRTProvider) // 按账户返回 *http.Transport
 
