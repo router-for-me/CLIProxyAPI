@@ -404,6 +404,13 @@ func main() {
 	} else {
 		cfg.AuthDir = resolvedAuthDir
 	}
+	if repoRoot, ok := util.FindGitRepoRoot(cfg.AuthDir); ok {
+		if useGitStore {
+			log.Warnf("auth-dir %q is inside a git repository (%q); git-backed token storage is enabled, ensure the repo/remote is private and tokens are not exposed", cfg.AuthDir, repoRoot)
+		} else {
+			log.Warnf("auth-dir %q is inside a git repository (%q); do not commit token files, add it to .gitignore or set auth-dir outside the repo", cfg.AuthDir, repoRoot)
+		}
+	}
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.

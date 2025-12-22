@@ -18,6 +18,7 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/securefile"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -192,19 +193,15 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		if errMarshal != nil {
 			return "", fmt.Errorf("object store: marshal metadata: %w", errMarshal)
 		}
-		if existing, errRead := os.ReadFile(path); errRead == nil {
+		if existing, _, errRead := securefile.ReadAuthJSONFile(path); errRead == nil {
 			if jsonEqual(existing, raw) {
 				return path, nil
 			}
 		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
 			return "", fmt.Errorf("object store: read existing metadata: %w", errRead)
 		}
-		tmp := path + ".tmp"
-		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-			return "", fmt.Errorf("object store: write temp auth file: %w", errWrite)
-		}
-		if errRename := os.Rename(tmp, path); errRename != nil {
-			return "", fmt.Errorf("object store: rename auth file: %w", errRename)
+		if errWrite := securefile.WriteAuthJSONFile(path, raw); errWrite != nil {
+			return "", fmt.Errorf("object store: write auth file: %w", errWrite)
 		}
 	default:
 		return "", fmt.Errorf("object store: nothing to persist for %s", auth.ID)
@@ -311,7 +308,7 @@ func (s *ObjectTokenStore) PersistConfig(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	data, err := os.ReadFile(s.configPath)
+	data, err := securefile.ReadFileRawLocked(s.configPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return s.deleteObject(ctx, objectStoreConfigKey)
@@ -352,7 +349,7 @@ func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example str
 		if errRead != nil {
 			return fmt.Errorf("object store: read config: %w", errRead)
 		}
-		if errWrite := os.WriteFile(s.configPath, normalizeLineEndingsBytes(data), 0o600); errWrite != nil {
+		if errWrite := securefile.WriteFileRawLocked(s.configPath, normalizeLineEndingsBytes(data), 0o600); errWrite != nil {
 			return fmt.Errorf("object store: write config: %w", errWrite)
 		}
 	case isObjectNotFound(err):
@@ -365,12 +362,12 @@ func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example str
 				if errCreate := os.MkdirAll(filepath.Dir(s.configPath), 0o700); errCreate != nil {
 					return fmt.Errorf("object store: prepare config directory: %w", errCreate)
 				}
-				if errWrite := os.WriteFile(s.configPath, []byte{}, 0o600); errWrite != nil {
+				if errWrite := securefile.WriteFileRawLocked(s.configPath, []byte{}, 0o600); errWrite != nil {
 					return fmt.Errorf("object store: create empty config: %w", errWrite)
 				}
 			}
 		}
-		data, errRead := os.ReadFile(s.configPath)
+		data, errRead := securefile.ReadFileRawLocked(s.configPath)
 		if errRead != nil {
 			return fmt.Errorf("object store: read local config: %w", errRead)
 		}
@@ -429,7 +426,7 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 		if errRead != nil {
 			return fmt.Errorf("object store: read auth %s: %w", object.Key, errRead)
 		}
-		if errWrite := os.WriteFile(local, data, 0o600); errWrite != nil {
+		if errWrite := securefile.WriteFileRawLocked(local, data, 0o600); errWrite != nil {
 			return fmt.Errorf("object store: write auth %s: %w", local, errWrite)
 		}
 	}
@@ -444,7 +441,7 @@ func (s *ObjectTokenStore) uploadAuth(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("object store: resolve auth relative path: %w", err)
 	}
-	data, err := os.ReadFile(path)
+	data, err := securefile.ReadFileRawLocked(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return s.deleteAuthObject(ctx, path)
@@ -553,7 +550,7 @@ func (s *ObjectTokenStore) resolveDeletePath(id string) (string, error) {
 }
 
 func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
-	data, err := os.ReadFile(path)
+	data, _, err := securefile.ReadAuthJSONFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}

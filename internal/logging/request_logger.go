@@ -194,7 +194,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 	content := l.formatLogContent(url, method, requestHeaders, body, apiRequest, apiResponse, decompressedResponse, statusCode, responseHeaders, apiResponseErrors)
 
 	// Write to file
-	if err = os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err = os.WriteFile(filePath, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("failed to write log file: %w", err)
 	}
 
@@ -233,7 +233,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 	filePath := filepath.Join(l.logsDir, filename)
 
 	// Create and open file
-	file, err := os.Create(filePath)
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create log file: %w", err)
 	}
@@ -270,7 +270,7 @@ func (l *FileRequestLogger) generateErrorFilename(url string) string {
 //   - error: An error if directory creation fails, nil otherwise
 func (l *FileRequestLogger) ensureLogsDir() error {
 	if _, err := os.Stat(l.logsDir); os.IsNotExist(err) {
-		return os.MkdirAll(l.logsDir, 0755)
+		return os.MkdirAll(l.logsDir, 0o700)
 	}
 	return nil
 }
@@ -618,7 +618,7 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 	content.WriteString("\n")
 
 	content.WriteString("=== REQUEST BODY ===\n")
-	content.Write(body)
+	content.Write(util.MaskSensitiveJSON(body))
 	content.WriteString("\n\n")
 
 	return content.String()

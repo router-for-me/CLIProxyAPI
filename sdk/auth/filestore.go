@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/securefile"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -19,12 +20,27 @@ type FileTokenStore struct {
 	mu      sync.Mutex
 	dirLock sync.RWMutex
 	baseDir string
+
+	errorsMu       sync.RWMutex
+	lastLoadErrors []securefile.LoadError
 }
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
 // TokenStorage implementation embedded in the token record.
 func NewFileTokenStore() *FileTokenStore {
 	return &FileTokenStore{}
+}
+
+// LastLoadErrors returns the most recent best-effort load errors captured during List().
+func (s *FileTokenStore) LastLoadErrors() []securefile.LoadError {
+	if s == nil {
+		return nil
+	}
+	s.errorsMu.RLock()
+	defer s.errorsMu.RUnlock()
+	out := make([]securefile.LoadError, len(s.lastLoadErrors))
+	copy(out, s.lastLoadErrors)
+	return out
 }
 
 // SetBaseDir updates the default directory used for auth JSON persistence when no explicit path is provided.
@@ -71,19 +87,15 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
-		if existing, errRead := os.ReadFile(path); errRead == nil {
+		if existing, _, errRead := securefile.ReadAuthJSONFile(path); errRead == nil {
 			if jsonEqual(existing, raw) {
 				return path, nil
 			}
 		} else if errRead != nil && !os.IsNotExist(errRead) {
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
-		tmp := path + ".tmp"
-		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-			return "", fmt.Errorf("auth filestore: write temp failed: %w", errWrite)
-		}
-		if errRename := os.Rename(tmp, path); errRename != nil {
-			return "", fmt.Errorf("auth filestore: rename failed: %w", errRename)
+		if errWrite := securefile.WriteAuthJSONFile(path, raw); errWrite != nil {
+			return "", fmt.Errorf("auth filestore: write failed: %w", errWrite)
 		}
 	default:
 		return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
@@ -107,6 +119,7 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 	if dir == "" {
 		return nil, fmt.Errorf("auth filestore: directory not configured")
 	}
+	loadErrors := make([]securefile.LoadError, 0)
 	entries := make([]*cliproxyauth.Auth, 0)
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -120,6 +133,15 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 		}
 		auth, err := s.readAuthFile(path, dir)
 		if err != nil {
+			errorType := "read_failed"
+			lower := strings.ToLower(err.Error())
+			switch {
+			case strings.Contains(lower, "decrypt") || strings.Contains(lower, "encryption key"):
+				errorType = "decrypt_failed"
+			case strings.Contains(lower, "unmarshal") || strings.Contains(lower, "invalid"):
+				errorType = "invalid_json"
+			}
+			loadErrors = append(loadErrors, securefile.LoadError{Path: path, ErrorType: errorType, Message: err.Error()})
 			return nil
 		}
 		if auth != nil {
@@ -130,6 +152,9 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 	if err != nil {
 		return nil, err
 	}
+	s.errorsMu.Lock()
+	s.lastLoadErrors = loadErrors
+	s.errorsMu.Unlock()
 	return entries, nil
 }
 
@@ -161,7 +186,7 @@ func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
 }
 
 func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
-	data, err := os.ReadFile(path)
+	data, _, err := securefile.ReadAuthJSONFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
