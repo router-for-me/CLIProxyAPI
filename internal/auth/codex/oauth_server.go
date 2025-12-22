@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -18,7 +19,8 @@ import (
 // and captures the necessary parameters to complete the authentication flow.
 type OAuthServer struct {
 	// server is the underlying HTTP server instance
-	server *http.Server
+	server   *http.Server
+	listener net.Listener
 	// port is the port number on which the server listens
 	port int
 	// resultChan is a channel for sending OAuth results
@@ -60,6 +62,16 @@ func NewOAuthServer(port int) *OAuthServer {
 	}
 }
 
+// Port returns the actual bound port once the server has started.
+func (s *OAuthServer) Port() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.port
+}
+
 // Start starts the OAuth callback server.
 // It sets up the HTTP handlers for the callback and success endpoints,
 // and begins listening on the specified port.
@@ -74,33 +86,38 @@ func (s *OAuthServer) Start() error {
 		return fmt.Errorf("server is already running")
 	}
 
-	// Check if port is available
-	if !s.isPortAvailable() {
-		return fmt.Errorf("port %d is already in use", s.port)
-	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/callback", s.handleCallback)
 	mux.HandleFunc("/success", s.handleSuccess)
 
+	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		if errors.Is(err, syscall.EADDRINUSE) {
+			return fmt.Errorf("port %d is already in use", s.port)
+		}
+		return fmt.Errorf("failed to listen on %s: %w", addr, err)
+	}
+
 	s.server = &http.Server{
-		Addr:         fmt.Sprintf(":%d", s.port),
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+	}
+	s.listener = ln
+	if tcp, ok := ln.Addr().(*net.TCPAddr); ok {
+		s.port = tcp.Port
 	}
 
 	s.running = true
 
 	// Start server in goroutine
 	go func() {
-		if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.errorChan <- fmt.Errorf("server failed to start: %w", err)
 		}
 	}()
-
-	// Give server a moment to start
-	time.Sleep(100 * time.Millisecond)
 
 	return nil
 }
@@ -128,6 +145,10 @@ func (s *OAuthServer) Stop(ctx context.Context) error {
 	defer cancel()
 
 	err := s.server.Shutdown(shutdownCtx)
+	if s.listener != nil {
+		_ = s.listener.Close()
+		s.listener = nil
+	}
 	s.running = false
 	s.server = nil
 
@@ -239,6 +260,11 @@ func (s *OAuthServer) handleSuccess(w http.ResponseWriter, r *http.Request) {
 		platformURL = "https://platform.openai.com"
 	}
 
+	// Validate platformURL to prevent XSS - only allow http/https URLs
+	if !isValidURL(platformURL) {
+		platformURL = "https://platform.openai.com"
+	}
+
 	// Generate success page HTML with dynamic content
 	successHTML := s.generateSuccessHTML(setupRequired, platformURL)
 
@@ -246,6 +272,12 @@ func (s *OAuthServer) handleSuccess(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Errorf("Failed to write success page: %v", err)
 	}
+}
+
+// isValidURL checks if the URL is a valid http/https URL to prevent XSS
+func isValidURL(urlStr string) bool {
+	urlStr = strings.TrimSpace(urlStr)
+	return strings.HasPrefix(urlStr, "https://") || strings.HasPrefix(urlStr, "http://")
 }
 
 // generateSuccessHTML creates the HTML content for the success page.
@@ -287,23 +319,6 @@ func (s *OAuthServer) sendResult(result *OAuthResult) {
 	default:
 		log.Warn("OAuth result channel is full, result dropped")
 	}
-}
-
-// isPortAvailable checks if the specified port is available.
-// It attempts to listen on the port to determine availability.
-//
-// Returns:
-//   - bool: True if the port is available, false otherwise
-func (s *OAuthServer) isPortAvailable() bool {
-	addr := fmt.Sprintf(":%d", s.port)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return false
-	}
-	defer func() {
-		_ = listener.Close()
-	}()
-	return true
 }
 
 // IsRunning returns whether the server is currently running.

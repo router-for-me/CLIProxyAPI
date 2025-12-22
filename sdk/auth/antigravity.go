@@ -3,9 +3,8 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,7 +12,8 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/oauthflow"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/oauthhttp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -60,121 +60,79 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		opts = &LoginOptions{}
 	}
 
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	httpClient := util.SetOAuthProxy(&cfg.SDKConfig, &http.Client{Timeout: 30 * time.Second})
 
-	state, err := misc.GenerateRandomState()
+	desiredPort := antigravityCallbackPort
+	provider := newAntigravityOAuthProvider(httpClient)
+
+	flow, err := oauthflow.RunAuthCodeFlow(ctx, provider, oauthflow.AuthCodeFlowOptions{
+		DesiredPort:  desiredPort,
+		CallbackPath: "/oauth-callback",
+		Timeout:      5 * time.Minute,
+		OnAuthURL: func(authURL string, callbackPort int, redirectURI string) {
+			if desiredPort != 0 && callbackPort != desiredPort {
+				log.Warnf("antigravity oauth callback port %d is busy; falling back to an ephemeral port", desiredPort)
+			}
+
+			if !opts.NoBrowser {
+				fmt.Println("Opening browser for antigravity authentication")
+				if !browser.IsAvailable() {
+					log.Warn("No browser available; please open the URL manually")
+					util.PrintSSHTunnelInstructions(callbackPort)
+					fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
+				} else if errOpen := browser.OpenURL(authURL); errOpen != nil {
+					log.Warnf("Failed to open browser automatically: %v", errOpen)
+					util.PrintSSHTunnelInstructions(callbackPort)
+					fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
+				}
+			} else {
+				util.PrintSSHTunnelInstructions(callbackPort)
+				fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
+			}
+
+			fmt.Println("Waiting for antigravity authentication callback...")
+		},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("antigravity: failed to generate state: %w", err)
-	}
-
-	srv, port, cbChan, errServer := startAntigravityCallbackServer()
-	if errServer != nil {
-		return nil, fmt.Errorf("antigravity: failed to start callback server: %w", errServer)
-	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", port)
-	authURL := buildAntigravityAuthURL(redirectURI, state)
-
-	if !opts.NoBrowser {
-		fmt.Println("Opening browser for antigravity authentication")
-		if !browser.IsAvailable() {
-			log.Warn("No browser available; please open the URL manually")
-			util.PrintSSHTunnelInstructions(port)
-			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
-		} else if errOpen := browser.OpenURL(authURL); errOpen != nil {
-			log.Warnf("Failed to open browser automatically: %v", errOpen)
-			util.PrintSSHTunnelInstructions(port)
-			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
+		var flowErr *oauthflow.FlowError
+		if errors.As(err, &flowErr) && flowErr != nil {
+			switch flowErr.Kind {
+			case oauthflow.FlowErrorKindPortInUse:
+				return nil, fmt.Errorf("antigravity auth callback port in use: %w", err)
+			case oauthflow.FlowErrorKindServerStartFailed:
+				return nil, fmt.Errorf("antigravity auth callback server failed: %w", err)
+			case oauthflow.FlowErrorKindCallbackTimeout:
+				return nil, fmt.Errorf("antigravity auth: callback wait failed: %w", err)
+			case oauthflow.FlowErrorKindProviderError:
+				if flow != nil && flow.CallbackError != "" {
+					return nil, fmt.Errorf("antigravity auth: provider returned error %s", flow.CallbackError)
+				}
+				return nil, fmt.Errorf("antigravity auth: provider returned error")
+			case oauthflow.FlowErrorKindInvalidState:
+				return nil, fmt.Errorf("antigravity auth: state mismatch")
+			case oauthflow.FlowErrorKindCodeExchangeFailed:
+				return nil, fmt.Errorf("antigravity token exchange failed: %w", flowErr.Err)
+			}
 		}
-	} else {
-		util.PrintSSHTunnelInstructions(port)
-		fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
+		return nil, err
+	}
+	if flow == nil || flow.Token == nil {
+		return nil, fmt.Errorf("antigravity authentication failed: missing token result")
 	}
 
-	fmt.Println("Waiting for antigravity authentication callback...")
-
-	var cbRes callbackResult
-	timeoutTimer := time.NewTimer(5 * time.Minute)
-	defer timeoutTimer.Stop()
-
-	var manualPromptTimer *time.Timer
-	var manualPromptC <-chan time.Time
-	if opts.Prompt != nil {
-		manualPromptTimer = time.NewTimer(15 * time.Second)
-		manualPromptC = manualPromptTimer.C
-		defer manualPromptTimer.Stop()
-	}
-
-waitForCallback:
-	for {
-		select {
-		case res := <-cbChan:
-			cbRes = res
-			break waitForCallback
-		case <-manualPromptC:
-			manualPromptC = nil
-			if manualPromptTimer != nil {
-				manualPromptTimer.Stop()
-			}
-			select {
-			case res := <-cbChan:
-				cbRes = res
-				break waitForCallback
-			default:
-			}
-			input, errPrompt := opts.Prompt("Paste the antigravity callback URL (or press Enter to keep waiting): ")
-			if errPrompt != nil {
-				return nil, errPrompt
-			}
-			parsed, errParse := misc.ParseOAuthCallback(input)
-			if errParse != nil {
-				return nil, errParse
-			}
-			if parsed == nil {
-				continue
-			}
-			cbRes = callbackResult{
-				Code:  parsed.Code,
-				State: parsed.State,
-				Error: parsed.Error,
-			}
-			break waitForCallback
-		case <-timeoutTimer.C:
-			return nil, fmt.Errorf("antigravity: authentication timed out")
-		}
-	}
-
-	if cbRes.Error != "" {
-		return nil, fmt.Errorf("antigravity: authentication failed: %s", cbRes.Error)
-	}
-	if cbRes.State != state {
-		return nil, fmt.Errorf("antigravity: invalid state")
-	}
-	if cbRes.Code == "" {
-		return nil, fmt.Errorf("antigravity: missing authorization code")
-	}
-
-	tokenResp, errToken := exchangeAntigravityCode(ctx, cbRes.Code, redirectURI, httpClient)
-	if errToken != nil {
-		return nil, fmt.Errorf("antigravity: token exchange failed: %w", errToken)
-	}
+	token := flow.Token
 
 	email := ""
-	if tokenResp.AccessToken != "" {
-		if info, errInfo := fetchAntigravityUserInfo(ctx, tokenResp.AccessToken, httpClient); errInfo == nil && strings.TrimSpace(info.Email) != "" {
+	if token.AccessToken != "" {
+		if info, errInfo := fetchAntigravityUserInfo(ctx, token.AccessToken, httpClient); errInfo == nil && strings.TrimSpace(info.Email) != "" {
 			email = strings.TrimSpace(info.Email)
 		}
 	}
 
 	// Fetch project ID via loadCodeAssist (same approach as Gemini CLI)
 	projectID := ""
-	if tokenResp.AccessToken != "" {
-		fetchedProjectID, errProject := fetchAntigravityProjectID(ctx, tokenResp.AccessToken, httpClient)
+	if token.AccessToken != "" {
+		fetchedProjectID, errProject := fetchAntigravityProjectID(ctx, token.AccessToken, httpClient)
 		if errProject != nil {
 			log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
 		} else {
@@ -184,13 +142,28 @@ waitForCallback:
 	}
 
 	now := time.Now()
+	expiresIn := int64(0)
+	if token.Metadata != nil {
+		switch v := token.Metadata["expires_in"].(type) {
+		case int:
+			expiresIn = int64(v)
+		case int64:
+			expiresIn = v
+		case float64:
+			expiresIn = int64(v)
+		}
+	}
+	expiredAt := strings.TrimSpace(token.ExpiresAt)
+	if expiredAt == "" && expiresIn > 0 {
+		expiredAt = now.Add(time.Duration(expiresIn) * time.Second).Format(time.RFC3339)
+	}
 	metadata := map[string]any{
 		"type":          "antigravity",
-		"access_token":  tokenResp.AccessToken,
-		"refresh_token": tokenResp.RefreshToken,
-		"expires_in":    tokenResp.ExpiresIn,
+		"access_token":  token.AccessToken,
+		"refresh_token": token.RefreshToken,
+		"expires_in":    expiresIn,
 		"timestamp":     now.UnixMilli(),
-		"expired":       now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+		"expired":       expiredAt,
 	}
 	if email != "" {
 		metadata["email"] = email
@@ -218,45 +191,107 @@ waitForCallback:
 	}, nil
 }
 
-type callbackResult struct {
-	Code  string
-	Error string
-	State string
+type antigravityOAuthProvider struct {
+	httpClient *http.Client
 }
 
-func startAntigravityCallbackServer() (*http.Server, int, <-chan callbackResult, error) {
-	addr := fmt.Sprintf(":%d", antigravityCallbackPort)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, 0, nil, err
+func newAntigravityOAuthProvider(httpClient *http.Client) *antigravityOAuthProvider {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	resultCh := make(chan callbackResult, 1)
+	return &antigravityOAuthProvider{httpClient: httpClient}
+}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth-callback", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		res := callbackResult{
-			Code:  strings.TrimSpace(q.Get("code")),
-			Error: strings.TrimSpace(q.Get("error")),
-			State: strings.TrimSpace(q.Get("state")),
-		}
-		resultCh <- res
-		if res.Code != "" && res.Error == "" {
-			_, _ = w.Write([]byte("<h1>Login successful</h1><p>You can close this window.</p>"))
-		} else {
-			_, _ = w.Write([]byte("<h1>Login failed</h1><p>Please check the CLI output.</p>"))
-		}
-	})
+func (p *antigravityOAuthProvider) Provider() string {
+	return "antigravity"
+}
 
-	srv := &http.Server{Handler: mux}
-	go func() {
-		if errServe := srv.Serve(listener); errServe != nil && !strings.Contains(errServe.Error(), "Server closed") {
-			log.Warnf("antigravity callback server error: %v", errServe)
-		}
-	}()
+func (p *antigravityOAuthProvider) AuthorizeURL(session oauthflow.OAuthSession) (string, oauthflow.OAuthSession, error) {
+	if p == nil {
+		return "", session, fmt.Errorf("antigravity oauth provider: provider is nil")
+	}
+	redirectURI := strings.TrimSpace(session.RedirectURI)
+	if redirectURI == "" {
+		return "", session, fmt.Errorf("antigravity oauth provider: redirect URI is empty")
+	}
+	authURL := buildAntigravityAuthURL(redirectURI, session.State, session.CodeChallenge)
+	return authURL, session, nil
+}
 
-	return srv, port, resultCh, nil
+func (p *antigravityOAuthProvider) ExchangeCode(ctx context.Context, session oauthflow.OAuthSession, code string) (*oauthflow.TokenResult, error) {
+	if p == nil {
+		return nil, fmt.Errorf("antigravity oauth provider: provider is nil")
+	}
+	tokenResp, err := exchangeAntigravityCode(ctx, code, session.RedirectURI, session.CodeVerifier, p.httpClient)
+	if err != nil {
+		return nil, err
+	}
+	if tokenResp == nil {
+		return nil, fmt.Errorf("antigravity oauth provider: token response is nil")
+	}
+
+	tokenType := strings.TrimSpace(tokenResp.TokenType)
+	if tokenType == "" {
+		tokenType = "Bearer"
+	}
+	expiresAt := ""
+	if tokenResp.ExpiresIn > 0 {
+		expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
+	}
+
+	meta := map[string]any{
+		"expires_in": tokenResp.ExpiresIn,
+	}
+
+	return &oauthflow.TokenResult{
+		AccessToken:  strings.TrimSpace(tokenResp.AccessToken),
+		RefreshToken: strings.TrimSpace(tokenResp.RefreshToken),
+		ExpiresAt:    expiresAt,
+		TokenType:    tokenType,
+		Metadata:     meta,
+	}, nil
+}
+
+func (p *antigravityOAuthProvider) Refresh(ctx context.Context, refreshToken string) (*oauthflow.TokenResult, error) {
+	if p == nil {
+		return nil, fmt.Errorf("antigravity oauth provider: provider is nil")
+	}
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil, fmt.Errorf("antigravity oauth provider: refresh token is empty")
+	}
+	tokenResp, err := refreshAntigravityTokens(ctx, refreshToken, p.httpClient)
+	if err != nil {
+		return nil, err
+	}
+	if tokenResp == nil {
+		return nil, fmt.Errorf("antigravity oauth provider: refresh response is nil")
+	}
+
+	tokenType := strings.TrimSpace(tokenResp.TokenType)
+	if tokenType == "" {
+		tokenType = "Bearer"
+	}
+	expiresAt := ""
+	if tokenResp.ExpiresIn > 0 {
+		expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
+	}
+
+	meta := map[string]any{
+		"expires_in": tokenResp.ExpiresIn,
+	}
+
+	return &oauthflow.TokenResult{
+		AccessToken:  strings.TrimSpace(tokenResp.AccessToken),
+		RefreshToken: refreshToken,
+		ExpiresAt:    expiresAt,
+		TokenType:    tokenType,
+		Metadata:     meta,
+	}, nil
+}
+
+func (p *antigravityOAuthProvider) Revoke(ctx context.Context, token string) error {
+	return oauthflow.ErrRevokeNotSupported
 }
 
 type antigravityTokenResponse struct {
@@ -266,36 +301,102 @@ type antigravityTokenResponse struct {
 	TokenType    string `json:"token_type"`
 }
 
-func exchangeAntigravityCode(ctx context.Context, code, redirectURI string, httpClient *http.Client) (*antigravityTokenResponse, error) {
+func exchangeAntigravityCode(ctx context.Context, code, redirectURI, codeVerifier string, httpClient *http.Client) (*antigravityTokenResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	data := url.Values{}
 	data.Set("code", code)
 	data.Set("client_id", antigravityClientID)
 	data.Set("client_secret", antigravityClientSecret)
 	data.Set("redirect_uri", redirectURI)
 	data.Set("grant_type", "authorization_code")
+	if strings.TrimSpace(codeVerifier) != "" {
+		data.Set("code_verifier", strings.TrimSpace(codeVerifier))
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(data.Encode()))
+	encoded := data.Encode()
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(encoded))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
+		return nil, err
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("oauth token exchange failed: status %d: %s: %w", status, msg, err)
+		}
+		return nil, fmt.Errorf("oauth token exchange failed: status %d: %s", status, msg)
+	}
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, errDo := httpClient.Do(req)
-	if errDo != nil {
-		return nil, errDo
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity token exchange: close body error: %v", errClose)
-		}
-	}()
 
 	var token antigravityTokenResponse
-	if errDecode := json.NewDecoder(resp.Body).Decode(&token); errDecode != nil {
+	if errDecode := json.Unmarshal(body, &token); errDecode != nil {
 		return nil, errDecode
 	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("oauth token exchange failed: status %d", resp.StatusCode)
+	return &token, nil
+}
+
+func refreshAntigravityTokens(ctx context.Context, refreshToken string, httpClient *http.Client) (*antigravityTokenResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil, fmt.Errorf("refresh token is empty")
+	}
+	data := url.Values{}
+	data.Set("refresh_token", refreshToken)
+	data.Set("client_id", antigravityClientID)
+	data.Set("client_secret", antigravityClientSecret)
+	data.Set("grant_type", "refresh_token")
+
+	encoded := data.Encode()
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(encoded))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
+		return nil, err
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("oauth token refresh failed: status %d: %s: %w", status, msg, err)
+		}
+		return nil, fmt.Errorf("oauth token refresh failed: status %d: %s", status, msg)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var token antigravityTokenResponse
+	if errDecode := json.Unmarshal(body, &token); errDecode != nil {
+		return nil, errDecode
 	}
 	return &token, nil
 }
@@ -308,33 +409,40 @@ func fetchAntigravityUserInfo(ctx context.Context, accessToken string, httpClien
 	if strings.TrimSpace(accessToken) == "" {
 		return &antigravityUserInfo{}, nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.googleapis.com/oauth2/v1/userinfo?alt=json", nil)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.googleapis.com/oauth2/v1/userinfo?alt=json", nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Authorization", "Bearer "+accessToken)
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
+		return nil, err
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		return &antigravityUserInfo{}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	resp, errDo := httpClient.Do(req)
-	if errDo != nil {
-		return nil, errDo
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity userinfo: close body error: %v", errClose)
-		}
-	}()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return &antigravityUserInfo{}, nil
-	}
 	var info antigravityUserInfo
-	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
+	if errDecode := json.Unmarshal(body, &info); errDecode != nil {
 		return nil, errDecode
 	}
 	return &info, nil
 }
 
-func buildAntigravityAuthURL(redirectURI, state string) string {
+func buildAntigravityAuthURL(redirectURI, state, codeChallenge string) string {
 	params := url.Values{}
 	params.Set("access_type", "offline")
 	params.Set("client_id", antigravityClientID)
@@ -343,6 +451,10 @@ func buildAntigravityAuthURL(redirectURI, state string) string {
 	params.Set("response_type", "code")
 	params.Set("scope", strings.Join(antigravityScopes, " "))
 	params.Set("state", state)
+	if strings.TrimSpace(codeChallenge) != "" {
+		params.Set("code_challenge", strings.TrimSpace(codeChallenge))
+		params.Set("code_challenge_method", "S256")
+	}
 	return "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
 }
 
@@ -371,6 +483,9 @@ func FetchAntigravityProjectID(ctx context.Context, accessToken string, httpClie
 // fetchAntigravityProjectID retrieves the project ID for the authenticated user via loadCodeAssist.
 // This uses the same approach as Gemini CLI to get the cloudaicompanionProject.
 func fetchAntigravityProjectID(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Call loadCodeAssist to get the project
 	loadReqBody := map[string]any{
 		"metadata": map[string]string{
@@ -386,33 +501,37 @@ func fetchAntigravityProjectID(ctx context.Context, accessToken string, httpClie
 	}
 
 	endpointURL := fmt.Sprintf("%s/%s:loadCodeAssist", antigravityAPIEndpoint, antigravityAPIVersion)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+	status, _, bodyBytes, err := oauthhttp.Do(
+		ctx,
+		httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
+			if err != nil {
+				return nil, fmt.Errorf("create request: %w", err)
+			}
+			req.Header.Set("Authorization", "Bearer "+accessToken)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("User-Agent", antigravityAPIUserAgent)
+			req.Header.Set("X-Goog-Api-Client", antigravityAPIClient)
+			req.Header.Set("Client-Metadata", antigravityClientMetadata)
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
+		return "", fmt.Errorf("execute request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", antigravityAPIUserAgent)
-	req.Header.Set("X-Goog-Api-Client", antigravityAPIClient)
-	req.Header.Set("Client-Metadata", antigravityClientMetadata)
 
-	resp, errDo := httpClient.Do(req)
-	if errDo != nil {
-		return "", fmt.Errorf("execute request: %w", errDo)
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity loadCodeAssist: close body error: %v", errClose)
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		msg := strings.TrimSpace(string(bodyBytes))
+		if err != nil {
+			return "", fmt.Errorf("request failed with status %d: %s: %w", status, msg, err)
 		}
-	}()
-
-	bodyBytes, errRead := io.ReadAll(resp.Body)
-	if errRead != nil {
-		return "", fmt.Errorf("read response: %w", errRead)
+		return "", fmt.Errorf("request failed with status %d: %s", status, msg)
 	}
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+	if err != nil {
+		return "", fmt.Errorf("execute request: %w", err)
 	}
 
 	var loadResp map[string]any

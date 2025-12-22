@@ -4,25 +4,26 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/oauthhttp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	anthropicAuthURL  = "https://claude.ai/oauth/authorize"
-	anthropicTokenURL = "https://console.anthropic.com/v1/oauth/token"
-	anthropicClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	redirectURI       = "http://localhost:54545/callback"
+	anthropicAuthURL   = "https://claude.ai/oauth/authorize"
+	anthropicTokenURL  = "https://console.anthropic.com/v1/oauth/token"
+	anthropicClientID  = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	defaultRedirectURI = "http://localhost:54545/callback"
 )
 
 // tokenResponse represents the response structure from Anthropic's OAuth token endpoint.
@@ -58,8 +59,9 @@ type ClaudeAuth struct {
 // Returns:
 //   - *ClaudeAuth: A new Claude authentication service instance
 func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
+	client := &http.Client{Timeout: 30 * time.Second}
 	return &ClaudeAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+		httpClient: util.SetOAuthProxy(&cfg.SDKConfig, client),
 	}
 }
 
@@ -76,8 +78,16 @@ func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
 //   - string: The state parameter for verification
 //   - error: An error if PKCE codes are missing or URL generation fails
 func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, string, error) {
+	return o.GenerateAuthURLWithRedirectURI(state, pkceCodes, defaultRedirectURI)
+}
+
+func (o *ClaudeAuth) GenerateAuthURLWithRedirectURI(state string, pkceCodes *PKCECodes, redirectURI string) (string, string, error) {
 	if pkceCodes == nil {
 		return "", "", fmt.Errorf("PKCE codes are required")
+	}
+	redirectURI = strings.TrimSpace(redirectURI)
+	if redirectURI == "" {
+		redirectURI = defaultRedirectURI
 	}
 
 	params := url.Values{
@@ -127,10 +137,18 @@ func (c *ClaudeAuth) parseCodeAndState(code string) (parsedCode, parsedState str
 //   - *ClaudeAuthBundle: The complete authentication bundle with tokens
 //   - error: An error if token exchange fails
 func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
+	return o.ExchangeCodeForTokensWithRedirectURI(ctx, code, state, pkceCodes, defaultRedirectURI)
+}
+
+func (o *ClaudeAuth) ExchangeCodeForTokensWithRedirectURI(ctx context.Context, code, state string, pkceCodes *PKCECodes, redirectURI string) (*ClaudeAuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
 	}
 	newCode, newState := o.parseCodeAndState(code)
+	redirectURI = strings.TrimSpace(redirectURI)
+	if redirectURI == "" {
+		redirectURI = defaultRedirectURI
+	}
 
 	// Prepare token exchange request
 	reqBody := map[string]interface{}{
@@ -152,35 +170,33 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	// log.Debugf("Token exchange request: %s", string(jsonBody))
-
-	req, err := http.NewRequestWithContext(ctx, "POST", anthropicTokenURL, strings.NewReader(string(jsonBody)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create token request: %w", err)
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		o.httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicTokenURL, bytes.NewReader(jsonBody))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create token request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
+		return nil, fmt.Errorf("token exchange request failed: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := o.httpClient.Do(req)
+	if status != http.StatusOK {
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("token exchange failed with status %d: %s: %w", status, msg, err)
+		}
+		return nil, fmt.Errorf("token exchange failed with status %d: %s", status, msg)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("token exchange request failed: %w", err)
 	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("failed to close response body: %v", errClose)
-		}
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read token response: %w", err)
-	}
-	// log.Debugf("Token response: %s", string(body))
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(body))
-	}
-	// log.Debugf("Token response: %s", string(body))
 
 	var tokenResp tokenResponse
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
@@ -231,32 +247,33 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", anthropicTokenURL, strings.NewReader(string(jsonBody)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create refresh request: %w", err)
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		o.httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicTokenURL, bytes.NewReader(jsonBody))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create refresh request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
+		return nil, fmt.Errorf("token refresh request failed: %w", err)
 	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := o.httpClient.Do(req)
+	if status != http.StatusOK {
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("token refresh failed with status %d: %s: %w", status, msg, err)
+		}
+		return nil, fmt.Errorf("token refresh failed with status %d: %s", status, msg)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("token refresh request failed: %w", err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read refresh response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	// log.Debugf("Token response: %s", string(body))
 
 	var tokenResp tokenResponse
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
