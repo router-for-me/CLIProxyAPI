@@ -54,11 +54,25 @@ func ConvertGeminiRequestToAntigravity(_ string, inputRawJSON []byte, _ bool) []
 	rawJSON = []byte(template)
 
 	// Normalize roles in request.contents: default to valid values if missing/invalid
+	// Also remove invalid fields that should not be in contents elements (fixes #655 and related issues)
+	invalidContentFields := []string{
+		"safetySettings", "model", "userAgent", "requestId",
+		"sessionId", "toolConfig", "generationConfig", "systemInstruction",
+		"tools", "cachedContent", "defer_loading",
+	}
 	contents := gjson.GetBytes(rawJSON, "request.contents")
 	if contents.Exists() {
 		prevRole := ""
 		idx := 0
 		contents.ForEach(func(_ gjson.Result, value gjson.Result) bool {
+			// Remove invalid fields from each content element
+			for _, field := range invalidContentFields {
+				if value.Get(field).Exists() {
+					path := fmt.Sprintf("request.contents.%d.%s", idx, field)
+					rawJSON, _ = sjson.DeleteBytes(rawJSON, path)
+				}
+			}
+
 			role := value.Get("role").String()
 			valid := role == "user" || role == "model"
 			if role == "" || !valid {
