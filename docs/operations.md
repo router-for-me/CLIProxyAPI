@@ -199,34 +199,26 @@ When multiple credentials match, you can choose a selection strategy:
 
 ```yaml
 routing:
-  strategy: "fill-first"  # default; or "round-robin", "random"
+  strategy: "fill-first"    # fill-first (default), round-robin, random, least-busy, lowest-latency
+  health-aware: true        # Filter unhealthy credentials (COOLDOWN, ERROR)
+  prefer-healthy: true      # Prefer HEALTHY over DEGRADED when health-aware
+  fill-first-max-inflight-per-auth: 4  # 0 = unlimited
+  fill-first-spillover: "next-auth"    # next-auth (default), least-busy
 ```
 
-Additional strategies:
-- `least-busy` (uses in-flight request counts)
-- `lowest-latency` (requires `health-tracking.enable: true`)
+Notes:
+- `least-busy` uses in-flight request counts; `lowest-latency` requires `health-tracking.enable: true`.
+- `fill-first` “burns” one account first; spillover prevents overload under bursty concurrency.
+- `next-auth` preserves deterministic “drain first”; `least-busy` maximizes throughput.
 
 ### Fill-first spillover (recommended for “many creds”)
 
-`fill-first` intentionally “burns” one account first (to stagger rolling-window subscription caps), but with many concurrent terminals it can also overload a single credential, leading to avoidable `429` errors. These knobs keep the intent while adding safe spillover:
-
-```yaml
-routing:
-  strategy: "fill-first"
-  fill-first-max-inflight-per-auth: 4   # 0 = unlimited
-  fill-first-spillover: "next-auth"     # next-auth (default), least-busy
-```
+`fill-first` intentionally “burns” one account first (to stagger rolling-window subscription caps), but with many concurrent terminals it can also overload a single credential, leading to avoidable `429` errors. Use `fill-first-max-inflight-per-auth` and `fill-first-spillover` to keep the intent while enabling safe spillover.
 
 - When the preferred credential is at capacity (`max-inflight`), selection spills over to another credential instead of overloading one.
 - `next-auth` preserves deterministic “drain first”; `least-busy` maximizes throughput under bursty load.
 
-Health-aware filtering (requires `health-tracking.enable: true`):
-
-```yaml
-routing:
-  health-aware: true
-  prefer-healthy: true
-```
+Health-aware filtering uses `health-aware` and `prefer-healthy` (requires `health-tracking.enable: true`).
 
 ## Streaming (Keep-Alives + Safe Bootstrap Retries)
 
