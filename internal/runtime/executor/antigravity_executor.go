@@ -44,6 +44,10 @@ const (
 	defaultAntigravityAgent    = "antigravity/1.11.5 windows/amd64"
 	antigravityAuthType        = "antigravity"
 	refreshSkew                = 3000 * time.Second
+
+	// Token warning thresholds for Antigravity API
+	antigravityTokenLimit         = 56000 // Approximate token limit for Antigravity API
+	antigravityTokenWarningThresh = 45000 // ~80% of limit - warn user to compress
 )
 
 var randSource = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -595,6 +599,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			scanner := bufio.NewScanner(resp.Body)
 			scanner.Buffer(nil, streamScannerBuffer)
 			var param any
+			var lastInputTokens int64
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				appendAPIResponseChunk(ctx, e.cfg, line)
@@ -610,6 +615,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 				if detail, ok := parseAntigravityStreamUsage(payload); ok {
 					reporter.publish(ctx, detail)
+					lastInputTokens = detail.InputTokens
 				}
 
 				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bytes.Clone(payload), &param)
@@ -617,6 +623,16 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 				}
 			}
+
+			// Inject token warning if usage exceeds threshold
+			if lastInputTokens >= antigravityTokenWarningThresh {
+				usagePercent := float64(lastInputTokens) / float64(antigravityTokenLimit) * 100
+				warningMsg := fmt.Sprintf("\n\n---\n**[SYSTEM WARNING]** Token usage at %.0f%% (%d/%d). Context limit approaching. Run `/compress` or `/compact` to avoid empty responses.\n---", usagePercent, lastInputTokens, antigravityTokenLimit)
+				warningChunk := buildTokenWarningChunk(warningMsg)
+				out <- cliproxyexecutor.StreamChunk{Payload: warningChunk}
+				log.Warnf("antigravity executor: token warning injected - usage %.0f%% (%d/%d)", usagePercent, lastInputTokens, antigravityTokenLimit)
+			}
+
 			tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, []byte("[DONE]"), &param)
 			for i := range tail {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(tail[i])}
@@ -1358,4 +1374,26 @@ func antigravityMinThinkingBudget(model string) int {
 		return modelInfo.Thinking.Min
 	}
 	return -1
+}
+
+// buildTokenWarningChunk creates an SSE chunk with a token usage warning message.
+// The chunk is formatted as an OpenAI-compatible streaming response.
+func buildTokenWarningChunk(message string) []byte {
+	chunk := map[string]any{
+		"id":      "token-warning-" + uuid.New().String()[:8],
+		"object":  "chat.completion.chunk",
+		"created": time.Now().Unix(),
+		"model":   "system",
+		"choices": []map[string]any{
+			{
+				"index": 0,
+				"delta": map[string]any{
+					"content": message,
+				},
+				"finish_reason": nil,
+			},
+		},
+	}
+	data, _ := json.Marshal(chunk)
+	return []byte("data: " + string(data) + "\n\n")
 }
