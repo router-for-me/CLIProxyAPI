@@ -835,27 +835,34 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 		// Helper: wait for callback file
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
-		waitForFile := func(path string, timeout time.Duration) (map[string]string, error) {
-			deadline := time.Now().Add(timeout)
+		waitForFile := func(ctx context.Context, path string, timeout time.Duration) (map[string]string, error) {
+			timer := time.NewTimer(timeout)
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer timer.Stop()
+			defer ticker.Stop()
 			for {
-				if time.Now().After(deadline) {
+				select {
+				case <-ctx.Done():
+					setOAuthStatus(state, "OAuth flow canceled")
+					return nil, ctx.Err()
+				case <-timer.C:
 					setOAuthStatus(state, "Timeout waiting for OAuth callback")
 					return nil, fmt.Errorf("timeout waiting for OAuth callback")
+				case <-ticker.C:
+					data, errRead := os.ReadFile(path)
+					if errRead == nil {
+						var m map[string]string
+						_ = json.Unmarshal(data, &m)
+						_ = os.Remove(path)
+						return m, nil
+					}
 				}
-				data, errRead := os.ReadFile(path)
-				if errRead == nil {
-					var m map[string]string
-					_ = json.Unmarshal(data, &m)
-					_ = os.Remove(path)
-					return m, nil
-				}
-				time.Sleep(500 * time.Millisecond)
 			}
 		}
 
 		fmt.Println("Waiting for authentication callback...")
 		// Wait up to 5 minutes
-		resultMap, errWait := waitForFile(waitFile, 5*time.Minute)
+		resultMap, errWait := waitForFile(ctx, waitFile, 5*time.Minute)
 		if errWait != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCallbackTimeout, errWait)
 			log.Error(claude.GetUserFriendlyMessage(authErr))
@@ -1018,32 +1025,41 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		// Wait for callback file written by server route
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-gemini-%s.oauth", state))
 		fmt.Println("Waiting for authentication callback...")
-		deadline := time.Now().Add(5 * time.Minute)
+		timer := time.NewTimer(5 * time.Minute)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer timer.Stop()
+		defer ticker.Stop()
 		var authCode string
+	waitForCallback:
 		for {
-			if time.Now().After(deadline) {
+			select {
+			case <-ctx.Done():
+				log.Error("oauth flow canceled")
+				setOAuthStatus(state, "OAuth flow canceled")
+				return
+			case <-timer.C:
 				log.Error("oauth flow timed out")
 				setOAuthStatus(state, "OAuth flow timed out")
 				return
-			}
-			if data, errR := os.ReadFile(waitFile); errR == nil {
-				var m map[string]string
-				_ = json.Unmarshal(data, &m)
-				_ = os.Remove(waitFile)
-				if errStr := m["error"]; errStr != "" {
-					log.Errorf("Authentication failed: %s", errStr)
-					setOAuthStatus(state, "Authentication failed")
-					return
+			case <-ticker.C:
+				if data, errR := os.ReadFile(waitFile); errR == nil {
+					var m map[string]string
+					_ = json.Unmarshal(data, &m)
+					_ = os.Remove(waitFile)
+					if errStr := m["error"]; errStr != "" {
+						log.Errorf("Authentication failed: %s", errStr)
+						setOAuthStatus(state, "Authentication failed")
+						return
+					}
+					authCode = m["code"]
+					if authCode == "" {
+						log.Errorf("Authentication failed: code not found")
+						setOAuthStatus(state, "Authentication failed: code not found")
+						return
+					}
+					break waitForCallback
 				}
-				authCode = m["code"]
-				if authCode == "" {
-					log.Errorf("Authentication failed: code not found")
-					setOAuthStatus(state, "Authentication failed: code not found")
-					return
-				}
-				break
 			}
-			time.Sleep(500 * time.Millisecond)
 		}
 
 		// Exchange authorization code for token
@@ -1256,35 +1272,44 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		// Wait for callback file
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
+		timer := time.NewTimer(5 * time.Minute)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer timer.Stop()
+		defer ticker.Stop()
 		var code string
+	waitForCallback:
 		for {
-			if time.Now().After(deadline) {
+			select {
+			case <-ctx.Done():
+				log.WithError(ctx.Err()).Error("oauth flow canceled")
+				setOAuthStatus(state, "OAuth flow canceled")
+				return
+			case <-timer.C:
 				authErr := codex.NewAuthenticationError(codex.ErrCallbackTimeout, fmt.Errorf("timeout waiting for OAuth callback"))
 				log.Error(codex.GetUserFriendlyMessage(authErr))
 				setOAuthStatus(state, "Timeout waiting for OAuth callback")
 				return
-			}
-			if data, errR := os.ReadFile(waitFile); errR == nil {
-				var m map[string]string
-				_ = json.Unmarshal(data, &m)
-				_ = os.Remove(waitFile)
-				if errStr := m["error"]; errStr != "" {
-					oauthErr := codex.NewOAuthError(errStr, "", http.StatusBadRequest)
-					log.Error(codex.GetUserFriendlyMessage(oauthErr))
-					setOAuthStatus(state, "Bad Request")
-					return
+			case <-ticker.C:
+				if data, errR := os.ReadFile(waitFile); errR == nil {
+					var m map[string]string
+					_ = json.Unmarshal(data, &m)
+					_ = os.Remove(waitFile)
+					if errStr := m["error"]; errStr != "" {
+						oauthErr := codex.NewOAuthError(errStr, "", http.StatusBadRequest)
+						log.Error(codex.GetUserFriendlyMessage(oauthErr))
+						setOAuthStatus(state, "Bad Request")
+						return
+					}
+					if m["state"] != state {
+						authErr := codex.NewAuthenticationError(codex.ErrInvalidState, fmt.Errorf("expected %s, got %s", state, m["state"]))
+						setOAuthStatus(state, "State code error")
+						log.Error(codex.GetUserFriendlyMessage(authErr))
+						return
+					}
+					code = m["code"]
+					break waitForCallback
 				}
-				if m["state"] != state {
-					authErr := codex.NewAuthenticationError(codex.ErrInvalidState, fmt.Errorf("expected %s, got %s", state, m["state"]))
-					setOAuthStatus(state, "State code error")
-					log.Error(codex.GetUserFriendlyMessage(authErr))
-					return
-				}
-				code = m["code"]
-				break
 			}
-			time.Sleep(500 * time.Millisecond)
 		}
 
 		log.Debug("Authorization code received, exchanging for tokens...")
@@ -1438,37 +1463,46 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		}
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
+		timer := time.NewTimer(5 * time.Minute)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer timer.Stop()
+		defer ticker.Stop()
 		var authCode string
+	waitForCallback:
 		for {
-			if time.Now().After(deadline) {
+			select {
+			case <-ctx.Done():
+				log.WithError(ctx.Err()).Error("oauth flow canceled")
+				setOAuthStatus(state, "OAuth flow canceled")
+				return
+			case <-timer.C:
 				log.Error("oauth flow timed out")
 				setOAuthStatus(state, "OAuth flow timed out")
 				return
+			case <-ticker.C:
+				if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
+					var payload map[string]string
+					_ = json.Unmarshal(data, &payload)
+					_ = os.Remove(waitFile)
+					if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
+						log.Errorf("Authentication failed: %s", errStr)
+						setOAuthStatus(state, "Authentication failed")
+						return
+					}
+					if payloadState := strings.TrimSpace(payload["state"]); payloadState != "" && payloadState != state {
+						log.Errorf("Authentication failed: state mismatch")
+						setOAuthStatus(state, "Authentication failed: state mismatch")
+						return
+					}
+					authCode = strings.TrimSpace(payload["code"])
+					if authCode == "" {
+						log.Error("Authentication failed: code not found")
+						setOAuthStatus(state, "Authentication failed: code not found")
+						return
+					}
+					break waitForCallback
+				}
 			}
-			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
-				var payload map[string]string
-				_ = json.Unmarshal(data, &payload)
-				_ = os.Remove(waitFile)
-				if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
-					log.Errorf("Authentication failed: %s", errStr)
-					setOAuthStatus(state, "Authentication failed")
-					return
-				}
-				if payloadState := strings.TrimSpace(payload["state"]); payloadState != "" && payloadState != state {
-					log.Errorf("Authentication failed: state mismatch")
-					setOAuthStatus(state, "Authentication failed: state mismatch")
-					return
-				}
-				authCode = strings.TrimSpace(payload["code"])
-				if authCode == "" {
-					log.Error("Authentication failed: code not found")
-					setOAuthStatus(state, "Authentication failed: code not found")
-					return
-				}
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
 		}
 
 		httpClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
@@ -1699,20 +1733,29 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		fmt.Println("Waiting for authentication...")
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-iflow-%s.oauth", state))
-		deadline := time.Now().Add(5 * time.Minute)
+		timer := time.NewTimer(5 * time.Minute)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer timer.Stop()
+		defer ticker.Stop()
 		var resultMap map[string]string
+	waitForCallback:
 		for {
-			if time.Now().After(deadline) {
+			select {
+			case <-ctx.Done():
+				setOAuthStatus(state, "Authentication canceled")
+				fmt.Println("Authentication canceled")
+				return
+			case <-timer.C:
 				setOAuthStatus(state, "Authentication failed")
 				fmt.Println("Authentication failed: timeout waiting for callback")
 				return
+			case <-ticker.C:
+				if data, errR := os.ReadFile(waitFile); errR == nil {
+					_ = os.Remove(waitFile)
+					_ = json.Unmarshal(data, &resultMap)
+					break waitForCallback
+				}
 			}
-			if data, errR := os.ReadFile(waitFile); errR == nil {
-				_ = os.Remove(waitFile)
-				_ = json.Unmarshal(data, &resultMap)
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
 		}
 
 		if errStr := strings.TrimSpace(resultMap["error"]); errStr != "" {
@@ -2061,7 +2104,11 @@ func performGeminiCLISetup(ctx context.Context, httpClient *http.Client, storage
 		}
 
 		log.Println("Onboarding in progress, waiting 5 seconds...")
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
 
