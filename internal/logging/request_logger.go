@@ -225,7 +225,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		responseToWrite = response
 	}
 
-	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if errOpen != nil {
 		return fmt.Errorf("failed to create log file: %w", errOpen)
 	}
@@ -340,7 +340,7 @@ func (l *FileRequestLogger) generateErrorFilename(url string) string {
 //   - error: An error if directory creation fails, nil otherwise
 func (l *FileRequestLogger) ensureLogsDir() error {
 	if _, err := os.Stat(l.logsDir); os.IsNotExist(err) {
-		return os.MkdirAll(l.logsDir, 0755)
+		return os.MkdirAll(l.logsDir, 0o700)
 	}
 	return nil
 }
@@ -905,7 +905,7 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 	content.WriteString("\n")
 
 	content.WriteString("=== REQUEST BODY ===\n")
-	content.Write(body)
+	content.Write(util.MaskSensitiveJSON(body))
 	content.WriteString("\n\n")
 
 	return content.String()
@@ -1070,7 +1070,7 @@ func (w *FileStreamingLogWriter) Close() error {
 		return nil
 	}
 
-	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if errOpen != nil {
 		w.cleanupTempFiles()
 		return fmt.Errorf("failed to create log file: %w", errOpen)
