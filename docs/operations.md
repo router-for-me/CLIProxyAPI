@@ -236,16 +236,9 @@ Notes:
 
 ## “10 Terminals / Many Subscriptions” Recommended Defaults
 
-This configuration biases toward **predictable** routing (burn one account first) while reducing avoidable interruptions under bursty concurrency:
+This configuration biases toward **predictable** routing (burn one account first) while reducing avoidable interruptions under bursty concurrency. Start with the routing block above and add:
 
 ```yaml
-routing:
-  strategy: "fill-first"
-  health-aware: true
-  prefer-healthy: true
-  fill-first-max-inflight-per-auth: 4
-  fill-first-spillover: "next-auth"
-
 health-tracking:
   enable: true
 
