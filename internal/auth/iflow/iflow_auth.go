@@ -9,10 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/oauthhttp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
@@ -28,9 +30,20 @@ const (
 	iFlowAPIKeyEndpoint = "https://platform.iflow.cn/api/openapi/apikey"
 
 	// Client credentials provided by iFlow for the Code Assist integration.
-	iFlowOAuthClientID     = "10009311001"
-	iFlowOAuthClientSecret = "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW"
+	iFlowOAuthClientID = "10009311001"
+	// Default client secret (can be overridden via IFLOW_CLIENT_SECRET env var)
+	defaultIFlowClientSecret = "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW"
 )
+
+// getIFlowClientSecret returns the iFlow OAuth client secret.
+// It first checks the IFLOW_CLIENT_SECRET environment variable,
+// falling back to the default value if not set.
+func getIFlowClientSecret() string {
+	if secret := os.Getenv("IFLOW_CLIENT_SECRET"); secret != "" {
+		return secret
+	}
+	return defaultIFlowClientSecret
+}
 
 // DefaultAPIBaseURL is the canonical chat completions endpoint.
 const DefaultAPIBaseURL = "https://apis.iflow.cn/v1"
@@ -49,7 +62,7 @@ type IFlowAuth struct {
 // NewIFlowAuth constructs a new IFlowAuth with proxy-aware transport.
 func NewIFlowAuth(cfg *config.Config) *IFlowAuth {
 	client := &http.Client{Timeout: 30 * time.Second}
-	return &IFlowAuth{httpClient: util.SetProxy(&cfg.SDKConfig, client)}
+	return &IFlowAuth{httpClient: util.SetOAuthProxy(&cfg.SDKConfig, client)}
 }
 
 // AuthorizationURL builds the authorization URL and matching redirect URI.
@@ -72,14 +85,8 @@ func (ia *IFlowAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectUR
 	form.Set("code", code)
 	form.Set("redirect_uri", redirectURI)
 	form.Set("client_id", iFlowOAuthClientID)
-	form.Set("client_secret", iFlowOAuthClientSecret)
-
-	req, err := ia.newTokenRequest(ctx, form)
-	if err != nil {
-		return nil, err
-	}
-
-	return ia.doTokenRequest(ctx, req)
+	form.Set("client_secret", getIFlowClientSecret())
+	return ia.doTokenRequest(ctx, form)
 }
 
 // RefreshTokens exchanges a refresh token for a new access token.
@@ -88,44 +95,47 @@ func (ia *IFlowAuth) RefreshTokens(ctx context.Context, refreshToken string) (*I
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 	form.Set("client_id", iFlowOAuthClientID)
-	form.Set("client_secret", iFlowOAuthClientSecret)
-
-	req, err := ia.newTokenRequest(ctx, form)
-	if err != nil {
-		return nil, err
-	}
-
-	return ia.doTokenRequest(ctx, req)
+	form.Set("client_secret", getIFlowClientSecret())
+	return ia.doTokenRequest(ctx, form)
 }
 
-func (ia *IFlowAuth) newTokenRequest(ctx context.Context, form url.Values) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, iFlowOAuthTokenEndpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("iflow token: create request failed: %w", err)
+func (ia *IFlowAuth) doTokenRequest(ctx context.Context, form url.Values) (*IFlowTokenData, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
-	basic := base64.StdEncoding.EncodeToString([]byte(iFlowOAuthClientID + ":" + iFlowOAuthClientSecret))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Basic "+basic)
-	return req, nil
-}
+	encoded := form.Encode()
+	basic := base64.StdEncoding.EncodeToString([]byte(iFlowOAuthClientID + ":" + getIFlowClientSecret()))
 
-func (ia *IFlowAuth) doTokenRequest(ctx context.Context, req *http.Request) (*IFlowTokenData, error) {
-	resp, err := ia.httpClient.Do(req)
-	if err != nil {
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		ia.httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, iFlowOAuthTokenEndpoint, strings.NewReader(encoded))
+			if err != nil {
+				return nil, fmt.Errorf("iflow token: create request failed: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("Authorization", "Basic "+basic)
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
 		return nil, fmt.Errorf("iflow token: request failed: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("iflow token: read response failed: %w", err)
+	if status != http.StatusOK {
+		log.Debugf("iflow token request failed: status=%d body=%s", status, string(body))
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("iflow token: %d %s: %w", status, msg, err)
+		}
+		return nil, fmt.Errorf("iflow token: %d %s", status, msg)
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		log.Debugf("iflow token request failed: status=%d body=%s", resp.StatusCode, string(body))
-		return nil, fmt.Errorf("iflow token: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("iflow token: request failed: %w", err)
 	}
 
 	var tokenResp IFlowTokenResponse
@@ -171,28 +181,38 @@ func (ia *IFlowAuth) FetchUserInfo(ctx context.Context, accessToken string) (*us
 	if strings.TrimSpace(accessToken) == "" {
 		return nil, fmt.Errorf("iflow api key: access token is empty")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	endpoint := fmt.Sprintf("%s?accessToken=%s", iFlowUserInfoEndpoint, url.QueryEscape(accessToken))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("iflow api key: create request failed: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := ia.httpClient.Do(req)
-	if err != nil {
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		ia.httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+			if err != nil {
+				return nil, fmt.Errorf("iflow api key: create request failed: %w", err)
+			}
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
 		return nil, fmt.Errorf("iflow api key: request failed: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("iflow api key: read response failed: %w", err)
+	if status != http.StatusOK {
+		log.Debugf("iflow api key failed: status=%d body=%s", status, string(body))
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("iflow api key: %d %s: %w", status, msg, err)
+		}
+		return nil, fmt.Errorf("iflow api key: %d %s", status, msg)
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		log.Debugf("iflow api key failed: status=%d body=%s", resp.StatusCode, string(body))
-		return nil, fmt.Errorf("iflow api key: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("iflow api key: request failed: %w", err)
 	}
 
 	var result userInfoResponse

@@ -8,22 +8,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/oauthhttp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	openaiAuthURL  = "https://auth.openai.com/oauth/authorize"
-	openaiTokenURL = "https://auth.openai.com/oauth/token"
-	openaiClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
-	redirectURI    = "http://localhost:1455/auth/callback"
+	openaiAuthURL      = "https://auth.openai.com/oauth/authorize"
+	openaiTokenURL     = "https://auth.openai.com/oauth/token"
+	openaiClientID     = "app_EMoamEEZ73f0CkXaXp7hrann"
+	defaultRedirectURI = "http://localhost:1455/auth/callback"
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -36,8 +36,9 @@ type CodexAuth struct {
 // NewCodexAuth creates a new CodexAuth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
 func NewCodexAuth(cfg *config.Config) *CodexAuth {
+	client := &http.Client{Timeout: 30 * time.Second}
 	return &CodexAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+		httpClient: util.SetOAuthProxy(&cfg.SDKConfig, client),
 	}
 }
 
@@ -45,8 +46,16 @@ func NewCodexAuth(cfg *config.Config) *CodexAuth {
 // It constructs the URL with the necessary parameters, including the client ID,
 // response type, redirect URI, scopes, and PKCE challenge.
 func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, error) {
+	return o.GenerateAuthURLWithRedirectURI(state, pkceCodes, defaultRedirectURI)
+}
+
+func (o *CodexAuth) GenerateAuthURLWithRedirectURI(state string, pkceCodes *PKCECodes, redirectURI string) (string, error) {
 	if pkceCodes == nil {
 		return "", fmt.Errorf("PKCE codes are required")
+	}
+	redirectURI = strings.TrimSpace(redirectURI)
+	if redirectURI == "" {
+		redirectURI = defaultRedirectURI
 	}
 
 	params := url.Values{
@@ -70,8 +79,16 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 // It performs an HTTP POST request to the OpenAI token endpoint with the provided
 // authorization code and PKCE verifier.
 func (o *CodexAuth) ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *PKCECodes) (*CodexAuthBundle, error) {
+	return o.ExchangeCodeForTokensWithRedirectURI(ctx, code, pkceCodes, defaultRedirectURI)
+}
+
+func (o *CodexAuth) ExchangeCodeForTokensWithRedirectURI(ctx context.Context, code string, pkceCodes *PKCECodes, redirectURI string) (*CodexAuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
+	}
+	redirectURI = strings.TrimSpace(redirectURI)
+	if redirectURI == "" {
+		redirectURI = defaultRedirectURI
 	}
 
 	// Prepare token exchange request
@@ -82,31 +99,34 @@ func (o *CodexAuth) ExchangeCodeForTokens(ctx context.Context, code string, pkce
 		"redirect_uri":  {redirectURI},
 		"code_verifier": {pkceCodes.CodeVerifier},
 	}
+	encoded := data.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", openaiTokenURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create token request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := o.httpClient.Do(req)
-	if err != nil {
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		o.httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, openaiTokenURL, strings.NewReader(encoded))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create token request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
 		return nil, fmt.Errorf("token exchange request failed: %w", err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read token response: %w", err)
+	if status != http.StatusOK {
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("token exchange failed with status %d: %s: %w", status, msg, err)
+		}
+		return nil, fmt.Errorf("token exchange failed with status %d: %s", status, msg)
 	}
-	// log.Debugf("Token response: %s", string(body))
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(body))
+	if err != nil {
+		return nil, fmt.Errorf("token exchange request failed: %w", err)
 	}
 
 	// Parse token response
@@ -168,30 +188,34 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		"refresh_token": {refreshToken},
 		"scope":         {"openid profile email"},
 	}
+	encoded := data.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", openaiTokenURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create refresh request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := o.httpClient.Do(req)
-	if err != nil {
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		o.httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, openaiTokenURL, strings.NewReader(encoded))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create refresh request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
 		return nil, fmt.Errorf("token refresh request failed: %w", err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read refresh response: %w", err)
+	if status != http.StatusOK {
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("token refresh failed with status %d: %s: %w", status, msg, err)
+		}
+		return nil, fmt.Errorf("token refresh failed with status %d: %s", status, msg)
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+	if err != nil {
+		return nil, fmt.Errorf("token refresh request failed: %w", err)
 	}
 
 	var tokenResp struct {
