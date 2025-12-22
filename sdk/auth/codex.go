@@ -97,16 +97,76 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 
 	fmt.Println("Waiting for Codex authentication callback...")
 
-	result, err := oauthServer.WaitForCallback(5 * time.Minute)
-	if err != nil {
-		if strings.Contains(err.Error(), "timeout") {
-			return nil, codex.NewAuthenticationError(codex.ErrCallbackTimeout, err)
+	callbackCh := make(chan *codex.OAuthResult, 1)
+	callbackErrCh := make(chan error, 1)
+	manualDescription := ""
+
+	go func() {
+		result, errWait := oauthServer.WaitForCallback(5 * time.Minute)
+		if errWait != nil {
+			callbackErrCh <- errWait
+			return
 		}
-		return nil, err
+		callbackCh <- result
+	}()
+
+	var result *codex.OAuthResult
+	var manualPromptTimer *time.Timer
+	var manualPromptC <-chan time.Time
+	if opts.Prompt != nil {
+		manualPromptTimer = time.NewTimer(15 * time.Second)
+		manualPromptC = manualPromptTimer.C
+		defer manualPromptTimer.Stop()
+	}
+
+waitForCallback:
+	for {
+		select {
+		case result = <-callbackCh:
+			break waitForCallback
+		case err = <-callbackErrCh:
+			if strings.Contains(err.Error(), "timeout") {
+				return nil, codex.NewAuthenticationError(codex.ErrCallbackTimeout, err)
+			}
+			return nil, err
+		case <-manualPromptC:
+			manualPromptC = nil
+			if manualPromptTimer != nil {
+				manualPromptTimer.Stop()
+			}
+			select {
+			case result = <-callbackCh:
+				break waitForCallback
+			case err = <-callbackErrCh:
+				if strings.Contains(err.Error(), "timeout") {
+					return nil, codex.NewAuthenticationError(codex.ErrCallbackTimeout, err)
+				}
+				return nil, err
+			default:
+			}
+			input, errPrompt := opts.Prompt("Paste the Codex callback URL (or press Enter to keep waiting): ")
+			if errPrompt != nil {
+				return nil, errPrompt
+			}
+			parsed, errParse := misc.ParseOAuthCallback(input)
+			if errParse != nil {
+				return nil, errParse
+			}
+			if parsed == nil {
+				continue
+			}
+			manualDescription = parsed.ErrorDescription
+			result = &codex.OAuthResult{
+				Code:  parsed.Code,
+				State: parsed.State,
+				Error: parsed.Error,
+			}
+			break waitForCallback
+		}
 	}
 
 	if result.Error != "" {
-		return nil, codex.NewOAuthError(result.Error, "", http.StatusBadRequest)
+		return nil, codex.NewOAuthError(result.Error, manualDescription, http.StatusBadRequest)
 	}
 
 	if result.State != state {

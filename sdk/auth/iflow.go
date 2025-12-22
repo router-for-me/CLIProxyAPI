@@ -84,9 +84,64 @@ func (a *IFlowAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 
 	fmt.Println("Waiting for iFlow authentication callback...")
 
-	result, err := oauthServer.WaitForCallback(5 * time.Minute)
-	if err != nil {
-		return nil, fmt.Errorf("iflow auth: callback wait failed: %w", err)
+	callbackCh := make(chan *iflow.OAuthResult, 1)
+	callbackErrCh := make(chan error, 1)
+
+	go func() {
+		result, errWait := oauthServer.WaitForCallback(5 * time.Minute)
+		if errWait != nil {
+			callbackErrCh <- errWait
+			return
+		}
+		callbackCh <- result
+	}()
+
+	var result *iflow.OAuthResult
+	var manualPromptTimer *time.Timer
+	var manualPromptC <-chan time.Time
+	if opts.Prompt != nil {
+		manualPromptTimer = time.NewTimer(15 * time.Second)
+		manualPromptC = manualPromptTimer.C
+		defer manualPromptTimer.Stop()
+	}
+
+waitForCallback:
+	for {
+		select {
+		case result = <-callbackCh:
+			break waitForCallback
+		case err = <-callbackErrCh:
+			return nil, fmt.Errorf("iflow auth: callback wait failed: %w", err)
+		case <-manualPromptC:
+			manualPromptC = nil
+			if manualPromptTimer != nil {
+				manualPromptTimer.Stop()
+			}
+			select {
+			case result = <-callbackCh:
+				break waitForCallback
+			case err = <-callbackErrCh:
+				return nil, fmt.Errorf("iflow auth: callback wait failed: %w", err)
+			default:
+			}
+			input, errPrompt := opts.Prompt("Paste the iFlow callback URL (or press Enter to keep waiting): ")
+			if errPrompt != nil {
+				return nil, errPrompt
+			}
+			parsed, errParse := misc.ParseOAuthCallback(input)
+			if errParse != nil {
+				return nil, errParse
+			}
+			if parsed == nil {
+				continue
+			}
+			result = &iflow.OAuthResult{
+				Code:  parsed.Code,
+				State: parsed.State,
+				Error: parsed.Error,
+			}
+			break waitForCallback
+		}
 	}
 	if result.Error != "" {
 		return nil, fmt.Errorf("iflow auth: provider returned error %s", result.Error)

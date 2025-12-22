@@ -14,6 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	log "github.com/sirupsen/logrus"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -35,6 +38,10 @@ type Params struct {
 	HasSentFinalEvents   bool   // Indicates if final content/message events have been sent
 	HasToolUse           bool   // Indicates if tool use was observed in the stream
 	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
+
+	// Signature caching support
+	SessionID           string          // Session ID derived from request for signature caching
+	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -62,6 +69,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
+			SessionID:        deriveSessionID(originalRequestRawJSON),
 		}
 	}
 
@@ -119,11 +127,20 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				// Process thinking content (internal reasoning)
 				if partResult.Get("thought").Bool() {
 					if thoughtSignature := partResult.Get("thoughtSignature"); thoughtSignature.Exists() && thoughtSignature.String() != "" {
+						log.Debug("Branch: signature_delta")
+
+						if params.SessionID != "" && params.CurrentThinkingText.Len() > 0 {
+							cache.CacheSignature(params.SessionID, params.CurrentThinkingText.String(), thoughtSignature.String())
+							log.Debugf("Cached signature for thinking block (sessionID=%s, textLen=%d)", params.SessionID, params.CurrentThinkingText.Len())
+							params.CurrentThinkingText.Reset()
+						}
+
 						output = output + "event: content_block_delta\n"
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", thoughtSignature.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
 						params.HasContent = true
 					} else if params.ResponseType == 2 { // Continue existing thinking block if already in thinking state
+						params.CurrentThinkingText.WriteString(partTextResult.String())
 						output = output + "event: content_block_delta\n"
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex), "delta.thinking", partTextResult.String())
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
@@ -152,6 +169,9 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
 						params.ResponseType = 2 // Set state to thinking
 						params.HasContent = true
+						// Start accumulating thinking text for signature caching
+						params.CurrentThinkingText.Reset()
+						params.CurrentThinkingText.WriteString(partTextResult.String())
 					}
 				} else {
 					finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason")
