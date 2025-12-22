@@ -81,6 +81,7 @@ svc, _ := cliproxy.NewBuilder().
 服务内部使用核心 `auth.Manager` 负责选择、执行、自动刷新。内嵌时可自定义其传输或钩子：
 
 ```go
+// selector 传 nil 时默认使用 "fill-first" 选择策略。
 core := coreauth.NewManager(coreauth.NewFileStore(cfg.AuthDir), nil, nil)
 core.SetRoundTripperProvider(myRTProvider) // 按账户返回 *http.Transport
 
@@ -161,4 +162,3 @@ _ = svc.Shutdown(ctx)
 - 热更新：`config.yaml` 与 `auths/` 变化会被自动侦测并应用。
 - 请求日志可通过管理 API 在运行时开关。
 - `gemini-web.*` 相关配置在内嵌服务器中会被遵循。
-
