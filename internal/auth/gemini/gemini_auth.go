@@ -58,12 +58,12 @@ func NewGeminiAuth() *GeminiAuth {
 //   - ctx: The context for the HTTP client
 //   - ts: The Gemini token storage containing authentication tokens
 //   - cfg: The configuration containing proxy settings
-//   - noBrowser: Optional parameter to disable browser opening
+//   - opts: Optional web login configuration (e.g., disable browser opening)
 //
 // Returns:
 //   - *http.Client: An HTTP client configured with authentication
 //   - error: An error if the client configuration fails, nil otherwise
-func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiTokenStorage, cfg *config.Config, noBrowser ...bool) (*http.Client, error) {
+func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiTokenStorage, cfg *config.Config, opts *WebLoginOptions) (*http.Client, error) {
 	oauthHTTPClient := util.SetOAuthProxy(&cfg.SDKConfig, &http.Client{Timeout: 30 * time.Second})
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, oauthHTTPClient)
 
@@ -82,7 +82,7 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 	// If no token is found in storage, initiate the web-based OAuth flow.
 	if ts.Token == nil {
 		fmt.Printf("Could not load token from file, starting OAuth flow.\n")
-		token, err = g.getTokenFromWeb(ctx, oauthHTTPClient, noBrowser...)
+		token, err = g.getTokenFromWeb(ctx, oauthHTTPClient, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get token from web: %w", err)
 		}
@@ -184,17 +184,21 @@ func (g *GeminiAuth) createTokenStorage(ctx context.Context, config *oauth2.Conf
 // Parameters:
 //   - ctx: The context for the HTTP client
 //   - config: The OAuth2 configuration
-//   - noBrowser: Optional parameter to disable browser opening
+//   - opts: Optional web login configuration (e.g., disable browser opening)
 //
 // Returns:
 //   - *oauth2.Token: The OAuth2 token obtained from the authorization flow
 //   - error: An error if the token acquisition fails, nil otherwise
-func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, httpClient *http.Client, noBrowser ...bool) (*oauth2.Token, error) {
+func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, httpClient *http.Client, opts *WebLoginOptions) (*oauth2.Token, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	provider := NewOAuthProvider(httpClient)
 	desiredPort := 8085
+	noBrowser := true
+	if opts != nil {
+		noBrowser = opts.NoBrowser
+	}
 
 	flow, err := oauthflow.RunAuthCodeFlow(ctx, provider, oauthflow.AuthCodeFlowOptions{
 		DesiredPort:  desiredPort,
@@ -206,7 +210,7 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, httpClient *http.Clien
 			}
 
 			opened := false
-			if len(noBrowser) == 1 && !noBrowser[0] {
+			if !noBrowser {
 				fmt.Println("Opening browser for authentication...")
 				if !browser.IsAvailable() {
 					log.Warn("No browser available on this system")
