@@ -12,6 +12,29 @@ import (
 
 var gjsonPathKeyReplacer = strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?")
 
+// CleanJSONSchemaForGemini transforms a JSON schema to be compatible with Gemini/Antigravity API.
+// It handles unsupported keywords, type flattening, and schema simplification while preserving
+// semantic information as description hints.
+func CleanJSONSchemaForGemini(jsonStr string) string {
+	// Phase 1: Convert and add hints
+	jsonStr = convertRefsToHints(jsonStr)
+	jsonStr = convertConstToEnum(jsonStr)
+	jsonStr = addEnumHints(jsonStr)
+	jsonStr = addAdditionalPropertiesHints(jsonStr)
+	jsonStr = moveConstraintsToDescription(jsonStr)
+
+	// Phase 2: Flatten complex structures
+	jsonStr = mergeAllOf(jsonStr)
+	jsonStr = flattenAnyOfOneOf(jsonStr)
+	jsonStr = flattenTypeArrays(jsonStr)
+
+	// Phase 3: Cleanup
+	jsonStr = removeUnsupportedKeywords(jsonStr)
+	jsonStr = cleanupRequiredFields(jsonStr)
+
+	return jsonStr
+}
+
 // CleanJSONSchemaForAntigravity transforms a JSON schema to be compatible with Antigravity API.
 // It handles unsupported keywords, type flattening, and schema simplification while preserving
 // semantic information as description hints.
