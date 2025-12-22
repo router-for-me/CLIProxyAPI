@@ -283,11 +283,10 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 		}
 		metadata := make(map[string]any)
 		raw := []byte(payload)
-		decoded := raw
-		if plaintext, _, errDecode := securefile.DecodeAuthJSON(raw, securefile.CurrentAuthEncryption()); errDecode == nil {
-			decoded = plaintext
-		} else if errDecode != nil {
-			log.WithError(errDecode).Warnf("postgres store: auth %s decode failed; treating payload as raw json", id)
+		decoded, _, errDecode := securefile.DecodeAuthJSON(raw, securefile.CurrentAuthEncryption())
+		if errDecode != nil {
+			log.WithError(errDecode).Warnf("postgres store: auth %s decode failed, skipping", id)
+			continue
 		}
 		if err = json.Unmarshal(decoded, &metadata); err != nil {
 			log.WithError(err).Warnf("postgres store: skipping auth %s with invalid json", id)
