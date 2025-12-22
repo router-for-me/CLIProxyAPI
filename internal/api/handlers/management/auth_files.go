@@ -2424,95 +2424,104 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 			waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-kiro-%s.oauth", state))
 			deadline := time.Now().Add(5 * time.Minute)
 
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+
 			for {
-				if time.Now().After(deadline) {
-					log.Error("oauth flow timed out")
-					setOAuthStatus(state, "OAuth flow timed out")
+				select {
+				case <-ctx.Done():
+					log.Error("oauth flow cancelled")
+					setOAuthStatus(state, "OAuth flow cancelled")
 					return
+				case <-ticker.C:
+					if time.Now().After(deadline) {
+						log.Error("oauth flow timed out")
+						setOAuthStatus(state, "OAuth flow timed out")
+						return
+					}
+					if data, errR := os.ReadFile(waitFile); errR == nil {
+						var m map[string]string
+						_ = json.Unmarshal(data, &m)
+						_ = os.Remove(waitFile)
+						if errStr := m["error"]; errStr != "" {
+							log.Errorf("Authentication failed: %s", errStr)
+							setOAuthStatus(state, "Authentication failed")
+							return
+						}
+						if m["state"] != state {
+							log.Errorf("State mismatch")
+							setOAuthStatus(state, "State mismatch")
+							return
+						}
+						code := m["code"]
+						if code == "" {
+							log.Error("No authorization code received")
+							setOAuthStatus(state, "No authorization code received")
+							return
+						}
+
+						// Exchange code for tokens
+						tokenReq := &kiroauth.CreateTokenRequest{
+							Code:         code,
+							CodeVerifier: codeVerifier,
+							RedirectURI:  kiroauth.KiroRedirectURI,
+						}
+
+						tokenResp, errToken := socialClient.CreateToken(ctx, tokenReq)
+						if errToken != nil {
+							log.Errorf("Failed to exchange code for tokens: %v", errToken)
+							setOAuthStatus(state, "Failed to exchange code for tokens")
+							return
+						}
+
+						// Save the token
+						expiresIn := tokenResp.ExpiresIn
+						if expiresIn <= 0 {
+							expiresIn = 3600
+						}
+						expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
+						email := kiroauth.ExtractEmailFromJWT(tokenResp.AccessToken)
+
+						idPart := kiroauth.SanitizeEmailForFilename(email)
+						if idPart == "" {
+							idPart = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+						}
+
+						now := time.Now()
+						fileName := fmt.Sprintf("kiro-%s-%s.json", strings.ToLower(provider), idPart)
+
+						record := &coreauth.Auth{
+							ID:       fileName,
+							Provider: "kiro",
+							FileName: fileName,
+							Metadata: map[string]any{
+								"type":          "kiro",
+								"access_token":  tokenResp.AccessToken,
+								"refresh_token": tokenResp.RefreshToken,
+								"profile_arn":   tokenResp.ProfileArn,
+								"expires_at":    expiresAt.Format(time.RFC3339),
+								"auth_method":   "social",
+								"provider":      provider,
+								"email":         email,
+								"last_refresh":  now.Format(time.RFC3339),
+							},
+						}
+
+						savedPath, errSave := h.saveTokenRecord(ctx, record)
+						if errSave != nil {
+							log.Errorf("Failed to save authentication tokens: %v", errSave)
+							setOAuthStatus(state, "Failed to save authentication tokens")
+							return
+						}
+
+						fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+						if email != "" {
+							fmt.Printf("Authenticated as: %s\n", email)
+						}
+						deleteOAuthStatus(state)
+						return
+					}
 				}
-				if data, errR := os.ReadFile(waitFile); errR == nil {
-					var m map[string]string
-					_ = json.Unmarshal(data, &m)
-					_ = os.Remove(waitFile)
-					if errStr := m["error"]; errStr != "" {
-						log.Errorf("Authentication failed: %s", errStr)
-						setOAuthStatus(state, "Authentication failed")
-						return
-					}
-					if m["state"] != state {
-						log.Errorf("State mismatch")
-						setOAuthStatus(state, "State mismatch")
-						return
-					}
-					code := m["code"]
-					if code == "" {
-						log.Error("No authorization code received")
-						setOAuthStatus(state, "No authorization code received")
-						return
-					}
-
-					// Exchange code for tokens
-					tokenReq := &kiroauth.CreateTokenRequest{
-						Code:         code,
-						CodeVerifier: codeVerifier,
-						RedirectURI:  kiroauth.KiroRedirectURI,
-					}
-
-					tokenResp, errToken := socialClient.CreateToken(ctx, tokenReq)
-					if errToken != nil {
-						log.Errorf("Failed to exchange code for tokens: %v", errToken)
-						setOAuthStatus(state, "Failed to exchange code for tokens")
-						return
-					}
-
-					// Save the token
-					expiresIn := tokenResp.ExpiresIn
-					if expiresIn <= 0 {
-						expiresIn = 3600
-					}
-					expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
-					email := kiroauth.ExtractEmailFromJWT(tokenResp.AccessToken)
-
-					idPart := kiroauth.SanitizeEmailForFilename(email)
-					if idPart == "" {
-						idPart = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
-					}
-
-					now := time.Now()
-					fileName := fmt.Sprintf("kiro-%s-%s.json", strings.ToLower(provider), idPart)
-
-					record := &coreauth.Auth{
-						ID:       fileName,
-						Provider: "kiro",
-						FileName: fileName,
-						Metadata: map[string]any{
-							"type":          "kiro",
-							"access_token":  tokenResp.AccessToken,
-							"refresh_token": tokenResp.RefreshToken,
-							"profile_arn":   tokenResp.ProfileArn,
-							"expires_at":    expiresAt.Format(time.RFC3339),
-							"auth_method":   "social",
-							"provider":      provider,
-							"email":         email,
-							"last_refresh":  now.Format(time.RFC3339),
-						},
-					}
-
-					savedPath, errSave := h.saveTokenRecord(ctx, record)
-					if errSave != nil {
-						log.Errorf("Failed to save authentication tokens: %v", errSave)
-						setOAuthStatus(state, "Failed to save authentication tokens")
-						return
-					}
-
-					fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-					if email != "" {
-						fmt.Printf("Authenticated as: %s\n", email)
-					}
-					deleteOAuthStatus(state)
-					return
-				}
-				time.Sleep(500 * time.Millisecond)
 			}
 		}()
 
