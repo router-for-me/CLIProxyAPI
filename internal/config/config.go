@@ -36,6 +36,9 @@ type Config struct {
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
+	// AuthEncryption controls encryption-at-rest for auth JSON files.
+	AuthEncryption AuthEncryptionConfig `yaml:"auth-encryption" json:"auth-encryption"`
+
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
 
@@ -112,6 +115,14 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+}
+
+// AuthEncryptionConfig controls auth file encryption settings.
+type AuthEncryptionConfig struct {
+	// Enabled toggles encryption-at-rest for auth JSON files.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// AllowPlaintextFallback enables best-effort re-encryption of plaintext auth files when enabled.
+	AllowPlaintextFallback bool `yaml:"allow-plaintext-fallback" json:"allow-plaintext-fallback"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.

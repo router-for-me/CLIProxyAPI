@@ -31,6 +31,14 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
+# Auth file encryption-at-rest
+# auth-encryption:
+#   enabled: false
+#   allow-plaintext-fallback: true
+#   # Encryption key is read from env:
+#   # - CLIPROXY_AUTH_ENCRYPTION_KEY
+#   # - CLI_PROXY_API_AUTH_ENCRYPTION_KEY
+
 # API keys for authentication
 api-keys:
   - "your-api-key-1"

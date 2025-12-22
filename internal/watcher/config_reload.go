@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/securefile"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	"gopkg.in/yaml.v3"
@@ -103,6 +104,9 @@ func (w *Watcher) reloadConfig() bool {
 	w.config = newConfig
 	w.clientsMutex.Unlock()
 
+	authEncryptionChanged := oldConfig == nil || oldConfig.AuthEncryption.Enabled != newConfig.AuthEncryption.Enabled
+	applyAuthEncryptionConfig(newConfig, newConfig.AuthDir, authEncryptionChanged)
+
 	var affectedOAuthProviders []string
 	if oldConfig != nil {
 		_, affectedOAuthProviders = diff.DiffOAuthExcludedModelChanges(oldConfig.OAuthExcludedModels, newConfig.OAuthExcludedModels)
@@ -131,4 +135,30 @@ func (w *Watcher) reloadConfig() bool {
 	log.Infof("config successfully reloaded, triggering client reload")
 	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
 	return true
+}
+
+func applyAuthEncryptionConfig(cfg *config.Config, authDir string, migrate bool) {
+	if cfg == nil {
+		securefile.ConfigureAuthEncryption(securefile.AuthEncryptionSettings{})
+		return
+	}
+	settings := securefile.AuthEncryptionSettings{
+		Enabled:                cfg.AuthEncryption.Enabled,
+		AllowPlaintextFallback: cfg.AuthEncryption.AllowPlaintextFallback,
+	}
+	securefile.ConfigureAuthEncryption(settings)
+	if settings.Enabled && securefile.ResolveAuthEncryptionSecret(settings.Secret) == "" {
+		log.Warn("auth-encryption enabled but no key configured; set CLIPROXY_AUTH_ENCRYPTION_KEY or CLI_PROXY_API_AUTH_ENCRYPTION_KEY")
+	}
+	if !migrate {
+		return
+	}
+	changed, err := securefile.MigrateAuthJSONDir(authDir, settings)
+	if err != nil {
+		log.WithError(err).Warn("auth encryption migration encountered errors")
+	}
+	if len(changed) == 0 {
+		return
+	}
+	log.Infof("auth encryption migration updated %d auth file(s)", len(changed))
 }
