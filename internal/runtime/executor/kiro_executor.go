@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -178,64 +180,6 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 type KiroExecutor struct {
 	cfg       *config.Config
 	refreshMu sync.Mutex // Serializes token refresh operations to prevent race conditions
-
-	// cognitoCredsCache caches Cognito credentials per auth ID for IDC authentication
-	// Key: auth.ID, Value: *kiroauth.CognitoCredentials
-	cognitoCredsCache sync.Map
-}
-
-// getCachedCognitoCredentials retrieves cached Cognito credentials if they are still valid.
-func (e *KiroExecutor) getCachedCognitoCredentials(authID string) *kiroauth.CognitoCredentials {
-	if cached, ok := e.cognitoCredsCache.Load(authID); ok {
-		creds := cached.(*kiroauth.CognitoCredentials)
-		if !creds.IsExpired() {
-			return creds
-		}
-		// Credentials expired, remove from cache
-		e.cognitoCredsCache.Delete(authID)
-	}
-	return nil
-}
-
-// cacheCognitoCredentials stores Cognito credentials in the cache.
-func (e *KiroExecutor) cacheCognitoCredentials(authID string, creds *kiroauth.CognitoCredentials) {
-	e.cognitoCredsCache.Store(authID, creds)
-}
-
-// getOrExchangeCognitoCredentials retrieves cached Cognito credentials or exchanges the SSO token for new ones.
-func (e *KiroExecutor) getOrExchangeCognitoCredentials(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) (*kiroauth.CognitoCredentials, error) {
-	if auth == nil {
-		return nil, fmt.Errorf("auth is nil")
-	}
-
-	// Check cache first
-	if creds := e.getCachedCognitoCredentials(auth.ID); creds != nil {
-		log.Debugf("kiro: using cached Cognito credentials for auth %s (expires: %s)", auth.ID, creds.Expiration.Format(time.RFC3339))
-		return creds, nil
-	}
-
-	// Get region from auth metadata
-	region := "us-east-1"
-	if auth.Metadata != nil {
-		if r, ok := auth.Metadata["region"].(string); ok && r != "" {
-			region = r
-		}
-	}
-
-	log.Infof("kiro: exchanging SSO token for Cognito credentials (region: %s)", region)
-
-	// Exchange SSO token for Cognito credentials
-	cognitoClient := kiroauth.NewCognitoIdentityClient(e.cfg)
-	creds, err := cognitoClient.ExchangeSSOTokenForCredentials(ctx, accessToken, region)
-	if err != nil {
-		return nil, fmt.Errorf("failed to exchange SSO token for Cognito credentials: %w", err)
-	}
-
-	// Cache the credentials
-	e.cacheCognitoCredentials(auth.ID, creds)
-	log.Infof("kiro: Cognito credentials obtained and cached (expires: %s)", creds.Expiration.Format(time.RFC3339))
-
-	return creds, nil
 }
 
 // isIDCAuth checks if the auth uses IDC (Identity Center) authentication method.
@@ -245,12 +189,6 @@ func isIDCAuth(auth *cliproxyauth.Auth) bool {
 	}
 	authMethod, _ := auth.Metadata["auth_method"].(string)
 	return authMethod == "idc"
-}
-
-// signRequestWithSigV4 signs an HTTP request with AWS SigV4 using Cognito credentials.
-func signRequestWithSigV4(req *http.Request, payload []byte, creds *kiroauth.CognitoCredentials, region, service string) error {
-	signer := kiroauth.NewSigV4Signer(creds, region, service)
-	return signer.SignRequest(req, payload)
 }
 
 // buildKiroPayloadForFormat builds the Kiro API payload based on the source format.
@@ -301,6 +239,10 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 			log.Warnf("kiro: pre-request token refresh failed: %v", refreshErr)
 		} else if refreshedAuth != nil {
 			auth = refreshedAuth
+			// Persist the refreshed auth to file so subsequent requests use it
+			if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+				log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+			}
 			accessToken, profileArn = kiroCredentials(auth)
 			log.Infof("kiro: token refreshed successfully before request")
 		}
@@ -372,40 +314,8 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 
-			// Choose auth method: SigV4 for IDC, Bearer token for others
-			// NOTE: Cognito credential exchange disabled for now - testing Bearer token first
-			if false && isIDCAuth(auth) {
-				// IDC auth requires SigV4 signing with Cognito-exchanged credentials
-				cognitoCreds, err := e.getOrExchangeCognitoCredentials(ctx, auth, accessToken)
-				if err != nil {
-					log.Warnf("kiro: failed to get Cognito credentials for IDC auth: %v", err)
-					return resp, fmt.Errorf("IDC auth requires Cognito credentials: %w", err)
-				}
-
-				// Get region from auth metadata
-				region := "us-east-1"
-				if auth.Metadata != nil {
-					if r, ok := auth.Metadata["region"].(string); ok && r != "" {
-						region = r
-					}
-				}
-
-				// Determine service from URL
-				service := "codewhisperer"
-				if strings.Contains(url, "q.us-east-1.amazonaws.com") {
-					service = "qdeveloper"
-				}
-
-				// Sign the request with SigV4
-				if err := signRequestWithSigV4(httpReq, kiroPayload, cognitoCreds, region, service); err != nil {
-					log.Warnf("kiro: failed to sign request with SigV4: %v", err)
-					return resp, fmt.Errorf("SigV4 signing failed: %w", err)
-				}
-				log.Debugf("kiro: request signed with SigV4 for IDC auth (service: %s, region: %s)", service, region)
-			} else {
-				// Standard Bearer token authentication for Builder ID, social auth, etc.
-				httpReq.Header.Set("Authorization", "Bearer "+accessToken)
-			}
+			// Bearer token authentication for all auth types (Builder ID, IDC, social, etc.)
+			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 
 			var attrs map[string]string
 			if auth != nil {
@@ -494,6 +404,11 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 					if refreshedAuth != nil {
 						auth = refreshedAuth
+						// Persist the refreshed auth to file so subsequent requests use it
+						if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+							log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+							// Continue anyway - the token is valid for this request
+						}
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
 						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
@@ -552,6 +467,11 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					}
 					if refreshedAuth != nil {
 						auth = refreshedAuth
+						// Persist the refreshed auth to file so subsequent requests use it
+						if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+							log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+							// Continue anyway - the token is valid for this request
+						}
 						accessToken, profileArn = kiroCredentials(auth)
 						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 						log.Infof("kiro: token refreshed for 403, retrying request")
@@ -654,6 +574,10 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			log.Warnf("kiro: pre-request token refresh failed: %v", refreshErr)
 		} else if refreshedAuth != nil {
 			auth = refreshedAuth
+			// Persist the refreshed auth to file so subsequent requests use it
+			if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+				log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+			}
 			accessToken, profileArn = kiroCredentials(auth)
 			log.Infof("kiro: token refreshed successfully before stream request")
 		}
@@ -723,40 +647,8 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 
-			// Choose auth method: SigV4 for IDC, Bearer token for others
-			// NOTE: Cognito credential exchange disabled for now - testing Bearer token first
-			if false && isIDCAuth(auth) {
-				// IDC auth requires SigV4 signing with Cognito-exchanged credentials
-				cognitoCreds, err := e.getOrExchangeCognitoCredentials(ctx, auth, accessToken)
-				if err != nil {
-					log.Warnf("kiro: failed to get Cognito credentials for IDC auth: %v", err)
-					return nil, fmt.Errorf("IDC auth requires Cognito credentials: %w", err)
-				}
-
-				// Get region from auth metadata
-				region := "us-east-1"
-				if auth.Metadata != nil {
-					if r, ok := auth.Metadata["region"].(string); ok && r != "" {
-						region = r
-					}
-				}
-
-				// Determine service from URL
-				service := "codewhisperer"
-				if strings.Contains(url, "q.us-east-1.amazonaws.com") {
-					service = "qdeveloper"
-				}
-
-				// Sign the request with SigV4
-				if err := signRequestWithSigV4(httpReq, kiroPayload, cognitoCreds, region, service); err != nil {
-					log.Warnf("kiro: failed to sign request with SigV4: %v", err)
-					return nil, fmt.Errorf("SigV4 signing failed: %w", err)
-				}
-				log.Debugf("kiro: stream request signed with SigV4 for IDC auth (service: %s, region: %s)", service, region)
-			} else {
-				// Standard Bearer token authentication for Builder ID, social auth, etc.
-				httpReq.Header.Set("Authorization", "Bearer "+accessToken)
-			}
+			// Bearer token authentication for all auth types (Builder ID, IDC, social, etc.)
+			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 
 			var attrs map[string]string
 			if auth != nil {
@@ -858,6 +750,11 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 					if refreshedAuth != nil {
 						auth = refreshedAuth
+						// Persist the refreshed auth to file so subsequent requests use it
+						if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+							log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+							// Continue anyway - the token is valid for this request
+						}
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
 						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
@@ -916,6 +813,11 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					}
 					if refreshedAuth != nil {
 						auth = refreshedAuth
+						// Persist the refreshed auth to file so subsequent requests use it
+						if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+							log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+							// Continue anyway - the token is valid for this request
+						}
 						accessToken, profileArn = kiroCredentials(auth)
 						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 						log.Infof("kiro: token refreshed for 403, retrying stream request")
@@ -3191,6 +3093,7 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	var refreshToken string
 	var clientID, clientSecret string
 	var authMethod string
+	var region, startURL string
 
 	if auth.Metadata != nil {
 		if rt, ok := auth.Metadata["refresh_token"].(string); ok {
@@ -3205,6 +3108,12 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		if am, ok := auth.Metadata["auth_method"].(string); ok {
 			authMethod = am
 		}
+		if r, ok := auth.Metadata["region"].(string); ok {
+			region = r
+		}
+		if su, ok := auth.Metadata["start_url"].(string); ok {
+			startURL = su
+		}
 	}
 
 	if refreshToken == "" {
@@ -3214,12 +3123,20 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	var tokenData *kiroauth.KiroTokenData
 	var err error
 
-	// Use SSO OIDC refresh for AWS Builder ID, otherwise use Kiro's OAuth refresh endpoint
-	if clientID != "" && clientSecret != "" && authMethod == "builder-id" {
+	ssoClient := kiroauth.NewSSOOIDCClient(e.cfg)
+
+	// Use SSO OIDC refresh for AWS Builder ID or IDC, otherwise use Kiro's OAuth refresh endpoint
+	switch {
+	case clientID != "" && clientSecret != "" && authMethod == "idc" && region != "":
+		// IDC refresh with region-specific endpoint
+		log.Debugf("kiro executor: using SSO OIDC refresh for IDC (region=%s)", region)
+		tokenData, err = ssoClient.RefreshTokenWithRegion(ctx, clientID, clientSecret, refreshToken, region, startURL)
+	case clientID != "" && clientSecret != "" && authMethod == "builder-id":
+		// Builder ID refresh with default endpoint
 		log.Debugf("kiro executor: using SSO OIDC refresh for AWS Builder ID")
-		ssoClient := kiroauth.NewSSOOIDCClient(e.cfg)
 		tokenData, err = ssoClient.RefreshToken(ctx, clientID, clientSecret, refreshToken)
-	} else {
+	default:
+		// Fallback to Kiro's OAuth refresh endpoint (for social auth: Google/GitHub)
 		log.Debugf("kiro executor: using Kiro OAuth refresh endpoint")
 		oauth := kiroauth.NewKiroOAuth(e.cfg)
 		tokenData, err = oauth.RefreshToken(ctx, refreshToken)
@@ -3273,6 +3190,53 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 
 	log.Infof("kiro executor: token refreshed successfully, expires at %s", tokenData.ExpiresAt)
 	return updated, nil
+}
+
+// persistRefreshedAuth persists a refreshed auth record to disk.
+// This ensures token refreshes from inline retry are saved to the auth file.
+func (e *KiroExecutor) persistRefreshedAuth(auth *cliproxyauth.Auth) error {
+	if auth == nil || auth.Metadata == nil {
+		return fmt.Errorf("kiro executor: cannot persist nil auth or metadata")
+	}
+
+	// Determine the file path from auth attributes or filename
+	var authPath string
+	if auth.Attributes != nil {
+		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
+			authPath = p
+		}
+	}
+	if authPath == "" {
+		fileName := strings.TrimSpace(auth.FileName)
+		if fileName == "" {
+			return fmt.Errorf("kiro executor: auth has no file path or filename")
+		}
+		if filepath.IsAbs(fileName) {
+			authPath = fileName
+		} else if e.cfg != nil && e.cfg.AuthDir != "" {
+			authPath = filepath.Join(e.cfg.AuthDir, fileName)
+		} else {
+			return fmt.Errorf("kiro executor: cannot determine auth file path")
+		}
+	}
+
+	// Marshal metadata to JSON
+	raw, err := json.Marshal(auth.Metadata)
+	if err != nil {
+		return fmt.Errorf("kiro executor: marshal metadata failed: %w", err)
+	}
+
+	// Write to temp file first, then rename (atomic write)
+	tmp := authPath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return fmt.Errorf("kiro executor: write temp auth file failed: %w", err)
+	}
+	if err := os.Rename(tmp, authPath); err != nil {
+		return fmt.Errorf("kiro executor: rename auth file failed: %w", err)
+	}
+
+	log.Debugf("kiro executor: persisted refreshed auth to %s", authPath)
+	return nil
 }
 
 // isTokenExpired checks if a JWT access token has expired.

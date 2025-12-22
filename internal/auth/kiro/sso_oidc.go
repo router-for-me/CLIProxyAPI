@@ -334,7 +334,7 @@ func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, cl
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Debugf("token refresh failed (status %d): %s", resp.StatusCode, string(respBody))
+		log.Warnf("IDC token refresh failed (status %d): %s", resp.StatusCode, string(respBody))
 		return nil, fmt.Errorf("token refresh failed (status %d)", resp.StatusCode)
 	}
 
