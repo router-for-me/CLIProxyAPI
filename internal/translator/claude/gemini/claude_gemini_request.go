@@ -194,7 +194,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						if name := fc.Get("name"); name.Exists() {
 							toolUse, _ = sjson.Set(toolUse, "name", name.String())
 						}
-						if args := fc.Get("args"); args.Exists() {
+						if args := fc.Get("args"); args.Exists() && args.IsObject() {
 							toolUse, _ = sjson.SetRaw(toolUse, "input", args.Raw)
 						}
 						msg, _ = sjson.SetRaw(msg, "content.-1", toolUse)
@@ -314,11 +314,11 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			if mode := funcCalling.Get("mode"); mode.Exists() {
 				switch mode.String() {
 				case "AUTO":
-					out, _ = sjson.Set(out, "tool_choice", map[string]interface{}{"type": "auto"})
+					out, _ = sjson.SetRaw(out, "tool_choice", `{"type":"auto"}`)
 				case "NONE":
-					out, _ = sjson.Set(out, "tool_choice", map[string]interface{}{"type": "none"})
+					out, _ = sjson.SetRaw(out, "tool_choice", `{"type":"none"}`)
 				case "ANY":
-					out, _ = sjson.Set(out, "tool_choice", map[string]interface{}{"type": "any"})
+					out, _ = sjson.SetRaw(out, "tool_choice", `{"type":"any"}`)
 				}
 			}
 		}

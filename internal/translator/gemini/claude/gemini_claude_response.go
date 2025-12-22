@@ -9,7 +9,6 @@ package claude
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -282,22 +281,16 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 	root := gjson.ParseBytes(rawJSON)
 
-	response := map[string]interface{}{
-		"id":            root.Get("responseId").String(),
-		"type":          "message",
-		"role":          "assistant",
-		"model":         root.Get("modelVersion").String(),
-		"content":       []interface{}{},
-		"stop_reason":   nil,
-		"stop_sequence": nil,
-		"usage": map[string]interface{}{
-			"input_tokens":  root.Get("usageMetadata.promptTokenCount").Int(),
-			"output_tokens": root.Get("usageMetadata.candidatesTokenCount").Int() + root.Get("usageMetadata.thoughtsTokenCount").Int(),
-		},
-	}
+	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
+	out, _ = sjson.Set(out, "id", root.Get("responseId").String())
+	out, _ = sjson.Set(out, "model", root.Get("modelVersion").String())
+
+	inputTokens := root.Get("usageMetadata.promptTokenCount").Int()
+	outputTokens := root.Get("usageMetadata.candidatesTokenCount").Int() + root.Get("usageMetadata.thoughtsTokenCount").Int()
+	out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
+	out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
 
 	parts := root.Get("candidates.0.content.parts")
-	var contentBlocks []interface{}
 	textBuilder := strings.Builder{}
 	thinkingBuilder := strings.Builder{}
 	toolIDCounter := 0
@@ -307,10 +300,9 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		if textBuilder.Len() == 0 {
 			return
 		}
-		contentBlocks = append(contentBlocks, map[string]interface{}{
-			"type": "text",
-			"text": textBuilder.String(),
-		})
+		block := `{"type":"text","text":""}`
+		block, _ = sjson.Set(block, "text", textBuilder.String())
+		out, _ = sjson.SetRaw(out, "content.-1", block)
 		textBuilder.Reset()
 	}
 
@@ -318,10 +310,9 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		if thinkingBuilder.Len() == 0 {
 			return
 		}
-		contentBlocks = append(contentBlocks, map[string]interface{}{
-			"type":     "thinking",
-			"thinking": thinkingBuilder.String(),
-		})
+		block := `{"type":"thinking","thinking":""}`
+		block, _ = sjson.Set(block, "thinking", thinkingBuilder.String())
+		out, _ = sjson.SetRaw(out, "content.-1", block)
 		thinkingBuilder.Reset()
 	}
 
@@ -345,21 +336,15 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 				name := functionCall.Get("name").String()
 				toolIDCounter++
-				toolBlock := map[string]interface{}{
-					"type":  "tool_use",
-					"id":    fmt.Sprintf("tool_%d", toolIDCounter),
-					"name":  name,
-					"input": map[string]interface{}{},
+				toolBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
+				toolBlock, _ = sjson.Set(toolBlock, "id", fmt.Sprintf("tool_%d", toolIDCounter))
+				toolBlock, _ = sjson.Set(toolBlock, "name", name)
+				inputRaw := "{}"
+				if args := functionCall.Get("args"); args.Exists() && gjson.Valid(args.Raw) && args.IsObject() {
+					inputRaw = args.Raw
 				}
-
-				if args := functionCall.Get("args"); args.Exists() {
-					var parsed interface{}
-					if err := json.Unmarshal([]byte(args.Raw), &parsed); err == nil {
-						toolBlock["input"] = parsed
-					}
-				}
-
-				contentBlocks = append(contentBlocks, toolBlock)
+				toolBlock, _ = sjson.SetRaw(toolBlock, "input", inputRaw)
+				out, _ = sjson.SetRaw(out, "content.-1", toolBlock)
 				continue
 			}
 		}
@@ -367,8 +352,6 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 	flushThinking()
 	flushText()
-
-	response["content"] = contentBlocks
 
 	stopReason := "end_turn"
 	if hasToolCall {
@@ -385,19 +368,13 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 			}
 		}
 	}
-	response["stop_reason"] = stopReason
+	out, _ = sjson.Set(out, "stop_reason", stopReason)
 
-	if usage := response["usage"].(map[string]interface{}); usage["input_tokens"] == int64(0) && usage["output_tokens"] == int64(0) {
-		if usageMeta := root.Get("usageMetadata"); !usageMeta.Exists() {
-			delete(response, "usage")
-		}
+	if inputTokens == int64(0) && outputTokens == int64(0) && !root.Get("usageMetadata").Exists() {
+		out, _ = sjson.Delete(out, "usage")
 	}
 
-	encoded, err := json.Marshal(response)
-	if err != nil {
-		return ""
-	}
-	return string(encoded)
+	return out
 }
 
 func ClaudeTokenCount(ctx context.Context, count int64) string {

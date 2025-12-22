@@ -452,7 +452,7 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 				toolBlock, _ = sjson.Set(toolBlock, "id", fmt.Sprintf("tool_%d", toolIDCounter))
 				toolBlock, _ = sjson.Set(toolBlock, "name", name)
 
-				if args := functionCall.Get("args"); args.Exists() && args.Raw != "" && gjson.Valid(args.Raw) {
+				if args := functionCall.Get("args"); args.Exists() && args.Raw != "" && gjson.Valid(args.Raw) && args.IsObject() {
 					toolBlock, _ = sjson.SetRaw(toolBlock, "input", args.Raw)
 				}
 

@@ -377,27 +377,18 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		}
 
 		// Compose outputs in encountered order: reasoning, message, function_calls
-		var outputs []interface{}
+		outputsWrapper := `{"arr":[]}`
 		if st.ReasoningOpened {
-			outputs = append(outputs, map[string]interface{}{
-				"id":      st.ReasoningItemID,
-				"type":    "reasoning",
-				"summary": []interface{}{map[string]interface{}{"type": "summary_text", "text": st.ReasoningBuf.String()}},
-			})
+			item := `{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`
+			item, _ = sjson.Set(item, "id", st.ReasoningItemID)
+			item, _ = sjson.Set(item, "summary.0.text", st.ReasoningBuf.String())
+			outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 		}
 		if st.MsgOpened {
-			outputs = append(outputs, map[string]interface{}{
-				"id":     st.CurrentMsgID,
-				"type":   "message",
-				"status": "completed",
-				"content": []interface{}{map[string]interface{}{
-					"type":        "output_text",
-					"annotations": []interface{}{},
-					"logprobs":    []interface{}{},
-					"text":        st.TextBuf.String(),
-				}},
-				"role": "assistant",
-			})
+			item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
+			item, _ = sjson.Set(item, "id", st.CurrentMsgID)
+			item, _ = sjson.Set(item, "content.0.text", st.TextBuf.String())
+			outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 		}
 		if len(st.FuncArgsBuf) > 0 {
 			idxs := make([]int, 0, len(st.FuncArgsBuf))
@@ -416,18 +407,16 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				if b := st.FuncArgsBuf[idx]; b != nil {
 					args = b.String()
 				}
-				outputs = append(outputs, map[string]interface{}{
-					"id":        fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]),
-					"type":      "function_call",
-					"status":    "completed",
-					"arguments": args,
-					"call_id":   st.FuncCallIDs[idx],
-					"name":      st.FuncNames[idx],
-				})
+				item := `{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`
+				item, _ = sjson.Set(item, "id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+				item, _ = sjson.Set(item, "arguments", args)
+				item, _ = sjson.Set(item, "call_id", st.FuncCallIDs[idx])
+				item, _ = sjson.Set(item, "name", st.FuncNames[idx])
+				outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 			}
 		}
-		if len(outputs) > 0 {
-			completed, _ = sjson.Set(completed, "response.output", outputs)
+		if gjson.Get(outputsWrapper, "arr.#").Int() > 0 {
+			completed, _ = sjson.SetRaw(completed, "response.output", gjson.Get(outputsWrapper, "arr").Raw)
 		}
 
 		// usage mapping
@@ -558,11 +547,24 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 
 	// Build outputs from candidates[0].content.parts
-	var outputs []interface{}
 	var reasoningText strings.Builder
 	var reasoningEncrypted string
 	var messageText strings.Builder
 	var haveMessage bool
+
+	haveOutput := false
+	ensureOutput := func() {
+		if haveOutput {
+			return
+		}
+		resp, _ = sjson.SetRaw(resp, "output", "[]")
+		haveOutput = true
+	}
+	appendOutput := func(itemJSON string) {
+		ensureOutput()
+		resp, _ = sjson.SetRaw(resp, "output.-1", itemJSON)
+	}
+
 	if parts := root.Get("candidates.0.content.parts"); parts.Exists() && parts.IsArray() {
 		parts.ForEach(func(_, p gjson.Result) bool {
 			if p.Get("thought").Bool() {
@@ -583,19 +585,16 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				name := fc.Get("name").String()
 				args := fc.Get("args")
 				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
-				outputs = append(outputs, map[string]interface{}{
-					"id":     fmt.Sprintf("fc_%s", callID),
-					"type":   "function_call",
-					"status": "completed",
-					"arguments": func() string {
-						if args.Exists() {
-							return args.Raw
-						}
-						return ""
-					}(),
-					"call_id": callID,
-					"name":    name,
-				})
+				itemJSON := `{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`
+				itemJSON, _ = sjson.Set(itemJSON, "id", fmt.Sprintf("fc_%s", callID))
+				itemJSON, _ = sjson.Set(itemJSON, "call_id", callID)
+				itemJSON, _ = sjson.Set(itemJSON, "name", name)
+				argsStr := ""
+				if args.Exists() {
+					argsStr = args.Raw
+				}
+				itemJSON, _ = sjson.Set(itemJSON, "arguments", argsStr)
+				appendOutput(itemJSON)
 				return true
 			}
 			return true
@@ -605,42 +604,24 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	// Reasoning output item
 	if reasoningText.Len() > 0 || reasoningEncrypted != "" {
 		rid := strings.TrimPrefix(id, "resp_")
-		item := map[string]interface{}{
-			"id":                fmt.Sprintf("rs_%s", rid),
-			"type":              "reasoning",
-			"encrypted_content": reasoningEncrypted,
-		}
-		var summaries []interface{}
+		itemJSON := `{"id":"","type":"reasoning","encrypted_content":""}`
+		itemJSON, _ = sjson.Set(itemJSON, "id", fmt.Sprintf("rs_%s", rid))
+		itemJSON, _ = sjson.Set(itemJSON, "encrypted_content", reasoningEncrypted)
 		if reasoningText.Len() > 0 {
-			summaries = append(summaries, map[string]interface{}{
-				"type": "summary_text",
-				"text": reasoningText.String(),
-			})
+			summaryJSON := `{"type":"summary_text","text":""}`
+			summaryJSON, _ = sjson.Set(summaryJSON, "text", reasoningText.String())
+			itemJSON, _ = sjson.SetRaw(itemJSON, "summary", "[]")
+			itemJSON, _ = sjson.SetRaw(itemJSON, "summary.-1", summaryJSON)
 		}
-		if summaries != nil {
-			item["summary"] = summaries
-		}
-		outputs = append(outputs, item)
+		appendOutput(itemJSON)
 	}
 
 	// Assistant message output item
 	if haveMessage {
-		outputs = append(outputs, map[string]interface{}{
-			"id":     fmt.Sprintf("msg_%s_0", strings.TrimPrefix(id, "resp_")),
-			"type":   "message",
-			"status": "completed",
-			"content": []interface{}{map[string]interface{}{
-				"type":        "output_text",
-				"annotations": []interface{}{},
-				"logprobs":    []interface{}{},
-				"text":        messageText.String(),
-			}},
-			"role": "assistant",
-		})
-	}
-
-	if len(outputs) > 0 {
-		resp, _ = sjson.Set(resp, "output", outputs)
+		itemJSON := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
+		itemJSON, _ = sjson.Set(itemJSON, "id", fmt.Sprintf("msg_%s_0", strings.TrimPrefix(id, "resp_")))
+		itemJSON, _ = sjson.Set(itemJSON, "content.0.text", messageText.String())
+		appendOutput(itemJSON)
 	}
 
 	// usage mapping

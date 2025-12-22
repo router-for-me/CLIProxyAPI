@@ -7,7 +7,6 @@ package gemini
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -190,19 +189,19 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 		}
 
 		// Process output content to build parts array
-		var parts []interface{}
 		hasToolCall := false
-		var pendingFunctionCalls []interface{}
+		var pendingFunctionCalls []string
 
 		flushPendingFunctionCalls := func() {
-			if len(pendingFunctionCalls) > 0 {
-				// Add all pending function calls as individual parts
-				// This maintains the original Gemini API format while ensuring consecutive calls are grouped together
-				for _, fc := range pendingFunctionCalls {
-					parts = append(parts, fc)
-				}
-				pendingFunctionCalls = nil
+			if len(pendingFunctionCalls) == 0 {
+				return
 			}
+			// Add all pending function calls as individual parts
+			// This maintains the original Gemini API format while ensuring consecutive calls are grouped together
+			for _, fc := range pendingFunctionCalls {
+				template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", fc)
+			}
+			pendingFunctionCalls = nil
 		}
 
 		if output := responseData.Get("output"); output.Exists() && output.IsArray() {
@@ -216,11 +215,9 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 
 					// Add thinking content
 					if content := value.Get("content"); content.Exists() {
-						part := map[string]interface{}{
-							"thought": true,
-							"text":    content.String(),
-						}
-						parts = append(parts, part)
+						part := `{"text":"","thought":true}`
+						part, _ = sjson.Set(part, "text", content.String())
+						template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
 					}
 
 				case "message":
@@ -232,10 +229,9 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 						content.ForEach(func(_, contentItem gjson.Result) bool {
 							if contentItem.Get("type").String() == "output_text" {
 								if text := contentItem.Get("text"); text.Exists() {
-									part := map[string]interface{}{
-										"text": text.String(),
-									}
-									parts = append(parts, part)
+									part := `{"text":""}`
+									part, _ = sjson.Set(part, "text", text.String())
+									template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
 								}
 							}
 							return true
@@ -245,28 +241,21 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 				case "function_call":
 					// Collect function call for potential merging with consecutive ones
 					hasToolCall = true
-					functionCall := map[string]interface{}{
-						"functionCall": map[string]interface{}{
-							"name": func() string {
-								n := value.Get("name").String()
-								rev := buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
-								if orig, ok := rev[n]; ok {
-									return orig
-								}
-								return n
-							}(),
-							"args": map[string]interface{}{},
-						},
+					functionCall := `{"functionCall":{"args":{},"name":""}}`
+					{
+						n := value.Get("name").String()
+						rev := buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
+						if orig, ok := rev[n]; ok {
+							n = orig
+						}
+						functionCall, _ = sjson.Set(functionCall, "functionCall.name", n)
 					}
 
 					// Parse and set arguments
 					if argsStr := value.Get("arguments").String(); argsStr != "" {
 						argsResult := gjson.Parse(argsStr)
 						if argsResult.IsObject() {
-							var args map[string]interface{}
-							if err := json.Unmarshal([]byte(argsStr), &args); err == nil {
-								functionCall["functionCall"].(map[string]interface{})["args"] = args
-							}
+							functionCall, _ = sjson.SetRaw(functionCall, "functionCall.args", argsStr)
 						}
 					}
 
@@ -277,11 +266,6 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 
 			// Handle any remaining pending function calls at the end
 			flushPendingFunctionCalls()
-		}
-
-		// Set the parts array
-		if len(parts) > 0 {
-			template, _ = sjson.SetRaw(template, "candidates.0.content.parts", mustMarshalJSON(parts))
 		}
 
 		// Set finish reason based on whether there were tool calls
@@ -321,15 +305,6 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 		}
 	}
 	return rev
-}
-
-// mustMarshalJSON marshals a value to JSON, panicking on error.
-func mustMarshalJSON(v interface{}) string {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return ""
-	}
-	return string(data)
 }
 
 func GeminiTokenCount(ctx context.Context, count int64) string {

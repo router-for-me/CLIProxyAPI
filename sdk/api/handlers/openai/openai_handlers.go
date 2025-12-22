@@ -17,6 +17,7 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -109,12 +110,37 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
-	if streamResult.Type == gjson.True {
+	stream := streamResult.Type == gjson.True
+
+	// Some clients send OpenAI Responses-format payloads to /v1/chat/completions.
+	// Convert them to Chat Completions so downstream translators preserve tool metadata.
+	if shouldTreatAsResponsesFormat(rawJSON) {
+		modelName := gjson.GetBytes(rawJSON, "model").String()
+		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
+		stream = gjson.GetBytes(rawJSON, "stream").Bool()
+	}
+
+	if stream {
 		h.handleStreamingResponse(c, rawJSON)
 	} else {
 		h.handleNonStreamingResponse(c, rawJSON)
 	}
 
+}
+
+// shouldTreatAsResponsesFormat detects OpenAI Responses-style payloads that are
+// accidentally sent to the Chat Completions endpoint.
+func shouldTreatAsResponsesFormat(rawJSON []byte) bool {
+	if gjson.GetBytes(rawJSON, "messages").Exists() {
+		return false
+	}
+	if gjson.GetBytes(rawJSON, "input").Exists() {
+		return true
+	}
+	if gjson.GetBytes(rawJSON, "instructions").Exists() {
+		return true
+	}
+	return false
 }
 
 // Completions handles the /v1/completions endpoint.
