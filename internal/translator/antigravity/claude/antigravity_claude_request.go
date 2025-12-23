@@ -86,6 +86,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				hasSystemInstruction = true
 			}
 		}
+	} else if systemResult.Type == gjson.String {
+		systemInstructionJSON = `{"role":"user","parts":[{"text":""}]}`
+		systemInstructionJSON, _ = sjson.Set(systemInstructionJSON, "parts.0.text", systemResult.String())
+		hasSystemInstruction = true
 	}
 
 	// contents
