@@ -198,6 +198,15 @@ ws-auth: false
 #   iflow:
 #     - "tstars2.0"
 
+# Claude OAuth Model Aliases
+# Define model aliases for Claude Code (OAuth) accounts. This allows you to use shorter
+# or more convenient model names when making API requests with authenticated Claude accounts.
+# Format: alias: upstream-model-name
+# claude-oauth-model-aliases:
+#   claude-haiku-4-5: "claude-haiku-4-5-20251001"  # Use "claude-haiku-4-5" as alias for the full model name
+#   claude-sonnet-latest: "claude-sonnet-4-5-20250929"
+#   claude-opus-latest: "claude-opus-4-20250514"
+
 # Optional payload configuration
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.

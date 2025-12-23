@@ -88,6 +88,10 @@ type Config struct {
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
+	// ClaudeOAuthModelAliases defines model aliases for Claude OAuth (Claude Code) accounts.
+	// Maps alias names to upstream model names for routing.
+	ClaudeOAuthModelAliases map[string]string `yaml:"claude-oauth-model-aliases,omitempty" json:"claude-oauth-model-aliases,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 

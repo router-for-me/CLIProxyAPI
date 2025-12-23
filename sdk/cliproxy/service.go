@@ -737,6 +737,10 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
+		// Add OAuth model aliases for Claude Code accounts
+		if oauthAliases := s.buildClaudeOAuthAliasModels(); len(oauthAliases) > 0 {
+			models = append(models, oauthAliases...)
+		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
 		models = registry.GetOpenAIModels()
@@ -1177,5 +1181,46 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 			DisplayName: display,
 		})
 	}
+	return out
+}
+
+// buildClaudeOAuthAliasModels builds model info entries from global Claude OAuth model aliases configuration.
+// This allows aliasing models for Claude Code (OAuth) accounts where API key config is not available.
+func (s *Service) buildClaudeOAuthAliasModels() []*ModelInfo {
+	if s.cfg == nil || len(s.cfg.ClaudeOAuthModelAliases) == 0 {
+		return nil
+	}
+
+	now := time.Now().Unix()
+	out := make([]*ModelInfo, 0, len(s.cfg.ClaudeOAuthModelAliases))
+	seen := make(map[string]struct{}, len(s.cfg.ClaudeOAuthModelAliases))
+
+	for alias, upstream := range s.cfg.ClaudeOAuthModelAliases {
+		alias = strings.TrimSpace(alias)
+		upstream = strings.TrimSpace(upstream)
+
+		if alias == "" || upstream == "" {
+			continue
+		}
+
+		key := strings.ToLower(alias)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		// Use the upstream model as display name
+		display := upstream
+
+		out = append(out, &ModelInfo{
+			ID:          alias,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "claude",
+			Type:        "claude",
+			DisplayName: display,
+		})
+	}
+
 	return out
 }

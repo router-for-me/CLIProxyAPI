@@ -505,6 +505,10 @@ func (e *ClaudeExecutor) resolveUpstreamModel(alias string, auth *cliproxyauth.A
 
 	entry := e.resolveClaudeConfig(auth)
 	if entry == nil {
+		// Check for OAuth model aliases (for Claude Code OAuth accounts)
+		if e.cfg != nil && auth != nil && strings.EqualFold(auth.Provider, "claude") {
+			return e.resolveOAuthModelAlias(trimmed)
+		}
 		return ""
 	}
 
@@ -537,6 +541,32 @@ func (e *ClaudeExecutor) resolveUpstreamModel(alias string, auth *cliproxyauth.A
 			if name != "" && strings.EqualFold(name, candidate) {
 				return name
 			}
+		}
+	}
+
+	// If no match in API key config, check OAuth aliases as fallback
+	if e.cfg != nil {
+		return e.resolveOAuthModelAlias(trimmed)
+	}
+
+	return ""
+}
+
+// resolveOAuthModelAlias resolves a model alias using the global Claude OAuth model aliases configuration.
+// This supports aliasing for Claude Code (OAuth) accounts where API key config is not available.
+func (e *ClaudeExecutor) resolveOAuthModelAlias(alias string) string {
+	if e.cfg == nil || len(e.cfg.ClaudeOAuthModelAliases) == 0 {
+		return ""
+	}
+
+	// Case-insensitive lookup for alias
+	aliasLower := strings.ToLower(alias)
+	for configuredAlias, upstream := range e.cfg.ClaudeOAuthModelAliases {
+		if strings.TrimSpace(configuredAlias) == "" {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(configuredAlias)) == aliasLower {
+			return strings.TrimSpace(upstream)
 		}
 	}
 	return ""
