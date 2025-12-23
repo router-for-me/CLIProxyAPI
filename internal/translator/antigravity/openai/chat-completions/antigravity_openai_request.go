@@ -247,15 +247,16 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			} else if role == "assistant" {
 				node := []byte(`{"role":"model","parts":[]}`)
 				p := 0
-				if content.Type == gjson.String {
+				hasContent := false
+				if content.Type == gjson.String && content.String() != "" {
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
-					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 					p++
+					hasContent = true
 				}
 
 				// Tool calls -> single model content with functionCall parts
 				tcs := m.Get("tool_calls")
-				if tcs.IsArray() {
+				if tcs.IsArray() && len(tcs.Array()) > 0 {
 					fIDs := make([]string, 0)
 					for _, tc := range tcs.Array() {
 						if tc.Get("type").String() != "function" {
@@ -305,6 +306,9 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					if pp > 0 {
 						out, _ = sjson.SetRawBytes(out, "request.contents.-1", toolNode)
 					}
+				} else if hasContent {
+					// No tool_calls, but has text content - append model node
+					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 				}
 			}
 		}
