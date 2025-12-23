@@ -429,6 +429,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 
+	// Normalize Claude OAuth model aliases map for efficient lookups.
+	cfg.ClaudeOAuthModelAliases = NormalizeClaudeOAuthModelAliases(cfg.ClaudeOAuthModelAliases)
+
 	if cfg.legacyMigrationPending {
 		fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
 		if !optional && configFile != "" {
@@ -621,6 +624,28 @@ func NormalizeOAuthExcludedModels(entries map[string][]string) map[string][]stri
 			continue
 		}
 		out[key] = normalized
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NormalizeClaudeOAuthModelAliases normalizes the Claude OAuth model aliases map by trimming
+// whitespace, lowercasing keys, and trimming whitespace from values. This enables efficient
+// case-insensitive lookup during request processing.
+func NormalizeClaudeOAuthModelAliases(entries map[string]string) map[string]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(entries))
+	for alias, upstream := range entries {
+		normalizedKey := strings.ToLower(strings.TrimSpace(alias))
+		normalizedValue := strings.TrimSpace(upstream)
+		if normalizedKey == "" || normalizedValue == "" {
+			continue
+		}
+		out[normalizedKey] = normalizedValue
 	}
 	if len(out) == 0 {
 		return nil

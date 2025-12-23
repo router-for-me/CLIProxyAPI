@@ -554,22 +554,15 @@ func (e *ClaudeExecutor) resolveUpstreamModel(alias string, auth *cliproxyauth.A
 
 // resolveOAuthModelAlias resolves a model alias using the global Claude OAuth model aliases configuration.
 // This supports aliasing for Claude Code (OAuth) accounts where API key config is not available.
+// The map keys are normalized (lowercase and trimmed) during config loading for efficient lookup.
 func (e *ClaudeExecutor) resolveOAuthModelAlias(alias string) string {
 	if e.cfg == nil || len(e.cfg.ClaudeOAuthModelAliases) == 0 {
 		return ""
 	}
 
-	// Case-insensitive lookup for alias
-	aliasLower := strings.ToLower(alias)
-	for configuredAlias, upstream := range e.cfg.ClaudeOAuthModelAliases {
-		if strings.TrimSpace(configuredAlias) == "" {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(configuredAlias)) == aliasLower {
-			return strings.TrimSpace(upstream)
-		}
-	}
-	return ""
+	// Direct map lookup with normalized key - keys are normalized during config loading
+	normalizedAlias := strings.ToLower(strings.TrimSpace(alias))
+	return e.cfg.ClaudeOAuthModelAliases[normalizedAlias]
 }
 
 func (e *ClaudeExecutor) resolveClaudeConfig(auth *cliproxyauth.Auth) *config.ClaudeKey {

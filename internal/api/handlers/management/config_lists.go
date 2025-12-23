@@ -572,6 +572,32 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 	h.persist(c)
 }
 
+// claude-oauth-model-aliases: map[string]string
+func (h *Handler) GetClaudeOAuthModelAliases(c *gin.Context) {
+	c.JSON(200, gin.H{"claude-oauth-model-aliases": config.NormalizeClaudeOAuthModelAliases(h.cfg.ClaudeOAuthModelAliases)})
+}
+
+func (h *Handler) PutClaudeOAuthModelAliases(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var entries map[string]string
+	if err = json.Unmarshal(data, &entries); err != nil {
+		var wrapper struct {
+			Items map[string]string `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &wrapper); err2 != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		entries = wrapper.Items
+	}
+	h.cfg.ClaudeOAuthModelAliases = config.NormalizeClaudeOAuthModelAliases(entries)
+	h.persist(c)
+}
+
 // codex-api-key: []CodexKey
 func (h *Handler) GetCodexKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"codex-api-key": h.cfg.CodexKey})

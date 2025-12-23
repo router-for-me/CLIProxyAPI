@@ -1186,6 +1186,8 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 
 // buildClaudeOAuthAliasModels builds model info entries from global Claude OAuth model aliases configuration.
 // This allows aliasing models for Claude Code (OAuth) accounts where API key config is not available.
+// Note: The map is already normalized (keys lower-cased, values trimmed, empty entries filtered)
+// during config loading in config.NormalizeClaudeOAuthModelAliases().
 func (s *Service) buildClaudeOAuthAliasModels() []*ModelInfo {
 	if s.cfg == nil || len(s.cfg.ClaudeOAuthModelAliases) == 0 {
 		return nil
@@ -1193,24 +1195,13 @@ func (s *Service) buildClaudeOAuthAliasModels() []*ModelInfo {
 
 	now := time.Now().Unix()
 	out := make([]*ModelInfo, 0, len(s.cfg.ClaudeOAuthModelAliases))
-	seen := make(map[string]struct{}, len(s.cfg.ClaudeOAuthModelAliases))
 
 	for alias, upstream := range s.cfg.ClaudeOAuthModelAliases {
-		alias = strings.TrimSpace(alias)
-		upstream = strings.TrimSpace(upstream)
-
-		if alias == "" || upstream == "" {
-			continue
-		}
-
-		key := strings.ToLower(alias)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-
-		// Use the upstream model as display name
-		display := upstream
+		// Map is already normalized during config loading:
+		// - alias is already lowercased and trimmed
+		// - upstream is already trimmed
+		// - empty entries are already filtered
+		// - keys are unique (map property)
 
 		out = append(out, &ModelInfo{
 			ID:          alias,
@@ -1218,7 +1209,7 @@ func (s *Service) buildClaudeOAuthAliasModels() []*ModelInfo {
 			Created:     now,
 			OwnedBy:     "claude",
 			Type:        "claude",
-			DisplayName: display,
+			DisplayName: upstream,
 		})
 	}
 
