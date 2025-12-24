@@ -40,6 +40,10 @@ type KiroTokenData struct {
 	ClientSecret string `json:"clientSecret,omitempty"`
 	// Email is the user's email address (used for file naming)
 	Email string `json:"email,omitempty"`
+	// StartURL is the IDC/Identity Center start URL (only for IDC auth method)
+	StartURL string `json:"startUrl,omitempty"`
+	// Region is the AWS region for IDC authentication (only for IDC auth method)
+	Region string `json:"region,omitempty"`
 }
 
 // KiroAuthBundle aggregates authentication data after OAuth flow completion

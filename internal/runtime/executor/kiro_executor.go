@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -43,10 +45,15 @@ const (
 	// Event Stream error type constants
 	ErrStreamFatal     = "fatal"     // Connection/authentication errors, not recoverable
 	ErrStreamMalformed = "malformed" // Format errors, data cannot be parsed
-	// kiroUserAgent matches amq2api format for User-Agent header
+	// kiroUserAgent matches amq2api format for User-Agent header (Amazon Q CLI style)
 	kiroUserAgent = "aws-sdk-rust/1.3.9 os/macos lang/rust/1.87.0"
-	// kiroFullUserAgent is the complete x-amz-user-agent header matching amq2api
+	// kiroFullUserAgent is the complete x-amz-user-agent header matching amq2api (Amazon Q CLI style)
 	kiroFullUserAgent = "aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.88.0 os/macos lang/rust/1.87.0 m/E app/AmazonQ-For-CLI"
+
+	// Kiro IDE style headers (from kiro2api - for IDC auth)
+	kiroIDEUserAgent     = "aws-sdk-js/1.0.18 ua/2.1 os/darwin#25.0.0 lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1"
+	kiroIDEAmzUserAgent  = "aws-sdk-js/1.0.18 KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1"
+	kiroIDEAgentModeSpec = "spec"
 )
 
 // Real-time usage estimation configuration
@@ -101,9 +108,22 @@ var kiroEndpointConfigs = []kiroEndpointConfig{
 
 // getKiroEndpointConfigs returns the list of Kiro API endpoint configurations to try in order.
 // Supports reordering based on "preferred_endpoint" in auth metadata/attributes.
+// For IDC auth method, automatically uses CodeWhisperer endpoint with CLI origin.
 func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	if auth == nil {
 		return kiroEndpointConfigs
+	}
+
+	// For IDC auth, use CodeWhisperer endpoint with AI_EDITOR origin (same as Social auth)
+	// Based on kiro2api analysis: IDC tokens work with CodeWhisperer endpoint using Bearer auth
+	// The difference is only in how tokens are refreshed (OIDC with clientId/clientSecret for IDC)
+	// NOT in how API calls are made - both Social and IDC use the same endpoint/origin
+	if auth.Metadata != nil {
+		authMethod, _ := auth.Metadata["auth_method"].(string)
+		if authMethod == "idc" {
+			log.Debugf("kiro: IDC auth, using CodeWhisperer endpoint")
+			return kiroEndpointConfigs
+		}
 	}
 
 	// Check for preference
@@ -162,6 +182,15 @@ type KiroExecutor struct {
 	refreshMu sync.Mutex // Serializes token refresh operations to prevent race conditions
 }
 
+// isIDCAuth checks if the auth uses IDC (Identity Center) authentication method.
+func isIDCAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	authMethod, _ := auth.Metadata["auth_method"].(string)
+	return authMethod == "idc"
+}
+
 // buildKiroPayloadForFormat builds the Kiro API payload based on the source format.
 // This is critical because OpenAI and Claude formats have different tool structures:
 // - OpenAI: tools[].function.name, tools[].function.description
@@ -210,6 +239,10 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 			log.Warnf("kiro: pre-request token refresh failed: %v", refreshErr)
 		} else if refreshedAuth != nil {
 			auth = refreshedAuth
+			// Persist the refreshed auth to file so subsequent requests use it
+			if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+				log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+			}
 			accessToken, profileArn = kiroCredentials(auth)
 			log.Infof("kiro: token refreshed successfully before request")
 		}
@@ -262,14 +295,27 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			}
 
 			httpReq.Header.Set("Content-Type", kiroContentType)
-			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 			httpReq.Header.Set("Accept", kiroAcceptStream)
 			// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
 			httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
-			httpReq.Header.Set("User-Agent", kiroUserAgent)
-			httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+
+			// Use different headers based on auth type
+			// IDC auth uses Kiro IDE style headers (from kiro2api)
+			// Other auth types use Amazon Q CLI style headers
+			if isIDCAuth(auth) {
+				httpReq.Header.Set("User-Agent", kiroIDEUserAgent)
+				httpReq.Header.Set("X-Amz-User-Agent", kiroIDEAmzUserAgent)
+				httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
+				log.Debugf("kiro: using Kiro IDE headers for IDC auth")
+			} else {
+				httpReq.Header.Set("User-Agent", kiroUserAgent)
+				httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+			}
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
+
+			// Bearer token authentication for all auth types (Builder ID, IDC, social, etc.)
+			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 
 			var attrs map[string]string
 			if auth != nil {
@@ -358,6 +404,11 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 					if refreshedAuth != nil {
 						auth = refreshedAuth
+						// Persist the refreshed auth to file so subsequent requests use it
+						if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+							log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+							// Continue anyway - the token is valid for this request
+						}
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
 						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
@@ -416,6 +467,11 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					}
 					if refreshedAuth != nil {
 						auth = refreshedAuth
+						// Persist the refreshed auth to file so subsequent requests use it
+						if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+							log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+							// Continue anyway - the token is valid for this request
+						}
 						accessToken, profileArn = kiroCredentials(auth)
 						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 						log.Infof("kiro: token refreshed for 403, retrying request")
@@ -518,6 +574,10 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			log.Warnf("kiro: pre-request token refresh failed: %v", refreshErr)
 		} else if refreshedAuth != nil {
 			auth = refreshedAuth
+			// Persist the refreshed auth to file so subsequent requests use it
+			if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+				log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+			}
 			accessToken, profileArn = kiroCredentials(auth)
 			log.Infof("kiro: token refreshed successfully before stream request")
 		}
@@ -568,14 +628,27 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			}
 
 			httpReq.Header.Set("Content-Type", kiroContentType)
-			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 			httpReq.Header.Set("Accept", kiroAcceptStream)
 			// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
 			httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
-			httpReq.Header.Set("User-Agent", kiroUserAgent)
-			httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+
+			// Use different headers based on auth type
+			// IDC auth uses Kiro IDE style headers (from kiro2api)
+			// Other auth types use Amazon Q CLI style headers
+			if isIDCAuth(auth) {
+				httpReq.Header.Set("User-Agent", kiroIDEUserAgent)
+				httpReq.Header.Set("X-Amz-User-Agent", kiroIDEAmzUserAgent)
+				httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
+				log.Debugf("kiro: using Kiro IDE headers for IDC auth")
+			} else {
+				httpReq.Header.Set("User-Agent", kiroUserAgent)
+				httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+			}
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
+
+			// Bearer token authentication for all auth types (Builder ID, IDC, social, etc.)
+			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 
 			var attrs map[string]string
 			if auth != nil {
@@ -677,6 +750,11 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 					if refreshedAuth != nil {
 						auth = refreshedAuth
+						// Persist the refreshed auth to file so subsequent requests use it
+						if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+							log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+							// Continue anyway - the token is valid for this request
+						}
 						accessToken, profileArn = kiroCredentials(auth)
 						// Rebuild payload with new profile ARN if changed
 						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
@@ -735,6 +813,11 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					}
 					if refreshedAuth != nil {
 						auth = refreshedAuth
+						// Persist the refreshed auth to file so subsequent requests use it
+						if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+							log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+							// Continue anyway - the token is valid for this request
+						}
 						accessToken, profileArn = kiroCredentials(auth)
 						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 						log.Infof("kiro: token refreshed for 403, retrying stream request")
@@ -1001,12 +1084,12 @@ func getEffectiveProfileArn(auth *cliproxyauth.Auth, profileArn string) string {
 // This consolidates the auth_method check that was previously done separately.
 func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn string) string {
 	if auth != nil && auth.Metadata != nil {
-		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && authMethod == "builder-id" {
-			// builder-id auth doesn't need profileArn
+		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && (authMethod == "builder-id" || authMethod == "idc") {
+			// builder-id and idc auth don't need profileArn
 			return ""
 		}
 	}
-	// For non-builder-id auth (social auth), profileArn is required
+	// For non-builder-id/idc auth (social auth), profileArn is required
 	if profileArn == "" {
 		log.Warnf("kiro: profile ARN not found in auth, API calls may fail")
 	}
@@ -3010,6 +3093,7 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	var refreshToken string
 	var clientID, clientSecret string
 	var authMethod string
+	var region, startURL string
 
 	if auth.Metadata != nil {
 		if rt, ok := auth.Metadata["refresh_token"].(string); ok {
@@ -3024,6 +3108,12 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		if am, ok := auth.Metadata["auth_method"].(string); ok {
 			authMethod = am
 		}
+		if r, ok := auth.Metadata["region"].(string); ok {
+			region = r
+		}
+		if su, ok := auth.Metadata["start_url"].(string); ok {
+			startURL = su
+		}
 	}
 
 	if refreshToken == "" {
@@ -3033,12 +3123,20 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	var tokenData *kiroauth.KiroTokenData
 	var err error
 
-	// Use SSO OIDC refresh for AWS Builder ID, otherwise use Kiro's OAuth refresh endpoint
-	if clientID != "" && clientSecret != "" && authMethod == "builder-id" {
+	ssoClient := kiroauth.NewSSOOIDCClient(e.cfg)
+
+	// Use SSO OIDC refresh for AWS Builder ID or IDC, otherwise use Kiro's OAuth refresh endpoint
+	switch {
+	case clientID != "" && clientSecret != "" && authMethod == "idc" && region != "":
+		// IDC refresh with region-specific endpoint
+		log.Debugf("kiro executor: using SSO OIDC refresh for IDC (region=%s)", region)
+		tokenData, err = ssoClient.RefreshTokenWithRegion(ctx, clientID, clientSecret, refreshToken, region, startURL)
+	case clientID != "" && clientSecret != "" && authMethod == "builder-id":
+		// Builder ID refresh with default endpoint
 		log.Debugf("kiro executor: using SSO OIDC refresh for AWS Builder ID")
-		ssoClient := kiroauth.NewSSOOIDCClient(e.cfg)
 		tokenData, err = ssoClient.RefreshToken(ctx, clientID, clientSecret, refreshToken)
-	} else {
+	default:
+		// Fallback to Kiro's OAuth refresh endpoint (for social auth: Google/GitHub)
 		log.Debugf("kiro executor: using Kiro OAuth refresh endpoint")
 		oauth := kiroauth.NewKiroOAuth(e.cfg)
 		tokenData, err = oauth.RefreshToken(ctx, refreshToken)
@@ -3092,6 +3190,53 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 
 	log.Infof("kiro executor: token refreshed successfully, expires at %s", tokenData.ExpiresAt)
 	return updated, nil
+}
+
+// persistRefreshedAuth persists a refreshed auth record to disk.
+// This ensures token refreshes from inline retry are saved to the auth file.
+func (e *KiroExecutor) persistRefreshedAuth(auth *cliproxyauth.Auth) error {
+	if auth == nil || auth.Metadata == nil {
+		return fmt.Errorf("kiro executor: cannot persist nil auth or metadata")
+	}
+
+	// Determine the file path from auth attributes or filename
+	var authPath string
+	if auth.Attributes != nil {
+		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
+			authPath = p
+		}
+	}
+	if authPath == "" {
+		fileName := strings.TrimSpace(auth.FileName)
+		if fileName == "" {
+			return fmt.Errorf("kiro executor: auth has no file path or filename")
+		}
+		if filepath.IsAbs(fileName) {
+			authPath = fileName
+		} else if e.cfg != nil && e.cfg.AuthDir != "" {
+			authPath = filepath.Join(e.cfg.AuthDir, fileName)
+		} else {
+			return fmt.Errorf("kiro executor: cannot determine auth file path")
+		}
+	}
+
+	// Marshal metadata to JSON
+	raw, err := json.Marshal(auth.Metadata)
+	if err != nil {
+		return fmt.Errorf("kiro executor: marshal metadata failed: %w", err)
+	}
+
+	// Write to temp file first, then rename (atomic write)
+	tmp := authPath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return fmt.Errorf("kiro executor: write temp auth file failed: %w", err)
+	}
+	if err := os.Rename(tmp, authPath); err != nil {
+		return fmt.Errorf("kiro executor: rename auth file failed: %w", err)
+	}
+
+	log.Debugf("kiro executor: persisted refreshed auth to %s", authPath)
+	return nil
 }
 
 // isTokenExpired checks if a JWT access token has expired.

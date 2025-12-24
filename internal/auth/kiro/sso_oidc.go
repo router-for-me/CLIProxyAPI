@@ -2,16 +2,19 @@
 package kiro
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -24,19 +27,31 @@ import (
 const (
 	// AWS SSO OIDC endpoints
 	ssoOIDCEndpoint = "https://oidc.us-east-1.amazonaws.com"
-	
+
 	// Kiro's start URL for Builder ID
 	builderIDStartURL = "https://view.awsapps.com/start"
-	
+
+	// Default region for IDC
+	defaultIDCRegion = "us-east-1"
+
 	// Polling interval
 	pollInterval = 5 * time.Second
-	
+
 	// Authorization code flow callback
 	authCodeCallbackPath = "/oauth/callback"
 	authCodeCallbackPort = 19877
-	
+
 	// User-Agent to match official Kiro IDE
 	kiroUserAgent = "KiroIDE"
+
+	// IDC token refresh headers (matching Kiro IDE behavior)
+	idcAmzUserAgent = "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE"
+)
+
+// Sentinel errors for OIDC token polling
+var (
+	ErrAuthorizationPending = errors.New("authorization_pending")
+	ErrSlowDown             = errors.New("slow_down")
 )
 
 // SSOOIDCClient handles AWS SSO OIDC authentication.
@@ -81,6 +96,440 @@ type CreateTokenResponse struct {
 	TokenType    string `json:"tokenType"`
 	ExpiresIn    int    `json:"expiresIn"`
 	RefreshToken string `json:"refreshToken"`
+}
+
+// getOIDCEndpoint returns the OIDC endpoint for the given region.
+func getOIDCEndpoint(region string) string {
+	if region == "" {
+		region = defaultIDCRegion
+	}
+	return fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
+}
+
+// promptInput prompts the user for input with an optional default value.
+func promptInput(prompt, defaultValue string) string {
+	reader := bufio.NewReader(os.Stdin)
+	if defaultValue != "" {
+		fmt.Printf("%s [%s]: ", prompt, defaultValue)
+	} else {
+		fmt.Printf("%s: ", prompt)
+	}
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		log.Warnf("Error reading input: %v", err)
+		return defaultValue
+	}
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return defaultValue
+	}
+	return input
+}
+
+// promptSelect prompts the user to select from options using number input.
+func promptSelect(prompt string, options []string) int {
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		fmt.Println(prompt)
+		for i, opt := range options {
+			fmt.Printf("  %d) %s\n", i+1, opt)
+		}
+		fmt.Printf("Enter selection (1-%d): ", len(options))
+
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			log.Warnf("Error reading input: %v", err)
+			return 0 // Default to first option on error
+		}
+		input = strings.TrimSpace(input)
+
+		// Parse the selection
+		var selection int
+		if _, err := fmt.Sscanf(input, "%d", &selection); err != nil || selection < 1 || selection > len(options) {
+			fmt.Printf("Invalid selection '%s'. Please enter a number between 1 and %d.\n\n", input, len(options))
+			continue
+		}
+		return selection - 1
+	}
+}
+
+// RegisterClientWithRegion registers a new OIDC client with AWS using a specific region.
+func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region string) (*RegisterClientResponse, error) {
+	endpoint := getOIDCEndpoint(region)
+
+	payload := map[string]interface{}{
+		"clientName": "Kiro IDE",
+		"clientType": "public",
+		"scopes":     []string{"codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations", "codewhisperer:transformations", "codewhisperer:taskassist"},
+		"grantTypes": []string{"urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/client/register", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kiroUserAgent)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Debugf("register client failed (status %d): %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("register client failed (status %d)", resp.StatusCode)
+	}
+
+	var result RegisterClientResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// StartDeviceAuthorizationWithIDC starts the device authorization flow for IDC.
+func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, clientID, clientSecret, startURL, region string) (*StartDeviceAuthResponse, error) {
+	endpoint := getOIDCEndpoint(region)
+
+	payload := map[string]string{
+		"clientId":     clientID,
+		"clientSecret": clientSecret,
+		"startUrl":     startURL,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/device_authorization", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kiroUserAgent)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Debugf("start device auth failed (status %d): %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("start device auth failed (status %d)", resp.StatusCode)
+	}
+
+	var result StartDeviceAuthResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// CreateTokenWithRegion polls for the access token after user authorization using a specific region.
+func (c *SSOOIDCClient) CreateTokenWithRegion(ctx context.Context, clientID, clientSecret, deviceCode, region string) (*CreateTokenResponse, error) {
+	endpoint := getOIDCEndpoint(region)
+
+	payload := map[string]string{
+		"clientId":     clientID,
+		"clientSecret": clientSecret,
+		"deviceCode":   deviceCode,
+		"grantType":    "urn:ietf:params:oauth:grant-type:device_code",
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/token", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kiroUserAgent)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for pending authorization
+	if resp.StatusCode == http.StatusBadRequest {
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil {
+			if errResp.Error == "authorization_pending" {
+				return nil, ErrAuthorizationPending
+			}
+			if errResp.Error == "slow_down" {
+				return nil, ErrSlowDown
+			}
+		}
+		log.Debugf("create token failed: %s", string(respBody))
+		return nil, fmt.Errorf("create token failed")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Debugf("create token failed (status %d): %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("create token failed (status %d)", resp.StatusCode)
+	}
+
+	var result CreateTokenResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// RefreshTokenWithRegion refreshes an access token using the refresh token with a specific region.
+func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, clientSecret, refreshToken, region, startURL string) (*KiroTokenData, error) {
+	endpoint := getOIDCEndpoint(region)
+
+	payload := map[string]string{
+		"clientId":     clientID,
+		"clientSecret": clientSecret,
+		"refreshToken": refreshToken,
+		"grantType":    "refresh_token",
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/token", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+
+	// Set headers matching kiro2api's IDC token refresh
+	// These headers are required for successful IDC token refresh
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Host", fmt.Sprintf("oidc.%s.amazonaws.com", region))
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("x-amz-user-agent", idcAmzUserAgent)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "*")
+	req.Header.Set("sec-fetch-mode", "cors")
+	req.Header.Set("User-Agent", "node")
+	req.Header.Set("Accept-Encoding", "br, gzip, deflate")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Warnf("IDC token refresh failed (status %d): %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("token refresh failed (status %d)", resp.StatusCode)
+	}
+
+	var result CreateTokenResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	expiresAt := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
+
+	return &KiroTokenData{
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
+		ExpiresAt:    expiresAt.Format(time.RFC3339),
+		AuthMethod:   "idc",
+		Provider:     "AWS",
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		StartURL:     startURL,
+		Region:       region,
+	}, nil
+}
+
+// LoginWithIDC performs the full device code flow for AWS Identity Center (IDC).
+func (c *SSOOIDCClient) LoginWithIDC(ctx context.Context, startURL, region string) (*KiroTokenData, error) {
+	fmt.Println("\n╔══════════════════════════════════════════════════════════╗")
+	fmt.Println("║       Kiro Authentication (AWS Identity Center)          ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════╝")
+
+	// Step 1: Register client with the specified region
+	fmt.Println("\nRegistering client...")
+	regResp, err := c.RegisterClientWithRegion(ctx, region)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register client: %w", err)
+	}
+	log.Debugf("Client registered: %s", regResp.ClientID)
+
+	// Step 2: Start device authorization with IDC start URL
+	fmt.Println("Starting device authorization...")
+	authResp, err := c.StartDeviceAuthorizationWithIDC(ctx, regResp.ClientID, regResp.ClientSecret, startURL, region)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start device auth: %w", err)
+	}
+
+	// Step 3: Show user the verification URL
+	fmt.Printf("\n")
+	fmt.Println("════════════════════════════════════════════════════════════")
+	fmt.Printf("  Confirm the following code in the browser:\n")
+	fmt.Printf("  Code: %s\n", authResp.UserCode)
+	fmt.Println("════════════════════════════════════════════════════════════")
+	fmt.Printf("\n  Open this URL: %s\n\n", authResp.VerificationURIComplete)
+
+	// Set incognito mode based on config
+	if c.cfg != nil {
+		browser.SetIncognitoMode(c.cfg.IncognitoBrowser)
+		if !c.cfg.IncognitoBrowser {
+			log.Info("kiro: using normal browser mode (--no-incognito). Note: You may not be able to select a different account.")
+		} else {
+			log.Debug("kiro: using incognito mode for multi-account support")
+		}
+	} else {
+		browser.SetIncognitoMode(true)
+		log.Debug("kiro: using incognito mode for multi-account support (default)")
+	}
+
+	// Open browser
+	if err := browser.OpenURL(authResp.VerificationURIComplete); err != nil {
+		log.Warnf("Could not open browser automatically: %v", err)
+		fmt.Println("  Please open the URL manually in your browser.")
+	} else {
+		fmt.Println("  (Browser opened automatically)")
+	}
+
+	// Step 4: Poll for token
+	fmt.Println("Waiting for authorization...")
+
+	interval := pollInterval
+	if authResp.Interval > 0 {
+		interval = time.Duration(authResp.Interval) * time.Second
+	}
+
+	deadline := time.Now().Add(time.Duration(authResp.ExpiresIn) * time.Second)
+
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			browser.CloseBrowser()
+			return nil, ctx.Err()
+		case <-time.After(interval):
+			tokenResp, err := c.CreateTokenWithRegion(ctx, regResp.ClientID, regResp.ClientSecret, authResp.DeviceCode, region)
+			if err != nil {
+				if errors.Is(err, ErrAuthorizationPending) {
+					fmt.Print(".")
+					continue
+				}
+				if errors.Is(err, ErrSlowDown) {
+					interval += 5 * time.Second
+					continue
+				}
+				browser.CloseBrowser()
+				return nil, fmt.Errorf("token creation failed: %w", err)
+			}
+
+			fmt.Println("\n\n✓ Authorization successful!")
+
+			// Close the browser window
+			if err := browser.CloseBrowser(); err != nil {
+				log.Debugf("Failed to close browser: %v", err)
+			}
+
+			// Step 5: Get profile ARN from CodeWhisperer API
+			fmt.Println("Fetching profile information...")
+			profileArn := c.fetchProfileArn(ctx, tokenResp.AccessToken)
+
+			// Fetch user email
+			email := FetchUserEmailWithFallback(ctx, c.cfg, tokenResp.AccessToken)
+			if email != "" {
+				fmt.Printf("  Logged in as: %s\n", email)
+			}
+
+			expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+
+			return &KiroTokenData{
+				AccessToken:  tokenResp.AccessToken,
+				RefreshToken: tokenResp.RefreshToken,
+				ProfileArn:   profileArn,
+				ExpiresAt:    expiresAt.Format(time.RFC3339),
+				AuthMethod:   "idc",
+				Provider:     "AWS",
+				ClientID:     regResp.ClientID,
+				ClientSecret: regResp.ClientSecret,
+				Email:        email,
+				StartURL:     startURL,
+				Region:       region,
+			}, nil
+		}
+	}
+
+	// Close browser on timeout
+	if err := browser.CloseBrowser(); err != nil {
+		log.Debugf("Failed to close browser on timeout: %v", err)
+	}
+	return nil, fmt.Errorf("authorization timed out")
+}
+
+// LoginWithMethodSelection prompts the user to select between Builder ID and IDC, then performs the login.
+func (c *SSOOIDCClient) LoginWithMethodSelection(ctx context.Context) (*KiroTokenData, error) {
+	fmt.Println("\n╔══════════════════════════════════════════════════════════╗")
+	fmt.Println("║              Kiro Authentication (AWS)                    ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════╝")
+
+	// Prompt for login method
+	options := []string{
+		"Use with Builder ID (personal AWS account)",
+		"Use with IDC Account (organization SSO)",
+	}
+	selection := promptSelect("\n? Select login method:", options)
+
+	if selection == 0 {
+		// Builder ID flow - use existing implementation
+		return c.LoginWithBuilderID(ctx)
+	}
+
+	// IDC flow - prompt for start URL and region
+	fmt.Println()
+	startURL := promptInput("? Enter Start URL", "")
+	if startURL == "" {
+		return nil, fmt.Errorf("start URL is required for IDC login")
+	}
+
+	region := promptInput("? Enter Region", defaultIDCRegion)
+
+	return c.LoginWithIDC(ctx, startURL, region)
 }
 
 // RegisterClient registers a new OIDC client with AWS.
@@ -211,10 +660,10 @@ func (c *SSOOIDCClient) CreateToken(ctx context.Context, clientID, clientSecret,
 		}
 		if json.Unmarshal(respBody, &errResp) == nil {
 			if errResp.Error == "authorization_pending" {
-				return nil, fmt.Errorf("authorization_pending")
+				return nil, ErrAuthorizationPending
 			}
 			if errResp.Error == "slow_down" {
-				return nil, fmt.Errorf("slow_down")
+				return nil, ErrSlowDown
 			}
 		}
 		log.Debugf("create token failed: %s", string(respBody))
@@ -359,12 +808,11 @@ func (c *SSOOIDCClient) LoginWithBuilderID(ctx context.Context) (*KiroTokenData,
 		case <-time.After(interval):
 			tokenResp, err := c.CreateToken(ctx, regResp.ClientID, regResp.ClientSecret, authResp.DeviceCode)
 			if err != nil {
-				errStr := err.Error()
-				if strings.Contains(errStr, "authorization_pending") {
+				if errors.Is(err, ErrAuthorizationPending) {
 					fmt.Print(".")
 					continue
 				}
-				if strings.Contains(errStr, "slow_down") {
+				if errors.Is(err, ErrSlowDown) {
 					interval += 5 * time.Second
 					continue
 				}
