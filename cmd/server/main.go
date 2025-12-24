@@ -61,11 +61,17 @@ func applyAuthEncryptionConfig(cfg *config.Config, authDir string, persister aut
 		Enabled:                cfg.AuthEncryption.Enabled,
 		AllowPlaintextFallback: cfg.AuthEncryption.AllowPlaintextFallback,
 	}
+	secret := securefile.ResolveAuthEncryptionSecret(settings.Secret)
+	settings.Secret = secret
 	securefile.ConfigureAuthEncryption(settings)
-	if settings.Enabled && securefile.ResolveAuthEncryptionSecret(settings.Secret) == "" {
-		log.Warn("auth-encryption enabled but no key configured; set CLIPROXY_AUTH_ENCRYPTION_KEY or CLI_PROXY_API_AUTH_ENCRYPTION_KEY")
+	if secret == "" {
+		if settings.Enabled {
+			log.Warn("auth-encryption enabled but no key configured; set CLIPROXY_AUTH_ENCRYPTION_KEY or CLI_PROXY_API_AUTH_ENCRYPTION_KEY")
+		} else if migrate {
+			log.Warn("auth-encryption disabled but no key configured; encrypted auth files cannot be decrypted without CLIPROXY_AUTH_ENCRYPTION_KEY or CLI_PROXY_API_AUTH_ENCRYPTION_KEY")
+		}
 	}
-	if !migrate {
+	if !migrate || secret == "" {
 		return
 	}
 	changed, err := securefile.MigrateAuthJSONDir(authDir, settings)
