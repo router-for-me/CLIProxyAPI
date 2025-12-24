@@ -40,25 +40,22 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 	timestamp := entry.Time.Format("2006-01-02 15:04:05")
 	message := strings.TrimRight(entry.Message, "\r\n")
 
-	reqID := ""
+	reqID := "--------"
 	if id, ok := entry.Data["request_id"].(string); ok && id != "" {
 		reqID = id
 	}
 
-	callerFile := "unknown"
-	callerLine := 0
-	if entry.Caller != nil {
-		callerFile = filepath.Base(entry.Caller.File)
-		callerLine = entry.Caller.Line
+	level := entry.Level.String()
+	if level == "warning" {
+		level = "warn"
 	}
-
-	levelStr := fmt.Sprintf("%-5s", entry.Level.String())
+	levelStr := fmt.Sprintf("%-5s", level)
 
 	var formatted string
-	if reqID != "" {
-		formatted = fmt.Sprintf("[%s] [%s] [%s:%d] | %s | %s\n", timestamp, levelStr, callerFile, callerLine, reqID, message)
+	if entry.Caller != nil {
+		formatted = fmt.Sprintf("[%s] [%s] [%s] [%s:%d] %s\n", timestamp, reqID, levelStr, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
 	} else {
-		formatted = fmt.Sprintf("[%s] [%s] [%s:%d] %s\n", timestamp, levelStr, callerFile, callerLine, message)
+		formatted = fmt.Sprintf("[%s] [%s] [%s] %s\n", timestamp, reqID, levelStr, message)
 	}
 	buffer.WriteString(formatted)
 
