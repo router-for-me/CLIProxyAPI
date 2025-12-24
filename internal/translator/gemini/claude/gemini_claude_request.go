@@ -7,10 +7,8 @@ package claude
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 
-	client "github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
@@ -34,92 +32,102 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	rawJSON := bytes.Clone(inputRawJSON)
 	rawJSON = bytes.Replace(rawJSON, []byte(`"url":{"type":"string","format":"uri",`), []byte(`"url":{"type":"string",`), -1)
 
+	// Build output Gemini CLI request JSON
+	out := `{"contents":[]}`
+	out, _ = sjson.Set(out, "model", modelName)
+
 	// system instruction
-	var systemInstruction *client.Content
-	systemResult := gjson.GetBytes(rawJSON, "system")
-	if systemResult.IsArray() {
-		systemResults := systemResult.Array()
-		systemInstruction = &client.Content{Role: "user", Parts: []client.Part{}}
-		for i := 0; i < len(systemResults); i++ {
-			systemPromptResult := systemResults[i]
-			systemTypePromptResult := systemPromptResult.Get("type")
-			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
-				systemPrompt := systemPromptResult.Get("text").String()
-				systemPart := client.Part{Text: systemPrompt}
-				systemInstruction.Parts = append(systemInstruction.Parts, systemPart)
+	if systemResult := gjson.GetBytes(rawJSON, "system"); systemResult.IsArray() {
+		systemInstruction := `{"role":"user","parts":[]}`
+		hasSystemParts := false
+		systemResult.ForEach(func(_, systemPromptResult gjson.Result) bool {
+			if systemPromptResult.Get("type").String() == "text" {
+				textResult := systemPromptResult.Get("text")
+				if textResult.Type == gjson.String {
+					part := `{"text":""}`
+					part, _ = sjson.Set(part, "text", textResult.String())
+					systemInstruction, _ = sjson.SetRaw(systemInstruction, "parts.-1", part)
+					hasSystemParts = true
+				}
 			}
+			return true
+		})
+		if hasSystemParts {
+			out, _ = sjson.SetRaw(out, "system_instruction", systemInstruction)
 		}
-		if len(systemInstruction.Parts) == 0 {
-			systemInstruction = nil
-		}
+	} else if systemResult.Type == gjson.String {
+		out, _ = sjson.Set(out, "request.system_instruction.parts.-1.text", systemResult.String())
 	}
 
 	// contents
-	contents := make([]client.Content, 0)
-	messagesResult := gjson.GetBytes(rawJSON, "messages")
-	if messagesResult.IsArray() {
-		messageResults := messagesResult.Array()
-		for i := 0; i < len(messageResults); i++ {
-			messageResult := messageResults[i]
+	if messagesResult := gjson.GetBytes(rawJSON, "messages"); messagesResult.IsArray() {
+		messagesResult.ForEach(func(_, messageResult gjson.Result) bool {
 			roleResult := messageResult.Get("role")
 			if roleResult.Type != gjson.String {
-				continue
+				return true
 			}
 			role := roleResult.String()
 			if role == "assistant" {
 				role = "model"
 			}
-			clientContent := client.Content{Role: role, Parts: []client.Part{}}
+
+			contentJSON := `{"role":"","parts":[]}`
+			contentJSON, _ = sjson.Set(contentJSON, "role", role)
+
 			contentsResult := messageResult.Get("content")
 			if contentsResult.IsArray() {
-				contentResults := contentsResult.Array()
-				for j := 0; j < len(contentResults); j++ {
-					contentResult := contentResults[j]
-					contentTypeResult := contentResult.Get("type")
-					if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
-						prompt := contentResult.Get("text").String()
-						clientContent.Parts = append(clientContent.Parts, client.Part{Text: prompt})
-					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_use" {
+				contentsResult.ForEach(func(_, contentResult gjson.Result) bool {
+					switch contentResult.Get("type").String() {
+					case "text":
+						part := `{"text":""}`
+						part, _ = sjson.Set(part, "text", contentResult.Get("text").String())
+						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+
+					case "tool_use":
 						functionName := contentResult.Get("name").String()
 						functionArgs := contentResult.Get("input").String()
-						var args map[string]any
-						if err := json.Unmarshal([]byte(functionArgs), &args); err == nil {
-							clientContent.Parts = append(clientContent.Parts, client.Part{
-								FunctionCall:     &client.FunctionCall{Name: functionName, Args: args},
-								ThoughtSignature: geminiClaudeThoughtSignature,
-							})
+						argsResult := gjson.Parse(functionArgs)
+						if argsResult.IsObject() && gjson.Valid(functionArgs) {
+							part := `{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`
+							part, _ = sjson.Set(part, "thoughtSignature", geminiClaudeThoughtSignature)
+							part, _ = sjson.Set(part, "functionCall.name", functionName)
+							part, _ = sjson.SetRaw(part, "functionCall.args", functionArgs)
+							contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 						}
-					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
+
+					case "tool_result":
 						toolCallID := contentResult.Get("tool_use_id").String()
-						if toolCallID != "" {
-							funcName := toolCallID
-							toolCallIDs := strings.Split(toolCallID, "-")
-							if len(toolCallIDs) > 1 {
-								funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
-							}
-							responseData := contentResult.Get("content").Raw
-							functionResponse := client.FunctionResponse{Name: funcName, Response: map[string]interface{}{"result": responseData}}
-							clientContent.Parts = append(clientContent.Parts, client.Part{FunctionResponse: &functionResponse})
+						if toolCallID == "" {
+							return true
 						}
+						funcName := toolCallID
+						toolCallIDs := strings.Split(toolCallID, "-")
+						if len(toolCallIDs) > 1 {
+							funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
+						}
+						responseData := contentResult.Get("content").Raw
+						part := `{"functionResponse":{"name":"","response":{"result":""}}}`
+						part, _ = sjson.Set(part, "functionResponse.name", funcName)
+						part, _ = sjson.Set(part, "functionResponse.response.result", responseData)
+						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 					}
-				}
-				contents = append(contents, clientContent)
+					return true
+				})
+				out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
 			} else if contentsResult.Type == gjson.String {
-				prompt := contentsResult.String()
-				contents = append(contents, client.Content{Role: role, Parts: []client.Part{{Text: prompt}}})
+				part := `{"text":""}`
+				part, _ = sjson.Set(part, "text", contentsResult.String())
+				contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+				out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
 			}
-		}
+			return true
+		})
 	}
 
 	// tools
-	var tools []client.ToolDeclaration
-	toolsResult := gjson.GetBytes(rawJSON, "tools")
-	if toolsResult.IsArray() {
-		tools = make([]client.ToolDeclaration, 1)
-		tools[0].FunctionDeclarations = make([]any, 0)
-		toolsResults := toolsResult.Array()
-		for i := 0; i < len(toolsResults); i++ {
-			toolResult := toolsResults[i]
+	if toolsResult := gjson.GetBytes(rawJSON, "tools"); toolsResult.IsArray() {
+		hasTools := false
+		toolsResult.ForEach(func(_, toolResult gjson.Result) bool {
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				inputSchema := inputSchemaResult.Raw
@@ -129,30 +137,19 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				tool, _ = sjson.Delete(tool, "input_examples")
 				tool, _ = sjson.Delete(tool, "type")
 				tool, _ = sjson.Delete(tool, "cache_control")
-				var toolDeclaration any
-				if err := json.Unmarshal([]byte(tool), &toolDeclaration); err == nil {
-					tools[0].FunctionDeclarations = append(tools[0].FunctionDeclarations, toolDeclaration)
+				if gjson.Valid(tool) && gjson.Parse(tool).IsObject() {
+					if !hasTools {
+						out, _ = sjson.SetRaw(out, "tools", `[{"functionDeclarations":[]}]`)
+						hasTools = true
+					}
+					out, _ = sjson.SetRaw(out, "tools.0.functionDeclarations.-1", tool)
 				}
 			}
+			return true
+		})
+		if !hasTools {
+			out, _ = sjson.Delete(out, "tools")
 		}
-	} else {
-		tools = make([]client.ToolDeclaration, 0)
-	}
-
-	// Build output Gemini CLI request JSON
-	out := `{"contents":[]}`
-	out, _ = sjson.Set(out, "model", modelName)
-	if systemInstruction != nil {
-		b, _ := json.Marshal(systemInstruction)
-		out, _ = sjson.SetRaw(out, "system_instruction", string(b))
-	}
-	if len(contents) > 0 {
-		b, _ := json.Marshal(contents)
-		out, _ = sjson.SetRaw(out, "contents", string(b))
-	}
-	if len(tools) > 0 && len(tools[0].FunctionDeclarations) > 0 {
-		b, _ := json.Marshal(tools)
-		out, _ = sjson.SetRaw(out, "tools", string(b))
 	}
 
 	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when enabled

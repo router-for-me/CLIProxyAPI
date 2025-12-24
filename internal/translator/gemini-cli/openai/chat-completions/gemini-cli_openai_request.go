@@ -160,6 +160,14 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 				} else if content.IsObject() && content.Get("type").String() == "text" {
 					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
 					out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.0.text", content.Get("text").String())
+				} else if content.IsArray() {
+					contents := content.Array()
+					if len(contents) > 0 {
+						out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
+						for j := 0; j < len(contents); j++ {
+							out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", j), contents[j].Get("text").String())
+						}
+					}
 				}
 			} else if role == "user" || (role == "system" && len(arr) == 1) {
 				// Build single user content node to avoid splitting into multiple contents
@@ -236,7 +244,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 
 					// Append a single tool content combining name + response per function
-					toolNode := []byte(`{"role":"tool","parts":[]}`)
+					toolNode := []byte(`{"role":"user","parts":[]}`)
 					pp := 0
 					for _, fid := range fIDs {
 						if name, ok := tcID2Name[fid]; ok {
@@ -278,7 +286,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 								log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
 								continue
 							}
-							fnRaw, errSet = sjson.Set(fnRaw, "parametersJsonSchema.properties", map[string]interface{}{})
+							fnRaw, errSet = sjson.SetRaw(fnRaw, "parametersJsonSchema.properties", `{}`)
 							if errSet != nil {
 								log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
 								continue
@@ -293,7 +301,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 							log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
 							continue
 						}
-						fnRaw, errSet = sjson.Set(fnRaw, "parametersJsonSchema.properties", map[string]interface{}{})
+						fnRaw, errSet = sjson.SetRaw(fnRaw, "parametersJsonSchema.properties", `{}`)
 						if errSet != nil {
 							log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
 							continue

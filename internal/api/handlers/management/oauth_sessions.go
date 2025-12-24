@@ -111,6 +111,27 @@ func (s *oauthSessionStore) Complete(state string) {
 	delete(s.sessions, state)
 }
 
+func (s *oauthSessionStore) CompleteProvider(provider string) int {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return 0
+	}
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.purgeExpiredLocked(now)
+	removed := 0
+	for state, session := range s.sessions {
+		if strings.EqualFold(session.Provider, provider) {
+			delete(s.sessions, state)
+			removed++
+		}
+	}
+	return removed
+}
+
 func (s *oauthSessionStore) Get(state string) (oauthSession, bool) {
 	state = strings.TrimSpace(state)
 	now := time.Now()
@@ -152,6 +173,10 @@ func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state
 func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state, message) }
 
 func CompleteOAuthSession(state string) { oauthSessions.Complete(state) }
+
+func CompleteOAuthSessionsByProvider(provider string) int {
+	return oauthSessions.CompleteProvider(provider)
+}
 
 func GetOAuthSession(state string) (provider string, status string, ok bool) {
 	session, ok := oauthSessions.Get(state)

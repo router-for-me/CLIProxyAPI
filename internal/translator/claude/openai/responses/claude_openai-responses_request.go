@@ -254,7 +254,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				toolUse, _ = sjson.Set(toolUse, "id", callID)
 				toolUse, _ = sjson.Set(toolUse, "name", name)
 				if argsStr != "" && gjson.Valid(argsStr) {
-					toolUse, _ = sjson.SetRaw(toolUse, "input", argsStr)
+					argsJSON := gjson.Parse(argsStr)
+					if argsJSON.IsObject() {
+						toolUse, _ = sjson.SetRaw(toolUse, "input", argsJSON.Raw)
+					}
 				}
 
 				asst := `{"role":"assistant","content":[]}`
@@ -309,16 +312,18 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		case gjson.String:
 			switch toolChoice.String() {
 			case "auto":
-				out, _ = sjson.Set(out, "tool_choice", map[string]interface{}{"type": "auto"})
+				out, _ = sjson.SetRaw(out, "tool_choice", `{"type":"auto"}`)
 			case "none":
 				// Leave unset; implies no tools
 			case "required":
-				out, _ = sjson.Set(out, "tool_choice", map[string]interface{}{"type": "any"})
+				out, _ = sjson.SetRaw(out, "tool_choice", `{"type":"any"}`)
 			}
 		case gjson.JSON:
 			if toolChoice.Get("type").String() == "function" {
 				fn := toolChoice.Get("function.name").String()
-				out, _ = sjson.Set(out, "tool_choice", map[string]interface{}{"type": "tool", "name": fn})
+				toolChoiceJSON := `{"name":"","type":"tool"}`
+				toolChoiceJSON, _ = sjson.Set(toolChoiceJSON, "name", fn)
+				out, _ = sjson.SetRaw(out, "tool_choice", toolChoiceJSON)
 			}
 		default:
 

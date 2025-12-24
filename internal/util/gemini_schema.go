@@ -12,10 +12,10 @@ import (
 
 var gjsonPathKeyReplacer = strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?")
 
-// CleanJSONSchemaForGemini transforms a JSON schema to be compatible with Gemini/Antigravity API.
+// CleanJSONSchemaForAntigravity transforms a JSON schema to be compatible with Antigravity API.
 // It handles unsupported keywords, type flattening, and schema simplification while preserving
 // semantic information as description hints.
-func CleanJSONSchemaForGemini(jsonStr string) string {
+func CleanJSONSchemaForAntigravity(jsonStr string) string {
 	// Phase 1: Convert and add hints
 	jsonStr = convertRefsToHints(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
@@ -31,6 +31,9 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr)
 	jsonStr = cleanupRequiredFields(jsonStr)
+
+	// Phase 4: Add placeholder for empty object schemas (Claude VALIDATED mode requirement)
+	jsonStr = addEmptySchemaPlaceholder(jsonStr)
 
 	return jsonStr
 }
@@ -105,7 +108,8 @@ func addAdditionalPropertiesHints(jsonStr string) string {
 
 var unsupportedConstraints = []string{
 	"minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
-	"pattern", "minItems", "maxItems",
+	"pattern", "minItems", "maxItems", "format",
+	"default", "examples", // Claude rejects these in VALIDATED mode
 }
 
 func moveConstraintsToDescription(jsonStr string) string {
@@ -336,6 +340,52 @@ func cleanupRequiredFields(jsonStr string) string {
 			}
 		}
 	}
+	return jsonStr
+}
+
+// addEmptySchemaPlaceholder adds a placeholder "reason" property to empty object schemas.
+// Claude VALIDATED mode requires at least one property in tool schemas.
+func addEmptySchemaPlaceholder(jsonStr string) string {
+	// Find all "type" fields
+	paths := findPaths(jsonStr, "type")
+
+	// Process from deepest to shallowest (to handle nested objects properly)
+	sortByDepth(paths)
+
+	for _, p := range paths {
+		typeVal := gjson.Get(jsonStr, p)
+		if typeVal.String() != "object" {
+			continue
+		}
+
+		// Get the parent path (the object containing "type")
+		parentPath := trimSuffix(p, ".type")
+
+		// Check if properties exists and is empty or missing
+		propsPath := joinPath(parentPath, "properties")
+		propsVal := gjson.Get(jsonStr, propsPath)
+
+		needsPlaceholder := false
+		if !propsVal.Exists() {
+			// No properties field at all
+			needsPlaceholder = true
+		} else if propsVal.IsObject() && len(propsVal.Map()) == 0 {
+			// Empty properties object
+			needsPlaceholder = true
+		}
+
+		if needsPlaceholder {
+			// Add placeholder "reason" property
+			reasonPath := joinPath(propsPath, "reason")
+			jsonStr, _ = sjson.Set(jsonStr, reasonPath+".type", "string")
+			jsonStr, _ = sjson.Set(jsonStr, reasonPath+".description", "Brief explanation of why you are calling this tool")
+
+			// Add to required array
+			reqPath := joinPath(parentPath, "required")
+			jsonStr, _ = sjson.Set(jsonStr, reqPath, []string{"reason"})
+		}
+	}
+
 	return jsonStr
 }
 

@@ -7,6 +7,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,18 +36,18 @@ import (
 // When UseCanonicalTranslator is enabled, TranslateToGeminiCLI handles the conversion.
 
 const (
-	antigravityBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-	// antigravityBaseURLAutopush     = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLProd     = "https://cloudcode-pa.googleapis.com"
-	antigravityCountTokensPath = "/v1internal:countTokens"
-	antigravityStreamPath      = "/v1internal:streamGenerateContent"
-	antigravityGeneratePath    = "/v1internal:generateContent"
-	antigravityModelsPath      = "/v1internal:fetchAvailableModels"
-	antigravityClientID        = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret    = "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"
-	defaultAntigravityAgent    = "antigravity/1.11.5 windows/amd64"
-	antigravityAuthType        = "antigravity"
-	refreshSkew                = 3000 * time.Second
+	antigravityBaseURLDaily        = "https://daily-cloudcode-pa.googleapis.com"
+	antigravitySandboxBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	antigravityBaseURLProd         = "https://cloudcode-pa.googleapis.com"
+	antigravityCountTokensPath     = "/v1internal:countTokens"
+	antigravityStreamPath          = "/v1internal:streamGenerateContent"
+	antigravityGeneratePath        = "/v1internal:generateContent"
+	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
+	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	antigravityClientSecret        = "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"
+	defaultAntigravityAgent        = "antigravity/1.104.0 darwin/arm64"
+	antigravityAuthType            = "antigravity"
+	refreshSkew                    = 3000 * time.Second
 )
 
 // Note: We use crypto/rand via uuid package for thread-safe random generation
@@ -1089,7 +1091,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 		// Use the centralized schema cleaner to handle unsupported keywords,
 		// const->enum conversion, and flattening of types/anyOf.
-		strJSON = util.CleanJSONSchemaForGemini(strJSON)
+		strJSON = util.CleanJSONSchemaForAntigravity(strJSON)
 
 		payload = []byte(strJSON)
 	}
@@ -1232,7 +1234,7 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	return []string{
 		antigravityBaseURLProd,
 		antigravityBaseURLDaily,
-		// antigravityBaseURLAutopush,
+		antigravitySandboxBaseURLDaily,
 	}
 }
 
@@ -1281,7 +1283,7 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 		request = make(map[string]interface{})
 		root["request"] = request
 	}
-	request["sessionId"] = generateSessionID()
+	request["sessionId"] = generateStableSessionID(payload)
 	delete(request, "safetySettings")
 
 	if genConfig, ok := request["generationConfig"].(map[string]interface{}); ok {
@@ -1347,6 +1349,23 @@ func generateSessionID() string {
 	uuidStr := uuid.NewString()
 	// Convert first 16 hex chars to int64-like string
 	return "-" + uuidStr[:8] + uuidStr[9:13] + uuidStr[14:18]
+}
+
+func generateStableSessionID(payload []byte) string {
+	contents := gjson.GetBytes(payload, "request.contents")
+	if contents.IsArray() {
+		for _, content := range contents.Array() {
+			if content.Get("role").String() == "user" {
+				text := content.Get("parts.0.text").String()
+				if text != "" {
+					h := sha256.Sum256([]byte(text))
+					n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
+					return "-" + strconv.FormatInt(n, 10)
+				}
+			}
+		}
+	}
+	return generateSessionID()
 }
 
 func generateProjectID() string {
