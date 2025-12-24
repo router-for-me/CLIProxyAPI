@@ -655,6 +655,7 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 				for providerType := range registration.Providers {
 					modelInfoCopy := *registration.Info
 					modelInfoCopy.Type = providerType
+
 					model := r.convertModelToMap(&modelInfoCopy, handlerType)
 					if model != nil {
 						models = append(models, model)
@@ -761,26 +762,115 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 // GetModelInfo returns the registered ModelInfo for the given model ID, if present.
 // Returns nil if the model is unknown to the registry.
 // This function searches both direct model IDs and provider-prefixed keys (provider:modelID).
+// It also handles display format prefixes like "[Antigravity] gemini-2.5-flash".
 func (r *ModelRegistry) GetModelInfo(modelID string) *ModelInfo {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	// First, try direct lookup (for backward compatibility)
+	// Strip display prefix if present (e.g., "[Antigravity] gemini-2.5-flash" -> "gemini-2.5-flash")
+	cleanModelID := modelID
+	if idx := strings.Index(modelID, "] "); idx != -1 {
+		cleanModelID = modelID[idx+2:]
+	}
+
+	var info *ModelInfo
+
+	// First, try direct lookup with original ID (for backward compatibility)
 	if reg, ok := r.models[modelID]; ok && reg != nil {
-		return reg.Info
+		info = reg.Info
+	}
+
+	// Try direct lookup with cleaned ID
+	if info == nil && cleanModelID != modelID {
+		if reg, ok := r.models[cleanModelID]; ok && reg != nil {
+			info = reg.Info
+		}
 	}
 
 	// Search through all registered models for provider-prefixed keys
 	// Models are stored as "provider:modelID", so we need to check all keys
 	// that end with ":modelID"
-	suffix := ":" + modelID
-	for key, reg := range r.models {
-		if strings.HasSuffix(key, suffix) && reg != nil {
-			return reg.Info
+	if info == nil {
+		suffix := ":" + cleanModelID
+		for key, reg := range r.models {
+			if strings.HasSuffix(key, suffix) && reg != nil {
+				info = reg.Info
+				break
+			}
 		}
 	}
 
+	// If found, enrich with static data if dynamic data is missing
+	// If not found, try to find in static definitions directly
+	if info != nil {
+		// Clone to avoid modifying the registry copy
+		clone := *info
+		r.enrichWithStaticInfo(&clone, cleanModelID)
+		return &clone
+	} else {
+		// Try to find purely static model
+		static := r.findStaticModel(cleanModelID)
+		return static
+	}
+}
+
+// findStaticModel searches all static model lists for a match
+func (r *ModelRegistry) findStaticModel(id string) *ModelInfo {
+	lists := [][]*ModelInfo{
+		GetClaudeModels(),
+		GetGeminiModels(),
+		GetGeminiVertexModels(),
+		GetGeminiCLIModels(),
+		GetAIStudioModels(),
+		GetOpenAIModels(),
+		GetQwenModels(),
+		GetIFlowModels(),
+		GetClineModels(),
+		GetGitHubCopilotModels(),
+		GetKiroModels(),
+		GetAmazonQModels(),
+	}
+
+	for _, list := range lists {
+		for _, m := range list {
+			if m.ID == id {
+				return m
+			}
+		}
+	}
 	return nil
+}
+
+// enrichWithStaticInfo fills in missing fields from static definition
+func (r *ModelRegistry) enrichWithStaticInfo(dynamic *ModelInfo, id string) {
+	static := r.findStaticModel(id)
+	if static == nil {
+		return
+	}
+
+	if dynamic.ContextLength == 0 {
+		dynamic.ContextLength = static.ContextLength
+	}
+	if dynamic.InputTokenLimit == 0 {
+		dynamic.InputTokenLimit = static.InputTokenLimit
+	}
+	if dynamic.OutputTokenLimit == 0 {
+		dynamic.OutputTokenLimit = static.OutputTokenLimit
+	}
+	if dynamic.MaxCompletionTokens == 0 {
+		dynamic.MaxCompletionTokens = static.MaxCompletionTokens
+	}
+	if dynamic.Thinking == nil && static.Thinking != nil {
+		dynamic.Thinking = static.Thinking
+	}
+
+	// Normalize cross-platform fields
+	if dynamic.ContextLength == 0 && dynamic.InputTokenLimit > 0 {
+		dynamic.ContextLength = dynamic.InputTokenLimit
+	}
+	if dynamic.MaxCompletionTokens == 0 && dynamic.OutputTokenLimit > 0 {
+		dynamic.MaxCompletionTokens = dynamic.OutputTokenLimit
+	}
 }
 
 // providerDisplayNames maps provider type keys to human-readable display names.

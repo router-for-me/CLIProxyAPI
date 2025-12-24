@@ -17,6 +17,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/sjson"
 	"golang.org/x/net/context"
 )
 
@@ -182,9 +183,13 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, errMsg
 	}
+
+	// Normalize model in payload to remove provider prefix (e.g., "[Cline] x-ai/grok" -> "x-ai/grok")
+	normalizedPayload := normalizeModelInPayload(rawJSON, normalizedModel)
+
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: normalizedPayload,
 	}
 	if cloned := cloneMetadata(metadata); cloned != nil {
 		req.Metadata = cloned
@@ -224,9 +229,13 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if errMsg != nil {
 		return nil, errMsg
 	}
+
+	// Normalize model in payload to remove provider prefix
+	normalizedPayload := normalizeModelInPayload(rawJSON, normalizedModel)
+
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: normalizedPayload,
 	}
 	if cloned := cloneMetadata(metadata); cloned != nil {
 		req.Metadata = cloned
@@ -269,9 +278,13 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, errChan
 	}
+
+	// Normalize model in payload to remove provider prefix
+	normalizedPayload := normalizeModelInPayload(rawJSON, normalizedModel)
+
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: normalizedPayload,
 	}
 	if cloned := cloneMetadata(metadata); cloned != nil {
 		req.Metadata = cloned
@@ -485,3 +498,19 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.
 // It can optionally accept parameters, which are used for logging the response.
 type APIHandlerCancelFunc func(params ...interface{})
+
+// normalizeModelInPayload replaces the model field in JSON payload with the normalized model name.
+// This removes provider prefixes like "[Cline] " from the model field before sending to upstream APIs.
+func normalizeModelInPayload(rawJSON []byte, normalizedModel string) []byte {
+	if len(rawJSON) == 0 || normalizedModel == "" {
+		return cloneBytes(rawJSON)
+	}
+
+	// Use sjson to replace the model field with the normalized model
+	result, err := sjson.SetBytes(rawJSON, "model", normalizedModel)
+	if err != nil {
+		// If setting fails, return original payload
+		return cloneBytes(rawJSON)
+	}
+	return result
+}

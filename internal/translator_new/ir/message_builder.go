@@ -320,13 +320,15 @@ type ReasoningFields struct {
 }
 
 // ParseReasoningFromJSON extracts reasoning content from any supported format.
-// Checks fields in priority order: reasoning_content, reasoning_text, thinking, cot_summary, reasoning_details[].
+// Checks fields in priority order: reasoning_content, reasoning, reasoning_text, thinking, cot_summary, reasoning_details[].
 func ParseReasoningFromJSON(data gjson.Result) ReasoningFields {
 	var rf ReasoningFields
 
 	// Parse reasoning text from multiple formats (priority order)
 	if rc := data.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
 		rf.Text = rc.String() // xAI Grok
+	} else if r := data.Get("reasoning"); r.Exists() && r.String() != "" {
+		rf.Text = r.String() // Cline/OpenRouter
 	} else if rt := data.Get("reasoning_text"); rt.Exists() && rt.String() != "" {
 		rf.Text = rt.String() // OpenAI o1/o3
 	} else if th := data.Get("thinking"); th.Exists() && th.String() != "" {

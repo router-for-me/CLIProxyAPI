@@ -759,28 +759,52 @@ func GetIFlowModels() []*ModelInfo {
 
 // GetClineModels returns the standard Cline model definitions
 func GetClineModels() []*ModelInfo {
-	entries := []struct {
-		ID          string
-		DisplayName string
-		Description string
-		Created     int64
-	}{
-		{ID: "minimax/minimax-m2", DisplayName: "MiniMax M2", Description: "MiniMax M2 via Cline", Created: 1758672000},
-		{ID: "x-ai/grok-code-fast-1", DisplayName: "Grok Code Fast 1", Description: "X.AI Grok Code Fast 1 via Cline", Created: 1735689600},
+	return []*ModelInfo{
+		{
+			ID:                  "x-ai/grok-code-fast-1",
+			Object:              "model",
+			Created:             1735689600,
+			OwnedBy:             "cline",
+			Type:                "cline",
+			DisplayName:         "Grok Code Fast 1",
+			Description:         "xAI's Grok Coding model - fast model for coding",
+			ContextLength:       256000,
+			MaxCompletionTokens: 16384,
+		},
+		{
+			ID:                  "minimax/minimax-m2",
+			Object:              "model",
+			Created:             1758672000,
+			OwnedBy:             "cline",
+			Type:                "cline",
+			DisplayName:         "MiniMax M2",
+			Description:         "Open source model with good performance",
+			ContextLength:       192000,
+			MaxCompletionTokens: 128000,
+		},
+		{
+			ID:                  "z-ai/glm-4.6",
+			Object:              "model",
+			Created:             1750000000,
+			OwnedBy:             "cline",
+			Type:                "cline",
+			DisplayName:         "GLM 4.6",
+			Description:         "Zhipu AI's latest agentic coding model in GLM series",
+			ContextLength:       200000,
+			MaxCompletionTokens: 128000,
+		},
+		{
+			ID:                  "mistralai/devstral-2512:free",
+			Object:              "model",
+			Created:             1750000000,
+			OwnedBy:             "cline",
+			Type:                "cline",
+			DisplayName:         "Devstral",
+			Description:         "Mistral's latest model with strong coding abilities",
+			ContextLength:       256000,
+			MaxCompletionTokens: 256000,
+		},
 	}
-	models := make([]*ModelInfo, 0, len(entries))
-	for _, entry := range entries {
-		models = append(models, &ModelInfo{
-			ID:          entry.ID,
-			Object:      "model",
-			Created:     entry.Created,
-			OwnedBy:     "cline",
-			Type:        "cline",
-			DisplayName: entry.DisplayName,
-			Description: entry.Description,
-		})
-	}
-	return models
 }
 
 // GetGitHubCopilotModels returns the available models for GitHub Copilot.

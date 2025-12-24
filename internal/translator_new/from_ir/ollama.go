@@ -546,16 +546,24 @@ func mapFinishReasonToOllama(reason ir.FinishReason) string {
 // ToOllamaShowResponse generates an Ollama show response for a given model name.
 // Looks up model info from registry, falls back to sensible defaults.
 func ToOllamaShowResponse(modelName string) []byte {
+	// Strip display prefix if present (e.g., "[Antigravity] gemini-2.5-flash" -> "gemini-2.5-flash")
+	cleanModelName := modelName
+	if idx := strings.Index(modelName, "] "); idx != -1 {
+		cleanModelName = modelName[idx+2:]
+	}
+
 	// Default values for unknown models
 	contextLength := 128000  // 128K context
 	maxOutputTokens := 16384 // 16K output
-	architecture := "transformer"
+	architecture := "llama"  // Default architecture that VS Code Copilot understands
 
-	// Try to find model in registry (search across all providers)
-	if info := findModelInfoByName(modelName); info != nil {
-		if info.Type != "" {
+	// Try to find model in registry
+	if info := findModelInfoByName(cleanModelName); info != nil {
+		// Use model type as architecture if it's a known architecture
+		if isKnownArchitecture(info.Type) {
 			architecture = info.Type
 		}
+
 		if info.ContextLength > 0 {
 			contextLength = info.ContextLength
 		} else if info.InputTokenLimit > 0 {
@@ -568,74 +576,81 @@ func ToOllamaShowResponse(modelName string) []byte {
 		}
 	}
 
+	// Build model_info with architecture-specific fields
+	// VS Code Copilot reads: modelInfo.model_info[`${modelInfo.model_info['general.architecture']}.context_length`]
+	// VS Code Copilot uses 'general.basename' as display name, so we keep the original name with prefix
+	modelInfo := map[string]interface{}{
+		"general.architecture":           architecture,
+		"general.basename":               modelName,
+		"general.file_type":              2,
+		"general.parameter_count":        0,
+		"general.quantization_version":   2,
+		"general.context_length":         contextLength,
+		"llama.context_length":           contextLength,
+		"llama.rope.freq_base":           10000.0,
+		architecture + ".context_length": contextLength,
+	}
+
+	// Determine capabilities based on model name
+	capabilities := inferCapabilities(cleanModelName)
+
 	result := map[string]interface{}{
 		"license":    "",
-		"modelfile":  "# Modelfile for " + modelName + "\nFROM " + modelName,
+		"modelfile":  "# Modelfile for " + cleanModelName + "\nFROM " + cleanModelName,
 		"parameters": fmt.Sprintf("num_ctx %d\nnum_predict %d\ntemperature 0.7\ntop_p 0.9", contextLength, maxOutputTokens),
 		"template":   "{{ if .System }}{{ .System }}\n{{ end }}{{ .Prompt }}",
 		"details": map[string]interface{}{
 			"parent_model":       "",
 			"format":             "gguf",
-			"family":             "Ollama",
-			"families":           []string{"Ollama"},
+			"family":             architecture,
+			"families":           []string{architecture},
 			"parameter_size":     "0B",
 			"quantization_level": "Q4_K_M",
 		},
-		"model_info": map[string]interface{}{
-			"general.architecture":           architecture,
-			"general.basename":               modelName,
-			"general.file_type":              2,
-			"general.parameter_count":        0,
-			"general.quantization_version":   2,
-			"general.context_length":         contextLength,
-			"llama.context_length":           contextLength,
-			"llama.rope.freq_base":           10000.0,
-			architecture + ".context_length": contextLength,
-		},
-		"capabilities": []string{"tools", "vision", "completion"},
+		"model_info":   modelInfo,
+		"capabilities": capabilities,
 	}
 
 	jsonBytes, _ := json.Marshal(result)
 	return jsonBytes
 }
 
+// isKnownArchitecture checks if the type is a real model architecture (not a provider name)
+func isKnownArchitecture(modelType string) bool {
+	switch strings.ToLower(modelType) {
+	case "claude", "gemini", "openai", "qwen", "llama", "deepseek", "mistral":
+		return true
+	}
+	return false
+}
+
+// inferCapabilities determines model capabilities based on model name.
+func inferCapabilities(modelID string) []string {
+	name := strings.ToLower(modelID)
+
+	capabilities := []string{"completion"}
+
+	// Most modern models support tools
+	capabilities = append(capabilities, "tools")
+
+	// Check for vision support via name heuristic
+	isVision := strings.Contains(name, "vision") ||
+		strings.Contains(name, "vl") ||
+		strings.Contains(name, "image") ||
+		strings.Contains(name, "gemini") ||
+		strings.Contains(name, "gpt-4") ||
+		strings.Contains(name, "claude")
+
+	if isVision {
+		capabilities = append(capabilities, "vision")
+	}
+
+	return capabilities
+}
+
 // findModelInfoByName searches for model info in registry by model name.
-// It handles the provider:modelID format used internally by registry.
+// It delegates to registry.GetModelInfo which handles all format variations
+// including provider-prefixed keys (provider:modelID) and display prefixes ([Provider] modelID).
 func findModelInfoByName(modelName string) *registry.ModelInfo {
-	reg := registry.GetGlobalRegistry()
-
-	// First try direct lookup
-	if info := reg.GetModelInfo(modelName); info != nil {
-		return info
-	}
-
-	// Search through available models (handles provider:modelID format)
-	models := reg.GetAvailableModels("openai")
-	for _, m := range models {
-		id, ok := m["id"].(string)
-		if !ok {
-			continue
-		}
-		// Strip provider prefix if present (e.g., "[Gemini CLI] gemini-2.5-flash" -> "gemini-2.5-flash")
-		cleanID := id
-		if idx := strings.Index(id, "] "); idx != -1 {
-			cleanID = id[idx+2:]
-		}
-		if strings.EqualFold(cleanID, modelName) {
-			// Found match, build ModelInfo from map
-			info := &registry.ModelInfo{ID: cleanID}
-			if v, ok := m["type"].(string); ok {
-				info.Type = v
-			}
-			if v, ok := m["context_length"].(int); ok {
-				info.ContextLength = v
-			}
-			if v, ok := m["max_completion_tokens"].(int); ok {
-				info.MaxCompletionTokens = v
-			}
-			return info
-		}
-	}
-
-	return nil
+	return registry.GetGlobalRegistry().GetModelInfo(modelName)
 }

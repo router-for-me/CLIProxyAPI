@@ -16,8 +16,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	"github.com/tidwall/gjson"
 )
 
@@ -181,7 +181,11 @@ func (h *OllamaAPIHandler) Chat(c *gin.Context) {
 		})
 		return
 	}
-	irReq.Model = modelName
+	
+	// Normalize model name for upstream request (remove prefix like "[Cline] ")
+	// but keep original modelName for routing
+	cleanModelName := util.NormalizeIncomingModelID(modelName)
+	irReq.Model = cleanModelName
 
 	openaiRequest, err := from_ir.ToOpenAIRequest(irReq)
 	if err != nil {
@@ -194,13 +198,10 @@ func (h *OllamaAPIHandler) Chat(c *gin.Context) {
 		return
 	}
 
-	// Use OpenAI handler to process the request
-	openaiHandler := openai.NewOpenAIAPIHandler(h.BaseAPIHandler)
-
 	if stream {
-		h.handleOllamaChatStream(c, openaiHandler, openaiRequest, modelName)
+		h.handleOllamaChatStream(c, openaiRequest, modelName)
 	} else {
-		h.handleOllamaChatNonStream(c, openaiHandler, openaiRequest, modelName)
+		h.handleOllamaChatNonStream(c, openaiRequest, modelName)
 	}
 }
 
@@ -244,7 +245,11 @@ func (h *OllamaAPIHandler) Generate(c *gin.Context) {
 		})
 		return
 	}
-	irReq.Model = modelName
+	
+	// Normalize model name for upstream request (remove prefix like "[Cline] ")
+	// but keep original modelName for routing
+	cleanModelName := util.NormalizeIncomingModelID(modelName)
+	irReq.Model = cleanModelName
 
 	openaiRequest, err := from_ir.ToOpenAIRequest(irReq)
 	if err != nil {
@@ -257,18 +262,15 @@ func (h *OllamaAPIHandler) Generate(c *gin.Context) {
 		return
 	}
 
-	// Use OpenAI handler to process the request
-	openaiHandler := openai.NewOpenAIAPIHandler(h.BaseAPIHandler)
-
 	if stream {
-		h.handleOllamaGenerateStream(c, openaiHandler, openaiRequest, modelName)
+		h.handleOllamaGenerateStream(c, openaiRequest, modelName)
 	} else {
-		h.handleOllamaGenerateNonStream(c, openaiHandler, openaiRequest, modelName)
+		h.handleOllamaGenerateNonStream(c, openaiRequest, modelName)
 	}
 }
 
 // handleOllamaChatStream handles streaming chat responses
-func (h *OllamaAPIHandler) handleOllamaChatStream(c *gin.Context, openaiHandler *openai.OpenAIAPIHandler, openaiRequest []byte, modelName string) {
+func (h *OllamaAPIHandler) handleOllamaChatStream(c *gin.Context, openaiRequest []byte, modelName string) {
 	c.Header("Content-Type", "application/json")
 	c.Header("Transfer-Encoding", "chunked")
 	c.Header("Access-Control-Allow-Origin", "*")
@@ -292,8 +294,8 @@ func (h *OllamaAPIHandler) handleOllamaChatStream(c *gin.Context, openaiHandler 
 		cliCancel(nil)
 	}()
 
-	// Execute streaming request using OpenAI handler's method
-	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, constant.OpenAI, modelName, openaiRequest, h.GetAlt(c))
+	// Execute streaming request using Ollama handler type (ensures new translator is used)
+	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, constant.Ollama, modelName, openaiRequest, h.GetAlt(c))
 
 	// Process streaming chunks
 	for {
@@ -348,7 +350,7 @@ func (h *OllamaAPIHandler) handleOllamaChatStream(c *gin.Context, openaiHandler 
 }
 
 // handleOllamaChatNonStream handles non-streaming chat responses
-func (h *OllamaAPIHandler) handleOllamaChatNonStream(c *gin.Context, openaiHandler *openai.OpenAIAPIHandler, openaiRequest []byte, modelName string) {
+func (h *OllamaAPIHandler) handleOllamaChatNonStream(c *gin.Context, openaiRequest []byte, modelName string) {
 	c.Header("Content-Type", "application/json")
 	c.Header("Access-Control-Allow-Origin", "*")
 	c.Header("Server", fmt.Sprintf("ollama/%s", OllamaVersion))
@@ -359,8 +361,8 @@ func (h *OllamaAPIHandler) handleOllamaChatNonStream(c *gin.Context, openaiHandl
 		cliCancel(nil)
 	}()
 
-	// Execute non-streaming request
-	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, constant.OpenAI, modelName, openaiRequest, h.GetAlt(c))
+	// Execute non-streaming request using Ollama handler type
+	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, constant.Ollama, modelName, openaiRequest, h.GetAlt(c))
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -385,7 +387,7 @@ func (h *OllamaAPIHandler) handleOllamaChatNonStream(c *gin.Context, openaiHandl
 }
 
 // handleOllamaGenerateStream handles streaming generate responses
-func (h *OllamaAPIHandler) handleOllamaGenerateStream(c *gin.Context, openaiHandler *openai.OpenAIAPIHandler, openaiRequest []byte, modelName string) {
+func (h *OllamaAPIHandler) handleOllamaGenerateStream(c *gin.Context, openaiRequest []byte, modelName string) {
 	c.Header("Content-Type", "application/json")
 	c.Header("Transfer-Encoding", "chunked")
 	c.Header("Access-Control-Allow-Origin", "*")
@@ -409,8 +411,8 @@ func (h *OllamaAPIHandler) handleOllamaGenerateStream(c *gin.Context, openaiHand
 		cliCancel(nil)
 	}()
 
-	// Execute streaming request using OpenAI handler's method
-	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, constant.OpenAI, modelName, openaiRequest, h.GetAlt(c))
+	// Execute streaming request using Ollama handler type
+	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, constant.Ollama, modelName, openaiRequest, h.GetAlt(c))
 
 	// Process streaming chunks
 	for {
@@ -465,7 +467,7 @@ func (h *OllamaAPIHandler) handleOllamaGenerateStream(c *gin.Context, openaiHand
 }
 
 // handleOllamaGenerateNonStream handles non-streaming generate responses
-func (h *OllamaAPIHandler) handleOllamaGenerateNonStream(c *gin.Context, openaiHandler *openai.OpenAIAPIHandler, openaiRequest []byte, modelName string) {
+func (h *OllamaAPIHandler) handleOllamaGenerateNonStream(c *gin.Context, openaiRequest []byte, modelName string) {
 	c.Header("Content-Type", "application/json")
 	c.Header("Access-Control-Allow-Origin", "*")
 	c.Header("Server", fmt.Sprintf("ollama/%s", OllamaVersion))
@@ -476,8 +478,8 @@ func (h *OllamaAPIHandler) handleOllamaGenerateNonStream(c *gin.Context, openaiH
 		cliCancel(nil)
 	}()
 
-	// Execute non-streaming request
-	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, constant.OpenAI, modelName, openaiRequest, h.GetAlt(c))
+	// Execute non-streaming request using Ollama handler type
+	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, constant.Ollama, modelName, openaiRequest, h.GetAlt(c))
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)

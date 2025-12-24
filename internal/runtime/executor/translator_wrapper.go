@@ -615,6 +615,12 @@ func TranslateOpenAIResponseStream(cfg *config.Config, to sdktranslator.Format, 
 		return nil, nil // Caller should use old translator
 	}
 
+	return TranslateOpenAIResponseStreamForced(to, openaiChunk, model, messageID, state)
+}
+
+// TranslateOpenAIResponseStreamForced converts OpenAI streaming chunk to target format.
+// Always uses new translator regardless of config (for providers like Cline that require it).
+func TranslateOpenAIResponseStreamForced(to sdktranslator.Format, openaiChunk []byte, model string, messageID string, state *OpenAIStreamState) ([][]byte, error) {
 	// Step 1: Parse OpenAI chunk to IR events
 	events, err := to_ir.ParseOpenAIChunk(openaiChunk)
 	if err != nil {
@@ -688,6 +694,12 @@ func TranslateOpenAIResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 		return nil, nil // Caller should use old translator
 	}
 
+	return TranslateOpenAIResponseNonStreamForced(to, openaiResponse, model)
+}
+
+// TranslateOpenAIResponseNonStreamForced converts OpenAI non-streaming response to target format.
+// Always uses new translator regardless of config (for providers like Cline that require it).
+func TranslateOpenAIResponseNonStreamForced(to sdktranslator.Format, openaiResponse []byte, model string) ([]byte, error) {
 	// Step 1: Parse OpenAI response to IR
 	messages, usage, err := to_ir.ParseOpenAIResponse(openaiResponse)
 	if err != nil {
