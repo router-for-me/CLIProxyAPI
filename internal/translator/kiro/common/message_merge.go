@@ -10,6 +10,7 @@ import (
 // MergeAdjacentMessages merges adjacent messages with the same role.
 // This reduces API call complexity and improves compatibility.
 // Based on AIClient-2-API implementation.
+// NOTE: Tool messages are NOT merged because each has a unique tool_call_id that must be preserved.
 func MergeAdjacentMessages(messages []gjson.Result) []gjson.Result {
 	if len(messages) <= 1 {
 		return messages
@@ -25,6 +26,12 @@ func MergeAdjacentMessages(messages []gjson.Result) []gjson.Result {
 		lastMsg := merged[len(merged)-1]
 		currentRole := msg.Get("role").String()
 		lastRole := lastMsg.Get("role").String()
+
+		// Don't merge tool messages - each has a unique tool_call_id
+		if currentRole == "tool" || lastRole == "tool" {
+			merged = append(merged, msg)
+			continue
+		}
 
 		if currentRole == lastRole {
 			// Merge content from current message into last message

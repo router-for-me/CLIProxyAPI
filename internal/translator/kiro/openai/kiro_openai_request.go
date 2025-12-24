@@ -469,6 +469,11 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 		}
 	}
 
+	// Track pending tool results that should be attached to the next user message
+	// This is critical for LiteLLM-translated requests where tool results appear
+	// as separate "tool" role messages between assistant and user messages
+	var pendingToolResults []KiroToolResult
+
 	for i, msg := range messagesArray {
 		role := msg.Get("role").String()
 		isLastMessage := i == len(messagesArray)-1
@@ -480,6 +485,10 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 
 		case "user":
 			userMsg, toolResults := buildUserMessageFromOpenAI(msg, modelID, origin)
+			// Merge any pending tool results from preceding "tool" role messages
+			toolResults = append(pendingToolResults, toolResults...)
+			pendingToolResults = nil // Reset pending tool results
+
 			if isLastMessage {
 				currentUserMsg = &userMsg
 				currentToolResults = toolResults
@@ -505,6 +514,24 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 
 		case "assistant":
 			assistantMsg := buildAssistantMessageFromOpenAI(msg)
+
+			// If there are pending tool results, we need to insert a synthetic user message
+			// before this assistant message to maintain proper conversation structure
+			if len(pendingToolResults) > 0 {
+				syntheticUserMsg := KiroUserInputMessage{
+					Content: "Tool results provided.",
+					ModelID: modelID,
+					Origin:  origin,
+					UserInputMessageContext: &KiroUserInputMessageContext{
+						ToolResults: pendingToolResults,
+					},
+				}
+				history = append(history, KiroHistoryMessage{
+					UserInputMessage: &syntheticUserMsg,
+				})
+				pendingToolResults = nil
+			}
+
 			if isLastMessage {
 				history = append(history, KiroHistoryMessage{
 					AssistantResponseMessage: &assistantMsg,
@@ -524,7 +551,7 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 		case "tool":
 			// Tool messages in OpenAI format provide results for tool_calls
 			// These are typically followed by user or assistant messages
-			// Process them and merge into the next user message's tool results
+			// Collect them as pending and attach to the next user message
 			toolCallID := msg.Get("tool_call_id").String()
 			content := msg.Get("content").String()
 
@@ -534,9 +561,21 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 					Content:   []KiroTextContent{{Text: content}},
 					Status:    "success",
 				}
-				// Tool results should be included in the next user message
-				// For now, collect them and they'll be handled when we build the current message
-				currentToolResults = append(currentToolResults, toolResult)
+				// Collect pending tool results to attach to the next user message
+				pendingToolResults = append(pendingToolResults, toolResult)
+			}
+		}
+	}
+
+	// Handle case where tool results are at the end with no following user message
+	if len(pendingToolResults) > 0 {
+		currentToolResults = append(currentToolResults, pendingToolResults...)
+		// If there's no current user message, create a synthetic one for the tool results
+		if currentUserMsg == nil {
+			currentUserMsg = &KiroUserInputMessage{
+				Content: "Tool results provided.",
+				ModelID: modelID,
+				Origin:  origin,
 			}
 		}
 	}
