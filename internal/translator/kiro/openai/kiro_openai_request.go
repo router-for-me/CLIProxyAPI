@@ -450,25 +450,6 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 	// Merge adjacent messages with the same role
 	messagesArray := kirocommon.MergeAdjacentMessages(messages.Array())
 
-	// Build tool_call_id to name mapping from assistant messages
-	toolCallIDToName := make(map[string]string)
-	for _, msg := range messagesArray {
-		if msg.Get("role").String() == "assistant" {
-			toolCalls := msg.Get("tool_calls")
-			if toolCalls.IsArray() {
-				for _, tc := range toolCalls.Array() {
-					if tc.Get("type").String() == "function" {
-						id := tc.Get("id").String()
-						name := tc.Get("function.name").String()
-						if id != "" && name != "" {
-							toolCallIDToName[id] = name
-						}
-					}
-				}
-			}
-		}
-	}
-
 	// Track pending tool results that should be attached to the next user message
 	// This is critical for LiteLLM-translated requests where tool results appear
 	// as separate "tool" role messages between assistant and user messages
@@ -590,9 +571,6 @@ func buildUserMessageFromOpenAI(msg gjson.Result, modelID, origin string) (KiroU
 	var toolResults []KiroToolResult
 	var images []KiroImage
 
-	// Track seen toolCallIds to deduplicate
-	seenToolCallIDs := make(map[string]bool)
-
 	if content.IsArray() {
 		for _, part := range content.Array() {
 			partType := part.Get("type").String()
@@ -627,9 +605,6 @@ func buildUserMessageFromOpenAI(msg gjson.Result, modelID, origin string) (KiroU
 	} else if content.Type == gjson.String {
 		contentBuilder.WriteString(content.String())
 	}
-
-	// Check for tool_calls in the message (shouldn't be in user messages, but handle edge cases)
-	_ = seenToolCallIDs // Used for deduplication if needed
 
 	userMsg := KiroUserInputMessage{
 		Content: contentBuilder.String(),
