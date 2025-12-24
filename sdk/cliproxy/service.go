@@ -506,6 +506,13 @@ func (s *Service) Run(ctx context.Context) error {
 
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
+		previousStrategy := ""
+		s.cfgMu.RLock()
+		if s.cfg != nil {
+			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+		}
+		s.cfgMu.RUnlock()
+
 		if newCfg == nil {
 			s.cfgMu.RLock()
 			newCfg = s.cfg
@@ -514,6 +521,30 @@ func (s *Service) Run(ctx context.Context) error {
 		if newCfg == nil {
 			return
 		}
+
+		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
+		normalizeStrategy := func(strategy string) string {
+			switch strategy {
+			case "fill-first", "fillfirst", "ff":
+				return "fill-first"
+			default:
+				return "round-robin"
+			}
+		}
+		previousStrategy = normalizeStrategy(previousStrategy)
+		nextStrategy = normalizeStrategy(nextStrategy)
+		if s.coreManager != nil && previousStrategy != nextStrategy {
+			var selector coreauth.Selector
+			switch nextStrategy {
+			case "fill-first":
+				selector = &coreauth.FillFirstSelector{}
+			default:
+				selector = &coreauth.RoundRobinSelector{}
+			}
+			s.coreManager.SetSelector(selector)
+			log.Infof("routing strategy updated to %s", nextStrategy)
+		}
+
 		s.applyRetryConfig(newCfg)
 		if s.server != nil {
 			s.server.UpdateClients(newCfg)

@@ -55,6 +55,8 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		if hasSystemParts {
 			out, _ = sjson.SetRaw(out, "system_instruction", systemInstruction)
 		}
+	} else if systemResult.Type == gjson.String {
+		out, _ = sjson.Set(out, "request.system_instruction.parts.-1.text", systemResult.String())
 	}
 
 	// contents

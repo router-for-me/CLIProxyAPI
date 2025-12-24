@@ -11,7 +11,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -128,11 +127,6 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the OpenAIResponses-compatible request
 func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("Access-Control-Allow-Origin", "*")
-
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -149,46 +143,88 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
-	h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
-	return
-}
 
-func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+	setSSEHeaders := func() {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("Access-Control-Allow-Origin", "*")
+	}
+
+	// Peek at the first chunk
 	for {
 		select {
 		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
+			cliCancel(c.Request.Context().Err())
 			return
-		case chunk, ok := <-data:
+		case errMsg, ok := <-errChan:
 			if !ok {
+				// Err channel closed cleanly; wait for data channel.
+				errChan = nil
+				continue
+			}
+			// Upstream failed immediately. Return proper error status and JSON.
+			h.WriteErrorResponse(c, errMsg)
+			if errMsg != nil {
+				cliCancel(errMsg.Error)
+			} else {
+				cliCancel(nil)
+			}
+			return
+		case chunk, ok := <-dataChan:
+			if !ok {
+				// Stream closed without data? Send headers and done.
+				setSSEHeaders()
 				_, _ = c.Writer.Write([]byte("\n"))
 				flusher.Flush()
-				cancel(nil)
+				cliCancel(nil)
 				return
 			}
 
+			// Success! Set headers.
+			setSSEHeaders()
+
+			// Write first chunk logic (matching forwardResponsesStream)
 			if bytes.HasPrefix(chunk, []byte("event:")) {
 				_, _ = c.Writer.Write([]byte("\n"))
 			}
 			_, _ = c.Writer.Write(chunk)
 			_, _ = c.Writer.Write([]byte("\n"))
-
 			flusher.Flush()
-		case errMsg, ok := <-errs:
-			if !ok {
-				continue
-			}
-			if errMsg != nil {
-				h.WriteErrorResponse(c, errMsg)
-				flusher.Flush()
-			}
-			var execErr error
-			if errMsg != nil {
-				execErr = errMsg.Error
-			}
-			cancel(execErr)
+
+			// Continue
+			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
 			return
-		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		WriteChunk: func(chunk []byte) {
+			if bytes.HasPrefix(chunk, []byte("event:")) {
+				_, _ = c.Writer.Write([]byte("\n"))
+			}
+			_, _ = c.Writer.Write(chunk)
+			_, _ = c.Writer.Write([]byte("\n"))
+		},
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			if errMsg == nil {
+				return
+			}
+			status := http.StatusInternalServerError
+			if errMsg.StatusCode > 0 {
+				status = errMsg.StatusCode
+			}
+			errText := http.StatusText(status)
+			if errMsg.Error != nil && errMsg.Error.Error() != "" {
+				errText = errMsg.Error.Error()
+			}
+			body := handlers.BuildErrorResponseBody(status, errText)
+			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(body))
+		},
+		WriteDone: func() {
+			_, _ = c.Writer.Write([]byte("\n"))
+		},
+	})
 }

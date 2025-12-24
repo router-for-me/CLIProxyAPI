@@ -62,6 +62,8 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 		if hasSystemParts {
 			out, _ = sjson.SetRaw(out, "request.systemInstruction", systemInstruction)
 		}
+	} else if systemResult.Type == gjson.String {
+		out, _ = sjson.Set(out, "request.systemInstruction.parts.-1.text", systemResult.String())
 	}
 
 	// contents

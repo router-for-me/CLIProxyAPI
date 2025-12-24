@@ -15,10 +15,11 @@ import (
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
 type RequestInfo struct {
-	URL     string              // URL is the request URL.
-	Method  string              // Method is the HTTP method (e.g., GET, POST).
-	Headers map[string][]string // Headers contains the request headers.
-	Body    []byte              // Body is the raw request body.
+	URL       string              // URL is the request URL.
+	Method    string              // Method is the HTTP method (e.g., GET, POST).
+	Headers   map[string][]string // Headers contains the request headers.
+	Body      []byte              // Body is the raw request body.
+	RequestID string              // RequestID is the unique identifier for the request.
 }
 
 // ResponseWriterWrapper wraps the standard gin.ResponseWriter to intercept and log response data.
@@ -149,6 +150,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 			w.requestInfo.Method,
 			w.requestInfo.Headers,
 			w.requestInfo.Body,
+			w.requestInfo.RequestID,
 		)
 		if err == nil {
 			w.streamWriter = streamWriter
@@ -346,7 +348,7 @@ func (w *ResponseWriterWrapper) logRequest(statusCode int, headers map[string][]
 	}
 
 	if loggerWithOptions, ok := w.logger.(interface {
-		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool) error
+		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string) error
 	}); ok {
 		return loggerWithOptions.LogRequestWithOptions(
 			w.requestInfo.URL,
@@ -360,6 +362,7 @@ func (w *ResponseWriterWrapper) logRequest(statusCode int, headers map[string][]
 			apiResponseBody,
 			apiResponseErrors,
 			forceLog,
+			w.requestInfo.RequestID,
 		)
 	}
 
@@ -374,5 +377,6 @@ func (w *ResponseWriterWrapper) logRequest(statusCode int, headers map[string][]
 		apiRequestBody,
 		apiResponseBody,
 		apiResponseErrors,
+		w.requestInfo.RequestID,
 	)
 }

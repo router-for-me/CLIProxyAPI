@@ -24,7 +24,8 @@ var (
 )
 
 // LogFormatter defines a custom log format for logrus.
-// This formatter adds timestamp, level, and source location to each log entry.
+// This formatter adds timestamp, level, request ID, and source location to each log entry.
+// Format: [2025-12-23 20:14:04] [debug] [manager.go:524] | a1b2c3d4 | Use API key sk-9...0RHO for model gpt-5.2
 type LogFormatter struct{}
 
 // Format renders a single log entry with custom formatting.
@@ -39,11 +40,22 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 	timestamp := entry.Time.Format("2006-01-02 15:04:05")
 	message := strings.TrimRight(entry.Message, "\r\n")
 
+	reqID := ""
+	if id, ok := entry.Data["request_id"].(string); ok && id != "" {
+		reqID = id
+	}
+
+	levelStr := fmt.Sprintf("%-5s", entry.Level.String())
+
 	var formatted string
-	if entry.Caller != nil {
-		formatted = fmt.Sprintf("[%s] [%s] [%s:%d] %s\n", timestamp, entry.Level, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
+	if reqID != "" && entry.Caller != nil {
+		formatted = fmt.Sprintf("[%s] [%s] [%s:%d] | %s | %s\n", timestamp, levelStr, filepath.Base(entry.Caller.File), entry.Caller.Line, reqID, message)
+	} else if reqID != "" {
+		formatted = fmt.Sprintf("[%s] [%s] | %s | %s\n", timestamp, levelStr, reqID, message)
+	} else if entry.Caller != nil {
+		formatted = fmt.Sprintf("[%s] [%s] [%s:%d] %s\n", timestamp, levelStr, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
 	} else {
-		formatted = fmt.Sprintf("[%s] [%s] %s\n", timestamp, entry.Level, message)
+		formatted = fmt.Sprintf("[%s] [%s] %s\n", timestamp, levelStr, message)
 	}
 	buffer.WriteString(formatted)
 

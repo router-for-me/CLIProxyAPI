@@ -178,6 +178,14 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				} else if content.IsObject() && content.Get("type").String() == "text" {
 					out, _ = sjson.SetBytes(out, "system_instruction.role", "user")
 					out, _ = sjson.SetBytes(out, "system_instruction.parts.0.text", content.Get("text").String())
+				} else if content.IsArray() {
+					contents := content.Array()
+					if len(contents) > 0 {
+						out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
+						for j := 0; j < len(contents); j++ {
+							out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", j), contents[j].Get("text").String())
+						}
+					}
 				}
 			} else if role == "user" || (role == "system" && len(arr) == 1) {
 				// Build single user content node to avoid splitting into multiple contents
@@ -278,7 +286,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
 
 					// Append a single tool content combining name + response per function
-					toolNode := []byte(`{"role":"tool","parts":[]}`)
+					toolNode := []byte(`{"role":"user","parts":[]}`)
 					pp := 0
 					for _, fid := range fIDs {
 						if name, ok := tcID2Name[fid]; ok {

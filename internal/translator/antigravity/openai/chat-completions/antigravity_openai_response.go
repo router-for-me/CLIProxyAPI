@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -93,9 +95,18 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		}
 		promptTokenCount := usageResult.Get("promptTokenCount").Int()
 		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
+		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
 		template, _ = sjson.Set(template, "usage.prompt_tokens", promptTokenCount+thoughtsTokenCount)
 		if thoughtsTokenCount > 0 {
 			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
+		}
+		// Include cached token count if present (indicates prompt caching is working)
+		if cachedTokenCount > 0 {
+			var err error
+			template, err = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
+			if err != nil {
+				log.Warnf("antigravity openai response: failed to set cached_tokens: %v", err)
+			}
 		}
 	}
 

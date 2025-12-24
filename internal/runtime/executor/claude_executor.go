@@ -662,7 +662,14 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 }
 
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string) {
-	r.Header.Set("Authorization", "Bearer "+apiKey)
+	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
+	isAnthropicBase := r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com")
+	if isAnthropicBase && useAPIKey {
+		r.Header.Del("Authorization")
+		r.Header.Set("x-api-key", apiKey)
+	} else {
+		r.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	r.Header.Set("Content-Type", "application/json")
 
 	var ginHeaders http.Header

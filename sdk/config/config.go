@@ -12,6 +12,7 @@ type AccessProvider = internalconfig.AccessProvider
 
 type Config = internalconfig.Config
 
+type StreamingConfig = internalconfig.StreamingConfig
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
 type AmpCode = internalconfig.AmpCode
