@@ -3,7 +3,7 @@
 package amp
 
 import (
-    "regexp"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -27,15 +27,15 @@ type ModelMapper interface {
 // DefaultModelMapper implements ModelMapper with thread-safe mapping storage.
 type DefaultModelMapper struct {
 	mu       sync.RWMutex
-    mappings map[string]string // exact: from -> to (normalized lowercase keys)
-    regexps  []regexMapping    // regex rules evaluated in order
+	mappings map[string]string // exact: from -> to (normalized lowercase keys)
+	regexps  []regexMapping    // regex rules evaluated in order
 }
 
 // NewModelMapper creates a new model mapper with the given initial mappings.
 func NewModelMapper(mappings []config.AmpModelMapping) *DefaultModelMapper {
 	m := &DefaultModelMapper{
-        mappings: make(map[string]string),
-        regexps:  nil,
+		mappings: make(map[string]string),
+		regexps:  nil,
 	}
 	m.UpdateMappings(mappings)
 	return m
@@ -58,18 +58,18 @@ func (m *DefaultModelMapper) MapModel(requestedModel string) string {
 	// Check for direct mapping
 	targetModel, exists := m.mappings[normalizedRequest]
 	if !exists {
-        // Try regex mappings in order
-        base, _ := util.NormalizeThinkingModel(requestedModel)
-        for _, rm := range m.regexps {
-            if rm.re.MatchString(requestedModel) || (base != "" && rm.re.MatchString(base)) {
-                targetModel = rm.to
-                exists = true
-                break
-            }
-        }
-        if !exists {
-            return ""
-        }
+		// Try regex mappings in order
+		base, _ := util.NormalizeThinkingModel(requestedModel)
+		for _, rm := range m.regexps {
+			if rm.re.MatchString(requestedModel) || (base != "" && rm.re.MatchString(base)) {
+				targetModel = rm.to
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			return ""
+		}
 	}
 
 	// Verify target model has available providers
@@ -91,8 +91,8 @@ func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
 	defer m.mu.Unlock()
 
 	// Clear and rebuild mappings
-    m.mappings = make(map[string]string, len(mappings))
-    m.regexps = make([]regexMapping, 0, len(mappings))
+	m.mappings = make(map[string]string, len(mappings))
+	m.regexps = make([]regexMapping, 0, len(mappings))
 
 	for _, mapping := range mappings {
 		from := strings.TrimSpace(mapping.From)
@@ -103,30 +103,30 @@ func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
 			continue
 		}
 
-        if mapping.Regex {
-            // Compile case-insensitive regex; wrap with (?i) to match behavior of exact lookups
-            pattern := "(?i)" + from
-            re, err := regexp.Compile(pattern)
-            if err != nil {
-                log.Warnf("amp model mapping: invalid regex %q: %v", from, err)
-                continue
-            }
-            m.regexps = append(m.regexps, regexMapping{re: re, to: to})
-            log.Debugf("amp model regex mapping registered: /%s/ -> %s", from, to)
-        } else {
-            // Store with normalized lowercase key for case-insensitive lookup
-            normalizedFrom := strings.ToLower(from)
-            m.mappings[normalizedFrom] = to
-            log.Debugf("amp model mapping registered: %s -> %s", from, to)
-        }
+		if mapping.Regex {
+			// Compile case-insensitive regex; wrap with (?i) to match behavior of exact lookups
+			pattern := "(?i)" + from
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				log.Warnf("amp model mapping: invalid regex %q: %v", from, err)
+				continue
+			}
+			m.regexps = append(m.regexps, regexMapping{re: re, to: to})
+			log.Debugf("amp model regex mapping registered: /%s/ -> %s", from, to)
+		} else {
+			// Store with normalized lowercase key for case-insensitive lookup
+			normalizedFrom := strings.ToLower(from)
+			m.mappings[normalizedFrom] = to
+			log.Debugf("amp model mapping registered: %s -> %s", from, to)
+		}
 	}
 
 	if len(m.mappings) > 0 {
 		log.Infof("amp model mapping: loaded %d mapping(s)", len(m.mappings))
 	}
-    if n := len(m.regexps); n > 0 {
-        log.Infof("amp model mapping: loaded %d regex mapping(s)", n)
-    }
+	if n := len(m.regexps); n > 0 {
+		log.Infof("amp model mapping: loaded %d regex mapping(s)", n)
+	}
 }
 
 // GetMappings returns a copy of current mappings (for debugging/status).
@@ -142,6 +142,6 @@ func (m *DefaultModelMapper) GetMappings() map[string]string {
 }
 
 type regexMapping struct {
-    re *regexp.Regexp
-    to string
+	re *regexp.Regexp
+	to string
 }

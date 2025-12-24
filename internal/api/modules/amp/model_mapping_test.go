@@ -205,79 +205,79 @@ func TestModelMapper_GetMappings_ReturnsCopy(t *testing.T) {
 }
 
 func TestModelMapper_Regex_MatchBaseWithoutParens(t *testing.T) {
-    reg := registry.GetGlobalRegistry()
-    reg.RegisterClient("test-client-regex-1", "gemini", []*registry.ModelInfo{
-        {ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
-    })
-    defer reg.UnregisterClient("test-client-regex-1")
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-client-regex-1", "gemini", []*registry.ModelInfo{
+		{ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
+	})
+	defer reg.UnregisterClient("test-client-regex-1")
 
-    mappings := []config.AmpModelMapping{
-        {From: "^gpt-5$", To: "gemini-2.5-pro", Regex: true},
-    }
+	mappings := []config.AmpModelMapping{
+		{From: "^gpt-5$", To: "gemini-2.5-pro", Regex: true},
+	}
 
-    mapper := NewModelMapper(mappings)
+	mapper := NewModelMapper(mappings)
 
-    // Incoming model has reasoning suffix but should match base via regex
-    result := mapper.MapModel("gpt-5(high)")
-    if result != "gemini-2.5-pro" {
-        t.Errorf("Expected gemini-2.5-pro, got %s", result)
-    }
+	// Incoming model has reasoning suffix but should match base via regex
+	result := mapper.MapModel("gpt-5(high)")
+	if result != "gemini-2.5-pro" {
+		t.Errorf("Expected gemini-2.5-pro, got %s", result)
+	}
 }
 
 func TestModelMapper_Regex_ExactPrecedence(t *testing.T) {
-    reg := registry.GetGlobalRegistry()
-    reg.RegisterClient("test-client-regex-2", "claude", []*registry.ModelInfo{
-        {ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
-    })
-    reg.RegisterClient("test-client-regex-3", "gemini", []*registry.ModelInfo{
-        {ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
-    })
-    defer reg.UnregisterClient("test-client-regex-2")
-    defer reg.UnregisterClient("test-client-regex-3")
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-client-regex-2", "claude", []*registry.ModelInfo{
+		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+	})
+	reg.RegisterClient("test-client-regex-3", "gemini", []*registry.ModelInfo{
+		{ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
+	})
+	defer reg.UnregisterClient("test-client-regex-2")
+	defer reg.UnregisterClient("test-client-regex-3")
 
-    mappings := []config.AmpModelMapping{
-        {From: "gpt-5", To: "claude-sonnet-4"},                      // exact
-        {From: "^gpt-5.*$", To: "gemini-2.5-pro", Regex: true}, // regex
-    }
+	mappings := []config.AmpModelMapping{
+		{From: "gpt-5", To: "claude-sonnet-4"},                 // exact
+		{From: "^gpt-5.*$", To: "gemini-2.5-pro", Regex: true}, // regex
+	}
 
-    mapper := NewModelMapper(mappings)
+	mapper := NewModelMapper(mappings)
 
-    // Exact match should win over regex
-    result := mapper.MapModel("gpt-5")
-    if result != "claude-sonnet-4" {
-        t.Errorf("Expected claude-sonnet-4, got %s", result)
-    }
+	// Exact match should win over regex
+	result := mapper.MapModel("gpt-5")
+	if result != "claude-sonnet-4" {
+		t.Errorf("Expected claude-sonnet-4, got %s", result)
+	}
 }
 
 func TestModelMapper_Regex_InvalidPattern_Skipped(t *testing.T) {
-    // Invalid regex should be skipped and not cause panic
-    mappings := []config.AmpModelMapping{
-        {From: "(", To: "target", Regex: true},
-    }
+	// Invalid regex should be skipped and not cause panic
+	mappings := []config.AmpModelMapping{
+		{From: "(", To: "target", Regex: true},
+	}
 
-    mapper := NewModelMapper(mappings)
+	mapper := NewModelMapper(mappings)
 
-    result := mapper.MapModel("anything")
-    if result != "" {
-        t.Errorf("Expected empty result due to invalid regex, got %s", result)
-    }
+	result := mapper.MapModel("anything")
+	if result != "" {
+		t.Errorf("Expected empty result due to invalid regex, got %s", result)
+	}
 }
 
 func TestModelMapper_Regex_CaseInsensitive(t *testing.T) {
-    reg := registry.GetGlobalRegistry()
-    reg.RegisterClient("test-client-regex-4", "claude", []*registry.ModelInfo{
-        {ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
-    })
-    defer reg.UnregisterClient("test-client-regex-4")
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-client-regex-4", "claude", []*registry.ModelInfo{
+		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+	})
+	defer reg.UnregisterClient("test-client-regex-4")
 
-    mappings := []config.AmpModelMapping{
-        {From: "^CLAUDE-OPUS-.*$", To: "claude-sonnet-4", Regex: true},
-    }
+	mappings := []config.AmpModelMapping{
+		{From: "^CLAUDE-OPUS-.*$", To: "claude-sonnet-4", Regex: true},
+	}
 
-    mapper := NewModelMapper(mappings)
+	mapper := NewModelMapper(mappings)
 
-    result := mapper.MapModel("claude-opus-4.5")
-    if result != "claude-sonnet-4" {
-        t.Errorf("Expected claude-sonnet-4, got %s", result)
-    }
+	result := mapper.MapModel("claude-opus-4.5")
+	if result != "claude-sonnet-4" {
+		t.Errorf("Expected claude-sonnet-4, got %s", result)
+	}
 }

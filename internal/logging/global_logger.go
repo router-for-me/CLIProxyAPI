@@ -45,17 +45,20 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 		reqID = id
 	}
 
+	callerFile := "unknown"
+	callerLine := 0
+	if entry.Caller != nil {
+		callerFile = filepath.Base(entry.Caller.File)
+		callerLine = entry.Caller.Line
+	}
+
 	levelStr := fmt.Sprintf("%-5s", entry.Level.String())
 
 	var formatted string
-	if reqID != "" && entry.Caller != nil {
-		formatted = fmt.Sprintf("[%s] [%s] [%s:%d] | %s | %s\n", timestamp, levelStr, filepath.Base(entry.Caller.File), entry.Caller.Line, reqID, message)
-	} else if reqID != "" {
-		formatted = fmt.Sprintf("[%s] [%s] | %s | %s\n", timestamp, levelStr, reqID, message)
-	} else if entry.Caller != nil {
-		formatted = fmt.Sprintf("[%s] [%s] [%s:%d] %s\n", timestamp, levelStr, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
+	if reqID != "" {
+		formatted = fmt.Sprintf("[%s] [%s] [%s:%d] | %s | %s\n", timestamp, levelStr, callerFile, callerLine, reqID, message)
 	} else {
-		formatted = fmt.Sprintf("[%s] [%s] %s\n", timestamp, levelStr, message)
+		formatted = fmt.Sprintf("[%s] [%s] [%s:%d] %s\n", timestamp, levelStr, callerFile, callerLine, message)
 	}
 	buffer.WriteString(formatted)
 
@@ -67,6 +70,7 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 func SetupBaseLogger() {
 	setupOnce.Do(func() {
 		log.SetOutput(os.Stdout)
+		log.SetLevel(log.InfoLevel)
 		log.SetReportCaller(true)
 		log.SetFormatter(&LogFormatter{})
 
