@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -389,17 +390,18 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 
 		accountType, accountInfo := auth.AccountInfo()
 		proxyInfo := auth.ProxyInfo()
+		entry := logEntryWithRequestID(ctx)
 		if accountType == "api_key" {
 			if proxyInfo != "" {
-				log.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
+				entry.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
 			} else {
-				log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
+				entry.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
 			}
 		} else if accountType == "oauth" {
 			if proxyInfo != "" {
-				log.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
+				entry.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
 			} else {
-				log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
+				entry.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
 			}
 		}
 
@@ -449,17 +451,18 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 
 		accountType, accountInfo := auth.AccountInfo()
 		proxyInfo := auth.ProxyInfo()
+		entry := logEntryWithRequestID(ctx)
 		if accountType == "api_key" {
 			if proxyInfo != "" {
-				log.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
+				entry.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
 			} else {
-				log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
+				entry.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
 			}
 		} else if accountType == "oauth" {
 			if proxyInfo != "" {
-				log.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
+				entry.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
 			} else {
-				log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
+				entry.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
 			}
 		}
 
@@ -509,17 +512,18 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 
 		accountType, accountInfo := auth.AccountInfo()
 		proxyInfo := auth.ProxyInfo()
+		entry := logEntryWithRequestID(ctx)
 		if accountType == "api_key" {
 			if proxyInfo != "" {
-				log.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
+				entry.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
 			} else {
-				log.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
+				entry.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
 			}
 		} else if accountType == "oauth" {
 			if proxyInfo != "" {
-				log.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
+				entry.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
 			} else {
-				log.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
+				entry.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
 			}
 		}
 
@@ -1602,6 +1606,17 @@ type RoundTripperProvider interface {
 // to mutate outbound HTTP requests with provider credentials.
 type RequestPreparer interface {
 	PrepareRequest(req *http.Request, auth *Auth) error
+}
+
+// logEntryWithRequestID returns a logrus entry with request_id field if available in context.
+func logEntryWithRequestID(ctx context.Context) *log.Entry {
+	if ctx == nil {
+		return log.NewEntry(log.StandardLogger())
+	}
+	if reqID := logging.GetRequestID(ctx); reqID != "" {
+		return log.WithField("request_id", reqID)
+	}
+	return log.NewEntry(log.StandardLogger())
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.

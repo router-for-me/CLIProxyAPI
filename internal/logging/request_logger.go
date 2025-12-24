@@ -43,10 +43,11 @@ type RequestLogger interface {
 	//   - response: The raw response data
 	//   - apiRequest: The API request data
 	//   - apiResponse: The API response data
+	//   - requestID: Optional request ID for log file naming
 	//
 	// Returns:
 	//   - error: An error if logging fails, nil otherwise
-	LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage) error
+	LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string) error
 
 	// LogStreamingRequest initiates logging for a streaming request and returns a writer for chunks.
 	//
@@ -55,11 +56,12 @@ type RequestLogger interface {
 	//   - method: The HTTP method
 	//   - headers: The request headers
 	//   - body: The request body
+	//   - requestID: Optional request ID for log file naming
 	//
 	// Returns:
 	//   - StreamingLogWriter: A writer for streaming response chunks
 	//   - error: An error if logging initialization fails, nil otherwise
-	LogStreamingRequest(url, method string, headers map[string][]string, body []byte) (StreamingLogWriter, error)
+	LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error)
 
 	// IsEnabled returns whether request logging is currently enabled.
 	//
@@ -177,20 +179,21 @@ func (l *FileRequestLogger) SetEnabled(enabled bool) {
 //   - response: The raw response data
 //   - apiRequest: The API request data
 //   - apiResponse: The API response data
+//   - requestID: Optional request ID for log file naming
 //
 // Returns:
 //   - error: An error if logging fails, nil otherwise
-func (l *FileRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage) error {
-	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, apiRequest, apiResponse, apiResponseErrors, false)
+func (l *FileRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string) error {
+	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, apiRequest, apiResponse, apiResponseErrors, false, requestID)
 }
 
 // LogRequestWithOptions logs a request with optional forced logging behavior.
 // The force flag allows writing error logs even when regular request logging is disabled.
-func (l *FileRequestLogger) LogRequestWithOptions(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool) error {
-	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, apiRequest, apiResponse, apiResponseErrors, force)
+func (l *FileRequestLogger) LogRequestWithOptions(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string) error {
+	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, apiRequest, apiResponse, apiResponseErrors, force, requestID)
 }
 
-func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool) error {
+func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string) error {
 	if !l.enabled && !force {
 		return nil
 	}
@@ -200,10 +203,10 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		return fmt.Errorf("failed to create logs directory: %w", errEnsure)
 	}
 
-	// Generate filename
-	filename := l.generateFilename(url)
+	// Generate filename with request ID
+	filename := l.generateFilename(url, requestID)
 	if force && !l.enabled {
-		filename = l.generateErrorFilename(url)
+		filename = l.generateErrorFilename(url, requestID)
 	}
 	filePath := filepath.Join(l.logsDir, filename)
 
@@ -271,11 +274,12 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 //   - method: The HTTP method
 //   - headers: The request headers
 //   - body: The request body
+//   - requestID: Optional request ID for log file naming
 //
 // Returns:
 //   - StreamingLogWriter: A writer for streaming response chunks
 //   - error: An error if logging initialization fails, nil otherwise
-func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte) (StreamingLogWriter, error) {
+func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error) {
 	if !l.enabled {
 		return &NoOpStreamingLogWriter{}, nil
 	}
@@ -285,8 +289,8 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		return nil, fmt.Errorf("failed to create logs directory: %w", err)
 	}
 
-	// Generate filename
-	filename := l.generateFilename(url)
+	// Generate filename with request ID
+	filename := l.generateFilename(url, requestID)
 	filePath := filepath.Join(l.logsDir, filename)
 
 	requestHeaders := make(map[string][]string, len(headers))
@@ -330,8 +334,8 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 }
 
 // generateErrorFilename creates a filename with an error prefix to differentiate forced error logs.
-func (l *FileRequestLogger) generateErrorFilename(url string) string {
-	return fmt.Sprintf("error-%s", l.generateFilename(url))
+func (l *FileRequestLogger) generateErrorFilename(url string, requestID ...string) string {
+	return fmt.Sprintf("error-%s", l.generateFilename(url, requestID...))
 }
 
 // ensureLogsDir creates the logs directory if it doesn't exist.
@@ -346,13 +350,15 @@ func (l *FileRequestLogger) ensureLogsDir() error {
 }
 
 // generateFilename creates a sanitized filename from the URL path and current timestamp.
+// Format: v1-responses-2025-12-23T195811-a1b2c3d4.log
 //
 // Parameters:
 //   - url: The request URL
+//   - requestID: Optional request ID to include in filename
 //
 // Returns:
 //   - string: A sanitized filename for the log file
-func (l *FileRequestLogger) generateFilename(url string) string {
+func (l *FileRequestLogger) generateFilename(url string, requestID ...string) string {
 	// Extract path from URL
 	path := url
 	if strings.Contains(url, "?") {
@@ -368,12 +374,18 @@ func (l *FileRequestLogger) generateFilename(url string) string {
 	sanitized := l.sanitizeForFilename(path)
 
 	// Add timestamp
-	timestamp := time.Now().Format("2006-01-02T150405-.000000000")
-	timestamp = strings.Replace(timestamp, ".", "", -1)
+	timestamp := time.Now().Format("2006-01-02T150405")
 
-	id := requestLogID.Add(1)
+	// Use request ID if provided, otherwise use sequential ID
+	var idPart string
+	if len(requestID) > 0 && requestID[0] != "" {
+		idPart = requestID[0]
+	} else {
+		id := requestLogID.Add(1)
+		idPart = fmt.Sprintf("%d", id)
+	}
 
-	return fmt.Sprintf("%s-%s-%d.log", sanitized, timestamp, id)
+	return fmt.Sprintf("%s-%s-%s.log", sanitized, timestamp, idPart)
 }
 
 // sanitizeForFilename replaces characters that are not safe for filenames.
