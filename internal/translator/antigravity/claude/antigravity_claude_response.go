@@ -271,11 +271,11 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 
 	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
 		params.HasUsageMetadata = true
-		params.PromptTokenCount = usageResult.Get("promptTokenCount").Int()
+		params.CachedTokenCount = usageResult.Get("cachedContentTokenCount").Int()
+		params.PromptTokenCount = usageResult.Get("promptTokenCount").Int() - params.CachedTokenCount
 		params.CandidatesTokenCount = usageResult.Get("candidatesTokenCount").Int()
 		params.ThoughtsTokenCount = usageResult.Get("thoughtsTokenCount").Int()
 		params.TotalTokenCount = usageResult.Get("totalTokenCount").Int()
-		params.CachedTokenCount = usageResult.Get("cachedContentTokenCount").Int()
 		if params.CandidatesTokenCount == 0 && params.TotalTokenCount > 0 {
 			params.CandidatesTokenCount = params.TotalTokenCount - params.PromptTokenCount - params.ThoughtsTokenCount
 			if params.CandidatesTokenCount < 0 {
