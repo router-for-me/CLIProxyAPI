@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,11 +15,24 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// aiAPIPrefixes defines path prefixes for AI API requests that should have request ID tracking.
+var aiAPIPrefixes = []string{
+	"/v1/chat/completions",
+	"/v1/completions",
+	"/v1/messages",
+	"/v1/responses",
+	"/v1beta/models/",
+	"/api/provider/",
+}
+
 const skipGinLogKey = "__gin_skip_request_logging__"
 
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
 // using logrus. It captures request details including method, path, status code, latency,
-// client IP, and any error messages, formatting them in a Gin-style log format.
+// client IP, and any error messages. Request ID is only added for AI API requests.
+//
+// Output format (AI API): [2025-12-23 20:14:10] [info ] | a1b2c3d4 | 200 |       23.559s | ...
+// Output format (others): [2025-12-23 20:14:10] [info ] | -------- | 200 |       23.559s | ...
 //
 // Returns:
 //   - gin.HandlerFunc: A middleware handler for request logging
@@ -27,6 +41,15 @@ func GinLogrusLogger() gin.HandlerFunc {
 		start := time.Now()
 		path := c.Request.URL.Path
 		raw := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
+
+		// Only generate request ID for AI API paths
+		var requestID string
+		if isAIAPIPath(path) {
+			requestID = GenerateRequestID()
+			SetGinRequestID(c, requestID)
+			ctx := WithRequestID(c.Request.Context(), requestID)
+			c.Request = c.Request.WithContext(ctx)
+		}
 
 		c.Next()
 
@@ -49,21 +72,38 @@ func GinLogrusLogger() gin.HandlerFunc {
 		clientIP := c.ClientIP()
 		method := c.Request.Method
 		errorMessage := c.Errors.ByType(gin.ErrorTypePrivate).String()
-		timestamp := time.Now().Format("2006/01/02 - 15:04:05")
-		logLine := fmt.Sprintf("[GIN] %s | %3d | %13v | %15s | %-7s \"%s\"", timestamp, statusCode, latency, clientIP, method, path)
+
+		logLine := fmt.Sprintf("%3d | %13v | %15s | %-7s \"%s\"", statusCode, latency, clientIP, method, path)
 		if errorMessage != "" {
 			logLine = logLine + " | " + errorMessage
 		}
 
+		var entry *log.Entry
+		if requestID != "" {
+			entry = log.WithField("request_id", requestID)
+		} else {
+			entry = log.WithField("request_id", "--------")
+		}
+
 		switch {
 		case statusCode >= http.StatusInternalServerError:
-			log.Error(logLine)
+			entry.Error(logLine)
 		case statusCode >= http.StatusBadRequest:
-			log.Warn(logLine)
+			entry.Warn(logLine)
 		default:
-			log.Info(logLine)
+			entry.Info(logLine)
 		}
 	}
+}
+
+// isAIAPIPath checks if the given path is an AI API endpoint that should have request ID tracking.
+func isAIAPIPath(path string) bool {
+	for _, prefix := range aiAPIPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // GinLogrusRecovery returns a Gin middleware handler that recovers from panics and logs
