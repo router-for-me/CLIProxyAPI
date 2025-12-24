@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -217,13 +218,39 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 // Parameters:
 //   - handler: The API handler associated with the request.
 //   - c: The Gin context of the current request.
-//   - ctx: The parent context.
+//   - ctx: The parent context (caller values/deadlines are preserved; request context adds cancellation and request ID).
 //
 // Returns:
 //   - context.Context: The new context with cancellation and embedded values.
 //   - APIHandlerCancelFunc: A function to cancel the context and log the response.
 func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *gin.Context, ctx context.Context) (context.Context, APIHandlerCancelFunc) {
-	newCtx, cancel := context.WithCancel(ctx)
+	parentCtx := ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+
+	var requestCtx context.Context
+	if c != nil && c.Request != nil {
+		requestCtx = c.Request.Context()
+	}
+
+	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
+		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
+			parentCtx = logging.WithRequestID(parentCtx, requestID)
+		} else if requestID := logging.GetGinRequestID(c); requestID != "" {
+			parentCtx = logging.WithRequestID(parentCtx, requestID)
+		}
+	}
+	newCtx, cancel := context.WithCancel(parentCtx)
+	if requestCtx != nil && requestCtx != parentCtx {
+		go func() {
+			select {
+			case <-requestCtx.Done():
+				cancel()
+			case <-newCtx.Done():
+			}
+		}()
+	}
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {

@@ -156,6 +156,11 @@ type AmpModelMapping struct {
 	// To is the target model name to route to (e.g., "claude-sonnet-4").
 	// The target model must have available providers in the registry.
 	To string `yaml:"to" json:"to"`
+
+	// Regex indicates whether the 'from' field should be interpreted as a regular
+	// expression for matching model names. When true, this mapping is evaluated
+	// after exact matches and in the order provided. Defaults to false (exact match).
+	Regex bool `yaml:"regex,omitempty" json:"regex,omitempty"`
 }
 
 // AmpCode groups Amp CLI integration settings including upstream routing,
@@ -401,7 +406,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.DisableCooling = false
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
-	cfg.IncognitoBrowser = false                     // Default to normal browser (AWS uses incognito by force)
+	cfg.IncognitoBrowser = false // Default to normal browser (AWS uses incognito by force)
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
