@@ -455,7 +455,7 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 	if err != nil {
 		return nil, err
 	}
-	return []byte(fmt.Sprintf("data: %s\n\n", string(jsonBytes))), nil
+	return jsonBytes, nil
 }
 
 func convertMessageToOpenAI(msg ir.Message) map[string]interface{} {

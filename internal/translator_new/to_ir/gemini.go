@@ -250,11 +250,13 @@ func parseGeminiUsage(parsed gjson.Result) *ir.Usage {
 	}
 	promptTokens := int(u.Get("promptTokenCount").Int())
 	thoughtsTokens := int(u.Get("thoughtsTokenCount").Int())
+	cachedTokens := int(u.Get("cachedContentTokenCount").Int())
 	return &ir.Usage{
 		PromptTokens:       promptTokens + thoughtsTokens,
 		CompletionTokens:   int(u.Get("candidatesTokenCount").Int()),
 		TotalTokens:        int(u.Get("totalTokenCount").Int()),
 		ThoughtsTokenCount: thoughtsTokens,
+		CachedTokens:       cachedTokens,
 	}
 }
 

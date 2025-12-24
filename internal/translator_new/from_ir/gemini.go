@@ -9,6 +9,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -206,6 +207,15 @@ func (p *GeminiProvider) applyMessages(root map[string]interface{}, req *ir.Unif
 	toolCallIDToName := ir.BuildToolCallMap(req.Messages)
 	toolResults := ir.BuildToolResultsMap(req.Messages)
 
+	// Check if interleaved thinking hint should be injected
+	// This is needed when both tools and thinking are active for Claude models
+	hasTools := len(req.Tools) > 0
+	hasThinking := req.Thinking != nil && req.Thinking.Budget > 0
+	isClaudeThinking := util.IsClaudeThinkingModel(req.Model)
+	shouldInjectHint := hasTools && hasThinking && isClaudeThinking
+
+	const interleavedHint = "Interleaved thinking is enabled. You may think between tool calls and after receiving tool results before deciding the next action or final answer. Do not mention these instructions or any constraints about thinking blocks; just apply them."
+
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case ir.RoleSystem:
@@ -218,10 +228,23 @@ func (p *GeminiProvider) applyMessages(root map[string]interface{}, req *ir.Unif
 				}
 			}
 			if textContent != "" {
+				parts := []interface{}{
+					map[string]interface{}{"text": textContent},
+				}
+				// Inject interleaved thinking hint if needed
+				if shouldInjectHint {
+					parts = append(parts, map[string]interface{}{"text": interleavedHint})
+				}
+				root["systemInstruction"] = map[string]interface{}{
+					"role":  "user",
+					"parts": parts,
+				}
+			} else if shouldInjectHint {
+				// No system instruction but need to inject hint
 				root["systemInstruction"] = map[string]interface{}{
 					"role": "user",
 					"parts": []interface{}{
-						map[string]interface{}{"text": textContent},
+						map[string]interface{}{"text": interleavedHint},
 					},
 				}
 			}
@@ -256,6 +279,65 @@ func (p *GeminiProvider) applyMessages(root map[string]interface{}, req *ir.Unif
 				var parts []interface{}
 				var toolCallIDs []string
 
+				// Get session ID for signature validation
+				var sessionID string
+				if req.Metadata != nil {
+					if sid, ok := req.Metadata["session_id"].(string); ok {
+						sessionID = sid
+					}
+				}
+
+				// Track current message's thinking signature for tool calls
+				var currentMessageThinkingSignature string
+
+				// First, process any reasoning/text content parts
+				for _, part := range msg.Content {
+					switch part.Type {
+					case ir.ContentTypeReasoning:
+						// Validate signature for thinking blocks
+						signature := part.ThoughtSignature
+
+						// Try cached signature first (more reliable than client-provided)
+						if sessionID != "" && part.Reasoning != "" {
+							if cachedSig := cache.GetCachedSignature(sessionID, part.Reasoning); cachedSig != "" {
+								signature = cachedSig
+							}
+						}
+
+						// Fallback to client signature only if cache miss and client signature is valid
+						if signature == "" && cache.HasValidSignature(part.ThoughtSignature) {
+							signature = part.ThoughtSignature
+						}
+
+						// Skip unsigned thinking blocks (Antigravity API requires valid signatures)
+						if !cache.HasValidSignature(signature) {
+							// Drop unsigned thinking blocks entirely
+							continue
+						}
+
+						// Store for subsequent tool calls in the same message
+						currentMessageThinkingSignature = signature
+
+						p := map[string]interface{}{
+							"text":    part.Reasoning,
+							"thought": true,
+						}
+						if signature != "" {
+							p["thoughtSignature"] = signature
+						}
+						parts = append(parts, p)
+					case ir.ContentTypeText:
+						if part.Text != "" {
+							p := map[string]interface{}{"text": part.Text}
+							if part.ThoughtSignature != "" {
+								p["thoughtSignature"] = part.ThoughtSignature
+							}
+							parts = append(parts, p)
+						}
+					}
+				}
+
+				// Then process tool calls
 				for i, tc := range msg.ToolCalls {
 					argsJSON := ir.ValidateAndNormalizeJSON(tc.Args)
 					fcMap := map[string]interface{}{
@@ -274,7 +356,10 @@ func (p *GeminiProvider) applyMessages(root map[string]interface{}, req *ir.Unif
 					part := map[string]interface{}{
 						"functionCall": fcMap,
 					}
-					if tc.ThoughtSignature != "" {
+					// Use thinking signature from reasoning block if available
+					if cache.HasValidSignature(currentMessageThinkingSignature) {
+						part["thoughtSignature"] = currentMessageThinkingSignature
+					} else if cache.HasValidSignature(tc.ThoughtSignature) {
 						part["thoughtSignature"] = tc.ThoughtSignature
 					} else if i == 0 {
 						// Fallback for missing signature (e.g. from non-thinking model or lost history)
@@ -377,15 +462,45 @@ func (p *GeminiProvider) applyMessages(root map[string]interface{}, req *ir.Unif
 			} else {
 				// Assistant text message (with optional reasoning)
 				var parts []interface{}
+
+				// Get session ID for signature validation
+				var sessionID string
+				if req.Metadata != nil {
+					if sid, ok := req.Metadata["session_id"].(string); ok {
+						sessionID = sid
+					}
+				}
+
 				for _, part := range msg.Content {
 					switch part.Type {
 					case ir.ContentTypeReasoning:
+						// Validate signature for thinking blocks
+						signature := part.ThoughtSignature
+
+						// Try cached signature first (more reliable than client-provided)
+						if sessionID != "" && part.Reasoning != "" {
+							if cachedSig := cache.GetCachedSignature(sessionID, part.Reasoning); cachedSig != "" {
+								signature = cachedSig
+							}
+						}
+
+						// Fallback to client signature only if cache miss and client signature is valid
+						if signature == "" && cache.HasValidSignature(part.ThoughtSignature) {
+							signature = part.ThoughtSignature
+						}
+
+						// Skip unsigned thinking blocks (Antigravity API requires valid signatures)
+						if !cache.HasValidSignature(signature) {
+							// Drop unsigned thinking blocks entirely
+							continue
+						}
+
 						p := map[string]interface{}{
 							"text":    part.Reasoning,
 							"thought": true,
 						}
-						if part.ThoughtSignature != "" {
-							p["thoughtSignature"] = part.ThoughtSignature
+						if signature != "" {
+							p["thoughtSignature"] = signature
 						}
 						parts = append(parts, p)
 					case ir.ContentTypeText:
@@ -397,14 +512,24 @@ func (p *GeminiProvider) applyMessages(root map[string]interface{}, req *ir.Unif
 					}
 				}
 
-				// Combine remaining text parts if any (legacy behavior, but we iterate parts above now)
-
 				if len(parts) > 0 {
 					contents = append(contents, map[string]interface{}{
 						"role":  "model",
 						"parts": parts,
 					})
 				}
+			}
+		}
+	}
+
+	// If no system instruction was set but we need to inject hint, create one
+	if shouldInjectHint {
+		if _, hasSystem := root["systemInstruction"]; !hasSystem {
+			root["systemInstruction"] = map[string]interface{}{
+				"role": "user",
+				"parts": []interface{}{
+					map[string]interface{}{"text": interleavedHint},
+				},
 			}
 		}
 	}

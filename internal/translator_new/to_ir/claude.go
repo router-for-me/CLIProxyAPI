@@ -7,12 +7,37 @@ package to_ir
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	"github.com/tidwall/gjson"
 )
+
+// deriveSessionID generates a stable session ID from the request.
+// Uses the hash of the first user message to identify the conversation.
+func deriveSessionID(rawJSON []byte) string {
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	for _, msg := range messages.Array() {
+		if msg.Get("role").String() == "user" {
+			content := msg.Get("content").String()
+			if content == "" {
+				// Try to get text from content array
+				content = msg.Get("content.0.text").String()
+			}
+			if content != "" {
+				h := sha256.Sum256([]byte(content))
+				return hex.EncodeToString(h[:16])
+			}
+		}
+	}
+	return ""
+}
 
 // ParseClaudeRequest converts a raw Claude Messages API JSON body into unified format.
 func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
@@ -27,6 +52,15 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 	parsed := gjson.ParseBytes(rawJSON)
 
 	req.Model = parsed.Get("model").String()
+
+	// Derive session ID for signature caching
+	sessionID := deriveSessionID(rawJSON)
+	if sessionID != "" {
+		if req.Metadata == nil {
+			req.Metadata = make(map[string]any)
+		}
+		req.Metadata["session_id"] = sessionID
+	}
 
 	// Generation Parameters
 	if v := parsed.Get("max_tokens"); v.Exists() {
@@ -143,7 +177,19 @@ func parseClaudeMessage(m gjson.Result) ir.Message {
 			case "text":
 				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: block.Get("text").String()})
 			case "thinking":
-				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: block.Get("thinking").String()})
+				// Extract thinking text - handle both simple string and wrapped object formats
+				thinkingText := block.Get("thinking").String()
+				if thinkingText == "" {
+					// Try wrapped format: {"thinking": {"text": "...", "cache_control": {...}}}
+					if inner := block.Get("thinking.text"); inner.Exists() {
+						thinkingText = inner.String()
+					}
+				}
+				msg.Content = append(msg.Content, ir.ContentPart{
+					Type:             ir.ContentTypeReasoning,
+					Reasoning:        thinkingText,
+					ThoughtSignature: block.Get("signature").String(),
+				})
 			case "image":
 				if source := block.Get("source"); source.Exists() && source.Get("type").String() == "base64" {
 					msg.Content = append(msg.Content, ir.ContentPart{

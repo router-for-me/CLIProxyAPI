@@ -13,6 +13,9 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	"github.com/tidwall/gjson"
 )
@@ -39,11 +42,44 @@ type ClaudeStreamState struct {
 	HasToolCalls     bool
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
 	FinishSent       bool
+
+	// Signature caching support
+	SessionID           string          // Session ID derived from request for signature caching
+	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
 }
 
 // NewClaudeStreamState creates a new streaming state tracker.
 func NewClaudeStreamState() *ClaudeStreamState {
 	return &ClaudeStreamState{TextBlockIndex: 0, ToolBlockCount: 0}
+}
+
+// NewClaudeStreamStateWithSessionID creates a new streaming state tracker with session ID for signature caching.
+// The sessionID is derived from the original request to identify the conversation.
+func NewClaudeStreamStateWithSessionID(sessionID string) *ClaudeStreamState {
+	return &ClaudeStreamState{TextBlockIndex: 0, ToolBlockCount: 0, SessionID: sessionID}
+}
+
+// DeriveSessionID generates a stable session ID from the request.
+// Uses the hash of the first user message to identify the conversation.
+func DeriveSessionID(rawJSON []byte) string {
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	for _, msg := range messages.Array() {
+		if msg.Get("role").String() == "user" {
+			content := msg.Get("content").String()
+			if content == "" {
+				// Try to get text from content array
+				content = msg.Get("content.0.text").String()
+			}
+			if content != "" {
+				h := sha256.Sum256([]byte(content))
+				return hex.EncodeToString(h[:16])
+			}
+		}
+	}
+	return ""
 }
 
 // ConvertRequest transforms unified request into Claude Messages API JSON.
@@ -360,6 +396,8 @@ func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
 			}))
 		}
 		state.HasContent = true
+		// Accumulate thinking text for signature caching
+		state.CurrentThinkingText.WriteString(thinking)
 	}
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
 		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
@@ -370,6 +408,7 @@ func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
 
 // emitSignatureDelta emits a signature_delta event for Claude thinking mode.
 // This is used when Gemini returns a thoughtSignature instead of readable thinking text.
+// Also caches the signature for future requests in the same session.
 func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
 	var result strings.Builder
 	idx := 0
@@ -383,6 +422,13 @@ func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
 			}))
 		}
 		state.HasContent = true
+
+		// Cache signature for future requests in the same session
+		if state.SessionID != "" && state.CurrentThinkingText.Len() > 0 {
+			cache.CacheSignature(state.SessionID, state.CurrentThinkingText.String(), signature)
+			log.Debugf("Cached signature for thinking block (sessionID=%s, textLen=%d)", state.SessionID, state.CurrentThinkingText.Len())
+			state.CurrentThinkingText.Reset()
+		}
 	}
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
 		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
