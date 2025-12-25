@@ -91,6 +91,10 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// Aliases defines global model aliases that can be used across all providers.
+	// Map key is the alias name, value is the target model ID.
+	Aliases map[string]string `yaml:"aliases" json:"aliases"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 

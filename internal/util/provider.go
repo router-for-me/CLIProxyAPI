@@ -6,10 +6,15 @@ package util
 import (
 	"net/url"
 	"strings"
+	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	log "github.com/sirupsen/logrus"
+)
+
+var (
+	aliasValue atomic.Value // stores map[string]string
 )
 
 // GetProviderName determines all AI service providers capable of serving a registered model.
@@ -34,6 +39,9 @@ func GetProviderName(modelName string) []string {
 	if modelName == "" {
 		return nil
 	}
+
+	// Resolve global aliases first
+	modelName = ResolveAlias(modelName)
 
 	providers := make([]string, 0, 4)
 	seen := make(map[string]struct{})
@@ -266,4 +274,37 @@ func shouldMaskQueryParam(key string) bool {
 		return true
 	}
 	return false
+}
+
+// SetAliases sets the global alias map from the configuration.
+// This should be called when the configuration is updated.
+func SetAliases(aliases map[string]string) {
+	if aliases == nil {
+		aliases = make(map[string]string)
+	}
+	aliasValue.Store(aliases)
+}
+
+// ResolveAlias resolves a model name through the global alias map.
+// If the model name is an alias, it returns the target model ID.
+// Otherwise, it returns the original model name unchanged.
+//
+// Parameters:
+//   - modelName: The model name or alias to resolve
+//
+// Returns:
+//   - string: The resolved model ID, or the original if not an alias
+func ResolveAlias(modelName string) string {
+	if modelName == "" {
+		return modelName
+	}
+	val := aliasValue.Load()
+	if val == nil {
+		return modelName
+	}
+	aliases := val.(map[string]string)
+	if target, exists := aliases[modelName]; exists {
+		return target
+	}
+	return modelName
 }

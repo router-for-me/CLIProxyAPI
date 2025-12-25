@@ -199,16 +199,29 @@ ws-auth: false
 #     - "tstars2.0"
 
 # Optional payload configuration
-# payload:
-#   default: # Default rules only set parameters when they are missing in the payload.
-#     - models:
-#         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
-#       params: # JSON path (gjson/sjson syntax) -> value
-#         "generationConfig.thinkingConfig.thinkingBudget": 32768
-#   override: # Override rules always set parameters, overwriting any existing values.
-#     - models:
-#         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
-#       params: # JSON path (gjson/sjson syntax) -> value
-#         "reasoning.effort": "high"
+payload:
+  default: # Default rules only set parameters when they are missing in the payload.
+    - models:
+        - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
+          protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
+      params: # JSON path (gjson/sjson syntax) -> value
+        "generationConfig.thinkingConfig.thinkingBudget": 32768
+  override: # Override rules always set parameters, overwriting any existing values.
+    - models:
+        - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
+          protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
+      params: # JSON path (gjson/sjson syntax) -> value
+        "reasoning.effort": "high"
+
+# Global model aliases
+# Define custom aliases that can be used across all providers to map to specific model IDs.
+# This eliminates the need for per-provider alias configuration.
+aliases:
+  # Claude aliases - use shorter names for latest versions
+  "claude-haiku-4-5": "claude-haiku-4-5-20251001"
+  "claude-sonnet-4-5": "claude-sonnet-4-5-20250929"
+  "claude-opus-4-5": "claude-opus-4-5-20251101"
+  
+  # Custom aliases - any name you prefer
+  "best-model": "claude-sonnet-4-5-20250929"
+  "fast-model": "claude-haiku-4-5-20251001"

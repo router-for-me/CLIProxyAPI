@@ -496,6 +496,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
 
+		mgmt.GET("/aliases", s.mgmt.GetAliases)
+		mgmt.PUT("/aliases", s.mgmt.PutAliases)
+		mgmt.PUT("/aliases/:alias", s.mgmt.PutAlias)
+		mgmt.DELETE("/aliases/:alias", s.mgmt.DeleteAlias)
+
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
 		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
 		mgmt.PATCH("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
@@ -821,6 +826,11 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (s *Server) UpdateClients(cfg *config.Config) {
+	// Set global aliases from config
+	if cfg.Aliases != nil {
+		util.SetAliases(cfg.Aliases)
+	}
+
 	// Reconstruct old config from YAML snapshot to avoid reference sharing issues
 	var oldCfg *config.Config
 	if len(s.oldConfigYaml) > 0 {
