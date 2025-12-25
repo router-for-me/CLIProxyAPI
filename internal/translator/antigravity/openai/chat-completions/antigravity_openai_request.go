@@ -249,8 +249,28 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				p := 0
 				if content.Type == gjson.String {
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
-					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 					p++
+				} else if content.IsArray() {
+					// Assistant multimodal content (e.g. text + image) -> single model content with parts
+					for _, item := range content.Array() {
+						switch item.Get("type").String() {
+						case "text":
+							p++
+						case "image_url":
+							// If the assistant returned an inline data URL, preserve it for history fidelity.
+							imageURL := item.Get("image_url.url").String()
+							if len(imageURL) > 5 { // expect data:...
+								pieces := strings.SplitN(imageURL[5:], ";", 2)
+								if len(pieces) == 2 && len(pieces[1]) > 7 {
+									mime := pieces[0]
+									data := pieces[1][7:]
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
+									p++
+								}
+							}
+						}
+					}
 				}
 
 				// Tool calls -> single model content with functionCall parts
@@ -305,6 +325,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					if pp > 0 {
 						out, _ = sjson.SetRawBytes(out, "request.contents.-1", toolNode)
 					}
+				} else {
+					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 				}
 			}
 		}

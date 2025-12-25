@@ -233,18 +233,15 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			} else if role == "assistant" {
 				node := []byte(`{"role":"model","parts":[]}`)
 				p := 0
-
 				if content.Type == gjson.String {
 					// Assistant text -> single model content
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
-					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
 					p++
 				} else if content.IsArray() {
 					// Assistant multimodal content (e.g. text + image) -> single model content with parts
 					for _, item := range content.Array() {
 						switch item.Get("type").String() {
 						case "text":
-							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", item.Get("text").String())
 							p++
 						case "image_url":
 							// If the assistant returned an inline data URL, preserve it for history fidelity.
@@ -261,7 +258,6 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							}
 						}
 					}
-					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
 				}
 
 				// Tool calls -> single model content with functionCall parts
@@ -302,6 +298,8 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					if pp > 0 {
 						out, _ = sjson.SetRawBytes(out, "contents.-1", toolNode)
 					}
+				} else {
+					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
 				}
 			}
 		}

@@ -182,12 +182,14 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 					mimeType = "image/png"
 				}
 				imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
-				imagePayload := `{"image_url":{"url":""},"type":"image_url"}`
-				imagePayload, _ = sjson.Set(imagePayload, "image_url.url", imageURL)
 				imagesResult := gjson.Get(template, "choices.0.delta.images")
 				if !imagesResult.Exists() || !imagesResult.IsArray() {
 					template, _ = sjson.SetRaw(template, "choices.0.delta.images", `[]`)
 				}
+				imageIndex := len(gjson.Get(template, "choices.0.delta.images").Array())
+				imagePayload := `{"type":"image_url","image_url":{"url":""}}`
+				imagePayload, _ = sjson.Set(imagePayload, "index", imageIndex)
+				imagePayload, _ = sjson.Set(imagePayload, "image_url.url", imageURL)
 				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
 				template, _ = sjson.SetRaw(template, "choices.0.delta.images.-1", imagePayload)
 			}
@@ -316,12 +318,14 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 					mimeType = "image/png"
 				}
 				imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
-				imagePayload := `{"image_url":{"url":""},"type":"image_url"}`
-				imagePayload, _ = sjson.Set(imagePayload, "image_url.url", imageURL)
 				imagesResult := gjson.Get(template, "choices.0.message.images")
 				if !imagesResult.Exists() || !imagesResult.IsArray() {
 					template, _ = sjson.SetRaw(template, "choices.0.message.images", `[]`)
 				}
+				imageIndex := len(gjson.Get(template, "choices.0.message.images").Array())
+				imagePayload := `{"type":"image_url","image_url":{"url":""}}`
+				imagePayload, _ = sjson.Set(imagePayload, "index", imageIndex)
+				imagePayload, _ = sjson.Set(imagePayload, "image_url.url", imageURL)
 				template, _ = sjson.Set(template, "choices.0.message.role", "assistant")
 				template, _ = sjson.SetRaw(template, "choices.0.message.images.-1", imagePayload)
 			}
