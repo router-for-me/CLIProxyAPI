@@ -576,16 +576,23 @@ func rewriteModelForAuth(model string, metadata map[string]any, auth *Auth) (str
 	if auth == nil || model == "" {
 		return model, metadata
 	}
+
+	// 1. Handle prefix stripping
 	prefix := strings.TrimSpace(auth.Prefix)
-	if prefix == "" {
-		return model, metadata
+	rewritten := model
+	if prefix != "" {
+		needle := prefix + "/"
+		if strings.HasPrefix(model, needle) {
+			rewritten = strings.TrimPrefix(model, needle)
+			metadata = stripPrefixFromMetadata(metadata, needle)
+		}
 	}
-	needle := prefix + "/"
-	if !strings.HasPrefix(model, needle) {
-		return model, metadata
-	}
-	rewritten := strings.TrimPrefix(model, needle)
-	return rewritten, stripPrefixFromMetadata(metadata, needle)
+
+	// 2. Handle alias resolution for the client
+	// If the client was picked because it supports an alias target, we must use that target name.
+	rewritten = registry.GetGlobalRegistry().ResolveModelForClient(auth.ID, rewritten)
+
+	return rewritten, metadata
 }
 
 func stripPrefixFromMetadata(metadata map[string]any, needle string) map[string]any {

@@ -541,8 +541,8 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
 	normalizedModel, metadata = normalizeModelMetadata(resolvedModelName)
 
-	// Use the normalizedModel to get the provider name.
-	providers = util.GetProviderName(normalizedModel)
+	// Use the normalizedModel to get the provider name and resolved model name.
+	providers, normalizedModel = util.GetProviderNameAndModel(normalizedModel)
 	if len(providers) == 0 && metadata != nil {
 		if originalRaw, ok := metadata[util.ThinkingOriginalModelMetadataKey]; ok {
 			if originalModel, okStr := originalRaw.(string); okStr {

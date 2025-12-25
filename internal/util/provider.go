@@ -14,58 +14,44 @@ import (
 )
 
 var (
-	aliasValue atomic.Value // stores map[string]string
+	aliasValue atomic.Value // stores map[string][]string
 )
 
 // GetProviderName determines all AI service providers capable of serving a registered model.
 // It first queries the global model registry to retrieve the providers backing the supplied model name.
-// When the model has not been registered yet, it falls back to legacy string heuristics to infer
-// potential providers.
-//
-// Supported providers include (but are not limited to):
-//   - "gemini" for Google's Gemini family
-//   - "codex" for OpenAI GPT-compatible providers
-//   - "claude" for Anthropic models
-//   - "qwen" for Alibaba's Qwen models
-//   - "openai-compatibility" for external OpenAI-compatible providers
 //
 // Parameters:
 //   - modelName: The name of the model to identify providers for.
-//   - cfg: The application configuration containing OpenAI compatibility settings.
 //
 // Returns:
 //   - []string: All provider identifiers capable of serving the model, ordered by preference.
 func GetProviderName(modelName string) []string {
-	if modelName == "" {
-		return nil
-	}
-
-	// Resolve global aliases first
-	modelName = ResolveAlias(modelName)
-
-	providers := make([]string, 0, 4)
-	seen := make(map[string]struct{})
-
-	appendProvider := func(name string) {
-		if name == "" {
-			return
-		}
-		if _, exists := seen[name]; exists {
-			return
-		}
-		seen[name] = struct{}{}
-		providers = append(providers, name)
-	}
-
-	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelName) {
-		appendProvider(provider)
-	}
-
-	if len(providers) > 0 {
-		return providers
-	}
-
+	providers, _ := GetProviderNameAndModel(modelName)
 	return providers
+}
+
+// GetProviderNameAndModel determines all AI service providers capable of serving a model,
+// and returns the resolved model name if an alias was used.
+// It considers all possible sources: direct model name and global aliases.
+//
+// Parameters:
+//   - modelName: The name of the model to identify providers for.
+//
+// Returns:
+//   - []string: All provider identifiers capable of serving the model.
+//   - string: The resolved model name (original or alias target).
+func GetProviderNameAndModel(modelName string) ([]string, string) {
+	if modelName == "" {
+		return nil, ""
+	}
+
+	// GetModelProviders now handles the union of direct and aliased providers
+	providers := getProvidersFromRegistry(modelName)
+	return providers, modelName
+}
+
+func getProvidersFromRegistry(modelName string) []string {
+	return registry.GetGlobalRegistry().GetModelProviders(modelName)
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
@@ -278,33 +264,34 @@ func shouldMaskQueryParam(key string) bool {
 
 // SetAliases sets the global alias map from the configuration.
 // This should be called when the configuration is updated.
-func SetAliases(aliases map[string]string) {
+func SetAliases(aliases map[string][]string) {
 	if aliases == nil {
-		aliases = make(map[string]string)
+		aliases = make(map[string][]string)
 	}
 	aliasValue.Store(aliases)
+	registry.GetGlobalRegistry().SetAliases(aliases)
 }
 
 // ResolveAlias resolves a model name through the global alias map.
-// If the model name is an alias, it returns the target model ID.
-// Otherwise, it returns the original model name unchanged.
+// If the model name is an alias, it returns the target model IDs.
+// Otherwise, it returns nil.
 //
 // Parameters:
 //   - modelName: The model name or alias to resolve
 //
 // Returns:
-//   - string: The resolved model ID, or the original if not an alias
-func ResolveAlias(modelName string) string {
+//   - []string: The resolved model IDs, or nil if not an alias
+func ResolveAlias(modelName string) []string {
 	if modelName == "" {
-		return modelName
+		return nil
 	}
 	val := aliasValue.Load()
 	if val == nil {
-		return modelName
+		return nil
 	}
-	aliases := val.(map[string]string)
-	if target, exists := aliases[modelName]; exists {
-		return target
+	aliases := val.(map[string][]string)
+	if targets, exists := aliases[modelName]; exists {
+		return targets
 	}
-	return modelName
+	return nil
 }

@@ -93,9 +93,70 @@ type Config struct {
 
 	// Aliases defines global model aliases that can be used across all providers.
 	// Map key is the alias name, value is the target model ID.
-	Aliases map[string]string `yaml:"aliases" json:"aliases"`
+	Aliases Aliases `yaml:"aliases" json:"aliases"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// Aliases defines global model aliases that can be used across all providers.
+// Map key is the alias name, value is a list of target model IDs.
+type Aliases map[string][]string
+
+// UnmarshalYAML implements custom YAML unmarshalling to accept either a mapping
+// or a sequence of single-key mapping entries. It also supports both single string
+// and sequence of strings for alias targets.
+func (a *Aliases) UnmarshalYAML(node *yaml.Node) error {
+	if node == nil {
+		return nil
+	}
+
+	m := make(map[string][]string)
+
+	processMapping := func(n *yaml.Node) error {
+		if n.Kind != yaml.MappingNode {
+			return fmt.Errorf("expected mapping node, got kind=%d", n.Kind)
+		}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			keyNode := n.Content[i]
+			valNode := n.Content[i+1]
+			key := keyNode.Value
+
+			switch valNode.Kind {
+			case yaml.ScalarNode:
+				m[key] = append(m[key], valNode.Value)
+			case yaml.SequenceNode:
+				var targets []string
+				if err := valNode.Decode(&targets); err != nil {
+					return err
+				}
+				m[key] = append(m[key], targets...)
+			default:
+				return fmt.Errorf("alias target for %s must be a string or sequence, got kind=%d", key, valNode.Kind)
+			}
+		}
+		return nil
+	}
+
+	switch node.Kind {
+	case yaml.MappingNode:
+		if err := processMapping(node); err != nil {
+			return err
+		}
+	case yaml.SequenceNode:
+		for _, elm := range node.Content {
+			if elm == nil {
+				continue
+			}
+			if err := processMapping(elm); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("aliases must be a mapping or sequence, got kind=%d", node.Kind)
+	}
+
+	*a = m
+	return nil
 }
 
 // TLSConfig holds HTTPS server settings.

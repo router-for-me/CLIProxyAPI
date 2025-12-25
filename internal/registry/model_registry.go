@@ -95,6 +95,8 @@ type ModelRegistry struct {
 	clientModelInfos map[string]map[string]*ModelInfo
 	// clientProviders maps client ID to its provider identifier
 	clientProviders map[string]string
+	// aliases maps model ID to its target model IDs
+	aliases map[string][]string
 	// mutex ensures thread-safe access to the registry
 	mutex *sync.RWMutex
 }
@@ -111,10 +113,33 @@ func GetGlobalRegistry() *ModelRegistry {
 			clientModels:     make(map[string][]string),
 			clientModelInfos: make(map[string]map[string]*ModelInfo),
 			clientProviders:  make(map[string]string),
+			aliases:          make(map[string][]string),
 			mutex:            &sync.RWMutex{},
 		}
 	})
 	return globalRegistry
+}
+
+// SetAliases sets the global model aliases in the registry.
+func (r *ModelRegistry) SetAliases(aliases map[string][]string) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if aliases == nil {
+		r.aliases = make(map[string][]string)
+	} else {
+		r.aliases = aliases
+	}
+}
+
+// ResolveAlias resolves a model ID through the registry's alias map.
+// It returns all target model IDs for the given alias.
+func (r *ModelRegistry) ResolveAlias(modelID string) []string {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	if targets, ok := r.aliases[modelID]; ok {
+		return targets
+	}
+	return nil
 }
 
 // RegisterClient registers a client and its supported models
@@ -545,6 +570,47 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
 }
 
+// ResolveModelForClient returns the model ID that the client actually supports for a given requested model ID.
+// It prioritizes direct matches over alias matches.
+func (r *ModelRegistry) ResolveModelForClient(clientID, modelID string) string {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return modelID
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	models, exists := r.clientModels[clientID]
+	if !exists || len(models) == 0 {
+		return modelID
+	}
+
+	// 1. Check for direct match
+	for _, id := range models {
+		if strings.EqualFold(strings.TrimSpace(id), modelID) {
+			return modelID
+		}
+	}
+
+	// 2. Check for alias matches
+	if targets, ok := r.aliases[modelID]; ok {
+		for _, target := range targets {
+			if target == modelID {
+				continue
+			}
+			for _, id := range models {
+				if strings.EqualFold(strings.TrimSpace(id), target) {
+					return target
+				}
+			}
+		}
+	}
+
+	return modelID
+}
+
 // ClientSupportsModel reports whether the client registered support for modelID.
 func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
@@ -561,32 +627,74 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 		return false
 	}
 
+	targets := r.aliases[modelID]
+
 	for _, id := range models {
-		if strings.EqualFold(strings.TrimSpace(id), modelID) {
+		trimmedID := strings.TrimSpace(id)
+		if strings.EqualFold(trimmedID, modelID) {
 			return true
+		}
+		for _, target := range targets {
+			if strings.EqualFold(trimmedID, target) {
+				return true
+			}
 		}
 	}
 
 	return false
 }
 
-// GetAvailableModels returns all models that have at least one available client
-// Parameters:
-//   - handlerType: The handler type to filter models for (e.g., "openai", "claude", "gemini")
-//
-// Returns:
-//   - []map[string]any: List of available models in the requested format
-func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any {
-	r.mutex.RLock()
-	defer r.mutex.RUnlock()
+// getModelCountLocked returns the number of available clients for a specific model.
+// It assumes the mutex is already held for reading.
+func (r *ModelRegistry) getModelCountLocked(modelID string) int {
+	countFor := func(id string) int {
+		registration, exists := r.models[id]
+		if !exists || registration == nil {
+			return 0
+		}
+		now := time.Now()
+		quotaExpiredDuration := 5 * time.Minute
 
-	models := make([]map[string]any, 0)
-	quotaExpiredDuration := 5 * time.Minute
+		// Count clients that have exceeded quota but haven't recovered yet
+		expiredClients := 0
+		for _, quotaTime := range registration.QuotaExceededClients {
+			if quotaTime != nil && now.Sub(*quotaTime) < quotaExpiredDuration {
+				expiredClients++
+			}
+		}
+		suspendedClients := 0
+		if registration.SuspendedClients != nil {
+			suspendedClients = len(registration.SuspendedClients)
+		}
+		result := registration.Count - expiredClients - suspendedClients
+		if result < 0 {
+			return 0
+		}
+		return result
+	}
 
-	for _, registration := range r.models {
-		// Check if model has any non-quota-exceeded clients
+	total := countFor(modelID)
+	if targets, ok := r.aliases[modelID]; ok {
+		for _, target := range targets {
+			if target != modelID {
+				total += countFor(target)
+			}
+		}
+	}
+	return total
+}
+
+// isModelAvailableLocked checks if a model has any available clients (including through aliases).
+// It assumes the mutex is already held for reading.
+func (r *ModelRegistry) isModelAvailableLocked(modelID string) bool {
+	check := func(id string) bool {
+		registration, exists := r.models[id]
+		if !exists || registration == nil {
+			return false
+		}
 		availableClients := registration.Count
 		now := time.Now()
+		quotaExpiredDuration := 5 * time.Minute
 
 		// Count clients that have exceeded quota but haven't recovered yet
 		expiredClients := 0
@@ -614,10 +722,74 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 		}
 
 		// Include models that have available clients, or those solely cooling down.
-		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+		return effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0)
+	}
+
+	if check(modelID) {
+		return true
+	}
+	if targets, ok := r.aliases[modelID]; ok {
+		for _, target := range targets {
+			if target != modelID && check(target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// GetAvailableModels returns all models that have at least one available client
+// Parameters:
+//   - handlerType: The handler type to filter models for (e.g., "openai", "claude", "gemini")
+//
+// Returns:
+//   - []map[string]any: List of available models in the requested format
+func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	models := make([]map[string]any, 0)
+	processedIDs := make(map[string]struct{})
+
+	// 1. Process all models in r.models
+	for modelID, registration := range r.models {
+		if r.isModelAvailableLocked(modelID) {
 			model := r.convertModelToMap(registration.Info, handlerType)
 			if model != nil {
 				models = append(models, model)
+				processedIDs[modelID] = struct{}{}
+			}
+		}
+	}
+
+	// 2. Process all aliases that aren't in r.models
+	for aliasID, targetIDs := range r.aliases {
+		if _, processed := processedIDs[aliasID]; processed {
+			continue
+		}
+
+		if r.isModelAvailableLocked(aliasID) {
+			// We need ModelInfo for the alias.
+			// If it's not in r.models, we use the first available target's ModelInfo but change the ID.
+			var info *ModelInfo
+			if reg, ok := r.models[aliasID]; ok {
+				info = reg.Info
+			} else {
+				for _, targetID := range targetIDs {
+					if targetReg, ok := r.models[targetID]; ok {
+						info = cloneModelInfo(targetReg.Info)
+						info.ID = aliasID
+						break
+					}
+				}
+			}
+
+			if info != nil {
+				model := r.convertModelToMap(info, handlerType)
+				if model != nil {
+					models = append(models, model)
+					processedIDs[aliasID] = struct{}{}
+				}
 			}
 		}
 	}
@@ -634,29 +806,7 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 func (r *ModelRegistry) GetModelCount(modelID string) int {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
-
-	if registration, exists := r.models[modelID]; exists {
-		now := time.Now()
-		quotaExpiredDuration := 5 * time.Minute
-
-		// Count clients that have exceeded quota but haven't recovered yet
-		expiredClients := 0
-		for _, quotaTime := range registration.QuotaExceededClients {
-			if quotaTime != nil && now.Sub(*quotaTime) < quotaExpiredDuration {
-				expiredClients++
-			}
-		}
-		suspendedClients := 0
-		if registration.SuspendedClients != nil {
-			suspendedClients = len(registration.SuspendedClients)
-		}
-		result := registration.Count - expiredClients - suspendedClients
-		if result < 0 {
-			return 0
-		}
-		return result
-	}
-	return 0
+	return r.getModelCountLocked(modelID)
 }
 
 // GetModelProviders returns provider identifiers that currently supply the given model
@@ -669,8 +819,34 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	registration, exists := r.models[modelID]
-	if !exists || registration == nil || len(registration.Providers) == 0 {
+	providersMap := make(map[string]int)
+
+	// Helper to add providers from a registration
+	addProviders := func(id string) {
+		registration, exists := r.models[id]
+		if !exists || registration == nil {
+			return
+		}
+		for name, count := range registration.Providers {
+			if count > 0 {
+				providersMap[name] += count
+			}
+		}
+	}
+
+	// Add providers for the direct model ID
+	addProviders(modelID)
+
+	// Add providers for the aliased model IDs
+	if targets, ok := r.aliases[modelID]; ok {
+		for _, target := range targets {
+			if target != modelID {
+				addProviders(target)
+			}
+		}
+	}
+
+	if len(providersMap) == 0 {
 		return nil
 	}
 
@@ -678,28 +854,9 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 		name  string
 		count int
 	}
-	providers := make([]providerCount, 0, len(registration.Providers))
-	// suspendedByProvider := make(map[string]int)
-	// if registration.SuspendedClients != nil {
-	// 	for clientID := range registration.SuspendedClients {
-	// 		if provider, ok := r.clientProviders[clientID]; ok && provider != "" {
-	// 			suspendedByProvider[provider]++
-	// 		}
-	// 	}
-	// }
-	for name, count := range registration.Providers {
-		if count <= 0 {
-			continue
-		}
-		// adjusted := count - suspendedByProvider[name]
-		// if adjusted <= 0 {
-		// 	continue
-		// }
-		// providers = append(providers, providerCount{name: name, count: adjusted})
+	providers := make([]providerCount, 0, len(providersMap))
+	for name, count := range providersMap {
 		providers = append(providers, providerCount{name: name, count: count})
-	}
-	if len(providers) == 0 {
-		return nil
 	}
 
 	sort.Slice(providers, func(i, j int) bool {
@@ -717,13 +874,32 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 }
 
 // GetModelInfo returns the registered ModelInfo for the given model ID, if present.
+// It resolves aliases if the direct model ID is not found in the registry.
 // Returns nil if the model is unknown to the registry.
 func (r *ModelRegistry) GetModelInfo(modelID string) *ModelInfo {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
+
+	// 1. Try direct match
 	if reg, ok := r.models[modelID]; ok && reg != nil {
 		return reg.Info
 	}
+
+	// 2. Try alias resolution
+	if targets, ok := r.aliases[modelID]; ok {
+		for _, target := range targets {
+			if target == modelID {
+				continue
+			}
+			if reg, ok := r.models[target]; ok && reg != nil {
+				// Return a clone with the alias ID to match user expectation
+				info := cloneModelInfo(reg.Info)
+				info.ID = modelID
+				return info
+			}
+		}
+	}
+
 	return nil
 }
 

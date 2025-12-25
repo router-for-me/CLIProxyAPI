@@ -216,12 +216,20 @@ payload:
 # Global model aliases
 # Define custom aliases that can be used across all providers to map to specific model IDs.
 # This eliminates the need for per-provider alias configuration.
+# Supports both single-target strings and multi-target lists for provider aggregation.
 aliases:
-  # Claude aliases - use shorter names for latest versions
+  # Single target alias
   "claude-haiku-4-5": "claude-haiku-4-5-20251001"
-  "claude-sonnet-4-5": "claude-sonnet-4-5-20250929"
-  "claude-opus-4-5": "claude-opus-4-5-20251101"
-  
+
+  # Multi-target alias (aggregates providers from all listed models)
+  "claude-sonnet-4-5":
+    - "claude-sonnet-4-5-20250929"
+    - "gemini-claude-sonnet-4-5"
+
+  "claude-opus-4-5":
+    - "claude-opus-4-5-20251101"
+    - "gemini-claude-opus-4-5-thinking"
+
   # Custom aliases - any name you prefer
   "best-model": "claude-sonnet-4-5-20250929"
   "fast-model": "claude-haiku-4-5-20251001"

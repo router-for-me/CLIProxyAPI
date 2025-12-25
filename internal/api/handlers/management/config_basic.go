@@ -252,14 +252,14 @@ func (h *Handler) DeleteProxyURL(c *gin.Context) {
 func (h *Handler) GetAliases(c *gin.Context) {
 	aliases := h.cfg.Aliases
 	if aliases == nil {
-		aliases = make(map[string]string)
+		aliases = make(map[string][]string)
 	}
 	c.JSON(200, gin.H{"aliases": aliases})
 }
 
 func (h *Handler) PutAliases(c *gin.Context) {
 	var body struct {
-		Aliases *map[string]string `json:"aliases"`
+		Aliases *map[string][]string `json:"aliases"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Aliases == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
@@ -280,22 +280,34 @@ func (h *Handler) PutAlias(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Target *string `json:"target"`
+		Target  *string   `json:"target"`
+		Targets *[]string `json:"targets"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.Target == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing target"})
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	if h.cfg.Aliases == nil {
-		h.cfg.Aliases = make(map[string]string)
+
+	var targets []string
+	if body.Targets != nil {
+		targets = *body.Targets
+	} else if body.Target != nil {
+		targets = []string{*body.Target}
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing target or targets"})
+		return
 	}
-	h.cfg.Aliases[alias] = *body.Target
+
+	if h.cfg.Aliases == nil {
+		h.cfg.Aliases = make(map[string][]string)
+	}
+	h.cfg.Aliases[alias] = targets
 	if !h.persist(c) {
 		return
 	}
 	// Update global aliases after persisting
 	util.SetAliases(h.cfg.Aliases)
-	c.JSON(200, gin.H{"alias": alias, "target": *body.Target})
+	c.JSON(200, gin.H{"alias": alias, "targets": targets})
 }
 
 func (h *Handler) DeleteAlias(c *gin.Context) {
