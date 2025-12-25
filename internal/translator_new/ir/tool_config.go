@@ -3,17 +3,11 @@
 // This file contains configuration for tool call normalization.
 // These mappings help fix common model mistakes where parameter names
 // don't match the expected schema.
-//
-// TODO: In the future, this could be loaded from external config (YAML/JSON)
-// to allow customization without code changes.
 package ir
 
 // ParameterSynonyms maps parameter names to their synonyms.
 // When a model returns a parameter name that doesn't exist in the schema,
 // we check if it's a known synonym and remap it to the expected name.
-//
-// Key: parameter name that model might send
-// Value: list of possible expected names in schema (checked in order)
 var ParameterSynonyms = map[string][]string{
 	// File path variations
 	"path":             {"target_file", "file_path", "filename", "target_directory"},
@@ -52,9 +46,6 @@ var ParameterSynonyms = map[string][]string{
 
 // ToolDefaults defines default values for commonly missing required parameters.
 // When a model forgets to include a required parameter, we add the default value.
-//
-// Key: tool name
-// Value: map of parameter name -> default value
 var ToolDefaults = map[string]map[string]interface{}{
 	"run_terminal_cmd": {
 		"is_background": false, // Default to foreground execution
@@ -63,7 +54,6 @@ var ToolDefaults = map[string]map[string]interface{}{
 
 // StringTypeParameters lists parameter names that typically expect string values.
 // Used to detect when model sends array but schema expects string.
-// This is a fallback when schema type information is not available.
 var StringTypeParameters = map[string]bool{
 	"target_file":      true,
 	"file_path":        true,

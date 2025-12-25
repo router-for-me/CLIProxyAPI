@@ -1,8 +1,3 @@
-/**
- * @file Claude API builder utilities
- * @description Shared utilities and constants for Claude API translation.
- */
-
 package ir
 
 import (
@@ -11,7 +6,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// Constants: Roles, Blocks, Stop Reasons, SSE Events
+// Constants for Claude API integration
 const (
 	ClaudeRoleUser             = "user"
 	ClaudeRoleAssistant        = "assistant"

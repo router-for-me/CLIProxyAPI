@@ -14,8 +14,8 @@ import (
 type OpenAIRequestFormat int
 
 const (
-	FormatChatCompletions OpenAIRequestFormat = iota // /v1/chat/completions - uses "messages"
-	FormatResponsesAPI                               // /v1/responses - uses "input"
+	FormatChatCompletions OpenAIRequestFormat = iota // /v1/chat/completions
+	FormatResponsesAPI                               // /v1/responses
 )
 
 // ToOpenAIRequest converts unified request to OpenAI Chat Completions API JSON (default format).
@@ -24,8 +24,6 @@ func ToOpenAIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 }
 
 // ToOpenAIRequestFmt converts unified request to specified OpenAI API format.
-// Use FormatChatCompletions for traditional /v1/chat/completions endpoint.
-// Use FormatResponsesAPI for new /v1/responses endpoint (Codex CLI, etc.).
 func ToOpenAIRequestFmt(req *ir.UnifiedChatRequest, format OpenAIRequestFormat) ([]byte, error) {
 	if format == FormatResponsesAPI {
 		return convertToResponsesAPIRequest(req)
@@ -34,7 +32,6 @@ func ToOpenAIRequestFmt(req *ir.UnifiedChatRequest, format OpenAIRequestFormat) 
 }
 
 // convertToChatCompletionsRequest builds JSON for /v1/chat/completions endpoint.
-// This is the traditional OpenAI format used by most clients (Cursor, Cline, etc.).
 func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	m := map[string]interface{}{
 		"model":    req.Model,
@@ -65,20 +62,7 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 	m["messages"] = messages
 
 	if len(req.Tools) > 0 {
-		tools := make([]interface{}, len(req.Tools))
-		for i, t := range req.Tools {
-			params := t.Parameters
-			if params == nil {
-				params = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
-			}
-			tools[i] = map[string]interface{}{
-				"type": "function",
-				"function": map[string]interface{}{
-					"name": t.Name, "description": t.Description, "parameters": params,
-				},
-			}
-		}
-		m["tools"] = tools
+		m["tools"] = buildOpenAITools(req.Tools)
 	}
 
 	if req.ToolChoice != "" {
@@ -95,8 +79,6 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 }
 
 // convertToResponsesAPIRequest builds JSON for /v1/responses endpoint.
-// This is the new OpenAI format used by Codex CLI and newer clients.
-// Key differences: uses "input" instead of "messages", "max_output_tokens" instead of "max_tokens".
 func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	m := map[string]interface{}{"model": req.Model}
 	if req.Temperature != nil {
@@ -125,29 +107,12 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 		m["input"] = input
 	}
 
-	if req.Thinking != nil && (req.Thinking.IncludeThoughts || req.Thinking.Effort != "" || req.Thinking.Summary != "") {
-		reasoning := map[string]interface{}{}
-		if req.Thinking.Effort != "" {
-			reasoning["effort"] = req.Thinking.Effort
-		} else if req.Thinking.IncludeThoughts {
-			reasoning["effort"] = ir.MapBudgetToEffort(req.Thinking.Budget, "low")
-		}
-		if req.Thinking.Summary != "" {
-			reasoning["summary"] = req.Thinking.Summary
-		}
-		if len(reasoning) > 0 {
-			m["reasoning"] = reasoning
-		}
+	if req.Thinking != nil {
+		applyResponsesThinking(m, req.Thinking)
 	}
 
 	if len(req.Tools) > 0 {
-		tools := make([]interface{}, len(req.Tools))
-		for i, t := range req.Tools {
-			tools[i] = map[string]interface{}{
-				"type": "function", "name": t.Name, "description": t.Description, "parameters": t.Parameters,
-			}
-		}
-		m["tools"] = tools
+		m["tools"] = buildResponsesTools(req.Tools)
 	}
 
 	if req.ToolChoice != "" {
@@ -160,14 +125,7 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 		m["previous_response_id"] = req.PreviousResponseID
 	}
 	if req.PromptID != "" {
-		prompt := map[string]interface{}{"id": req.PromptID}
-		if req.PromptVersion != "" {
-			prompt["version"] = req.PromptVersion
-		}
-		if len(req.PromptVariables) > 0 {
-			prompt["variables"] = req.PromptVariables
-		}
-		m["prompt"] = prompt
+		applyPromptConfig(m, req)
 	}
 	if req.PromptCacheKey != "" {
 		m["prompt_cache_key"] = req.PromptCacheKey
@@ -177,6 +135,67 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	}
 
 	return json.Marshal(m)
+}
+
+func buildOpenAITools(tools []ir.ToolDefinition) []interface{} {
+	res := make([]interface{}, len(tools))
+	for i, t := range tools {
+		params := t.Parameters
+		if params == nil {
+			params = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
+		}
+		res[i] = map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        t.Name,
+				"description": t.Description,
+				"parameters":  params,
+			},
+		}
+	}
+	return res
+}
+
+func buildResponsesTools(tools []ir.ToolDefinition) []interface{} {
+	res := make([]interface{}, len(tools))
+	for i, t := range tools {
+		res[i] = map[string]interface{}{
+			"type":        "function",
+			"name":        t.Name,
+			"description": t.Description,
+			"parameters":  t.Parameters,
+		}
+	}
+	return res
+}
+
+func applyResponsesThinking(m map[string]interface{}, thinking *ir.ThinkingConfig) {
+	if !thinking.IncludeThoughts && thinking.Effort == "" && thinking.Summary == "" {
+		return
+	}
+	reasoning := map[string]interface{}{}
+	if thinking.Effort != "" {
+		reasoning["effort"] = thinking.Effort
+	} else if thinking.IncludeThoughts {
+		reasoning["effort"] = ir.MapBudgetToEffort(thinking.Budget, "low")
+	}
+	if thinking.Summary != "" {
+		reasoning["summary"] = thinking.Summary
+	}
+	if len(reasoning) > 0 {
+		m["reasoning"] = reasoning
+	}
+}
+
+func applyPromptConfig(m map[string]interface{}, req *ir.UnifiedChatRequest) {
+	prompt := map[string]interface{}{"id": req.PromptID}
+	if req.PromptVersion != "" {
+		prompt["version"] = req.PromptVersion
+	}
+	if len(req.PromptVariables) > 0 {
+		prompt["variables"] = req.PromptVariables
+	}
+	m["prompt"] = prompt
 }
 
 func convertMessageToResponsesInput(msg ir.Message) interface{} {
@@ -301,19 +320,23 @@ func ToOpenAIChatCompletionMeta(messages []ir.Message, usage *ir.Usage, model, m
 	}
 
 	if usageMap := builder.BuildUsageMap(); usageMap != nil {
-		thoughtsTokens := 0
-		if meta != nil && meta.ThoughtsTokenCount > 0 {
-			thoughtsTokens = meta.ThoughtsTokenCount
-		} else if usage != nil && usage.ThoughtsTokenCount > 0 {
-			thoughtsTokens = usage.ThoughtsTokenCount
-		}
-		if thoughtsTokens > 0 {
-			usageMap["completion_tokens_details"] = map[string]interface{}{"reasoning_tokens": thoughtsTokens}
-		}
+		addUsageDetails(usageMap, usage, meta)
 		response["usage"] = usageMap
 	}
 
 	return json.Marshal(response)
+}
+
+func addUsageDetails(usageMap map[string]interface{}, usage *ir.Usage, meta *ir.OpenAIMeta) {
+	thoughtsTokens := 0
+	if meta != nil && meta.ThoughtsTokenCount > 0 {
+		thoughtsTokens = meta.ThoughtsTokenCount
+	} else if usage != nil && usage.ThoughtsTokenCount > 0 {
+		thoughtsTokens = usage.ThoughtsTokenCount
+	}
+	if thoughtsTokens > 0 {
+		usageMap["completion_tokens_details"] = map[string]interface{}{"reasoning_tokens": thoughtsTokens}
+	}
 }
 
 // ToOpenAIChunk converts event to OpenAI SSE streaming chunk.
@@ -355,39 +378,11 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 		choice["delta"] = ir.BuildReasoningDelta(event.Reasoning, event.ThoughtSignature)
 	case ir.EventTypeToolCall:
 		if event.ToolCall != nil {
-			// Build tool call chunk - only include non-empty fields
-			tcChunk := map[string]interface{}{
-				"index": event.ToolCallIndex,
-			}
-			if event.ToolCall.ID != "" {
-				tcChunk["id"] = event.ToolCall.ID
-				tcChunk["type"] = "function"
-			}
-			funcChunk := map[string]interface{}{}
-			if event.ToolCall.Name != "" {
-				funcChunk["name"] = event.ToolCall.Name
-			}
-			// Args contains the delta for streaming
-			funcChunk["arguments"] = event.ToolCall.Args
-			tcChunk["function"] = funcChunk
-
-			choice["delta"] = map[string]interface{}{
-				"tool_calls": []interface{}{tcChunk},
-			}
+			choice["delta"] = buildToolCallDelta(event)
 		}
 	case ir.EventTypeImage:
 		if event.Image != nil {
-			choice["delta"] = map[string]interface{}{
-				"role": "assistant",
-				"images": []interface{}{
-					map[string]interface{}{
-						"type": "image_url",
-						"image_url": map[string]string{
-							"url": fmt.Sprintf("data:%s;base64,%s", event.Image.MimeType, event.Image.Data),
-						},
-					},
-				},
-			}
+			choice["delta"] = buildImageDelta(event)
 		}
 	case ir.EventTypeFinish:
 		choice["finish_reason"] = ir.MapFinishReasonToOpenAI(event.FinishReason)
@@ -400,44 +395,8 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 		if event.ContentFilter != nil {
 			choice["content_filter_results"] = event.ContentFilter
 		}
-
 		if event.Usage != nil {
-			usageMap := map[string]interface{}{
-				"prompt_tokens": event.Usage.PromptTokens, "completion_tokens": event.Usage.CompletionTokens, "total_tokens": event.Usage.TotalTokens,
-			}
-
-			promptDetails := map[string]interface{}{}
-			if event.Usage.CachedTokens > 0 {
-				promptDetails["cached_tokens"] = event.Usage.CachedTokens
-			}
-			if event.Usage.AudioTokens > 0 {
-				promptDetails["audio_tokens"] = event.Usage.AudioTokens
-			}
-			if len(promptDetails) > 0 {
-				usageMap["prompt_tokens_details"] = promptDetails
-			}
-
-			completionDetails := map[string]interface{}{}
-			thoughtsTokens := 0
-			if meta != nil && meta.ThoughtsTokenCount > 0 {
-				thoughtsTokens = meta.ThoughtsTokenCount
-			} else if event.Usage.ThoughtsTokenCount > 0 {
-				thoughtsTokens = event.Usage.ThoughtsTokenCount
-			}
-			if thoughtsTokens > 0 {
-				completionDetails["reasoning_tokens"] = thoughtsTokens
-			}
-			if event.Usage.AcceptedPredictionTokens > 0 {
-				completionDetails["accepted_prediction_tokens"] = event.Usage.AcceptedPredictionTokens
-			}
-			if event.Usage.RejectedPredictionTokens > 0 {
-				completionDetails["rejected_prediction_tokens"] = event.Usage.RejectedPredictionTokens
-			}
-			if len(completionDetails) > 0 {
-				usageMap["completion_tokens_details"] = completionDetails
-			}
-
-			chunk["usage"] = usageMap
+			chunk["usage"] = buildChunkUsage(event.Usage, meta)
 		}
 	case ir.EventTypeError:
 		return nil, fmt.Errorf("stream error: %v", event.Error)
@@ -445,17 +404,80 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 		return nil, nil
 	}
 
-	// Add logprobs to non-finish events if present (though usually only on finish or token)
 	if event.Logprobs != nil && event.Type != ir.EventTypeFinish {
 		choice["logprobs"] = event.Logprobs
 	}
 
 	chunk["choices"] = []interface{}{choice}
-	jsonBytes, err := json.Marshal(chunk)
-	if err != nil {
-		return nil, err
+	return json.Marshal(chunk)
+}
+
+func buildToolCallDelta(event ir.UnifiedEvent) map[string]interface{} {
+	tcChunk := map[string]interface{}{"index": event.ToolCallIndex}
+	if event.ToolCall.ID != "" {
+		tcChunk["id"] = event.ToolCall.ID
+		tcChunk["type"] = "function"
 	}
-	return jsonBytes, nil
+	funcChunk := map[string]interface{}{}
+	if event.ToolCall.Name != "" {
+		funcChunk["name"] = event.ToolCall.Name
+	}
+	funcChunk["arguments"] = event.ToolCall.Args
+	tcChunk["function"] = funcChunk
+	return map[string]interface{}{"tool_calls": []interface{}{tcChunk}}
+}
+
+func buildImageDelta(event ir.UnifiedEvent) map[string]interface{} {
+	return map[string]interface{}{
+		"role": "assistant",
+		"images": []interface{}{
+			map[string]interface{}{
+				"type": "image_url",
+				"image_url": map[string]string{
+					"url": fmt.Sprintf("data:%s;base64,%s", event.Image.MimeType, event.Image.Data),
+				},
+			},
+		},
+	}
+}
+
+func buildChunkUsage(usage *ir.Usage, meta *ir.OpenAIMeta) map[string]interface{} {
+	usageMap := map[string]interface{}{
+		"prompt_tokens": usage.PromptTokens, "completion_tokens": usage.CompletionTokens, "total_tokens": usage.TotalTokens,
+	}
+
+	promptDetails := map[string]interface{}{}
+	if usage.CachedTokens > 0 {
+		promptDetails["cached_tokens"] = usage.CachedTokens
+	}
+	if usage.AudioTokens > 0 {
+		promptDetails["audio_tokens"] = usage.AudioTokens
+	}
+	if len(promptDetails) > 0 {
+		usageMap["prompt_tokens_details"] = promptDetails
+	}
+
+	completionDetails := map[string]interface{}{}
+	thoughtsTokens := 0
+	if meta != nil && meta.ThoughtsTokenCount > 0 {
+		thoughtsTokens = meta.ThoughtsTokenCount
+	} else if usage.ThoughtsTokenCount > 0 {
+		thoughtsTokens = usage.ThoughtsTokenCount
+	}
+	if thoughtsTokens > 0 {
+		completionDetails["reasoning_tokens"] = thoughtsTokens
+	}
+	if usage.AcceptedPredictionTokens > 0 {
+		completionDetails["accepted_prediction_tokens"] = usage.AcceptedPredictionTokens
+	}
+	if usage.RejectedPredictionTokens > 0 {
+		completionDetails["rejected_prediction_tokens"] = usage.RejectedPredictionTokens
+	}
+	if len(completionDetails) > 0 {
+		usageMap["completion_tokens_details"] = completionDetails
+	}
+
+	return usageMap
 }
 
 func convertMessageToOpenAI(msg ir.Message) map[string]interface{} {
@@ -587,45 +609,46 @@ func ToResponsesAPIResponse(messages []ir.Message, usage *ir.Usage, model string
 	}
 
 	if usageMap := builder.BuildUsageMap(); usageMap != nil {
-		responsesUsage := map[string]interface{}{
-			"input_tokens": usageMap["prompt_tokens"], "output_tokens": usageMap["completion_tokens"], "total_tokens": usageMap["total_tokens"],
-		}
-		if usage != nil && usage.CachedTokens > 0 {
-			responsesUsage["input_tokens_details"] = map[string]interface{}{"cached_tokens": usage.CachedTokens}
-		}
-		thoughtsTokens := 0
-		if meta != nil && meta.ThoughtsTokenCount > 0 {
-			thoughtsTokens = meta.ThoughtsTokenCount
-		} else if usage != nil && usage.ThoughtsTokenCount > 0 {
-			thoughtsTokens = usage.ThoughtsTokenCount
-		}
-		if thoughtsTokens > 0 {
-			responsesUsage["output_tokens_details"] = map[string]interface{}{"reasoning_tokens": thoughtsTokens}
-		}
-		response["usage"] = responsesUsage
+		addResponsesUsage(response, usageMap, usage, meta)
 	}
 
 	return json.Marshal(response)
 }
 
-// ResponsesStreamState holds state for Responses API streaming conversion.
-// Responses API streaming uses semantic events (response.output_text.delta, etc.)
-// and requires tracking state across multiple events to build proper "done" events.
-type ResponsesStreamState struct {
-	Seq             int            // Sequence number for events (required by Responses API)
-	ResponseID      string         // Response ID (generated once, reused for all events)
-	Created         int64          // Creation timestamp
-	Started         bool           // Whether initial events (response.created, response.in_progress) were sent
-	ReasoningID     string         // ID for reasoning output item (if any)
-	MsgID           string         // ID for message output item (if any)
-	TextBuffer      string         // Accumulated text content (needed for "done" event)
-	ReasoningBuffer string         // Accumulated reasoning content
-	FuncCallIDs     map[int]string // Tool call IDs by index
-	FuncNames       map[int]string // Tool call names by index
-	FuncArgsBuffer  map[int]string // Accumulated tool call arguments by index
+func addResponsesUsage(response map[string]interface{}, usageMap map[string]interface{}, usage *ir.Usage, meta *ir.OpenAIMeta) {
+	responsesUsage := map[string]interface{}{
+		"input_tokens": usageMap["prompt_tokens"], "output_tokens": usageMap["completion_tokens"], "total_tokens": usageMap["total_tokens"],
+	}
+	if usage != nil && usage.CachedTokens > 0 {
+		responsesUsage["input_tokens_details"] = map[string]interface{}{"cached_tokens": usage.CachedTokens}
+	}
+	thoughtsTokens := 0
+	if meta != nil && meta.ThoughtsTokenCount > 0 {
+		thoughtsTokens = meta.ThoughtsTokenCount
+	} else if usage != nil && usage.ThoughtsTokenCount > 0 {
+		thoughtsTokens = usage.ThoughtsTokenCount
+	}
+	if thoughtsTokens > 0 {
+		responsesUsage["output_tokens_details"] = map[string]interface{}{"reasoning_tokens": thoughtsTokens}
+	}
+	response["usage"] = responsesUsage
 }
 
-// NewResponsesStreamState creates a new streaming state for Responses API.
+// ResponsesStreamState holds state for Responses API streaming conversion.
+type ResponsesStreamState struct {
+	Seq             int
+	ResponseID      string
+	Created         int64
+	Started         bool
+	ReasoningID     string
+	MsgID           string
+	TextBuffer      string
+	ReasoningBuffer string
+	FuncCallIDs     map[int]string
+	FuncNames       map[int]string
+	FuncArgsBuffer  map[int]string
+}
+
 func NewResponsesStreamState() *ResponsesStreamState {
 	return &ResponsesStreamState{
 		FuncCallIDs:    make(map[int]string),
@@ -635,8 +658,6 @@ func NewResponsesStreamState() *ResponsesStreamState {
 }
 
 // ToResponsesAPIChunk converts event to Responses API SSE streaming chunks.
-// Returns multiple SSE strings because Responses API requires semantic events
-// (e.g., first token requires output_item.added + content_part.added + delta events).
 func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesStreamState) ([]string, error) {
 	if state.ResponseID == "" {
 		state.ResponseID = fmt.Sprintf("resp_%d", time.Now().UnixNano())
@@ -647,162 +668,196 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 	var out []string
 
 	if !state.Started {
-		for _, t := range []string{"response.created", "response.in_progress"} {
-			b, _ := json.Marshal(map[string]interface{}{
-				"type": t, "sequence_number": nextSeq(),
-				"response": map[string]interface{}{
-					"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": "in_progress",
-					"output": []interface{}{},
-				},
-			})
-			out = append(out, fmt.Sprintf("event: %s\ndata: %s\n\n", t, string(b)))
-		}
+		out = append(out, buildResponsesStartEvents(state, nextSeq)...)
 		state.Started = true
 	}
 
 	switch event.Type {
 	case ir.EventTypeToken:
-		if state.MsgID == "" {
-			state.MsgID = fmt.Sprintf("msg_%s", state.ResponseID)
-			b1, _ := json.Marshal(map[string]interface{}{
-				"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": 0,
-				"item": map[string]interface{}{"id": state.MsgID, "type": "message", "status": "in_progress", "role": "assistant", "content": []interface{}{}},
-			})
-			out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b1)))
-			b2, _ := json.Marshal(map[string]interface{}{
-				"type": "response.content_part.added", "sequence_number": nextSeq(), "item_id": state.MsgID,
-				"output_index": 0, "content_index": 0, "part": map[string]interface{}{"type": "output_text", "text": ""},
-			})
-			out = append(out, fmt.Sprintf("event: response.content_part.added\ndata: %s\n\n", string(b2)))
-		}
-		state.TextBuffer += event.Content
-		b, _ := json.Marshal(map[string]interface{}{
-			"type": "response.output_text.delta", "sequence_number": nextSeq(), "item_id": state.MsgID,
-			"output_index": 0, "content_index": 0, "delta": event.Content,
-		})
-		out = append(out, fmt.Sprintf("event: response.output_text.delta\ndata: %s\n\n", string(b)))
-
+		out = append(out, handleTokenEvent(event, state, nextSeq)...)
 	case ir.EventTypeReasoning, ir.EventTypeReasoningSummary:
-		text := event.Reasoning
-		if event.Type == ir.EventTypeReasoningSummary {
-			text = event.ReasoningSummary
-		}
-		if state.ReasoningID == "" {
-			state.ReasoningID = fmt.Sprintf("rs_%s", state.ResponseID)
-			b, _ := json.Marshal(map[string]interface{}{
-				"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": 0,
-				"item": map[string]interface{}{"id": state.ReasoningID, "type": "reasoning", "status": "in_progress", "summary": []interface{}{}},
-			})
-			out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
-		}
-		state.ReasoningBuffer += text
-		b, _ := json.Marshal(map[string]interface{}{
-			"type": "response.reasoning_summary_text.delta", "sequence_number": nextSeq(), "item_id": state.ReasoningID,
-			"output_index": 0, "content_index": 0, "delta": text,
-		})
-		out = append(out, fmt.Sprintf("event: response.reasoning_summary_text.delta\ndata: %s\n\n", string(b)))
-
+		out = append(out, handleReasoningEvent(event, state, nextSeq)...)
 	case ir.EventTypeToolCall:
-		idx := event.ToolCallIndex
-		if _, exists := state.FuncCallIDs[idx]; !exists {
-			state.FuncCallIDs[idx] = fmt.Sprintf("fc_%s", event.ToolCall.ID)
-			state.FuncNames[idx] = event.ToolCall.Name
-			b, _ := json.Marshal(map[string]interface{}{
-				"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": idx,
-				"item": map[string]interface{}{
-					"id": state.FuncCallIDs[idx], "type": "function_call", "status": "in_progress",
-					"call_id": event.ToolCall.ID, "name": event.ToolCall.Name, "arguments": "",
-				},
-			})
-			out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
-		}
-		// For complete tool call, we might not get deltas, so we can just emit done if needed,
-		// but usually we get deltas or the full args. If we get full args here:
-		if event.ToolCall.Args != "" {
-			b, _ := json.Marshal(map[string]interface{}{
-				"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-				"output_index": idx, "delta": event.ToolCall.Args,
-			})
-			out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
-		}
+		out = append(out, handleToolCallEvent(event, state, nextSeq)...)
+	case ir.EventTypeToolCallDelta:
+		out = append(out, handleToolCallDeltaEvent(event, state, nextSeq)...)
+	case ir.EventTypeFinish:
+		out = append(out, handleFinishEvent(event, state, nextSeq)...)
+	}
+
+	return out, nil
+}
+
+func buildResponsesStartEvents(state *ResponsesStreamState, nextSeq func() int) []string {
+	var out []string
+	for _, t := range []string{"response.created", "response.in_progress"} {
 		b, _ := json.Marshal(map[string]interface{}{
-			"type": "response.output_item.done", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-			"output_index": idx, "item": map[string]interface{}{
-				"id": state.FuncCallIDs[idx], "type": "function_call", "status": "completed",
-				"call_id": event.ToolCall.ID, "name": event.ToolCall.Name, "arguments": event.ToolCall.Args,
+			"type": t, "sequence_number": nextSeq(),
+			"response": map[string]interface{}{
+				"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": "in_progress",
+				"output": []interface{}{},
 			},
 		})
-		out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b)))
+		out = append(out, fmt.Sprintf("event: %s\ndata: %s\n\n", t, string(b)))
+	}
+	return out
+}
 
-	case ir.EventTypeToolCallDelta:
-		idx := event.ToolCallIndex
-		if _, exists := state.FuncCallIDs[idx]; !exists {
-			state.FuncCallIDs[idx] = fmt.Sprintf("fc_%s", event.ToolCall.ID)
-			b, _ := json.Marshal(map[string]interface{}{
-				"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": idx,
-				"item": map[string]interface{}{
-					"id": state.FuncCallIDs[idx], "type": "function_call", "status": "in_progress",
-					"call_id": event.ToolCall.ID, "name": "", "arguments": "",
-				},
-			})
-			out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
-		}
-		state.FuncArgsBuffer[idx] += event.ToolCall.Args
+func handleTokenEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nextSeq func() int) []string {
+	var out []string
+	if state.MsgID == "" {
+		state.MsgID = fmt.Sprintf("msg_%s", state.ResponseID)
+		b1, _ := json.Marshal(map[string]interface{}{
+			"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": 0,
+			"item": map[string]interface{}{"id": state.MsgID, "type": "message", "status": "in_progress", "role": "assistant", "content": []interface{}{}},
+		})
+		out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b1)))
+		b2, _ := json.Marshal(map[string]interface{}{
+			"type": "response.content_part.added", "sequence_number": nextSeq(), "item_id": state.MsgID,
+			"output_index": 0, "content_index": 0, "part": map[string]interface{}{"type": "output_text", "text": ""},
+		})
+		out = append(out, fmt.Sprintf("event: response.content_part.added\ndata: %s\n\n", string(b2)))
+	}
+	state.TextBuffer += event.Content
+	b, _ := json.Marshal(map[string]interface{}{
+		"type": "response.output_text.delta", "sequence_number": nextSeq(), "item_id": state.MsgID,
+		"output_index": 0, "content_index": 0, "delta": event.Content,
+	})
+	out = append(out, fmt.Sprintf("event: response.output_text.delta\ndata: %s\n\n", string(b)))
+	return out
+}
+
+func handleReasoningEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nextSeq func() int) []string {
+	var out []string
+	text := event.Reasoning
+	if event.Type == ir.EventTypeReasoningSummary {
+		text = event.ReasoningSummary
+	}
+	if state.ReasoningID == "" {
+		state.ReasoningID = fmt.Sprintf("rs_%s", state.ResponseID)
+		b, _ := json.Marshal(map[string]interface{}{
+			"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": 0,
+			"item": map[string]interface{}{"id": state.ReasoningID, "type": "reasoning", "status": "in_progress", "summary": []interface{}{}},
+		})
+		out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
+	}
+	state.ReasoningBuffer += text
+	b, _ := json.Marshal(map[string]interface{}{
+		"type": "response.reasoning_summary_text.delta", "sequence_number": nextSeq(), "item_id": state.ReasoningID,
+		"output_index": 0, "content_index": 0, "delta": text,
+	})
+	out = append(out, fmt.Sprintf("event: response.reasoning_summary_text.delta\ndata: %s\n\n", string(b)))
+	return out
+}
+
+func handleToolCallEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nextSeq func() int) []string {
+	var out []string
+	idx := event.ToolCallIndex
+	if _, exists := state.FuncCallIDs[idx]; !exists {
+		state.FuncCallIDs[idx] = fmt.Sprintf("fc_%s", event.ToolCall.ID)
+		state.FuncNames[idx] = event.ToolCall.Name
+		b, _ := json.Marshal(map[string]interface{}{
+			"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": idx,
+			"item": map[string]interface{}{
+				"id": state.FuncCallIDs[idx], "type": "function_call", "status": "in_progress",
+				"call_id": event.ToolCall.ID, "name": event.ToolCall.Name, "arguments": "",
+			},
+		})
+		out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
+	}
+	if event.ToolCall.Args != "" {
 		b, _ := json.Marshal(map[string]interface{}{
 			"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
 			"output_index": idx, "delta": event.ToolCall.Args,
 		})
 		out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
+	}
+	b, _ := json.Marshal(map[string]interface{}{
+		"type": "response.output_item.done", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+		"output_index": idx, "item": map[string]interface{}{
+			"id": state.FuncCallIDs[idx], "type": "function_call", "status": "completed",
+			"call_id": event.ToolCall.ID, "name": event.ToolCall.Name, "arguments": event.ToolCall.Args,
+		},
+	})
+	out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b)))
+	return out
+}
 
-	case ir.EventTypeFinish:
-		if state.MsgID != "" {
-			b1, _ := json.Marshal(map[string]interface{}{
-				"type": "response.content_part.done", "sequence_number": nextSeq(), "item_id": state.MsgID,
-				"output_index": 0, "content_index": 0, "part": map[string]interface{}{"type": "output_text", "text": state.TextBuffer},
-			})
-			out = append(out, fmt.Sprintf("event: response.content_part.done\ndata: %s\n\n", string(b1)))
-			b2, _ := json.Marshal(map[string]interface{}{
-				"type": "response.output_item.done", "sequence_number": nextSeq(), "output_index": 0,
-				"item": map[string]interface{}{
-					"id": state.MsgID, "type": "message", "status": "completed", "role": "assistant",
-					"content": []interface{}{map[string]interface{}{"type": "output_text", "text": state.TextBuffer}},
-				},
-			})
-			out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b2)))
-		}
-		if state.ReasoningID != "" {
-			b, _ := json.Marshal(map[string]interface{}{
-				"type": "response.output_item.done", "sequence_number": nextSeq(), "output_index": 0,
-				"item": map[string]interface{}{
-					"id": state.ReasoningID, "type": "reasoning", "status": "completed",
-					"summary": []interface{}{map[string]interface{}{"type": "summary_text", "text": state.ReasoningBuffer}},
-				},
-			})
-			out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b)))
-		}
-
-		usageMap := map[string]interface{}{}
-		if event.Usage != nil {
-			usageMap = map[string]interface{}{
-				"input_tokens": event.Usage.PromptTokens, "output_tokens": event.Usage.CompletionTokens, "total_tokens": event.Usage.TotalTokens,
-			}
-			if event.Usage.CachedTokens > 0 {
-				usageMap["input_tokens_details"] = map[string]interface{}{"cached_tokens": event.Usage.CachedTokens}
-			}
-			if event.Usage.ThoughtsTokenCount > 0 {
-				usageMap["output_tokens_details"] = map[string]interface{}{"reasoning_tokens": event.Usage.ThoughtsTokenCount}
-			}
-		}
-
+func handleToolCallDeltaEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nextSeq func() int) []string {
+	var out []string
+	idx := event.ToolCallIndex
+	if _, exists := state.FuncCallIDs[idx]; !exists {
+		state.FuncCallIDs[idx] = fmt.Sprintf("fc_%s", event.ToolCall.ID)
 		b, _ := json.Marshal(map[string]interface{}{
-			"type": "response.done", "sequence_number": nextSeq(),
-			"response": map[string]interface{}{
-				"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": "completed",
-				"usage": usageMap,
+			"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": idx,
+			"item": map[string]interface{}{
+				"id": state.FuncCallIDs[idx], "type": "function_call", "status": "in_progress",
+				"call_id": event.ToolCall.ID, "name": "", "arguments": "",
 			},
 		})
-		out = append(out, fmt.Sprintf("event: response.done\ndata: %s\n\n", string(b)))
+		out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
+	}
+	state.FuncArgsBuffer[idx] += event.ToolCall.Args
+	b, _ := json.Marshal(map[string]interface{}{
+		"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+		"output_index": idx, "delta": event.ToolCall.Args,
+	})
+	out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
+	return out
+}
+
+func handleFinishEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nextSeq func() int) []string {
+	var out []string
+	if state.MsgID != "" {
+		b1, _ := json.Marshal(map[string]interface{}{
+			"type": "response.content_part.done", "sequence_number": nextSeq(), "item_id": state.MsgID,
+			"output_index": 0, "content_index": 0, "part": map[string]interface{}{"type": "output_text", "text": state.TextBuffer},
+		})
+		out = append(out, fmt.Sprintf("event: response.content_part.done\ndata: %s\n\n", string(b1)))
+		b2, _ := json.Marshal(map[string]interface{}{
+			"type": "response.output_item.done", "sequence_number": nextSeq(), "output_index": 0,
+			"item": map[string]interface{}{
+				"id": state.MsgID, "type": "message", "status": "completed", "role": "assistant",
+				"content": []interface{}{map[string]interface{}{"type": "output_text", "text": state.TextBuffer}},
+			},
+		})
+		out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b2)))
+	}
+	if state.ReasoningID != "" {
+		b, _ := json.Marshal(map[string]interface{}{
+			"type": "response.output_item.done", "sequence_number": nextSeq(), "output_index": 0,
+			"item": map[string]interface{}{
+				"id": state.ReasoningID, "type": "reasoning", "status": "completed",
+				"summary": []interface{}{map[string]interface{}{"type": "summary_text", "text": state.ReasoningBuffer}},
+			},
+		})
+		out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b)))
 	}
 
-	return out, nil
+	usageMap := buildUsageMapForResponses(event.Usage)
+	b, _ := json.Marshal(map[string]interface{}{
+		"type": "response.done", "sequence_number": nextSeq(),
+		"response": map[string]interface{}{
+			"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": "completed",
+			"usage": usageMap,
+		},
+	})
+	out = append(out, fmt.Sprintf("event: response.done\ndata: %s\n\n", string(b)))
+	return out
+}
+
+func buildUsageMapForResponses(usage *ir.Usage) map[string]interface{} {
+	usageMap := map[string]interface{}{}
+	if usage != nil {
+		usageMap = map[string]interface{}{
+			"input_tokens": usage.PromptTokens, "output_tokens": usage.CompletionTokens, "total_tokens": usage.TotalTokens,
+		}
+		if usage.CachedTokens > 0 {
+			usageMap["input_tokens_details"] = map[string]interface{}{"cached_tokens": usage.CachedTokens}
+		}
+		if usage.ThoughtsTokenCount > 0 {
+			usageMap["output_tokens_details"] = map[string]interface{}{"reasoning_tokens": usage.ThoughtsTokenCount}
+		}
+	}
+	return usageMap
 }

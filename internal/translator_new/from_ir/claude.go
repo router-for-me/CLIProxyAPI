@@ -14,13 +14,13 @@ import (
 
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
-	"github.com/tidwall/gjson"
 )
 
-// Claude user tracking (matches old translator behavior)
+// Claude user tracking
 var (
 	claudeUser    = ""
 	claudeAccount = ""
@@ -32,35 +32,29 @@ type ClaudeProvider struct{}
 
 // ClaudeStreamState tracks state for streaming response conversion.
 type ClaudeStreamState struct {
-	MessageID        string
-	Model            string
-	MessageStartSent bool
-	TextBlockStarted bool
-	TextBlockStopped bool
-	TextBlockIndex   int
-	ToolBlockCount   int
-	HasToolCalls     bool
-	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
-	FinishSent       bool
-
-	// Signature caching support
-	SessionID           string          // Session ID derived from request for signature caching
-	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
+	MessageID           string
+	Model               string
+	SessionID           string
+	CurrentThinkingText strings.Builder
+	TextBlockIndex      int
+	ToolBlockCount      int
+	MessageStartSent    bool
+	TextBlockStarted    bool
+	TextBlockStopped    bool
+	HasToolCalls        bool
+	HasContent          bool
+	FinishSent          bool
 }
 
-// NewClaudeStreamState creates a new streaming state tracker.
 func NewClaudeStreamState() *ClaudeStreamState {
 	return &ClaudeStreamState{TextBlockIndex: 0, ToolBlockCount: 0}
 }
 
-// NewClaudeStreamStateWithSessionID creates a new streaming state tracker with session ID for signature caching.
-// The sessionID is derived from the original request to identify the conversation.
 func NewClaudeStreamStateWithSessionID(sessionID string) *ClaudeStreamState {
 	return &ClaudeStreamState{TextBlockIndex: 0, ToolBlockCount: 0, SessionID: sessionID}
 }
 
 // DeriveSessionID generates a stable session ID from the request.
-// Uses the hash of the first user message to identify the conversation.
 func DeriveSessionID(rawJSON []byte) string {
 	messages := gjson.GetBytes(rawJSON, "messages")
 	if !messages.IsArray() {
@@ -70,7 +64,6 @@ func DeriveSessionID(rawJSON []byte) string {
 		if msg.Get("role").String() == "user" {
 			content := msg.Get("content").String()
 			if content == "" {
-				// Try to get text from content array
 				content = msg.Get("content.0.text").String()
 			}
 			if content != "" {
@@ -84,18 +77,7 @@ func DeriveSessionID(rawJSON []byte) string {
 
 // ConvertRequest transforms unified request into Claude Messages API JSON.
 func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
-	if claudeAccount == "" {
-		u, _ := uuid.NewRandom()
-		claudeAccount = u.String()
-	}
-	if claudeSession == "" {
-		u, _ := uuid.NewRandom()
-		claudeSession = u.String()
-	}
-	if claudeUser == "" {
-		sum := sha256.Sum256([]byte(claudeAccount + claudeSession))
-		claudeUser = hex.EncodeToString(sum[:])
-	}
+	ensureClaudeUser()
 	userID := fmt.Sprintf("user_%s_account_%s_session_%s", claudeUser, claudeAccount, claudeSession)
 
 	root := map[string]interface{}{
@@ -122,27 +104,62 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 	}
 
 	if req.Thinking != nil {
-		thinking := map[string]interface{}{}
-		if req.Thinking.IncludeThoughts && req.Thinking.Budget != 0 {
-			thinking["type"] = "enabled"
-			if req.Thinking.Budget > 0 {
-				thinking["budget_tokens"] = req.Thinking.Budget
-			}
-		} else if req.Thinking.Budget == 0 {
-			thinking["type"] = "disabled"
-		}
-		if len(thinking) > 0 {
-			root["thinking"] = thinking
+		applyThinkingConfig(root, req.Thinking)
+	}
+
+	messages := buildMessages(req.Messages)
+	root["messages"] = messages
+
+	if len(req.Tools) > 0 {
+		root["tools"] = buildTools(req.Tools)
+	}
+
+	if len(req.Metadata) > 0 {
+		meta := root["metadata"].(map[string]interface{})
+		for k, v := range req.Metadata {
+			meta[k] = v
 		}
 	}
 
+	return json.Marshal(root)
+}
+
+func ensureClaudeUser() {
+	if claudeAccount == "" {
+		u, _ := uuid.NewRandom()
+		claudeAccount = u.String()
+	}
+	if claudeSession == "" {
+		u, _ := uuid.NewRandom()
+		claudeSession = u.String()
+	}
+	if claudeUser == "" {
+		sum := sha256.Sum256([]byte(claudeAccount + claudeSession))
+		claudeUser = hex.EncodeToString(sum[:])
+	}
+}
+
+func applyThinkingConfig(root map[string]interface{}, thinking *ir.ThinkingConfig) {
+	t := map[string]interface{}{}
+	if thinking.IncludeThoughts && thinking.Budget != 0 {
+		t["type"] = "enabled"
+		if thinking.Budget > 0 {
+			t["budget_tokens"] = thinking.Budget
+		}
+	} else if thinking.Budget == 0 {
+		t["type"] = "disabled"
+	}
+	if len(t) > 0 {
+		root["thinking"] = t
+	}
+}
+
+func buildMessages(msgs []ir.Message) []interface{} {
 	var messages []interface{}
-	for _, msg := range req.Messages {
+	for _, msg := range msgs {
 		switch msg.Role {
 		case ir.RoleSystem:
-			if text := ir.CombineTextParts(msg); text != "" {
-				root["system"] = text
-			}
+			// System messages are handled at root level in ConvertRequest but IR structure keeps them in messages
 		case ir.RoleUser:
 			if parts := buildClaudeContentParts(msg, false); len(parts) > 0 {
 				messages = append(messages, map[string]interface{}{"role": ir.ClaudeRoleUser, "content": parts})
@@ -164,35 +181,9 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 			}
 		}
 	}
-	root["messages"] = messages
-
-	if len(req.Tools) > 0 {
-		var tools []interface{}
-		for _, t := range req.Tools {
-			tool := map[string]interface{}{"name": t.Name, "description": t.Description}
-			if len(t.Parameters) > 0 {
-				tool["input_schema"] = ir.CleanJsonSchemaForClaude(copyMap(t.Parameters))
-			} else {
-				tool["input_schema"] = map[string]interface{}{
-					"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false, "$schema": "http://json-schema.org/draft-07/schema#",
-				}
-			}
-			tools = append(tools, tool)
-		}
-		root["tools"] = tools
-	}
-
-	if len(req.Metadata) > 0 {
-		meta := root["metadata"].(map[string]interface{})
-		for k, v := range req.Metadata {
-			meta[k] = v
-		}
-	}
-
-	return json.Marshal(root)
+	return messages
 }
 
-// ParseResponse parses non-streaming Claude response into unified format.
 func (p *ClaudeProvider) ParseResponse(responseJSON []byte) ([]ir.Message, *ir.Usage, error) {
 	if !gjson.ValidBytes(responseJSON) {
 		return nil, nil, &json.UnmarshalTypeError{Value: "invalid json"}
@@ -216,12 +207,10 @@ func (p *ClaudeProvider) ParseResponse(responseJSON []byte) ([]ir.Message, *ir.U
 	return []ir.Message{msg}, usage, nil
 }
 
-// ParseStreamChunk parses streaming Claude SSE chunk into events.
 func (p *ClaudeProvider) ParseStreamChunk(chunkJSON []byte) ([]ir.UnifiedEvent, error) {
 	return p.ParseStreamChunkWithState(chunkJSON, nil)
 }
 
-// ParseStreamChunkWithState parses streaming Claude SSE chunk with state tracking.
 func (p *ClaudeProvider) ParseStreamChunkWithState(chunkJSON []byte, state *ir.ClaudeStreamParserState) ([]ir.UnifiedEvent, error) {
 	data := ir.ExtractSSEData(chunkJSON)
 	if len(data) == 0 || !gjson.ValidBytes(data) {
@@ -253,7 +242,6 @@ func (p *ClaudeProvider) ParseStreamChunkWithState(chunkJSON []byte, state *ir.C
 	return nil, nil
 }
 
-// ToClaudeSSE converts event to Claude SSE format.
 func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeStreamState) ([]byte, error) {
 	var result strings.Builder
 
@@ -274,7 +262,6 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 	case ir.EventTypeToken:
 		result.WriteString(emitTextDelta(event.Content, state))
 	case ir.EventTypeReasoning:
-		// If we have a thought signature, emit signature_delta instead of thinking_delta
 		if event.ThoughtSignature != "" {
 			result.WriteString(emitSignatureDelta(event.ThoughtSignature, state))
 		} else {
@@ -304,7 +291,6 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 	return []byte(result.String()), nil
 }
 
-// ToClaudeResponse converts messages to complete Claude response.
 func ToClaudeResponse(messages []ir.Message, usage *ir.Usage, model, messageID string) ([]byte, error) {
 	builder := ir.NewResponseBuilder(messages, usage, model)
 	response := map[string]interface{}{
@@ -357,6 +343,22 @@ func buildClaudeContentParts(msg ir.Message, includeToolCalls bool) []interface{
 	return parts
 }
 
+func buildTools(tools []ir.ToolDefinition) []interface{} {
+	var result []interface{}
+	for _, t := range tools {
+		tool := map[string]interface{}{"name": t.Name, "description": t.Description}
+		if len(t.Parameters) > 0 {
+			tool["input_schema"] = ir.CleanJsonSchemaForClaude(copyMap(t.Parameters))
+		} else {
+			tool["input_schema"] = map[string]interface{}{
+				"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false, "$schema": "http://json-schema.org/draft-07/schema#",
+			}
+		}
+		result = append(result, tool)
+	}
+	return result
+}
+
 func formatSSE(eventType string, data interface{}) string {
 	jsonData, _ := json.Marshal(data)
 	return fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, string(jsonData))
@@ -396,7 +398,6 @@ func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
 			}))
 		}
 		state.HasContent = true
-		// Accumulate thinking text for signature caching
 		state.CurrentThinkingText.WriteString(thinking)
 	}
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
@@ -406,9 +407,6 @@ func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
 	return result.String()
 }
 
-// emitSignatureDelta emits a signature_delta event for Claude thinking mode.
-// This is used when Gemini returns a thoughtSignature instead of readable thinking text.
-// Also caches the signature for future requests in the same session.
 func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
 	var result strings.Builder
 	idx := 0
@@ -423,7 +421,6 @@ func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
 		}
 		state.HasContent = true
 
-		// Cache signature for future requests in the same session
 		if state.SessionID != "" && state.CurrentThinkingText.Len() > 0 {
 			cache.CacheSignature(state.SessionID, state.CurrentThinkingText.String(), signature)
 			log.Debugf("Cached signature for thinking block (sessionID=%s, textLen=%d)", state.SessionID, state.CurrentThinkingText.Len())
@@ -470,7 +467,6 @@ func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 }
 
 func emitFinish(usage *ir.Usage, state *ClaudeStreamState) string {
-	// Only send final events if we have actually output content
 	if state != nil && !state.HasContent {
 		return ""
 	}

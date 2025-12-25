@@ -16,32 +16,9 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// deriveSessionID generates a stable session ID from the request.
-// Uses the hash of the first user message to identify the conversation.
-func deriveSessionID(rawJSON []byte) string {
-	messages := gjson.GetBytes(rawJSON, "messages")
-	if !messages.IsArray() {
-		return ""
-	}
-	for _, msg := range messages.Array() {
-		if msg.Get("role").String() == "user" {
-			content := msg.Get("content").String()
-			if content == "" {
-				// Try to get text from content array
-				content = msg.Get("content.0.text").String()
-			}
-			if content != "" {
-				h := sha256.Sum256([]byte(content))
-				return hex.EncodeToString(h[:16])
-			}
-		}
-	}
-	return ""
-}
-
 // ParseClaudeRequest converts a raw Claude Messages API JSON body into unified format.
 func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
-	// URL format fix: remove "format":"uri" which causes issues with some backends
+	// URL format fix
 	rawJSON = bytes.Replace(rawJSON, []byte(`"url":{"type":"string","format":"uri",`), []byte(`"url":{"type":"string",`), -1)
 
 	if !gjson.ValidBytes(rawJSON) {
@@ -53,16 +30,44 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 
 	req.Model = parsed.Get("model").String()
 
-	// Derive session ID for signature caching
-	sessionID := deriveSessionID(rawJSON)
-	if sessionID != "" {
+	if sessionID := deriveSessionID(rawJSON); sessionID != "" {
 		if req.Metadata == nil {
 			req.Metadata = make(map[string]any)
 		}
 		req.Metadata["session_id"] = sessionID
 	}
 
-	// Generation Parameters
+	parseGenerationParams(parsed, req)
+	parseSystemMessage(parsed, req)
+	parseMessages(parsed, req)
+	parseTools(parsed, req)
+	parseThinkingConfig(parsed, req)
+	parseMetadata(parsed, req)
+
+	return req, nil
+}
+
+func deriveSessionID(rawJSON []byte) string {
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	for _, msg := range messages.Array() {
+		if msg.Get("role").String() == "user" {
+			content := msg.Get("content").String()
+			if content == "" {
+				content = msg.Get("content.0.text").String()
+			}
+			if content != "" {
+				h := sha256.Sum256([]byte(content))
+				return hex.EncodeToString(h[:16])
+			}
+		}
+	}
+	return ""
+}
+
+func parseGenerationParams(parsed gjson.Result, req *ir.UnifiedChatRequest) {
 	if v := parsed.Get("max_tokens"); v.Exists() {
 		i := int(v.Int())
 		req.MaxTokens = &i
@@ -84,8 +89,9 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 			req.StopSequences = append(req.StopSequences, s.String())
 		}
 	}
+}
 
-	// System message
+func parseSystemMessage(parsed gjson.Result, req *ir.UnifiedChatRequest) {
 	if system := parsed.Get("system"); system.Exists() {
 		var systemText string
 		if system.Type == gjson.String {
@@ -105,15 +111,17 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 			})
 		}
 	}
+}
 
-	// Messages
+func parseMessages(parsed gjson.Result, req *ir.UnifiedChatRequest) {
 	if messages := parsed.Get("messages"); messages.Exists() && messages.IsArray() {
 		for _, m := range messages.Array() {
 			req.Messages = append(req.Messages, parseClaudeMessage(m))
 		}
 	}
+}
 
-	// Tools
+func parseTools(parsed gjson.Result, req *ir.UnifiedChatRequest) {
 	if tools := parsed.Get("tools"); tools.Exists() && tools.IsArray() {
 		for _, t := range tools.Array() {
 			var params map[string]interface{}
@@ -130,30 +138,30 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 			})
 		}
 	}
+}
 
-	// Thinking/Reasoning config
+func parseThinkingConfig(parsed gjson.Result, req *ir.UnifiedChatRequest) {
 	if thinking := parsed.Get("thinking"); thinking.Exists() && thinking.IsObject() {
 		if thinking.Get("type").String() == "enabled" {
 			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: true}
 			if budget := thinking.Get("budget_tokens"); budget.Exists() {
 				req.Thinking.Budget = int(budget.Int())
 			} else {
-				req.Thinking.Budget = -1 // Auto
+				req.Thinking.Budget = -1
 			}
 		} else if thinking.Get("type").String() == "disabled" {
 			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: false, Budget: 0}
 		}
 	}
+}
 
-	// Metadata
+func parseMetadata(parsed gjson.Result, req *ir.UnifiedChatRequest) {
 	if metadata := parsed.Get("metadata"); metadata.Exists() && metadata.IsObject() {
 		var meta map[string]any
 		if err := json.Unmarshal([]byte(metadata.Raw), &meta); err == nil {
 			req.Metadata = meta
 		}
 	}
-
-	return req, nil
 }
 
 func parseClaudeMessage(m gjson.Result) ir.Message {
@@ -177,10 +185,8 @@ func parseClaudeMessage(m gjson.Result) ir.Message {
 			case "text":
 				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: block.Get("text").String()})
 			case "thinking":
-				// Extract thinking text - handle both simple string and wrapped object formats
 				thinkingText := block.Get("thinking").String()
 				if thinkingText == "" {
-					// Try wrapped format: {"thinking": {"text": "...", "cache_control": {...}}}
 					if inner := block.Get("thinking.text"); inner.Exists() {
 						thinkingText = inner.String()
 					}

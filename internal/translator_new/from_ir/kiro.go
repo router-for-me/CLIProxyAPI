@@ -17,14 +17,7 @@ type KiroProvider struct{}
 
 // ConvertRequest converts UnifiedChatRequest to Kiro API JSON format.
 func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
-	// Extract origin from metadata (default to AI_EDITOR)
-	origin := "AI_EDITOR"
-	if req.Metadata != nil {
-		if o, ok := req.Metadata["origin"].(string); ok && o != "" {
-			origin = o
-		}
-	}
-
+	origin := extractOrigin(req)
 	tools := extractTools(req.Tools)
 	systemPrompt := extractSystemPrompt(req.Messages)
 	history, currentMessage := processMessages(req.Messages, tools, req.Model, origin)
@@ -39,6 +32,7 @@ func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error
 			"history":         history,
 		},
 	}
+
 	if req.Metadata != nil {
 		if arn, ok := req.Metadata["profileArn"].(string); ok && arn != "" {
 			request["profileArn"] = arn
@@ -50,6 +44,15 @@ func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error
 		return nil, err
 	}
 	return []byte(ir.SanitizeText(string(result))), nil
+}
+
+func extractOrigin(req *ir.UnifiedChatRequest) string {
+	if req.Metadata != nil {
+		if o, ok := req.Metadata["origin"].(string); ok && o != "" {
+			return o
+		}
+	}
+	return "AI_EDITOR"
 }
 
 func extractTools(irTools []ir.ToolDefinition) []interface{} {
@@ -79,77 +82,23 @@ func extractSystemPrompt(messages []ir.Message) string {
 }
 
 func processMessages(messages []ir.Message, tools []interface{}, modelID, origin string) ([]interface{}, map[string]interface{}) {
-	var nonSystem []ir.Message
-	for _, msg := range messages {
-		if msg.Role != ir.RoleSystem {
-			nonSystem = append(nonSystem, msg)
-		}
-	}
-
-	// Merge consecutive same-role messages (assistant/tool only)
-	if len(nonSystem) > 1 {
-		merged := make([]ir.Message, 0, len(nonSystem))
-		for _, msg := range nonSystem {
-			if len(merged) > 0 {
-				last := &merged[len(merged)-1]
-				if last.Role == msg.Role && msg.Role != ir.RoleUser {
-					last.Content = append(last.Content, msg.Content...)
-					continue
-				}
-			}
-			merged = append(merged, msg)
-		}
-		nonSystem = merged
-	}
-
-	// Ensure alternating roles: User -> Assistant -> User
-	var alternated []ir.Message
-	for i, msg := range nonSystem {
-		if i > 0 {
-			prev, curr := nonSystem[i-1].Role, msg.Role
-			isUserLike := func(r ir.Role) bool { return r == ir.RoleUser || r == ir.RoleTool }
-			if isUserLike(prev) && isUserLike(curr) {
-				alternated = append(alternated, ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "[Continued]"}}})
-			} else if prev == ir.RoleAssistant && curr == ir.RoleAssistant {
-				alternated = append(alternated, ir.Message{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Continue"}}})
-			}
-		}
-		alternated = append(alternated, msg)
-	}
-	nonSystem = alternated
+	nonSystem := filterSystemMessages(messages)
+	nonSystem = mergeConsecutiveMessages(nonSystem)
+	nonSystem = alternateRoles(nonSystem)
 
 	if len(nonSystem) == 0 {
 		return nil, nil
 	}
 
-	// Last message is currentMessage
 	lastMsg := nonSystem[len(nonSystem)-1]
 	if lastMsg.Role == ir.RoleUser {
-		history := make([]interface{}, 0, len(nonSystem)-1)
-		for i := 0; i < len(nonSystem)-1; i++ {
-			if m := convertMessage(nonSystem[i], tools, modelID, origin, false); m != nil {
-				history = append(history, m)
-			}
-		}
+		history := buildHistory(nonSystem[:len(nonSystem)-1], tools, modelID, origin)
 		return history, convertMessage(lastMsg, tools, modelID, origin, true)
 	}
 
 	// Handle trailing tool messages
-	trailingStart := len(nonSystem)
-	for i := len(nonSystem) - 1; i >= 0; i-- {
-		if nonSystem[i].Role == ir.RoleTool {
-			trailingStart = i
-		} else {
-			break
-		}
-	}
-
-	history := make([]interface{}, 0, trailingStart)
-	for i := 0; i < trailingStart; i++ {
-		if m := convertMessage(nonSystem[i], tools, modelID, origin, false); m != nil {
-			history = append(history, m)
-		}
-	}
+	trailingStart := findTrailingStart(nonSystem)
+	history := buildHistory(nonSystem[:trailingStart], tools, modelID, origin)
 
 	var currentMessage map[string]interface{}
 	if trailingStart < len(nonSystem) {
@@ -160,12 +109,79 @@ func processMessages(messages []ir.Message, tools []interface{}, modelID, origin
 	return history, currentMessage
 }
 
+func filterSystemMessages(messages []ir.Message) []ir.Message {
+	var result []ir.Message
+	for _, msg := range messages {
+		if msg.Role != ir.RoleSystem {
+			result = append(result, msg)
+		}
+	}
+	return result
+}
+
+func mergeConsecutiveMessages(messages []ir.Message) []ir.Message {
+	if len(messages) <= 1 {
+		return messages
+	}
+	merged := make([]ir.Message, 0, len(messages))
+	for _, msg := range messages {
+		if len(merged) > 0 {
+			last := &merged[len(merged)-1]
+			if last.Role == msg.Role && msg.Role != ir.RoleUser {
+				last.Content = append(last.Content, msg.Content...)
+				continue
+			}
+		}
+		merged = append(merged, msg)
+	}
+	return merged
+}
+
+func alternateRoles(messages []ir.Message) []ir.Message {
+	var alternated []ir.Message
+	for i, msg := range messages {
+		if i > 0 {
+			prev, curr := messages[i-1].Role, msg.Role
+			isUserLike := func(r ir.Role) bool { return r == ir.RoleUser || r == ir.RoleTool }
+			if isUserLike(prev) && isUserLike(curr) {
+				alternated = append(alternated, ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "[Continued]"}}})
+			} else if prev == ir.RoleAssistant && curr == ir.RoleAssistant {
+				alternated = append(alternated, ir.Message{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Continue"}}})
+			}
+		}
+		alternated = append(alternated, msg)
+	}
+	return alternated
+}
+
+func findTrailingStart(messages []ir.Message) int {
+	trailingStart := len(messages)
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == ir.RoleTool {
+			trailingStart = i
+		} else {
+			break
+		}
+	}
+	return trailingStart
+}
+
+func buildHistory(messages []ir.Message, tools []interface{}, modelID, origin string) []interface{} {
+	history := make([]interface{}, 0, len(messages))
+	for _, msg := range messages {
+		if m := convertMessage(msg, tools, modelID, origin, false); m != nil {
+			history = append(history, m)
+		}
+	}
+	return history
+}
+
 func convertMessage(msg ir.Message, tools []interface{}, modelID, origin string, isCurrent bool) map[string]interface{} {
 	switch msg.Role {
 	case ir.RoleUser:
 		return buildUserMessage(msg, tools, modelID, origin, isCurrent)
 	case ir.RoleAssistant:
-		return buildAssistantMessage(msg, isCurrent)
+		return buildAssistantMessage(msg)
 	case ir.RoleTool:
 		return buildToolResultMessage(msg, modelID, origin)
 	}
@@ -201,13 +217,13 @@ func buildUserMessage(msg ir.Message, tools []interface{}, modelID, origin strin
 	if len(images) > 0 {
 		userInput["images"] = images
 	} else if isCurrent {
-		userInput["images"] = nil // Explicit nil for current message if empty
+		userInput["images"] = nil
 	}
 
 	return map[string]interface{}{"userInputMessage": userInput}
 }
 
-func buildAssistantMessage(msg ir.Message, _ bool) map[string]interface{} {
+func buildAssistantMessage(msg ir.Message) map[string]interface{} {
 	toolUses := make([]interface{}, len(msg.ToolCalls))
 	for i, tc := range msg.ToolCalls {
 		toolUses[i] = map[string]interface{}{

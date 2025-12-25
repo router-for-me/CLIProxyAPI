@@ -110,7 +110,7 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 		}
 	}
 
-	req.Thinking = parseThinkingConfig(root)
+	req.Thinking = parseOpenAIThinkingConfig(root)
 
 	// Response Format (Structured Output)
 	if rf := root.Get("response_format"); rf.Exists() {
@@ -639,7 +639,7 @@ func parseOpenAITool(t gjson.Result) *ir.ToolDefinition {
 	return &ir.ToolDefinition{Name: name, Description: description, Parameters: params}
 }
 
-func parseThinkingConfig(root gjson.Result) *ir.ThinkingConfig {
+func parseOpenAIThinkingConfig(root gjson.Result) *ir.ThinkingConfig {
 	var thinking *ir.ThinkingConfig
 	if re := root.Get("reasoning_effort"); re.Exists() {
 		thinking = &ir.ThinkingConfig{Effort: re.String()}
