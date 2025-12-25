@@ -39,6 +39,9 @@ api-keys:
 # Enable debug logging
 debug: false
 
+# When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
+commercial-mode: false
+
 # Open OAuth URLs in incognito/private browser mode.
 # Useful when you want to login with a different account without logging out from your current session.
 # Default: false (but Kiro auth defaults to true for multi-account support)

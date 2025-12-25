@@ -39,6 +39,9 @@ type Config struct {
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
 
+	// CommercialMode disables high-overhead HTTP middleware features to minimize per-request memory usage.
+	CommercialMode bool `yaml:"commercial-mode" json:"commercial-mode"`
+
 	// LoggingToFile controls whether application logs are written to rotating files or stdout.
 	LoggingToFile bool `yaml:"logging-to-file" json:"logging-to-file"`
 
