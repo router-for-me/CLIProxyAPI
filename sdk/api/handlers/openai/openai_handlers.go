@@ -100,6 +100,7 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -155,6 +156,7 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -452,6 +454,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: "Streaming not supported",
 				Type:    "server_error",
@@ -509,6 +512,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: "Streaming not supported",
 				Type:    "server_error",

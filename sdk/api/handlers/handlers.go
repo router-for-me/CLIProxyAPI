@@ -21,8 +21,12 @@ import (
 )
 
 // ErrorResponse represents a standard error response format for the API.
-// It contains a single ErrorDetail field.
+// It follows the Anthropic Claude API error format with a top-level "type" field.
+// Reference: https://platform.claude.com/docs/en/api/errors
 type ErrorResponse struct {
+	// Type is always "error" for error responses (required by Claude API format).
+	Type string `json:"type"`
+
 	// Error contains detailed information about the error that occurred.
 	Error ErrorDetail `json:"error"`
 }
@@ -437,13 +441,14 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 			}
 		}
 		payload, err := json.Marshal(ErrorResponse{
+			Type: "error",
 			Error: ErrorDetail{
 				Message: errText,
 				Type:    errType,
 			},
 		})
 		if err != nil {
-			return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error"}}`, errText))
+			return []byte(fmt.Sprintf(`{"type":"error","error":{"message":%q,"type":"server_error"}}`, errText))
 		}
 		return payload
 	}

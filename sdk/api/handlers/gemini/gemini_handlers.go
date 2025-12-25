@@ -77,6 +77,7 @@ func (h *GeminiAPIHandler) GeminiGetHandler(c *gin.Context) {
 	}
 	if err := c.ShouldBindUri(&request); err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -167,6 +168,7 @@ func (h *GeminiAPIHandler) GeminiGetHandler(c *gin.Context) {
 		})
 	default:
 		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: "Not Found",
 				Type:    "not_found",
@@ -183,6 +185,7 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 	}
 	if err := c.ShouldBindUri(&request); err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -193,6 +196,7 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 	action := strings.Split(strings.TrimPrefix(request.Action, "/"), ":")
 	if len(action) != 2 {
 		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("%s not found.", c.Request.URL.Path),
 				Type:    "invalid_request_error",
@@ -237,6 +241,7 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: "Streaming not supported",
 				Type:    "server_error",

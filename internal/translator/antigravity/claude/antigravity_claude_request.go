@@ -399,16 +399,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetRaw(out, "request.tools", toolsJSON)
 	}
 
-	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
-	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() && util.ModelSupportsThinking(modelName) {
-		if t.Get("type").String() == "enabled" {
-			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
-				budget := int(b.Int())
-				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
-			}
-		}
-	}
+	// NOTE: Antigravity API does NOT support thinkingConfig for claude-opus-4-5-thinking model.
+	// Sending thinkingConfig results in 400 INVALID_ARGUMENT.
+	// The thinking model provides thinking output without explicit thinkingConfig.
+	// Therefore, we intentionally skip setting thinkingConfig for Antigravity provider.
+	// See: https://github.com/google-gemini/gemini-cli/issues/1953
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {
 		out, _ = sjson.Set(out, "request.generationConfig.temperature", v.Num)
 	}

@@ -51,6 +51,7 @@ func (h *GeminiCLIAPIHandler) Models() []map[string]any {
 func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 	if !strings.HasPrefix(c.Request.RemoteAddr, "127.0.0.1:") {
 		c.JSON(http.StatusForbidden, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: "CLI reply only allow local access",
 				Type:    "forbidden",
@@ -71,6 +72,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 		req, err := http.NewRequest("POST", fmt.Sprintf("https://cloudcode-pa.googleapis.com%s", c.Request.URL.RequestURI()), reqBody)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Type: "error",
 				Error: handlers.ErrorDetail{
 					Message: fmt.Sprintf("Invalid request: %v", err),
 					Type:    "invalid_request_error",
@@ -87,6 +89,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Type: "error",
 				Error: handlers.ErrorDetail{
 					Message: fmt.Sprintf("Invalid request: %v", err),
 					Type:    "invalid_request_error",
@@ -104,6 +107,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 			bodyBytes, _ := io.ReadAll(resp.Body)
 
 			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Type: "error",
 				Error: handlers.ErrorDetail{
 					Message: string(bodyBytes),
 					Type:    "invalid_request_error",
@@ -146,6 +150,7 @@ func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+			Type: "error",
 			Error: handlers.ErrorDetail{
 				Message: "Streaming not supported",
 				Type:    "server_error",
