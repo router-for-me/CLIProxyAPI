@@ -100,11 +100,6 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
-	// UseCanonicalTranslator enables the new canonical IR translator architecture.
-	// When true, requests are converted through a unified intermediate representation (IR)
-	// before being translated to provider-specific formats.
-	UseCanonicalTranslator bool `yaml:"use-canonical-translator" json:"use-canonical-translator"`
-
 	// IncognitoBrowser enables opening OAuth URLs in incognito/private browsing mode.
 	// This is useful when you want to login with a different account without logging out
 	// from your current session. Default: false.

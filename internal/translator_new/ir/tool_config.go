@@ -1,9 +1,15 @@
 // Package ir provides intermediate representation types for the translator system.
 //
-// This file contains configuration for tool call normalization.
-// These mappings help fix common model mistakes where parameter names
-// don't match the expected schema.
+// @file Tool call normalization configuration
+// @description Contains mappings for parameter synonyms, defaults, and sanitizers.
+//
+//	Fixes common model mistakes and incompatibilities with client expectations.
 package ir
+
+import (
+	"encoding/json"
+	"strings"
+)
 
 // ParameterSynonyms maps parameter names to their synonyms.
 // When a model returns a parameter name that doesn't exist in the schema,
@@ -73,4 +79,81 @@ var StringTypeParameters = map[string]bool{
 	"text":             true,
 	"title":            true,
 	"description":      true,
+}
+
+// ToolArgsSanitizers contains tool-specific argument sanitization functions.
+// These fix known incompatibilities between model outputs and client expectations.
+// Key: tool name, Value: sanitizer function that modifies args map in place and returns true if changed.
+var ToolArgsSanitizers = map[string]func(args map[string]interface{}) bool{
+	"grep": sanitizeGrepArgs,
+}
+
+// SanitizeGrepContextParams fixes grep -A/-B/-C conflict in any JSON args.
+// Cursor error: "Cannot specify both 'context' (-C) and 'context_before' (-B) or 'context_after' (-A)"
+// This is called for ALL tool calls to handle streaming where tool name may be unknown.
+func SanitizeGrepContextParams(argsJSON string) string {
+	if argsJSON == "" || argsJSON == "{}" {
+		return argsJSON
+	}
+	// Quick check: if no -C key, nothing to fix
+	if !hasGrepContextConflict(argsJSON) {
+		return argsJSON
+	}
+
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return argsJSON
+	}
+
+	if !sanitizeGrepArgs(args) {
+		return argsJSON
+	}
+
+	out, err := json.Marshal(args)
+	if err != nil {
+		return argsJSON
+	}
+	return string(out)
+}
+
+// hasGrepContextConflict quickly checks if JSON has potential -A/-B/-C conflict.
+func hasGrepContextConflict(argsJSON string) bool {
+	hasC := strings.Contains(argsJSON, `"-C"`)
+	hasAorB := strings.Contains(argsJSON, `"-A"`) || strings.Contains(argsJSON, `"-B"`)
+	return hasC && hasAorB
+}
+
+// sanitizeGrepArgs fixes grep tool arguments to avoid Cursor validation errors.
+func sanitizeGrepArgs(args map[string]interface{}) bool {
+	cVal, cExists := args["-C"]
+	_, aExists := args["-A"]
+	_, bExists := args["-B"]
+
+	if !cExists || (!aExists && !bExists) {
+		return false // No conflict
+	}
+
+	// Helper to check if value is effectively zero
+	isZero := func(v interface{}) bool {
+		switch val := v.(type) {
+		case float64:
+			return val == 0
+		case int:
+			return val == 0
+		case int64:
+			return val == 0
+		}
+		return false
+	}
+
+	// If -C is non-zero, it takes precedence - remove -A and -B
+	if !isZero(cVal) {
+		delete(args, "-A")
+		delete(args, "-B")
+		return true
+	}
+
+	// -C is zero - remove it, keep -A/-B
+	delete(args, "-C")
+	return true
 }

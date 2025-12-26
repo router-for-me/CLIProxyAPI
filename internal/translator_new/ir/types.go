@@ -81,10 +81,12 @@ type OpenAIMeta struct {
 // ToolCall represents a request from the model to execute a tool.
 type ToolCall struct {
 	ID               string
+	ItemID           string // Codex internal item_id (used for mapping in streaming)
 	Name             string
-	Args             string // JSON string of arguments
+	Args             string // JSON string of arguments (or raw text for custom tools)
 	PartialArgs      string // Raw partial arguments (e.g. Gemini partialArgs)
 	ThoughtSignature string // Gemini thought signature for this tool call
+	IsCustom         bool   // True for custom tools (e.g., apply_patch with grammar format)
 }
 
 // ImagePart represents an image content part.
@@ -105,6 +107,7 @@ type FilePart struct {
 // ToolResultPart represents the result of a tool execution.
 type ToolResultPart struct {
 	ToolCallID string
+	ToolName   string       // Name of the tool that was called (for custom tool detection)
 	Result     string       // JSON string result
 	Images     []*ImagePart // Multimodal tool result (images)
 	Files      []*FilePart  // Multimodal tool result (files)
@@ -133,6 +136,8 @@ type ToolDefinition struct {
 	Name        string
 	Description string
 	Parameters  map[string]interface{} // JSON Schema object (cleaned)
+	Format      map[string]interface{} // Grammar format for custom tools (e.g., apply_patch)
+	IsCustom    bool                   // True for custom/freeform tools that use raw text input
 }
 
 // ThinkingConfig controls the reasoning capabilities of the model.

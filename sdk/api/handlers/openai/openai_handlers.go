@@ -7,6 +7,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -112,9 +113,9 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	stream := streamResult.Type == gjson.True
 
-	// Some clients send OpenAI Responses-format payloads to /v1/chat/completions.
-	// Convert them to Chat Completions so downstream translators preserve tool metadata.
-	if shouldTreatAsResponsesFormat(rawJSON) {
+	// When using the OLD translator, convert Responses-format payloads to Chat Completions.
+	// The new canonical translator natively supports both formats and preserves custom tools.
+	if !h.Cfg.UseCanonicalTranslator && shouldTreatAsResponsesFormat(rawJSON) {
 		modelName := gjson.GetBytes(rawJSON, "model").String()
 		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
@@ -499,7 +500,19 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			// Success! Commit to streaming headers.
 			setSSEHeaders()
 
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			// Check if chunk is already in Responses API SSE format (starts with "event:" or "data:")
+			if bytes.HasPrefix(chunk, []byte("event:")) {
+				// SSE event line - write as-is with single newline (data line follows)
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n"))
+			} else if bytes.HasPrefix(chunk, []byte("data:")) {
+				// SSE data line - write with double newline to complete the event
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n\n"))
+			} else {
+				// Chat Completions format - wrap in data:
+				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			}
 			flusher.Flush()
 
 			// Continue streaming the rest
@@ -646,7 +659,19 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			// Check if chunk is already in Responses API SSE format (starts with "event:" or "data:")
+			if bytes.HasPrefix(chunk, []byte("event:")) {
+				// SSE event line - write as-is with single newline (data line follows)
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n"))
+			} else if bytes.HasPrefix(chunk, []byte("data:")) {
+				// SSE data line - write with double newline to complete the event
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n\n"))
+			} else {
+				// Chat Completions format - wrap in data:
+				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			}
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil {

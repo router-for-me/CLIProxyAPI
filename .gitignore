@@ -28,6 +28,7 @@ docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+log_analyzer.go
 
 # Tooling metadata
 .vscode/*
@@ -47,3 +48,4 @@ _wgun/
 # macOS
 .DS_Store
 ._*
+

@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"bytes"
+	"fmt"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -11,6 +13,12 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+)
+
+// OpenAI request format aliases for convenience.
+const (
+	FormatChatCompletions = from_ir.FormatChatCompletions
+	FormatResponsesAPI    = from_ir.FormatResponsesAPI
 )
 
 // convertRequestToIR converts a request payload to unified format.
@@ -82,9 +90,8 @@ func TranslateToGeminiCLI(cfg *config.Config, from sdktranslator.Format, model s
 		return nil, err
 	}
 	if irReq == nil {
-		// Unsupported format, fall back to old translator
-		to := sdktranslator.FromString("gemini-cli")
-		return sdktranslator.TranslateRequest(from, to, model, payload, streaming), nil
+		// Unsupported format - return error, no fallback to old translator
+		return nil, fmt.Errorf("new translator: unsupported source format %q for Gemini CLI conversion", from.String())
 	}
 
 	// Convert IR to Gemini CLI format
@@ -571,6 +578,70 @@ func TranslateClaudeResponseStream(cfg *config.Config, to sdktranslator.Format, 
 // OpenAIStreamState maintains state for OpenAI → OpenAI streaming conversions.
 type OpenAIStreamState struct {
 	ReasoningCharsAccum int // Track accumulated reasoning characters for token estimation
+	// ToolCallIDMap maps Codex item_id to call_id for proper tool call ID consistency.
+	// Codex API uses item_id in delta events but call_id is what clients expect.
+	ToolCallIDMap      map[string]string
+	ToolCallSentHeader map[int]bool // Track if tool call header (ID/Name) has been sent
+	// ResponsesState holds state for Responses API streaming (used by Codex)
+	ResponsesState *from_ir.ResponsesStreamState
+	// ToolCallIsCustom tracks which tool call indices are custom tools
+	ToolCallIsCustom []int
+	// OutputIndexToToolIndex maps Responses API output_index to Chat Completions tool_calls index.
+	// Responses API uses output_index as global index (0=reasoning, 1=message, 2+=tool_calls),
+	// but Chat Completions expects tool_calls[].index to start from 0 for first tool call.
+	OutputIndexToToolIndex map[int]int
+	// NextToolCallIndex tracks the next available tool call index for Chat Completions format.
+	NextToolCallIndex int
+}
+
+// NewOpenAIStreamState creates a new stream state for OpenAI provider.
+func NewOpenAIStreamState() *OpenAIStreamState {
+	return &OpenAIStreamState{
+		ToolCallIDMap:          make(map[string]string),
+		ToolCallSentHeader:     make(map[int]bool),
+		OutputIndexToToolIndex: make(map[int]int),
+		NextToolCallIndex:      0,
+	}
+}
+
+// TranslateToOpenAI converts request to OpenAI API format (Chat Completions or Responses API).
+// Uses new translator if feature flag is enabled in config, otherwise uses old translator.
+// format specifies the target OpenAI format (FormatChatCompletions or FormatResponsesAPI).
+func TranslateToOpenAI(cfg *config.Config, from sdktranslator.Format, model string, payload []byte, streaming bool, metadata map[string]any, format from_ir.OpenAIRequestFormat) ([]byte, error) {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
+		// For old translator, use "codex" for Responses API, "openai" for Chat Completions
+		var toStr string
+		if format == FormatResponsesAPI {
+			toStr = "codex"
+		} else {
+			toStr = "openai"
+		}
+		to := sdktranslator.FromString(toStr)
+		return sdktranslator.TranslateRequest(from, to, model, payload, streaming), nil
+	}
+
+	// Convert to IR using shared helper
+	irReq, err := convertRequestToIR(from, model, payload, metadata)
+	if err != nil {
+		return nil, err
+	}
+	if irReq == nil {
+		// Unsupported format - return error, no fallback to old translator
+		return nil, fmt.Errorf("new translator: unsupported source format %q for OpenAI conversion", from.String())
+	}
+
+	// Convert IR to OpenAI format
+	openaiJSON, err := from_ir.ToOpenAIRequestFmt(irReq, format)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add stream parameter if streaming is requested
+	if streaming {
+		openaiJSON, _ = sjson.SetBytes(openaiJSON, "stream", true)
+	}
+
+	return openaiJSON, nil
 }
 
 // TranslateToClaude converts request to Claude Messages API format.
@@ -588,9 +659,8 @@ func TranslateToClaude(cfg *config.Config, from sdktranslator.Format, model stri
 		return nil, err
 	}
 	if irReq == nil {
-		// Unsupported format, fall back to old translator
-		to := sdktranslator.FromString("claude")
-		return sdktranslator.TranslateRequest(from, to, model, payload, streaming), nil
+		// Unsupported format - return error, no fallback to old translator
+		return nil, fmt.Errorf("new translator: unsupported source format %q for Claude conversion", from.String())
 	}
 
 	// Convert IR to Claude format
@@ -621,6 +691,24 @@ func TranslateOpenAIResponseStream(cfg *config.Config, to sdktranslator.Format, 
 // TranslateOpenAIResponseStreamForced converts OpenAI streaming chunk to target format.
 // Always uses new translator regardless of config (for providers like Cline that require it).
 func TranslateOpenAIResponseStreamForced(to sdktranslator.Format, openaiChunk []byte, model string, messageID string, state *OpenAIStreamState) ([][]byte, error) {
+	toStr := to.String()
+
+	// PASSTHROUGH for Codex: upstream already sends correct Responses API SSE format.
+	// We should NOT parse and re-create events - just pass them through as-is.
+	// This preserves original sequence_numbers, item_ids, call_ids, and event ordering.
+	if toStr == "codex" {
+		trimmed := bytes.TrimSpace(openaiChunk)
+		if len(trimmed) == 0 {
+			return nil, nil
+		}
+		// Skip [DONE] marker - it will be added by WriteDone() in stream forwarder
+		// to avoid duplication
+		if bytes.Equal(trimmed, []byte("data: [DONE]")) || bytes.Equal(trimmed, []byte("[DONE]")) {
+			return nil, nil
+		}
+		return [][]byte{trimmed}, nil
+	}
+
 	// Step 1: Parse OpenAI chunk to IR events
 	events, err := to_ir.ParseOpenAIChunk(openaiChunk)
 	if err != nil {
@@ -632,13 +720,26 @@ func TranslateOpenAIResponseStreamForced(to sdktranslator.Format, openaiChunk []
 	}
 
 	// Step 2: Convert IR events to target format chunks
-	toStr := to.String()
 	var chunks [][]byte
 
 	switch toStr {
 	case "openai", "cline":
 		if state == nil {
-			state = &OpenAIStreamState{}
+			state = &OpenAIStreamState{
+				ToolCallIDMap:          make(map[string]string),
+				ToolCallSentHeader:     make(map[int]bool),
+				OutputIndexToToolIndex: make(map[int]int),
+				NextToolCallIndex:      0,
+			}
+		}
+		if state.ToolCallIDMap == nil {
+			state.ToolCallIDMap = make(map[string]string)
+		}
+		if state.ToolCallSentHeader == nil {
+			state.ToolCallSentHeader = make(map[int]bool)
+		}
+		if state.OutputIndexToToolIndex == nil {
+			state.OutputIndexToToolIndex = make(map[int]int)
 		}
 		for i := range events {
 			event := &events[i]
@@ -648,19 +749,86 @@ func TranslateOpenAIResponseStreamForced(to sdktranslator.Format, openaiChunk []
 				state.ReasoningCharsAccum += len(event.Reasoning)
 			}
 
-			// On finish, ensure reasoning_tokens is set if we had reasoning content
-			if event.Type == ir.EventTypeFinish && state.ReasoningCharsAccum > 0 {
-				if event.Usage == nil {
-					event.Usage = &ir.Usage{}
-				}
-				if event.Usage.ThoughtsTokenCount == 0 {
-					// Estimate: ~3 chars per token (conservative for mixed languages)
-					event.Usage.ThoughtsTokenCount = (state.ReasoningCharsAccum + 2) / 3
+			// Handle tool call ID mapping for Codex API compatibility
+			// Codex uses item_id in delta events but call_id is what clients expect
+			if event.ToolCall != nil {
+				if event.Type == ir.EventTypeToolCall && event.ToolCall.ItemID != "" && event.ToolCall.ID != "" {
+					// This is from response.output_item.added - save the mapping
+					state.ToolCallIDMap[event.ToolCall.ItemID] = event.ToolCall.ID
+				} else if event.ToolCall.ItemID != "" && event.ToolCall.ID == "" {
+					// This is from delta/done event - lookup the call_id
+					if callID, ok := state.ToolCallIDMap[event.ToolCall.ItemID]; ok {
+						event.ToolCall.ID = callID
+					}
 				}
 			}
 
-			// Use ToolCallIndex from event for proper tool call indexing
-			idx := event.ToolCallIndex
+			// On finish, handle reasoning tokens and fix finish_reason for tool calls
+			if event.Type == ir.EventTypeFinish {
+				// Fix finish_reason: if we had tool calls, change "stop" to "tool_calls"
+				// This is critical for Cursor to know it should execute the tool calls
+				if state.NextToolCallIndex > 0 && event.FinishReason == ir.FinishReasonStop {
+					event.FinishReason = ir.FinishReasonToolCalls
+				}
+
+				// Ensure reasoning_tokens is set if we had reasoning content
+				if state.ReasoningCharsAccum > 0 {
+					if event.Usage == nil {
+						event.Usage = &ir.Usage{}
+					}
+					if event.Usage.ThoughtsTokenCount == 0 {
+						// Estimate: ~3 chars per token (conservative for mixed languages)
+						event.Usage.ThoughtsTokenCount = (state.ReasoningCharsAccum + 2) / 3
+					}
+				}
+			}
+
+			// Handle Tool Call Indexing
+			// Responses API uses output_index as global index (0=reasoning, 1=message, 2+=tool_calls),
+			// but Chat Completions expects tool_calls[].index to start from 0 for first tool call.
+			outputIdx := event.ToolCallIndex
+			idx := outputIdx // Default to original index
+
+			// Map output_index to tool_call_index for tool call events
+			if event.Type == ir.EventTypeToolCall || event.Type == ir.EventTypeToolCallDelta {
+				if mappedIdx, exists := state.OutputIndexToToolIndex[outputIdx]; exists {
+					// Use existing mapping
+					idx = mappedIdx
+				} else if event.Type == ir.EventTypeToolCall {
+					// First time seeing this output_index for a tool call - assign new tool_call_index
+					idx = state.NextToolCallIndex
+					state.OutputIndexToToolIndex[outputIdx] = idx
+					state.NextToolCallIndex++
+				}
+				// For ToolCallDelta without prior ToolCall event, keep original index (shouldn't happen normally)
+			}
+
+			// Special handling for Responses API tool calls to prevent duplication
+			// The stream sends:
+			// 1. response.output_item.added (Type=ToolCall) -> has ID and Name, no Args
+			// 2. response.function_call_arguments.delta (Type=ToolCallDelta) -> has Args
+
+			// For Delta events, we NEVER want to send ID/Type, only arguments
+			if event.Type == ir.EventTypeToolCallDelta {
+				event.ToolCall.ID = ""
+				event.ToolCall.Name = ""
+			} else if event.Type == ir.EventTypeToolCall {
+				// For ToolCall events (start of tool call), we send ID/Name/Type ONCE
+				// However, if we mapped a CallID from ItemID, we must ensure it's set
+				if event.ToolCall.ItemID != "" && event.ToolCall.ID == "" {
+					if callID, ok := state.ToolCallIDMap[event.ToolCall.ItemID]; ok {
+						event.ToolCall.ID = callID
+					}
+				}
+
+				if state.ToolCallSentHeader[idx] {
+					event.ToolCall.ID = ""
+					event.ToolCall.Name = ""
+				} else {
+					state.ToolCallSentHeader[idx] = true
+				}
+			}
+
 			chunk, err := from_ir.ToOpenAIChunk(*event, model, messageID, idx)
 			if err != nil {
 				return nil, err

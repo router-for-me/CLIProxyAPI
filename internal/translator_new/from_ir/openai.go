@@ -79,6 +79,12 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 }
 
 // convertToResponsesAPIRequest builds JSON for /v1/responses endpoint.
+// IMPORTANT: Codex API (chatgpt.com/backend-api/codex/responses) strictly validates
+// the "instructions" field - it only accepts pre-registered Codex CLI prompts.
+// Arbitrary instructions are rejected with "Instructions are not valid" error.
+// Therefore, we do NOT set instructions here - it will be set by applyCodexSpecificFields
+// in codex_executor.go using misc.CodexInstructionsForModel().
+// System messages from client are converted to user messages in input[] array.
 func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	m := map[string]interface{}{"model": req.Model}
 	if req.Temperature != nil {
@@ -90,16 +96,36 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	if req.MaxTokens != nil {
 		m["max_output_tokens"] = *req.MaxTokens
 	}
-	if req.Instructions != "" {
-		m["instructions"] = req.Instructions
-	}
 
+	// NOTE: We intentionally do NOT set "instructions" here.
+	// Codex API validates instructions against a whitelist of registered prompts.
+	// Arbitrary instructions are rejected with "Instructions are not valid" error.
+	// System prompts from clients are already converted to user messages in input[] array,
+	// so we don't need to set instructions field at all.
+	// The model will receive the system prompt as the first message in input[].
+
+	// Build tool call context: map tool_call_id -> tool_name for custom tool detection
+	// This is needed because tool results only contain tool_call_id, not tool_name
+	toolCallContext := buildToolCallContext(req.Messages, req.Tools)
+
+	// Build input array - convert system messages to user messages
+	// (Codex API doesn't support role:system in input[], and instructions are validated)
 	var input []interface{}
 	for _, msg := range req.Messages {
-		if msg.Role == ir.RoleSystem && req.Instructions != "" {
+		if msg.Role == ir.RoleSystem {
+			// Convert system message to user message for Codex compatibility
+			if text := ir.CombineTextParts(msg); text != "" {
+				input = append(input, map[string]interface{}{
+					"type": "message",
+					"role": "user",
+					"content": []interface{}{
+						map[string]interface{}{"type": "input_text", "text": text},
+					},
+				})
+			}
 			continue
 		}
-		if item := convertMessageToResponsesInput(msg); item != nil {
+		if item := convertMessageToResponsesInputWithContext(msg, toolCallContext); item != nil {
 			input = append(input, item)
 		}
 	}
@@ -159,11 +185,26 @@ func buildOpenAITools(tools []ir.ToolDefinition) []interface{} {
 func buildResponsesTools(tools []ir.ToolDefinition) []interface{} {
 	res := make([]interface{}, len(tools))
 	for i, t := range tools {
-		res[i] = map[string]interface{}{
-			"type":        "function",
-			"name":        t.Name,
-			"description": t.Description,
-			"parameters":  t.Parameters,
+		// Custom/freeform tools (e.g., apply_patch) have IsCustom=true or nil Parameters
+		// These tools accept raw text input, not structured JSON
+		if t.IsCustom || t.Parameters == nil {
+			tool := map[string]interface{}{
+				"type":        "custom",
+				"name":        t.Name,
+				"description": t.Description,
+			}
+			// Include format field if present (e.g., grammar for apply_patch)
+			if t.Format != nil {
+				tool["format"] = t.Format
+			}
+			res[i] = tool
+		} else {
+			res[i] = map[string]interface{}{
+				"type":        "function",
+				"name":        t.Name,
+				"description": t.Description,
+				"parameters":  t.Parameters,
+			}
 		}
 	}
 	return res
@@ -198,20 +239,82 @@ func applyPromptConfig(m map[string]interface{}, req *ir.UnifiedChatRequest) {
 	m["prompt"] = prompt
 }
 
-func convertMessageToResponsesInput(msg ir.Message) interface{} {
-	switch msg.Role {
-	case ir.RoleSystem:
-		if text := ir.CombineTextParts(msg); text != "" {
-			return map[string]interface{}{
-				"type": "message", "role": "system",
-				"content": []interface{}{map[string]interface{}{"type": "input_text", "text": text}},
+// toolCallContext holds mapping from tool_call_id to tool metadata for custom tool detection.
+type toolCallContext struct {
+	// toolCallIDToName maps tool_call_id to tool name
+	toolCallIDToName map[string]string
+	// customTools is a set of tool names that are custom tools
+	customTools map[string]bool
+}
+
+// buildToolCallContext builds context for tool call detection from messages and tool definitions.
+func buildToolCallContext(messages []ir.Message, tools []ir.ToolDefinition) *toolCallContext {
+	ctx := &toolCallContext{
+		toolCallIDToName: make(map[string]string),
+		customTools:      make(map[string]bool),
+	}
+
+	// Mark custom tools from tool definitions
+	for _, tool := range tools {
+		if tool.IsCustom {
+			ctx.customTools[tool.Name] = true
+		}
+	}
+	// Also mark known custom tools
+	ctx.customTools["apply_patch"] = true
+
+	// Build tool_call_id -> tool_name mapping from assistant messages with tool calls
+	for _, msg := range messages {
+		if msg.Role == ir.RoleAssistant {
+			for _, tc := range msg.ToolCalls {
+				ctx.toolCallIDToName[tc.ID] = tc.Name
 			}
 		}
+	}
+
+	return ctx
+}
+
+// isCustomToolByContext checks if a tool is custom using the context.
+func (ctx *toolCallContext) isCustomToolByContext(toolCallID, toolName string) bool {
+	if toolName != "" {
+		return ctx.customTools[toolName]
+	}
+	if toolCallID != "" {
+		if name, ok := ctx.toolCallIDToName[toolCallID]; ok {
+			return ctx.customTools[name]
+		}
+	}
+	return false
+}
+
+// getToolNameByCallID returns tool name for a given tool_call_id.
+func (ctx *toolCallContext) getToolNameByCallID(toolCallID string) string {
+	if name, ok := ctx.toolCallIDToName[toolCallID]; ok {
+		return name
+	}
+	return ""
+}
+
+func convertMessageToResponsesInputWithContext(msg ir.Message, ctx *toolCallContext) interface{} {
+	switch msg.Role {
+	case ir.RoleSystem:
+		// System messages are NOT supported in Responses API input[].
+		// They must be passed via the top-level "instructions" field.
+		// This case returns nil to skip system messages in input array.
+		return nil
 	case ir.RoleUser:
 		return buildResponsesUserMessage(msg)
 	case ir.RoleAssistant:
 		if len(msg.ToolCalls) > 0 {
 			tc := msg.ToolCalls[0]
+			// Check if this is a custom tool (e.g., apply_patch)
+			// Custom tools use "input" field instead of "arguments" and different type
+			if tc.IsCustom || ctx.isCustomToolByContext(tc.ID, tc.Name) {
+				return map[string]interface{}{
+					"type": "custom_tool_call", "call_id": tc.ID, "name": tc.Name, "input": tc.Args,
+				}
+			}
 			return map[string]interface{}{
 				"type": "function_call", "call_id": tc.ID, "name": tc.Name, "arguments": tc.Args,
 			}
@@ -225,13 +328,29 @@ func convertMessageToResponsesInput(msg ir.Message) interface{} {
 	case ir.RoleTool:
 		for _, part := range msg.Content {
 			if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
+				toolCallID := part.ToolResult.ToolCallID
+				// Check if this is a result for a custom tool
+				// Custom tools use "custom_tool_call_output" type
+				if ctx.isCustomToolByContext(toolCallID, ctx.getToolNameByCallID(toolCallID)) {
+					return map[string]interface{}{
+						"type": "custom_tool_call_output", "call_id": toolCallID, "output": part.ToolResult.Result,
+					}
+				}
 				return map[string]interface{}{
-					"type": "function_call_output", "call_id": part.ToolResult.ToolCallID, "output": part.ToolResult.Result,
+					"type": "function_call_output", "call_id": toolCallID, "output": part.ToolResult.Result,
 				}
 			}
 		}
 	}
 	return nil
+}
+
+func convertMessageToResponsesInput(msg ir.Message) interface{} {
+	// Legacy function without context - uses empty context
+	return convertMessageToResponsesInputWithContext(msg, &toolCallContext{
+		toolCallIDToName: make(map[string]string),
+		customTools:      map[string]bool{"apply_patch": true},
+	})
 }
 
 func buildResponsesUserMessage(msg ir.Message) interface{} {
@@ -377,6 +496,11 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 	case ir.EventTypeReasoning:
 		choice["delta"] = ir.BuildReasoningDelta(event.Reasoning, event.ThoughtSignature)
 	case ir.EventTypeToolCall:
+		if event.ToolCall != nil {
+			choice["delta"] = buildToolCallDelta(event)
+		}
+	case ir.EventTypeToolCallDelta:
+		// Handle streaming tool call arguments (without name, just args delta)
 		if event.ToolCall != nil {
 			choice["delta"] = buildToolCallDelta(event)
 		}
@@ -647,6 +771,7 @@ type ResponsesStreamState struct {
 	FuncCallIDs     map[int]string
 	FuncNames       map[int]string
 	FuncArgsBuffer  map[int]string
+	FuncIsCustom    map[int]bool // Track which tool calls are custom tools
 }
 
 func NewResponsesStreamState() *ResponsesStreamState {
@@ -654,6 +779,7 @@ func NewResponsesStreamState() *ResponsesStreamState {
 		FuncCallIDs:    make(map[int]string),
 		FuncNames:      make(map[int]string),
 		FuncArgsBuffer: make(map[int]string),
+		FuncIsCustom:   make(map[int]bool),
 	}
 }
 
@@ -753,31 +879,94 @@ func handleReasoningEvent(event ir.UnifiedEvent, state *ResponsesStreamState, ne
 func handleToolCallEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nextSeq func() int) []string {
 	var out []string
 	idx := event.ToolCallIndex
+	isCustom := event.ToolCall.IsCustom
+
 	if _, exists := state.FuncCallIDs[idx]; !exists {
-		state.FuncCallIDs[idx] = fmt.Sprintf("fc_%s", event.ToolCall.ID)
+		// Use ItemID if available, otherwise generate new ID
+		id := event.ToolCall.ID
+		if event.ToolCall.ItemID != "" {
+			// If we have ItemID (from upstream delta), use it as our ID to maintain mapping
+			// The ID field in ToolCall might be the client-facing call_id, but here we need internal item_id
+			id = event.ToolCall.ItemID
+		} else {
+			id = fmt.Sprintf("fc_%s", event.ToolCall.ID)
+		}
+		state.FuncCallIDs[idx] = id
 		state.FuncNames[idx] = event.ToolCall.Name
+		state.FuncIsCustom[idx] = isCustom
+
+		// Use correct type based on whether it's a custom tool
+		itemType := "function_call"
+		if isCustom {
+			itemType = "custom_tool_call"
+		}
+
+		item := map[string]interface{}{
+			"id": state.FuncCallIDs[idx], "type": itemType, "status": "in_progress",
+			"call_id": event.ToolCall.ID, "name": event.ToolCall.Name,
+		}
+		if isCustom {
+			item["input"] = "" // Custom tools use "input" instead of "arguments"
+		} else {
+			item["arguments"] = ""
+		}
+
 		b, _ := json.Marshal(map[string]interface{}{
 			"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": idx,
-			"item": map[string]interface{}{
-				"id": state.FuncCallIDs[idx], "type": "function_call", "status": "in_progress",
-				"call_id": event.ToolCall.ID, "name": event.ToolCall.Name, "arguments": "",
-			},
+			"item": item,
 		})
 		out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
 	}
+
 	if event.ToolCall.Args != "" {
-		b, _ := json.Marshal(map[string]interface{}{
-			"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-			"output_index": idx, "delta": event.ToolCall.Args,
-		})
-		out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
+		// Use correct event type for delta
+		if isCustom {
+			b, _ := json.Marshal(map[string]interface{}{
+				"type": "response.custom_tool_call_input.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+				"output_index": idx, "delta": event.ToolCall.Args,
+			})
+			out = append(out, fmt.Sprintf("event: response.custom_tool_call_input.delta\ndata: %s\n\n", string(b)))
+		} else {
+			b, _ := json.Marshal(map[string]interface{}{
+				"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+				"output_index": idx, "delta": event.ToolCall.Args,
+			})
+			out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
+		}
 	}
+
+	// Use correct type for done event
+	itemType := "function_call"
+	if isCustom {
+		itemType = "custom_tool_call"
+	}
+
+	// Send arguments.done event (required by Codex client to finalize arguments accumulation)
+	if !isCustom {
+		bArgsDone, _ := json.Marshal(map[string]interface{}{
+			"type": "response.function_call_arguments.done", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+			"output_index": idx, "arguments": state.FuncArgsBuffer[idx],
+		})
+		out = append(out, fmt.Sprintf("event: response.function_call_arguments.done\ndata: %s\n\n", string(bArgsDone)))
+	} else {
+		// For custom tools, send custom_tool_call_input.done (if supported/needed, though less strictly documented)
+		// But usually custom tools just use input delta and then item done.
+		// Let's stick to item done for custom for now, or check if we need input done.
+	}
+
+	doneItem := map[string]interface{}{
+		"id": state.FuncCallIDs[idx], "type": itemType, "status": "completed",
+		"call_id": event.ToolCall.ID, "name": event.ToolCall.Name,
+	}
+	if isCustom {
+		doneItem["input"] = event.ToolCall.Args
+	} else {
+		doneItem["arguments"] = event.ToolCall.Args
+	}
+
 	b, _ := json.Marshal(map[string]interface{}{
 		"type": "response.output_item.done", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-		"output_index": idx, "item": map[string]interface{}{
-			"id": state.FuncCallIDs[idx], "type": "function_call", "status": "completed",
-			"call_id": event.ToolCall.ID, "name": event.ToolCall.Name, "arguments": event.ToolCall.Args,
-		},
+		"output_index": idx, "item": doneItem,
 	})
 	out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b)))
 	return out
@@ -786,23 +975,59 @@ func handleToolCallEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nex
 func handleToolCallDeltaEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nextSeq func() int) []string {
 	var out []string
 	idx := event.ToolCallIndex
+	isCustom := event.ToolCall.IsCustom
+
 	if _, exists := state.FuncCallIDs[idx]; !exists {
-		state.FuncCallIDs[idx] = fmt.Sprintf("fc_%s", event.ToolCall.ID)
+		// Use ItemID if available, otherwise generate new ID
+		id := event.ToolCall.ID
+		if event.ToolCall.ItemID != "" {
+			id = event.ToolCall.ItemID
+		} else {
+			id = fmt.Sprintf("fc_%s", event.ToolCall.ID)
+		}
+		state.FuncCallIDs[idx] = id
+		state.FuncIsCustom[idx] = isCustom
+
+		// Use correct type based on whether it's a custom tool
+		itemType := "function_call"
+		if isCustom {
+			itemType = "custom_tool_call"
+		}
+
+		item := map[string]interface{}{
+			"id": state.FuncCallIDs[idx], "type": itemType, "status": "in_progress",
+			"call_id": event.ToolCall.ID, "name": "",
+		}
+		if isCustom {
+			item["input"] = ""
+		} else {
+			item["arguments"] = ""
+		}
+
 		b, _ := json.Marshal(map[string]interface{}{
 			"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": idx,
-			"item": map[string]interface{}{
-				"id": state.FuncCallIDs[idx], "type": "function_call", "status": "in_progress",
-				"call_id": event.ToolCall.ID, "name": "", "arguments": "",
-			},
+			"item": item,
 		})
 		out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
 	}
+
 	state.FuncArgsBuffer[idx] += event.ToolCall.Args
-	b, _ := json.Marshal(map[string]interface{}{
-		"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-		"output_index": idx, "delta": event.ToolCall.Args,
-	})
-	out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
+
+	// Check if this index was marked as custom (either from this event or previous)
+	if state.FuncIsCustom[idx] || isCustom {
+		state.FuncIsCustom[idx] = true
+		b, _ := json.Marshal(map[string]interface{}{
+			"type": "response.custom_tool_call_input.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+			"output_index": idx, "delta": event.ToolCall.Args,
+		})
+		out = append(out, fmt.Sprintf("event: response.custom_tool_call_input.delta\ndata: %s\n\n", string(b)))
+	} else {
+		b, _ := json.Marshal(map[string]interface{}{
+			"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+			"output_index": idx, "delta": event.ToolCall.Args,
+		})
+		out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
+	}
 	return out
 }
 

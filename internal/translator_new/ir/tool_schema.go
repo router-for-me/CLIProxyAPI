@@ -86,11 +86,7 @@ func NewToolSchemaContextFromGJSON(toolsJSON []gjson.Result) *ToolSchemaContext 
 
 // NormalizeToolCallArgs fixes parameter names if the model made mistakes.
 func (ctx *ToolSchemaContext) NormalizeToolCallArgs(toolName, argsJSON string) string {
-	if ctx == nil || argsJSON == "" || argsJSON == "{}" {
-		return argsJSON
-	}
-	paramTypes, ok := ctx.Tools[toolName]
-	if !ok || len(paramTypes) == 0 {
+	if argsJSON == "" || argsJSON == "{}" {
 		return argsJSON
 	}
 
@@ -99,15 +95,34 @@ func (ctx *ToolSchemaContext) NormalizeToolCallArgs(toolName, argsJSON string) s
 		return argsJSON
 	}
 
-	normalizedArgs, changed := normalizeMapRecursive(actualArgs, paramTypes)
-	defaultsChanged := addMissingDefaults(toolName, normalizedArgs, paramTypes)
-	changed = changed || defaultsChanged
+	changed := false
+
+	// Apply tool-specific sanitizers first (e.g., grep context params fix)
+	if sanitizer, ok := ToolArgsSanitizers[toolName]; ok {
+		if sanitizer(actualArgs) {
+			changed = true
+		}
+	}
+
+	// Schema-based normalization (only if context available)
+	if ctx != nil {
+		if paramTypes, ok := ctx.Tools[toolName]; ok && len(paramTypes) > 0 {
+			normalizedArgs, schemaChanged := normalizeMapRecursive(actualArgs, paramTypes)
+			if schemaChanged {
+				actualArgs = normalizedArgs
+				changed = true
+			}
+			if addMissingDefaults(toolName, actualArgs, paramTypes) {
+				changed = true
+			}
+		}
+	}
 
 	if !changed {
 		return argsJSON
 	}
 
-	out, err := json.Marshal(normalizedArgs)
+	out, err := json.Marshal(actualArgs)
 	if err != nil {
 		return argsJSON
 	}

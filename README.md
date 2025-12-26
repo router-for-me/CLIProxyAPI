@@ -204,7 +204,7 @@ translator_new/
 | kiro               | ✅     | Amazon Q, tested (multiple auth methods) |
 | github_copilot     | ✅     | GitHub Copilot, tested |
 | claude             | ✅     | Anthropic, tested (Claude Code) |
-| **codex**          | ❌     | Requires migration |
+| codex              | ✅     | OpenAI Responses, tested |
 | **qwen**           | ❌     | Requires migration |
 | **iflow**          | ❌     | Requires migration |
 

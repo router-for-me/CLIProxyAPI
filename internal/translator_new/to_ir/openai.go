@@ -62,6 +62,15 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 		for _, m := range messages.Array() {
 			req.Messages = append(req.Messages, parseOpenAIMessage(m))
 		}
+		// Also check for "input" field even if "messages" exists, because some clients might mix them
+		// or use "input" for system messages/files but "messages" for chat history.
+		// Although standard API doesn't allow mixing, we should be robust.
+		if input := root.Get("input"); input.Exists() {
+			// If we have both, we need to be careful not to duplicate.
+			// Let's assume if 'messages' is present, it's the primary source.
+			// But maybe check 'input' for system instructions?
+			parseResponsesAPIFields(root, req) // This will append to messages/instructions
+		}
 	}
 
 	// Tools
@@ -134,6 +143,9 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 
 // parseResponsesAPIFields extracts Responses API specific fields into unified format.
 // Responses API uses "input" for messages and "instructions" for system prompt.
+// Note: Some clients incorrectly send system messages in input[] with role:"system".
+// Codex API does not support this - system messages must go to "instructions" field.
+// We handle this by extracting system messages from input[] and merging into Instructions.
 func parseResponsesAPIFields(root gjson.Result, req *ir.UnifiedChatRequest) {
 	// "instructions" in Responses API = system message in Chat Completions
 	if v := root.Get("instructions"); v.Exists() && v.String() != "" {
@@ -142,6 +154,10 @@ func parseResponsesAPIFields(root gjson.Result, req *ir.UnifiedChatRequest) {
 			Role: ir.RoleSystem, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: v.String()}},
 		})
 	}
+
+	// Collect system messages from input[] (invalid but some clients send this way)
+	var systemFromInput []string
+
 	if input := root.Get("input"); input.Exists() {
 		if input.Type == gjson.String {
 			req.Messages = append(req.Messages, ir.Message{
@@ -149,8 +165,79 @@ func parseResponsesAPIFields(root gjson.Result, req *ir.UnifiedChatRequest) {
 			})
 		} else if input.IsArray() {
 			for _, item := range input.Array() {
+				// Check if this is a system message in input[] (invalid format)
+				role := item.Get("role").String()
+				if role == "system" {
+					// Extract system message content and add to instructions
+					content := item.Get("content")
+					var text string
+					if content.Type == gjson.String {
+						text = content.String()
+					} else if content.IsArray() {
+						// Handle array content format
+						for _, part := range content.Array() {
+							if t := part.Get("text").String(); t != "" {
+								if text != "" {
+									text += "\n"
+								}
+								text += t
+							}
+						}
+					}
+					if text != "" {
+						systemFromInput = append(systemFromInput, text)
+					}
+					continue // Don't add to Messages, will go to Instructions
+				}
+
 				if msg := parseResponsesInputItem(item); msg != nil {
 					req.Messages = append(req.Messages, *msg)
+				}
+			}
+		}
+	}
+
+	// Merge system messages from input[] into Instructions
+	if len(systemFromInput) > 0 {
+		combined := ""
+		for _, s := range systemFromInput {
+			if combined != "" {
+				combined += "\n\n"
+			}
+			combined += s
+		}
+		if req.Instructions == "" {
+			req.Instructions = combined
+			// Also add to Messages for IR consistency
+			// Check if we already have a system message to append to
+			foundSystem := false
+			for i := range req.Messages {
+				if req.Messages[i].Role == ir.RoleSystem {
+					// We found one, append/replace content?
+					// Usually there's only one system message.
+					// Let's replace/append.
+					// Actually, the previous logic was appending a NEW system message if req.Instructions was empty,
+					// or updating existing if not.
+					// Let's stick to appending a new one if not found.
+					// Wait, if req.Instructions was empty, we add a new message.
+					// If it wasn't empty, we update existing.
+					foundSystem = true
+					break
+				}
+			}
+			if !foundSystem {
+				req.Messages = append([]ir.Message{{
+					Role: ir.RoleSystem, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: combined}},
+				}}, req.Messages...)
+			}
+		} else {
+			// Prepend to existing instructions
+			req.Instructions = combined + "\n\n" + req.Instructions
+			// Update the system message in Messages
+			for i := range req.Messages {
+				if req.Messages[i].Role == ir.RoleSystem {
+					req.Messages[i].Content = []ir.ContentPart{{Type: ir.ContentTypeText, Text: req.Instructions}}
+					break
 				}
 			}
 		}
@@ -204,7 +291,28 @@ func parseResponsesInputItem(item gjson.Result) *ir.Message {
 				ID: item.Get("call_id").String(), Name: item.Get("name").String(), Args: item.Get("arguments").String(),
 			}},
 		}
+	case "custom_tool_call":
+		// Custom tools (e.g., apply_patch) use "input" field instead of "arguments"
+		// and have IsCustom=true flag for proper handling in output conversion
+		return &ir.Message{
+			Role: ir.RoleAssistant,
+			ToolCalls: []ir.ToolCall{{
+				ID: item.Get("call_id").String(), Name: item.Get("name").String(),
+				Args: item.Get("input").String(), IsCustom: true,
+			}},
+		}
 	case "function_call_output":
+		return &ir.Message{
+			Role: ir.RoleTool,
+			Content: []ir.ContentPart{{
+				Type: ir.ContentTypeToolResult,
+				ToolResult: &ir.ToolResultPart{
+					ToolCallID: item.Get("call_id").String(), Result: item.Get("output").String(),
+				},
+			}},
+		}
+	case "custom_tool_call_output":
+		// Custom tool results - same structure as function_call_output but for custom tools
 		return &ir.Message{
 			Role: ir.RoleTool,
 			Content: []ir.ContentPart{{
@@ -457,9 +565,49 @@ func ParseOpenAIChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.UnifiedEvent, error) {
 	var events []ir.UnifiedEvent
 	switch eventType {
+	case "response.output_item.added":
+		// Handle function_call item added - this contains the function name
+		item := root.Get("item")
+		if item.Get("type").String() == "function_call" {
+			events = append(events, ir.UnifiedEvent{
+				Type: ir.EventTypeToolCall,
+				ToolCall: &ir.ToolCall{
+					ID:     item.Get("call_id").String(), // Client-facing ID
+					ItemID: item.Get("id").String(),      // Internal ID for delta matching
+					Name:   item.Get("name").String(),
+					Args:   "", // Arguments come in subsequent delta events
+				},
+				ToolCallIndex: int(root.Get("output_index").Int()),
+			})
+		}
+		// Handle custom_tool_call item added (e.g., apply_patch with grammar format)
+		if item.Get("type").String() == "custom_tool_call" {
+			events = append(events, ir.UnifiedEvent{
+				Type: ir.EventTypeToolCall,
+				ToolCall: &ir.ToolCall{
+					ID:       item.Get("call_id").String(), // Client-facing ID
+					ItemID:   item.Get("id").String(),      // Internal ID for delta matching
+					Name:     item.Get("name").String(),
+					Args:     "",   // Arguments come in subsequent delta events
+					IsCustom: true, // Mark as custom tool for proper response handling
+				},
+				ToolCallIndex: int(root.Get("output_index").Int()),
+			})
+		}
+		// Handle reasoning item added
+		if item.Get("type").String() == "reasoning" {
+			// Just a marker that reasoning started, usually followed by deltas
+		}
+		// Handle message item added
+		if item.Get("type").String() == "message" {
+			// Just a marker that message started
+		}
 	case "response.output_text.delta":
 		if delta := root.Get("delta"); delta.Exists() && delta.String() != "" {
 			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: delta.String()})
+		} else if text := root.Get("text"); text.Exists() && text.String() != "" {
+			// Fallback for some clients/versions
+			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: text.String()})
 		}
 	case "response.reasoning_summary_text.delta":
 		// Try "delta" first (correct field per OpenAI spec), fallback to "text" for compatibility
@@ -469,21 +617,43 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoningSummary, ReasoningSummary: text.String()})
 		}
 	case "response.function_call_arguments.delta":
+		// Skip delta events - we'll send full sanitized arguments in .done event
+		// This prevents Cursor from accumulating partial args with conflicting params like -A/-B/-C
+		// The .done event below will send the complete, sanitized arguments
+	case "response.custom_tool_call_input.delta":
+		// Handle custom tool call input delta (e.g., apply_patch with grammar format)
+		// Custom tools send raw text input instead of JSON arguments - no sanitization needed
 		if delta := root.Get("delta"); delta.Exists() {
 			events = append(events, ir.UnifiedEvent{
-				Type:          ir.EventTypeToolCallDelta,
-				ToolCall:      &ir.ToolCall{ID: root.Get("item_id").String(), Args: delta.String()},
+				Type: ir.EventTypeToolCallDelta,
+				ToolCall: &ir.ToolCall{
+					ItemID:   root.Get("item_id").String(),
+					Args:     delta.String(), // Raw text input for custom tools
+					IsCustom: true,
+				},
 				ToolCallIndex: int(root.Get("output_index").Int()),
 			})
 		}
+	case "response.custom_tool_call_input.done":
+		// Ignore done events to avoid duplication (same as function_call_arguments.done)
 	case "response.function_call_arguments.done":
-		events = append(events, ir.UnifiedEvent{
-			Type: ir.EventTypeToolCall,
-			ToolCall: &ir.ToolCall{
-				ID: root.Get("item_id").String(), Name: root.Get("name").String(), Args: root.Get("arguments").String(),
-			},
-			ToolCallIndex: int(root.Get("output_index").Int()),
-		})
+		// Send full sanitized arguments instead of ignoring
+		// This replaces the delta events we skipped above
+		if args := root.Get("arguments"); args.Exists() {
+			sanitizedArgs := ir.SanitizeGrepContextParams(args.String())
+			events = append(events, ir.UnifiedEvent{
+				Type: ir.EventTypeToolCallDelta,
+				ToolCall: &ir.ToolCall{
+					ItemID: root.Get("item_id").String(),
+					Args:   sanitizedArgs,
+				},
+				ToolCallIndex: int(root.Get("output_index").Int()),
+			})
+		}
+	case "response.content_part.done":
+		// Similar to above, ignore done events for content parts to avoid duplication
+	case "response.output_item.done":
+		// Ignore item done events
 	case "response.completed":
 		event := ir.UnifiedEvent{Type: ir.EventTypeFinish, FinishReason: ir.FinishReasonStop}
 		if u := root.Get("response.usage"); u.Exists() {
@@ -495,6 +665,11 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 			}
 			if v := u.Get("output_tokens_details.reasoning_tokens"); v.Exists() {
 				event.Usage.ThoughtsTokenCount = int(v.Int())
+			}
+		} else {
+			// Fallback: try to find usage at top level or in other fields if structure varies
+			if u := root.Get("usage"); u.Exists() {
+				event.Usage = ir.ParseOpenAIUsage(u)
 			}
 		}
 		events = append(events, event)
@@ -615,12 +790,38 @@ func parseOpenAIContentPart(item gjson.Result, msg *ir.Message) *ir.ContentPart 
 func parseOpenAITool(t gjson.Result) *ir.ToolDefinition {
 	var name, description string
 	var paramsResult gjson.Result
+	isCustomTool := false
 
-	if t.Get("type").String() == "function" {
-		fn := t.Get("function")
-		name, description, paramsResult = fn.Get("name").String(), fn.Get("description").String(), fn.Get("parameters")
-	} else if t.Get("name").Exists() {
-		name, description, paramsResult = t.Get("name").String(), t.Get("description").String(), t.Get("input_schema")
+	toolType := t.Get("type").String()
+
+	switch toolType {
+	case "function":
+		// Check for nested "function" object (standard OpenAI format)
+		// vs flat format (Cursor format: {"type":"function","name":"...","parameters":{}})
+		if fn := t.Get("function"); fn.Exists() && fn.IsObject() {
+			// Standard OpenAI format: {"type":"function","function":{"name":"...","parameters":{}}}
+			name, description, paramsResult = fn.Get("name").String(), fn.Get("description").String(), fn.Get("parameters")
+		} else {
+			// Flat format (Cursor): {"type":"function","name":"...","parameters":{}}
+			name, description = t.Get("name").String(), t.Get("description").String()
+			paramsResult = t.Get("parameters")
+		}
+	case "custom":
+		// Custom/freeform tools (e.g., apply_patch) - these don't use JSON parameters
+		// The tool input is passed as raw text, not structured JSON
+		name, description = t.Get("name").String(), t.Get("description").String()
+		isCustomTool = true
+	default:
+		// Fallback for tools without explicit type
+		if t.Get("name").Exists() {
+			name, description = t.Get("name").String(), t.Get("description").String()
+			// Try parameters first (flat format), then input_schema (Claude format)
+			if t.Get("parameters").Exists() {
+				paramsResult = t.Get("parameters")
+			} else {
+				paramsResult = t.Get("input_schema")
+			}
+		}
 	}
 
 	if name == "" {
@@ -628,15 +829,32 @@ func parseOpenAITool(t gjson.Result) *ir.ToolDefinition {
 	}
 
 	var params map[string]interface{}
-	if paramsResult.Exists() && paramsResult.IsObject() {
+	if !isCustomTool && paramsResult.Exists() && paramsResult.IsObject() {
 		if json.Unmarshal([]byte(paramsResult.Raw), &params) == nil {
 			params = ir.CleanJsonSchema(params)
 		}
 	}
-	if params == nil {
+	// For custom tools, params stays nil to indicate freeform input
+	// For regular tools, ensure we have at least an empty object
+	if params == nil && !isCustomTool {
 		params = make(map[string]interface{})
 	}
-	return &ir.ToolDefinition{Name: name, Description: description, Parameters: params}
+
+	// Parse format field for custom tools (e.g., apply_patch with grammar)
+	var format map[string]interface{}
+	if formatResult := t.Get("format"); formatResult.Exists() && formatResult.IsObject() {
+		if json.Unmarshal([]byte(formatResult.Raw), &format) != nil {
+			format = nil
+		}
+	}
+
+	return &ir.ToolDefinition{
+		Name:        name,
+		Description: description,
+		Parameters:  params,
+		Format:      format,
+		IsCustom:    isCustomTool,
+	}
 }
 
 func parseOpenAIThinkingConfig(root gjson.Result) *ir.ThinkingConfig {

@@ -184,12 +184,20 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			// Success! Set headers.
 			setSSEHeaders()
 
-			// Write first chunk logic (matching forwardResponsesStream)
+			// Write first chunk with proper SSE formatting
 			if bytes.HasPrefix(chunk, []byte("event:")) {
+				// SSE event line - write as-is with single newline (data line follows)
+				_, _ = c.Writer.Write(chunk)
 				_, _ = c.Writer.Write([]byte("\n"))
+			} else if bytes.HasPrefix(chunk, []byte("data:")) {
+				// SSE data line - write with double newline to complete the event
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n\n"))
+			} else {
+				// Unknown format - write as-is with double newline
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n\n"))
 			}
-			_, _ = c.Writer.Write(chunk)
-			_, _ = c.Writer.Write([]byte("\n"))
 			flusher.Flush()
 
 			// Continue
@@ -203,10 +211,18 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			if bytes.HasPrefix(chunk, []byte("event:")) {
+				// SSE event line - write as-is with single newline (data line follows)
+				_, _ = c.Writer.Write(chunk)
 				_, _ = c.Writer.Write([]byte("\n"))
+			} else if bytes.HasPrefix(chunk, []byte("data:")) {
+				// SSE data line - write with double newline to complete the event
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n\n"))
+			} else {
+				// Unknown format - write as-is with double newline
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n\n"))
 			}
-			_, _ = c.Writer.Write(chunk)
-			_, _ = c.Writer.Write([]byte("\n"))
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil {
