@@ -1008,6 +1008,12 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 				c.Set("accessProvider", result.Provider)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
+					// If upstream_key is present in metadata (from "<key>|<upstream_key>" format),
+					// inject it into the request context for the amp proxy to use
+					if upstreamKey, ok := result.Metadata["upstream_key"]; ok && upstreamKey != "" {
+						ctx := ampmodule.ContextWithUpstreamKey(c.Request.Context(), upstreamKey)
+						c.Request = c.Request.WithContext(ctx)
+					}
 				}
 			}
 			c.Next()

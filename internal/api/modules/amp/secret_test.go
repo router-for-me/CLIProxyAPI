@@ -278,3 +278,59 @@ func TestMultiSourceSecret_CacheEmptyResult(t *testing.T) {
 		t.Fatalf("after cache expiry, expected new-value, got %q", got3)
 	}
 }
+
+func TestUpstreamKeyContext(t *testing.T) {
+	ctx := context.Background()
+
+	// Test empty context returns empty string
+	if got := UpstreamKeyFromContext(ctx); got != "" {
+		t.Errorf("UpstreamKeyFromContext(empty) = %q, want empty", got)
+	}
+
+	// Test context with upstream key
+	ctx = ContextWithUpstreamKey(ctx, "my-upstream-key")
+	if got := UpstreamKeyFromContext(ctx); got != "my-upstream-key" {
+		t.Errorf("UpstreamKeyFromContext() = %q, want %q", got, "my-upstream-key")
+	}
+
+	// Test context with empty upstream key
+	ctx2 := ContextWithUpstreamKey(context.Background(), "")
+	if got := UpstreamKeyFromContext(ctx2); got != "" {
+		t.Errorf("UpstreamKeyFromContext(empty key) = %q, want empty", got)
+	}
+}
+
+func TestMultiSourceSecret_ContextUpstreamKeyPrecedence(t *testing.T) {
+	tmpDir := t.TempDir()
+	secretsPath := filepath.Join(tmpDir, "secrets.json")
+
+	// Create file-based secret
+	if err := os.WriteFile(secretsPath, []byte(`{"apiKey@https://ampcode.com/":"file-key"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set env var
+	t.Setenv("AMP_API_KEY", "env-key")
+
+	// Create source with explicit config key
+	s := NewMultiSourceSecretWithPath("config-key", secretsPath, 100*time.Millisecond)
+
+	// Test: context upstream key takes highest precedence
+	ctx := ContextWithUpstreamKey(context.Background(), "context-upstream-key")
+	got, err := s.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got != "context-upstream-key" {
+		t.Errorf("Get() = %q, want %q (context upstream should take precedence)", got, "context-upstream-key")
+	}
+
+	// Test: without context upstream key, falls back to config
+	got2, err := s.Get(context.Background())
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got2 != "config-key" {
+		t.Errorf("Get() = %q, want %q (config should be next in precedence)", got2, "config-key")
+	}
+}
