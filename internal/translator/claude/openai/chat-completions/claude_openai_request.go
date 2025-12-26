@@ -163,7 +163,15 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						switch partType {
 						case "text":
 							textPart := `{"type":"text","text":""}`
-							textPart, _ = sjson.Set(textPart, "text", part.Get("text").String())
+							// Handle nested text format: {"type": "text", "text": {"text": "content"}}
+							textResult := part.Get("text")
+							var textContent string
+							if textResult.IsObject() {
+								textContent = textResult.Get("text").String()
+							} else {
+								textContent = textResult.String()
+							}
+							textPart, _ = sjson.Set(textPart, "text", textContent)
 							msg, _ = sjson.SetRaw(msg, "content.-1", textPart)
 
 						case "image_url":

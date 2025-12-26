@@ -20,6 +20,16 @@ var (
 	dataTag = []byte("data:")
 )
 
+// escapeJSON escapes a string for safe inclusion in JSON
+func escapeJSON(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\r", "\\r")
+	s = strings.ReplaceAll(s, "\t", "\\t")
+	return s
+}
+
 // ConvertAnthropicResponseToOpenAIParams holds parameters for response conversion
 type ConvertAnthropicResponseToOpenAIParams struct {
 	CreatedAt    int64
@@ -143,9 +153,11 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 					hasContent = true
 				}
 			case "thinking_delta":
-				// Accumulate reasoning/thinking content
+				// Stream reasoning/thinking content as typed content part for OpenCode compatibility
 				if thinking := delta.Get("thinking"); thinking.Exists() {
-					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", thinking.String())
+					// Use content array with type:"reasoning" for ai-sdk compatibility
+					template, _ = sjson.SetRaw(template, "choices.0.delta.content",
+						`[{"type":"reasoning","text":"`+escapeJSON(thinking.String())+`"}]`)
 					hasContent = true
 				}
 			case "input_json_delta":
@@ -365,10 +377,6 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			}
 			if usage := root.Get("usage"); usage.Exists() {
 				outputTokens = usage.Get("output_tokens").Int()
-				// Estimate reasoning tokens from accumulated thinking content
-				if len(reasoningParts) > 0 {
-					reasoningTokens = int64(len(strings.Join(reasoningParts, "")) / 4) // Rough estimation
-				}
 			}
 		}
 	}
@@ -378,15 +386,23 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	out, _ = sjson.Set(out, "created", createdAt)
 	out, _ = sjson.Set(out, "model", model)
 
-	// Set message content by combining all text parts
-	messageContent := strings.Join(contentParts, "")
-	out, _ = sjson.Set(out, "choices.0.message.content", messageContent)
-
-	// Add reasoning content if available (following OpenAI reasoning format)
+	// Set message content - use array format with typed parts for OpenCode compatibility
 	if len(reasoningParts) > 0 {
+		// Build content array with reasoning and text parts
 		reasoningContent := strings.Join(reasoningParts, "")
-		// Add reasoning as a separate field in the message
-		out, _ = sjson.Set(out, "choices.0.message.reasoning", reasoningContent)
+		messageContent := strings.Join(contentParts, "")
+
+		// Create content array: [{"type":"reasoning","text":"..."},{"type":"text","text":"..."}]
+		contentArray := `[{"type":"reasoning","text":"` + escapeJSON(reasoningContent) + `"}`
+		if messageContent != "" {
+			contentArray += `,{"type":"text","text":"` + escapeJSON(messageContent) + `"}`
+		}
+		contentArray += `]`
+		out, _ = sjson.SetRaw(out, "choices.0.message.content", contentArray)
+	} else {
+		// No reasoning - use simple string content
+		messageContent := strings.Join(contentParts, "")
+		out, _ = sjson.Set(out, "choices.0.message.content", messageContent)
 	}
 
 	// Set tool calls if any were accumulated during processing

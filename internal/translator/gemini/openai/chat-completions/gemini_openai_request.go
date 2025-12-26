@@ -198,7 +198,15 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					for _, item := range items {
 						switch item.Get("type").String() {
 						case "text":
-							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", item.Get("text").String())
+							// Handle nested text format: {"type": "text", "text": {"text": "content"}}
+							textResult := item.Get("text")
+							var textContent string
+							if textResult.IsObject() {
+								textContent = textResult.Get("text").String()
+							} else {
+								textContent = textResult.String()
+							}
+							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", textContent)
 							p++
 						case "image_url":
 							imageURL := item.Get("image_url.url").String()

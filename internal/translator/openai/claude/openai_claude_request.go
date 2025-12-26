@@ -262,7 +262,12 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 
 	switch partType {
 	case "text":
-		text := part.Get("text").String()
+		textValue := part.Get("text")
+		// Handle potentially nested text format from some SDKs, e.g., {"text": {"text": "..."}}
+		for textValue.IsObject() {
+			textValue = textValue.Get("text")
+		}
+		text := textValue.String()
 		if strings.TrimSpace(text) == "" {
 			return "", false
 		}

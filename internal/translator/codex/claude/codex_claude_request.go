@@ -117,7 +117,15 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 					switch contentType {
 					case "text":
-						appendTextContent(messageContentResult.Get("text").String())
+						// Handle nested text format: {"type": "text", "text": {"text": "content"}}
+						textResult := messageContentResult.Get("text")
+						var textContent string
+						if textResult.IsObject() {
+							textContent = textResult.Get("text").String()
+						} else {
+							textContent = textResult.String()
+						}
+						appendTextContent(textContent)
 					case "image":
 						sourceResult := messageContentResult.Get("source")
 						if sourceResult.Exists() {

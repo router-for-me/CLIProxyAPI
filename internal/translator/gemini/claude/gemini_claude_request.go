@@ -80,7 +80,18 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					switch contentResult.Get("type").String() {
 					case "text":
 						part := `{"text":""}`
-						part, _ = sjson.Set(part, "text", contentResult.Get("text").String())
+						// Handle nested text format: {"type": "text", "text": {"text": "actual content"}}
+						// This can happen when SDKs echo back assistant messages with reasoning content
+						textResult := contentResult.Get("text")
+						var textContent string
+						if textResult.IsObject() {
+							// Nested format - extract inner text
+							textContent = textResult.Get("text").String()
+						} else {
+							// Normal format - text is a string
+							textContent = textResult.String()
+						}
+						part, _ = sjson.Set(part, "text", textContent)
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 
 					case "tool_use":
