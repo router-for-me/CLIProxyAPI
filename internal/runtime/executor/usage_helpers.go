@@ -19,7 +19,7 @@ type usageReporter struct {
 	provider    string
 	model       string
 	authID      string
-	authIndex   uint64
+	authIndex   string
 	apiKey      string
 	source      string
 	requestedAt time.Time
