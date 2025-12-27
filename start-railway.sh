@@ -7,10 +7,16 @@ set -e
 # Railway injects PORT, use it or default to 8080
 LISTEN_PORT="${PORT:-8080}"
 
-echo "Railway PORT env: ${PORT}"
+echo "=== Railway Environment Debug ==="
+echo "PORT env: ${PORT}"
 echo "Using port: ${LISTEN_PORT}"
+echo "API_KEY set: $([ -n \"${API_KEY}\" ] && echo 'yes' || echo 'no')"
+echo "MANAGEMENT_PASSWORD set: $([ -n \"${MANAGEMENT_PASSWORD}\" ] && echo 'yes' || echo 'no')"
+echo "================================="
 
 # Create config.yaml with the dynamic port
+# NOTE: The app reads MANAGEMENT_PASSWORD directly from environment (preferred)
+# The secret-key in config is only a fallback
 cat > /CLIProxyAPI/config.yaml << EOF
 # Auto-generated config for Railway deployment
 host: ""
@@ -27,6 +33,7 @@ debug: ${DEBUG:-false}
 auth-dir: "/CLIProxyAPI/.cli-proxy-api"
 
 # Management API settings
+# NOTE: App prefers MANAGEMENT_PASSWORD env var over this secret-key
 remote-management:
   allow-remote: true
   secret-key: "${MANAGEMENT_PASSWORD:-}"
