@@ -18,6 +18,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/securefile"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -249,19 +250,15 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
-		if existing, errRead := os.ReadFile(path); errRead == nil {
+		if existing, _, errRead := securefile.ReadAuthJSONFile(path); errRead == nil {
 			if jsonEqual(existing, raw) {
 				return path, nil
 			}
 		} else if !os.IsNotExist(errRead) {
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
-		tmp := path + ".tmp"
-		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-			return "", fmt.Errorf("auth filestore: write temp failed: %w", errWrite)
-		}
-		if errRename := os.Rename(tmp, path); errRename != nil {
-			return "", fmt.Errorf("auth filestore: rename failed: %w", errRename)
+		if errWrite := securefile.WriteAuthJSONFile(path, raw); errWrite != nil {
+			return "", fmt.Errorf("auth filestore: write failed: %w", errWrite)
 		}
 	default:
 		return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
@@ -406,7 +403,7 @@ func (s *GitTokenStore) resolveDeletePath(id string) (string, error) {
 }
 
 func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
-	data, err := os.ReadFile(path)
+	data, _, err := securefile.ReadAuthJSONFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
@@ -679,7 +676,7 @@ func (s *GitTokenStore) PersistConfig(_ context.Context) error {
 func ensureEmptyFile(path string) error {
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return os.WriteFile(path, []byte{}, 0o600)
+			return securefile.WriteFileRawLocked(path, []byte{}, 0o600)
 		}
 		return err
 	}

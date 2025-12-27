@@ -54,6 +54,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.ForceModelPrefix != newCfg.ForceModelPrefix {
 		changes = append(changes, fmt.Sprintf("force-model-prefix: %t -> %t", oldCfg.ForceModelPrefix, newCfg.ForceModelPrefix))
 	}
+	if oldCfg.AuthEncryption.Enabled != newCfg.AuthEncryption.Enabled {
+		changes = append(changes, fmt.Sprintf("auth-encryption.enabled: %t -> %t", oldCfg.AuthEncryption.Enabled, newCfg.AuthEncryption.Enabled))
+	}
+	if oldCfg.AuthEncryption.AllowPlaintextFallback != newCfg.AuthEncryption.AllowPlaintextFallback {
+		changes = append(changes, fmt.Sprintf("auth-encryption.allow-plaintext-fallback: %t -> %t", oldCfg.AuthEncryption.AllowPlaintextFallback, newCfg.AuthEncryption.AllowPlaintextFallback))
+	}
 
 	// Quota-exceeded behavior
 	if oldCfg.QuotaExceeded.SwitchProject != newCfg.QuotaExceeded.SwitchProject {

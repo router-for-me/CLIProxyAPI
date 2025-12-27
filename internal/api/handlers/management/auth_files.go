@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/securefile"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -345,7 +346,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 
 			// Read file to get type field
 			full := filepath.Join(h.cfg.AuthDir, name)
-			if data, errRead := os.ReadFile(full); errRead == nil {
+			if data, errRead := readAuthJSON(full); errRead == nil {
 				typeValue := gjson.GetBytes(data, "type").String()
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
@@ -457,6 +458,17 @@ func authAttribute(auth *coreauth.Auth, key string) string {
 	return auth.Attributes[key]
 }
 
+func readAuthJSON(path string) ([]byte, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("auth file path is empty")
+	}
+	data, _, err := securefile.ReadAuthJSONFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
 func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
 	if auth == nil || len(auth.Attributes) == 0 {
 		return false
@@ -476,7 +488,7 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 		return
 	}
 	full := filepath.Join(h.cfg.AuthDir, name)
-	data, err := os.ReadFile(full)
+	data, err := readAuthJSON(full)
 	if err != nil {
 		if os.IsNotExist(err) {
 			c.JSON(404, gin.H{"error": "file not found"})
@@ -512,9 +524,13 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to save file: %v", errSave)})
 			return
 		}
-		data, errRead := os.ReadFile(dst)
+		data, errRead := readAuthJSON(dst)
 		if errRead != nil {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read saved file: %v", errRead)})
+			return
+		}
+		if errWrite := securefile.WriteAuthJSONFile(dst, data); errWrite != nil {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to secure auth file: %v", errWrite)})
 			return
 		}
 		if errReg := h.registerAuthFromFile(ctx, dst, data); errReg != nil {
@@ -544,8 +560,8 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			dst = abs
 		}
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to write file: %v", errWrite)})
+	if errWrite := securefile.WriteAuthJSONFile(dst, data); errWrite != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to secure auth file: %v", errWrite)})
 		return
 	}
 	if err = h.registerAuthFromFile(ctx, dst, data); err != nil {
@@ -649,7 +665,7 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	}
 	if data == nil {
 		var err error
-		data, err = os.ReadFile(path)
+		data, err = readAuthJSON(path)
 		if err != nil {
 			return fmt.Errorf("failed to read auth file: %w", err)
 		}

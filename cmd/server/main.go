@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/securefile"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -45,6 +46,50 @@ func init() {
 	buildinfo.Version = Version
 	buildinfo.Commit = Commit
 	buildinfo.BuildDate = BuildDate
+}
+
+type authPersister interface {
+	PersistAuthFiles(ctx context.Context, message string, paths ...string) error
+}
+
+func applyAuthEncryptionConfig(cfg *config.Config, authDir string, persister authPersister, migrate bool) {
+	if cfg == nil {
+		securefile.ConfigureAuthEncryption(securefile.AuthEncryptionSettings{})
+		return
+	}
+	settings := securefile.AuthEncryptionSettings{
+		Enabled:                cfg.AuthEncryption.Enabled,
+		AllowPlaintextFallback: cfg.AuthEncryption.AllowPlaintextFallback,
+	}
+	secret := securefile.ResolveAuthEncryptionSecret(settings.Secret)
+	settings.Secret = secret
+	securefile.ConfigureAuthEncryption(settings)
+	if secret == "" {
+		if settings.Enabled {
+			log.Warn("auth-encryption enabled but no key configured; set CLIPROXY_AUTH_ENCRYPTION_KEY or CLI_PROXY_API_AUTH_ENCRYPTION_KEY")
+		} else if migrate {
+			log.Warn("auth-encryption disabled but no key configured; encrypted auth files cannot be decrypted without CLIPROXY_AUTH_ENCRYPTION_KEY or CLI_PROXY_API_AUTH_ENCRYPTION_KEY")
+		}
+	}
+	if !migrate || secret == "" {
+		return
+	}
+	changed, err := securefile.MigrateAuthJSONDir(authDir, settings)
+	if err != nil {
+		log.WithError(err).Warn("auth encryption migration encountered errors")
+	}
+	if len(changed) == 0 {
+		return
+	}
+	log.Infof("auth encryption migration updated %d auth file(s)", len(changed))
+	if persister == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := persister.PersistAuthFiles(ctx, "Migrate auth encryption", changed...); err != nil {
+		log.WithError(err).Warn("failed to persist auth encryption migration")
+	}
 }
 
 // main is the entry point of the application.
@@ -421,6 +466,13 @@ func main() {
 	} else {
 		cfg.AuthDir = resolvedAuthDir
 	}
+	if repoRoot, ok := util.FindGitRepoRoot(cfg.AuthDir); ok {
+		if useGitStore {
+			log.Warnf("auth-dir %q is inside a git repository (%q); git-backed token storage is enabled, ensure the repo/remote is private and tokens are not exposed", cfg.AuthDir, repoRoot)
+		} else {
+			log.Warnf("auth-dir %q is inside a git repository (%q); do not commit token files, add it to .gitignore or set auth-dir outside the repo", cfg.AuthDir, repoRoot)
+		}
+	}
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.
@@ -438,6 +490,14 @@ func main() {
 	} else {
 		sdkAuth.RegisterTokenStore(sdkAuth.NewFileTokenStore())
 	}
+
+	var persister authPersister
+	if store := sdkAuth.GetTokenStore(); store != nil {
+		if p, ok := store.(authPersister); ok {
+			persister = p
+		}
+	}
+	applyAuthEncryptionConfig(cfg, cfg.AuthDir, persister, true)
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register()
