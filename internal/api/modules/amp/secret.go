@@ -11,6 +11,23 @@ import (
 	"time"
 )
 
+// UpstreamKeyContextKey is the context key for per-request upstream API key
+// set via the "<key>|<upstream_key>" format in API keys configuration.
+type upstreamKeyContextKey struct{}
+
+// UpstreamKeyFromContext extracts the per-request upstream key from context.
+func UpstreamKeyFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(upstreamKeyContextKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// ContextWithUpstreamKey returns a context with the upstream key attached.
+func ContextWithUpstreamKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, upstreamKeyContextKey{}, key)
+}
+
 // SecretSource provides Amp API keys with configurable precedence and caching
 type SecretSource interface {
 	Get(ctx context.Context) (string, error)
@@ -67,10 +84,17 @@ func NewMultiSourceSecretWithPath(explicitKey string, filePath string, cacheTTL 
 	}
 }
 
-// Get retrieves the Amp API key using precedence: config > env > file
+// Get retrieves the Amp API key using precedence:
+// per-request key (from context) > config > env > file
 // Results are cached for cacheTTL duration to avoid excessive file reads
 func (s *MultiSourceSecret) Get(ctx context.Context) (string, error) {
-	// Precedence 1: Explicit config key (highest priority, no caching needed)
+	// Precedence 0: Per-request upstream key (highest priority)
+	// This is set via the "<key>|<upstream_key>" format in API keys configuration
+	if upstreamKey := UpstreamKeyFromContext(ctx); upstreamKey != "" {
+		return upstreamKey, nil
+	}
+
+	// Precedence 1: Explicit config key (no caching needed)
 	if s.explicitKey != "" {
 		return s.explicitKey, nil
 	}

@@ -32,6 +32,7 @@ remote-management:
 auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
+# Clients can send "<key>|<upstream_key>" format to specify a per-request upstream key for ampcode.
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"

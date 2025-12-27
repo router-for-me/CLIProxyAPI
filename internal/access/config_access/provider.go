@@ -39,6 +39,16 @@ func newProvider(cfg *sdkconfig.AccessProvider, _ *sdkconfig.SDKConfig) (sdkacce
 	return &provider{name: name, keys: keys}, nil
 }
 
+// parseClientKey parses the "<key>|<upstream_key>" format from client-provided credentials.
+// The upstream key is the string after the last "|".
+// If no "|" is present, returns the key as-is with empty upstream key.
+func parseClientKey(key string) (apiKey string, upstreamKey string) {
+	if idx := strings.LastIndex(key, "|"); idx != -1 {
+		return key[:idx], key[idx+1:]
+	}
+	return key, ""
+}
+
 func (p *provider) Identifier() string {
 	if p == nil || p.name == "" {
 		return sdkconfig.DefaultAccessProviderName
@@ -83,13 +93,20 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
-		if _, ok := p.keys[candidate.value]; ok {
+		// Parse "<key>|<upstream_key>" format from client-provided credentials
+		clientKey, upstreamKey := parseClientKey(candidate.value)
+		if _, ok := p.keys[clientKey]; ok {
+			metadata := map[string]string{
+				"source": candidate.source,
+			}
+			// Include upstream key in metadata if client provided it via "<key>|<upstream_key>" format
+			if upstreamKey != "" {
+				metadata["upstream_key"] = upstreamKey
+			}
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
-				Principal: candidate.value,
-				Metadata: map[string]string{
-					"source": candidate.source,
-				},
+				Principal: clientKey,
+				Metadata:  metadata,
 			}, nil
 		}
 	}
