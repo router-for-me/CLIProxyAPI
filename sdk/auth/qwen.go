@@ -44,12 +44,17 @@ func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 
 	authSvc := qwen.NewQwenAuth(cfg)
 
-	deviceFlow, err := authSvc.InitiateDeviceFlow(ctx)
+	deviceProvider := qwen.NewDeviceOAuthProvider(authSvc)
+
+	deviceFlow, err := deviceProvider.DeviceAuthorize(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("qwen device flow initiation failed: %w", err)
 	}
 
-	authURL := deviceFlow.VerificationURIComplete
+	authURL := strings.TrimSpace(deviceFlow.VerificationURIComplete)
+	if authURL == "" {
+		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
+	}
 
 	if !opts.NoBrowser {
 		fmt.Println("Opening browser for Qwen authentication")
@@ -66,11 +71,24 @@ func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 
 	fmt.Println("Waiting for Qwen authentication...")
 
-	tokenData, err := authSvc.PollForToken(deviceFlow.DeviceCode, deviceFlow.CodeVerifier)
+	tokenResult, err := deviceProvider.DevicePoll(ctx, deviceFlow)
 	if err != nil {
 		return nil, fmt.Errorf("qwen authentication failed: %w", err)
 	}
 
+	tokenData := &qwen.QwenTokenData{
+		AccessToken:  tokenResult.AccessToken,
+		RefreshToken: tokenResult.RefreshToken,
+		TokenType:    tokenResult.TokenType,
+		Expire:       tokenResult.ExpiresAt,
+	}
+	if tokenResult.Metadata != nil {
+		if raw, ok := tokenResult.Metadata["resource_url"]; ok {
+			if val, okStr := raw.(string); okStr {
+				tokenData.ResourceURL = strings.TrimSpace(val)
+			}
+		}
+	}
 	tokenStorage := authSvc.CreateTokenStorage(tokenData)
 
 	email := ""

@@ -7,13 +7,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/oauthflow"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/oauthhttp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
@@ -85,7 +86,7 @@ type QwenAuth struct {
 // NewQwenAuth creates a new QwenAuth instance with a proxy-configured HTTP client.
 func NewQwenAuth(cfg *config.Config) *QwenAuth {
 	return &QwenAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+		httpClient: util.SetOAuthProxy(&cfg.SDKConfig, &http.Client{Timeout: 30 * time.Second}),
 	}
 }
 
@@ -116,40 +117,46 @@ func (qa *QwenAuth) generatePKCEPair() (string, string, error) {
 
 // RefreshTokens exchanges a refresh token for a new access token.
 func (qa *QwenAuth) RefreshTokens(ctx context.Context, refreshToken string) (*QwenTokenData, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("refresh_token", refreshToken)
 	data.Set("client_id", QwenOAuthClientID)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", QwenOAuthTokenEndpoint, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create token request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := qa.httpClient.Do(req)
-
-	// resp, err := qa.httpClient.PostForm(QwenOAuthTokenEndpoint, data)
-	if err != nil {
+	encoded := data.Encode()
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		qa.httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, QwenOAuthTokenEndpoint, strings.NewReader(encoded))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create token request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
 		return nil, fmt.Errorf("token refresh request failed: %w", err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
+	if status != http.StatusOK {
 		var errorData map[string]interface{}
 		if err = json.Unmarshal(body, &errorData); err == nil {
 			return nil, fmt.Errorf("token refresh failed: %v - %v", errorData["error"], errorData["error_description"])
 		}
-		return nil, fmt.Errorf("token refresh failed: %s", string(body))
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("token refresh failed: %s: %w", msg, err)
+		}
+		return nil, fmt.Errorf("token refresh failed: %s", msg)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("token refresh request failed: %w", err)
 	}
 
 	var tokenData QwenTokenResponse
@@ -168,6 +175,9 @@ func (qa *QwenAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Qw
 
 // InitiateDeviceFlow starts the OAuth 2.0 device authorization flow and returns the device flow details.
 func (qa *QwenAuth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Generate PKCE code verifier and challenge
 	codeVerifier, codeChallenge, err := qa.generatePKCEPair()
 	if err != nil {
@@ -180,31 +190,34 @@ func (qa *QwenAuth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error)
 	data.Set("code_challenge", codeChallenge)
 	data.Set("code_challenge_method", "S256")
 
-	req, err := http.NewRequestWithContext(ctx, "POST", QwenOAuthDeviceCodeEndpoint, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create token request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := qa.httpClient.Do(req)
-
-	// resp, err := qa.httpClient.PostForm(QwenOAuthDeviceCodeEndpoint, data)
-	if err != nil {
+	encoded := data.Encode()
+	status, _, body, err := oauthhttp.Do(
+		ctx,
+		qa.httpClient,
+		func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, QwenOAuthDeviceCodeEndpoint, strings.NewReader(encoded))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create token request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		},
+		oauthhttp.DefaultRetryConfig(),
+	)
+	if err != nil && status == 0 {
 		return nil, fmt.Errorf("device authorization request failed: %w", err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+	if status != http.StatusOK {
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("device authorization failed: %d. Response: %s: %w", status, msg, err)
+		}
+		return nil, fmt.Errorf("device authorization failed: %d. Response: %s", status, msg)
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("device authorization failed: %d %s. Response: %s", resp.StatusCode, resp.Status, string(body))
+	if err != nil {
+		return nil, fmt.Errorf("device authorization request failed: %w", err)
 	}
 
 	var result DeviceFlow
@@ -224,90 +237,128 @@ func (qa *QwenAuth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error)
 }
 
 // PollForToken polls the token endpoint with the device code to obtain an access token.
-func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenData, error) {
-	pollInterval := 5 * time.Second
-	maxAttempts := 60 // 5 minutes max
+func (qa *QwenAuth) PollForToken(ctx context.Context, deviceFlow *DeviceFlow) (*QwenTokenData, error) {
+	if deviceFlow == nil {
+		return nil, fmt.Errorf("device flow is nil")
+	}
+	deviceCode := strings.TrimSpace(deviceFlow.DeviceCode)
+	if deviceCode == "" {
+		return nil, fmt.Errorf("device code is empty")
+	}
+	codeVerifier := strings.TrimSpace(deviceFlow.CodeVerifier)
+	if codeVerifier == "" {
+		return nil, fmt.Errorf("code verifier is empty")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	device := &oauthflow.DeviceCodeResult{
+		DeviceCode:   deviceCode,
+		ExpiresIn:    deviceFlow.ExpiresIn,
+		Interval:     deviceFlow.Interval,
+		CodeVerifier: codeVerifier,
+	}
+
+	token, err := oauthflow.PollDeviceToken(ctx, device, func(pollCtx context.Context) (*oauthflow.TokenResult, error) {
 		data := url.Values{}
 		data.Set("grant_type", QwenOAuthGrantType)
 		data.Set("client_id", QwenOAuthClientID)
 		data.Set("device_code", deviceCode)
 		data.Set("code_verifier", codeVerifier)
 
-		resp, err := http.PostForm(QwenOAuthTokenEndpoint, data)
-		if err != nil {
-			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			// Parse the response as JSON to check for OAuth RFC 8628 standard errors
-			var errorData map[string]interface{}
-			if err = json.Unmarshal(body, &errorData); err == nil {
-				// According to OAuth RFC 8628, handle standard polling responses
-				if resp.StatusCode == http.StatusBadRequest {
-					errorType, _ := errorData["error"].(string)
-					switch errorType {
-					case "authorization_pending":
-						// User has not yet approved the authorization request. Continue polling.
-						fmt.Printf("Polling attempt %d/%d...\n\n", attempt+1, maxAttempts)
-						time.Sleep(pollInterval)
-						continue
-					case "slow_down":
-						// Client is polling too frequently. Increase poll interval.
-						pollInterval = time.Duration(float64(pollInterval) * 1.5)
-						if pollInterval > 10*time.Second {
-							pollInterval = 10 * time.Second
-						}
-						fmt.Printf("Server requested to slow down, increasing poll interval to %v\n\n", pollInterval)
-						time.Sleep(pollInterval)
-						continue
-					case "expired_token":
-						return nil, fmt.Errorf("device code expired. Please restart the authentication process")
-					case "access_denied":
-						return nil, fmt.Errorf("authorization denied by user. Please restart the authentication process")
-					}
+		encoded := data.Encode()
+		status, _, body, err := oauthhttp.Do(
+			pollCtx,
+			qa.httpClient,
+			func() (*http.Request, error) {
+				req, err := http.NewRequestWithContext(pollCtx, http.MethodPost, QwenOAuthTokenEndpoint, strings.NewReader(encoded))
+				if err != nil {
+					return nil, err
 				}
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.Header.Set("Accept", "application/json")
+				return req, nil
+			},
+			oauthhttp.DefaultRetryConfig(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", oauthflow.ErrTransient, err)
+		}
 
-				// For other errors, return with proper error information
-				errorType, _ := errorData["error"].(string)
-				errorDesc, _ := errorData["error_description"].(string)
-				return nil, fmt.Errorf("device token poll failed: %s - %s", errorType, errorDesc)
+		if status == http.StatusOK {
+			var response QwenTokenResponse
+			if err = json.Unmarshal(body, &response); err != nil {
+				return nil, fmt.Errorf("failed to parse token response: %w", err)
 			}
-
-			// If JSON parsing fails, fall back to text response
-			return nil, fmt.Errorf("device token poll failed: %d %s. Response: %s", resp.StatusCode, resp.Status, string(body))
-		}
-		// log.Debugf("%s", string(body))
-		// Success - parse token data
-		var response QwenTokenResponse
-		if err = json.Unmarshal(body, &response); err != nil {
-			return nil, fmt.Errorf("failed to parse token response: %w", err)
-		}
-
-		// Convert to QwenTokenData format and save
-		tokenData := &QwenTokenData{
-			AccessToken:  response.AccessToken,
-			RefreshToken: response.RefreshToken,
-			TokenType:    response.TokenType,
-			ResourceURL:  response.ResourceURL,
-			Expire:       time.Now().Add(time.Duration(response.ExpiresIn) * time.Second).Format(time.RFC3339),
+			meta := map[string]any{}
+			if strings.TrimSpace(response.ResourceURL) != "" {
+				meta["resource_url"] = response.ResourceURL
+			}
+			tokenType := strings.TrimSpace(response.TokenType)
+			if tokenType == "" {
+				tokenType = "Bearer"
+			}
+			return &oauthflow.TokenResult{
+				AccessToken:  response.AccessToken,
+				RefreshToken: response.RefreshToken,
+				TokenType:    tokenType,
+				ExpiresAt:    time.Now().Add(time.Duration(response.ExpiresIn) * time.Second).Format(time.RFC3339),
+				Metadata:     meta,
+			}, nil
 		}
 
-		return tokenData, nil
+		// Parse the response as JSON to check for OAuth RFC 8628 standard errors.
+		var errorData struct {
+			Error            string `json:"error"`
+			ErrorDescription string `json:"error_description"`
+		}
+		if err = json.Unmarshal(body, &errorData); err == nil {
+			if status == http.StatusBadRequest {
+				switch strings.TrimSpace(errorData.Error) {
+				case "authorization_pending":
+					return nil, oauthflow.ErrAuthorizationPending
+				case "slow_down":
+					return nil, oauthflow.ErrSlowDown
+				case "expired_token":
+					return nil, oauthflow.ErrDeviceCodeExpired
+				case "access_denied":
+					return nil, oauthflow.ErrAccessDenied
+				}
+			}
+			if strings.TrimSpace(errorData.Error) != "" {
+				return nil, fmt.Errorf("device token poll failed: %s - %s", errorData.Error, errorData.ErrorDescription)
+			}
+		}
+
+		trimmed := strings.TrimSpace(string(body))
+		if status == http.StatusTooManyRequests || status >= http.StatusInternalServerError {
+			return nil, fmt.Errorf("%w: status %d: %s", oauthflow.ErrTransient, status, trimmed)
+		}
+		return nil, fmt.Errorf("device token poll failed: status %d: %s", status, trimmed)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if token == nil {
+		return nil, fmt.Errorf("token result is nil")
 	}
 
-	return nil, fmt.Errorf("authentication timeout. Please restart the authentication process")
+	tokenData := &QwenTokenData{
+		AccessToken:  token.AccessToken,
+		RefreshToken: token.RefreshToken,
+		TokenType:    token.TokenType,
+		Expire:       token.ExpiresAt,
+	}
+	if token.Metadata != nil {
+		if raw, ok := token.Metadata["resource_url"]; ok {
+			if val, okStr := raw.(string); okStr {
+				tokenData.ResourceURL = strings.TrimSpace(val)
+			}
+		}
+	}
+
+	return tokenData, nil
 }
 
 // RefreshTokensWithRetry attempts to refresh tokens with a specified number of retries upon failure.
