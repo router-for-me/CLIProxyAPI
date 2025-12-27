@@ -50,6 +50,16 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	defer reporter.trackFailure(ctx, &err)
 
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
+	}
+	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
+		upstreamModel = modelOverride
+	} else if !strings.EqualFold(upstreamModel, req.Model) {
+		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+			upstreamModel = modelOverride
+		}
+	}
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
@@ -147,6 +157,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	defer reporter.trackFailure(ctx, &err)
 
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
+	}
+	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
+		upstreamModel = modelOverride
+	} else if !strings.EqualFold(upstreamModel, req.Model) {
+		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+			upstreamModel = modelOverride
+		}
+	}
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
@@ -247,12 +267,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
+	}
+	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
+		upstreamModel = modelOverride
+	} else if !strings.EqualFold(upstreamModel, req.Model) {
+		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+			upstreamModel = modelOverride
+		}
+	}
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 
-	modelForCounting := req.Model
+	modelForCounting := upstreamModel
 
 	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning.effort", false)
 	body, _ = sjson.SetBytes(body, "model", upstreamModel)
@@ -519,4 +549,88 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+func (e *CodexExecutor) resolveUpstreamModel(alias string, auth *cliproxyauth.Auth) string {
+	trimmed := strings.TrimSpace(alias)
+	if trimmed == "" {
+		return ""
+	}
+
+	entry := e.resolveCodexConfig(auth)
+	if entry == nil {
+		return ""
+	}
+
+	normalizedModel, metadata := util.NormalizeThinkingModel(trimmed)
+
+	// Candidate names to match against configured aliases/names.
+	candidates := []string{strings.TrimSpace(normalizedModel)}
+	if !strings.EqualFold(normalizedModel, trimmed) {
+		candidates = append(candidates, trimmed)
+	}
+	if original := util.ResolveOriginalModel(normalizedModel, metadata); original != "" && !strings.EqualFold(original, normalizedModel) {
+		candidates = append(candidates, original)
+	}
+
+	for i := range entry.Models {
+		model := entry.Models[i]
+		name := strings.TrimSpace(model.Name)
+		modelAlias := strings.TrimSpace(model.Alias)
+
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			if modelAlias != "" && strings.EqualFold(modelAlias, candidate) {
+				if name != "" {
+					return name
+				}
+				return candidate
+			}
+			if name != "" && strings.EqualFold(name, candidate) {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {
+	if auth == nil || e.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range e.cfg.CodexKey {
+		entry := &e.cfg.CodexKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && attrBase != "" {
+			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range e.cfg.CodexKey {
+			entry := &e.cfg.CodexKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
 }

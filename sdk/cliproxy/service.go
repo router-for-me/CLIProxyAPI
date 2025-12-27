@@ -745,6 +745,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "codex":
 		models = registry.GetOpenAIModels()
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildCodexConfigModels(entry)
+			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
@@ -1183,6 +1186,44 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 			Created:     now,
 			OwnedBy:     "claude",
 			Type:        "claude",
+			DisplayName: display,
+		})
+	}
+	return out
+}
+
+func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
+	if entry == nil || len(entry.Models) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	out := make([]*ModelInfo, 0, len(entry.Models))
+	seen := make(map[string]struct{}, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		name := strings.TrimSpace(model.Name)
+		alias := strings.TrimSpace(model.Alias)
+		if alias == "" {
+			alias = name
+		}
+		if alias == "" {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		display := name
+		if display == "" {
+			display = alias
+		}
+		out = append(out, &ModelInfo{
+			ID:          alias,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "openai",
+			Type:        "openai",
 			DisplayName: display,
 		})
 	}

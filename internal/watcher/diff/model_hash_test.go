@@ -81,6 +81,15 @@ func TestComputeClaudeModelsHash_Empty(t *testing.T) {
 	}
 }
 
+func TestComputeCodexModelsHash_Empty(t *testing.T) {
+	if got := ComputeCodexModelsHash(nil); got != "" {
+		t.Fatalf("expected empty hash for nil models, got %q", got)
+	}
+	if got := ComputeCodexModelsHash([]config.CodexModel{}); got != "" {
+		t.Fatalf("expected empty hash for empty slice, got %q", got)
+	}
+}
+
 func TestComputeClaudeModelsHash_IgnoresBlankAndDedup(t *testing.T) {
 	a := []config.ClaudeModel{
 		{Name: "m1", Alias: "a1"},
@@ -91,6 +100,20 @@ func TestComputeClaudeModelsHash_IgnoresBlankAndDedup(t *testing.T) {
 		{Name: "m1", Alias: "a1"},
 	}
 	if h1, h2 := ComputeClaudeModelsHash(a), ComputeClaudeModelsHash(b); h1 == "" || h1 != h2 {
+		t.Fatalf("expected same hash ignoring blanks/dupes, got %q / %q", h1, h2)
+	}
+}
+
+func TestComputeCodexModelsHash_IgnoresBlankAndDedup(t *testing.T) {
+	a := []config.CodexModel{
+		{Name: "m1", Alias: "a1"},
+		{Name: " "},
+		{Name: "M1", Alias: "A1"},
+	}
+	b := []config.CodexModel{
+		{Name: "m1", Alias: "a1"},
+	}
+	if h1, h2 := ComputeCodexModelsHash(a), ComputeCodexModelsHash(b); h1 == "" || h1 != h2 {
 		t.Fatalf("expected same hash ignoring blanks/dupes, got %q / %q", h1, h2)
 	}
 }
@@ -154,6 +177,18 @@ func TestComputeClaudeModelsHash_Deterministic(t *testing.T) {
 		t.Fatalf("expected deterministic hash, got %s / %s", h1, h2)
 	}
 	if h3 := ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "a"}}); h3 == h1 {
+		t.Fatalf("expected different hash when models change, got %s", h3)
+	}
+}
+
+func TestComputeCodexModelsHash_Deterministic(t *testing.T) {
+	models := []config.CodexModel{{Name: "a", Alias: "A"}, {Name: "b"}}
+	h1 := ComputeCodexModelsHash(models)
+	h2 := ComputeCodexModelsHash(models)
+	if h1 == "" || h1 != h2 {
+		t.Fatalf("expected deterministic hash, got %s / %s", h1, h2)
+	}
+	if h3 := ComputeCodexModelsHash([]config.CodexModel{{Name: "a"}}); h3 == h1 {
 		t.Fatalf("expected different hash when models change, got %s", h3)
 	}
 }
