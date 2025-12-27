@@ -247,7 +247,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			} else if role == "assistant" {
 				node := []byte(`{"role":"model","parts":[]}`)
 				p := 0
-				if content.Type == gjson.String {
+				if content.Type == gjson.String && content.String() != "" {
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
 					p++
 				} else if content.IsArray() {

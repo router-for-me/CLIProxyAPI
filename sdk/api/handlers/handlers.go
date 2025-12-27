@@ -104,8 +104,8 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 // Returning 0 disables keep-alives (default when unset).
 func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	seconds := defaultStreamingKeepAliveSeconds
-	if cfg != nil && cfg.Streaming.KeepAliveSeconds != nil {
-		seconds = *cfg.Streaming.KeepAliveSeconds
+	if cfg != nil {
+		seconds = cfg.Streaming.KeepAliveSeconds
 	}
 	if seconds <= 0 {
 		return 0
@@ -116,8 +116,8 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 // StreamingBootstrapRetries returns how many times a streaming request may be retried before any bytes are sent.
 func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	retries := defaultStreamingBootstrapRetries
-	if cfg != nil && cfg.Streaming.BootstrapRetries != nil {
-		retries = *cfg.Streaming.BootstrapRetries
+	if cfg != nil {
+		retries = cfg.Streaming.BootstrapRetries
 	}
 	if retries < 0 {
 		retries = 0

@@ -13,8 +13,6 @@ Dockerfile
 docs/*
 README.md
 README_CN.md
-MANAGEMENT_API.md
-MANAGEMENT_API_CN.md
 LICENSE
 
 # Runtime data folders (should be mounted as volumes)
@@ -32,3 +30,4 @@ bin/*
 .agent/*
 .bmad/*
 _bmad/*
+_bmad-output/*
