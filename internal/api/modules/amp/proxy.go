@@ -3,8 +3,11 @@ package amp
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -67,7 +70,15 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 	// Modify incoming responses to handle gzip without Content-Encoding
 	// This addresses the same issue as inline handler gzip handling, but at the proxy level
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		// Only process successful responses
+		// Log upstream error responses for diagnostics (502, 503, etc.)
+		// These are NOT proxy connection errors - the upstream responded with an error status
+		if resp.StatusCode >= 500 {
+			log.Errorf("amp upstream responded with error [%d] for %s %s", resp.StatusCode, resp.Request.Method, resp.Request.URL.Path)
+		} else if resp.StatusCode >= 400 {
+			log.Warnf("amp upstream responded with client error [%d] for %s %s", resp.StatusCode, resp.Request.Method, resp.Request.URL.Path)
+		}
+
+		// Only process successful responses for gzip decompression
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil
 		}
@@ -151,9 +162,29 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		return nil
 	}
 
-	// Error handler for proxy failures
+	// Error handler for proxy failures with detailed error classification for diagnostics
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		log.Errorf("amp upstream proxy error for %s %s: %v", req.Method, req.URL.Path, err)
+		// Classify the error type for better diagnostics
+		var errType string
+		if errors.Is(err, context.DeadlineExceeded) {
+			errType = "timeout"
+		} else if errors.Is(err, context.Canceled) {
+			errType = "canceled"
+		} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			errType = "dial_timeout"
+		} else if _, ok := err.(net.Error); ok {
+			errType = "network_error"
+		} else {
+			errType = "connection_error"
+		}
+
+		// Don't log as error for context canceled - it's usually client closing connection
+		if errors.Is(err, context.Canceled) {
+			log.Debugf("amp upstream proxy [%s]: client canceled request for %s %s", errType, req.Method, req.URL.Path)
+		} else {
+			log.Errorf("amp upstream proxy error [%s] for %s %s: %v", errType, req.Method, req.URL.Path, err)
+		}
+
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusBadGateway)
 		_, _ = rw.Write([]byte(`{"error":"amp_upstream_proxy_error","message":"Failed to reach Amp upstream"}`))
