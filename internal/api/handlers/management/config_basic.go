@@ -160,6 +160,12 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	h.cfg = newCfg
+
+	// Update global aliases from the new config
+	if newCfg.Aliases != nil {
+		util.SetAliases(newCfg.Aliases)
+	}
+
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
@@ -240,4 +246,82 @@ func (h *Handler) PutProxyURL(c *gin.Context) {
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
+}
+
+// Aliases
+func (h *Handler) GetAliases(c *gin.Context) {
+	aliases := h.cfg.Aliases
+	if aliases == nil {
+		aliases = make(map[string][]string)
+	}
+	c.JSON(200, gin.H{"aliases": aliases})
+}
+
+func (h *Handler) PutAliases(c *gin.Context) {
+	var body struct {
+		Aliases *map[string][]string `json:"aliases"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Aliases == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	h.cfg.Aliases = *body.Aliases
+	h.persist(c)
+	// Update global aliases after persisting
+	if h.cfg.Aliases != nil {
+		util.SetAliases(h.cfg.Aliases)
+	}
+}
+
+func (h *Handler) PutAlias(c *gin.Context) {
+	alias := c.Param("alias")
+	if alias == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing alias"})
+		return
+	}
+	var body struct {
+		Target  *string   `json:"target"`
+		Targets *[]string `json:"targets"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	var targets []string
+	if body.Targets != nil {
+		targets = *body.Targets
+	} else if body.Target != nil {
+		targets = []string{*body.Target}
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing target or targets"})
+		return
+	}
+
+	if h.cfg.Aliases == nil {
+		h.cfg.Aliases = make(map[string][]string)
+	}
+	h.cfg.Aliases[alias] = targets
+	if !h.persist(c) {
+		return
+	}
+	// Update global aliases after persisting
+	util.SetAliases(h.cfg.Aliases)
+	c.JSON(200, gin.H{"alias": alias, "targets": targets})
+}
+
+func (h *Handler) DeleteAlias(c *gin.Context) {
+	alias := c.Param("alias")
+	if alias == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing alias"})
+		return
+	}
+	if h.cfg.Aliases != nil {
+		delete(h.cfg.Aliases, alias)
+	}
+	util.SetAliases(h.cfg.Aliases)
+	if !h.persist(c) {
+		return
+	}
+	c.JSON(200, gin.H{"deleted": alias})
 }
