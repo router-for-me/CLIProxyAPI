@@ -7,3 +7,8 @@ healthcheckPath = "/"
 healthcheckTimeout = 100
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
+
+# Railway will set PORT env var and we use it
+# If Railway auto-detects wrong port, we force it to 8080
+[deploy.env]
+PORT = "8080"
