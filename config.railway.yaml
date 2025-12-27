@@ -1,0 +1,17 @@
+# Railway deployment configuration for CLIProxyAPI
+# This file uses environment variables support by Railway
+
+# The PORT is injected by Railway as an environment variable
+# The server reads this from config, but we'll override via start script
+host: ""
+port: ${PORT:-8317}
+
+# API keys for authentication (set via Railway environment variables)
+api-keys:
+  - "${API_KEY:-default-api-key}"
+
+# Enable debug logging
+debug: false
+
+# Auth directory - use Railway's persistent storage
+auth-dir: "/CLIProxyAPI/.cli-proxy-api"
