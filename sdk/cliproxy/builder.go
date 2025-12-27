@@ -199,17 +199,19 @@ func (b *Builder) Build() (*Service, error) {
 			dirSetter.SetBaseDir(b.cfg.AuthDir)
 		}
 
-		strategy := ""
-		if b.cfg != nil {
-			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
-		}
-		var selector coreauth.Selector
-		switch strategy {
-		case "fill-first", "fillfirst", "ff":
-			selector = &coreauth.FillFirstSelector{}
-		default:
-			selector = &coreauth.RoundRobinSelector{}
-		}
+			strategy := ""
+			if b.cfg != nil {
+				strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
+			}
+			var selector coreauth.Selector
+			switch strategy {
+			case "sticky", "sticky-session", "stickysession", "ss":
+				selector = &coreauth.StickySelector{}
+			case "fill-first", "fillfirst", "ff":
+				selector = &coreauth.FillFirstSelector{}
+			default:
+				selector = &coreauth.RoundRobinSelector{}
+			}
 
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)
 	}

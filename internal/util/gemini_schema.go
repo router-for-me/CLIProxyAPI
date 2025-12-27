@@ -38,6 +38,12 @@ func CleanJSONSchemaForAntigravity(jsonStr string) string {
 	return jsonStr
 }
 
+// CleanJSONSchemaForGemini transforms a JSON schema to be compatible with Gemini API.
+// It removes unsupported keywords that Gemini rejects (e.g. propertyNames).
+func CleanJSONSchemaForGemini(jsonStr string) string {
+	return removeUnsupportedKeywords(jsonStr)
+}
+
 // convertRefsToHints converts $ref to description hints (Lazy Hint strategy).
 func convertRefsToHints(jsonStr string) string {
 	paths := findPaths(jsonStr, "$ref")

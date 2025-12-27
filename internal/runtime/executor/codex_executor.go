@@ -13,6 +13,8 @@ import (
 	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/openai/responses"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -39,6 +41,57 @@ func NewCodexExecutor(cfg *config.Config) *CodexExecutor { return &CodexExecutor
 func (e *CodexExecutor) Identifier() string { return "codex" }
 
 func (e *CodexExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
+
+// FetchCodexQuota performs a minimal Codex request to obtain x-codex-* headers for observability.
+// It closes the response body immediately after reading headers to minimize work.
+func FetchCodexQuota(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config, model string) (*usage.CodexQuotaSnapshot, error) {
+	apiKey, baseURL := codexCreds(auth)
+	if apiKey == "" {
+		return nil, fmt.Errorf("codex quota: missing token")
+	}
+	if baseURL == "" {
+		baseURL = "https://chatgpt.com/backend-api/codex"
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "gpt-5.2"
+	}
+	upstreamModel := util.ResolveOriginalModel(model, nil)
+
+	// Create a minimal OpenAI Responses request and convert it into Codex-compatible format.
+	payload := []byte(`{"model":"","input":"","stream":true}`)
+	payload, _ = sjson.SetBytes(payload, "model", upstreamModel)
+	body := responses.ConvertOpenAIResponsesRequestToCodex(upstreamModel, payload, true)
+	body = ApplyReasoningEffortMetadata(body, nil, upstreamModel, "reasoning.effort", false)
+	body = NormalizeThinkingConfig(body, upstreamModel, false)
+	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
+		return nil, errValidate
+	}
+	body = applyPayloadConfig(cfg, upstreamModel, body)
+	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+
+	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	applyCodexHeaders(httpReq, auth, apiKey)
+	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	if errClose := httpResp.Body.Close(); errClose != nil {
+		log.Errorf("codex quota: close response body error: %v", errClose)
+	}
+
+	if snap := usage.ParseCodexQuotaSnapshot(httpResp.Header); snap != nil {
+		return snap, nil
+	}
+	return nil, fmt.Errorf("codex quota: no quota headers present")
+}
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	apiKey, baseURL := codexCreds(auth)
@@ -98,7 +151,14 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
 	}()
+
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if auth != nil && auth.ID != "" {
+		if snapshot := usage.ParseCodexQuotaSnapshot(httpResp.Header); snapshot != nil {
+			usage.UpdateCodexQuotaSnapshot(auth.ID, snapshot)
+		}
+	}
+
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -191,7 +251,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
+
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if auth != nil && auth.ID != "" {
+		if snapshot := usage.ParseCodexQuotaSnapshot(httpResp.Header); snapshot != nil {
+			usage.UpdateCodexQuotaSnapshot(auth.ID, snapshot)
+		}
+	}
+
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {

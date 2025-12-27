@@ -140,6 +140,17 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	return map[string]any{idempotencyKeyMetadataKey: key}
 }
 
+func requestHeaders(ctx context.Context) http.Header {
+	if ctx == nil {
+		return nil
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil || ginCtx.Request.Header == nil {
+		return nil
+	}
+	return ginCtx.Request.Header.Clone()
+}
+
 func mergeMetadata(base, overlay map[string]any) map[string]any {
 	if len(base) == 0 && len(overlay) == 0 {
 		return nil
@@ -336,6 +347,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		OriginalRequest: cloneBytes(rawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
+	opts.Headers = requestHeaders(ctx)
 	opts.Metadata = mergeMetadata(cloneMetadata(metadata), reqMeta)
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
@@ -377,6 +389,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		OriginalRequest: cloneBytes(rawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
+	opts.Headers = requestHeaders(ctx)
 	opts.Metadata = mergeMetadata(cloneMetadata(metadata), reqMeta)
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
@@ -421,6 +434,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		OriginalRequest: cloneBytes(rawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
+	opts.Headers = requestHeaders(ctx)
 	opts.Metadata = mergeMetadata(cloneMetadata(metadata), reqMeta)
 	chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {

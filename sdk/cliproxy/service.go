@@ -525,6 +525,8 @@ func (s *Service) Run(ctx context.Context) error {
 		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
 		normalizeStrategy := func(strategy string) string {
 			switch strategy {
+			case "sticky", "sticky-session", "stickysession", "ss":
+				return "sticky"
 			case "fill-first", "fillfirst", "ff":
 				return "fill-first"
 			default:
@@ -538,6 +540,8 @@ func (s *Service) Run(ctx context.Context) error {
 			switch nextStrategy {
 			case "fill-first":
 				selector = &coreauth.FillFirstSelector{}
+			case "sticky":
+				selector = &coreauth.StickySelector{}
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}

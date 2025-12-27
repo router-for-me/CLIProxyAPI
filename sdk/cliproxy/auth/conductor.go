@@ -136,6 +136,17 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 }
 
+// Selector returns the currently configured auth selector.
+func (m *Manager) Selector() Selector {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	return selector
+}
+
 func (m *Manager) SetSelector(selector Selector) {
 	if m == nil {
 		return

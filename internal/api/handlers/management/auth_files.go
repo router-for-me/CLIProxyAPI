@@ -27,6 +27,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -276,6 +278,344 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	c.JSON(200, gin.H{"files": files})
 }
 
+func (h *Handler) GetAuthFileSessionBindings(c *gin.Context) {
+	if h == nil || c == nil {
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+	selector := h.authManager.Selector()
+	stickySelector, ok := selector.(*coreauth.StickySelector)
+	if !ok || stickySelector == nil {
+		c.JSON(http.StatusOK, gin.H{"bindings": []coreauth.SessionBindingStatus{}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"bindings": stickySelector.SessionBindingStatuses()})
+}
+
+type authPriorityUpdateRequest struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Priority int    `json:"priority"`
+}
+
+type authDisabledUpdateRequest struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Disabled bool   `json:"disabled"`
+}
+
+type antigravityQuotaRefreshRequest struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type codexQuotaRefreshRequest struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Model string `json:"model"`
+}
+
+// PutAuthFileDisabled enables/disables an auth entry (file-backed or runtime-only).
+//
+// JSON body:
+//   - id (preferred) or name
+//   - disabled: true to disable, false to enable
+func (h *Handler) PutAuthFileDisabled(c *gin.Context) {
+	if h == nil || c == nil {
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager not available"})
+		return
+	}
+
+	var req authDisabledUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+	req.ID = strings.TrimSpace(req.ID)
+	req.Name = strings.TrimSpace(req.Name)
+
+	if req.ID == "" && req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id or name is required"})
+		return
+	}
+
+	authID := req.ID
+	if authID == "" {
+		for _, a := range h.authManager.List() {
+			if a == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(a.FileName), req.Name) || strings.EqualFold(strings.TrimSpace(a.ID), req.Name) {
+				authID = a.ID
+				break
+			}
+		}
+	}
+	if authID == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+
+	auth, ok := h.authManager.GetByID(authID)
+	if !ok || auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+
+	auth.Disabled = req.Disabled
+	now := time.Now()
+	auth.UpdatedAt = now
+	if req.Disabled {
+		auth.Status = coreauth.StatusDisabled
+		if strings.TrimSpace(auth.StatusMessage) == "" {
+			auth.StatusMessage = "disabled via management API"
+		}
+	} else {
+		if auth.Status == coreauth.StatusDisabled {
+			auth.Status = coreauth.StatusActive
+		}
+		if strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "disabled via management api") {
+			auth.StatusMessage = ""
+		}
+	}
+
+	updated, err := h.authManager.Update(c.Request.Context(), auth)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"auth": h.buildAuthFileEntry(updated)})
+}
+
+// PutAuthFilePriority sets or clears an auth file priority.
+// Priority is stored in auth metadata under key "priority".
+//
+// JSON body:
+//   - id (preferred) or name
+//   - priority: set to > 0 to set, set to 0 to remove
+func (h *Handler) PutAuthFilePriority(c *gin.Context) {
+	if h == nil || c == nil {
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager not available"})
+		return
+	}
+
+	var req authPriorityUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+	req.ID = strings.TrimSpace(req.ID)
+	req.Name = strings.TrimSpace(req.Name)
+
+	if req.ID == "" && req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id or name is required"})
+		return
+	}
+	if req.Priority < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "priority must be >= 0"})
+		return
+	}
+
+	authID := req.ID
+	if authID == "" {
+		for _, a := range h.authManager.List() {
+			if a == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(a.FileName), req.Name) || strings.EqualFold(strings.TrimSpace(a.ID), req.Name) {
+				authID = a.ID
+				break
+			}
+		}
+	}
+	if authID == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+
+	auth, ok := h.authManager.GetByID(authID)
+	if !ok || auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	if req.Priority == 0 {
+		delete(auth.Metadata, "priority")
+	} else {
+		auth.Metadata["priority"] = req.Priority
+	}
+
+	updated, err := h.authManager.Update(c.Request.Context(), auth)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"auth": h.buildAuthFileEntry(updated)})
+}
+
+// PostAuthFileAntigravityQuota refreshes (fetches) Antigravity model quota information for an auth file.
+//
+// JSON body:
+//   - id (preferred) or name
+func (h *Handler) PostAuthFileAntigravityQuota(c *gin.Context) {
+	if h == nil || c == nil {
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager not available"})
+		return
+	}
+
+	var req antigravityQuotaRefreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+	req.ID = strings.TrimSpace(req.ID)
+	req.Name = strings.TrimSpace(req.Name)
+	if req.ID == "" && req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id or name is required"})
+		return
+	}
+
+	authID := req.ID
+	if authID == "" {
+		for _, a := range h.authManager.List() {
+			if a == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(a.FileName), req.Name) || strings.EqualFold(strings.TrimSpace(a.ID), req.Name) {
+				authID = a.ID
+				break
+			}
+		}
+	}
+	if authID == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+
+	auth, ok := h.authManager.GetByID(authID)
+	if !ok || auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth is not antigravity"})
+		return
+	}
+
+	projectID := ""
+	if auth.Metadata != nil {
+		if pid, ok := auth.Metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+	}
+
+	snap, updatedAuth, err := runtimeexecutor.FetchAntigravityQuota(c.Request.Context(), auth, h.cfg, projectID)
+	if err != nil {
+		status := http.StatusBadGateway
+		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+			if code := se.StatusCode(); code > 0 {
+				status = code
+			}
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+
+	if updatedAuth != nil {
+		auth = updatedAuth
+		persisted, errUpdate := h.authManager.Update(c.Request.Context(), auth)
+		if errUpdate != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errUpdate.Error()})
+			return
+		}
+		auth = persisted
+	}
+
+	if snap != nil {
+		usage.UpdateAntigravityQuotaSnapshot(auth.ID, snap)
+	}
+	c.JSON(http.StatusOK, gin.H{"auth": h.buildAuthFileEntry(auth)})
+}
+
+// PostAuthFileCodexQuota performs a minimal Codex request to fetch x-codex-* quota headers and cache them in memory.
+//
+// JSON body:
+//   - id (preferred) or name
+//   - model (optional): model to probe, defaults to gpt-5.2
+func (h *Handler) PostAuthFileCodexQuota(c *gin.Context) {
+	if h == nil || c == nil {
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager not available"})
+		return
+	}
+
+	var req codexQuotaRefreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+	req.ID = strings.TrimSpace(req.ID)
+	req.Name = strings.TrimSpace(req.Name)
+	req.Model = strings.TrimSpace(req.Model)
+	if req.ID == "" && req.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id or name is required"})
+		return
+	}
+
+	authID := req.ID
+	if authID == "" {
+		for _, a := range h.authManager.List() {
+			if a == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(a.FileName), req.Name) || strings.EqualFold(strings.TrimSpace(a.ID), req.Name) {
+				authID = a.ID
+				break
+			}
+		}
+	}
+	if authID == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+
+	auth, ok := h.authManager.GetByID(authID)
+	if !ok || auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth is not codex"})
+		return
+	}
+
+	snap, err := runtimeexecutor.FetchCodexQuota(c.Request.Context(), auth, h.cfg, req.Model)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	if snap != nil {
+		usage.UpdateCodexQuotaSnapshot(auth.ID, snap)
+	}
+	c.JSON(http.StatusOK, gin.H{"auth": h.buildAuthFileEntry(auth)})
+}
+
 // GetAuthFileModels returns the models supported by a specific auth file
 func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	name := c.Query("name")
@@ -348,8 +688,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			if data, errRead := os.ReadFile(full); errRead == nil {
 				typeValue := gjson.GetBytes(data, "type").String()
 				emailValue := gjson.GetBytes(data, "email").String()
+				priorityValue := gjson.GetBytes(data, "priority").Int()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
+				if priorityValue > 0 {
+					fileData["priority"] = priorityValue
+				}
 			}
 
 			files = append(files, fileData)
@@ -386,9 +730,21 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"status_message": auth.StatusMessage,
 		"disabled":       auth.Disabled,
 		"unavailable":    auth.Unavailable,
+		"quota":          auth.Quota,
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
 		"size":           int64(0),
+	}
+	if priority, ok := authPriority(auth); ok {
+		entry["priority"] = priority
+	}
+	if snap := usage.GetCodexQuotaSnapshot(auth.ID); snap != nil {
+		entry["codex_quota"] = snap
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+		if snap := usage.GetAntigravityQuotaSnapshot(auth.ID); snap != nil {
+			entry["antigravity_quota"] = snap
+		}
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
@@ -448,6 +804,40 @@ func authEmail(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+func authPriority(auth *coreauth.Auth) (int, bool) {
+	if auth == nil {
+		return 0, false
+	}
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["priority"]; ok {
+			switch val := v.(type) {
+			case int:
+				return val, true
+			case int64:
+				return int(val), true
+			case float64:
+				return int(val), true
+			case string:
+				val = strings.TrimSpace(val)
+				if val == "" {
+					return 0, false
+				}
+				if parsed, err := strconv.Atoi(val); err == nil {
+					return parsed, true
+				}
+			}
+		}
+	}
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["priority"]); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func authAttribute(auth *coreauth.Auth, key string) string {

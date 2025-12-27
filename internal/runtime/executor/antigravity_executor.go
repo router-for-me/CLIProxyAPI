@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -883,6 +884,107 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		return models
 	}
 	return nil
+}
+
+// FetchAntigravityQuota retrieves model quota information using fetchAvailableModels.
+// This is intended for management/observability use (manual refresh), not for request-path scheduling.
+func FetchAntigravityQuota(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config, projectID string) (*usage.AntigravityQuotaSnapshot, *cliproxyauth.Auth, error) {
+	exec := &AntigravityExecutor{cfg: cfg}
+	token, updatedAuth, errToken := exec.ensureAccessToken(ctx, auth)
+	if errToken != nil || token == "" {
+		return nil, updatedAuth, errToken
+	}
+	if updatedAuth != nil {
+		auth = updatedAuth
+	}
+
+	var payload []byte
+	projectID = strings.TrimSpace(projectID)
+	if projectID != "" {
+		if b, errMarshal := json.Marshal(map[string]any{"project": projectID}); errMarshal == nil {
+			payload = b
+		}
+	}
+	if len(payload) == 0 {
+		payload = []byte(`{}`)
+	}
+
+	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+
+	var lastStatus int
+	var lastBody []byte
+	var lastErr error
+
+	for idx, baseURL := range baseURLs {
+		modelsURL := baseURL + antigravityModelsPath
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, bytes.NewReader(payload))
+		if errReq != nil {
+			return nil, updatedAuth, errReq
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		if host := resolveHost(baseURL); host != "" {
+			httpReq.Host = host
+		}
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			lastErr = errDo
+			lastStatus = 0
+			lastBody = nil
+			if idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: quota request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				continue
+			}
+			return nil, updatedAuth, errDo
+		}
+
+		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity executor: close quota response body error: %v", errClose)
+		}
+		if errRead != nil {
+			lastErr = errRead
+			lastStatus = 0
+			lastBody = nil
+			if idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: quota read error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				continue
+			}
+			return nil, updatedAuth, errRead
+		}
+
+		if httpResp.StatusCode == http.StatusForbidden {
+			return usage.NewForbiddenAntigravityQuotaSnapshot(), updatedAuth, nil
+		}
+
+		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+			lastStatus = httpResp.StatusCode
+			lastBody = append([]byte(nil), bodyBytes...)
+			lastErr = nil
+			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: quota request rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				continue
+			}
+			return nil, updatedAuth, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+		}
+
+		if snap := usage.ParseAntigravityQuotaSnapshot(bodyBytes); snap != nil {
+			return snap, updatedAuth, nil
+		}
+		return &usage.AntigravityQuotaSnapshot{UpdatedAt: time.Now()}, updatedAuth, nil
+	}
+
+	switch {
+	case lastStatus != 0:
+		return nil, updatedAuth, statusErr{code: lastStatus, msg: string(lastBody)}
+	case lastErr != nil:
+		return nil, updatedAuth, lastErr
+	default:
+		return nil, updatedAuth, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity executor: no base url available"}
+	}
 }
 
 func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *cliproxyauth.Auth) (string, *cliproxyauth.Auth, error) {
