@@ -263,7 +263,6 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	rotated := m.rotateProviders(req.Model, normalized)
-	defer m.advanceProviderCursor(req.Model, normalized)
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -302,7 +301,6 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	rotated := m.rotateProviders(req.Model, normalized)
-	defer m.advanceProviderCursor(req.Model, normalized)
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -341,7 +339,6 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	rotated := m.rotateProviders(req.Model, normalized)
-	defer m.advanceProviderCursor(req.Model, normalized)
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -640,13 +637,20 @@ func (m *Manager) normalizeProviders(providers []string) []string {
 	return result
 }
 
+// rotateProviders returns a rotated view of the providers list starting from the
+// current offset for the model, and atomically increments the offset for the next call.
+// This ensures concurrent requests get different starting providers.
 func (m *Manager) rotateProviders(model string, providers []string) []string {
 	if len(providers) == 0 {
 		return nil
 	}
-	m.mu.RLock()
+
+	// Atomic read-and-increment: get current offset and advance cursor in one lock
+	m.mu.Lock()
 	offset := m.providerOffsets[model]
-	m.mu.RUnlock()
+	m.providerOffsets[model] = (offset + 1) % len(providers)
+	m.mu.Unlock()
+
 	if len(providers) > 0 {
 		offset %= len(providers)
 	}
@@ -660,19 +664,6 @@ func (m *Manager) rotateProviders(model string, providers []string) []string {
 	rotated = append(rotated, providers[offset:]...)
 	rotated = append(rotated, providers[:offset]...)
 	return rotated
-}
-
-func (m *Manager) advanceProviderCursor(model string, providers []string) {
-	if len(providers) == 0 {
-		m.mu.Lock()
-		delete(m.providerOffsets, model)
-		m.mu.Unlock()
-		return
-	}
-	m.mu.Lock()
-	current := m.providerOffsets[model]
-	m.providerOffsets[model] = (current + 1) % len(providers)
-	m.mu.Unlock()
 }
 
 func (m *Manager) retrySettings() (int, time.Duration) {
