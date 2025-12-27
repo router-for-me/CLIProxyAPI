@@ -710,6 +710,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	}
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.WireAPI = strings.TrimSpace(entry.WireAPI)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {

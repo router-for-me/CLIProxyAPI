@@ -133,6 +133,7 @@ ws-auth: false
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     wire-api: "responses" # optional: use "responses" to send /responses payloads instead of /chat/completions
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:

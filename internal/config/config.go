@@ -294,6 +294,9 @@ type OpenAICompatibility struct {
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// WireAPI selects the upstream OpenAI wire protocol (chat-completions or responses).
+	WireAPI string `yaml:"wire-api,omitempty" json:"wire-api,omitempty"`
+
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
@@ -462,6 +465,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.WireAPI = strings.TrimSpace(e.WireAPI)
 		e.Headers = NormalizeHeaders(e.Headers)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed

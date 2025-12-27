@@ -75,6 +75,17 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
 		details = append(details, "headers updated")
 	}
+	if trimmedOld, trimmedNew := strings.TrimSpace(oldEntry.WireAPI), strings.TrimSpace(newEntry.WireAPI); !strings.EqualFold(trimmedOld, trimmedNew) {
+		oldValue := trimmedOld
+		if oldValue == "" {
+			oldValue = "chat"
+		}
+		newValue := trimmedNew
+		if newValue == "" {
+			newValue = "chat"
+		}
+		details = append(details, fmt.Sprintf("wire-api %s -> %s", oldValue, newValue))
+	}
 	if len(details) == 0 {
 		return ""
 	}
