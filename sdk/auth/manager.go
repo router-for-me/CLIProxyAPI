@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -43,6 +44,11 @@ func (m *Manager) SetStore(store coreauth.Store) {
 	m.store = store
 }
 
+// GlobalProxySetter is an interface for token storage to set the use_global_proxy value
+type GlobalProxySetter interface {
+	SetUseGlobalProxy(bool)
+}
+
 // Login executes the provider login flow and persists the resulting auth record.
 func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, string, error) {
 	auth, ok := m.authenticators[provider]
@@ -56,6 +62,23 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 	}
 	if record == nil {
 		return nil, "", fmt.Errorf("cliproxy auth: authenticator %s returned nil record", provider)
+	}
+
+	// Always ask about using global proxy if auth doesn't have proxy URL configured
+	// This allows the setting to work even if user adds proxy to config.yaml later
+	if record.ProxyURL == "" {
+		// Determine default value based on provider
+		defaultValue := true
+		if provider == "qwen" || provider == "iflow" {
+			defaultValue = false
+		}
+		shouldUseGlobalProxy := AskUseGlobalProxy(opts, defaultValue)
+		record.UseGlobalProxy = shouldUseGlobalProxy
+
+		// Update the storage if it implements GlobalProxySetter
+		if storage, ok := record.Storage.(GlobalProxySetter); ok {
+			storage.SetUseGlobalProxy(shouldUseGlobalProxy)
+		}
 	}
 
 	if m.store == nil {
@@ -73,4 +96,36 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 		return record, "", err
 	}
 	return record, savedPath, nil
+}
+
+// AskUseGlobalProxy asks the user whether to use the global proxy from config.yaml.
+func AskUseGlobalProxy(opts *LoginOptions, defaultValue bool) bool {
+	if opts == nil || opts.Prompt == nil {
+		// If no prompt function available, return the default value
+		return defaultValue
+	}
+
+	fmt.Println()
+	fmt.Println("Would you like to use the global proxy from config.yaml for this authentication?")
+	fmt.Println("(This allows the proxy to be applied automatically if you add it to config.yaml later)")
+	if defaultValue {
+		fmt.Println("yes/no, default: yes")
+	} else {
+		fmt.Println("yes/no, default: no")
+	}
+
+	answer, err := opts.Prompt("Use global proxy? ")
+	if err != nil {
+		// If we can't get user input, return the default value
+		return defaultValue
+	}
+
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	if defaultValue {
+		// If default is true, only turn off if user says no
+		return answer != "n" && answer != "no"
+	} else {
+		// If default is false, only turn on if user says yes
+		return answer == "y" || answer == "yes"
+	}
 }

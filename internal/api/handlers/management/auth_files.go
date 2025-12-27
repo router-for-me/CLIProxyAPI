@@ -1657,8 +1657,8 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 			return
 		}
 
-		// Create token storage
-		tokenStorage := qwenAuth.CreateTokenStorage(tokenData)
+		// Create token storage - default to false for use_global_proxy for qwen
+		tokenStorage := qwenAuth.CreateTokenStorage(tokenData, false)
 
 		tokenStorage.Email = fmt.Sprintf("qwen-%d", time.Now().UnixMilli())
 		record := &coreauth.Auth{
@@ -1840,7 +1840,8 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 
 	tokenData.Cookie = cookieValue
 
-	tokenStorage := authSvc.CreateCookieTokenStorage(tokenData)
+	// For management API, default to false for use_global_proxy for iFlow
+	tokenStorage := authSvc.CreateCookieTokenStorage(tokenData, false)
 	email := strings.TrimSpace(tokenStorage.Email)
 	if email == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "failed to extract email from token"})

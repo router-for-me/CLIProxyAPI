@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 )
 
 // DoIFlowCookieAuth performs the iFlow cookie-based authentication.
@@ -49,6 +50,16 @@ func DoIFlowCookieAuth(cfg *config.Config, options *LoginOptions) {
 		return
 	}
 
+	// Ask if user wants to use global proxy
+	useGlobalProxy := false // Default to false for iFlow
+	if options != nil && options.Prompt != nil {
+		// Create sdk auth LoginOptions from cmd LoginOptions to use AskUseGlobalProxy
+		sdkOpts := &auth.LoginOptions{
+			Prompt: options.Prompt,
+		}
+		useGlobalProxy = auth.AskUseGlobalProxy(sdkOpts, false)
+	}
+
 	// Authenticate with cookie
 	auth := iflow.NewIFlowAuth(cfg)
 	ctx := context.Background()
@@ -60,7 +71,7 @@ func DoIFlowCookieAuth(cfg *config.Config, options *LoginOptions) {
 	}
 
 	// Create token storage
-	tokenStorage := auth.CreateCookieTokenStorage(tokenData)
+	tokenStorage := auth.CreateCookieTokenStorage(tokenData, useGlobalProxy)
 
 	// Get auth file path using email in filename
 	authFilePath := getAuthFilePath(cfg, "iflow", tokenData.Email)
