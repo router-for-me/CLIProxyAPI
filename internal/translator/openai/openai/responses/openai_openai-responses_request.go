@@ -163,6 +163,14 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		var chatCompletionsTools []interface{}
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
+			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
+			// Only function tools need structural conversion because Chat Completions nests details under "function".
+			toolType := tool.Get("type").String()
+			if toolType != "" && toolType != "function" && tool.IsObject() {
+				chatCompletionsTools = append(chatCompletionsTools, tool.Value())
+				return true
+			}
+
 			chatTool := `{"type":"function","function":{}}`
 
 			// Convert tool structure from responses format to chat completions format
