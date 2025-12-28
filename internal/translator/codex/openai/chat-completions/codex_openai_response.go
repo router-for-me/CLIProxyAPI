@@ -8,6 +8,7 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -70,7 +71,13 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	}
 
 	// Extract and set the model version.
-	if modelResult := gjson.GetBytes(rawJSON, "model"); modelResult.Exists() {
+	requestedModel := strings.TrimSpace(gjson.GetBytes(originalRequestRawJSON, "model").String())
+	if requestedModel == "" {
+		requestedModel = strings.TrimSpace(gjson.GetBytes(requestRawJSON, "model").String())
+	}
+	if requestedModel != "" {
+		template, _ = sjson.Set(template, "model", requestedModel)
+	} else if modelResult := gjson.GetBytes(rawJSON, "model"); modelResult.Exists() {
 		template, _ = sjson.Set(template, "model", modelResult.String())
 	}
 
@@ -178,7 +185,13 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	template := `{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`
 
 	// Extract and set the model version.
-	if modelResult := responseResult.Get("model"); modelResult.Exists() {
+	requestedModel := strings.TrimSpace(gjson.GetBytes(originalRequestRawJSON, "model").String())
+	if requestedModel == "" {
+		requestedModel = strings.TrimSpace(gjson.GetBytes(requestRawJSON, "model").String())
+	}
+	if requestedModel != "" {
+		template, _ = sjson.Set(template, "model", requestedModel)
+	} else if modelResult := responseResult.Get("model"); modelResult.Exists() {
 		template, _ = sjson.Set(template, "model", modelResult.String())
 	}
 

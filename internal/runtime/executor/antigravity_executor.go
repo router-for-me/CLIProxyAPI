@@ -849,35 +849,40 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		now := time.Now().Unix()
 		modelConfig := registry.GetAntigravityModelConfig()
 		models := make([]*registry.ModelInfo, 0, len(result.Map()))
+		buildModelInfo := func(id string, cfg *registry.AntigravityModelConfig, useCfgName bool) *registry.ModelInfo {
+			modelName := id
+			if useCfgName && cfg != nil && cfg.Name != "" {
+				modelName = cfg.Name
+			}
+			modelInfo := &registry.ModelInfo{
+				ID:          id,
+				Name:        modelName,
+				Description: id,
+				DisplayName: id,
+				Version:     id,
+				Object:      "model",
+				Created:     now,
+				OwnedBy:     antigravityAuthType,
+				Type:        antigravityAuthType,
+			}
+			if cfg != nil {
+				if cfg.Thinking != nil {
+					modelInfo.Thinking = cfg.Thinking
+				}
+				if cfg.MaxCompletionTokens > 0 {
+					modelInfo.MaxCompletionTokens = cfg.MaxCompletionTokens
+				}
+			}
+			return modelInfo
+		}
 		for originalName := range result.Map() {
 			aliasName := modelName2Alias(originalName)
 			if aliasName != "" {
 				cfg := modelConfig[aliasName]
-				modelName := aliasName
-				if cfg != nil && cfg.Name != "" {
-					modelName = cfg.Name
+				models = append(models, buildModelInfo(aliasName, cfg, true))
+				if shouldExposeAntigravityOriginalName(originalName, aliasName) {
+					models = append(models, buildModelInfo(originalName, cfg, false))
 				}
-				modelInfo := &registry.ModelInfo{
-					ID:          aliasName,
-					Name:        modelName,
-					Description: aliasName,
-					DisplayName: aliasName,
-					Version:     aliasName,
-					Object:      "model",
-					Created:     now,
-					OwnedBy:     antigravityAuthType,
-					Type:        antigravityAuthType,
-				}
-				// Look up Thinking support from static config using alias name
-				if cfg != nil {
-					if cfg.Thinking != nil {
-						modelInfo.Thinking = cfg.Thinking
-					}
-					if cfg.MaxCompletionTokens > 0 {
-						modelInfo.MaxCompletionTokens = cfg.MaxCompletionTokens
-					}
-				}
-				models = append(models, modelInfo)
 			}
 		}
 		return models
@@ -1032,6 +1037,9 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		httpReq.Header.Set("Accept", "text/event-stream")
 	} else {
 		httpReq.Header.Set("Accept", "application/json")
+	}
+	if util.IsClaudeThinkingModel(modelName) {
+		httpReq.Header.Set("Anthropic-Beta", "interleaved-thinking-2025-05-14")
 	}
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
@@ -1278,11 +1286,16 @@ func modelName2Alias(modelName string) string {
 		return "gemini-claude-sonnet-4-5-thinking"
 	case "claude-opus-4-5-thinking":
 		return "gemini-claude-opus-4-5-thinking"
-	case "chat_20706", "chat_23310", "gemini-2.5-flash-thinking", "gemini-3-pro-low", "gemini-2.5-pro":
-		return ""
 	default:
 		return modelName
 	}
+}
+
+func shouldExposeAntigravityOriginalName(originalName, aliasName string) bool {
+	if originalName == "" || aliasName == "" || originalName == aliasName {
+		return false
+	}
+	return true
 }
 
 func alias2ModelName(modelName string) string {
