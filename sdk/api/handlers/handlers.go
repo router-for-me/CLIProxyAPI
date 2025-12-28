@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/alias"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -20,6 +21,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -538,6 +540,16 @@ func statusFromError(err error) int {
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, metadata map[string]any, err *interfaces.ErrorMessage) {
 	// Resolve "auto" model to an actual available model first
 	resolvedModelName := util.ResolveAutoModel(modelName)
+
+	// Check for global model alias BEFORE provider lookup
+	if resolved := alias.GetGlobalResolver().Resolve(resolvedModelName); resolved != nil {
+		if selected := alias.GetGlobalResolver().SelectProvider(resolved); selected != nil {
+			// Use the provider-specific model name
+			resolvedModelName = selected.Model
+			log.Debugf("model alias resolved: %s -> %s (provider: %s)",
+				modelName, selected.Model, selected.Provider)
+		}
+	}
 
 	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
 	normalizedModel, metadata = normalizeModelMetadata(resolvedModelName)
