@@ -104,6 +104,9 @@ ws-auth: false
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     models:
+#       - name: "gpt-5-codex" # upstream model name
+#         alias: "codex-latest" # client alias mapped to the upstream model
 #     excluded-models:
 #       - "gpt-5.1"         # exclude specific models (exact match)
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)

@@ -7,6 +7,13 @@ assignees: ''
 
 ---
 
+**Is it a request payload issue?**
+[  ] Yes, this is a request payload issue. I am using a client/cURL to send a request payload, but I received an unexpected error.
+[  ] No, it's another issue.
+
+**If it's a request payload issue, you MUST know**
+Our team doesn't have any GODs or ORACLEs or MIND READERs. Please make sure to attach the request log or curl payload.
+
 **Describe the bug**
 A clear and concise description of what the bug is.
 

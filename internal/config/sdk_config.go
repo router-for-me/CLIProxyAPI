@@ -30,13 +30,13 @@ type SDKConfig struct {
 // StreamingConfig holds server streaming behavior configuration.
 type StreamingConfig struct {
 	// KeepAliveSeconds controls how often the server emits SSE heartbeats (": keep-alive\n\n").
-	// nil means default (15 seconds). <= 0 disables keep-alives.
-	KeepAliveSeconds *int `yaml:"keepalive-seconds,omitempty" json:"keepalive-seconds,omitempty"`
+	// <= 0 disables keep-alives. Default is 0.
+	KeepAliveSeconds int `yaml:"keepalive-seconds,omitempty" json:"keepalive-seconds,omitempty"`
 
 	// BootstrapRetries controls how many times the server may retry a streaming request before any bytes are sent,
 	// to allow auth rotation / transient recovery.
-	// nil means default (2). 0 disables bootstrap retries.
-	BootstrapRetries *int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+	// <= 0 disables bootstrap retries. Default is 0.
+	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
 }
 
 // AccessConfig groups request authentication providers.

@@ -597,11 +597,7 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	filtered := make([]config.CodexKey, 0, len(arr))
 	for i := range arr {
 		entry := arr[i]
-		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-		entry.Headers = config.NormalizeHeaders(entry.Headers)
-		entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+		normalizeCodexKey(&entry)
 		if entry.BaseURL == "" {
 			continue
 		}
@@ -613,12 +609,13 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		APIKey         *string            `json:"api-key"`
-		Prefix         *string            `json:"prefix"`
-		BaseURL        *string            `json:"base-url"`
-		ProxyURL       *string            `json:"proxy-url"`
-		Headers        *map[string]string `json:"headers"`
-		ExcludedModels *[]string          `json:"excluded-models"`
+		APIKey         *string              `json:"api-key"`
+		Prefix         *string              `json:"prefix"`
+		BaseURL        *string              `json:"base-url"`
+		ProxyURL       *string              `json:"proxy-url"`
+		Models         *[]config.CodexModel `json:"models"`
+		Headers        *map[string]string   `json:"headers"`
+		ExcludedModels *[]string            `json:"excluded-models"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -667,12 +664,16 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
 	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.CodexModel(nil), (*body.Value.Models)...)
+	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
+	normalizeCodexKey(&entry)
 	h.cfg.CodexKey[targetIndex] = entry
 	h.cfg.SanitizeCodexKeys()
 	h.persist(c)
@@ -750,6 +751,32 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 		return
 	}
 	normalized := make([]config.ClaudeModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
+}
+
+func normalizeCodexKey(entry *config.CodexKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.CodexModel, 0, len(entry.Models))
 	for i := range entry.Models {
 		model := entry.Models[i]
 		model.Name = strings.TrimSpace(model.Name)
