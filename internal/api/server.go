@@ -327,6 +327,16 @@ func (s *Server) setupRoutes() {
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 	}
 
+	// Anthropic-compatible API routes
+	anthropic := s.engine.Group("/anthropic")
+	anthropic.Use(AuthMiddleware(s.accessManager))
+	{
+		v1Anthropic := anthropic.Group("/v1")
+		v1Anthropic.GET("/models", claudeCodeHandlers.ClaudeModels)
+		v1Anthropic.POST("/messages", claudeCodeHandlers.ClaudeMessages)
+		v1Anthropic.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
+	}
+
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))

@@ -80,7 +80,13 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 		messageStartTemplate := `{"type": "message_start", "message": {"id": "msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY", "type": "message", "role": "assistant", "content": [], "model": "claude-3-5-sonnet-20241022", "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 0, "output_tokens": 0}}}`
 
 		// Override default values with actual response metadata if available from the Gemini CLI response
-		if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
+		requestedModel := strings.TrimSpace(gjson.GetBytes(originalRequestRawJSON, "model").String())
+		if requestedModel == "" {
+			requestedModel = strings.TrimSpace(gjson.GetBytes(requestRawJSON, "model").String())
+		}
+		if requestedModel != "" {
+			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.model", requestedModel)
+		} else if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
 			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.model", modelVersionResult.String())
 		}
 		if responseIDResult := gjson.GetBytes(rawJSON, "response.responseId"); responseIDResult.Exists() {
@@ -270,14 +276,19 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 // Returns:
 //   - string: A Claude-compatible JSON response.
 func ConvertGeminiCLIResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
-
 	root := gjson.ParseBytes(rawJSON)
 
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", root.Get("response.responseId").String())
-	out, _ = sjson.Set(out, "model", root.Get("response.modelVersion").String())
+	requestedModel := strings.TrimSpace(gjson.GetBytes(originalRequestRawJSON, "model").String())
+	if requestedModel == "" {
+		requestedModel = strings.TrimSpace(gjson.GetBytes(requestRawJSON, "model").String())
+	}
+	if requestedModel != "" {
+		out, _ = sjson.Set(out, "model", requestedModel)
+	} else {
+		out, _ = sjson.Set(out, "model", root.Get("response.modelVersion").String())
+	}
 
 	inputTokens := root.Get("response.usageMetadata.promptTokenCount").Int()
 	outputTokens := root.Get("response.usageMetadata.candidatesTokenCount").Int() + root.Get("response.usageMetadata.thoughtsTokenCount").Int()

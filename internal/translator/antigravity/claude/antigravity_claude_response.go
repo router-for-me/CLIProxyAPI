@@ -108,7 +108,13 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		}
 
 		// Override default values with actual response metadata if available from the Gemini CLI response
-		if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
+		requestedModel := strings.TrimSpace(gjson.GetBytes(originalRequestRawJSON, "model").String())
+		if requestedModel == "" {
+			requestedModel = strings.TrimSpace(gjson.GetBytes(requestRawJSON, "model").String())
+		}
+		if requestedModel != "" {
+			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.model", requestedModel)
+		} else if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
 			messageStartTemplate, _ = sjson.Set(messageStartTemplate, "message.model", modelVersionResult.String())
 		}
 		if responseIDResult := gjson.GetBytes(rawJSON, "response.responseId"); responseIDResult.Exists() {
@@ -371,9 +377,6 @@ func resolveStopReason(params *Params) string {
 // Returns:
 //   - string: A Claude-compatible JSON response.
 func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
-	_ = requestRawJSON
-
 	root := gjson.ParseBytes(rawJSON)
 	promptTokens := root.Get("response.usageMetadata.promptTokenCount").Int()
 	candidateTokens := root.Get("response.usageMetadata.candidatesTokenCount").Int()
@@ -390,7 +393,15 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 	responseJSON := `{"id":"","type":"message","role":"assistant","model":"","content":null,"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	responseJSON, _ = sjson.Set(responseJSON, "id", root.Get("response.responseId").String())
-	responseJSON, _ = sjson.Set(responseJSON, "model", root.Get("response.modelVersion").String())
+	requestedModel := strings.TrimSpace(gjson.GetBytes(originalRequestRawJSON, "model").String())
+	if requestedModel == "" {
+		requestedModel = strings.TrimSpace(gjson.GetBytes(requestRawJSON, "model").String())
+	}
+	if requestedModel != "" {
+		responseJSON, _ = sjson.Set(responseJSON, "model", requestedModel)
+	} else {
+		responseJSON, _ = sjson.Set(responseJSON, "model", root.Get("response.modelVersion").String())
+	}
 	responseJSON, _ = sjson.Set(responseJSON, "usage.input_tokens", promptTokens)
 	responseJSON, _ = sjson.Set(responseJSON, "usage.output_tokens", outputTokens)
 	// Add cache_read_input_tokens if cached tokens are present (indicates prompt caching is working)

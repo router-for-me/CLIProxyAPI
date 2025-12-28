@@ -59,7 +59,13 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	template := `{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`
 
 	// Extract and set the model version.
-	if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
+	requestedModel := strings.TrimSpace(gjson.GetBytes(originalRequestRawJSON, "model").String())
+	if requestedModel == "" {
+		requestedModel = strings.TrimSpace(gjson.GetBytes(requestRawJSON, "model").String())
+	}
+	if requestedModel != "" {
+		template, _ = sjson.Set(template, "model", requestedModel)
+	} else if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
 		template, _ = sjson.Set(template, "model", modelVersionResult.String())
 	}
 
