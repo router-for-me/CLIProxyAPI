@@ -73,6 +73,29 @@ quota-exceeded:
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
 
+# Global model aliases for cross-provider failover
+# Map user-friendly alias names to provider-specific model names.
+# When quota is exhausted on one provider, automatically fail over to the next.
+# model-aliases:
+#   default-strategy: round-robin  # round-robin (default), fill-first
+#   aliases:
+#     - alias: opus-4.5
+#       strategy: fill-first  # optional: override default strategy for this alias
+#       providers:
+#         - provider: antigravity
+#           model: gemini-claude-opus-4-5-thinking
+#         - provider: kiro
+#           model: kiro-claude-opus-4-5-agentic
+#         - provider: claude
+#           model: claude-opus-4-5-20251101
+#     - alias: sonnet-4
+#       # uses default round-robin strategy
+#       providers:
+#         - provider: antigravity
+#           model: gemini-claude-sonnet-4-thinking
+#         - provider: kiro
+#           model: kiro-claude-sonnet-4-agentic
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
