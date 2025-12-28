@@ -66,6 +66,9 @@ type Config struct {
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
+	// ModelAliases defines global model alias mappings for cross-provider routing.
+	ModelAliases ModelAliasConfig `yaml:"model-aliases" json:"model-aliases"`
+
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
@@ -147,6 +150,33 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// ModelAliasConfig defines global model alias mappings with routing strategies.
+type ModelAliasConfig struct {
+	// DefaultStrategy is the default routing strategy for aliases ("round-robin" or "fill-first").
+	// Defaults to "round-robin" if not specified.
+	DefaultStrategy string       `yaml:"default-strategy,omitempty" json:"default-strategy,omitempty"`
+	// Aliases defines the list of model alias mappings.
+	Aliases         []ModelAlias `yaml:"aliases,omitempty" json:"aliases,omitempty"`
+}
+
+// ModelAlias maps a single alias to multiple provider-specific models.
+type ModelAlias struct {
+	// Alias is the user-facing model name (e.g., "opus-4.5").
+	Alias     string          `yaml:"alias" json:"alias"`
+	// Strategy overrides the default routing strategy for this alias.
+	Strategy  string          `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	// Providers lists the provider-specific model mappings in priority order.
+	Providers []AliasProvider `yaml:"providers" json:"providers"`
+}
+
+// AliasProvider maps a provider name to its specific model name.
+type AliasProvider struct {
+	// Provider is the provider identifier (e.g., "antigravity", "kiro", "claude").
+	Provider string `yaml:"provider" json:"provider"`
+	// Model is the provider-specific model name.
+	Model    string `yaml:"model" json:"model"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -484,6 +514,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Kiro keys: trim whitespace from credential fields
 	cfg.SanitizeKiroKeys()
 
+	// Sanitize model aliases configuration
+	cfg.SanitizeModelAliases()
+
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
@@ -578,6 +611,39 @@ func (cfg *Config) SanitizeKiroKeys() {
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.PreferredEndpoint = strings.TrimSpace(entry.PreferredEndpoint)
 	}
+}
+
+// SanitizeModelAliases normalizes model alias configuration.
+func (cfg *Config) SanitizeModelAliases() {
+	if cfg == nil {
+		return
+	}
+	cfg.ModelAliases.DefaultStrategy = strings.ToLower(strings.TrimSpace(cfg.ModelAliases.DefaultStrategy))
+	if cfg.ModelAliases.DefaultStrategy == "" {
+		cfg.ModelAliases.DefaultStrategy = "round-robin"
+	}
+
+	validAliases := make([]ModelAlias, 0, len(cfg.ModelAliases.Aliases))
+	for _, alias := range cfg.ModelAliases.Aliases {
+		alias.Alias = strings.TrimSpace(alias.Alias)
+		alias.Strategy = strings.ToLower(strings.TrimSpace(alias.Strategy))
+		if alias.Alias == "" || len(alias.Providers) == 0 {
+			continue
+		}
+		validProviders := make([]AliasProvider, 0, len(alias.Providers))
+		for _, p := range alias.Providers {
+			p.Provider = strings.ToLower(strings.TrimSpace(p.Provider))
+			p.Model = strings.TrimSpace(p.Model)
+			if p.Provider != "" && p.Model != "" {
+				validProviders = append(validProviders, p)
+			}
+		}
+		if len(validProviders) > 0 {
+			alias.Providers = validProviders
+			validAliases = append(validAliases, alias)
+		}
+	}
+	cfg.ModelAliases.Aliases = validAliases
 }
 
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.
