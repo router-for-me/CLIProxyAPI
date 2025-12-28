@@ -618,7 +618,23 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 
 	body := BuildErrorResponseBody(status, errText)
-	c.Set("API_RESPONSE", bytes.Clone(body))
+	// Check if this error body was already recorded by the executor (to avoid duplicate logging)
+	// This can happen when the last retry fails and both executor and handler try to log the same error
+	shouldAppend := true
+	if existing, exists := c.Get("API_RESPONSE"); exists {
+		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
+			trimmedBody := bytes.TrimSpace(body)
+			if len(trimmedBody) > 0 && bytes.Contains(existingBytes, trimmedBody) {
+				// Error already logged by executor, skip appending
+				shouldAppend = false
+			}
+		}
+	}
+	if shouldAppend {
+		// Use appendAPIResponse to preserve any previously captured API response data
+		// (such as formatted upstream response logs from logging_helpers.go)
+		appendAPIResponse(c, body)
+	}
 
 	if !c.Writer.Written() {
 		c.Writer.Header().Set("Content-Type", "application/json")
