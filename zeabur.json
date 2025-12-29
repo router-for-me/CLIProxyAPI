@@ -1,13 +1,5 @@
 {
-  "$schema": "https://schema.zeabur.app/template.json",
-  "name": "CLIProxyAPI",
-  "description": "CLI Proxy API Server",
-  "ports": [
-    {
-      "id": "web",
-      "port": 8080,
-      "type": "HTTP"
-    }
-  ],
-  "dockerfile": "./Dockerfile.railway"
+    "$schema": "https://schema.zeabur.app/template.json",
+    "name": "CLIProxyAPI",
+    "description": "CLI Proxy API Server"
 }

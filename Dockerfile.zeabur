@@ -1,0 +1,44 @@
+# Zeabur-optimized Dockerfile for CLIProxyAPI
+# Uses the same logic as Railway deployment
+
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+
+RUN go mod download
+
+COPY . .
+
+ARG VERSION=dev
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
+
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o ./CLIProxyAPI ./cmd/server/
+
+FROM alpine:3.22.0
+
+RUN apk add --no-cache tzdata
+
+RUN mkdir /CLIProxyAPI
+
+COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+COPY --from=builder ./app/start-zeabur.sh /CLIProxyAPI/start-zeabur.sh
+
+COPY config.example.yaml /CLIProxyAPI/config.example.yaml
+
+WORKDIR /CLIProxyAPI
+
+# Make startup script executable
+RUN chmod +x /CLIProxyAPI/start-zeabur.sh
+
+# Zeabur injects PORT environment variable (default 8080)
+EXPOSE 8080
+
+ENV TZ=Asia/Shanghai
+
+RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
+
+# Use startup script that creates config with dynamic PORT
+CMD ["/CLIProxyAPI/start-zeabur.sh"]
