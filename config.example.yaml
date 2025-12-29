@@ -35,6 +35,7 @@ auth-dir: "~/.cli-proxy-api"
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"
+  - "your-api-key-3"
 
 # Enable debug logging
 debug: false
@@ -181,6 +182,18 @@ ws-auth: false
 #   upstream-url: "https://ampcode.com"
 #   # Optional: Override API key for Amp upstream (otherwise uses env or file)
 #   upstream-api-key: ""
+#   # Per-client upstream API key mapping
+#   # Maps client API keys (from top-level api-keys) to different Amp upstream API keys.
+#   # Useful when different clients need to use different Amp accounts/quotas.
+#   # If a client key isn't mapped, falls back to upstream-api-key (default behavior).
+#   upstream-api-keys:
+#     - upstream-api-key: "amp_key_for_team_a"    # Upstream key to use for these clients
+#       api-keys:                                 # Client keys that use this upstream key
+#         - "your-api-key-1"
+#         - "your-api-key-2"
+#     - upstream-api-key: "amp_key_for_team_b"
+#       api-keys:
+#         - "your-api-key-3"
 #   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (default: false)
 #   restrict-management-to-localhost: false
 #   # Force model mappings to run before checking local API keys (default: false)

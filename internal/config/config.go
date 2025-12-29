@@ -175,6 +175,11 @@ type AmpCode struct {
 	// UpstreamAPIKey optionally overrides the Authorization header when proxying Amp upstream calls.
 	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
 
+	// UpstreamAPIKeys maps client API keys (from top-level api-keys) to upstream API keys.
+	// When a client authenticates with a key that matches an entry, that upstream key is used.
+	// If no match is found, falls back to UpstreamAPIKey (default behavior).
+	UpstreamAPIKeys []AmpUpstreamAPIKeyEntry `yaml:"upstream-api-keys,omitempty" json:"upstream-api-keys,omitempty"`
+
 	// RestrictManagementToLocalhost restricts Amp management routes (/api/user, /api/threads, etc.)
 	// to only accept connections from localhost (127.0.0.1, ::1). When true, prevents drive-by
 	// browser attacks and remote access to management endpoints. Default: false (API key auth is sufficient).
@@ -188,6 +193,17 @@ type AmpCode struct {
 	// ForceModelMappings when true, model mappings take precedence over local API keys.
 	// When false (default), local API keys are used first if available.
 	ForceModelMappings bool `yaml:"force-model-mappings" json:"force-model-mappings"`
+}
+
+// AmpUpstreamAPIKeyEntry maps a set of client API keys to a specific upstream API key.
+// When a request is authenticated with one of the APIKeys, the corresponding UpstreamAPIKey
+// is used for the upstream Amp request.
+type AmpUpstreamAPIKeyEntry struct {
+	// UpstreamAPIKey is the API key to use when proxying to the Amp upstream.
+	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
+
+	// APIKeys are the client API keys (from top-level api-keys) that map to this upstream key.
+	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.

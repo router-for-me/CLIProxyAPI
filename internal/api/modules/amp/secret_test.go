@@ -8,6 +8,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus/hooks/test"
 )
 
 func TestMultiSourceSecret_PrecedenceOrder(t *testing.T) {
@@ -276,5 +280,87 @@ func TestMultiSourceSecret_CacheEmptyResult(t *testing.T) {
 	got3, _ := s.Get(ctx)
 	if got3 != "new-value" {
 		t.Fatalf("after cache expiry, expected new-value, got %q", got3)
+	}
+}
+
+func TestMappedSecretSource_UsesMappingFromContext(t *testing.T) {
+	defaultSource := NewStaticSecretSource("default")
+	s := NewMappedSecretSource(defaultSource)
+	s.UpdateMappings([]config.AmpUpstreamAPIKeyEntry{
+		{
+			UpstreamAPIKey: "u1",
+			APIKeys:        []string{"k1"},
+		},
+	})
+
+	ctx := context.WithValue(context.Background(), clientAPIKeyContextKey{}, "k1")
+	got, err := s.Get(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "u1" {
+		t.Fatalf("want u1, got %q", got)
+	}
+
+	ctx = context.WithValue(context.Background(), clientAPIKeyContextKey{}, "k2")
+	got, err = s.Get(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "default" {
+		t.Fatalf("want default fallback, got %q", got)
+	}
+}
+
+func TestMappedSecretSource_DuplicateClientKey_FirstWins(t *testing.T) {
+	defaultSource := NewStaticSecretSource("default")
+	s := NewMappedSecretSource(defaultSource)
+	s.UpdateMappings([]config.AmpUpstreamAPIKeyEntry{
+		{
+			UpstreamAPIKey: "u1",
+			APIKeys:        []string{"k1"},
+		},
+		{
+			UpstreamAPIKey: "u2",
+			APIKeys:        []string{"k1"},
+		},
+	})
+
+	ctx := context.WithValue(context.Background(), clientAPIKeyContextKey{}, "k1")
+	got, err := s.Get(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "u1" {
+		t.Fatalf("want u1 (first wins), got %q", got)
+	}
+}
+
+func TestMappedSecretSource_DuplicateClientKey_LogsWarning(t *testing.T) {
+	hook := test.NewLocal(log.StandardLogger())
+	defer hook.Reset()
+
+	defaultSource := NewStaticSecretSource("default")
+	s := NewMappedSecretSource(defaultSource)
+	s.UpdateMappings([]config.AmpUpstreamAPIKeyEntry{
+		{
+			UpstreamAPIKey: "u1",
+			APIKeys:        []string{"k1"},
+		},
+		{
+			UpstreamAPIKey: "u2",
+			APIKeys:        []string{"k1"},
+		},
+	})
+
+	foundWarning := false
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && entry.Message == "amp upstream-api-keys: client API key appears in multiple entries; using first mapping." {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatal("expected warning log for duplicate client key, but none was found")
 	}
 }

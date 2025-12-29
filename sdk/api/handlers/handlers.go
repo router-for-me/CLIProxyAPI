@@ -619,7 +619,22 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 
 	body := BuildErrorResponseBody(status, errText)
-	c.Set("API_RESPONSE", bytes.Clone(body))
+	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
+	var previous []byte
+	if existing, exists := c.Get("API_RESPONSE"); exists {
+		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
+			previous = bytes.Clone(existingBytes)
+		}
+	}
+	appendAPIResponse(c, body)
+	trimmedErrText := strings.TrimSpace(errText)
+	trimmedBody := bytes.TrimSpace(body)
+	if len(previous) > 0 {
+		if (trimmedErrText != "" && bytes.Contains(previous, []byte(trimmedErrText))) ||
+			(len(trimmedBody) > 0 && bytes.Contains(previous, trimmedBody)) {
+			c.Set("API_RESPONSE", previous)
+		}
+	}
 
 	if !c.Writer.Written() {
 		c.Writer.Header().Set("Content-Type", "application/json")
