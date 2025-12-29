@@ -81,7 +81,8 @@ func (m *Manager) SetAuthStore(store coreauth.Store) {
 
 // SetRefreshInterval configures the background refresh interval.
 // If interval is > 0, creates a new worker that will be started when StartWorker is called.
-// If interval is <= 0, stops any existing worker and disables background refresh.
+// The cache TTL is also set to match the interval so cache stays valid between worker ticks.
+// If interval is <= 0, stops any existing worker, disables background refresh, and resets cache TTL to default.
 func (m *Manager) SetRefreshInterval(interval time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -95,6 +96,12 @@ func (m *Manager) SetRefreshInterval(interval time.Duration) {
 	// Create new worker if interval is positive
 	if interval > 0 {
 		m.worker = NewWorker(m, interval)
+		// Set cache TTL to match worker interval so cache stays valid between ticks
+		// Add a small buffer (10%) to avoid race conditions at interval boundaries
+		m.cache.SetTTL(interval + interval/10)
+	} else {
+		// Reset cache TTL to default when worker is disabled
+		m.cache.SetTTL(DefaultCacheTTL)
 	}
 }
 
@@ -234,9 +241,11 @@ func (m *Manager) FetchAllQuotas(ctx context.Context) (*QuotaResponse, error) {
 	}
 
 	response := &QuotaResponse{
-		Quotas:      make(map[string]map[string]*ProviderQuotaData),
-		LastUpdated: time.Now(),
+		Quotas: make(map[string]map[string]*ProviderQuotaData),
 	}
+
+	// Track the earliest LastUpdated from all quota data
+	var earliestUpdate time.Time
 
 	// Group auths by provider
 	for _, auth := range auths {
@@ -249,6 +258,20 @@ func (m *Manager) FetchAllQuotas(ctx context.Context) (*QuotaResponse, error) {
 
 		quotaData := m.fetchQuotaForAuth(ctx, auth, false)
 		response.Quotas[provider][accountID] = quotaData
+
+		// Track earliest update time from actual data
+		if !quotaData.LastUpdated.IsZero() {
+			if earliestUpdate.IsZero() || quotaData.LastUpdated.Before(earliestUpdate) {
+				earliestUpdate = quotaData.LastUpdated
+			}
+		}
+	}
+
+	// Use earliest data timestamp, or current time if no data
+	if earliestUpdate.IsZero() {
+		response.LastUpdated = time.Now()
+	} else {
+		response.LastUpdated = earliestUpdate
 	}
 
 	return response, nil
@@ -282,10 +305,12 @@ func (m *Manager) FetchProviderQuotas(ctx context.Context, provider string) (*Pr
 	}
 
 	response := &ProviderQuotaResponse{
-		Provider:    provider,
-		Accounts:    make(map[string]*ProviderQuotaData),
-		LastUpdated: time.Now(),
+		Provider: provider,
+		Accounts: make(map[string]*ProviderQuotaData),
 	}
+
+	// Track the earliest LastUpdated from all quota data
+	var earliestUpdate time.Time
 
 	// Filter and fetch for this provider
 	for _, auth := range auths {
@@ -297,6 +322,20 @@ func (m *Manager) FetchProviderQuotas(ctx context.Context, provider string) (*Pr
 		accountID := m.getAccountID(auth)
 		quotaData := m.fetchQuotaForAuth(ctx, auth, false)
 		response.Accounts[accountID] = quotaData
+
+		// Track earliest update time from actual data
+		if !quotaData.LastUpdated.IsZero() {
+			if earliestUpdate.IsZero() || quotaData.LastUpdated.Before(earliestUpdate) {
+				earliestUpdate = quotaData.LastUpdated
+			}
+		}
+	}
+
+	// Use earliest data timestamp, or current time if no data
+	if earliestUpdate.IsZero() {
+		response.LastUpdated = time.Now()
+	} else {
+		response.LastUpdated = earliestUpdate
 	}
 
 	return response, nil
