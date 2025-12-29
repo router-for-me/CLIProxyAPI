@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -52,6 +53,12 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	tokenStore := sdkAuth.GetTokenStore()
 	quotaManager := quota.NewManager(tokenStore, nil)
 
+	// Configure quota refresh interval if set in config
+	if cfg != nil && cfg.QuotaRefreshInterval > 0 {
+		interval := time.Duration(cfg.QuotaRefreshInterval) * time.Second
+		quotaManager.SetRefreshInterval(interval)
+	}
+
 	return &Handler{
 		cfg:                 cfg,
 		configFilePath:      configFilePath,
@@ -93,6 +100,22 @@ func (h *Handler) SetLogDirectory(dir string) {
 		}
 	}
 	h.logDir = dir
+}
+
+// StartBackgroundWorkers starts background workers (quota refresh, etc.)
+// This should be called when the server is ready to handle requests.
+func (h *Handler) StartBackgroundWorkers(ctx context.Context) {
+	if h.quotaManager != nil {
+		h.quotaManager.StartWorker(ctx)
+	}
+}
+
+// StopBackgroundWorkers stops all background workers.
+// This should be called during server shutdown.
+func (h *Handler) StopBackgroundWorkers() {
+	if h.quotaManager != nil {
+		h.quotaManager.StopWorker()
+	}
 }
 
 // Middleware enforces access control for management endpoints.

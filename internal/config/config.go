@@ -55,6 +55,12 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// QuotaRefreshInterval is the interval in seconds for background quota refresh.
+	// When set to a positive value, the server will periodically fetch quota data
+	// for all configured providers in the background and cache it in memory.
+	// Set to 0 to disable background refresh (fetch on-demand only). Default: 0
+	QuotaRefreshInterval int `yaml:"quota-refresh-interval" json:"quota-refresh-interval"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.

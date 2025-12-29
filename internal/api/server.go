@@ -771,6 +771,22 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// StartBackgroundWorkers starts background workers such as quota refresh.
+// This should be called before Start() with the run context.
+func (s *Server) StartBackgroundWorkers(ctx context.Context) {
+	if s.mgmt != nil {
+		s.mgmt.StartBackgroundWorkers(ctx)
+	}
+}
+
+// StopBackgroundWorkers stops all background workers.
+// This is called automatically by Stop() but can be called manually if needed.
+func (s *Server) StopBackgroundWorkers() {
+	if s.mgmt != nil {
+		s.mgmt.StopBackgroundWorkers()
+	}
+}
+
 // Stop gracefully shuts down the API server without interrupting any
 // active connections.
 //
@@ -781,6 +797,9 @@ func (s *Server) Start() error {
 //   - error: An error if the server fails to stop
 func (s *Server) Stop(ctx context.Context) error {
 	log.Debug("Stopping API server...")
+
+	// Stop background workers first
+	s.StopBackgroundWorkers()
 
 	if s.keepAliveEnabled {
 		select {

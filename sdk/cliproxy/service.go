@@ -500,6 +500,11 @@ func (s *Service) Run(ctx context.Context) error {
 	time.Sleep(100 * time.Millisecond)
 	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
 
+	// Start background workers (quota refresh, etc.) after server is running
+	if s.server != nil {
+		s.server.StartBackgroundWorkers(ctx)
+	}
+
 	if s.hooks.OnAfterStart != nil {
 		s.hooks.OnAfterStart(s)
 	}

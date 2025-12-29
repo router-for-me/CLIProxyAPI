@@ -34,6 +34,7 @@ type Manager struct {
 	cache      *QuotaCache
 	authStore  coreauth.Store
 	httpClient *http.Client
+	worker     *Worker
 }
 
 // NewManager creates a new quota manager with the given auth store.
@@ -76,6 +77,72 @@ func (m *Manager) SetAuthStore(store coreauth.Store) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.authStore = store
+}
+
+// SetRefreshInterval configures the background refresh interval.
+// If interval is > 0, creates a new worker that will be started when StartWorker is called.
+// If interval is <= 0, stops any existing worker and disables background refresh.
+func (m *Manager) SetRefreshInterval(interval time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Stop existing worker if running
+	if m.worker != nil {
+		m.worker.Stop()
+		m.worker = nil
+	}
+
+	// Create new worker if interval is positive
+	if interval > 0 {
+		m.worker = NewWorker(m, interval)
+	}
+}
+
+// StartWorker starts the background quota refresh worker if configured.
+// This should be called after the server is ready to handle requests.
+func (m *Manager) StartWorker(ctx context.Context) {
+	m.mu.RLock()
+	worker := m.worker
+	m.mu.RUnlock()
+
+	if worker != nil {
+		worker.Start(ctx)
+	}
+}
+
+// StopWorker stops the background quota refresh worker.
+// This should be called during server shutdown.
+func (m *Manager) StopWorker() {
+	m.mu.RLock()
+	worker := m.worker
+	m.mu.RUnlock()
+
+	if worker != nil {
+		worker.Stop()
+	}
+}
+
+// WorkerStatus returns information about the background worker.
+// Returns nil if no worker is configured.
+func (m *Manager) WorkerStatus() *WorkerStatus {
+	m.mu.RLock()
+	worker := m.worker
+	m.mu.RUnlock()
+
+	if worker == nil {
+		return nil
+	}
+
+	return &WorkerStatus{
+		Running:  worker.IsRunning(),
+		Interval: worker.Interval(),
+	}
+}
+
+// WorkerStatus contains information about the quota refresh worker.
+type WorkerStatus struct {
+	Running  bool          `json:"running"`
+	Interval time.Duration `json:"interval"`
 }
 
 // getFetcherForProvider returns the fetcher that can handle the given provider.
