@@ -22,10 +22,30 @@ type ModelQuota struct {
 	Remaining *int64 `json:"remaining,omitempty"`
 }
 
+// WindowQuota represents quota information for a rate limit window (used by Codex).
+type WindowQuota struct {
+	// Percentage is the remaining quota as a percentage (0-100).
+	Percentage float64 `json:"percentage"`
+	// ResetTime is when the quota resets, in RFC3339 format.
+	ResetTime string `json:"reset_time,omitempty"`
+	// WindowSeconds is the duration of the rate limit window in seconds.
+	WindowSeconds int64 `json:"window_seconds,omitempty"`
+}
+
+// RateLimitWindows represents rate limit windows for providers like Codex.
+type RateLimitWindows struct {
+	// Session is the session-based rate limit window (e.g., 5 hours).
+	Session *WindowQuota `json:"session,omitempty"`
+	// Weekly is the weekly rate limit window (e.g., 7 days).
+	Weekly *WindowQuota `json:"weekly,omitempty"`
+}
+
 // ProviderQuotaData represents quota data for one account of a provider.
 type ProviderQuotaData struct {
-	// Models contains quota info for each model/category.
-	Models []ModelQuota `json:"models"`
+	// Models contains quota info for each model/category (used by Antigravity, Gemini-CLI, etc.).
+	Models []ModelQuota `json:"models,omitempty"`
+	// Windows contains rate limit window info (used by Codex).
+	Windows *RateLimitWindows `json:"windows,omitempty"`
 	// LastUpdated is when the quota was last fetched.
 	LastUpdated time.Time `json:"last_updated"`
 	// IsForbidden indicates if the account has been blocked/forbidden.

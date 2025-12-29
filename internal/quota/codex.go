@@ -103,7 +103,6 @@ func (f *CodexFetcher) fetchUsageData(ctx context.Context, accessToken string) (
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
 		return &ProviderQuotaData{
-			Models:      []ModelQuota{},
 			LastUpdated: time.Now(),
 			IsForbidden: true,
 			Error:       fmt.Sprintf("HTTP %d", resp.StatusCode),
@@ -122,100 +121,88 @@ func (f *CodexFetcher) fetchUsageData(ctx context.Context, accessToken string) (
 	return f.parseUsageResponse(&result), nil
 }
 
-// API response structures based on Quotio's CodexCLIQuotaFetcher
+// API response structures matching the ChatGPT backend API
 
 type codexUsageResponse struct {
-	RateLimit *rateLimitInfo `json:"rate_limit"`
-	Plan      *planInfo      `json:"plan"`
+	PlanType            string         `json:"plan_type"`
+	RateLimit           *rateLimitInfo `json:"rate_limit"`
+	CodeReviewRateLimit *rateLimitInfo `json:"code_review_rate_limit"`
 }
 
 type rateLimitInfo struct {
+	Allowed         bool        `json:"allowed"`
+	LimitReached    bool        `json:"limit_reached"`
 	PrimaryWindow   *windowInfo `json:"primary_window"`
 	SecondaryWindow *windowInfo `json:"secondary_window"`
 }
 
 type windowInfo struct {
-	Used    int64  `json:"used"`
-	Limit   int64  `json:"limit"`
-	ResetAt string `json:"reset_at"`
-}
-
-type planInfo struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"display_name"`
+	UsedPercent        float64 `json:"used_percent"`
+	LimitWindowSeconds int64   `json:"limit_window_seconds"`
+	ResetAfterSeconds  int64   `json:"reset_after_seconds"`
+	ResetAt            int64   `json:"reset_at"`
 }
 
 // parseUsageResponse converts the API response to our unified ProviderQuotaData format.
 func (f *CodexFetcher) parseUsageResponse(resp *codexUsageResponse) *ProviderQuotaData {
-	var models []ModelQuota
+	windows := &RateLimitWindows{}
 
 	if resp.RateLimit != nil {
-		// Primary window (session usage)
+		// Primary window (session usage - typically 5 hours)
 		if resp.RateLimit.PrimaryWindow != nil {
 			pw := resp.RateLimit.PrimaryWindow
-			percentage := float64(100)
-			if pw.Limit > 0 {
-				remaining := pw.Limit - pw.Used
-				percentage = float64(remaining) / float64(pw.Limit) * 100
-				if percentage < 0 {
-					percentage = 0
-				}
+			// remaining percentage = 100 - used_percent
+			percentage := 100.0 - pw.UsedPercent
+			if percentage < 0 {
+				percentage = 0
 			}
-			used := pw.Used
-			limit := pw.Limit
-			remaining := pw.Limit - pw.Used
-			if remaining < 0 {
-				remaining = 0
+
+			// Convert Unix timestamp to ISO 8601 string for ResetTime
+			resetTime := time.Unix(pw.ResetAt, 0).UTC().Format(time.RFC3339)
+
+			windows.Session = &WindowQuota{
+				Percentage:    percentage,
+				ResetTime:     resetTime,
+				WindowSeconds: pw.LimitWindowSeconds,
 			}
-			models = append(models, ModelQuota{
-				Name:       "codex-session",
-				Percentage: percentage,
-				ResetTime:  pw.ResetAt,
-				Used:       &used,
-				Limit:      &limit,
-				Remaining:  &remaining,
-			})
 		}
 
-		// Secondary window (weekly usage)
+		// Secondary window (weekly usage - typically 7 days)
 		if resp.RateLimit.SecondaryWindow != nil {
 			sw := resp.RateLimit.SecondaryWindow
-			percentage := float64(100)
-			if sw.Limit > 0 {
-				remaining := sw.Limit - sw.Used
-				percentage = float64(remaining) / float64(sw.Limit) * 100
-				if percentage < 0 {
-					percentage = 0
-				}
+			// remaining percentage = 100 - used_percent
+			percentage := 100.0 - sw.UsedPercent
+			if percentage < 0 {
+				percentage = 0
 			}
-			used := sw.Used
-			limit := sw.Limit
-			remaining := sw.Limit - sw.Used
-			if remaining < 0 {
-				remaining = 0
+
+			// Convert Unix timestamp to ISO 8601 string for ResetTime
+			resetTime := time.Unix(sw.ResetAt, 0).UTC().Format(time.RFC3339)
+
+			windows.Weekly = &WindowQuota{
+				Percentage:    percentage,
+				ResetTime:     resetTime,
+				WindowSeconds: sw.LimitWindowSeconds,
 			}
-			models = append(models, ModelQuota{
-				Name:       "codex-weekly",
-				Percentage: percentage,
-				ResetTime:  sw.ResetAt,
-				Used:       &used,
-				Limit:      &limit,
-				Remaining:  &remaining,
-			})
 		}
 	}
 
 	data := &ProviderQuotaData{
-		Models:      models,
+		Windows:     windows,
 		LastUpdated: time.Now(),
 		IsForbidden: false,
 	}
 
-	// Set plan type
-	if resp.Plan != nil {
-		data.PlanType = resp.Plan.Name
+	// Set plan type from root level
+	if resp.PlanType != "" {
+		data.PlanType = resp.PlanType
+	}
+
+	// Add extra info about rate limit status
+	if resp.RateLimit != nil {
 		data.Extra = map[string]any{
-			"plan_display_name": resp.Plan.DisplayName,
+			"allowed":       resp.RateLimit.Allowed,
+			"limit_reached": resp.RateLimit.LimitReached,
 		}
 	}
 
