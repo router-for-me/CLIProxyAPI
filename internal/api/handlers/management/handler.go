@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -36,6 +37,7 @@ type Handler struct {
 	authManager         *coreauth.Manager
 	usageStats          *usage.RequestStatistics
 	tokenStore          coreauth.Store
+	quotaManager        *quota.Manager
 	localPassword       string
 	allowRemoteOverride bool
 	envSecret           string
@@ -47,13 +49,17 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envSecret = strings.TrimSpace(envSecret)
 
+	tokenStore := sdkAuth.GetTokenStore()
+	quotaManager := quota.NewManager(tokenStore, nil)
+
 	return &Handler{
 		cfg:                 cfg,
 		configFilePath:      configFilePath,
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
 		usageStats:          usage.GetRequestStatistics(),
-		tokenStore:          sdkAuth.GetTokenStore(),
+		tokenStore:          tokenStore,
+		quotaManager:        quotaManager,
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}

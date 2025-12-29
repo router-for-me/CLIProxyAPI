@@ -595,6 +595,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		// Quota fetching endpoints
+		mgmt.GET("/quotas", s.mgmt.GetAllQuotas)
+		mgmt.GET("/quotas/:provider", s.mgmt.GetProviderQuotas)
+		mgmt.GET("/quotas/:provider/:account", s.mgmt.GetAccountQuota)
+		mgmt.POST("/quotas/refresh", s.mgmt.RefreshQuotas)
+		mgmt.GET("/subscription-info", s.mgmt.GetSubscriptionInfo)
 	}
 }
 
