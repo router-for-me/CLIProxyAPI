@@ -134,6 +134,7 @@ ws-auth: false
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
+#         base-url: "https://custom.api.com" # optional: per-key base URL override
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #       - api-key: "sk-or-v1-...b781" # without proxy-url
 #     models: # The models supported by the provider.
