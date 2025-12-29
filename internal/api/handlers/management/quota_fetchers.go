@@ -1,6 +1,7 @@
 package management
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -42,6 +43,13 @@ func (h *Handler) GetProviderQuotas(c *gin.Context) {
 	ctx := c.Request.Context()
 	quotas, err := h.quotaManager.FetchProviderQuotas(ctx, provider)
 	if err != nil {
+		if errors.Is(err, quota.ErrUnknownProvider) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":           err.Error(),
+				"known_providers": h.quotaManager.GetKnownProviders(),
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -67,6 +75,13 @@ func (h *Handler) GetAccountQuota(c *gin.Context) {
 	ctx := c.Request.Context()
 	quotaResp, err := h.quotaManager.FetchAccountQuota(ctx, provider, account)
 	if err != nil {
+		if errors.Is(err, quota.ErrUnknownProvider) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":           err.Error(),
+				"known_providers": h.quotaManager.GetKnownProviders(),
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

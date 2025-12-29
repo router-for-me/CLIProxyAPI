@@ -2,6 +2,8 @@ package quota
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -11,13 +13,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// ErrUnknownProvider is returned when a provider is not recognized.
+var ErrUnknownProvider = errors.New("unknown provider")
+
 // unsupportedProviders lists providers that don't have quota APIs.
+// These are "known" providers but don't support quota fetching.
 var unsupportedProviders = map[string]bool{
-	"claude":  true,
-	"gemini":  true, // API key-based Gemini (pay-per-use)
-	"vertex":  true,
-	"iflow":   true,
-	"qwen":    true,
+	"claude":   true,
+	"gemini":   true, // API key-based Gemini (pay-per-use)
+	"vertex":   true,
+	"iflow":    true,
+	"qwen":     true,
 	"aistudio": true,
 }
 
@@ -92,6 +98,55 @@ func isUnsupportedProvider(provider string) bool {
 	return unsupportedProviders[provider]
 }
 
+// GetKnownProviders returns a list of all known provider names.
+// This includes both supported providers (with fetchers) and unsupported providers.
+func (m *Manager) GetKnownProviders() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	providers := make(map[string]bool)
+
+	// Add providers from fetchers
+	for _, fetcher := range m.fetchers {
+		for _, p := range fetcher.SupportedProviders() {
+			providers[strings.ToLower(p)] = true
+		}
+	}
+
+	// Add unsupported providers (they're still "known")
+	for p := range unsupportedProviders {
+		providers[p] = true
+	}
+
+	result := make([]string, 0, len(providers))
+	for p := range providers {
+		result = append(result, p)
+	}
+	return result
+}
+
+// IsKnownProvider returns true if the provider is recognized.
+func (m *Manager) IsKnownProvider(provider string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+
+	// Check if it's an unsupported but known provider
+	if unsupportedProviders[provider] {
+		return true
+	}
+
+	// Check if any fetcher supports this provider
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, fetcher := range m.fetchers {
+		if fetcher.CanFetch(provider) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // FetchAllQuotas fetches quota for all connected accounts.
 func (m *Manager) FetchAllQuotas(ctx context.Context) (*QuotaResponse, error) {
 	m.mu.RLock()
@@ -134,11 +189,16 @@ func (m *Manager) FetchAllQuotas(ctx context.Context) (*QuotaResponse, error) {
 
 // FetchProviderQuotas fetches quota for all accounts of a specific provider.
 func (m *Manager) FetchProviderQuotas(ctx context.Context, provider string) (*ProviderQuotaResponse, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+
+	// Validate provider is known
+	if !m.IsKnownProvider(provider) {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownProvider, provider)
+	}
+
 	m.mu.RLock()
 	authStore := m.authStore
 	m.mu.RUnlock()
-
-	provider = strings.ToLower(strings.TrimSpace(provider))
 
 	if authStore == nil {
 		return &ProviderQuotaResponse{
@@ -177,11 +237,16 @@ func (m *Manager) FetchProviderQuotas(ctx context.Context, provider string) (*Pr
 
 // FetchAccountQuota fetches quota for a specific account.
 func (m *Manager) FetchAccountQuota(ctx context.Context, provider, accountID string) (*AccountQuotaResponse, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+
+	// Validate provider is known
+	if !m.IsKnownProvider(provider) {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownProvider, provider)
+	}
+
 	m.mu.RLock()
 	authStore := m.authStore
 	m.mu.RUnlock()
-
-	provider = strings.ToLower(strings.TrimSpace(provider))
 
 	if authStore == nil {
 		return &AccountQuotaResponse{
