@@ -507,6 +507,62 @@ func TestConfigSynthesizer_OpenAICompat_FallbackWithModels(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_PerEntryBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:    "TestProvider",
+					BaseURL: "https://default.api.com",
+					Models: []config.OpenAICompatibilityModel{
+						{Name: "model-a"},
+					},
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "key-with-custom-base", BaseURL: "https://custom.api.com"},
+						{APIKey: "key-without-base"},
+						{APIKey: "key-with-empty-base", BaseURL: ""},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 3 {
+		t.Fatalf("expected 3 auths, got %d", len(auths))
+	}
+
+	// First entry has custom base URL
+	if auths[0].Attributes["base_url"] != "https://custom.api.com" {
+		t.Errorf("expected base_url https://custom.api.com, got %s", auths[0].Attributes["base_url"])
+	}
+	if auths[0].Attributes["api_key"] != "key-with-custom-base" {
+		t.Errorf("expected api_key key-with-custom-base, got %s", auths[0].Attributes["api_key"])
+	}
+
+	// Second entry falls back to parent base URL
+	if auths[1].Attributes["base_url"] != "https://default.api.com" {
+		t.Errorf("expected base_url https://default.api.com, got %s", auths[1].Attributes["base_url"])
+	}
+	if auths[1].Attributes["api_key"] != "key-without-base" {
+		t.Errorf("expected api_key key-without-base, got %s", auths[1].Attributes["api_key"])
+	}
+
+	// Third entry with empty base URL falls back to parent base URL
+	if auths[2].Attributes["base_url"] != "https://default.api.com" {
+		t.Errorf("expected base_url https://default.api.com, got %s", auths[2].Attributes["base_url"])
+	}
+	if auths[2].Attributes["api_key"] != "key-with-empty-base" {
+		t.Errorf("expected api_key key-with-empty-base, got %s", auths[2].Attributes["api_key"])
+	}
+}
+
 func TestConfigSynthesizer_VertexCompat_WithModels(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

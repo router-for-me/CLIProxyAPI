@@ -188,11 +188,15 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			entry := &compat.APIKeyEntries[j]
 			key := strings.TrimSpace(entry.APIKey)
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			entryBaseURL := strings.TrimSpace(entry.BaseURL)
+			if entryBaseURL == "" {
+				entryBaseURL = base
+			}
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-			id, token := idGen.Next(idKind, key, base, proxyURL)
+			id, token := idGen.Next(idKind, key, entryBaseURL, proxyURL)
 			attrs := map[string]string{
 				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
-				"base_url":     base,
+				"base_url":     entryBaseURL,
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
 			}
