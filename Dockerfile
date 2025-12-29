@@ -21,15 +21,21 @@ RUN apk add --no-cache tzdata
 RUN mkdir /CLIProxyAPI
 
 COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+COPY --from=builder ./app/start-cloud.sh /CLIProxyAPI/start-cloud.sh
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 
 WORKDIR /CLIProxyAPI
 
-EXPOSE 8317
+# Make startup script executable
+RUN chmod +x /CLIProxyAPI/start-cloud.sh
+
+# Expose both 8080 (cloud default) and 8317 (local default)
+EXPOSE 8080 8317
 
 ENV TZ=Asia/Shanghai
 
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
 
-CMD ["./CLIProxyAPI"]
+# Use cloud startup script that generates config from environment variables
+CMD ["/CLIProxyAPI/start-cloud.sh"]
