@@ -244,8 +244,8 @@ func (m *Manager) FetchAllQuotas(ctx context.Context) (*QuotaResponse, error) {
 		Quotas: make(map[string]map[string]*ProviderQuotaData),
 	}
 
-	// Track the earliest LastUpdated from all quota data
-	var earliestUpdate time.Time
+	// Track the latest LastUpdated from all quota data
+	var latestUpdate time.Time
 
 	// Group auths by provider
 	for _, auth := range auths {
@@ -259,19 +259,19 @@ func (m *Manager) FetchAllQuotas(ctx context.Context) (*QuotaResponse, error) {
 		quotaData := m.fetchQuotaForAuth(ctx, auth, false)
 		response.Quotas[provider][accountID] = quotaData
 
-		// Track earliest update time from actual data
+		// Track latest update time from actual data
 		if !quotaData.LastUpdated.IsZero() {
-			if earliestUpdate.IsZero() || quotaData.LastUpdated.Before(earliestUpdate) {
-				earliestUpdate = quotaData.LastUpdated
+			if latestUpdate.IsZero() || quotaData.LastUpdated.After(latestUpdate) {
+				latestUpdate = quotaData.LastUpdated
 			}
 		}
 	}
 
-	// Use earliest data timestamp, or current time if no data
-	if earliestUpdate.IsZero() {
+	// Use latest data timestamp, or current time if no data
+	if latestUpdate.IsZero() {
 		response.LastUpdated = time.Now()
 	} else {
-		response.LastUpdated = earliestUpdate
+		response.LastUpdated = latestUpdate
 	}
 
 	return response, nil
@@ -309,8 +309,8 @@ func (m *Manager) FetchProviderQuotas(ctx context.Context, provider string) (*Pr
 		Accounts: make(map[string]*ProviderQuotaData),
 	}
 
-	// Track the earliest LastUpdated from all quota data
-	var earliestUpdate time.Time
+	// Track the latest LastUpdated from all quota data
+	var latestUpdate time.Time
 
 	// Filter and fetch for this provider
 	for _, auth := range auths {
@@ -323,19 +323,19 @@ func (m *Manager) FetchProviderQuotas(ctx context.Context, provider string) (*Pr
 		quotaData := m.fetchQuotaForAuth(ctx, auth, false)
 		response.Accounts[accountID] = quotaData
 
-		// Track earliest update time from actual data
+		// Track latest update time from actual data
 		if !quotaData.LastUpdated.IsZero() {
-			if earliestUpdate.IsZero() || quotaData.LastUpdated.Before(earliestUpdate) {
-				earliestUpdate = quotaData.LastUpdated
+			if latestUpdate.IsZero() || quotaData.LastUpdated.After(latestUpdate) {
+				latestUpdate = quotaData.LastUpdated
 			}
 		}
 	}
 
-	// Use earliest data timestamp, or current time if no data
-	if earliestUpdate.IsZero() {
+	// Use latest data timestamp, or current time if no data
+	if latestUpdate.IsZero() {
 		response.LastUpdated = time.Now()
 	} else {
-		response.LastUpdated = earliestUpdate
+		response.LastUpdated = latestUpdate
 	}
 
 	return response, nil

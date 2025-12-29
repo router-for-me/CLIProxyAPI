@@ -83,7 +83,7 @@ func (c *QuotaCache) InvalidateProvider(provider string) {
 
 	prefix := provider + ":"
 	for key := range c.entries {
-		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
 			delete(c.entries, key)
 		}
 	}

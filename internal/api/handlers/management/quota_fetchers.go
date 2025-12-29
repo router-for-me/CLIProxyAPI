@@ -98,9 +98,11 @@ func (h *Handler) RefreshQuotas(c *gin.Context) {
 	}
 
 	var req quota.RefreshRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		// Allow empty body - refresh all
-		req.Providers = nil
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
+			return
+		}
 	}
 
 	ctx := c.Request.Context()
