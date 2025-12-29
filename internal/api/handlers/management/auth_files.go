@@ -454,24 +454,11 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	}
 
 	result := gin.H{}
+	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
+		result["chatgpt_account_id"] = v
+	}
 	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
 		result["plan_type"] = v
-	}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.UserID); v != "" {
-		result["user_id"] = v
-	}
-
-	if len(claims.CodexAuthInfo.Organizations) > 0 {
-		orgs := make([]gin.H, 0, len(claims.CodexAuthInfo.Organizations))
-		for _, org := range claims.CodexAuthInfo.Organizations {
-			orgs = append(orgs, gin.H{
-				"id":         strings.TrimSpace(org.ID),
-				"title":      strings.TrimSpace(org.Title),
-				"role":       strings.TrimSpace(org.Role),
-				"is_default": org.IsDefault,
-			})
-		}
-		result["organizations"] = orgs
 	}
 
 	if len(result) == 0 {
