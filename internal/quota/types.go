@@ -123,17 +123,12 @@ type RefreshRequest struct {
 }
 
 // UnavailableQuota returns a ProviderQuotaData indicating quota is not available.
+// This is used for providers that don't have a public quota API.
 func UnavailableQuota(reason string) *ProviderQuotaData {
 	return &ProviderQuotaData{
-		Models: []ModelQuota{
-			{
-				Name:       "quota",
-				Percentage: -1,
-			},
-		},
+		// No models/windows - quota info is not available for this provider
 		LastUpdated: time.Now(),
 		IsForbidden: false,
-		PlanType:    "unavailable",
 		Error:       reason,
 	}
 }

@@ -14,11 +14,11 @@ import (
 )
 
 const (
-	antigravityQuotaAPIURL     = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
-	antigravityLoadProjectURL  = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-	antigravityAPIUserAgent    = "antigravity/1.11.3 Darwin/arm64"
-	antigravityAPIClient       = "google-cloud-sdk vscode_cloudshelleditor/0.1"
-	antigravityClientMetadata  = `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
+	antigravityQuotaAPIURL    = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
+	antigravityLoadProjectURL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+	antigravityAPIUserAgent   = "antigravity/1.11.3 Darwin/arm64"
+	antigravityAPIClient      = "google-cloud-sdk vscode_cloudshelleditor/0.1"
+	antigravityClientMetadata = `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
 )
 
 // AntigravityFetcher implements quota fetching for Antigravity and Gemini-CLI providers.
@@ -226,11 +226,11 @@ func (f *AntigravityFetcher) setRequestHeaders(req *http.Request, accessToken st
 
 type fetchAvailableModelsResponse struct {
 	// Models is a map from model name to model info (not an array!)
-	Models           map[string]modelInfo `json:"models"`
-	CurrentTier      *tierInfo            `json:"currentTier"`
-	AvailableTiers   []tierInfo           `json:"availableTiers"`
-	ProjectID        string               `json:"cloudaicompanionProject"`
-	TierUpgradeURL   string               `json:"tierUpgradeUrl"`
+	Models         map[string]modelInfo `json:"models"`
+	CurrentTier    *tierInfo            `json:"currentTier"`
+	AvailableTiers []tierInfo           `json:"availableTiers"`
+	ProjectID      string               `json:"cloudaicompanionProject"`
+	TierUpgradeURL string               `json:"tierUpgradeUrl"`
 }
 
 type modelInfo struct {

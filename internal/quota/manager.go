@@ -20,7 +20,7 @@ var ErrUnknownProvider = errors.New("unknown provider")
 // These are "known" providers but don't support quota fetching.
 var unsupportedProviders = map[string]bool{
 	"claude":   true,
-	"gemini":   true, // API key-based Gemini (pay-per-use)
+	"gemini":   true, // Gemini CLI doesn't have a public quota API
 	"vertex":   true,
 	"iflow":    true,
 	"qwen":     true,
