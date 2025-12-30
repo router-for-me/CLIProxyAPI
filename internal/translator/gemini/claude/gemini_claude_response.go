@@ -248,10 +248,24 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				output = output + "event: message_delta\n"
 				output = output + `data: `
 
-				template := `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
+				stopReason := "end_turn"
 				if usedTool {
-					template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
+					stopReason = "tool_use"
+				} else {
+					if finish := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finish.Exists() {
+						switch finish.String() {
+						case "MAX_TOKENS":
+							stopReason = "max_tokens"
+						case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
+							stopReason = "end_turn"
+						default:
+							stopReason = "end_turn"
+						}
+					}
 				}
+
+				template := `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
+				template, _ = sjson.Set(template, "delta.stop_reason", stopReason)
 
 				thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
 				template, _ = sjson.Set(template, "usage.output_tokens", candidatesTokenCountResult.Int()+thoughtsTokenCount)

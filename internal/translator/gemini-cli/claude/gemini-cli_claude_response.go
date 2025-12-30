@@ -239,12 +239,25 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 				output = output + "event: message_delta\n"
 				output = output + `data: `
 
+				stopReason := "end_turn"
+				if usedTool {
+					stopReason = "tool_use"
+				} else {
+					if finish := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finish.Exists() {
+						switch finish.String() {
+						case "MAX_TOKENS":
+							stopReason = "max_tokens"
+						case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
+							stopReason = "end_turn"
+						default:
+							stopReason = "end_turn"
+						}
+					}
+				}
+
 				// Create the message delta template with appropriate stop reason
 				template := `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
-				// Set tool_use stop reason if tools were used in this response
-				if usedTool {
-					template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
-				}
+				template, _ = sjson.Set(template, "delta.stop_reason", stopReason)
 
 				// Include thinking tokens in output token count if present
 				thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
