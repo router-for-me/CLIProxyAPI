@@ -184,6 +184,12 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		auth = updatedAuth
 	}
 
+	// Check for web search tool - if present, use Gemini directly instead of Claude
+	if doWebSearchTool(req.Payload) {
+		log.Debugf("antigravity executor: web_search tool detected, using Gemini for non-stream: %s", req.Model)
+		return e.executeWebSearchOnly(ctx, auth, token, req, opts)
+	}
+
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
@@ -518,6 +524,19 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		auth = updatedAuth
 	}
 
+	// Resolve upstream model for consistent Claude detection (handles model aliases/mappings)
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
+	}
+	isClaude := strings.Contains(strings.ToLower(upstreamModel), "claude")
+
+	// Check for web search tool + Claude model - if present, use Gemini directly instead of Claude
+	if isClaude && doWebSearchTool(req.Payload) {
+		log.Debugf("antigravity executor: web_search tool detected, using Gemini for stream: %s", req.Model)
+		return e.executeWebSearchOnlyStream(ctx, auth, token, req, opts)
+	}
+
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
@@ -592,7 +611,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 		out := make(chan cliproxyexecutor.StreamChunk)
 		stream = out
-		go func(resp *http.Response) {
+		go func(resp *http.Response, fromFmt, toFmt sdktranslator.Format) {
 			defer close(out)
 			defer func() {
 				if errClose := resp.Body.Close(); errClose != nil {
@@ -619,12 +638,13 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					reporter.publish(ctx, detail)
 				}
 
-				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bytes.Clone(payload), &param)
+				chunks := sdktranslator.TranslateStream(ctx, toFmt, fromFmt, req.Model, bytes.Clone(opts.OriginalRequest), translated, bytes.Clone(payload), &param)
+
 				for i := range chunks {
 					out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 				}
 			}
-			tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, []byte("[DONE]"), &param)
+			tail := sdktranslator.TranslateStream(ctx, toFmt, fromFmt, req.Model, bytes.Clone(opts.OriginalRequest), translated, []byte("[DONE]"), &param)
 			for i := range tail {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(tail[i])}
 			}
@@ -635,7 +655,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			} else {
 				reporter.ensurePublished(ctx)
 			}
-		}(httpResp)
+		}(httpResp, from, to)
 		return stream, nil
 	}
 
@@ -1370,4 +1390,430 @@ func antigravityMinThinkingBudget(model string) int {
 		return modelInfo.Thinking.Min
 	}
 	return -1
+}
+
+// Web search support for Claude models via `gemini-2.5-flash` googleSearch
+
+const webSearchGeminiModel = "gemini-2.5-flash"
+
+// doWebSearchTool checks if the original request contains a web_search tool.
+func doWebSearchTool(payload []byte) bool {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := tool.Get("type").String()
+		if strings.HasPrefix(toolType, "web_search") {
+			return true
+		}
+	}
+	return false
+}
+
+// extractUserQuery extracts the last user message text for web search.
+func extractUserQuery(payload []byte) string {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	arr := messages.Array()
+	// Find the last user message
+	for i := len(arr) - 1; i >= 0; i-- {
+		msg := arr[i]
+		if msg.Get("role").String() == "user" {
+			content := msg.Get("content")
+			if content.Type == gjson.String {
+				return content.String()
+			}
+			// Try array format
+			if content.IsArray() {
+				for _, item := range content.Array() {
+					if item.Get("type").String() == "text" {
+						return item.Get("text").String()
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// executeGeminiWebSearch performs a web search using Gemini with googleSearch tool.
+// Returns the full response body (containing both text and groundingMetadata).
+func (e *AntigravityExecutor) executeGeminiWebSearch(ctx context.Context, auth *cliproxyauth.Auth, token, query string) ([]byte, error) {
+	if query == "" {
+		return nil, fmt.Errorf("empty query")
+	}
+
+	// Build Gemini request with googleSearch tool
+	geminiPayload := `{"model":"","request":{"contents":[],"tools":[{"googleSearch":{}}]}}`
+	geminiPayload, _ = sjson.Set(geminiPayload, "model", webSearchGeminiModel)
+	geminiPayload, _ = sjson.Set(geminiPayload, "request.contents.0.role", "user")
+	geminiPayload, _ = sjson.Set(geminiPayload, "request.contents.0.parts.0.text", query)
+
+	// Apply project ID
+	projectID := ""
+	if auth != nil && auth.Metadata != nil {
+		if pid, ok := auth.Metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+	}
+	geminiPayload = string(geminiToAntigravity(webSearchGeminiModel, []byte(geminiPayload), projectID))
+
+	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+
+	for _, baseURL := range baseURLs {
+		base := strings.TrimSuffix(baseURL, "/")
+		requestURL := base + antigravityGeneratePath
+
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader([]byte(geminiPayload)))
+		if errReq != nil {
+			continue
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("Accept", "application/json")
+		if host := resolveHost(base); host != "" {
+			httpReq.Host = host
+		}
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			log.Debugf("antigravity web search: request failed: %v", errDo)
+			continue
+		}
+
+		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		_ = httpResp.Body.Close()
+		if errRead != nil {
+			continue
+		}
+
+		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+			log.Debugf("antigravity web search: upstream error status: %d", httpResp.StatusCode)
+			continue
+		}
+
+		log.Debugf("antigravity web search: got response for query: %s", query)
+		return bodyBytes, nil
+	}
+
+	return nil, fmt.Errorf("web search failed")
+}
+
+// executeWebSearchOnly handles web search requests by using Gemini instead of Claude.
+// This is a non-streaming implementation that returns the response in Claude format.
+func (e *AntigravityExecutor) executeWebSearchOnly(ctx context.Context, auth *cliproxyauth.Auth, token string, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+
+	query := extractUserQuery(req.Payload)
+	if query == "" {
+		reporter.publishFailure(ctx)
+		return cliproxyexecutor.Response{}, fmt.Errorf("no user query found for web search")
+	}
+
+	// Execute Gemini web search
+	geminiResp, err := e.executeGeminiWebSearch(ctx, auth, token, query)
+	if err != nil {
+		reporter.publishFailure(ctx)
+		return cliproxyexecutor.Response{}, err
+	}
+
+	// Publish usage from Gemini response
+	reporter.publish(ctx, parseAntigravityUsage(geminiResp))
+
+	// Convert Gemini response to Claude format
+	claudeResp := convertGeminiToClaudeNonStream(req.Model, geminiResp)
+	reporter.ensurePublished(ctx)
+
+	return cliproxyexecutor.Response{Payload: []byte(claudeResp)}, nil
+}
+
+// executeWebSearchOnlyStream handles web search requests by using Gemini instead of Claude.
+// This is a streaming implementation that returns the response in Claude SSE format.
+func (e *AntigravityExecutor) executeWebSearchOnlyStream(ctx context.Context, auth *cliproxyauth.Auth, token string, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+
+	query := extractUserQuery(req.Payload)
+	if query == "" {
+		reporter.publishFailure(ctx)
+		return nil, fmt.Errorf("no user query found for web search")
+	}
+
+	// Execute Gemini web search (non-streaming, then convert to stream format)
+	geminiResp, err := e.executeGeminiWebSearch(ctx, auth, token, query)
+	if err != nil {
+		reporter.publishFailure(ctx)
+		return nil, err
+	}
+
+	// Publish usage from Gemini response
+	reporter.publish(ctx, parseAntigravityUsage(geminiResp))
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+
+		// Convert Gemini response to Claude SSE stream
+		sseEvents := convertGeminiToClaudeSSEStream(req.Model, geminiResp)
+		for _, event := range sseEvents {
+			out <- cliproxyexecutor.StreamChunk{Payload: []byte(event)}
+		}
+
+		reporter.ensurePublished(ctx)
+	}()
+
+	return out, nil
+}
+
+// convertGeminiToClaudeNonStream converts a Gemini response to Claude non-streaming format.
+func convertGeminiToClaudeNonStream(model string, geminiResp []byte) string {
+	// Extract data from Gemini response
+	// Try wrapped format first (response.candidates...), then top-level (candidates...)
+	textContent := ""
+	if parts := gjson.GetBytes(geminiResp, "response.candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	} else if parts := gjson.GetBytes(geminiResp, "candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	}
+
+	groundingMetadata := gjson.GetBytes(geminiResp, "response.candidates.0.groundingMetadata")
+	if !groundingMetadata.Exists() {
+		groundingMetadata = gjson.GetBytes(geminiResp, "candidates.0.groundingMetadata")
+	}
+
+	// Get usage from Gemini response
+	inputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.promptTokenCount").Int()
+	if inputTokens == 0 {
+		inputTokens = gjson.GetBytes(geminiResp, "usageMetadata.promptTokenCount").Int()
+	}
+	outputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.candidatesTokenCount").Int()
+	if outputTokens == 0 {
+		outputTokens = gjson.GetBytes(geminiResp, "usageMetadata.candidatesTokenCount").Int()
+	}
+
+	// Build Claude response
+	msgID := fmt.Sprintf("msg_%s", uuid.New().String()[:24])
+	toolUseID := fmt.Sprintf("srvtoolu_%d", time.Now().UnixNano())
+
+	// Build search query from webSearchQueries
+	searchQuery := ""
+	if queries := groundingMetadata.Get("webSearchQueries"); queries.IsArray() && len(queries.Array()) > 0 {
+		searchQuery = queries.Array()[0].String()
+	}
+
+	// Build content array
+	content := []map[string]interface{}{}
+
+	// 1. server_tool_use block
+	serverToolUse := map[string]interface{}{
+		"type":  "server_tool_use",
+		"id":    toolUseID,
+		"name":  "web_search",
+		"input": map[string]interface{}{"query": searchQuery},
+	}
+	content = append(content, serverToolUse)
+
+	// 2. web_search_tool_result block
+	webSearchResults := []map[string]interface{}{}
+	groundingChunks := groundingMetadata.Get("groundingChunks")
+	if groundingChunks.IsArray() {
+		for _, chunk := range groundingChunks.Array() {
+			web := chunk.Get("web")
+			if web.Exists() {
+				result := map[string]interface{}{
+					"type":     "web_search_result",
+					"page_age": nil,
+				}
+				if title := web.Get("title"); title.Exists() {
+					result["title"] = title.String()
+				}
+				if uri := web.Get("uri"); uri.Exists() {
+					result["url"] = uri.String()
+				}
+				if domain := web.Get("domain"); domain.Exists() {
+					result["encrypted_content"] = domain.String()
+				}
+				webSearchResults = append(webSearchResults, result)
+			}
+		}
+	}
+	webSearchToolResult := map[string]interface{}{
+		"type":        "web_search_tool_result",
+		"tool_use_id": toolUseID,
+		"content":     webSearchResults,
+	}
+	content = append(content, webSearchToolResult)
+
+	// 3. text block with Gemini's response
+	if textContent != "" {
+		textBlock := map[string]interface{}{
+			"type": "text",
+			"text": textContent,
+		}
+		content = append(content, textBlock)
+	}
+
+	// Build final response
+	response := map[string]interface{}{
+		"id":            msgID,
+		"type":          "message",
+		"role":          "assistant",
+		"content":       content,
+		"model":         model,
+		"stop_reason":   "end_turn",
+		"stop_sequence": nil,
+		"usage": map[string]interface{}{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+			"server_tool_use": map[string]interface{}{
+				"web_search_requests": 1,
+			},
+		},
+	}
+
+	respJSON, _ := json.Marshal(response)
+	return string(respJSON)
+}
+
+// convertGeminiToClaudeSSEStream converts a Gemini response to Claude SSE stream format.
+func convertGeminiToClaudeSSEStream(model string, geminiResp []byte) []string {
+	var events []string
+
+	// Extract data from Gemini response
+	textContent := ""
+	if parts := gjson.GetBytes(geminiResp, "response.candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	} else if parts := gjson.GetBytes(geminiResp, "candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	}
+
+	groundingMetadata := gjson.GetBytes(geminiResp, "response.candidates.0.groundingMetadata")
+	if !groundingMetadata.Exists() {
+		groundingMetadata = gjson.GetBytes(geminiResp, "candidates.0.groundingMetadata")
+	}
+
+	// Get usage from Gemini response
+	inputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.promptTokenCount").Int()
+	if inputTokens == 0 {
+		inputTokens = gjson.GetBytes(geminiResp, "usageMetadata.promptTokenCount").Int()
+	}
+	outputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.candidatesTokenCount").Int()
+	if outputTokens == 0 {
+		outputTokens = gjson.GetBytes(geminiResp, "usageMetadata.candidatesTokenCount").Int()
+	}
+
+	msgID := fmt.Sprintf("msg_%s", uuid.New().String()[:24])
+	toolUseID := fmt.Sprintf("srvtoolu_%d", time.Now().UnixNano())
+
+	// Build search query from webSearchQueries
+	searchQuery := ""
+	if queries := groundingMetadata.Get("webSearchQueries"); queries.IsArray() && len(queries.Array()) > 0 {
+		searchQuery = queries.Array()[0].String()
+	}
+
+	// 1. message_start
+	messageStart := fmt.Sprintf(`{"type":"message_start","message":{"id":"%s","type":"message","role":"assistant","content":[],"model":"%s","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":%d,"output_tokens":0}}}`,
+		msgID, model, inputTokens)
+	events = append(events, "event: message_start\ndata: "+messageStart+"\n\n")
+
+	contentIndex := 0
+
+	// 2. server_tool_use block (index 0)
+	serverToolUseStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"server_tool_use","id":"%s","name":"web_search","input":{}}}`,
+		contentIndex, toolUseID)
+	events = append(events, "event: content_block_start\ndata: "+serverToolUseStart+"\n\n")
+
+	// input_json_delta
+	if searchQuery != "" {
+		queryJSON, _ := sjson.Set(`{}`, "query", searchQuery)
+		inputDelta := fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, contentIndex)
+		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", queryJSON)
+		events = append(events, "event: content_block_delta\ndata: "+inputDelta+"\n\n")
+	}
+
+	events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
+	contentIndex++
+
+	// 3. web_search_tool_result block (index 1)
+	webSearchResults := "[]"
+	groundingChunks := groundingMetadata.Get("groundingChunks")
+	if groundingChunks.IsArray() {
+		for _, chunk := range groundingChunks.Array() {
+			web := chunk.Get("web")
+			if web.Exists() {
+				result := `{"type":"web_search_result"}`
+				if title := web.Get("title"); title.Exists() {
+					result, _ = sjson.Set(result, "title", title.String())
+				}
+				if uri := web.Get("uri"); uri.Exists() {
+					result, _ = sjson.Set(result, "url", uri.String())
+				}
+				if domain := web.Get("domain"); domain.Exists() {
+					result, _ = sjson.Set(result, "encrypted_content", domain.String())
+				}
+				result, _ = sjson.Set(result, "page_age", nil)
+				webSearchResults, _ = sjson.SetRaw(webSearchResults, "-1", result)
+			}
+		}
+	}
+
+	webSearchToolResultStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"web_search_tool_result","tool_use_id":"%s","content":[]}}`,
+		contentIndex, toolUseID)
+	webSearchToolResultStart, _ = sjson.SetRaw(webSearchToolResultStart, "content_block.content", webSearchResults)
+	events = append(events, "event: content_block_start\ndata: "+webSearchToolResultStart+"\n\n")
+	events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
+	contentIndex++
+
+	// 4. text block with Gemini's response (index 2)
+	if textContent != "" {
+		textBlockStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, contentIndex)
+		events = append(events, "event: content_block_start\ndata: "+textBlockStart+"\n\n")
+
+		// Split text into smaller chunks for more realistic streaming
+		// Use rune-based chunking to avoid UTF-8 multi-byte character truncation
+		runes := []rune(textContent)
+		chunkSize := 50
+		for i := 0; i < len(runes); i += chunkSize {
+			end := i + chunkSize
+			if end > len(runes) {
+				end = len(runes)
+			}
+			chunk := string(runes[i:end])
+			textDelta := fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, contentIndex)
+			textDelta, _ = sjson.Set(textDelta, "delta.text", chunk)
+			events = append(events, "event: content_block_delta\ndata: "+textDelta+"\n\n")
+		}
+
+		events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
+	}
+
+	// 5. message_delta with stop_reason and usage
+	messageDelta := fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d,"server_tool_use":{"web_search_requests":1}}}`,
+		inputTokens, outputTokens)
+	events = append(events, "event: message_delta\ndata: "+messageDelta+"\n\n")
+
+	// 6. message_stop
+	events = append(events, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+
+	return events
 }
