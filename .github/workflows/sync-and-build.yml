@@ -1,0 +1,79 @@
+name: Sync Upstream and Build Docker
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name 'JohnnyPh'
+          git config --global user.email '28253406+JohnnyPh@users.noreply.github.com'
+
+      - name: Sync with Upstream
+        id: sync
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+          git fetch upstream --tags
+          CURRENT_BRANCH=$(git branch --show-current)
+          echo "Current branch: $CURRENT_BRANCH"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date."
+            echo "changes_detected=false" >> $GITHUB_OUTPUT
+          else
+            echo "Updates detected. Fast-forwarding..."
+            if git merge --ff-only upstream/main; then
+              echo "Fast-forward successful."
+              git push origin $CURRENT_BRANCH
+              echo "changes_detected=true" >> $GITHUB_OUTPUT
+            else
+              echo "::error::Fast-forward failed (diverged history). Cannot sync automatically."
+              exit 1
+            fi
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Prepare build args
+        id: prep
+        run: |
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          echo "date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          VERSION=$(git describe --tags --always --dirty || git rev-parse --short HEAD)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/cli-proxy-api:latest
+            ${{ secrets.DOCKER_USERNAME }}/cli-proxy-api:${{ github.sha }}
+          build-args: |
+            VERSION=${{ steps.prep.outputs.version }}
+            COMMIT=${{ github.sha }}
+            GIT_COMMIT=${{ github.sha }}
+            DATE=${{ steps.prep.outputs.date }}
+            BUILD_DATE=${{ steps.prep.outputs.date }}
+            builtAt=${{ steps.prep.outputs.date }}
