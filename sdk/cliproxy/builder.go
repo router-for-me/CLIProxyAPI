@@ -215,6 +215,7 @@ func (b *Builder) Build() (*Service, error) {
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+	coreManager.SetGlobalModelNameMappings(b.cfg.ModelNameMappings)
 
 	service := &Service{
 		cfg:            b.cfg,

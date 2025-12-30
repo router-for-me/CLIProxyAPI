@@ -110,6 +110,9 @@ type Manager struct {
 	requestRetry     atomic.Int32
 	maxRetryInterval atomic.Int64
 
+	// modelNameMappings stores global model name alias mappings (alias -> upstream name) keyed by channel.
+	modelNameMappings atomic.Value
+
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
@@ -411,6 +414,7 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		}
 		execReq := req
 		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
+		execReq.Metadata = m.applyGlobalModelNameMappingMetadata(auth, execReq.Model, execReq.Metadata)
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -475,6 +479,7 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		}
 		execReq := req
 		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
+		execReq.Metadata = m.applyGlobalModelNameMappingMetadata(auth, execReq.Model, execReq.Metadata)
 		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -539,6 +544,7 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		}
 		execReq := req
 		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
+		execReq.Metadata = m.applyGlobalModelNameMappingMetadata(auth, execReq.Model, execReq.Metadata)
 		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
 			rerr := &Error{Message: errStream.Error()}
@@ -604,6 +610,7 @@ func stripPrefixFromMetadata(metadata map[string]any, needle string) map[string]
 	keys := []string{
 		util.ThinkingOriginalModelMetadataKey,
 		util.GeminiOriginalModelMetadataKey,
+		util.ModelMappingOriginalModelMetadataKey,
 	}
 	var out map[string]any
 	for _, key := range keys {

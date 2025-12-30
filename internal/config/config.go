@@ -88,6 +88,13 @@ type Config struct {
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
+	// ModelNameMappings defines global per-channel model name mappings.
+	// These mappings affect both model listing and model routing for supported channels.
+	//
+	// NOTE: This does not apply to existing per-credential model alias features under:
+	// codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
+	ModelNameMappings map[string][]ModelNameMapping `yaml:"model-name-mappings,omitempty" json:"model-name-mappings,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -132,6 +139,13 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// ModelNameMapping defines a model ID rename mapping for a specific channel.
+// It maps the original model name (From) to the client-visible alias (To).
+type ModelNameMapping struct {
+	From string `yaml:"from" json:"from"`
+	To   string `yaml:"to" json:"to"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -425,6 +439,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 
+	// Normalize global model name mappings.
+	cfg.SanitizeModelNameMappings()
+
 	if cfg.legacyMigrationPending {
 		fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
 		if !optional && configFile != "" {
@@ -439,6 +456,50 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// SanitizeModelNameMappings normalizes and deduplicates global model name mappings.
+// It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
+// and ensures (From, To) pairs are unique within each channel.
+func (cfg *Config) SanitizeModelNameMappings() {
+	if cfg == nil || len(cfg.ModelNameMappings) == 0 {
+		return
+	}
+	out := make(map[string][]ModelNameMapping, len(cfg.ModelNameMappings))
+	for rawChannel, mappings := range cfg.ModelNameMappings {
+		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if channel == "" || len(mappings) == 0 {
+			continue
+		}
+		seenFrom := make(map[string]struct{}, len(mappings))
+		seenTo := make(map[string]struct{}, len(mappings))
+		clean := make([]ModelNameMapping, 0, len(mappings))
+		for _, mapping := range mappings {
+			from := strings.TrimSpace(mapping.From)
+			to := strings.TrimSpace(mapping.To)
+			if from == "" || to == "" {
+				continue
+			}
+			if strings.EqualFold(from, to) {
+				continue
+			}
+			fromKey := strings.ToLower(from)
+			toKey := strings.ToLower(to)
+			if _, ok := seenFrom[fromKey]; ok {
+				continue
+			}
+			if _, ok := seenTo[toKey]; ok {
+				continue
+			}
+			seenFrom[fromKey] = struct{}{}
+			seenTo[toKey] = struct{}{}
+			clean = append(clean, ModelNameMapping{From: from, To: to})
+		}
+		if len(clean) > 0 {
+			out[channel] = clean
+		}
+	}
+	cfg.ModelNameMappings = out
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are

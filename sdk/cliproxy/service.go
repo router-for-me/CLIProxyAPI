@@ -552,6 +552,9 @@ func (s *Service) Run(ctx context.Context) error {
 		s.cfgMu.Lock()
 		s.cfg = newCfg
 		s.cfgMu.Unlock()
+		if s.coreManager != nil {
+			s.coreManager.SetGlobalModelNameMappings(newCfg.ModelNameMappings)
+		}
 		s.rebindExecutors()
 	}
 
@@ -677,6 +680,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		return
 	}
 	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
+	if authKind == "" {
+		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
+			authKind = "apikey"
+		}
+	}
 	if a.Attributes != nil {
 		if v := strings.TrimSpace(a.Attributes["gemini_virtual_primary"]); strings.EqualFold(v, "true") {
 			GlobalModelRegistry().UnregisterClient(a.ID)
@@ -833,6 +841,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 	}
+	models = applyGlobalModelNameMappings(s.cfg, provider, authKind, models)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {
@@ -1138,6 +1147,124 @@ func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
 			Type:        "vertex",
 			DisplayName: display,
 		})
+	}
+	return out
+}
+
+func globalModelMappingChannel(provider, authKind string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	authKind = strings.ToLower(strings.TrimSpace(authKind))
+	switch provider {
+	case "gemini":
+		if authKind == "apikey" {
+			return "apikey-gemini"
+		}
+		return "gemini"
+	case "codex":
+		if authKind == "apikey" {
+			return ""
+		}
+		return "codex"
+	case "claude":
+		if authKind == "apikey" {
+			return ""
+		}
+		return "claude"
+	case "vertex":
+		if authKind == "apikey" {
+			return ""
+		}
+		return "vertex"
+	case "antigravity", "qwen", "iflow":
+		return provider
+	default:
+		return ""
+	}
+}
+
+func rewriteModelInfoName(name, oldID, newID string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return name
+	}
+	oldID = strings.TrimSpace(oldID)
+	newID = strings.TrimSpace(newID)
+	if oldID == "" || newID == "" {
+		return name
+	}
+	if strings.EqualFold(oldID, newID) {
+		return name
+	}
+	if strings.HasSuffix(trimmed, "/"+oldID) {
+		prefix := strings.TrimSuffix(trimmed, oldID)
+		return prefix + newID
+	}
+	if trimmed == "models/"+oldID {
+		return "models/" + newID
+	}
+	return name
+}
+
+func applyGlobalModelNameMappings(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
+	if cfg == nil || len(models) == 0 {
+		return models
+	}
+	channel := globalModelMappingChannel(provider, authKind)
+	if channel == "" || len(cfg.ModelNameMappings) == 0 {
+		return models
+	}
+	mappings := cfg.ModelNameMappings[channel]
+	if len(mappings) == 0 {
+		return models
+	}
+	forward := make(map[string]string, len(mappings))
+	for i := range mappings {
+		from := strings.TrimSpace(mappings[i].From)
+		to := strings.TrimSpace(mappings[i].To)
+		if from == "" || to == "" {
+			continue
+		}
+		if strings.EqualFold(from, to) {
+			continue
+		}
+		key := strings.ToLower(from)
+		if _, exists := forward[key]; exists {
+			continue
+		}
+		forward[key] = to
+	}
+	if len(forward) == 0 {
+		return models
+	}
+	out := make([]*ModelInfo, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		mappedID := id
+		if to, ok := forward[strings.ToLower(id)]; ok && strings.TrimSpace(to) != "" {
+			mappedID = strings.TrimSpace(to)
+		}
+		uniqueKey := strings.ToLower(mappedID)
+		if _, exists := seen[uniqueKey]; exists {
+			continue
+		}
+		seen[uniqueKey] = struct{}{}
+		if mappedID == id {
+			out = append(out, model)
+			continue
+		}
+		clone := *model
+		clone.ID = mappedID
+		if clone.Name != "" {
+			clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
+		}
+		out = append(out, &clone)
 	}
 	return out
 }

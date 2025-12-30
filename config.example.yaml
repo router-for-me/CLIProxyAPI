@@ -171,6 +171,32 @@ ws-auth: false
 #     - from: "claude-3-opus-20240229"
 #       to: "claude-3-5-sonnet-20241022"
 
+# Global model name mappings (per channel)
+# These mappings rename model IDs for both model listing and request routing.
+# NOTE: Mappings do not apply to codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# model-name-mappings:
+#   gemini:
+#     - from: "gemini-2.5-pro"          # original model name under this channel
+#       to: "gpt-5"                     # client-visible alias
+#   apikey-gemini:
+#     - from: "gemini-2.5-pro"
+#       to: "gpt-5"
+#   claude:
+#     - from: "claude-sonnet-4"
+#       to: "gpt-4o"
+#   vertex:
+#     - from: "gemini-2.5-pro"
+#       to: "gpt-5"
+#   qwen:
+#     - from: "qwen3-coder-plus"
+#       to: "gpt-4o-mini"
+#   iflow:
+#     - from: "glm-4.7"
+#       to: "gpt-5.1-mini"
+#   antigravity:
+#     - from: "gemini-3-pro-preview"
+#       to: "gpt-5"
+
 # OAuth provider excluded models
 # oauth-excluded-models:
 #   gemini-cli:
