@@ -414,7 +414,7 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		}
 		execReq := req
 		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
-		execReq.Metadata = m.applyGlobalModelNameMappingMetadata(auth, execReq.Model, execReq.Metadata)
+		execReq.Metadata = m.applyOAuthModelMappingMetadata(auth, execReq.Model, execReq.Metadata)
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -479,7 +479,7 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		}
 		execReq := req
 		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
-		execReq.Metadata = m.applyGlobalModelNameMappingMetadata(auth, execReq.Model, execReq.Metadata)
+		execReq.Metadata = m.applyOAuthModelMappingMetadata(auth, execReq.Model, execReq.Metadata)
 		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -544,7 +544,7 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		}
 		execReq := req
 		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
-		execReq.Metadata = m.applyGlobalModelNameMappingMetadata(auth, execReq.Model, execReq.Metadata)
+		execReq.Metadata = m.applyOAuthModelMappingMetadata(auth, execReq.Model, execReq.Metadata)
 		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
 			rerr := &Error{Message: errStream.Error()}

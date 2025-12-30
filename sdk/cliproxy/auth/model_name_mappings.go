@@ -26,19 +26,19 @@ func compileModelNameMappingTable(mappings map[string][]internalconfig.ModelName
 		}
 		rev := make(map[string]string, len(entries))
 		for _, entry := range entries {
-			from := strings.TrimSpace(entry.From)
-			to := strings.TrimSpace(entry.To)
-			if from == "" || to == "" {
+			name := strings.TrimSpace(entry.Name)
+			alias := strings.TrimSpace(entry.Alias)
+			if name == "" || alias == "" {
 				continue
 			}
-			if strings.EqualFold(from, to) {
+			if strings.EqualFold(name, alias) {
 				continue
 			}
-			aliasKey := strings.ToLower(to)
+			aliasKey := strings.ToLower(alias)
 			if _, exists := rev[aliasKey]; exists {
 				continue
 			}
-			rev[aliasKey] = from
+			rev[aliasKey] = name
 		}
 		if len(rev) > 0 {
 			out.reverse[channel] = rev
@@ -50,10 +50,10 @@ func compileModelNameMappingTable(mappings map[string][]internalconfig.ModelName
 	return out
 }
 
-// SetGlobalModelNameMappings updates the global model name mapping table used during execution.
+// SetOAuthModelMappings updates the OAuth model name mapping table used during execution.
 // The mapping is applied per-auth channel to resolve the upstream model name while keeping the
 // client-visible model name unchanged for translation/response formatting.
-func (m *Manager) SetGlobalModelNameMappings(mappings map[string][]internalconfig.ModelNameMapping) {
+func (m *Manager) SetOAuthModelMappings(mappings map[string][]internalconfig.ModelNameMapping) {
 	if m == nil {
 		return
 	}
@@ -65,8 +65,8 @@ func (m *Manager) SetGlobalModelNameMappings(mappings map[string][]internalconfi
 	m.modelNameMappings.Store(table)
 }
 
-func (m *Manager) applyGlobalModelNameMappingMetadata(auth *Auth, requestedModel string, metadata map[string]any) map[string]any {
-	original := m.resolveGlobalUpstreamModelForAuth(auth, requestedModel)
+func (m *Manager) applyOAuthModelMappingMetadata(auth *Auth, requestedModel string, metadata map[string]any) map[string]any {
+	original := m.resolveOAuthUpstreamModel(auth, requestedModel)
 	if original == "" {
 		return metadata
 	}
@@ -88,11 +88,11 @@ func (m *Manager) applyGlobalModelNameMappingMetadata(auth *Auth, requestedModel
 	return out
 }
 
-func (m *Manager) resolveGlobalUpstreamModelForAuth(auth *Auth, requestedModel string) string {
+func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) string {
 	if m == nil || auth == nil {
 		return ""
 	}
-	channel := globalModelMappingChannelForAuth(auth)
+	channel := modelMappingChannel(auth)
 	if channel == "" {
 		return ""
 	}
@@ -116,7 +116,10 @@ func (m *Manager) resolveGlobalUpstreamModelForAuth(auth *Auth, requestedModel s
 	return original
 }
 
-func globalModelMappingChannelForAuth(auth *Auth) string {
+// modelMappingChannel extracts the OAuth model mapping channel from an Auth object.
+// It determines the provider and auth kind from the Auth's attributes and delegates
+// to OAuthModelMappingChannel for the actual channel resolution.
+func modelMappingChannel(auth *Auth) string {
 	if auth == nil {
 		return ""
 	}
@@ -130,32 +133,38 @@ func globalModelMappingChannelForAuth(auth *Auth) string {
 			authKind = "apikey"
 		}
 	}
-	return globalModelMappingChannel(provider, authKind)
+	return OAuthModelMappingChannel(provider, authKind)
 }
 
-func globalModelMappingChannel(provider, authKind string) string {
+// OAuthModelMappingChannel returns the OAuth model mapping channel name for a given provider
+// and auth kind. Returns empty string if the provider/authKind combination doesn't support
+// OAuth model mappings (e.g., API key authentication).
+//
+// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow.
+func OAuthModelMappingChannel(provider, authKind string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	authKind = strings.ToLower(strings.TrimSpace(authKind))
 	switch provider {
 	case "gemini":
-		if authKind == "apikey" {
-			return "apikey-gemini"
-		}
-		return "gemini"
-	case "codex":
-		if authKind == "apikey" {
-			return ""
-		}
-		return "codex"
-	case "claude":
-		if authKind == "apikey" {
-			return ""
-		}
-		return "claude"
+		// gemini provider uses gemini-api-key config, not oauth-model-mappings.
+		// OAuth-based gemini auth is converted to "gemini-cli" by the synthesizer.
+		return ""
 	case "vertex":
 		if authKind == "apikey" {
 			return ""
 		}
 		return "vertex"
-	case "antigravity", "qwen", "iflow":
+	case "claude":
+		if authKind == "apikey" {
+			return ""
+		}
+		return "claude"
+	case "codex":
+		if authKind == "apikey" {
+			return ""
+		}
+		return "codex"
+	case "gemini-cli", "aistudio", "antigravity", "qwen", "iflow":
 		return provider
 	default:
 		return ""

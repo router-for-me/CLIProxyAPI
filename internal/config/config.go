@@ -88,12 +88,13 @@ type Config struct {
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
-	// ModelNameMappings defines global per-channel model name mappings.
-	// These mappings affect both model listing and model routing for supported channels.
+	// OAuthModelMappings defines global model name mappings for OAuth/file-backed auth channels.
+	// These mappings affect both model listing and model routing for supported channels:
+	// gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
-	// codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
-	ModelNameMappings map[string][]ModelNameMapping `yaml:"model-name-mappings,omitempty" json:"model-name-mappings,omitempty"`
+	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
+	OAuthModelMappings map[string][]ModelNameMapping `yaml:"oauth-model-mappings,omitempty" json:"oauth-model-mappings,omitempty"`
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
@@ -142,10 +143,10 @@ type RoutingConfig struct {
 }
 
 // ModelNameMapping defines a model ID rename mapping for a specific channel.
-// It maps the original model name (From) to the client-visible alias (To).
+// It maps the original model name (Name) to the client-visible alias (Alias).
 type ModelNameMapping struct {
-	From string `yaml:"from" json:"from"`
-	To   string `yaml:"to" json:"to"`
+	Name  string `yaml:"name" json:"name"`
+	Alias string `yaml:"alias" json:"alias"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -439,8 +440,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 
-	// Normalize global model name mappings.
-	cfg.SanitizeModelNameMappings()
+	// Normalize global OAuth model name mappings.
+	cfg.SanitizeOAuthModelMappings()
 
 	if cfg.legacyMigrationPending {
 		fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
@@ -458,48 +459,48 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	return &cfg, nil
 }
 
-// SanitizeModelNameMappings normalizes and deduplicates global model name mappings.
+// SanitizeOAuthModelMappings normalizes and deduplicates global OAuth model name mappings.
 // It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
 // and ensures (From, To) pairs are unique within each channel.
-func (cfg *Config) SanitizeModelNameMappings() {
-	if cfg == nil || len(cfg.ModelNameMappings) == 0 {
+func (cfg *Config) SanitizeOAuthModelMappings() {
+	if cfg == nil || len(cfg.OAuthModelMappings) == 0 {
 		return
 	}
-	out := make(map[string][]ModelNameMapping, len(cfg.ModelNameMappings))
-	for rawChannel, mappings := range cfg.ModelNameMappings {
+	out := make(map[string][]ModelNameMapping, len(cfg.OAuthModelMappings))
+	for rawChannel, mappings := range cfg.OAuthModelMappings {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
 		if channel == "" || len(mappings) == 0 {
 			continue
 		}
-		seenFrom := make(map[string]struct{}, len(mappings))
-		seenTo := make(map[string]struct{}, len(mappings))
+		seenName := make(map[string]struct{}, len(mappings))
+		seenAlias := make(map[string]struct{}, len(mappings))
 		clean := make([]ModelNameMapping, 0, len(mappings))
 		for _, mapping := range mappings {
-			from := strings.TrimSpace(mapping.From)
-			to := strings.TrimSpace(mapping.To)
-			if from == "" || to == "" {
+			name := strings.TrimSpace(mapping.Name)
+			alias := strings.TrimSpace(mapping.Alias)
+			if name == "" || alias == "" {
 				continue
 			}
-			if strings.EqualFold(from, to) {
+			if strings.EqualFold(name, alias) {
 				continue
 			}
-			fromKey := strings.ToLower(from)
-			toKey := strings.ToLower(to)
-			if _, ok := seenFrom[fromKey]; ok {
+			nameKey := strings.ToLower(name)
+			aliasKey := strings.ToLower(alias)
+			if _, ok := seenName[nameKey]; ok {
 				continue
 			}
-			if _, ok := seenTo[toKey]; ok {
+			if _, ok := seenAlias[aliasKey]; ok {
 				continue
 			}
-			seenFrom[fromKey] = struct{}{}
-			seenTo[toKey] = struct{}{}
-			clean = append(clean, ModelNameMapping{From: from, To: to})
+			seenName[nameKey] = struct{}{}
+			seenAlias[aliasKey] = struct{}{}
+			clean = append(clean, ModelNameMapping{Name: name, Alias: alias})
 		}
 		if len(clean) > 0 {
 			out[channel] = clean
 		}
 	}
-	cfg.ModelNameMappings = out
+	cfg.OAuthModelMappings = out
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
