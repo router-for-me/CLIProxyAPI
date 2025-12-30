@@ -252,15 +252,8 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				if usedTool {
 					stopReason = "tool_use"
 				} else {
-					if finish := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finish.Exists() {
-						switch finish.String() {
-						case "MAX_TOKENS":
-							stopReason = "max_tokens"
-						case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
-							stopReason = "end_turn"
-						default:
-							stopReason = "end_turn"
-						}
+					if finish := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
+						stopReason = "max_tokens"
 					}
 				}
 

@@ -110,7 +110,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 						rawFuncName := toolCallID
 						toolCallIDs := strings.Split(toolCallID, "-")
 						if len(toolCallIDs) > 1 {
-							rawFuncName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
+							rawFuncName = strings.Join(toolCallIDs[0:len(toolCallIDs)-2], "-")
 						}
 						funcName := util.SanitizeFunctionName(rawFuncName)
 						responseData := contentResult.Get("content").Raw

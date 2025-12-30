@@ -285,20 +285,7 @@ func buildShortNameMap(names []string) map[string]string {
 	used := map[string]struct{}{}
 	m := map[string]string{}
 
-	baseCandidate := func(n string) string {
-		const limit = 64
-		if len(n) <= limit {
-			return util.SanitizeFunctionName(n)
-		}
-		if strings.HasPrefix(n, "mcp__") {
-			idx := strings.LastIndex(n, "__")
-			if idx > 0 {
-				cand := "mcp__" + n[idx+2:]
-				return util.SanitizeFunctionName(cand)
-			}
-		}
-		return util.SanitizeFunctionName(n)
-	}
+	baseCandidate := shortenNameIfNeeded
 
 	makeUnique := func(cand string) string {
 		if _, ok := used[cand]; !ok {
