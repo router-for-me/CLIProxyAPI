@@ -556,6 +556,9 @@ func (s *Service) Run(ctx context.Context) error {
 		s.cfgMu.Lock()
 		s.cfg = newCfg
 		s.cfgMu.Unlock()
+		if s.coreManager != nil {
+			s.coreManager.SetOAuthModelMappings(newCfg.OAuthModelMappings)
+		}
 		s.rebindExecutors()
 	}
 
@@ -681,6 +684,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		return
 	}
 	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
+	if authKind == "" {
+		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
+			authKind = "apikey"
+		}
+	}
 	if a.Attributes != nil {
 		if v := strings.TrimSpace(a.Attributes["gemini_virtual_primary"]); strings.EqualFold(v, "true") {
 			GlobalModelRegistry().UnregisterClient(a.ID)
@@ -845,6 +853,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 	}
+	models = applyOAuthModelMappings(s.cfg, provider, authKind, models)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {
@@ -1150,6 +1159,93 @@ func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
 			Type:        "vertex",
 			DisplayName: display,
 		})
+	}
+	return out
+}
+
+func rewriteModelInfoName(name, oldID, newID string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return name
+	}
+	oldID = strings.TrimSpace(oldID)
+	newID = strings.TrimSpace(newID)
+	if oldID == "" || newID == "" {
+		return name
+	}
+	if strings.EqualFold(oldID, newID) {
+		return name
+	}
+	if strings.HasSuffix(trimmed, "/"+oldID) {
+		prefix := strings.TrimSuffix(trimmed, oldID)
+		return prefix + newID
+	}
+	if trimmed == "models/"+oldID {
+		return "models/" + newID
+	}
+	return name
+}
+
+func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
+	if cfg == nil || len(models) == 0 {
+		return models
+	}
+	channel := coreauth.OAuthModelMappingChannel(provider, authKind)
+	if channel == "" || len(cfg.OAuthModelMappings) == 0 {
+		return models
+	}
+	mappings := cfg.OAuthModelMappings[channel]
+	if len(mappings) == 0 {
+		return models
+	}
+	forward := make(map[string]string, len(mappings))
+	for i := range mappings {
+		name := strings.TrimSpace(mappings[i].Name)
+		alias := strings.TrimSpace(mappings[i].Alias)
+		if name == "" || alias == "" {
+			continue
+		}
+		if strings.EqualFold(name, alias) {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, exists := forward[key]; exists {
+			continue
+		}
+		forward[key] = alias
+	}
+	if len(forward) == 0 {
+		return models
+	}
+	out := make([]*ModelInfo, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		mappedID := id
+		if to, ok := forward[strings.ToLower(id)]; ok && strings.TrimSpace(to) != "" {
+			mappedID = strings.TrimSpace(to)
+		}
+		uniqueKey := strings.ToLower(mappedID)
+		if _, exists := seen[uniqueKey]; exists {
+			continue
+		}
+		seen[uniqueKey] = struct{}{}
+		if mappedID == id {
+			out = append(out, model)
+			continue
+		}
+		clone := *model
+		clone.ID = mappedID
+		if clone.Name != "" {
+			clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
+		}
+		out = append(out, &clone)
 	}
 	return out
 }

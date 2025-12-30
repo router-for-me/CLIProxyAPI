@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -84,10 +85,30 @@ func SetupBaseLogger() {
 	})
 }
 
+// isDirWritable checks if the specified directory exists and is writable by attempting to create and remove a test file.
+func isDirWritable(dir string) bool {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+
+	testFile := filepath.Join(dir, ".perm_test")
+	f, err := os.Create(testFile)
+	if err != nil {
+		return false
+	}
+
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(testFile)
+	}()
+	return true
+}
+
 // ConfigureLogOutput switches the global log destination between rotating files and stdout.
 // When logsMaxTotalSizeMB > 0, a background cleaner removes the oldest log files in the logs directory
 // until the total size is within the limit.
-func ConfigureLogOutput(loggingToFile bool, logsMaxTotalSizeMB int) error {
+func ConfigureLogOutput(cfg *config.Config) error {
 	SetupBaseLogger()
 
 	writerMu.Lock()
@@ -96,10 +117,12 @@ func ConfigureLogOutput(loggingToFile bool, logsMaxTotalSizeMB int) error {
 	logDir := "logs"
 	if base := util.WritablePath(); base != "" {
 		logDir = filepath.Join(base, "logs")
+	} else if !isDirWritable(logDir) {
+		logDir = filepath.Join(cfg.AuthDir, "logs")
 	}
 
 	protectedPath := ""
-	if loggingToFile {
+	if cfg.LoggingToFile {
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			return fmt.Errorf("logging: failed to create log directory: %w", err)
 		}
@@ -123,7 +146,7 @@ func ConfigureLogOutput(loggingToFile bool, logsMaxTotalSizeMB int) error {
 		log.SetOutput(os.Stdout)
 	}
 
-	configureLogDirCleanerLocked(logDir, logsMaxTotalSizeMB, protectedPath)
+	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, protectedPath)
 	return nil
 }
 

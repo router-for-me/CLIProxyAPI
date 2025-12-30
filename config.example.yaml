@@ -171,9 +171,9 @@ ws-auth: false
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     models:                                     # optional: map aliases to upstream model names
-#       - name: "gemini-2.0-flash"                # upstream model name
+#       - name: "gemini-2.5-flash"                # upstream model name
 #         alias: "vertex-flash"                   # client-visible alias
-#       - name: "gemini-1.5-pro"
+#       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
 
 # Amp Integration
@@ -203,12 +203,42 @@ ws-auth: false
 #   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
 #   # but you have a similar model available (e.g., Claude Sonnet 4).
 #   model-mappings:
-#     - from: "claude-opus-4.5"       # Model requested by Amp CLI
-#       to: "claude-sonnet-4"         # Route to this available model instead
-#     - from: "gpt-5"
-#       to: "gemini-2.5-pro"
-#     - from: "claude-3-opus-20240229"
-#       to: "claude-3-5-sonnet-20241022"
+#     - from: "claude-opus-4-5-20251101"          # Model requested by Amp CLI
+#       to: "gemini-claude-opus-4-5-thinking"     # Route to this available model instead
+#     - from: "claude-sonnet-4-5-20250929"
+#       to: "gemini-claude-sonnet-4-5-thinking"
+#     - from: "claude-haiku-4-5-20251001"
+#       to: "gemini-2.5-flash"
+
+# Global OAuth model name mappings (per channel)
+# These mappings rename model IDs for both model listing and request routing.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow.
+# NOTE: Mappings do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# oauth-model-mappings:
+#   gemini-cli:
+#     - name: "gemini-2.5-pro"          # original model name under this channel
+#       alias: "g2.5p"                  # client-visible alias
+#   vertex:
+#     - name: "gemini-2.5-pro"
+#       alias: "g2.5p"
+#   aistudio:
+#     - name: "gemini-2.5-pro"
+#       alias: "g2.5p"
+#   antigravity:
+#     - name: "gemini-3-pro-preview"
+#       alias: "g3p"
+#   claude:
+#     - name: "claude-sonnet-4-5-20250929"
+#       alias: "cs4.5"
+#   codex:
+#     - name: "gpt-5"
+#       alias: "g5"
+#   qwen:
+#     - name: "qwen3-coder-plus"
+#       alias: "qwen-plus"
+#   iflow:
+#     - name: "glm-4.7"
+#       alias: "glm-god"
 
 # OAuth provider excluded models
 # oauth-excluded-models:
