@@ -90,6 +90,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if !equalStringMap(o.Headers, n.Headers) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].headers: updated", i))
 			}
+			oldModels := SummarizeGeminiModels(o.Models)
+			newModels := SummarizeGeminiModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(changes, fmt.Sprintf("gemini[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
+			}
 			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
 			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
 			if oldExcluded.hash != newExcluded.hash {
@@ -120,6 +125,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if !equalStringMap(o.Headers, n.Headers) {
 				changes = append(changes, fmt.Sprintf("claude[%d].headers: updated", i))
 			}
+			oldModels := SummarizeClaudeModels(o.Models)
+			newModels := SummarizeClaudeModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(changes, fmt.Sprintf("claude[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
+			}
 			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
 			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
 			if oldExcluded.hash != newExcluded.hash {
@@ -149,6 +159,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if !equalStringMap(o.Headers, n.Headers) {
 				changes = append(changes, fmt.Sprintf("codex[%d].headers: updated", i))
+			}
+			oldModels := SummarizeCodexModels(o.Models)
+			newModels := SummarizeCodexModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(changes, fmt.Sprintf("codex[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
 			}
 			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
 			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
@@ -192,6 +207,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 
 	if entries, _ := DiffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
+		changes = append(changes, entries...)
+	}
+	if entries, _ := DiffOAuthModelMappingChanges(oldCfg.OAuthModelMappings, newCfg.OAuthModelMappings); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}
 

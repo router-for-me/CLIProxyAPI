@@ -714,6 +714,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "gemini":
 		models = registry.GetGeminiModels()
 		if entry := s.resolveConfigGeminiKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildGeminiConfigModels(entry)
+			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
@@ -1125,17 +1128,22 @@ func matchWildcard(pattern, value string) bool {
 	return true
 }
 
-func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
-	if entry == nil || len(entry.Models) == 0 {
+type modelEntry interface {
+	GetName() string
+	GetAlias() string
+}
+
+func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
+	if len(models) == 0 {
 		return nil
 	}
 	now := time.Now().Unix()
-	out := make([]*ModelInfo, 0, len(entry.Models))
-	seen := make(map[string]struct{}, len(entry.Models))
-	for i := range entry.Models {
-		model := entry.Models[i]
-		name := strings.TrimSpace(model.Name)
-		alias := strings.TrimSpace(model.Alias)
+	out := make([]*ModelInfo, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for i := range models {
+		model := models[i]
+		name := strings.TrimSpace(model.GetName())
+		alias := strings.TrimSpace(model.GetAlias())
 		if alias == "" {
 			alias = name
 		}
@@ -1151,16 +1159,50 @@ func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
 		if display == "" {
 			display = alias
 		}
-		out = append(out, &ModelInfo{
+		info := &ModelInfo{
 			ID:          alias,
 			Object:      "model",
 			Created:     now,
-			OwnedBy:     "vertex",
-			Type:        "vertex",
+			OwnedBy:     ownedBy,
+			Type:        modelType,
 			DisplayName: display,
-		})
+		}
+		if name != "" {
+			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
+				info.Thinking = upstream.Thinking
+			}
+		}
+		out = append(out, info)
 	}
 	return out
+}
+
+func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "google", "vertex")
+}
+
+func buildGeminiConfigModels(entry *config.GeminiKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "google", "gemini")
+}
+
+func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "anthropic", "claude")
+}
+
+func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "openai", "openai")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {
@@ -1246,82 +1288,6 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 			clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
 		}
 		out = append(out, &clone)
-	}
-	return out
-}
-
-func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
-	if entry == nil || len(entry.Models) == 0 {
-		return nil
-	}
-	now := time.Now().Unix()
-	out := make([]*ModelInfo, 0, len(entry.Models))
-	seen := make(map[string]struct{}, len(entry.Models))
-	for i := range entry.Models {
-		model := entry.Models[i]
-		name := strings.TrimSpace(model.Name)
-		alias := strings.TrimSpace(model.Alias)
-		if alias == "" {
-			alias = name
-		}
-		if alias == "" {
-			continue
-		}
-		key := strings.ToLower(alias)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		display := name
-		if display == "" {
-			display = alias
-		}
-		out = append(out, &ModelInfo{
-			ID:          alias,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     "claude",
-			Type:        "claude",
-			DisplayName: display,
-		})
-	}
-	return out
-}
-
-func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
-	if entry == nil || len(entry.Models) == 0 {
-		return nil
-	}
-	now := time.Now().Unix()
-	out := make([]*ModelInfo, 0, len(entry.Models))
-	seen := make(map[string]struct{}, len(entry.Models))
-	for i := range entry.Models {
-		model := entry.Models[i]
-		name := strings.TrimSpace(model.Name)
-		alias := strings.TrimSpace(model.Alias)
-		if alias == "" {
-			alias = name
-		}
-		if alias == "" {
-			continue
-		}
-		key := strings.ToLower(alias)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		display := name
-		if display == "" {
-			display = alias
-		}
-		out = append(out, &ModelInfo{
-			ID:          alias,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     "openai",
-			Type:        "openai",
-			DisplayName: display,
-		})
 	}
 	return out
 }

@@ -49,28 +49,21 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel == "" {
-		upstreamModel = req.Model
-	}
-	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
-		upstreamModel = modelOverride
-	} else if !strings.EqualFold(upstreamModel, req.Model) {
-		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
-			upstreamModel = modelOverride
-		}
+	model := req.Model
+	if override := e.resolveUpstreamModel(req.Model, auth); override != "" {
+		model = override
 	}
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning.effort", false)
-	body = NormalizeThinkingConfig(body, upstreamModel, false)
-	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
+	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), false)
+	body = ApplyReasoningEffortMetadata(body, req.Metadata, model, "reasoning.effort", false)
+	body = NormalizeThinkingConfig(body, model, false)
+	if errValidate := ValidateThinkingConfig(body, model); errValidate != nil {
 		return resp, errValidate
 	}
-	body = applyPayloadConfig(e.cfg, req.Model, body)
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body = applyPayloadConfig(e.cfg, model, body)
+	body, _ = sjson.SetBytes(body, "model", model)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 
@@ -156,30 +149,23 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel == "" {
-		upstreamModel = req.Model
-	}
-	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
-		upstreamModel = modelOverride
-	} else if !strings.EqualFold(upstreamModel, req.Model) {
-		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
-			upstreamModel = modelOverride
-		}
+	model := req.Model
+	if override := e.resolveUpstreamModel(req.Model, auth); override != "" {
+		model = override
 	}
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
 
-	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning.effort", false)
-	body = NormalizeThinkingConfig(body, upstreamModel, false)
-	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
+	body = ApplyReasoningEffortMetadata(body, req.Metadata, model, "reasoning.effort", false)
+	body = NormalizeThinkingConfig(body, model, false)
+	if errValidate := ValidateThinkingConfig(body, model); errValidate != nil {
 		return nil, errValidate
 	}
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = applyPayloadConfig(e.cfg, model, body)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body, _ = sjson.SetBytes(body, "model", model)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -266,30 +252,21 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel == "" {
-		upstreamModel = req.Model
-	}
-	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
-		upstreamModel = modelOverride
-	} else if !strings.EqualFold(upstreamModel, req.Model) {
-		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
-			upstreamModel = modelOverride
-		}
+	model := req.Model
+	if override := e.resolveUpstreamModel(req.Model, auth); override != "" {
+		model = override
 	}
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), false)
 
-	modelForCounting := upstreamModel
-
-	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning.effort", false)
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body = ApplyReasoningEffortMetadata(body, req.Metadata, model, "reasoning.effort", false)
+	body, _ = sjson.SetBytes(body, "model", model)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.SetBytes(body, "stream", false)
 
-	enc, err := tokenizerForCodexModel(modelForCounting)
+	enc, err := tokenizerForCodexModel(model)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: tokenizer init failed: %w", err)
 	}

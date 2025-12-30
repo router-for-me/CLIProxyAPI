@@ -77,19 +77,22 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	model := req.Model
+	if override := e.resolveUpstreamModel(model, auth); override != "" {
+		model = override
+	}
 
 	// Official Gemini API via API key or OAuth bearer
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	body = ApplyThinkingMetadata(body, req.Metadata, req.Model)
-	body = util.ApplyDefaultThinkingIfNeeded(req.Model, body)
-	body = util.NormalizeGeminiThinkingBudget(req.Model, body)
-	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
-	body = fixGeminiImageAspectRatio(req.Model, body)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), false)
+	body = ApplyThinkingMetadata(body, req.Metadata, model)
+	body = util.ApplyDefaultThinkingIfNeeded(model, body)
+	body = util.NormalizeGeminiThinkingBudget(model, body)
+	body = util.StripThinkingConfigIfUnsupported(model, body)
+	body = fixGeminiImageAspectRatio(model, body)
+	body = applyPayloadConfig(e.cfg, model, body)
+	body, _ = sjson.SetBytes(body, "model", model)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -98,7 +101,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 	}
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, upstreamModel, action)
+	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, model, action)
 	if opts.Alt != "" && action != "countTokens" {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
@@ -173,21 +176,24 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	model := req.Model
+	if override := e.resolveUpstreamModel(model, auth); override != "" {
+		model = override
+	}
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-	body = ApplyThinkingMetadata(body, req.Metadata, req.Model)
-	body = util.ApplyDefaultThinkingIfNeeded(req.Model, body)
-	body = util.NormalizeGeminiThinkingBudget(req.Model, body)
-	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
-	body = fixGeminiImageAspectRatio(req.Model, body)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
+	body = ApplyThinkingMetadata(body, req.Metadata, model)
+	body = util.ApplyDefaultThinkingIfNeeded(model, body)
+	body = util.NormalizeGeminiThinkingBudget(model, body)
+	body = util.StripThinkingConfigIfUnsupported(model, body)
+	body = fixGeminiImageAspectRatio(model, body)
+	body = applyPayloadConfig(e.cfg, model, body)
+	body, _ = sjson.SetBytes(body, "model", model)
 
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, upstreamModel, "streamGenerateContent")
+	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, model, "streamGenerateContent")
 	if opts.Alt == "" {
 		url = url + "?alt=sse"
 	} else {
@@ -287,19 +293,25 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	apiKey, bearer := geminiCreds(auth)
 
+	model := req.Model
+	if override := e.resolveUpstreamModel(model, auth); override != "" {
+		model = override
+	}
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	translatedReq := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	translatedReq = ApplyThinkingMetadata(translatedReq, req.Metadata, req.Model)
-	translatedReq = util.StripThinkingConfigIfUnsupported(req.Model, translatedReq)
-	translatedReq = fixGeminiImageAspectRatio(req.Model, translatedReq)
+	translatedReq := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), false)
+	translatedReq = ApplyThinkingMetadata(translatedReq, req.Metadata, model)
+	translatedReq = util.StripThinkingConfigIfUnsupported(model, translatedReq)
+	translatedReq = fixGeminiImageAspectRatio(model, translatedReq)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
+	translatedReq, _ = sjson.SetBytes(translatedReq, "model", model)
 
 	baseURL := resolveGeminiBaseURL(auth)
-	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, req.Model, "countTokens")
+	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, model, "countTokens")
 
 	requestBody := bytes.NewReader(translatedReq)
 
@@ -396,6 +408,90 @@ func resolveGeminiBaseURL(auth *cliproxyauth.Auth) string {
 		return glEndpoint
 	}
 	return base
+}
+
+func (e *GeminiExecutor) resolveUpstreamModel(alias string, auth *cliproxyauth.Auth) string {
+	trimmed := strings.TrimSpace(alias)
+	if trimmed == "" {
+		return ""
+	}
+
+	entry := e.resolveGeminiConfig(auth)
+	if entry == nil {
+		return ""
+	}
+
+	normalizedModel, metadata := util.NormalizeThinkingModel(trimmed)
+
+	// Candidate names to match against configured aliases/names.
+	candidates := []string{strings.TrimSpace(normalizedModel)}
+	if !strings.EqualFold(normalizedModel, trimmed) {
+		candidates = append(candidates, trimmed)
+	}
+	if original := util.ResolveOriginalModel(normalizedModel, metadata); original != "" && !strings.EqualFold(original, normalizedModel) {
+		candidates = append(candidates, original)
+	}
+
+	for i := range entry.Models {
+		model := entry.Models[i]
+		name := strings.TrimSpace(model.Name)
+		modelAlias := strings.TrimSpace(model.Alias)
+
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			if modelAlias != "" && strings.EqualFold(modelAlias, candidate) {
+				if name != "" {
+					return name
+				}
+				return candidate
+			}
+			if name != "" && strings.EqualFold(name, candidate) {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func (e *GeminiExecutor) resolveGeminiConfig(auth *cliproxyauth.Auth) *config.GeminiKey {
+	if auth == nil || e.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range e.cfg.GeminiKey {
+		entry := &e.cfg.GeminiKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && attrBase != "" {
+			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range e.cfg.GeminiKey {
+			entry := &e.cfg.GeminiKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
 }
 
 func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth) {

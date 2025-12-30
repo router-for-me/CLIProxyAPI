@@ -66,6 +66,9 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		if base != "" {
 			attrs["base_url"] = base
 		}
+		if hash := diff.ComputeGeminiModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
 		a := &coreauth.Auth{
 			ID:         id,

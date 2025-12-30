@@ -58,12 +58,9 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	to := sdktranslator.FromString("openai")
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" {
-		body, _ = sjson.SetBytes(body, "model", upstreamModel)
-	}
-	body = NormalizeThinkingConfig(body, upstreamModel, false)
-	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
+	body, _ = sjson.SetBytes(body, "model", req.Model)
+	body = NormalizeThinkingConfig(body, req.Model, false)
+	if errValidate := ValidateThinkingConfig(body, req.Model); errValidate != nil {
 		return resp, errValidate
 	}
 	body = applyIFlowThinkingConfig(body)
@@ -151,12 +148,9 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
 	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" {
-		body, _ = sjson.SetBytes(body, "model", upstreamModel)
-	}
-	body = NormalizeThinkingConfig(body, upstreamModel, false)
-	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
+	body, _ = sjson.SetBytes(body, "model", req.Model)
+	body = NormalizeThinkingConfig(body, req.Model, false)
+	if errValidate := ValidateThinkingConfig(body, req.Model); errValidate != nil {
 		return nil, errValidate
 	}
 	body = applyIFlowThinkingConfig(body)

@@ -95,6 +95,9 @@ ws-auth: false
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080"
+#     models:
+#       - name: "gemini-2.5-flash" # upstream model name
+#         alias: "gemini-flash"    # client alias mapped to the upstream model
 #     excluded-models:
 #       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
 #       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
@@ -111,7 +114,7 @@ ws-auth: false
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #     models:
-#       - name: "gpt-5-codex" # upstream model name
+#       - name: "gpt-5-codex"   # upstream model name
 #         alias: "codex-latest" # client alias mapped to the upstream model
 #     excluded-models:
 #       - "gpt-5.1"         # exclude specific models (exact match)
@@ -130,7 +133,7 @@ ws-auth: false
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #     models:
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
-#         alias: "claude-sonnet-latest" # client alias mapped to the upstream model
+#         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
 #     excluded-models:
 #       - "claude-opus-4-5-20251101" # exclude specific models (exact match)
 #       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
