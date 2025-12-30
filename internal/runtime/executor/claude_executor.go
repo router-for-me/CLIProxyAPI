@@ -108,6 +108,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	// Capture quota headers from response (passive update)
+	if quotaInfo := parseClaudeCodeQuotaHeaders(httpResp.Header); quotaInfo != nil {
+		updateAuthQuotaMetadata(auth, quotaInfo)
+	}
+
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -215,6 +221,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	// Capture quota headers from response (passive update)
+	if quotaInfo := parseClaudeCodeQuotaHeaders(httpResp.Header); quotaInfo != nil {
+		updateAuthQuotaMetadata(auth, quotaInfo)
+	}
+
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -412,6 +424,71 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+// CheckQuota performs a minimal inference request to retrieve current quota information.
+// This uses claude-haiku-4-5-20251001 with max_tokens=1 to minimize cost.
+// Returns nil if auth is not an OAuth account or if quota headers are not present.
+func (e *ClaudeExecutor) CheckQuota(ctx context.Context, auth *cliproxyauth.Auth) (*ClaudeCodeQuotaInfo, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("auth is nil")
+	}
+
+	// Only check quota for OAuth accounts
+	if auth.Metadata == nil {
+		return nil, fmt.Errorf("not an OAuth account")
+	}
+	if _, hasToken := auth.Metadata["access_token"]; !hasToken {
+		return nil, fmt.Errorf("not an OAuth account")
+	}
+
+	apiKey, baseURL := claudeCreds(auth)
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com"
+	}
+
+	// Minimal request payload
+	payload := []byte(`{
+		"model": "claude-haiku-4-5-20251001",
+		"max_tokens": 1,
+		"messages": [{"role": "user", "content": "limit"}]
+	}`)
+
+	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	applyClaudeHeaders(httpReq, auth, apiKey, false, nil)
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer httpResp.Body.Close()
+
+	// Parse quota headers regardless of response status
+	quotaInfo := parseClaudeCodeQuotaHeaders(httpResp.Header)
+	if quotaInfo == nil {
+		return nil, fmt.Errorf("no quota headers in response")
+	}
+
+	// Store in auth metadata
+	updateAuthQuotaMetadata(auth, quotaInfo)
+
+	return quotaInfo, nil
+}
+
+// updateAuthQuotaMetadata updates the auth's metadata with quota information.
+func updateAuthQuotaMetadata(auth *cliproxyauth.Auth, info *ClaudeCodeQuotaInfo) {
+	if auth == nil || info == nil {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["claude_code_quota"] = info
 }
 
 // extractAndRemoveBetas extracts the "betas" array from the body and removes it.
