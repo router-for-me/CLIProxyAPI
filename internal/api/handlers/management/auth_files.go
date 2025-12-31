@@ -411,6 +411,10 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
 	}
+	// Include metadata for frontend (e.g., account_id for Codex)
+	if auth.Metadata != nil && len(auth.Metadata) > 0 {
+		entry["metadata"] = auth.Metadata
+	}
 	if path != "" {
 		entry["path"] = path
 		entry["source"] = "file"
