@@ -224,9 +224,19 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, nil
 	}
 	m.mu.Lock()
-	if existing, ok := m.auths[auth.ID]; ok && existing != nil && !auth.indexAssigned && auth.Index == "" {
-		auth.Index = existing.Index
-		auth.indexAssigned = existing.indexAssigned
+	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
+		if !auth.indexAssigned && auth.Index == "" {
+			auth.Index = existing.Index
+			auth.indexAssigned = existing.indexAssigned
+		}
+		// Preserve runtime state that is not persisted (deep copy)
+		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+			copiedStates := make(map[string]*ModelState, len(existing.ModelStates))
+			for k, v := range existing.ModelStates {
+				copiedStates[k] = v.Clone()
+			}
+			auth.ModelStates = copiedStates
+		}
 	}
 	auth.EnsureIndex()
 	m.auths[auth.ID] = auth.Clone()

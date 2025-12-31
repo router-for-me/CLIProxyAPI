@@ -156,7 +156,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
 			}
-			err = statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+			err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 			return resp, err
 		}
 
@@ -170,7 +170,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	switch {
 	case lastStatus != 0:
-		err = statusErr{code: lastStatus, msg: string(lastBody)}
+		err = newAntigravityStatusErr(lastStatus, lastBody)
 	case lastErr != nil:
 		err = lastErr
 	default:
@@ -260,7 +260,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
 			}
-			err = statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+			err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 			return resp, err
 		}
 
@@ -325,7 +325,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	switch {
 	case lastStatus != 0:
-		err = statusErr{code: lastStatus, msg: string(lastBody)}
+		err = newAntigravityStatusErr(lastStatus, lastBody)
 	case lastErr != nil:
 		err = lastErr
 	default:
@@ -601,7 +601,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
 			}
-			err = statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+			err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 			return nil, err
 		}
 
@@ -656,7 +656,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	switch {
 	case lastStatus != 0:
-		err = statusErr{code: lastStatus, msg: string(lastBody)}
+		err = newAntigravityStatusErr(lastStatus, lastBody)
 	case lastErr != nil:
 		err = lastErr
 	default:
@@ -793,12 +793,12 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 			continue
 		}
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+		return cliproxyexecutor.Response{}, newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 	}
 
 	switch {
 	case lastStatus != 0:
-		return cliproxyexecutor.Response{}, statusErr{code: lastStatus, msg: string(lastBody)}
+		return cliproxyexecutor.Response{}, newAntigravityStatusErr(lastStatus, lastBody)
 	case lastErr != nil:
 		return cliproxyexecutor.Response{}, lastErr
 	default:
@@ -961,7 +961,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		return auth, statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+		return auth, newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 	}
 
 	var tokenResp struct {
@@ -1385,4 +1385,56 @@ func antigravityMinThinkingBudget(model string) int {
 		return modelInfo.Thinking.Min
 	}
 	return -1
+}
+
+// parseAntigravityRetryDelay extracts the retryDelay from Antigravity 429 response.
+// The response format is:
+//
+//	{
+//	  "error": {
+//	    "details": [
+//	      {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "10627.493230411s"}
+//	    ]
+//	  }
+//	}
+func parseAntigravityRetryDelay(body []byte) *time.Duration {
+	if len(body) == 0 {
+		return nil
+	}
+	details := gjson.GetBytes(body, "error.details")
+	if !details.Exists() || !details.IsArray() {
+		return nil
+	}
+	for _, detail := range details.Array() {
+		typeField := detail.Get("@type").String()
+		if !strings.HasSuffix(typeField, "/google.rpc.RetryInfo") {
+			continue
+		}
+		retryDelay := detail.Get("retryDelay").String()
+		if retryDelay == "" {
+			continue
+		}
+		// Parse duration string like "10627.493230411s"
+		d, err := time.ParseDuration(retryDelay)
+		if err != nil {
+			log.Debugf("antigravity executor: failed to parse retryDelay %q: %v", retryDelay, err)
+			continue
+		}
+		if d > 0 {
+			return &d
+		}
+	}
+	return nil
+}
+
+// newAntigravityStatusErr creates a statusErr, parsing retryDelay for 429 responses.
+func newAntigravityStatusErr(code int, body []byte) statusErr {
+	var retryAfter *time.Duration
+	if code == http.StatusTooManyRequests {
+		retryAfter = parseAntigravityRetryDelay(body)
+		if retryAfter != nil {
+			log.Debugf("antigravity executor: parsed retryDelay: %v", *retryAfter)
+		}
+	}
+	return statusErr{code: code, msg: string(body), retryAfter: retryAfter}
 }
