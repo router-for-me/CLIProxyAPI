@@ -282,6 +282,14 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		auth.CreatedAt = existing.CreatedAt
 		auth.LastRefreshedAt = existing.LastRefreshedAt
 		auth.NextRefreshAfter = existing.NextRefreshAfter
+		// Preserve runtime state that is not persisted to file (deep copy)
+		if len(existing.ModelStates) > 0 {
+			copiedStates := make(map[string]*coreauth.ModelState, len(existing.ModelStates))
+			for k, v := range existing.ModelStates {
+				copiedStates[k] = v.Clone()
+			}
+			auth.ModelStates = copiedStates
+		}
 		if _, err := s.coreManager.Update(ctx, auth); err != nil {
 			log.Errorf("failed to update auth %s: %v", auth.ID, err)
 		}
