@@ -99,9 +99,12 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = "event: content_block_stop\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
 	} else if typeStr == "response.completed" {
-		template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
+		template = `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
 		p := (*param).(*bool)
-		if *p {
+		stopReason := rootResult.Get("response.stop_reason").String()
+		if stopReason != "" {
+			template, _ = sjson.Set(template, "delta.stop_reason", stopReason)
+		} else if *p {
 			template, _ = sjson.Set(template, "delta.stop_reason", "tool_use")
 		} else {
 			template, _ = sjson.Set(template, "delta.stop_reason", "end_turn")

@@ -185,7 +185,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						// Antigravity API validates signatures, so dummy values are rejected.
 						// The TypeScript plugin removes unsigned thinking blocks instead of injecting dummies.
 
-						functionName := contentResult.Get("name").String()
+						functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
 						argsResult := contentResult.Get("input")
 						functionID := contentResult.Get("id").String()
 
@@ -225,11 +225,12 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
 						toolCallID := contentResult.Get("tool_use_id").String()
 						if toolCallID != "" {
-							funcName := toolCallID
+							rawFuncName := toolCallID
 							toolCallIDs := strings.Split(toolCallID, "-")
 							if len(toolCallIDs) > 1 {
-								funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-2], "-")
+								rawFuncName = strings.Join(toolCallIDs[0:len(toolCallIDs)-2], "-")
 							}
+							funcName := util.SanitizeFunctionName(rawFuncName)
 							functionResponseResult := contentResult.Get("content")
 
 							functionResponseJSON := `{}`
@@ -337,6 +338,12 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				inputSchema := util.CleanJSONSchemaForAntigravity(inputSchemaResult.Raw)
 				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
 				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
+
+				// Sanitize tool name
+				if name := gjson.Get(tool, "name"); name.Exists() {
+					tool, _ = sjson.Set(tool, "name", util.SanitizeFunctionName(name.String()))
+				}
+
 				for toolKey := range gjson.Parse(tool).Map() {
 					if util.InArray(allowedToolKeys, toolKey) {
 						continue
