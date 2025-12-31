@@ -14,32 +14,54 @@ import (
 // ApplyThinkingMetadata applies thinking config from model suffix metadata (e.g., (high), (8192))
 // for standard Gemini format payloads. It normalizes the budget when the model supports thinking.
 func ApplyThinkingMetadata(payload []byte, metadata map[string]any, model string) []byte {
-	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(model, metadata)
+	// Use the alias from metadata if available, as it's registered in the global registry
+	// with thinking metadata; the upstream model name may not be registered.
+	lookupModel := util.ResolveOriginalModel(model, metadata)
+
+	// Determine which model to use for thinking support check.
+	// If the alias (lookupModel) is not in the registry, fall back to the upstream model.
+	thinkingModel := lookupModel
+	if !util.ModelSupportsThinking(lookupModel) && util.ModelSupportsThinking(model) {
+		thinkingModel = model
+	}
+
+	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(thinkingModel, metadata)
 	if !ok || (budgetOverride == nil && includeOverride == nil) {
 		return payload
 	}
-	if !util.ModelSupportsThinking(model) {
+	if !util.ModelSupportsThinking(thinkingModel) {
 		return payload
 	}
 	if budgetOverride != nil {
-		norm := util.NormalizeThinkingBudget(model, *budgetOverride)
+		norm := util.NormalizeThinkingBudget(thinkingModel, *budgetOverride)
 		budgetOverride = &norm
 	}
 	return util.ApplyGeminiThinkingConfig(payload, budgetOverride, includeOverride)
 }
 
-// applyThinkingMetadataCLI applies thinking config from model suffix metadata (e.g., (high), (8192))
+// ApplyThinkingMetadataCLI applies thinking config from model suffix metadata (e.g., (high), (8192))
 // for Gemini CLI format payloads (nested under "request"). It normalizes the budget when the model supports thinking.
-func applyThinkingMetadataCLI(payload []byte, metadata map[string]any, model string) []byte {
-	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(model, metadata)
+func ApplyThinkingMetadataCLI(payload []byte, metadata map[string]any, model string) []byte {
+	// Use the alias from metadata if available, as it's registered in the global registry
+	// with thinking metadata; the upstream model name may not be registered.
+	lookupModel := util.ResolveOriginalModel(model, metadata)
+
+	// Determine which model to use for thinking support check.
+	// If the alias (lookupModel) is not in the registry, fall back to the upstream model.
+	thinkingModel := lookupModel
+	if !util.ModelSupportsThinking(lookupModel) && util.ModelSupportsThinking(model) {
+		thinkingModel = model
+	}
+
+	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(thinkingModel, metadata)
 	if !ok || (budgetOverride == nil && includeOverride == nil) {
 		return payload
 	}
-	if !util.ModelSupportsThinking(model) {
+	if !util.ModelSupportsThinking(thinkingModel) {
 		return payload
 	}
 	if budgetOverride != nil {
-		norm := util.NormalizeThinkingBudget(model, *budgetOverride)
+		norm := util.NormalizeThinkingBudget(thinkingModel, *budgetOverride)
 		budgetOverride = &norm
 	}
 	return util.ApplyGeminiCLIThinkingConfig(payload, budgetOverride, includeOverride)
