@@ -35,6 +35,10 @@ type ClaudeExecutor struct {
 	cfg *config.Config
 }
 
+// minimalClaudeModelForQuotaCheck is the model used for minimal quota check requests.
+// This is a lightweight model to minimize cost when checking quota information.
+const minimalClaudeModelForQuotaCheck = "claude-haiku-4-5"
+
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
@@ -427,7 +431,7 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 }
 
 // CheckQuota performs a minimal inference request to retrieve current quota information.
-// This uses claude-haiku-4-5-20251001 with max_tokens=1 to minimize cost.
+// This uses minimalClaudeModelForQuotaCheck with max_tokens=1 to minimize cost.
 // Returns nil if auth is not an OAuth account or if quota headers are not present.
 func (e *ClaudeExecutor) CheckQuota(ctx context.Context, auth *cliproxyauth.Auth) (*ClaudeCodeQuotaInfo, error) {
 	if auth == nil {
@@ -448,11 +452,11 @@ func (e *ClaudeExecutor) CheckQuota(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	// Minimal request payload
-	payload := []byte(`{
-		"model": "claude-haiku-4-5-20251001",
+	payload := []byte(fmt.Sprintf(`{
+		"model": "%s",
 		"max_tokens": 1,
 		"messages": [{"role": "user", "content": "limit"}]
-	}`)
+	}`, minimalClaudeModelForQuotaCheck))
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))

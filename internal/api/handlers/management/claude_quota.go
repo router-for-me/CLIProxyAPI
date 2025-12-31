@@ -6,8 +6,46 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
+
+// getAndValidateClaudeAuth retrieves and validates a Claude OAuth auth by ID.
+// Returns the auth object and true if valid, or writes an error response and returns nil, false.
+func (h *Handler) getAndValidateClaudeAuth(c *gin.Context) (*coreauth.Auth, bool) {
+	authID := c.Param("authId")
+	if authID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth ID required"})
+		return nil, false
+	}
+
+	if h == nil || h.authManager == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth manager not available"})
+		return nil, false
+	}
+
+	auth, ok := h.authManager.GetByID(authID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return nil, false
+	}
+
+	if auth.Provider != "claude" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth is not a Claude account"})
+		return nil, false
+	}
+
+	if auth.Metadata == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "not an OAuth account"})
+		return nil, false
+	}
+	if _, hasToken := auth.Metadata["access_token"]; !hasToken {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "not an OAuth account"})
+		return nil, false
+	}
+
+	return auth, true
+}
 
 // extractClaudeQuota safely extracts ClaudeCodeQuotaInfo from auth metadata.
 // Handles both direct struct pointers and JSON-deserialized maps.
@@ -45,7 +83,7 @@ func extractClaudeQuota(metadata map[string]any) *executor.ClaudeCodeQuotaInfo {
 // GET /v0/management/claude-api-key/quotas
 func (h *Handler) GetClaudeCodeQuotas(c *gin.Context) {
 	if h == nil || h.authManager == nil {
-		c.JSON(http.StatusOK, gin.H{"quotas": []interface{}{}})
+		c.JSON(http.StatusOK, gin.H{"quotas": []interface{}{}, "count": 0})
 		return
 	}
 
@@ -81,41 +119,15 @@ func (h *Handler) GetClaudeCodeQuotas(c *gin.Context) {
 // GetClaudeCodeQuota returns quota information for a specific Claude OAuth account.
 // GET /v0/management/claude-api-key/quota/:authId
 func (h *Handler) GetClaudeCodeQuota(c *gin.Context) {
-	authID := c.Param("authId")
-	if authID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "auth ID required"})
-		return
-	}
-
-	if h == nil || h.authManager == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth manager not available"})
-		return
-	}
-
-	auth, ok := h.authManager.GetByID(authID)
+	auth, ok := h.getAndValidateClaudeAuth(c)
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
-		return
-	}
-
-	if auth.Provider != "claude" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "auth is not a Claude account"})
-		return
-	}
-
-	if auth.Metadata == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "not an OAuth account"})
-		return
-	}
-	if _, hasToken := auth.Metadata["access_token"]; !hasToken {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "not an OAuth account"})
 		return
 	}
 
 	quota := extractClaudeQuota(auth.Metadata)
 	email := authEmail(auth)
 	c.JSON(http.StatusOK, gin.H{
-		"auth_id": authID,
+		"auth_id": auth.ID,
 		"email":   email,
 		"label":   auth.Label,
 		"quota":   quota,
@@ -125,40 +137,9 @@ func (h *Handler) GetClaudeCodeQuota(c *gin.Context) {
 // RefreshClaudeCodeQuota performs a quota check for a specific Claude OAuth account.
 // POST /v0/management/claude-api-key/quota/:authId/refresh
 func (h *Handler) RefreshClaudeCodeQuota(c *gin.Context) {
-	authID := c.Param("authId")
-	if authID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "auth ID required"})
-		return
-	}
-
-	if h == nil || h.authManager == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth manager not available"})
-		return
-	}
-
-	auth, ok := h.authManager.GetByID(authID)
+	auth, ok := h.getAndValidateClaudeAuth(c)
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
 		return
-	}
-
-	if auth.Provider != "claude" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "auth is not a Claude account"})
-		return
-	}
-
-	if auth.Metadata == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "not an OAuth account"})
-		return
-	}
-	if _, hasToken := auth.Metadata["access_token"]; !hasToken {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "not an OAuth account"})
-		return
-	}
-
-	// Ensure Metadata map exists (defensive programming)
-	if auth.Metadata == nil {
-		auth.Metadata = make(map[string]any)
 	}
 
 	// Perform quota check using minimal request
@@ -166,7 +147,7 @@ func (h *Handler) RefreshClaudeCodeQuota(c *gin.Context) {
 	exec := executor.NewClaudeExecutor(h.cfg)
 	quotaInfo, err := exec.CheckQuota(c.Request.Context(), auth)
 	if err != nil {
-		log.Warnf("failed to check quota for auth %s: %v", authID, err)
+		log.Warnf("failed to check quota for auth %s: %v", auth.ID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -181,7 +162,7 @@ func (h *Handler) RefreshClaudeCodeQuota(c *gin.Context) {
 
 	email := authEmail(updatedAuth)
 	c.JSON(http.StatusOK, gin.H{
-		"auth_id": authID,
+		"auth_id": auth.ID,
 		"email":   email,
 		"label":   updatedAuth.Label,
 		"quota":   quotaInfo,
