@@ -131,3 +131,7 @@ QQ 群：188637136
 或
 
 Telegram 群：https://t.me/CLIProxyAPI
+
+## 星标历史
+
+[![Star History Chart](https://api.star-history.com/svg?repos=router-for-me/CLIProxyAPI&type=date&legend=top-left)](https://www.star-history.com/#router-for-me/CLIProxyAPI&type=date&legend=top-left)

@@ -124,3 +124,7 @@ Native macOS menu bar app that unifies Claude, Gemini, OpenAI, Qwen, and Antigra
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=router-for-me/CLIProxyAPI&type=date&legend=top-left)](https://www.star-history.com/#router-for-me/CLIProxyAPI&type=date&legend=top-left)
