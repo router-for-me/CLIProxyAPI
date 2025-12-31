@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // SecretSource provides Amp API keys with configurable precedence and caching
@@ -163,4 +166,83 @@ func NewStaticSecretSource(key string) *StaticSecretSource {
 // Get returns the static API key
 func (s *StaticSecretSource) Get(ctx context.Context) (string, error) {
 	return s.key, nil
+}
+
+// MappedSecretSource wraps a default SecretSource and adds per-client API key mapping.
+// When a request context contains a client API key that matches a configured mapping,
+// the corresponding upstream key is returned. Otherwise, falls back to the default source.
+type MappedSecretSource struct {
+	defaultSource SecretSource
+	mu            sync.RWMutex
+	lookup        map[string]string // clientKey -> upstreamKey
+}
+
+// NewMappedSecretSource creates a MappedSecretSource wrapping the given default source.
+func NewMappedSecretSource(defaultSource SecretSource) *MappedSecretSource {
+	return &MappedSecretSource{
+		defaultSource: defaultSource,
+		lookup:        make(map[string]string),
+	}
+}
+
+// Get retrieves the Amp API key, checking per-client mappings first.
+// If the request context contains a client API key that matches a configured mapping,
+// returns the corresponding upstream key. Otherwise, falls back to the default source.
+func (s *MappedSecretSource) Get(ctx context.Context) (string, error) {
+	// Try to get client API key from request context
+	clientKey := getClientAPIKeyFromContext(ctx)
+	if clientKey != "" {
+		s.mu.RLock()
+		if upstreamKey, ok := s.lookup[clientKey]; ok && upstreamKey != "" {
+			s.mu.RUnlock()
+			return upstreamKey, nil
+		}
+		s.mu.RUnlock()
+	}
+
+	// Fall back to default source
+	return s.defaultSource.Get(ctx)
+}
+
+// UpdateMappings rebuilds the client-to-upstream key mapping from configuration entries.
+// If the same client key appears in multiple entries, logs a warning and uses the first one.
+func (s *MappedSecretSource) UpdateMappings(entries []config.AmpUpstreamAPIKeyEntry) {
+	newLookup := make(map[string]string)
+
+	for _, entry := range entries {
+		upstreamKey := strings.TrimSpace(entry.UpstreamAPIKey)
+		if upstreamKey == "" {
+			continue
+		}
+		for _, clientKey := range entry.APIKeys {
+			trimmedKey := strings.TrimSpace(clientKey)
+			if trimmedKey == "" {
+				continue
+			}
+			if _, exists := newLookup[trimmedKey]; exists {
+				// Log warning for duplicate client key, first one wins
+				log.Warnf("amp upstream-api-keys: client API key appears in multiple entries; using first mapping.")
+				continue
+			}
+			newLookup[trimmedKey] = upstreamKey
+		}
+	}
+
+	s.mu.Lock()
+	s.lookup = newLookup
+	s.mu.Unlock()
+}
+
+// UpdateDefaultExplicitKey updates the explicit key on the underlying MultiSourceSecret (if applicable).
+func (s *MappedSecretSource) UpdateDefaultExplicitKey(key string) {
+	if ms, ok := s.defaultSource.(*MultiSourceSecret); ok {
+		ms.UpdateExplicitKey(key)
+	}
+}
+
+// InvalidateCache invalidates cache on the underlying MultiSourceSecret (if applicable).
+func (s *MappedSecretSource) InvalidateCache() {
+	if ms, ok := s.defaultSource.(*MultiSourceSecret); ok {
+		ms.InvalidateCache()
+	}
 }

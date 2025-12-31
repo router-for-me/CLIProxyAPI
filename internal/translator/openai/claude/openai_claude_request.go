@@ -7,7 +7,6 @@ package claude
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -138,11 +137,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 						// Convert input to arguments JSON string
 						if input := part.Get("input"); input.Exists() {
-							if inputJSON, err := json.Marshal(input.Value()); err == nil {
-								toolCallJSON, _ = sjson.Set(toolCallJSON, "function.arguments", string(inputJSON))
-							} else {
-								toolCallJSON, _ = sjson.Set(toolCallJSON, "function.arguments", "{}")
-							}
+							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.arguments", input.Raw)
 						} else {
 							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.arguments", "{}")
 						}
@@ -191,8 +186,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				// Emit tool calls in a separate assistant message
 				if role == "assistant" && len(toolCalls) > 0 {
 					toolCallMsgJSON := `{"role":"assistant","tool_calls":[]}`
-					toolCallsJSON, _ := json.Marshal(toolCalls)
-					toolCallMsgJSON, _ = sjson.SetRaw(toolCallMsgJSON, "tool_calls", string(toolCallsJSON))
+					toolCallMsgJSON, _ = sjson.Set(toolCallMsgJSON, "tool_calls", toolCalls)
 					messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(toolCallMsgJSON).Value())
 				}
 

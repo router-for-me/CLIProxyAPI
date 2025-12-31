@@ -312,3 +312,41 @@ func TestAmpModule_ProviderAliasesAlwaysRegistered(t *testing.T) {
 		})
 	}
 }
+
+func TestAmpModule_hasUpstreamAPIKeysChanged_DetectsRemovedKeyWithDuplicateInput(t *testing.T) {
+	m := &AmpModule{}
+
+	oldCfg := &config.AmpCode{
+		UpstreamAPIKeys: []config.AmpUpstreamAPIKeyEntry{
+			{UpstreamAPIKey: "u1", APIKeys: []string{"k1", "k2"}},
+		},
+	}
+	newCfg := &config.AmpCode{
+		UpstreamAPIKeys: []config.AmpUpstreamAPIKeyEntry{
+			{UpstreamAPIKey: "u1", APIKeys: []string{"k1", "k1"}},
+		},
+	}
+
+	if !m.hasUpstreamAPIKeysChanged(oldCfg, newCfg) {
+		t.Fatal("expected change to be detected when k2 is removed but new list contains duplicates")
+	}
+}
+
+func TestAmpModule_hasUpstreamAPIKeysChanged_IgnoresEmptyAndWhitespaceKeys(t *testing.T) {
+	m := &AmpModule{}
+
+	oldCfg := &config.AmpCode{
+		UpstreamAPIKeys: []config.AmpUpstreamAPIKeyEntry{
+			{UpstreamAPIKey: "u1", APIKeys: []string{"k1", "k2"}},
+		},
+	}
+	newCfg := &config.AmpCode{
+		UpstreamAPIKeys: []config.AmpUpstreamAPIKeyEntry{
+			{UpstreamAPIKey: "u1", APIKeys: []string{"  k1  ", "", "k2", "   "}},
+		},
+	}
+
+	if m.hasUpstreamAPIKeysChanged(oldCfg, newCfg) {
+		t.Fatal("expected no change when only whitespace/empty entries differ")
+	}
+}

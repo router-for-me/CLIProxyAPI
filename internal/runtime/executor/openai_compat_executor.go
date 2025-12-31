@@ -61,12 +61,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
 	allowCompat := e.allowCompatReasoningEffort(req.Model, auth)
 	translated = ApplyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" && modelOverride == "" {
-		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
-	}
-	translated = NormalizeThinkingConfig(translated, upstreamModel, allowCompat)
-	if errValidate := ValidateThinkingConfig(translated, upstreamModel); errValidate != nil {
+	translated = NormalizeThinkingConfig(translated, req.Model, allowCompat)
+	if errValidate := ValidateThinkingConfig(translated, req.Model); errValidate != nil {
 		return resp, errValidate
 	}
 
@@ -157,12 +153,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
 	allowCompat := e.allowCompatReasoningEffort(req.Model, auth)
 	translated = ApplyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" && modelOverride == "" {
-		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
-	}
-	translated = NormalizeThinkingConfig(translated, upstreamModel, allowCompat)
-	if errValidate := ValidateThinkingConfig(translated, upstreamModel); errValidate != nil {
+	translated = NormalizeThinkingConfig(translated, req.Model, allowCompat)
+	if errValidate := ValidateThinkingConfig(translated, req.Model); errValidate != nil {
 		return nil, errValidate
 	}
 

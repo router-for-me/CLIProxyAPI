@@ -246,11 +246,20 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 			}
 		}
 
-		// Check API key change
+		// Check API key change (both default and per-client mappings)
 		apiKeyChanged := m.hasAPIKeyChanged(oldSettings, &newSettings)
-		if apiKeyChanged {
+		upstreamAPIKeysChanged := m.hasUpstreamAPIKeysChanged(oldSettings, &newSettings)
+		if apiKeyChanged || upstreamAPIKeysChanged {
 			if m.secretSource != nil {
-				if ms, ok := m.secretSource.(*MultiSourceSecret); ok {
+				if ms, ok := m.secretSource.(*MappedSecretSource); ok {
+					if apiKeyChanged {
+						ms.UpdateDefaultExplicitKey(newSettings.UpstreamAPIKey)
+						ms.InvalidateCache()
+					}
+					if upstreamAPIKeysChanged {
+						ms.UpdateMappings(newSettings.UpstreamAPIKeys)
+					}
+				} else if ms, ok := m.secretSource.(*MultiSourceSecret); ok {
 					ms.UpdateExplicitKey(newSettings.UpstreamAPIKey)
 					ms.InvalidateCache()
 				}
@@ -278,10 +287,22 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 
 func (m *AmpModule) enableUpstreamProxy(upstreamURL string, settings *config.AmpCode) error {
 	if m.secretSource == nil {
-		m.secretSource = NewMultiSourceSecret(settings.UpstreamAPIKey, 0 /* default 5min */)
+		// Create MultiSourceSecret as the default source, then wrap with MappedSecretSource
+		defaultSource := NewMultiSourceSecret(settings.UpstreamAPIKey, 0 /* default 5min */)
+		mappedSource := NewMappedSecretSource(defaultSource)
+		mappedSource.UpdateMappings(settings.UpstreamAPIKeys)
+		m.secretSource = mappedSource
+	} else if ms, ok := m.secretSource.(*MappedSecretSource); ok {
+		ms.UpdateDefaultExplicitKey(settings.UpstreamAPIKey)
+		ms.InvalidateCache()
+		ms.UpdateMappings(settings.UpstreamAPIKeys)
 	} else if ms, ok := m.secretSource.(*MultiSourceSecret); ok {
+		// Legacy path: wrap existing MultiSourceSecret with MappedSecretSource
 		ms.UpdateExplicitKey(settings.UpstreamAPIKey)
 		ms.InvalidateCache()
+		mappedSource := NewMappedSecretSource(ms)
+		mappedSource.UpdateMappings(settings.UpstreamAPIKeys)
+		m.secretSource = mappedSource
 	}
 
 	proxy, err := createReverseProxy(upstreamURL, m.secretSource)
@@ -306,16 +327,23 @@ func (m *AmpModule) hasModelMappingsChanged(old *config.AmpCode, new *config.Amp
 		return true
 	}
 
-	// Build map for efficient comparison
-	oldMap := make(map[string]string, len(old.ModelMappings))
+	// Build map for efficient and robust comparison
+	type mappingInfo struct {
+		to    string
+		regex bool
+	}
+	oldMap := make(map[string]mappingInfo, len(old.ModelMappings))
 	for _, mapping := range old.ModelMappings {
-		oldMap[strings.TrimSpace(mapping.From)] = strings.TrimSpace(mapping.To)
+		oldMap[strings.TrimSpace(mapping.From)] = mappingInfo{
+			to:    strings.TrimSpace(mapping.To),
+			regex: mapping.Regex,
+		}
 	}
 
 	for _, mapping := range new.ModelMappings {
 		from := strings.TrimSpace(mapping.From)
 		to := strings.TrimSpace(mapping.To)
-		if oldTo, exists := oldMap[from]; !exists || oldTo != to {
+		if oldVal, exists := oldMap[from]; !exists || oldVal.to != to || oldVal.regex != mapping.Regex {
 			return true
 		}
 	}
@@ -331,6 +359,66 @@ func (m *AmpModule) hasAPIKeyChanged(old *config.AmpCode, new *config.AmpCode) b
 	}
 	newKey := strings.TrimSpace(new.UpstreamAPIKey)
 	return oldKey != newKey
+}
+
+// hasUpstreamAPIKeysChanged compares old and new per-client upstream API key mappings.
+func (m *AmpModule) hasUpstreamAPIKeysChanged(old *config.AmpCode, new *config.AmpCode) bool {
+	if old == nil {
+		return len(new.UpstreamAPIKeys) > 0
+	}
+
+	if len(old.UpstreamAPIKeys) != len(new.UpstreamAPIKeys) {
+		return true
+	}
+
+	// Build map for comparison: upstreamKey -> set of clientKeys
+	type entryInfo struct {
+		upstreamKey string
+		clientKeys  map[string]struct{}
+	}
+	oldEntries := make([]entryInfo, len(old.UpstreamAPIKeys))
+	for i, entry := range old.UpstreamAPIKeys {
+		clientKeys := make(map[string]struct{}, len(entry.APIKeys))
+		for _, k := range entry.APIKeys {
+			trimmed := strings.TrimSpace(k)
+			if trimmed == "" {
+				continue
+			}
+			clientKeys[trimmed] = struct{}{}
+		}
+		oldEntries[i] = entryInfo{
+			upstreamKey: strings.TrimSpace(entry.UpstreamAPIKey),
+			clientKeys:  clientKeys,
+		}
+	}
+
+	for i, newEntry := range new.UpstreamAPIKeys {
+		if i >= len(oldEntries) {
+			return true
+		}
+		oldE := oldEntries[i]
+		if strings.TrimSpace(newEntry.UpstreamAPIKey) != oldE.upstreamKey {
+			return true
+		}
+		newKeys := make(map[string]struct{}, len(newEntry.APIKeys))
+		for _, k := range newEntry.APIKeys {
+			trimmed := strings.TrimSpace(k)
+			if trimmed == "" {
+				continue
+			}
+			newKeys[trimmed] = struct{}{}
+		}
+		if len(newKeys) != len(oldE.clientKeys) {
+			return true
+		}
+		for k := range newKeys {
+			if _, ok := oldE.clientKeys[k]; !ok {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // GetModelMapper returns the model mapper instance (for testing/debugging).

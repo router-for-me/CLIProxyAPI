@@ -7,7 +7,6 @@ package gemini
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
@@ -117,8 +116,6 @@ func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) []by
 
 // FunctionCallGroup represents a group of function calls and their responses
 type FunctionCallGroup struct {
-	ModelContent    map[string]interface{}
-	FunctionCalls   []gjson.Result
 	ResponsesNeeded int
 }
 
@@ -146,7 +143,7 @@ func fixCLIToolResponse(input string) (string, error) {
 	}
 
 	// Initialize data structures for processing and grouping
-	var newContents []interface{}          // Final processed contents array
+	contentsWrapper := `{"contents":[]}`
 	var pendingGroups []*FunctionCallGroup // Groups awaiting completion with responses
 	var collectedResponses []gjson.Result  // Standalone responses to be matched
 
@@ -178,23 +175,17 @@ func fixCLIToolResponse(input string) (string, error) {
 					collectedResponses = collectedResponses[group.ResponsesNeeded:]
 
 					// Create merged function response content
-					var responseParts []interface{}
+					functionResponseContent := `{"parts":[],"role":"function"}`
 					for _, response := range groupResponses {
-						var responseMap map[string]interface{}
-						errUnmarshal := json.Unmarshal([]byte(response.Raw), &responseMap)
-						if errUnmarshal != nil {
-							log.Warnf("failed to unmarshal function response: %v\n", errUnmarshal)
+						if !response.IsObject() {
+							log.Warnf("failed to parse function response")
 							continue
 						}
-						responseParts = append(responseParts, responseMap)
+						functionResponseContent, _ = sjson.SetRaw(functionResponseContent, "parts.-1", response.Raw)
 					}
 
-					if len(responseParts) > 0 {
-						functionResponseContent := map[string]interface{}{
-							"parts": responseParts,
-							"role":  "function",
-						}
-						newContents = append(newContents, functionResponseContent)
+					if gjson.Get(functionResponseContent, "parts.#").Int() > 0 {
+						contentsWrapper, _ = sjson.SetRaw(contentsWrapper, "contents.-1", functionResponseContent)
 					}
 
 					// Remove this group as it's been satisfied
@@ -208,50 +199,42 @@ func fixCLIToolResponse(input string) (string, error) {
 
 		// If this is a model with function calls, create a new group
 		if role == "model" {
-			var functionCallsInThisModel []gjson.Result
+			functionCallsCount := 0
 			parts.ForEach(func(_, part gjson.Result) bool {
 				if part.Get("functionCall").Exists() {
-					functionCallsInThisModel = append(functionCallsInThisModel, part)
+					functionCallsCount++
 				}
 				return true
 			})
 
-			if len(functionCallsInThisModel) > 0 {
+			if functionCallsCount > 0 {
 				// Add the model content
-				var contentMap map[string]interface{}
-				errUnmarshal := json.Unmarshal([]byte(value.Raw), &contentMap)
-				if errUnmarshal != nil {
-					log.Warnf("failed to unmarshal model content: %v\n", errUnmarshal)
+				if !value.IsObject() {
+					log.Warnf("failed to parse model content")
 					return true
 				}
-				newContents = append(newContents, contentMap)
+				contentsWrapper, _ = sjson.SetRaw(contentsWrapper, "contents.-1", value.Raw)
 
 				// Create a new group for tracking responses
 				group := &FunctionCallGroup{
-					ModelContent:    contentMap,
-					FunctionCalls:   functionCallsInThisModel,
-					ResponsesNeeded: len(functionCallsInThisModel),
+					ResponsesNeeded: functionCallsCount,
 				}
 				pendingGroups = append(pendingGroups, group)
 			} else {
 				// Regular model content without function calls
-				var contentMap map[string]interface{}
-				errUnmarshal := json.Unmarshal([]byte(value.Raw), &contentMap)
-				if errUnmarshal != nil {
-					log.Warnf("failed to unmarshal content: %v\n", errUnmarshal)
+				if !value.IsObject() {
+					log.Warnf("failed to parse content")
 					return true
 				}
-				newContents = append(newContents, contentMap)
+				contentsWrapper, _ = sjson.SetRaw(contentsWrapper, "contents.-1", value.Raw)
 			}
 		} else {
 			// Non-model content (user, etc.)
-			var contentMap map[string]interface{}
-			errUnmarshal := json.Unmarshal([]byte(value.Raw), &contentMap)
-			if errUnmarshal != nil {
-				log.Warnf("failed to unmarshal content: %v\n", errUnmarshal)
+			if !value.IsObject() {
+				log.Warnf("failed to parse content")
 				return true
 			}
-			newContents = append(newContents, contentMap)
+			contentsWrapper, _ = sjson.SetRaw(contentsWrapper, "contents.-1", value.Raw)
 		}
 
 		return true
@@ -263,31 +246,24 @@ func fixCLIToolResponse(input string) (string, error) {
 			groupResponses := collectedResponses[:group.ResponsesNeeded]
 			collectedResponses = collectedResponses[group.ResponsesNeeded:]
 
-			var responseParts []interface{}
+			functionResponseContent := `{"parts":[],"role":"function"}`
 			for _, response := range groupResponses {
-				var responseMap map[string]interface{}
-				errUnmarshal := json.Unmarshal([]byte(response.Raw), &responseMap)
-				if errUnmarshal != nil {
-					log.Warnf("failed to unmarshal function response: %v\n", errUnmarshal)
+				if !response.IsObject() {
+					log.Warnf("failed to parse function response")
 					continue
 				}
-				responseParts = append(responseParts, responseMap)
+				functionResponseContent, _ = sjson.SetRaw(functionResponseContent, "parts.-1", response.Raw)
 			}
 
-			if len(responseParts) > 0 {
-				functionResponseContent := map[string]interface{}{
-					"parts": responseParts,
-					"role":  "function",
-				}
-				newContents = append(newContents, functionResponseContent)
+			if gjson.Get(functionResponseContent, "parts.#").Int() > 0 {
+				contentsWrapper, _ = sjson.SetRaw(contentsWrapper, "contents.-1", functionResponseContent)
 			}
 		}
 	}
 
 	// Update the original JSON with the new contents
 	result := input
-	newContentsJSON, _ := json.Marshal(newContents)
-	result, _ = sjson.Set(result, "request.contents", json.RawMessage(newContentsJSON))
+	result, _ = sjson.SetRaw(result, "request.contents", gjson.Get(contentsWrapper, "contents").Raw)
 
 	return result, nil
 }

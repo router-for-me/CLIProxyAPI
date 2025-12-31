@@ -263,51 +263,6 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 	}
 }
 
-// convertArrayToJSON converts []interface{} to JSON array string
-func convertArrayToJSON(arr []interface{}) string {
-	result := "[]"
-	for _, item := range arr {
-		switch itemData := item.(type) {
-		case map[string]interface{}:
-			itemJSON := convertMapToJSON(itemData)
-			result, _ = sjson.SetRaw(result, "-1", itemJSON)
-		case string:
-			result, _ = sjson.Set(result, "-1", itemData)
-		case bool:
-			result, _ = sjson.Set(result, "-1", itemData)
-		case float64, int, int64:
-			result, _ = sjson.Set(result, "-1", itemData)
-		default:
-			result, _ = sjson.Set(result, "-1", itemData)
-		}
-	}
-	return result
-}
-
-// convertMapToJSON converts map[string]interface{} to JSON object string
-func convertMapToJSON(m map[string]interface{}) string {
-	result := "{}"
-	for key, value := range m {
-		switch val := value.(type) {
-		case map[string]interface{}:
-			nestedJSON := convertMapToJSON(val)
-			result, _ = sjson.SetRaw(result, key, nestedJSON)
-		case []interface{}:
-			arrayJSON := convertArrayToJSON(val)
-			result, _ = sjson.SetRaw(result, key, arrayJSON)
-		case string:
-			result, _ = sjson.Set(result, key, val)
-		case bool:
-			result, _ = sjson.Set(result, key, val)
-		case float64, int, int64:
-			result, _ = sjson.Set(result, key, val)
-		default:
-			result, _ = sjson.Set(result, key, val)
-		}
-	}
-	return result
-}
-
 // ConvertClaudeResponseToGeminiNonStream converts a non-streaming Claude Code response to a non-streaming Gemini response.
 // This function processes the complete Claude Code response and transforms it into a single Gemini-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
@@ -356,8 +311,8 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 	}
 
 	// Process each streaming event and collect parts
-	var allParts []interface{}
-	var finalUsage map[string]interface{}
+	var allParts []string
+	var finalUsageJSON string
 	var responseID string
 	var createdAt int64
 
@@ -407,16 +362,14 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 					if text := delta.Get("text"); text.Exists() && text.String() != "" {
 						partJSON := `{"text":""}`
 						partJSON, _ = sjson.Set(partJSON, "text", text.String())
-						part := gjson.Parse(partJSON).Value().(map[string]interface{})
-						allParts = append(allParts, part)
+						allParts = append(allParts, partJSON)
 					}
 				case "thinking_delta":
 					// Process reasoning/thinking content
 					if text := delta.Get("thinking"); text.Exists() && text.String() != "" {
 						partJSON := `{"thought":true,"text":""}`
 						partJSON, _ = sjson.Set(partJSON, "text", text.String())
-						part := gjson.Parse(partJSON).Value().(map[string]interface{})
-						allParts = append(allParts, part)
+						allParts = append(allParts, partJSON)
 					}
 				case "input_json_delta":
 					// accumulate args partial_json for this index
@@ -456,9 +409,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 				if argsTrim != "" {
 					functionCallJSON, _ = sjson.SetRaw(functionCallJSON, "functionCall.args", argsTrim)
 				}
-				// Parse back to interface{} for allParts
-				functionCall := gjson.Parse(functionCallJSON).Value().(map[string]interface{})
-				allParts = append(allParts, functionCall)
+				allParts = append(allParts, functionCallJSON)
 				// cleanup used state for this index
 				if newParam.ToolUseArgs != nil {
 					delete(newParam.ToolUseArgs, idx)
@@ -501,8 +452,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 				// Set traffic type (required by Gemini API)
 				usageJSON, _ = sjson.Set(usageJSON, "trafficType", "PROVISIONED_THROUGHPUT")
 
-				// Convert to map[string]interface{} using gjson
-				finalUsage = gjson.Parse(usageJSON).Value().(map[string]interface{})
+				finalUsageJSON = usageJSON
 			}
 		}
 	}
@@ -520,12 +470,16 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 
 	// Set the consolidated parts array
 	if len(consolidatedParts) > 0 {
-		template, _ = sjson.SetRaw(template, "candidates.0.content.parts", convertToJSONString(consolidatedParts))
+		partsJSON := "[]"
+		for _, partJSON := range consolidatedParts {
+			partsJSON, _ = sjson.SetRaw(partsJSON, "-1", partJSON)
+		}
+		template, _ = sjson.SetRaw(template, "candidates.0.content.parts", partsJSON)
 	}
 
 	// Set usage metadata
-	if finalUsage != nil {
-		template, _ = sjson.SetRaw(template, "usageMetadata", convertToJSONString(finalUsage))
+	if finalUsageJSON != "" {
+		template, _ = sjson.SetRaw(template, "usageMetadata", finalUsageJSON)
 	}
 
 	return template
@@ -539,12 +493,12 @@ func GeminiTokenCount(ctx context.Context, count int64) string {
 // This function processes the parts array to combine adjacent text elements and thinking elements
 // into single consolidated parts, which results in a more readable and efficient response structure.
 // Tool calls and other non-text parts are preserved as separate elements.
-func consolidateParts(parts []interface{}) []interface{} {
+func consolidateParts(parts []string) []string {
 	if len(parts) == 0 {
 		return parts
 	}
 
-	var consolidated []interface{}
+	var consolidated []string
 	var currentTextPart strings.Builder
 	var currentThoughtPart strings.Builder
 	var hasText, hasThought bool
@@ -554,8 +508,7 @@ func consolidateParts(parts []interface{}) []interface{} {
 		if hasText && currentTextPart.Len() > 0 {
 			textPartJSON := `{"text":""}`
 			textPartJSON, _ = sjson.Set(textPartJSON, "text", currentTextPart.String())
-			textPart := gjson.Parse(textPartJSON).Value().(map[string]interface{})
-			consolidated = append(consolidated, textPart)
+			consolidated = append(consolidated, textPartJSON)
 			currentTextPart.Reset()
 			hasText = false
 		}
@@ -566,42 +519,42 @@ func consolidateParts(parts []interface{}) []interface{} {
 		if hasThought && currentThoughtPart.Len() > 0 {
 			thoughtPartJSON := `{"thought":true,"text":""}`
 			thoughtPartJSON, _ = sjson.Set(thoughtPartJSON, "text", currentThoughtPart.String())
-			thoughtPart := gjson.Parse(thoughtPartJSON).Value().(map[string]interface{})
-			consolidated = append(consolidated, thoughtPart)
+			consolidated = append(consolidated, thoughtPartJSON)
 			currentThoughtPart.Reset()
 			hasThought = false
 		}
 	}
 
-	for _, part := range parts {
-		partMap, ok := part.(map[string]interface{})
-		if !ok {
+	for _, partJSON := range parts {
+		part := gjson.Parse(partJSON)
+		if !part.Exists() || !part.IsObject() {
 			// Flush any pending parts and add this non-text part
 			flushText()
 			flushThought()
-			consolidated = append(consolidated, part)
+			consolidated = append(consolidated, partJSON)
 			continue
 		}
 
-		if thought, isThought := partMap["thought"]; isThought && thought == true {
+		thought := part.Get("thought")
+		if thought.Exists() && thought.Type == gjson.True {
 			// This is a thinking part - flush any pending text first
 			flushText() // Flush any pending text first
 
-			if text, hasTextContent := partMap["text"].(string); hasTextContent {
-				currentThoughtPart.WriteString(text)
+			if text := part.Get("text"); text.Exists() && text.Type == gjson.String {
+				currentThoughtPart.WriteString(text.String())
 				hasThought = true
 			}
-		} else if text, hasTextContent := partMap["text"].(string); hasTextContent {
+		} else if text := part.Get("text"); text.Exists() && text.Type == gjson.String {
 			// This is a regular text part - flush any pending thought first
 			flushThought() // Flush any pending thought first
 
-			currentTextPart.WriteString(text)
+			currentTextPart.WriteString(text.String())
 			hasText = true
 		} else {
 			// This is some other type of part (like function call) - flush both text and thought
 			flushText()
 			flushThought()
-			consolidated = append(consolidated, part)
+			consolidated = append(consolidated, partJSON)
 		}
 	}
 
@@ -610,21 +563,4 @@ func consolidateParts(parts []interface{}) []interface{} {
 	flushText()
 
 	return consolidated
-}
-
-// convertToJSONString converts interface{} to JSON string using sjson/gjson.
-// This function provides a consistent way to serialize different data types to JSON strings
-// for inclusion in the Gemini API response structure.
-func convertToJSONString(v interface{}) string {
-	switch val := v.(type) {
-	case []interface{}:
-		return convertArrayToJSON(val)
-	case map[string]interface{}:
-		return convertMapToJSON(val)
-	default:
-		// For simple types, create a temporary JSON and extract the value
-		temp := `{"temp":null}`
-		temp, _ = sjson.Set(temp, "temp", val)
-		return gjson.Get(temp, "temp").Raw
-	}
 }

@@ -6,6 +6,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -90,7 +91,7 @@ type modelStats struct {
 type RequestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
 	Source    string     `json:"source"`
-	AuthIndex uint64     `json:"auth_index"`
+	AuthIndex string     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
 }
@@ -281,6 +282,118 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	return result
 }
 
+type MergeResult struct {
+	Added   int64 `json:"added"`
+	Skipped int64 `json:"skipped"`
+}
+
+// MergeSnapshot merges an exported statistics snapshot into the current store.
+// Existing data is preserved and duplicate request details are skipped.
+func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResult {
+	result := MergeResult{}
+	if s == nil {
+		return result
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	seen := make(map[string]struct{})
+	for apiName, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for modelName, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			for _, detail := range modelStatsValue.Details {
+				seen[dedupKey(apiName, modelName, detail)] = struct{}{}
+			}
+		}
+	}
+
+	for apiName, apiSnapshot := range snapshot.APIs {
+		apiName = strings.TrimSpace(apiName)
+		if apiName == "" {
+			continue
+		}
+		stats, ok := s.apis[apiName]
+		if !ok || stats == nil {
+			stats = &apiStats{Models: make(map[string]*modelStats)}
+			s.apis[apiName] = stats
+		} else if stats.Models == nil {
+			stats.Models = make(map[string]*modelStats)
+		}
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelName = strings.TrimSpace(modelName)
+			if modelName == "" {
+				modelName = "unknown"
+			}
+			for _, detail := range modelSnapshot.Details {
+				detail.Tokens = normaliseTokenStats(detail.Tokens)
+				if detail.Timestamp.IsZero() {
+					detail.Timestamp = time.Now()
+				}
+				key := dedupKey(apiName, modelName, detail)
+				if _, exists := seen[key]; exists {
+					result.Skipped++
+					continue
+				}
+				seen[key] = struct{}{}
+				s.recordImported(apiName, modelName, stats, detail)
+				result.Added++
+			}
+		}
+	}
+
+	return result
+}
+
+func (s *RequestStatistics) recordImported(apiName, modelName string, stats *apiStats, detail RequestDetail) {
+	totalTokens := detail.Tokens.TotalTokens
+	if totalTokens < 0 {
+		totalTokens = 0
+	}
+
+	s.totalRequests++
+	if detail.Failed {
+		s.failureCount++
+	} else {
+		s.successCount++
+	}
+	s.totalTokens += totalTokens
+
+	s.updateAPIStats(stats, modelName, detail)
+
+	dayKey := detail.Timestamp.Format("2006-01-02")
+	hourKey := detail.Timestamp.Hour()
+
+	s.requestsByDay[dayKey]++
+	s.requestsByHour[hourKey]++
+	s.tokensByDay[dayKey] += totalTokens
+	s.tokensByHour[hourKey] += totalTokens
+}
+
+func dedupKey(apiName, modelName string, detail RequestDetail) string {
+	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
+	tokens := normaliseTokenStats(detail.Tokens)
+	return fmt.Sprintf(
+		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		apiName,
+		modelName,
+		timestamp,
+		detail.Source,
+		detail.AuthIndex,
+		detail.Failed,
+		tokens.InputTokens,
+		tokens.OutputTokens,
+		tokens.ReasoningTokens,
+		tokens.CachedTokens,
+		tokens.TotalTokens,
+	)
+}
+
 func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
@@ -336,6 +449,16 @@ func normaliseDetail(detail coreusage.Detail) TokenStats {
 	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
+	}
+	return tokens
+}
+
+func normaliseTokenStats(tokens TokenStats) TokenStats {
+	if tokens.TotalTokens == 0 {
+		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
+	}
+	if tokens.TotalTokens == 0 {
+		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
 	}
 	return tokens
 }

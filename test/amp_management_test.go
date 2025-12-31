@@ -56,6 +56,10 @@ func setupAmpRouter(h *management.Handler) *gin.Engine {
 		mgmt.GET("/ampcode/upstream-api-key", h.GetAmpUpstreamAPIKey)
 		mgmt.PUT("/ampcode/upstream-api-key", h.PutAmpUpstreamAPIKey)
 		mgmt.DELETE("/ampcode/upstream-api-key", h.DeleteAmpUpstreamAPIKey)
+		mgmt.GET("/ampcode/upstream-api-keys", h.GetAmpUpstreamAPIKeys)
+		mgmt.PUT("/ampcode/upstream-api-keys", h.PutAmpUpstreamAPIKeys)
+		mgmt.PATCH("/ampcode/upstream-api-keys", h.PatchAmpUpstreamAPIKeys)
+		mgmt.DELETE("/ampcode/upstream-api-keys", h.DeleteAmpUpstreamAPIKeys)
 		mgmt.GET("/ampcode/restrict-management-to-localhost", h.GetAmpRestrictManagementToLocalhost)
 		mgmt.PUT("/ampcode/restrict-management-to-localhost", h.PutAmpRestrictManagementToLocalhost)
 		mgmt.GET("/ampcode/model-mappings", h.GetAmpModelMappings)
@@ -185,6 +189,90 @@ func TestPutAmpUpstreamAPIKey(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
+func TestPutAmpUpstreamAPIKeys_PersistsAndReturns(t *testing.T) {
+	h, configPath := newAmpTestHandler(t)
+	r := setupAmpRouter(h)
+
+	body := `{"value":[{"upstream-api-key":"  u1  ","api-keys":["  k1  ","","k2"]}]}`
+	req := httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/upstream-api-keys", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	// Verify it was persisted to disk
+	loaded, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("failed to load config from disk: %v", err)
+	}
+	if len(loaded.AmpCode.UpstreamAPIKeys) != 1 {
+		t.Fatalf("expected 1 upstream-api-keys entry, got %d", len(loaded.AmpCode.UpstreamAPIKeys))
+	}
+	entry := loaded.AmpCode.UpstreamAPIKeys[0]
+	if entry.UpstreamAPIKey != "u1" {
+		t.Fatalf("expected upstream-api-key u1, got %q", entry.UpstreamAPIKey)
+	}
+	if len(entry.APIKeys) != 2 || entry.APIKeys[0] != "k1" || entry.APIKeys[1] != "k2" {
+		t.Fatalf("expected api-keys [k1 k2], got %#v", entry.APIKeys)
+	}
+
+	// Verify it is returned by GET /ampcode
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/ampcode", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+	var resp map[string]config.AmpCode
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if got := resp["ampcode"].UpstreamAPIKeys; len(got) != 1 || got[0].UpstreamAPIKey != "u1" {
+		t.Fatalf("expected upstream-api-keys to be present after update, got %#v", got)
+	}
+}
+
+func TestDeleteAmpUpstreamAPIKeys_ClearsAll(t *testing.T) {
+	h, _ := newAmpTestHandler(t)
+	r := setupAmpRouter(h)
+
+	// Seed with one entry
+	putBody := `{"value":[{"upstream-api-key":"u1","api-keys":["k1"]}]}`
+	req := httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/upstream-api-keys", bytes.NewBufferString(putBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	deleteBody := `{"value":[]}`
+	req = httptest.NewRequest(http.MethodDelete, "/v0/management/ampcode/upstream-api-keys", bytes.NewBufferString(deleteBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/ampcode/upstream-api-keys", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+	var resp map[string][]config.AmpUpstreamAPIKeyEntry
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp["upstream-api-keys"] != nil && len(resp["upstream-api-keys"]) != 0 {
+		t.Fatalf("expected cleared list, got %#v", resp["upstream-api-keys"])
 	}
 }
 

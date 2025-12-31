@@ -484,16 +484,12 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					}
 				}
 				// Build response.output using aggregated buffers
-				var outputs []interface{}
+				outputsWrapper := `{"arr":[]}`
 				if st.ReasoningBuf.Len() > 0 {
-					outputs = append(outputs, map[string]interface{}{
-						"id":   st.ReasoningID,
-						"type": "reasoning",
-						"summary": []interface{}{map[string]interface{}{
-							"type": "summary_text",
-							"text": st.ReasoningBuf.String(),
-						}},
-					})
+					item := `{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`
+					item, _ = sjson.Set(item, "id", st.ReasoningID)
+					item, _ = sjson.Set(item, "summary.0.text", st.ReasoningBuf.String())
+					outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 				}
 				// Append message items in ascending index order
 				if len(st.MsgItemAdded) > 0 {
@@ -513,18 +509,10 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						if b := st.MsgTextBuf[i]; b != nil {
 							txt = b.String()
 						}
-						outputs = append(outputs, map[string]interface{}{
-							"id":     fmt.Sprintf("msg_%s_%d", st.ResponseID, i),
-							"type":   "message",
-							"status": "completed",
-							"content": []interface{}{map[string]interface{}{
-								"type":        "output_text",
-								"annotations": []interface{}{},
-								"logprobs":    []interface{}{},
-								"text":        txt,
-							}},
-							"role": "assistant",
-						})
+						item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
+						item, _ = sjson.Set(item, "id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
+						item, _ = sjson.Set(item, "content.0.text", txt)
+						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 					}
 				}
 				if len(st.FuncArgsBuf) > 0 {
@@ -547,18 +535,16 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						}
 						callID := st.FuncCallIDs[i]
 						name := st.FuncNames[i]
-						outputs = append(outputs, map[string]interface{}{
-							"id":        fmt.Sprintf("fc_%s", callID),
-							"type":      "function_call",
-							"status":    "completed",
-							"arguments": args,
-							"call_id":   callID,
-							"name":      name,
-						})
+						item := `{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`
+						item, _ = sjson.Set(item, "id", fmt.Sprintf("fc_%s", callID))
+						item, _ = sjson.Set(item, "arguments", args)
+						item, _ = sjson.Set(item, "call_id", callID)
+						item, _ = sjson.Set(item, "name", name)
+						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 					}
 				}
-				if len(outputs) > 0 {
-					completed, _ = sjson.Set(completed, "response.output", outputs)
+				if gjson.Get(outputsWrapper, "arr.#").Int() > 0 {
+					completed, _ = sjson.SetRaw(completed, "response.output", gjson.Get(outputsWrapper, "arr").Raw)
 				}
 				if st.UsageSeen {
 					completed, _ = sjson.Set(completed, "response.usage.input_tokens", st.PromptTokens)
@@ -681,7 +667,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	}
 
 	// Build output list from choices[...]
-	var outputs []interface{}
+	outputsWrapper := `{"arr":[]}`
 	// Detect and capture reasoning content if present
 	rcText := gjson.GetBytes(rawJSON, "choices.0.message.reasoning_content").String()
 	includeReasoning := rcText != ""
@@ -693,21 +679,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		if strings.HasPrefix(rid, "resp_") {
 			rid = strings.TrimPrefix(rid, "resp_")
 		}
-		reasoningItem := map[string]interface{}{
-			"id":                fmt.Sprintf("rs_%s", rid),
-			"type":              "reasoning",
-			"encrypted_content": "",
-		}
 		// Prefer summary_text from reasoning_content; encrypted_content is optional
-		var summaries []interface{}
+		reasoningItem := `{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`
+		reasoningItem, _ = sjson.Set(reasoningItem, "id", fmt.Sprintf("rs_%s", rid))
 		if rcText != "" {
-			summaries = append(summaries, map[string]interface{}{
-				"type": "summary_text",
-				"text": rcText,
-			})
+			reasoningItem, _ = sjson.Set(reasoningItem, "summary.0.type", "summary_text")
+			reasoningItem, _ = sjson.Set(reasoningItem, "summary.0.text", rcText)
 		}
-		reasoningItem["summary"] = summaries
-		outputs = append(outputs, reasoningItem)
+		outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", reasoningItem)
 	}
 
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
@@ -716,18 +695,10 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 			if msg.Exists() {
 				// Text message part
 				if c := msg.Get("content"); c.Exists() && c.String() != "" {
-					outputs = append(outputs, map[string]interface{}{
-						"id":     fmt.Sprintf("msg_%s_%d", id, int(choice.Get("index").Int())),
-						"type":   "message",
-						"status": "completed",
-						"content": []interface{}{map[string]interface{}{
-							"type":        "output_text",
-							"annotations": []interface{}{},
-							"logprobs":    []interface{}{},
-							"text":        c.String(),
-						}},
-						"role": "assistant",
-					})
+					item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
+					item, _ = sjson.Set(item, "id", fmt.Sprintf("msg_%s_%d", id, int(choice.Get("index").Int())))
+					item, _ = sjson.Set(item, "content.0.text", c.String())
+					outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 				}
 
 				// Function/tool calls
@@ -736,14 +707,12 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						callID := tc.Get("id").String()
 						name := tc.Get("function.name").String()
 						args := tc.Get("function.arguments").String()
-						outputs = append(outputs, map[string]interface{}{
-							"id":        fmt.Sprintf("fc_%s", callID),
-							"type":      "function_call",
-							"status":    "completed",
-							"arguments": args,
-							"call_id":   callID,
-							"name":      name,
-						})
+						item := `{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`
+						item, _ = sjson.Set(item, "id", fmt.Sprintf("fc_%s", callID))
+						item, _ = sjson.Set(item, "arguments", args)
+						item, _ = sjson.Set(item, "call_id", callID)
+						item, _ = sjson.Set(item, "name", name)
+						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 						return true
 					})
 				}
@@ -751,8 +720,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 			return true
 		})
 	}
-	if len(outputs) > 0 {
-		resp, _ = sjson.Set(resp, "output", outputs)
+	if gjson.Get(outputsWrapper, "arr.#").Int() > 0 {
+		resp, _ = sjson.SetRaw(resp, "output", gjson.Get(outputsWrapper, "arr").Raw)
 	}
 
 	// usage mapping

@@ -226,13 +226,6 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName string, rawJSON []byte) {
 	alt := h.GetAlt(c)
 
-	if alt == "" {
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		c.Header("Access-Control-Allow-Origin", "*")
-	}
-
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -247,8 +240,65 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
-	h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, dataChan, errChan)
-	return
+
+	setSSEHeaders := func() {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("Access-Control-Allow-Origin", "*")
+	}
+
+	// Peek at the first chunk
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			cliCancel(c.Request.Context().Err())
+			return
+		case errMsg, ok := <-errChan:
+			if !ok {
+				// Err channel closed cleanly; wait for data channel.
+				errChan = nil
+				continue
+			}
+			// Upstream failed immediately. Return proper error status and JSON.
+			h.WriteErrorResponse(c, errMsg)
+			if errMsg != nil {
+				cliCancel(errMsg.Error)
+			} else {
+				cliCancel(nil)
+			}
+			return
+		case chunk, ok := <-dataChan:
+			if !ok {
+				// Closed without data
+				if alt == "" {
+					setSSEHeaders()
+				}
+				flusher.Flush()
+				cliCancel(nil)
+				return
+			}
+
+			// Success! Set headers.
+			if alt == "" {
+				setSSEHeaders()
+			}
+
+			// Write first chunk
+			if alt == "" {
+				_, _ = c.Writer.Write([]byte("data: "))
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n\n"))
+			} else {
+				_, _ = c.Writer.Write(chunk)
+			}
+			flusher.Flush()
+
+			// Continue
+			h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, dataChan, errChan)
+			return
+		}
+	}
 }
 
 // handleCountTokens handles token counting requests for Gemini models.
@@ -297,16 +347,15 @@ func (h *GeminiAPIHandler) handleGenerateContent(c *gin.Context, modelName strin
 }
 
 func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
-			return
-		case chunk, ok := <-data:
-			if !ok {
-				cancel(nil)
-				return
-			}
+	var keepAliveInterval *time.Duration
+	if alt != "" {
+		disabled := time.Duration(0)
+		keepAliveInterval = &disabled
+	}
+
+	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		KeepAliveInterval: keepAliveInterval,
+		WriteChunk: func(chunk []byte) {
 			if alt == "" {
 				_, _ = c.Writer.Write([]byte("data: "))
 				_, _ = c.Writer.Write(chunk)
@@ -314,22 +363,25 @@ func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flus
 			} else {
 				_, _ = c.Writer.Write(chunk)
 			}
-			flusher.Flush()
-		case errMsg, ok := <-errs:
-			if !ok {
-				continue
+		},
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			if errMsg == nil {
+				return
 			}
-			if errMsg != nil {
-				h.WriteErrorResponse(c, errMsg)
-				flusher.Flush()
+			status := http.StatusInternalServerError
+			if errMsg.StatusCode > 0 {
+				status = errMsg.StatusCode
 			}
-			var execErr error
-			if errMsg != nil {
-				execErr = errMsg.Error
+			errText := http.StatusText(status)
+			if errMsg.Error != nil && errMsg.Error.Error() != "" {
+				errText = errMsg.Error.Error()
 			}
-			cancel(execErr)
-			return
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
+			body := handlers.BuildErrorResponseBody(status, errText)
+			if alt == "" {
+				_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+			} else {
+				_, _ = c.Writer.Write(body)
+			}
+		},
+	})
 }

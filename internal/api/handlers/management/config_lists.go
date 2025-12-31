@@ -597,11 +597,7 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	filtered := make([]config.CodexKey, 0, len(arr))
 	for i := range arr {
 		entry := arr[i]
-		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-		entry.Headers = config.NormalizeHeaders(entry.Headers)
-		entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+		normalizeCodexKey(&entry)
 		if entry.BaseURL == "" {
 			continue
 		}
@@ -613,12 +609,13 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		APIKey         *string            `json:"api-key"`
-		Prefix         *string            `json:"prefix"`
-		BaseURL        *string            `json:"base-url"`
-		ProxyURL       *string            `json:"proxy-url"`
-		Headers        *map[string]string `json:"headers"`
-		ExcludedModels *[]string          `json:"excluded-models"`
+		APIKey         *string              `json:"api-key"`
+		Prefix         *string              `json:"prefix"`
+		BaseURL        *string              `json:"base-url"`
+		ProxyURL       *string              `json:"proxy-url"`
+		Models         *[]config.CodexModel `json:"models"`
+		Headers        *map[string]string   `json:"headers"`
+		ExcludedModels *[]string            `json:"excluded-models"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -667,12 +664,16 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
 	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.CodexModel(nil), (*body.Value.Models)...)
+	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
+	normalizeCodexKey(&entry)
 	h.cfg.CodexKey[targetIndex] = entry
 	h.cfg.SanitizeCodexKeys()
 	h.persist(c)
@@ -750,6 +751,32 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 		return
 	}
 	normalized := make([]config.ClaudeModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
+}
+
+func normalizeCodexKey(entry *config.CodexKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.CodexModel, 0, len(entry.Models))
 	for i := range entry.Models {
 		model := entry.Models[i]
 		model.Name = strings.TrimSpace(model.Name)
@@ -912,4 +939,152 @@ func (h *Handler) GetAmpForceModelMappings(c *gin.Context) {
 // PutAmpForceModelMappings updates the force model mappings setting.
 func (h *Handler) PutAmpForceModelMappings(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.AmpCode.ForceModelMappings = v })
+}
+
+// GetAmpUpstreamAPIKeys returns the ampcode upstream API keys mapping.
+func (h *Handler) GetAmpUpstreamAPIKeys(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(200, gin.H{"upstream-api-keys": []config.AmpUpstreamAPIKeyEntry{}})
+		return
+	}
+	c.JSON(200, gin.H{"upstream-api-keys": h.cfg.AmpCode.UpstreamAPIKeys})
+}
+
+// PutAmpUpstreamAPIKeys replaces all ampcode upstream API keys mappings.
+func (h *Handler) PutAmpUpstreamAPIKeys(c *gin.Context) {
+	var body struct {
+		Value []config.AmpUpstreamAPIKeyEntry `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	// Normalize entries: trim whitespace, filter empty
+	normalized := normalizeAmpUpstreamAPIKeyEntries(body.Value)
+	h.cfg.AmpCode.UpstreamAPIKeys = normalized
+	h.persist(c)
+}
+
+// PatchAmpUpstreamAPIKeys adds or updates upstream API keys entries.
+// Matching is done by upstream-api-key value.
+func (h *Handler) PatchAmpUpstreamAPIKeys(c *gin.Context) {
+	var body struct {
+		Value []config.AmpUpstreamAPIKeyEntry `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	existing := make(map[string]int)
+	for i, entry := range h.cfg.AmpCode.UpstreamAPIKeys {
+		existing[strings.TrimSpace(entry.UpstreamAPIKey)] = i
+	}
+
+	for _, newEntry := range body.Value {
+		upstreamKey := strings.TrimSpace(newEntry.UpstreamAPIKey)
+		if upstreamKey == "" {
+			continue
+		}
+		normalizedEntry := config.AmpUpstreamAPIKeyEntry{
+			UpstreamAPIKey: upstreamKey,
+			APIKeys:        normalizeAPIKeysList(newEntry.APIKeys),
+		}
+		if idx, ok := existing[upstreamKey]; ok {
+			h.cfg.AmpCode.UpstreamAPIKeys[idx] = normalizedEntry
+		} else {
+			h.cfg.AmpCode.UpstreamAPIKeys = append(h.cfg.AmpCode.UpstreamAPIKeys, normalizedEntry)
+			existing[upstreamKey] = len(h.cfg.AmpCode.UpstreamAPIKeys) - 1
+		}
+	}
+	h.persist(c)
+}
+
+// DeleteAmpUpstreamAPIKeys removes specified upstream API keys entries.
+// Body must be JSON: {"value": ["<upstream-api-key>", ...]}.
+// If "value" is an empty array, clears all entries.
+// If JSON is invalid or "value" is missing/null, returns 400 and does not persist any change.
+func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
+	var body struct {
+		Value []string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	if body.Value == nil {
+		c.JSON(400, gin.H{"error": "missing value"})
+		return
+	}
+
+	// Empty array means clear all
+	if len(body.Value) == 0 {
+		h.cfg.AmpCode.UpstreamAPIKeys = nil
+		h.persist(c)
+		return
+	}
+
+	toRemove := make(map[string]bool)
+	for _, key := range body.Value {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			continue
+		}
+		toRemove[trimmed] = true
+	}
+	if len(toRemove) == 0 {
+		c.JSON(400, gin.H{"error": "empty value"})
+		return
+	}
+
+	newEntries := make([]config.AmpUpstreamAPIKeyEntry, 0, len(h.cfg.AmpCode.UpstreamAPIKeys))
+	for _, entry := range h.cfg.AmpCode.UpstreamAPIKeys {
+		if !toRemove[strings.TrimSpace(entry.UpstreamAPIKey)] {
+			newEntries = append(newEntries, entry)
+		}
+	}
+	h.cfg.AmpCode.UpstreamAPIKeys = newEntries
+	h.persist(c)
+}
+
+// normalizeAmpUpstreamAPIKeyEntries normalizes a list of upstream API key entries.
+func normalizeAmpUpstreamAPIKeyEntries(entries []config.AmpUpstreamAPIKeyEntry) []config.AmpUpstreamAPIKeyEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.AmpUpstreamAPIKeyEntry, 0, len(entries))
+	for _, entry := range entries {
+		upstreamKey := strings.TrimSpace(entry.UpstreamAPIKey)
+		if upstreamKey == "" {
+			continue
+		}
+		apiKeys := normalizeAPIKeysList(entry.APIKeys)
+		out = append(out, config.AmpUpstreamAPIKeyEntry{
+			UpstreamAPIKey: upstreamKey,
+			APIKeys:        apiKeys,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// normalizeAPIKeysList trims and filters empty strings from a list of API keys.
+func normalizeAPIKeysList(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		trimmed := strings.TrimSpace(k)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
