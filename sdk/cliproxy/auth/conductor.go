@@ -267,6 +267,22 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 	rotated := m.rotateProviders(req.Model, normalized)
 
+	// Check session metadata for preferred provider (session affinity)
+	if opts.Metadata != nil {
+		if preferredProvider, ok := opts.Metadata["session_preferred_provider"].(string); ok && preferredProvider != "" {
+			// Move preferred provider to front if present in rotated list
+			for i, provider := range rotated {
+				if provider == preferredProvider {
+					// Swap preferred provider to front
+					if i > 0 {
+						rotated = append([]string{provider}, append(rotated[:i], rotated[i+1:]...)...)
+					}
+					break
+				}
+			}
+		}
+	}
+
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
 	if attempts < 1 {
@@ -305,6 +321,22 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	}
 	rotated := m.rotateProviders(req.Model, normalized)
 
+	// Check session metadata for preferred provider (session affinity)
+	if opts.Metadata != nil {
+		if preferredProvider, ok := opts.Metadata["session_preferred_provider"].(string); ok && preferredProvider != "" {
+			// Move preferred provider to front if present in rotated list
+			for i, provider := range rotated {
+				if provider == preferredProvider {
+					// Swap preferred provider to front
+					if i > 0 {
+						rotated = append([]string{provider}, append(rotated[:i], rotated[i+1:]...)...)
+					}
+					break
+				}
+			}
+		}
+	}
+
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
 	if attempts < 1 {
@@ -342,6 +374,22 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	rotated := m.rotateProviders(req.Model, normalized)
+
+	// Check session metadata for preferred provider (session affinity)
+	if opts.Metadata != nil {
+		if preferredProvider, ok := opts.Metadata["session_preferred_provider"].(string); ok && preferredProvider != "" {
+			// Move preferred provider to front if present in rotated list
+			for i, provider := range rotated {
+				if provider == preferredProvider {
+					// Swap preferred provider to front
+					if i > 0 {
+						rotated = append([]string{provider}, append(rotated[:i], rotated[i+1:]...)...)
+					}
+					break
+				}
+			}
+		}
+	}
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1

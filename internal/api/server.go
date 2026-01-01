@@ -34,6 +34,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coresession "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/session"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -150,6 +151,9 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
+	// sessionManager handles session lifecycle and conversation history
+	sessionManager *coresession.Manager
+
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
@@ -264,6 +268,41 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	s.mgmt.SetLogDirectory(logDir)
 	s.localPassword = optionState.localPassword
+
+	// Initialize session manager if enabled in config
+	if cfg.SDKConfig.Session.Enabled {
+		storageDir := cfg.SDKConfig.Session.StorageDir
+		if storageDir == "" {
+			storageDir = "~/.cli-proxy-api/sessions"
+		}
+		store, err := coresession.NewFileStore(storageDir)
+		if err != nil {
+			log.Warnf("Failed to create session store: %v (sessions disabled)", err)
+		} else {
+			ttl := 24 * time.Hour
+			if cfg.SDKConfig.Session.DefaultTTLHours > 0 {
+				ttl = time.Duration(cfg.SDKConfig.Session.DefaultTTLHours) * time.Hour
+			}
+			cleanupInterval := 1 * time.Hour
+			if cfg.SDKConfig.Session.CleanupIntervalHours > 0 {
+				cleanupInterval = time.Duration(cfg.SDKConfig.Session.CleanupIntervalHours) * time.Hour
+			}
+
+			sessionManager, err := coresession.NewManager(coresession.Config{
+				Store:           store,
+				DefaultTTL:      ttl,
+				CleanupInterval: cleanupInterval,
+			})
+			if err != nil {
+				log.Warnf("Failed to create session manager: %v (sessions disabled)", err)
+			} else {
+				s.sessionManager = sessionManager
+				s.handlers.SessionManager = sessionManager
+				s.mgmt.SetSessionManager(sessionManager)
+				log.Infof("Session management enabled (storage: %s, ttl: %v)", storageDir, ttl)
+			}
+		}
+	}
 
 	// Setup routes
 	s.setupRoutes()
@@ -599,6 +638,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		// Session management routes
+		mgmt.GET("/sessions", s.mgmt.ListSessions)
+		mgmt.GET("/sessions/:id", s.mgmt.GetSession)
+		mgmt.DELETE("/sessions/:id", s.mgmt.DeleteSession)
+		mgmt.POST("/sessions/cleanup", s.mgmt.CleanupSessions)
 	}
 }
 

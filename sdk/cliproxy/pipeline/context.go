@@ -6,6 +6,7 @@ import (
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
@@ -21,6 +22,10 @@ type Context struct {
 	Translator *sdktranslator.Pipeline
 	// HTTPClient allows middleware to customise the outbound transport per request.
 	HTTPClient *http.Client
+	// SessionID is the optional session identifier from the X-Session-ID header.
+	SessionID string
+	// Session references the loaded session state for conversation continuity.
+	Session *cliproxysession.Session
 }
 
 // Hook captures middleware callbacks around execution.
