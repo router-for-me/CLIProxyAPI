@@ -2527,8 +2527,7 @@ func (h *Handler) ApiCall(c *gin.Context) {
 	if h.authManager != nil && req.AuthIndex != "" {
 		auths := h.authManager.List()
 		for _, auth := range auths {
-			indexStr := strconv.FormatUint(auth.Index, 10)
-			if indexStr == req.AuthIndex || auth.ID == req.AuthIndex || auth.FileName == req.AuthIndex {
+			if auth.Index == req.AuthIndex || auth.ID == req.AuthIndex || auth.FileName == req.AuthIndex {
 				targetAuth = auth
 				break
 			}
