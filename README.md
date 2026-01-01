@@ -52,6 +52,8 @@ With `use-canonical-translator: false`, the system runs on the legacy translator
 | **Cline** | Provider with free models (MiniMax M2, Grok) |
 | **Model Registry** | Support for provider:modelID keys, visual prefixes |
 | **ThinkingSupport** | Metadata for reasoning-capable models |
+| **Stop Reason Mapping** | Correct mapping of finishReason to stop_reason for multi-turn conversations |
+| **Function Name Sanitization** | Utility to ensure function names comply with provider requirements |
 
 ---
 
@@ -74,6 +76,15 @@ With `use-canonical-translator: false`, the system runs on the legacy translator
 ```
 
 **Result:** 15 files (5 parsers + 5 emitters + 5 IR core), minimal duplication.
+
+### Zero Repetition Implementation
+
+The fixes were implemented with **zero code repetition** by centralizing key functionality:
+
+- **`SanitizeFunctionName` utility** — Single function in `internal/util/util.go` used across all translators (Codex, Antigravity, Gemini, Gemini CLI)
+- **Unified stop reason mapping** — Consistent logic applied to all providers instead of duplicate implementations
+- **Shared tool ID parsing** — Centralized fix for tool_use_id parsing bug applied to all relevant translators
+- **Common schema placeholder logic** — Single implementation for preventing unnecessary placeholders
 
 ## Metrics
 
@@ -169,6 +180,9 @@ translator_new/
 
 - **Reasoning/Thinking** — unified handling of thinking blocks with `reasoning_tokens` tracking
 - **Tool Calls** — unified ID generation and argument parsing
+- **Stop Reason Mapping** — correct mapping of finishReason to stop_reason for multi-turn conversations (fixes Claude Code stopping after single turn)
+- **Function Name Sanitization** — utility to ensure function names comply with provider requirements (e.g., Gemini/Vertex AI naming rules)
+- **Tool ID Parsing** — fixed bug where function name extraction used wrong index from tool_use_id format
 - **Multimodal** — images, PDF, inline data
 - **Streaming** — SSE (OpenAI/Claude) and NDJSON (Gemini/Ollama)
 - **Responses API** — full support for `/v1/responses`
