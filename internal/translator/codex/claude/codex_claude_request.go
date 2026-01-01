@@ -147,7 +147,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 							if short, ok := toolMap[name]; ok {
 								name = short
 							} else {
-								name = shortenNameIfNeeded(name)
+								name = util.SanitizeFunctionName(name)
 							}
 							functionCallMessage, _ = sjson.Set(functionCallMessage, "name", name)
 						}
@@ -201,7 +201,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				if short, ok := shortMap[name]; ok {
 					name = short
 				} else {
-					name = shortenNameIfNeeded(name)
+					name = util.SanitizeFunctionName(name)
 				}
 				tool, _ = sjson.Set(tool, "name", name)
 			}
@@ -288,20 +288,7 @@ func buildShortNameMap(names []string) map[string]string {
 	m := map[string]string{}
 
 	baseCandidate := func(n string) string {
-		if len(n) <= limit {
-			return n
-		}
-		if strings.HasPrefix(n, "mcp__") {
-			idx := strings.LastIndex(n, "__")
-			if idx > 0 {
-				cand := "mcp__" + n[idx+2:]
-				if len(cand) > limit {
-					cand = cand[:limit]
-				}
-				return cand
-			}
-		}
-		return n[:limit]
+		return util.SanitizeFunctionName(n)
 	}
 
 	makeUnique := func(cand string) string {
