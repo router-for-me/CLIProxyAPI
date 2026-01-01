@@ -598,6 +598,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
+		mgmt.POST("/antigravity-refresh-token", s.mgmt.AntigravityRefreshTokenAuth)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
 }

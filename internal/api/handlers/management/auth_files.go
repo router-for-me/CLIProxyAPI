@@ -2264,6 +2264,209 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 	return true, nil
 }
 
+// AntigravityRefreshTokenAuthRequest 定义刷新令牌认证请求结构
+type AntigravityRefreshTokenAuthRequest struct {
+	RefreshTokens []string `json:"refresh_tokens" binding:"required"`
+	ProjectID     string   `json:"project_id"`
+}
+
+// AntigravityRefreshTokenAuthResult 定义单个刷新令牌处理结果
+type AntigravityRefreshTokenAuthResult struct {
+	RefreshToken string `json:"refresh_token"`
+	Success      bool   `json:"success"`
+	Email        string `json:"email,omitempty"`
+	ProjectID    string `json:"project_id,omitempty"`
+	FileName     string `json:"file_name,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
+// AntigravityRefreshTokenAuth 处理使用刷新令牌批量添加 Antigravity 账号
+func (h *Handler) AntigravityRefreshTokenAuth(c *gin.Context) {
+	const (
+		antigravityClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+		antigravityClientSecret = "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"
+	)
+
+	ctx := c.Request.Context()
+
+	var req AntigravityRefreshTokenAuthRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体: " + err.Error()})
+		return
+	}
+
+	if len(req.RefreshTokens) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "refresh_tokens 不能为空"})
+		return
+	}
+
+	httpClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
+
+	results := make([]AntigravityRefreshTokenAuthResult, 0, len(req.RefreshTokens))
+	successCount := 0
+
+	for _, refreshToken := range req.RefreshTokens {
+		refreshToken = strings.TrimSpace(refreshToken)
+		if refreshToken == "" {
+			results = append(results, AntigravityRefreshTokenAuthResult{
+				RefreshToken: refreshToken,
+				Success:      false,
+				Error:        "刷新令牌为空",
+			})
+			continue
+		}
+
+		result := h.processAntigravityRefreshToken(ctx, refreshToken, req.ProjectID, antigravityClientID, antigravityClientSecret, httpClient)
+		results = append(results, result)
+		if result.Success {
+			successCount++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"results":       results,
+		"total":         len(req.RefreshTokens),
+		"success_count": successCount,
+		"failed_count":  len(req.RefreshTokens) - successCount,
+	})
+}
+
+// processAntigravityRefreshToken 处理单个刷新令牌
+func (h *Handler) processAntigravityRefreshToken(
+	ctx context.Context,
+	refreshToken, explicitProjectID, clientID, clientSecret string,
+	httpClient *http.Client,
+) AntigravityRefreshTokenAuthResult {
+	result := AntigravityRefreshTokenAuthResult{
+		RefreshToken: refreshToken[:min(10, len(refreshToken))] + "...",
+	}
+
+	// 使用刷新令牌获取访问令牌
+	form := url.Values{}
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("refresh_token", refreshToken)
+	form.Set("grant_type", "refresh_token")
+
+	req, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
+	if errNewRequest != nil {
+		result.Error = "创建令牌请求失败: " + errNewRequest.Error()
+		return result
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, errDo := httpClient.Do(req)
+	if errDo != nil {
+		result.Error = "执行令牌请求失败: " + errDo.Error()
+		return result
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("关闭令牌响应体失败: %v", errClose)
+		}
+	}()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		result.Error = fmt.Sprintf("令牌交换失败 (状态码 %d): %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		return result
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int64  `json:"expires_in"`
+		TokenType   string `json:"token_type"`
+	}
+	if errDecode := json.NewDecoder(resp.Body).Decode(&tokenResp); errDecode != nil {
+		result.Error = "解析令牌响应失败: " + errDecode.Error()
+		return result
+	}
+
+	if strings.TrimSpace(tokenResp.AccessToken) == "" {
+		result.Error = "未获取到访问令牌"
+		return result
+	}
+
+	// 获取用户信息
+	email := ""
+	infoReq, errInfoReq := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.googleapis.com/oauth2/v1/userinfo?alt=json", nil)
+	if errInfoReq == nil {
+		infoReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
+		infoResp, errInfo := httpClient.Do(infoReq)
+		if errInfo == nil {
+			defer func() { _ = infoResp.Body.Close() }()
+			if infoResp.StatusCode >= http.StatusOK && infoResp.StatusCode < http.StatusMultipleChoices {
+				var infoPayload struct {
+					Email string `json:"email"`
+				}
+				if errDecodeInfo := json.NewDecoder(infoResp.Body).Decode(&infoPayload); errDecodeInfo == nil {
+					email = strings.TrimSpace(infoPayload.Email)
+				}
+			}
+		}
+	}
+	result.Email = email
+
+	// 获取项目ID
+	projectID := explicitProjectID
+	if projectID == "" {
+		fetchedProjectID, errProject := sdkAuth.FetchAntigravityProjectID(ctx, tokenResp.AccessToken, httpClient)
+		if errProject != nil {
+			log.Warnf("antigravity: 获取项目ID失败: %v", errProject)
+		} else {
+			projectID = fetchedProjectID
+		}
+	}
+	result.ProjectID = projectID
+
+	// 构建元数据
+	now := time.Now()
+	metadata := map[string]any{
+		"type":          "antigravity",
+		"access_token":  tokenResp.AccessToken,
+		"refresh_token": refreshToken,
+		"expires_in":    tokenResp.ExpiresIn,
+		"timestamp":     now.UnixMilli(),
+		"expired":       now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+	}
+	if email != "" {
+		metadata["email"] = email
+	}
+	if projectID != "" {
+		metadata["project_id"] = projectID
+	}
+
+	// 保存认证记录
+	fileName := sanitizeAntigravityFileName(email)
+	label := strings.TrimSpace(email)
+	if label == "" {
+		label = "antigravity"
+	}
+
+	record := &coreauth.Auth{
+		ID:       fileName,
+		Provider: "antigravity",
+		FileName: fileName,
+		Label:    label,
+		Metadata: metadata,
+	}
+
+	savedPath, errSave := h.saveTokenRecord(ctx, record)
+	if errSave != nil {
+		result.Error = "保存令牌失败: " + errSave.Error()
+		return result
+	}
+
+	result.Success = true
+	result.FileName = savedPath
+	log.Infof("Antigravity 刷新令牌认证成功! 令牌已保存到 %s", savedPath)
+	if projectID != "" {
+		log.Infof("使用 GCP 项目: %s", projectID)
+	}
+
+	return result
+}
+
 func (h *Handler) GetAuthStatus(c *gin.Context) {
 	state := strings.TrimSpace(c.Query("state"))
 	if state == "" {
