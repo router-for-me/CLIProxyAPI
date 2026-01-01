@@ -441,21 +441,18 @@ func ensureToolsArray(body []byte) []byte {
 	return updated
 }
 
-// preserveReasoningContentInMessages ensures reasoning_content from assistant messages in the
-// conversation history is preserved when sending to iFlow models that support thinking.
-// This is critical for multi-turn conversations where the model needs to see its previous
-// reasoning to maintain coherent thought chains across tool calls and conversation turns.
+// preserveReasoningContentInMessages checks if reasoning_content from assistant messages
+// is preserved in conversation history for iFlow models that support thinking.
+// This is helpful for multi-turn conversations where the model may benefit from seeing
+// its previous reasoning to maintain coherent thought chains.
 //
-// For GLM-4.7 and MiniMax-M2.1, the full assistant response (including reasoning) must be
-// appended back into message history before the next call.
+// For GLM-4.6/4.7 and MiniMax M2/M2.1, it is recommended to include the full assistant
+// response (including reasoning_content) in message history for better context continuity.
 func preserveReasoningContentInMessages(body []byte) []byte {
 	model := strings.ToLower(gjson.GetBytes(body, "model").String())
 
 	// Only apply to models that support thinking with history preservation
-	needsPreservation := strings.HasPrefix(model, "glm-4.7") ||
-		strings.HasPrefix(model, "glm-4-7") ||
-		strings.HasPrefix(model, "minimax-m2.1") ||
-		strings.HasPrefix(model, "minimax-m2-1")
+	needsPreservation := strings.HasPrefix(model, "glm-4") || strings.HasPrefix(model, "minimax-m2")
 
 	if !needsPreservation {
 		return body
@@ -493,45 +490,35 @@ func preserveReasoningContentInMessages(body []byte) []byte {
 // This should be called after NormalizeThinkingConfig has processed the payload.
 //
 // Model-specific handling:
-//   - GLM-4.7: Uses extra_body={"thinking": {"type": "enabled"}, "clear_thinking": false}
-//   - MiniMax-M2.1: Uses reasoning_split=true for OpenAI-style reasoning separation
-//   - Other iFlow models: Uses chat_template_kwargs.enable_thinking (boolean)
+//   - GLM-4.6/4.7: Uses chat_template_kwargs.enable_thinking (boolean) and chat_template_kwargs.clear_thinking=false
+//   - MiniMax M2/M2.1: Uses reasoning_split=true for OpenAI-style reasoning separation
 func applyIFlowThinkingConfig(body []byte) []byte {
 	effort := gjson.GetBytes(body, "reasoning_effort")
-	model := strings.ToLower(gjson.GetBytes(body, "model").String())
-
-	// Check if thinking should be enabled
-	val := ""
-	if effort.Exists() {
-		val = strings.ToLower(strings.TrimSpace(effort.String()))
+	if !effort.Exists() {
+		return body
 	}
-	enableThinking := effort.Exists() && val != "none" && val != ""
+
+	model := strings.ToLower(gjson.GetBytes(body, "model").String())
+	val := strings.ToLower(strings.TrimSpace(effort.String()))
+	enableThinking := val != "none" && val != ""
 
 	// Remove reasoning_effort as we'll convert to model-specific format
-	if effort.Exists() {
-		body, _ = sjson.DeleteBytes(body, "reasoning_effort")
-	}
+	body, _ = sjson.DeleteBytes(body, "reasoning_effort")
+	body, _ = sjson.DeleteBytes(body, "thinking")
 
-	// GLM-4.7: Use extra_body with thinking config and clear_thinking: false
-	if strings.HasPrefix(model, "glm-4.7") || strings.HasPrefix(model, "glm-4-7") {
-		if enableThinking {
-			body, _ = sjson.SetBytes(body, "extra_body.thinking.type", "enabled")
-			body, _ = sjson.SetBytes(body, "extra_body.clear_thinking", false)
-		}
-		return body
-	}
-
-	// MiniMax-M2.1: Use reasoning_split=true for interleaved thinking
-	if strings.HasPrefix(model, "minimax-m2.1") || strings.HasPrefix(model, "minimax-m2-1") {
-		if enableThinking {
-			body, _ = sjson.SetBytes(body, "reasoning_split", true)
-		}
-		return body
-	}
-
-	// Other iFlow models (including GLM-4.6): Use chat_template_kwargs.enable_thinking
-	if effort.Exists() {
+	// GLM-4.6/4.7: Use chat_template_kwargs
+	if strings.HasPrefix(model, "glm-4") {
 		body, _ = sjson.SetBytes(body, "chat_template_kwargs.enable_thinking", enableThinking)
+		if enableThinking {
+			body, _ = sjson.SetBytes(body, "chat_template_kwargs.clear_thinking", false)
+		}
+		return body
+	}
+
+	// MiniMax M2/M2.1: Use reasoning_split
+	if strings.HasPrefix(model, "minimax-m2") {
+		body, _ = sjson.SetBytes(body, "reasoning_split", enableThinking)
+		return body
 	}
 
 	return body

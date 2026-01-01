@@ -480,15 +480,15 @@ func collectOpenAIReasoningTexts(node gjson.Result) []string {
 
 	switch node.Type {
 	case gjson.String:
-		if text := strings.TrimSpace(node.String()); text != "" {
+		if text := node.String(); text != "" {
 			texts = append(texts, text)
 		}
 	case gjson.JSON:
 		if text := node.Get("text"); text.Exists() {
-			if trimmed := strings.TrimSpace(text.String()); trimmed != "" {
-				texts = append(texts, trimmed)
+			if textStr := text.String(); textStr != "" {
+				texts = append(texts, textStr)
 			}
-		} else if raw := strings.TrimSpace(node.Raw); raw != "" && !strings.HasPrefix(raw, "{") && !strings.HasPrefix(raw, "[") {
+		} else if raw := node.Raw; raw != "" && !strings.HasPrefix(raw, "{") && !strings.HasPrefix(raw, "[") {
 			texts = append(texts, raw)
 		}
 	}
