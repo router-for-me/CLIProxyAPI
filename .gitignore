@@ -23,8 +23,8 @@ auths/*
 !auths/.gitkeep
 
 # Documentation
-docs/*
-!docs/cline-integration.md
+# docs/*
+# !docs/cline-integration.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

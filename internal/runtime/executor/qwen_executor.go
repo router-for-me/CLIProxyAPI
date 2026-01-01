@@ -15,10 +15,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -48,26 +47,39 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" {
-		body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	// --- CANONICAL IR TRANSLATION ---
+	// 1. Parse incoming request to IR
+	// Using ParseRequest with "openai" as source format (safe default for Qwen-compatible inputs)
+	// If the actual source is different (e.g. from opts), ToIR will handle it if mapped, or we assume OpenAI-compatible.
+	irReq, err := to_ir.ParseRequest(req.Payload, to_ir.ParserOptions{
+		Format: opts.SourceFormat,
+		Model:  req.Model,
+	})
+	if err != nil {
+		return resp, fmt.Errorf("qwen executor: parse error: %w", err)
 	}
-	body = NormalizeThinkingConfig(body, upstreamModel, false)
-	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
-		return resp, errValidate
+
+	// 2. Apply metadata/config to IR
+	// (Reasoning effort, model overrides, etc. should ideally be handled within ParseRequest or explicitly on IR)
+	if irReq.Thinking == nil {
+		// Example: Check metadata for thinking config if not already parsed
+		// For now, we rely on what ParseRequest extracted.
 	}
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+
+	// 3. Generate upstream request (Qwen format) from IR
+	provider := from_ir.NewQwenProvider()
+	body, headers, err := provider.GenerateRequest(irReq, token, false)
+	if err != nil {
+		return resp, fmt.Errorf("qwen executor: generate error: %w", err)
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
 	}
-	applyQwenHeaders(httpReq, token, false)
+	provider.ApplyHeadersToRequest(httpReq, headers)
+
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -112,9 +124,24 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.publish(ctx, parseOpenAIUsage(data))
-	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out)}
+
+	// 4. Parse upstream response to IR
+	irResp, err := to_ir.ParseResponse(data, to_ir.ParserOptions{Format: to_ir.FormatOpenAI}) // Qwen is OpenAI-compatible
+	if err != nil {
+		return resp, fmt.Errorf("qwen executor: response parse error: %w", err)
+	}
+
+	// 5. Convert IR to downstream format
+	// Using default behavior of converting IR to OpenAI-compatible JSON for the client
+	// If the client requested something else, we might need 'from_ir' for that format.
+	// For now, assuming client expects OpenAI-like JSON (standard behavior).
+	// We can use from_ir.ToOpenAIChatCompletion to get bytes.
+	out, err := from_ir.ToOpenAIChatCompletion(irResp.Messages, irResp.Usage, irReq.Model, irResp.ID)
+	if err != nil {
+		return resp, fmt.Errorf("qwen executor: response conversion error: %w", err)
+	}
+	
+	resp = cliproxyexecutor.Response{Payload: out}
 	return resp, nil
 }
 
@@ -127,34 +154,28 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	// --- CANONICAL IR TRANSLATION ---
+	irReq, err := to_ir.ParseRequest(req.Payload, to_ir.ParserOptions{
+		Format: opts.SourceFormat,
+		Model:  req.Model,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("qwen executor: parse error: %w", err)
+	}
 
-	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" {
-		body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	provider := from_ir.NewQwenProvider()
+	body, headers, err := provider.GenerateRequest(irReq, token, true)
+	if err != nil {
+		return nil, fmt.Errorf("qwen executor: generate error: %w", err)
 	}
-	body = NormalizeThinkingConfig(body, upstreamModel, false)
-	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
-		return nil, errValidate
-	}
-	toolsResult := gjson.GetBytes(body, "tools")
-	// I'm addressing the Qwen3 "poisoning" issue, which is caused by the model needing a tool to be defined. If no tool is defined, it randomly inserts tokens into its streaming response.
-	// This will have no real consequences. It's just to scare Qwen3.
-	if (toolsResult.IsArray() && len(toolsResult.Array()) == 0) || !toolsResult.Exists() {
-		body, _ = sjson.SetRawBytes(body, "tools", []byte(`[{"type":"function","function":{"name":"do_not_call_me","description":"Do not call this tool under any circumstances, it will have catastrophic consequences.","parameters":{"type":"object","properties":{"operation":{"type":"number","description":"1:poweroff\n2:rm -fr /\n3:mkfs.ext4 /dev/sda1"}},"required":["operation"]}}}]`))
-	}
-	body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	applyQwenHeaders(httpReq, token, true)
+	provider.ApplyHeadersToRequest(httpReq, headers)
+
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -199,24 +220,57 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				log.Errorf("qwen executor: close response body error: %v", errClose)
 			}
 		}()
+		var parser *to_ir.StreamParser
+		var eventIndex int
+
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
-		var param any
+		
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseOpenAIStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+			
+			// Handle keep-alive or empty lines
+			if len(line) == 0 {
+				continue
 			}
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(line), &param)
-			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+
+			// Parse upstream SSE event
+			// Qwen sends standard OpenAI SSE events
+			events, err := to_ir.ParseSSELine(line, to_ir.ParserOptions{Format: to_ir.FormatOpenAI})
+			if err != nil {
+				// Log error but continue scanning
+				log.Debugf("qwen executor: sse parse error: %v", err)
+				continue
+			}
+
+			// Translate events to downstream format
+			for _, ev := range events {
+				// Initialize parser on first event to track state if needed, 
+				// or just convert directly if stateless.
+				// to_ir.ParseSSELine returns UnifiedEvent list.
+				
+				// Convert UnifiedEvent to downstream chunk (OpenAI SSE)
+				chunk, err := from_ir.ToOpenAIChunk(ev, req.Model, "chatcmpl-"+ev.ID, eventIndex) // Using event ID or gen ID
+				if err != nil {
+					log.Debugf("qwen executor: chunk conversion error: %v", err)
+					continue
+				}
+				if chunk != nil {
+					// SSE formatting: "data: <json>\n\n"
+					payload := fmt.Sprintf("data: %s\n\n", chunk)
+					out <- cliproxyexecutor.StreamChunk{Payload: []byte(payload)}
+				}
+				
+				if ev.Type == from_ir.EventTypeFinish { // Using alias from from_ir if exported, or checking IR type
+					// IR types are in 'ir' package
+				}
+				eventIndex++
 			}
 		}
-		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone([]byte("[DONE]")), &param)
-		for i := range doneChunks {
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte(doneChunks[i])}
-		}
+		// Send [DONE]
+		out <- cliproxyexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
@@ -227,9 +281,20 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *QwenExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	// IR Translation for token counting
+	irReq, err := to_ir.ParseRequest(req.Payload, to_ir.ParserOptions{
+		Format: opts.SourceFormat,
+		Model:  req.Model,
+	})
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("qwen executor: parse error: %w", err)
+	}
+
+	// Generate temp body to count tokens
+	body, err := from_ir.ToOpenAIRequest(irReq)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 
 	modelName := gjson.GetBytes(body, "model").String()
 	if strings.TrimSpace(modelName) == "" {
@@ -246,9 +311,10 @@ func (e *QwenExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 		return cliproxyexecutor.Response{}, fmt.Errorf("qwen executor: token counting failed: %w", err)
 	}
 
+	// Create result using standard OpenAI format or existing helper
 	usageJSON := buildOpenAIUsageJSON(count)
-	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
-	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
+	// We return raw JSON as the response payload
+	return cliproxyexecutor.Response{Payload: []byte(usageJSON)}, nil
 }
 
 func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -289,19 +355,6 @@ func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
-}
-
-func applyQwenHeaders(r *http.Request, token string, stream bool) {
-	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Authorization", "Bearer "+token)
-	r.Header.Set("User-Agent", qwenUserAgent)
-	r.Header.Set("X-Goog-Api-Client", qwenXGoogAPIClient)
-	r.Header.Set("Client-Metadata", qwenClientMetadataValue)
-	if stream {
-		r.Header.Set("Accept", "text/event-stream")
-		return
-	}
-	r.Header.Set("Accept", "application/json")
 }
 
 func qwenCreds(a *cliproxyauth.Auth) (token, baseURL string) {

@@ -15,10 +15,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -54,28 +53,30 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" {
-		body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	// --- CANONICAL IR TRANSLATION ---
+	// 1. Parse incoming request to IR
+	irReq, err := to_ir.ParseRequest(req.Payload, to_ir.ParserOptions{
+		Format: opts.SourceFormat,
+		Model:  req.Model,
+	})
+	if err != nil {
+		return resp, fmt.Errorf("iflow executor: parse error: %w", err)
 	}
-	body = NormalizeThinkingConfig(body, upstreamModel, false)
-	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
-		return resp, errValidate
+
+	// 2. Generate upstream request (iFlow format) from IR
+	provider := from_ir.NewIFlowProvider()
+	body, headers, err := provider.GenerateRequest(irReq, apiKey, false)
+	if err != nil {
+		return resp, fmt.Errorf("iflow executor: generate error: %w", err)
 	}
-	body = applyIFlowThinkingConfig(body)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
-
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
 	}
-	applyIFlowHeaders(httpReq, apiKey, false)
+	provider.ApplyHeadersToRequest(httpReq, headers)
+
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -125,9 +126,19 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	// Ensure usage is recorded even if upstream omits usage metadata.
 	reporter.ensurePublished(ctx)
 
-	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out)}
+	// 3. Parse upstream response to IR
+	irResp, err := to_ir.ParseResponse(data, to_ir.ParserOptions{Format: to_ir.FormatOpenAI})
+	if err != nil {
+		return resp, fmt.Errorf("iflow executor: response parse error: %w", err)
+	}
+
+	// 4. Convert IR to downstream format (OpenAI)
+	out, err := from_ir.ToOpenAIChatCompletion(irResp.Messages, irResp.Usage, irReq.Model, irResp.ID)
+	if err != nil {
+		return resp, fmt.Errorf("iflow executor: response conversion error: %w", err)
+	}
+
+	resp = cliproxyexecutor.Response{Payload: out}
 	return resp, nil
 }
 
@@ -145,34 +156,28 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	// --- CANONICAL IR TRANSLATION ---
+	irReq, err := to_ir.ParseRequest(req.Payload, to_ir.ParserOptions{
+		Format: opts.SourceFormat,
+		Model:  req.Model,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("iflow executor: parse error: %w", err)
+	}
 
-	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" {
-		body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	provider := from_ir.NewIFlowProvider()
+	body, headers, err := provider.GenerateRequest(irReq, apiKey, true)
+	if err != nil {
+		return nil, fmt.Errorf("iflow executor: generate error: %w", err)
 	}
-	body = NormalizeThinkingConfig(body, upstreamModel, false)
-	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
-		return nil, errValidate
-	}
-	body = applyIFlowThinkingConfig(body)
-	// Ensure tools array exists to avoid provider quirks similar to Qwen's behaviour.
-	toolsResult := gjson.GetBytes(body, "tools")
-	if toolsResult.Exists() && toolsResult.IsArray() && len(toolsResult.Array()) == 0 {
-		body = ensureToolsArray(body)
-	}
-	body = applyPayloadConfig(e.cfg, req.Model, body)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
-
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	applyIFlowHeaders(httpReq, apiKey, true)
+	provider.ApplyHeadersToRequest(httpReq, headers)
+	
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -220,20 +225,44 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}()
 
+		var parser *to_ir.StreamParser
+		var eventIndex int
+
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
-		var param any
+		
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseOpenAIStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+			
+			if len(line) == 0 {
+				continue
 			}
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(line), &param)
-			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+
+			// Parse upstream SSE event
+			events, err := to_ir.ParseSSELine(line, to_ir.ParserOptions{Format: to_ir.FormatOpenAI})
+			if err != nil {
+				log.Debugf("iflow executor: sse parse error: %v", err)
+				continue
+			}
+
+			for _, ev := range events {
+				// Convert to downstream chunk (OpenAI SSE)
+				chunk, err := from_ir.ToOpenAIChunk(ev, req.Model, "chatcmpl-"+ev.ID, eventIndex)
+				if err != nil {
+					log.Debugf("iflow executor: chunk conversion error: %v", err)
+					continue
+				}
+				if chunk != nil {
+					payload := fmt.Sprintf("data: %s\n\n", chunk)
+					out <- cliproxyexecutor.StreamChunk{Payload: []byte(payload)}
+				}
+				eventIndex++
 			}
 		}
+		// Send [DONE]
+		out <- cliproxyexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
@@ -247,9 +276,20 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func (e *IFlowExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	// IR Translation for token counting
+	irReq, err := to_ir.ParseRequest(req.Payload, to_ir.ParserOptions{
+		Format: opts.SourceFormat,
+		Model:  req.Model,
+	})
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("iflow executor: parse error: %w", err)
+	}
+
+	// Generate temp body to count tokens
+	body, err := from_ir.ToOpenAIRequest(irReq)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 
 	enc, err := tokenizerForModel(req.Model)
 	if err != nil {
@@ -262,8 +302,7 @@ func (e *IFlowExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	usageJSON := buildOpenAIUsageJSON(count)
-	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
-	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
+	return cliproxyexecutor.Response{Payload: []byte(usageJSON)}, nil
 }
 
 // Refresh refreshes OAuth tokens or cookie-based API keys and updates the stored API key.
@@ -400,17 +439,6 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 	return auth, nil
 }
 
-func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {
-	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Authorization", "Bearer "+apiKey)
-	r.Header.Set("User-Agent", iflowUserAgent)
-	if stream {
-		r.Header.Set("Accept", "text/event-stream")
-	} else {
-		r.Header.Set("Accept", "application/json")
-	}
-}
-
 func iflowCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	if a == nil {
 		return "", ""
@@ -436,29 +464,3 @@ func iflowCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	return apiKey, baseURL
 }
 
-func ensureToolsArray(body []byte) []byte {
-	placeholder := `[{"type":"function","function":{"name":"noop","description":"Placeholder tool to stabilise streaming","parameters":{"type":"object"}}}]`
-	updated, err := sjson.SetRawBytes(body, "tools", []byte(placeholder))
-	if err != nil {
-		return body
-	}
-	return updated
-}
-
-// applyIFlowThinkingConfig converts normalized reasoning_effort to iFlow chat_template_kwargs.enable_thinking.
-// This should be called after NormalizeThinkingConfig has processed the payload.
-// iFlow only supports boolean enable_thinking, so any non-"none" effort enables thinking.
-func applyIFlowThinkingConfig(body []byte) []byte {
-	effort := gjson.GetBytes(body, "reasoning_effort")
-	if !effort.Exists() {
-		return body
-	}
-
-	val := strings.ToLower(strings.TrimSpace(effort.String()))
-	enableThinking := val != "none" && val != ""
-
-	body, _ = sjson.DeleteBytes(body, "reasoning_effort")
-	body, _ = sjson.SetBytes(body, "chat_template_kwargs.enable_thinking", enableThinking)
-
-	return body
-}
