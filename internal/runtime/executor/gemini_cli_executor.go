@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -438,6 +439,8 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	var lastStatus int
 	var lastBody []byte
 
+	// The loop variable attemptModel is only used as the concrete model id sent to the upstream
+	// Gemini CLI endpoint when iterating fallback variants.
 	for _, attemptModel := range models {
 		// Translate request through canonical IR
 		payload, errTranslate := TranslateToGeminiCLI(e.cfg, from, attemptModel, bytes.Clone(req.Payload), false, req.Metadata)

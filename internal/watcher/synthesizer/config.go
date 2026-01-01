@@ -64,6 +64,9 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		if base != "" {
 			attrs["base_url"] = base
 		}
+		if hash := diff.ComputeGeminiModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
 		a := &coreauth.Auth{
 			ID:         id,
@@ -148,6 +151,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		}
 		if ck.BaseURL != "" {
 			attrs["base_url"] = ck.BaseURL
+		}
+		if hash := diff.ComputeCodexModelsHash(ck.Models); hash != "" {
+			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)

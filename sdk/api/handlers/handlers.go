@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -104,8 +105,8 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 // Returning 0 disables keep-alives (default when unset).
 func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	seconds := defaultStreamingKeepAliveSeconds
-	if cfg != nil && cfg.Streaming.KeepAliveSeconds != nil {
-		seconds = *cfg.Streaming.KeepAliveSeconds
+	if cfg != nil {
+		seconds = cfg.Streaming.KeepAliveSeconds
 	}
 	if seconds <= 0 {
 		return 0
@@ -116,8 +117,8 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 // StreamingBootstrapRetries returns how many times a streaming request may be retried before any bytes are sent.
 func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	retries := defaultStreamingBootstrapRetries
-	if cfg != nil && cfg.Streaming.BootstrapRetries != nil {
-		retries = *cfg.Streaming.BootstrapRetries
+	if cfg != nil {
+		retries = cfg.Streaming.BootstrapRetries
 	}
 	if retries < 0 {
 		retries = 0
@@ -217,13 +218,39 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 // Parameters:
 //   - handler: The API handler associated with the request.
 //   - c: The Gin context of the current request.
-//   - ctx: The parent context.
+//   - ctx: The parent context (caller values/deadlines are preserved; request context adds cancellation and request ID).
 //
 // Returns:
 //   - context.Context: The new context with cancellation and embedded values.
 //   - APIHandlerCancelFunc: A function to cancel the context and log the response.
 func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *gin.Context, ctx context.Context) (context.Context, APIHandlerCancelFunc) {
-	newCtx, cancel := context.WithCancel(ctx)
+	parentCtx := ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+
+	var requestCtx context.Context
+	if c != nil && c.Request != nil {
+		requestCtx = c.Request.Context()
+	}
+
+	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
+		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
+			parentCtx = logging.WithRequestID(parentCtx, requestID)
+		} else if requestID := logging.GetGinRequestID(c); requestID != "" {
+			parentCtx = logging.WithRequestID(parentCtx, requestID)
+		}
+	}
+	newCtx, cancel := context.WithCancel(parentCtx)
+	if requestCtx != nil && requestCtx != parentCtx {
+		go func() {
+			select {
+			case <-requestCtx.Done():
+				cancel()
+			case <-newCtx.Done():
+			}
+		}()
+	}
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
@@ -612,7 +639,22 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 
 	body := BuildErrorResponseBody(status, errText)
-	c.Set("API_RESPONSE", bytes.Clone(body))
+	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
+	var previous []byte
+	if existing, exists := c.Get("API_RESPONSE"); exists {
+		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
+			previous = bytes.Clone(existingBytes)
+		}
+	}
+	appendAPIResponse(c, body)
+	trimmedErrText := strings.TrimSpace(errText)
+	trimmedBody := bytes.TrimSpace(body)
+	if len(previous) > 0 {
+		if (trimmedErrText != "" && bytes.Contains(previous, []byte(trimmedErrText))) ||
+			(len(trimmedBody) > 0 && bytes.Contains(previous, trimmedBody)) {
+			c.Set("API_RESPONSE", previous)
+		}
+	}
 
 	if !c.Writer.Written() {
 		c.Writer.Header().Set("Content-Type", "application/json")

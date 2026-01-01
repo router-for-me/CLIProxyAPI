@@ -15,6 +15,33 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+func removeQueryValuesMatching(req *http.Request, key string, match string) {
+	if req == nil || req.URL == nil || match == "" {
+		return
+	}
+
+	q := req.URL.Query()
+	values, ok := q[key]
+	if !ok || len(values) == 0 {
+		return
+	}
+
+	kept := make([]string, 0, len(values))
+	for _, v := range values {
+		if v == match {
+			continue
+		}
+		kept = append(kept, v)
+	}
+
+	if len(kept) == 0 {
+		q.Del(key)
+	} else {
+		q[key] = kept
+	}
+	req.URL.RawQuery = q.Encode()
+}
+
 // readCloser wraps a reader and forwards Close to a separate closer.
 // Used to restore peeked bytes while preserving upstream body Close behavior.
 type readCloser struct {
@@ -45,6 +72,14 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		// We will set our own Authorization using the configured upstream-api-key
 		req.Header.Del("Authorization")
 		req.Header.Del("X-Api-Key")
+		req.Header.Del("X-Goog-Api-Key")
+
+		// Remove query-based credentials if they match the authenticated client API key.
+		// This prevents leaking client auth material to the Amp upstream while avoiding
+		// breaking unrelated upstream query parameters.
+		clientKey := getClientAPIKeyFromContext(req.Context())
+		removeQueryValuesMatching(req, "key", clientKey)
+		removeQueryValuesMatching(req, "auth_token", clientKey)
 
 		// Preserve correlation headers for debugging
 		if req.Header.Get("X-Request-ID") == "" {

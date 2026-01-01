@@ -196,10 +196,19 @@ type UnifiedChatRequest struct {
 	ParallelToolCalls  *bool                  // Whether to allow parallel tool calls (Responses API)
 }
 
+// UnifiedChatResponse represents the unified chat response structure.
+// It matches UnifiedChatRequest in the "Esperanto" format.
+type UnifiedChatResponse struct {
+	ID       string
+	Messages []Message
+	Usage    *Usage
+}
+
 // UnifiedEvent represents a single event in the chat stream.
 // It is the "Esperanto" response format.
 type UnifiedEvent struct {
 	Type              EventType
+	ID                string       // ID for streaming chunk mapping
 	Content           string       // For EventTypeToken
 	Reasoning         string       // For EventTypeReasoning (model thinking/reasoning content)
 	ReasoningSummary  string       // For EventTypeReasoningSummary (Responses API)

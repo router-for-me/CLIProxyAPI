@@ -463,4 +463,3 @@ func iflowCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	}
 	return apiKey, baseURL
 }
-

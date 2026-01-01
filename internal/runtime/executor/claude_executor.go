@@ -49,6 +49,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
+	model := req.Model
+	if override := e.resolveUpstreamModel(req.Model, auth); override != "" {
+		model = override
+	}
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
@@ -69,16 +73,20 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 	}
 	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	
 	// Inject thinking config based on model metadata for thinking variants
-	body = e.injectThinkingConfig(req.Model, req.Metadata, body)
+	body = e.injectThinkingConfig(model, req.Metadata, body)
 
-	if !strings.HasPrefix(upstreamModel, "claude-3-5-haiku") {
+	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = applyPayloadConfig(e.cfg, model, body)
+
+	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
+	body = disableThinkingIfToolChoiceForced(body)
 
 	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
-	body = ensureMaxTokensForThinking(req.Model, body)
+	body = ensureMaxTokensForThinking(model, body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -186,6 +194,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if upstreamModel == "" {
 		upstreamModel = req.Model
 	}
+	// model := req.Model  <-- Removed, using upstreamModel logic from HEAD
 	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
 		upstreamModel = modelOverride
 	} else if !strings.EqualFold(upstreamModel, req.Model) {
@@ -193,14 +202,20 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			upstreamModel = modelOverride
 		}
 	}
+	
+	// body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true) <-- Removed, using TranslateToClaude from HEAD
 	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	
 	// Inject thinking config based on model metadata for thinking variants
-	body = e.injectThinkingConfig(req.Model, req.Metadata, body)
+	body = e.injectThinkingConfig(upstreamModel, req.Metadata, body)
 	body = checkSystemInstructions(body)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = applyPayloadConfig(e.cfg, upstreamModel, body)
+
+	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
+	body = disableThinkingIfToolChoiceForced(body)
 
 	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
-	body = ensureMaxTokensForThinking(req.Model, body)
+	body = ensureMaxTokensForThinking(upstreamModel, body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -357,6 +372,8 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			upstreamModel = modelOverride
 		}
 	}
+	
+	body = sdktranslator.TranslateRequest(from, to, upstreamModel, bytes.Clone(req.Payload), stream)
 	body, _ = sjson.SetBytes(body, "model", upstreamModel)
 
 	if !strings.HasPrefix(upstreamModel, "claude-3-5-haiku") {
@@ -494,6 +511,19 @@ func (e *ClaudeExecutor) injectThinkingConfig(modelName string, metadata map[str
 		return body
 	}
 	return util.ApplyClaudeThinkingConfig(body, budget)
+}
+
+// disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
+// Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
+// See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
+func disableThinkingIfToolChoiceForced(body []byte) []byte {
+	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
+	// "auto" is allowed with thinking, but "any" or "tool" (specific tool) are not
+	if toolChoiceType == "any" || toolChoiceType == "tool" {
+		// Remove thinking configuration entirely to avoid API error
+		body, _ = sjson.DeleteBytes(body, "thinking")
+	}
+	return body
 }
 
 // ensureMaxTokensForThinking ensures max_tokens > thinking.budget_tokens when thinking is enabled.

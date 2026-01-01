@@ -114,13 +114,16 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					var builder strings.Builder
 					if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 						parts.ForEach(func(_, part gjson.Result) bool {
-							text := part.Get("text").String()
+							textResult := part.Get("text")
+							text := textResult.String()
 							if builder.Len() > 0 && text != "" {
 								builder.WriteByte('\n')
 							}
 							builder.WriteString(text)
 							return true
 						})
+					} else if parts.Type == gjson.String {
+						builder.WriteString(parts.String())
 					}
 					instructionsText = builder.String()
 					if instructionsText != "" {
@@ -207,6 +210,8 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 						}
 						return true
 					})
+				} else if parts.Type == gjson.String {
+					textAggregate.WriteString(parts.String())
 				}
 
 				// Fallback to given role if content types not decisive

@@ -308,6 +308,30 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 
 Contributions are welcome! Simple bug fixes with ready-to-merge code will likely be accepted. For larger changes or feature requests, consider forking — this gives you full control over the direction of your modifications.
 
+Those projects are based on CLIProxyAPI:
+
+### [vibeproxy](https://github.com/automazeio/vibeproxy)
+
+Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with AI coding tools - no API keys needed
+
+### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
+
+Browser-based tool to translate SRT subtitles using your Gemini subscription via CLIProxyAPI with automatic validation/error correction - no API keys needed
+
+### [CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)
+
+CLI wrapper for instant switching between multiple Claude accounts and alternative models (Gemini, Codex, Antigravity) via CLIProxyAPI OAuth - no API keys needed
+
+### [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)
+
+Native macOS GUI for managing CLIProxyAPI: configure providers, model mappings, and endpoints via OAuth - no API keys needed.
+
+### [Quotio](https://github.com/nguyenphutrong/quotio)
+
+Native macOS menu bar app that unifies Claude, Gemini, OpenAI, Qwen, and Antigravity subscriptions with real-time quota tracking and smart auto-failover for AI coding tools like Claude Code, OpenCode, and Droid - no API keys needed.
+
+> [!NOTE]  
+> If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 
 ## License
 

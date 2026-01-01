@@ -209,6 +209,94 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"files": files})
 }
 
+// GetRequestLogByID finds and downloads a request log file by its request ID.
+// The ID is matched against the suffix of log file names (format: *-{requestID}.log).
+func (h *Handler) GetRequestLogByID(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return
+	}
+
+	requestID := strings.TrimSpace(c.Param("id"))
+	if requestID == "" {
+		requestID = strings.TrimSpace(c.Query("id"))
+	}
+	if requestID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing request ID"})
+		return
+	}
+	if strings.ContainsAny(requestID, "/\\") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request ID"})
+		return
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "log directory not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list log directory: %v", err)})
+		return
+	}
+
+	suffix := "-" + requestID + ".log"
+	var matchedFile string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, suffix) {
+			matchedFile = name
+			break
+		}
+	}
+
+	if matchedFile == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "log file not found for the given request ID"})
+		return
+	}
+
+	dirAbs, errAbs := filepath.Abs(dir)
+	if errAbs != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)})
+		return
+	}
+	fullPath := filepath.Clean(filepath.Join(dirAbs, matchedFile))
+	prefix := dirAbs + string(os.PathSeparator)
+	if !strings.HasPrefix(fullPath, prefix) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
+		return
+	}
+
+	info, errStat := os.Stat(fullPath)
+	if errStat != nil {
+		if os.IsNotExist(errStat) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errStat)})
+		return
+	}
+	if info.IsDir() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
+		return
+	}
+
+	c.FileAttachment(fullPath, matchedFile)
+}
+
 // DownloadRequestErrorLog downloads a specific error request log file by name.
 func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 	if h == nil {

@@ -3,11 +3,15 @@ package amp
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 // Helper: compress data with gzip
@@ -303,6 +307,159 @@ func TestReverseProxy_EmptySecret(t *testing.T) {
 	}
 	if authVal := hdr.Get("Authorization"); authVal != "" && authVal != "Bearer " {
 		t.Fatalf("Authorization should not be set, got: %q", authVal)
+	}
+}
+
+func TestReverseProxy_StripsClientCredentialsFromHeadersAndQuery(t *testing.T) {
+	type captured struct {
+		headers http.Header
+		query   string
+	}
+	got := make(chan captured, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- captured{headers: r.Header.Clone(), query: r.URL.RawQuery}
+		w.WriteHeader(200)
+		w.Write([]byte(`ok`))
+	}))
+	defer upstream.Close()
+
+	proxy, err := createReverseProxy(upstream.URL, NewStaticSecretSource("upstream"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate clientAPIKeyMiddleware injection (per-request)
+		ctx := context.WithValue(r.Context(), clientAPIKeyContextKey{}, "client-key")
+		proxy.ServeHTTP(w, r.WithContext(ctx))
+	}))
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/test?key=client-key&key=keep&auth_token=client-key&foo=bar", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer client-key")
+	req.Header.Set("X-Api-Key", "client-key")
+	req.Header.Set("X-Goog-Api-Key", "client-key")
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	c := <-got
+
+	// These are client-provided credentials and must not reach the upstream.
+	if v := c.headers.Get("X-Goog-Api-Key"); v != "" {
+		t.Fatalf("X-Goog-Api-Key should be stripped, got: %q", v)
+	}
+
+	// We inject upstream Authorization/X-Api-Key, so the client auth must not survive.
+	if v := c.headers.Get("Authorization"); v != "Bearer upstream" {
+		t.Fatalf("Authorization should be upstream-injected, got: %q", v)
+	}
+	if v := c.headers.Get("X-Api-Key"); v != "upstream" {
+		t.Fatalf("X-Api-Key should be upstream-injected, got: %q", v)
+	}
+
+	// Query-based credentials should be stripped only when they match the authenticated client key.
+	// Should keep unrelated values and parameters.
+	if strings.Contains(c.query, "auth_token=client-key") || strings.Contains(c.query, "key=client-key") {
+		t.Fatalf("query credentials should be stripped, got raw query: %q", c.query)
+	}
+	if !strings.Contains(c.query, "key=keep") || !strings.Contains(c.query, "foo=bar") {
+		t.Fatalf("expected query to keep non-credential params, got raw query: %q", c.query)
+	}
+}
+
+func TestReverseProxy_InjectsMappedSecret_FromRequestContext(t *testing.T) {
+	gotHeaders := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders <- r.Header.Clone()
+		w.WriteHeader(200)
+		w.Write([]byte(`ok`))
+	}))
+	defer upstream.Close()
+
+	defaultSource := NewStaticSecretSource("default")
+	mapped := NewMappedSecretSource(defaultSource)
+	mapped.UpdateMappings([]config.AmpUpstreamAPIKeyEntry{
+		{
+			UpstreamAPIKey: "u1",
+			APIKeys:        []string{"k1"},
+		},
+	})
+
+	proxy, err := createReverseProxy(upstream.URL, mapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate clientAPIKeyMiddleware injection (per-request)
+		ctx := context.WithValue(r.Context(), clientAPIKeyContextKey{}, "k1")
+		proxy.ServeHTTP(w, r.WithContext(ctx))
+	}))
+	defer srv.Close()
+
+	res, err := http.Get(srv.URL + "/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	hdr := <-gotHeaders
+	if hdr.Get("X-Api-Key") != "u1" {
+		t.Fatalf("X-Api-Key missing or wrong, got: %q", hdr.Get("X-Api-Key"))
+	}
+	if hdr.Get("Authorization") != "Bearer u1" {
+		t.Fatalf("Authorization missing or wrong, got: %q", hdr.Get("Authorization"))
+	}
+}
+
+func TestReverseProxy_MappedSecret_FallsBackToDefault(t *testing.T) {
+	gotHeaders := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders <- r.Header.Clone()
+		w.WriteHeader(200)
+		w.Write([]byte(`ok`))
+	}))
+	defer upstream.Close()
+
+	defaultSource := NewStaticSecretSource("default")
+	mapped := NewMappedSecretSource(defaultSource)
+	mapped.UpdateMappings([]config.AmpUpstreamAPIKeyEntry{
+		{
+			UpstreamAPIKey: "u1",
+			APIKeys:        []string{"k1"},
+		},
+	})
+
+	proxy, err := createReverseProxy(upstream.URL, mapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), clientAPIKeyContextKey{}, "k2")
+		proxy.ServeHTTP(w, r.WithContext(ctx))
+	}))
+	defer srv.Close()
+
+	res, err := http.Get(srv.URL + "/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	hdr := <-gotHeaders
+	if hdr.Get("X-Api-Key") != "default" {
+		t.Fatalf("X-Api-Key fallback missing or wrong, got: %q", hdr.Get("X-Api-Key"))
+	}
+	if hdr.Get("Authorization") != "Bearer default" {
+		t.Fatalf("Authorization fallback missing or wrong, got: %q", hdr.Get("Authorization"))
 	}
 }
 

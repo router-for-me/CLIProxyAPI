@@ -13,6 +13,7 @@ type ModelRegistry interface {
 	ClearModelQuotaExceeded(clientID, modelID string)
 	ClientSupportsModel(clientID, modelID string) bool
 	GetAvailableModels(handlerType string) []map[string]any
+	GetAvailableModelsByProvider(provider string) []*ModelInfo
 }
 
 // GlobalModelRegistry returns the shared registry instance.

@@ -12,11 +12,15 @@ bin/*
 logs/*
 conv/*
 temp/*
+refs/*
+
+# Storage backends
 pgstore/*
 gitstore/*
 objectstore/*
+
+# Static assets
 static/*
-refs/*
 
 # Authentication data
 auths/*
@@ -33,13 +37,17 @@ log_analyzer.go
 # Tooling metadata
 .vscode/*
 .cursor/*
+.codex/*
 .claude/*
 .gemini/*
 .serena/*
 .agent/*
+.agents/*
+.opencode/*
 .bmad/*
 _bmad/*
 .mcp/cache/
+_bmad-output/*
 
 # Local data (fork-specific)
 /auth/
@@ -48,4 +56,3 @@ _wgun/
 # macOS
 .DS_Store
 ._*
-

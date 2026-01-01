@@ -98,10 +98,11 @@ func captureRequestInfo(c *gin.Context) (*RequestInfo, error) {
 	}
 
 	return &RequestInfo{
-		URL:     url,
-		Method:  method,
-		Headers: headers,
-		Body:    body,
+		URL:       url,
+		Method:    method,
+		Headers:   headers,
+		Body:      body,
+		RequestID: logging.GetGinRequestID(c),
 	}, nil
 }
 
