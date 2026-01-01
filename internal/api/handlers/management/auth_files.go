@@ -2264,13 +2264,13 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 	return true, nil
 }
 
-// AntigravityRefreshTokenAuthRequest 定义刷新令牌认证请求结构
+// AntigravityRefreshTokenAuthRequest defines the request structure for refresh token auth
 type AntigravityRefreshTokenAuthRequest struct {
 	RefreshTokens []string `json:"refresh_tokens" binding:"required"`
 	ProjectID     string   `json:"project_id"`
 }
 
-// AntigravityRefreshTokenAuthResult 定义单个刷新令牌处理结果
+// AntigravityRefreshTokenAuthResult defines the result for a single refresh token
 type AntigravityRefreshTokenAuthResult struct {
 	RefreshToken string `json:"refresh_token"`
 	Success      bool   `json:"success"`
@@ -2280,7 +2280,7 @@ type AntigravityRefreshTokenAuthResult struct {
 	Error        string `json:"error,omitempty"`
 }
 
-// AntigravityRefreshTokenAuth 处理使用刷新令牌批量添加 Antigravity 账号
+// AntigravityRefreshTokenAuth handles batch adding Antigravity accounts using refresh tokens
 func (h *Handler) AntigravityRefreshTokenAuth(c *gin.Context) {
 	const (
 		antigravityClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -2291,12 +2291,12 @@ func (h *Handler) AntigravityRefreshTokenAuth(c *gin.Context) {
 
 	var req AntigravityRefreshTokenAuthRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
 		return
 	}
 
 	if len(req.RefreshTokens) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "refresh_tokens 不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "refresh_tokens cannot be empty"})
 		return
 	}
 
@@ -2311,7 +2311,7 @@ func (h *Handler) AntigravityRefreshTokenAuth(c *gin.Context) {
 			results = append(results, AntigravityRefreshTokenAuthResult{
 				RefreshToken: refreshToken,
 				Success:      false,
-				Error:        "刷新令牌为空",
+				Error:        "refresh token is empty",
 			})
 			continue
 		}
@@ -2331,7 +2331,7 @@ func (h *Handler) AntigravityRefreshTokenAuth(c *gin.Context) {
 	})
 }
 
-// processAntigravityRefreshToken 处理单个刷新令牌
+// processAntigravityRefreshToken processes a single refresh token
 func (h *Handler) processAntigravityRefreshToken(
 	ctx context.Context,
 	refreshToken, explicitProjectID, clientID, clientSecret string,
@@ -2341,7 +2341,7 @@ func (h *Handler) processAntigravityRefreshToken(
 		RefreshToken: refreshToken[:min(10, len(refreshToken))] + "...",
 	}
 
-	// 使用刷新令牌获取访问令牌
+	// Exchange refresh token for access token
 	form := url.Values{}
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSecret)
@@ -2350,25 +2350,25 @@ func (h *Handler) processAntigravityRefreshToken(
 
 	req, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
 	if errNewRequest != nil {
-		result.Error = "创建令牌请求失败: " + errNewRequest.Error()
+		result.Error = "failed to create token request: " + errNewRequest.Error()
 		return result
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
-		result.Error = "执行令牌请求失败: " + errDo.Error()
+		result.Error = "failed to execute token request: " + errDo.Error()
 		return result
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("关闭令牌响应体失败: %v", errClose)
+			log.Errorf("failed to close token response body: %v", errClose)
 		}
 	}()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		result.Error = fmt.Sprintf("令牌交换失败 (状态码 %d): %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		result.Error = fmt.Sprintf("token exchange failed (status %d): %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 		return result
 	}
 
@@ -2378,16 +2378,16 @@ func (h *Handler) processAntigravityRefreshToken(
 		TokenType   string `json:"token_type"`
 	}
 	if errDecode := json.NewDecoder(resp.Body).Decode(&tokenResp); errDecode != nil {
-		result.Error = "解析令牌响应失败: " + errDecode.Error()
+		result.Error = "failed to parse token response: " + errDecode.Error()
 		return result
 	}
 
 	if strings.TrimSpace(tokenResp.AccessToken) == "" {
-		result.Error = "未获取到访问令牌"
+		result.Error = "no access token received"
 		return result
 	}
 
-	// 获取用户信息
+	// Get user info
 	email := ""
 	infoReq, errInfoReq := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.googleapis.com/oauth2/v1/userinfo?alt=json", nil)
 	if errInfoReq == nil {
@@ -2407,19 +2407,19 @@ func (h *Handler) processAntigravityRefreshToken(
 	}
 	result.Email = email
 
-	// 获取项目ID
+	// Get project ID
 	projectID := explicitProjectID
 	if projectID == "" {
 		fetchedProjectID, errProject := sdkAuth.FetchAntigravityProjectID(ctx, tokenResp.AccessToken, httpClient)
 		if errProject != nil {
-			log.Warnf("antigravity: 获取项目ID失败: %v", errProject)
+			log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
 		} else {
 			projectID = fetchedProjectID
 		}
 	}
 	result.ProjectID = projectID
 
-	// 构建元数据
+	// Build metadata
 	now := time.Now()
 	metadata := map[string]any{
 		"type":          "antigravity",
@@ -2436,7 +2436,7 @@ func (h *Handler) processAntigravityRefreshToken(
 		metadata["project_id"] = projectID
 	}
 
-	// 保存认证记录
+	// Save auth record
 	fileName := sanitizeAntigravityFileName(email)
 	label := strings.TrimSpace(email)
 	if label == "" {
@@ -2453,15 +2453,15 @@ func (h *Handler) processAntigravityRefreshToken(
 
 	savedPath, errSave := h.saveTokenRecord(ctx, record)
 	if errSave != nil {
-		result.Error = "保存令牌失败: " + errSave.Error()
+		result.Error = "failed to save token: " + errSave.Error()
 		return result
 	}
 
 	result.Success = true
 	result.FileName = savedPath
-	log.Infof("Antigravity 刷新令牌认证成功! 令牌已保存到 %s", savedPath)
+	log.Infof("antigravity refresh token auth succeeded, token saved to %s", savedPath)
 	if projectID != "" {
-		log.Infof("使用 GCP 项目: %s", projectID)
+		log.Infof("using GCP project: %s", projectID)
 	}
 
 	return result
