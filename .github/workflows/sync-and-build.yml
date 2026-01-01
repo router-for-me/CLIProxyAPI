@@ -27,19 +27,21 @@ jobs:
           git fetch upstream --tags
           CURRENT_BRANCH=$(git branch --show-current)
           echo "Current branch: $CURRENT_BRANCH"
-          if git merge-base --is-ancestor upstream/main HEAD; then
-            echo "Already up to date."
-            echo "changes_detected=false" >> $GITHUB_OUTPUT
-          else
-            echo "Updates detected. Fast-forwarding..."
-            if git merge --ff-only upstream/main; then
-              echo "Fast-forward successful."
-              git push origin $CURRENT_BRANCH
-              echo "changes_detected=true" >> $GITHUB_OUTPUT
+          if git merge-base --is-ancestor HEAD upstream/main; then
+            if [ "$(git rev-parse HEAD)" = "$(git rev-parse upstream/main)" ]; then
+              echo "Already up to date."
+              echo "changes_detected=false" >> $GITHUB_OUTPUT
             else
-              echo "::error::Fast-forward failed (diverged history). Cannot sync automatically."
-              exit 1
+              echo "Updates detected. Rebasing..."
+              git rebase upstream/main
+              git push --force-with-lease origin $CURRENT_BRANCH
+              echo "changes_detected=true" >> $GITHUB_OUTPUT
             fi
+          else
+            echo "Local commits not in upstream. Rebasing..."
+            git rebase upstream/main
+            git push --force-with-lease origin $CURRENT_BRANCH
+            echo "changes_detected=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Set up QEMU
