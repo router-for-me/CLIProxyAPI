@@ -96,10 +96,12 @@ type RequestStatistics struct {
 
 	apis map[string]*apiStats
 
-	requestsByDay  map[string]int64
-	requestsByHour map[int]int64
-	tokensByDay    map[string]int64
-	tokensByHour   map[int]int64
+	requestsByDay    map[string]int64
+	requestsByHour   map[int]int64
+	requestsByMinute map[string]int64
+	tokensByDay      map[string]int64
+	tokensByHour     map[int]int64
+	tokensByMinute   map[string]int64
 }
 
 // apiStats holds aggregated metrics for a single API key.
@@ -143,10 +145,12 @@ type StatisticsSnapshot struct {
 
 	APIs map[string]APISnapshot `json:"apis"`
 
-	RequestsByDay  map[string]int64 `json:"requests_by_day"`
-	RequestsByHour map[string]int64 `json:"requests_by_hour"`
-	TokensByDay    map[string]int64 `json:"tokens_by_day"`
-	TokensByHour   map[string]int64 `json:"tokens_by_hour"`
+	RequestsByDay    map[string]int64 `json:"requests_by_day"`
+	RequestsByHour   map[string]int64 `json:"requests_by_hour"`
+	RequestsByMinute map[string]int64 `json:"requests_by_minute"`
+	TokensByDay      map[string]int64 `json:"tokens_by_day"`
+	TokensByHour     map[string]int64 `json:"tokens_by_hour"`
+	TokensByMinute   map[string]int64 `json:"tokens_by_minute"`
 }
 
 // APISnapshot summarises metrics for a single API key.
@@ -171,11 +175,13 @@ func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis:           make(map[string]*apiStats),
-		requestsByDay:  make(map[string]int64),
-		requestsByHour: make(map[int]int64),
-		tokensByDay:    make(map[string]int64),
-		tokensByHour:   make(map[int]int64),
+		apis:             make(map[string]*apiStats),
+		requestsByDay:    make(map[string]int64),
+		requestsByHour:   make(map[int]int64),
+		requestsByMinute: make(map[string]int64),
+		tokensByDay:      make(map[string]int64),
+		tokensByHour:     make(map[int]int64),
+		tokensByMinute:   make(map[string]int64),
 	}
 }
 
@@ -208,6 +214,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	dayKey := timestamp.Format("2006-01-02")
 	hourKey := timestamp.Hour()
+	minuteKey := timestamp.Format("2006-01-02 15:04")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -235,8 +242,10 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
+	s.requestsByMinute[minuteKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	s.tokensByMinute[minuteKey] += totalTokens
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -298,6 +307,11 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		result.RequestsByHour[key] = v
 	}
 
+	result.RequestsByMinute = make(map[string]int64, len(s.requestsByMinute))
+	for minute, v := range s.requestsByMinute {
+		result.RequestsByMinute[minute] = v
+	}
+
 	result.TokensByDay = make(map[string]int64, len(s.tokensByDay))
 	for k, v := range s.tokensByDay {
 		result.TokensByDay[k] = v
@@ -307,6 +321,11 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	for hour, v := range s.tokensByHour {
 		key := formatHour(hour)
 		result.TokensByHour[key] = v
+	}
+
+	result.TokensByMinute = make(map[string]int64, len(s.tokensByMinute))
+	for minute, v := range s.tokensByMinute {
+		result.TokensByMinute[minute] = v
 	}
 
 	return result
@@ -403,11 +422,14 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()
+	minuteKey := detail.Timestamp.Format("2006-01-02 15:04")
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
+	s.requestsByMinute[minuteKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	s.tokensByMinute[minuteKey] += totalTokens
 }
 
 func dedupKey(apiName, modelName string, detail RequestDetail) string {
@@ -510,10 +532,16 @@ func (s *RequestStatistics) Restore(snapshot StatisticsSnapshot) {
 			s.requestsByHour[h] = v
 		}
 	}
+	for k, v := range snapshot.RequestsByMinute {
+		s.requestsByMinute[k] = v
+	}
 	for k, v := range snapshot.TokensByHour {
 		if h, err := strconv.Atoi(k); err == nil {
 			s.tokensByHour[h] = v
 		}
+	}
+	for k, v := range snapshot.TokensByMinute {
+		s.tokensByMinute[k] = v
 	}
 }
 
