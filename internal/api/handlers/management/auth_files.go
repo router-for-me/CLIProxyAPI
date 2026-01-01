@@ -2489,3 +2489,133 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
 }
+
+// ApiCallRequest 定义代理 API 调用请求结构
+type ApiCallRequest struct {
+	AuthIndex string            `json:"authIndex"`
+	Method    string            `json:"method"`
+	URL       string            `json:"url"`
+	Header    map[string]string `json:"header"`
+	Data      string            `json:"data"`
+}
+
+// ApiCall 代理 API 调用，使用指定凭证的 access_token
+func (h *Handler) ApiCall(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var req ApiCallRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体: " + err.Error()})
+		return
+	}
+
+	if req.URL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "url 不能为空"})
+		return
+	}
+
+	if req.Method == "" {
+		req.Method = "GET"
+	}
+
+	// 查找对应的 auth
+	var targetAuth *coreauth.Auth
+	if h.authManager != nil && req.AuthIndex != "" {
+		auths := h.authManager.List()
+		for _, auth := range auths {
+			indexStr := strconv.FormatUint(auth.Index, 10)
+			if indexStr == req.AuthIndex || auth.ID == req.AuthIndex || auth.FileName == req.AuthIndex {
+				targetAuth = auth
+				break
+			}
+		}
+	}
+
+	if targetAuth == nil && req.AuthIndex != "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "未找到对应的凭证: " + req.AuthIndex})
+		return
+	}
+
+	// 从 metadata 获取 access_token
+	var accessToken string
+	if targetAuth != nil && targetAuth.Metadata != nil {
+		if token, ok := targetAuth.Metadata["access_token"].(string); ok {
+			accessToken = strings.TrimSpace(token)
+		}
+	}
+
+	// 替换请求头中的 $TOKEN$ 占位符
+	headers := make(map[string]string)
+	for k, v := range req.Header {
+		if accessToken != "" {
+			v = strings.ReplaceAll(v, "$TOKEN$", accessToken)
+		}
+		headers[k] = v
+	}
+
+	// 创建代理请求
+	var body io.Reader
+	if req.Data != "" {
+		body = strings.NewReader(req.Data)
+	}
+
+	proxyReq, errNewReq := http.NewRequestWithContext(ctx, req.Method, req.URL, body)
+	if errNewReq != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "创建请求失败: " + errNewReq.Error()})
+		return
+	}
+
+	// 设置请求头
+	for k, v := range headers {
+		proxyReq.Header.Set(k, v)
+	}
+
+	// 使用配置的代理
+	httpClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{
+		Timeout: 30 * time.Second,
+	})
+
+	// 执行请求
+	resp, errDo := httpClient.Do(proxyReq)
+	if errDo != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"status_code": 0,
+			"error":       "执行请求失败: " + errDo.Error(),
+		})
+		return
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("关闭响应体失败: %v", errClose)
+		}
+	}()
+
+	// 读取响应体
+	respBody, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status_code": resp.StatusCode,
+			"error":       "读取响应失败: " + errRead.Error(),
+		})
+		return
+	}
+
+	// 解析响应体为 JSON（如果可能）
+	var bodyJSON interface{}
+	if json.Unmarshal(respBody, &bodyJSON) != nil {
+		bodyJSON = nil
+	}
+
+	// 转换响应头
+	respHeaders := make(map[string][]string)
+	for k, v := range resp.Header {
+		respHeaders[k] = v
+	}
+
+	// 返回响应
+	c.JSON(http.StatusOK, gin.H{
+		"status_code": resp.StatusCode,
+		"header":      respHeaders,
+		"body":        bodyJSON,
+	})
+}
