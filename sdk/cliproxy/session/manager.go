@@ -18,6 +18,7 @@ type Manager struct {
 	cleanupTicker  *time.Ticker
 	cleanupStop    chan struct{}
 	cleanupRunning bool
+	cleanupOnce    sync.Once // Ensures channel is closed only once
 	mu             sync.RWMutex
 }
 
@@ -216,6 +217,7 @@ func (m *Manager) StartCleanup(interval time.Duration) {
 	m.cleanupTicker = time.NewTicker(interval)
 	m.cleanupStop = make(chan struct{})
 	m.cleanupRunning = true
+	m.cleanupOnce = sync.Once{} // Reset once for new cleanup cycle
 
 	go func() {
 		for {
@@ -243,7 +245,10 @@ func (m *Manager) StopCleanup() {
 		return
 	}
 
-	close(m.cleanupStop)
+	// Use sync.Once to ensure channel is closed only once, preventing panic
+	m.cleanupOnce.Do(func() {
+		close(m.cleanupStop)
+	})
 	m.cleanupRunning = false
 }
 

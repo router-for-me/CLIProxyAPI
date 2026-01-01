@@ -75,11 +75,9 @@ func (s *Session) AddMessage(msg Message) {
 
 // GetHistory returns all messages suitable for injection into provider requests.
 // Excludes system metadata while preserving conversation context.
+// Callers must treat the returned slice as read-only and must not mutate it.
 func (s *Session) GetHistory() []Message {
-	// Return a copy to prevent external mutation
-	history := make([]Message, len(s.Messages))
-	copy(history, s.Messages)
-	return history
+	return s.Messages
 }
 
 // Touch updates the session's UpdatedAt timestamp without modifying messages.

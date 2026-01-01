@@ -267,21 +267,8 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 	rotated := m.rotateProviders(req.Model, normalized)
 
-	// Check session metadata for preferred provider (session affinity)
-	if opts.Metadata != nil {
-		if preferredProvider, ok := opts.Metadata["session_preferred_provider"].(string); ok && preferredProvider != "" {
-			// Move preferred provider to front if present in rotated list
-			for i, provider := range rotated {
-				if provider == preferredProvider {
-					// Swap preferred provider to front
-					if i > 0 {
-						rotated = append([]string{provider}, append(rotated[:i], rotated[i+1:]...)...)
-					}
-					break
-				}
-			}
-		}
-	}
+	// Apply session affinity to prioritize preferred provider
+	rotated = applySessionAffinity(rotated, opts)
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -321,21 +308,8 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	}
 	rotated := m.rotateProviders(req.Model, normalized)
 
-	// Check session metadata for preferred provider (session affinity)
-	if opts.Metadata != nil {
-		if preferredProvider, ok := opts.Metadata["session_preferred_provider"].(string); ok && preferredProvider != "" {
-			// Move preferred provider to front if present in rotated list
-			for i, provider := range rotated {
-				if provider == preferredProvider {
-					// Swap preferred provider to front
-					if i > 0 {
-						rotated = append([]string{provider}, append(rotated[:i], rotated[i+1:]...)...)
-					}
-					break
-				}
-			}
-		}
-	}
+	// Apply session affinity to prioritize preferred provider
+	rotated = applySessionAffinity(rotated, opts)
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -375,21 +349,8 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	}
 	rotated := m.rotateProviders(req.Model, normalized)
 
-	// Check session metadata for preferred provider (session affinity)
-	if opts.Metadata != nil {
-		if preferredProvider, ok := opts.Metadata["session_preferred_provider"].(string); ok && preferredProvider != "" {
-			// Move preferred provider to front if present in rotated list
-			for i, provider := range rotated {
-				if provider == preferredProvider {
-					// Swap preferred provider to front
-					if i > 0 {
-						rotated = append([]string{provider}, append(rotated[:i], rotated[i+1:]...)...)
-					}
-					break
-				}
-			}
-		}
-	}
+	// Apply session affinity to prioritize preferred provider
+	rotated = applySessionAffinity(rotated, opts)
 
 	retryTimes, maxWait := m.retrySettings()
 	attempts := retryTimes + 1
@@ -719,6 +680,27 @@ func (m *Manager) rotateProviders(model string, providers []string) []string {
 	rotated = append(rotated, providers[offset:]...)
 	rotated = append(rotated, providers[:offset]...)
 	return rotated
+}
+
+// applySessionAffinity reorders providers to prioritize the preferred provider from session metadata.
+// If a preferred provider is found in the providers list, it is moved to the front.
+func applySessionAffinity(providers []string, opts cliproxyexecutor.Options) []string {
+	if opts.Metadata == nil || len(providers) == 0 {
+		return providers
+	}
+	preferredProvider, ok := opts.Metadata["session_preferred_provider"].(string)
+	if !ok || preferredProvider == "" {
+		return providers
+	}
+	// Find and move preferred provider to front if present
+	for i, provider := range providers {
+		if provider == preferredProvider && i > 0 {
+			// Swap preferred provider to front (in-place)
+			providers[0], providers[i] = providers[i], providers[0]
+			break
+		}
+	}
+	return providers
 }
 
 func (m *Manager) retrySettings() (int, time.Duration) {
