@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 // ListSessions returns all active sessions.
@@ -18,7 +19,8 @@ func (h *Handler) ListSessions(c *gin.Context) {
 
 	sessions, err := h.sessionManager.List(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.WithError(err).Error("Failed to list sessions")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve sessions"})
 		return
 	}
 
@@ -44,7 +46,8 @@ func (h *Handler) GetSession(c *gin.Context) {
 
 	session, err := h.sessionManager.Get(c.Request.Context(), sessionID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.WithError(err).WithField("session_id", sessionID).Error("Failed to get session")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve session"})
 		return
 	}
 
@@ -71,7 +74,8 @@ func (h *Handler) DeleteSession(c *gin.Context) {
 	}
 
 	if err := h.sessionManager.Delete(c.Request.Context(), sessionID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.WithError(err).WithField("session_id", sessionID).Error("Failed to delete session")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete session"})
 		return
 	}
 
@@ -88,7 +92,8 @@ func (h *Handler) CleanupSessions(c *gin.Context) {
 
 	count, err := h.sessionManager.Cleanup(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.WithError(err).Error("Failed to cleanup sessions")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to cleanup sessions"})
 		return
 	}
 

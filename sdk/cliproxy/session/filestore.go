@@ -7,10 +7,16 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
+
+// validSessionIDPattern ensures session IDs are safe for filesystem operations
+var validSessionIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // FileStore persists session records using the filesystem as backing storage.
 // Thread-safe for concurrent access.
@@ -40,22 +46,48 @@ func NewFileStore(baseDir string) (*FileStore, error) {
 		return nil, fmt.Errorf("session filestore: create directory failed: %w", err)
 	}
 
+	// Ensure directory has secure permissions
+	info, err := os.Stat(baseDir)
+	if err != nil {
+		return nil, fmt.Errorf("session filestore: stat directory failed: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("session filestore: %s is not a directory", baseDir)
+	}
+	if info.Mode().Perm() != 0o700 {
+		if err := os.Chmod(baseDir, 0o700); err != nil {
+			log.Warnf("Failed to enforce directory permissions on %s: %v", baseDir, err)
+		}
+	}
+
 	return &FileStore{
 		baseDir: baseDir,
 	}, nil
+}
+
+// validateSessionID ensures the session ID is safe for filesystem operations
+func validateSessionID(id string) error {
+	if id == "" {
+		return fmt.Errorf("session ID is empty")
+	}
+	if !validSessionIDPattern.MatchString(id) {
+		return fmt.Errorf("session ID contains invalid characters (must be alphanumeric, hyphens, or underscores)")
+	}
+	return nil
 }
 
 // Get retrieves a session by ID from disk.
 // Returns nil if the session doesn't exist or has expired.
 func (s *FileStore) Get(ctx context.Context, id string) (*Session, error) {
 	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, fmt.Errorf("session filestore: id is empty")
+	if err := validateSessionID(id); err != nil {
+		return nil, fmt.Errorf("session filestore: %w", err)
 	}
 
 	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	path := filepath.Join(s.baseDir, id+".json")
-	s.mu.RUnlock()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -88,8 +120,8 @@ func (s *FileStore) Save(ctx context.Context, session *Session) (string, error) 
 	if session == nil {
 		return "", fmt.Errorf("session filestore: session is nil")
 	}
-	if session.ID == "" {
-		return "", fmt.Errorf("session filestore: session ID is empty")
+	if err := validateSessionID(session.ID); err != nil {
+		return "", fmt.Errorf("session filestore: %w", err)
 	}
 
 	s.mu.Lock()
@@ -109,8 +141,16 @@ func (s *FileStore) Save(ctx context.Context, session *Session) (string, error) 
 		return "", fmt.Errorf("session filestore: write temp failed: %w", err)
 	}
 
+	// Ensure temp file cleanup on error using defer
+	defer func() {
+		if _, err := os.Stat(tmp); err == nil {
+			if removeErr := os.Remove(tmp); removeErr != nil {
+				log.Warnf("Failed to clean up temp file %s: %v", tmp, removeErr)
+			}
+		}
+	}()
+
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp) // Clean up temp file on error
 		return "", fmt.Errorf("session filestore: rename failed: %w", err)
 	}
 
@@ -121,8 +161,8 @@ func (s *FileStore) Save(ctx context.Context, session *Session) (string, error) 
 // Returns nil if the session doesn't exist (idempotent).
 func (s *FileStore) Delete(ctx context.Context, id string) error {
 	id = strings.TrimSpace(id)
-	if id == "" {
-		return fmt.Errorf("session filestore: id is empty")
+	if err := validateSessionID(id); err != nil {
+		return fmt.Errorf("session filestore: %w", err)
 	}
 
 	s.mu.Lock()
@@ -140,15 +180,15 @@ func (s *FileStore) Delete(ctx context.Context, id string) error {
 // List returns all active (non-expired) sessions from disk.
 func (s *FileStore) List(ctx context.Context) ([]*Session, error) {
 	s.mu.RLock()
-	baseDir := s.baseDir
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
 
+	baseDir := s.baseDir
 	sessions := make([]*Session, 0)
 
 	err := filepath.WalkDir(baseDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			// Skip files we can't read
-			return nil
+			// Propagate errors instead of silently ignoring them
+			return walkErr
 		}
 
 		if d.IsDir() {
@@ -162,7 +202,8 @@ func (s *FileStore) List(ctx context.Context) ([]*Session, error) {
 
 		data, err := os.ReadFile(path)
 		if err != nil {
-			// Skip files we can't read
+			// Skip files we can't read, but log the error
+			log.Warnf("Failed to read session file %s: %v", path, err)
 			return nil
 		}
 
@@ -172,7 +213,8 @@ func (s *FileStore) List(ctx context.Context) ([]*Session, error) {
 
 		var session Session
 		if err := json.Unmarshal(data, &session); err != nil {
-			// Skip malformed files
+			// Skip malformed files, but log the error
+			log.Warnf("Failed to unmarshal session file %s: %v", path, err)
 			return nil
 		}
 
@@ -202,7 +244,7 @@ func (s *FileStore) Cleanup(ctx context.Context) (int, error) {
 
 	err := filepath.WalkDir(s.baseDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return nil
+			return walkErr
 		}
 
 		if d.IsDir() {
@@ -215,6 +257,7 @@ func (s *FileStore) Cleanup(ctx context.Context) (int, error) {
 
 		data, err := os.ReadFile(path)
 		if err != nil {
+			log.Warnf("Failed to read session file during cleanup %s: %v", path, err)
 			return nil
 		}
 
@@ -224,6 +267,7 @@ func (s *FileStore) Cleanup(ctx context.Context) (int, error) {
 
 		var session Session
 		if err := json.Unmarshal(data, &session); err != nil {
+			log.Warnf("Failed to unmarshal session file during cleanup %s: %v", path, err)
 			return nil
 		}
 
@@ -231,6 +275,8 @@ func (s *FileStore) Cleanup(ctx context.Context) (int, error) {
 		if now.After(session.ExpiresAt) {
 			if err := os.Remove(path); err == nil {
 				count++
+			} else {
+				log.Warnf("Failed to remove expired session %s: %v", path, err)
 			}
 		}
 

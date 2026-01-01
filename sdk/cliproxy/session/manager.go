@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
 )
 
 // Manager handles session lifecycle operations including creation, retrieval,
@@ -222,7 +223,9 @@ func (m *Manager) StartCleanup(interval time.Duration) {
 			case <-m.cleanupTicker.C:
 				// Run cleanup in background
 				ctx := context.Background()
-				_, _ = m.Cleanup(ctx) // Ignore errors in background cleanup
+				if _, err := m.Cleanup(ctx); err != nil {
+					log.WithError(err).Warn("Background session cleanup failed")
+				}
 			case <-m.cleanupStop:
 				m.cleanupTicker.Stop()
 				return
@@ -255,7 +258,13 @@ func (m *Manager) ExtendTTL(ctx context.Context, sessionID string, duration time
 		return fmt.Errorf("session manager: session not found: %s", sessionID)
 	}
 
-	session.ExpiresAt = session.ExpiresAt.Add(duration)
+	// Extend from current time if session is expired, otherwise from current expiry
+	base := session.ExpiresAt
+	now := time.Now()
+	if now.After(base) {
+		base = now
+	}
+	session.ExpiresAt = base.Add(duration)
 	session.Touch()
 
 	if _, err := m.store.Save(ctx, session); err != nil {

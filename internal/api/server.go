@@ -836,6 +836,12 @@ func (s *Server) Stop(ctx context.Context) error {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
 
+	// Stop session manager cleanup goroutine if running
+	if s.sessionManager != nil {
+		s.sessionManager.StopCleanup()
+		log.Debug("Session manager cleanup stopped")
+	}
+
 	log.Debug("API server stopped")
 	return nil
 }

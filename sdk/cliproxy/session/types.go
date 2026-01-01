@@ -60,6 +60,7 @@ func (s *Session) IsExpired() bool {
 }
 
 // AddMessage appends a message to the session and updates metadata.
+// Also updates PreferredProvider for session affinity when assistant messages are added.
 func (s *Session) AddMessage(msg Message) {
 	s.Messages = append(s.Messages, msg)
 	s.UpdatedAt = time.Now()
@@ -67,6 +68,8 @@ func (s *Session) AddMessage(msg Message) {
 	s.Metadata.TotalTokens += msg.TokensUsed
 	if msg.Role == "assistant" && msg.Provider != "" {
 		s.Metadata.LastProvider = msg.Provider
+		// Update PreferredProvider for session affinity
+		s.Metadata.PreferredProvider = msg.Provider
 	}
 }
 

@@ -810,6 +810,11 @@ func (m *Manager) executeProvidersOnce(ctx context.Context, providers []string, 
 	for _, provider := range providers {
 		resp, errExec := fn(ctx, provider)
 		if errExec == nil {
+			// Store the provider in response metadata for session affinity tracking
+			if resp.Metadata == nil {
+				resp.Metadata = make(map[string]any)
+			}
+			resp.Metadata["provider"] = provider
 			return resp, nil
 		}
 		lastErr = errExec

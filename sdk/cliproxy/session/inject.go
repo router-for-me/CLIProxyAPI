@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-func timeNow() time.Time {
-	return time.Now()
-}
+// timeNow is a variable for testability
+var timeNow = time.Now
 
 // InjectHistory injects session message history into a request payload.
 // It modifies the request JSON to prepend historical messages before new user messages.
@@ -145,6 +144,7 @@ func extractMessageFromMap(message map[string]interface{}, provider, model strin
 }
 
 func extractTokenUsage(resp map[string]interface{}) int {
+	// Try OpenAI/Claude standard usage object
 	if usage, ok := resp["usage"].(map[string]interface{}); ok {
 		// Try completion_tokens (OpenAI)
 		if tokens, ok := usage["completion_tokens"].(float64); ok {
@@ -154,8 +154,11 @@ func extractTokenUsage(resp map[string]interface{}) int {
 		if tokens, ok := usage["output_tokens"].(float64); ok {
 			return int(tokens)
 		}
-		// Try total_token_count (Gemini)
-		if tokens, ok := usage["total_token_count"].(float64); ok {
+	}
+	// Try Gemini usageMetadata object (uses candidatesTokenCount for completion tokens)
+	if usageMeta, ok := resp["usageMetadata"].(map[string]interface{}); ok {
+		// Use candidatesTokenCount for accurate completion token count
+		if tokens, ok := usageMeta["candidatesTokenCount"].(float64); ok {
 			return int(tokens)
 		}
 	}
