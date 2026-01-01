@@ -98,8 +98,8 @@ func SanitizeFunctionName(name string) string {
 	// First, replace invalid characters with underscores
 	var sanitized strings.Builder
 	for i, r := range name {
-		if (i == 0 && ((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' || r == '*')) ||
-			(i > 0 && ((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'))) {
+		if (i == 0 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '_' || r == '*')) ||
+			(i > 0 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_')) {
 			sanitized.WriteRune(r)
 		} else {
 			// Replace invalid characters with underscore
