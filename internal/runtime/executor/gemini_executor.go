@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -85,13 +87,29 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Official Gemini API via API key or OAuth bearer
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), false)
-	body = ApplyThinkingMetadata(body, req.Metadata, model)
-	body = util.ApplyDefaultThinkingIfNeeded(model, body)
-	body = util.NormalizeGeminiThinkingBudget(model, body)
-	body = util.StripThinkingConfigIfUnsupported(model, body)
-	body = fixGeminiImageAspectRatio(model, body)
-	body = applyPayloadConfig(e.cfg, model, body)
+	
+	// Use new translator (Canonical IR) or legacy fallback
+	useNewTranslator := e.cfg != nil && e.cfg.UseCanonicalTranslator
+	var body []byte
+	
+	if useNewTranslator {
+		// Translate via Canonical IR
+		var errTranslate error
+		body, errTranslate = TranslateToGemini(e.cfg, from, req.Model, bytes.Clone(req.Payload), false, req.Metadata)
+		if errTranslate != nil {
+			return resp, fmt.Errorf("failed to translate request: %w", errTranslate)
+		}
+	} else {
+		// Legacy translation
+		body = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+		body = ApplyThinkingMetadata(body, req.Metadata, req.Model)
+		body = util.ApplyDefaultThinkingIfNeeded(req.Model, body)
+		body = util.NormalizeGeminiThinkingBudget(req.Model, body)
+		body = util.StripThinkingConfigIfUnsupported(req.Model, body)
+		body = fixGeminiImageAspectRatio(req.Model, body)
+	}
+	
+	body = applyPayloadConfig(e.cfg, req.Model, body)
 	body, _ = sjson.SetBytes(body, "model", model)
 
 	action := "generateContent"
@@ -163,6 +181,17 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.publish(ctx, parseGeminiUsage(data))
+
+	// Try new translator first if enabled
+	if useNewTranslator {
+		translatedResp, errTranslate := TranslateGeminiResponseNonStream(e.cfg, from, data, req.Model)
+		if errTranslate == nil && translatedResp != nil {
+			resp = cliproxyexecutor.Response{Payload: translatedResp}
+			return resp, nil
+		}
+	}
+
+	// Fallback to old translator
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: []byte(out)}
@@ -183,13 +212,28 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
-	body = ApplyThinkingMetadata(body, req.Metadata, model)
-	body = util.ApplyDefaultThinkingIfNeeded(model, body)
-	body = util.NormalizeGeminiThinkingBudget(model, body)
-	body = util.StripThinkingConfigIfUnsupported(model, body)
-	body = fixGeminiImageAspectRatio(model, body)
-	body = applyPayloadConfig(e.cfg, model, body)
+	
+	// Use new translator (Canonical IR) or legacy fallback
+	useNewTranslator := e.cfg != nil && e.cfg.UseCanonicalTranslator
+	var body []byte
+	
+	if useNewTranslator {
+		// Translate request through canonical IR (handles all transformations internally)
+		var errTranslate error
+		body, errTranslate = TranslateToGemini(e.cfg, from, req.Model, bytes.Clone(req.Payload), true, req.Metadata)
+		if errTranslate != nil {
+			return nil, fmt.Errorf("failed to translate request: %w", errTranslate)
+		}
+	} else {
+		body = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+		body = ApplyThinkingMetadata(body, req.Metadata, req.Model)
+		body = util.ApplyDefaultThinkingIfNeeded(req.Model, body)
+		body = util.NormalizeGeminiThinkingBudget(req.Model, body)
+		body = util.StripThinkingConfigIfUnsupported(req.Model, body)
+		body = fixGeminiImageAspectRatio(req.Model, body)
+	}
+	
+	body = applyPayloadConfig(e.cfg, req.Model, body)
 	body, _ = sjson.SetBytes(body, "model", model)
 
 	baseURL := resolveGeminiBaseURL(auth)
@@ -260,6 +304,16 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		var param any
+		
+		// State for new translator
+		var streamState *GeminiCLIStreamState
+		if useNewTranslator {
+			streamState = &GeminiCLIStreamState{
+				ClaudeState: from_ir.NewClaudeStreamState(),
+			}
+		}
+		messageID := "chatcmpl-" + req.Model
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
@@ -271,14 +325,30 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if detail, ok := parseGeminiStreamUsage(payload); ok {
 				reporter.publish(ctx, detail)
 			}
+
+			// Try new translator first if enabled
+			if useNewTranslator {
+				translatedChunks, errTranslate := TranslateGeminiResponseStream(e.cfg, from, bytes.Clone(payload), req.Model, messageID, streamState)
+				if errTranslate == nil && translatedChunks != nil {
+					for _, chunk := range translatedChunks {
+						out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+					}
+					continue
+				}
+			}
+
+			// Fallback to old translator
 			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(payload), &param)
 			for i := range lines {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
 			}
 		}
-		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone([]byte("[DONE]")), &param)
-		for i := range lines {
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+		
+		if !useNewTranslator {
+			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone([]byte("[DONE]")), &param)
+			for i := range lines {
+				out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
@@ -300,10 +370,24 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
-	translatedReq := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), false)
-	translatedReq = ApplyThinkingMetadata(translatedReq, req.Metadata, model)
-	translatedReq = util.StripThinkingConfigIfUnsupported(model, translatedReq)
-	translatedReq = fixGeminiImageAspectRatio(model, translatedReq)
+	
+	// Use new translator (Canonical IR) or legacy fallback
+	useNewTranslator := e.cfg != nil && e.cfg.UseCanonicalTranslator
+	var translatedReq []byte
+	
+	if useNewTranslator {
+		var errTranslate error
+		translatedReq, errTranslate = TranslateToGemini(e.cfg, from, req.Model, bytes.Clone(req.Payload), false, req.Metadata)
+		if errTranslate != nil {
+			return cliproxyexecutor.Response{}, fmt.Errorf("failed to translate request: %w", errTranslate)
+		}
+	} else {
+		translatedReq = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+		translatedReq = ApplyThinkingMetadata(translatedReq, req.Metadata, req.Model)
+		translatedReq = util.StripThinkingConfigIfUnsupported(req.Model, translatedReq)
+		translatedReq = fixGeminiImageAspectRatio(req.Model, translatedReq)
+	}
+
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")

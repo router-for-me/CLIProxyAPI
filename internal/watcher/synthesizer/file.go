@@ -55,8 +55,13 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			continue
 		}
 		t, _ := metadata["type"].(string)
+		// Detect Kiro auth files by auth_method field (they don't have "type" field)
 		if t == "" {
-			continue
+			if authMethod, _ := metadata["auth_method"].(string); authMethod == "builder-id" || authMethod == "social" {
+				t = "kiro"
+			} else {
+				continue
+			}
 		}
 		provider := strings.ToLower(t)
 		if provider == "gemini" {
@@ -100,6 +105,12 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			Metadata:  metadata,
 			CreatedAt: now,
 			UpdatedAt: now,
+		}
+		// Set NextRefreshAfter for Kiro auth based on expires_at
+		if provider == "kiro" {
+			if expiresAt, ok := metadata["expires_at"].(float64); ok && expiresAt > 0 {
+				a.NextRefreshAfter = time.Unix(int64(expiresAt), 0)
+			}
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, nil, "oauth")
 		if provider == "gemini-cli" {

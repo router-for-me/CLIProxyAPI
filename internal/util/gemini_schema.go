@@ -389,7 +389,8 @@ func addEmptySchemaPlaceholder(jsonStr string) string {
 		}
 
 		// If schema has properties but none are required, add a minimal placeholder.
-		if propsVal.IsObject() && !hasRequiredProperties {
+		// Skip for top-level schemas (not nested within another object's properties) to prevent unnecessary placeholders
+		if propsVal.IsObject() && !hasRequiredProperties && strings.Contains(parentPath, ".properties") {
 			placeholderPath := joinPath(propsPath, "_")
 			if !gjson.Get(jsonStr, placeholderPath).Exists() {
 				jsonStr, _ = sjson.Set(jsonStr, placeholderPath+".type", "boolean")

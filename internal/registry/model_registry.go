@@ -97,6 +97,8 @@ type ModelRegistry struct {
 	clientProviders map[string]string
 	// mutex ensures thread-safe access to the registry
 	mutex *sync.RWMutex
+	// showProviderPrefixes controls whether to add visual provider prefixes to model IDs
+	showProviderPrefixes bool
 }
 
 // Global model registry instance
@@ -107,14 +109,27 @@ var registryOnce sync.Once
 func GetGlobalRegistry() *ModelRegistry {
 	registryOnce.Do(func() {
 		globalRegistry = &ModelRegistry{
-			models:           make(map[string]*ModelRegistration),
-			clientModels:     make(map[string][]string),
-			clientModelInfos: make(map[string]map[string]*ModelInfo),
-			clientProviders:  make(map[string]string),
-			mutex:            &sync.RWMutex{},
+			models:               make(map[string]*ModelRegistration),
+			clientModels:         make(map[string][]string),
+			clientModelInfos:     make(map[string]map[string]*ModelInfo),
+			clientProviders:      make(map[string]string),
+			mutex:                &sync.RWMutex{},
+			showProviderPrefixes: true, // Default enabled for visual provider identification
 		}
 	})
 	return globalRegistry
+}
+
+// SetShowProviderPrefixes configures whether to display provider prefixes in model IDs.
+// When enabled, model IDs will include visual prefixes like "[Gemini CLI] gemini-2.5-pro".
+// This is purely cosmetic and does not affect model routing.
+func (r *ModelRegistry) SetShowProviderPrefixes(enabled bool) {
+	if r == nil {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.showProviderPrefixes = enabled
 }
 
 // RegisterClient registers a client and its supported models
@@ -323,7 +338,15 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 	if model == nil || modelID == "" {
 		return
 	}
-	if existing, exists := r.models[modelID]; exists {
+
+	// Create provider-specific model key to avoid conflicts
+	// Each provider gets its own version of the model
+	providerModelKey := modelID
+	if provider != "" {
+		providerModelKey = provider + ":" + modelID
+	}
+
+	if existing, exists := r.models[providerModelKey]; exists {
 		existing.Count++
 		existing.LastUpdated = now
 		existing.Info = cloneModelInfo(model)
@@ -336,7 +359,7 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 			}
 			existing.Providers[provider]++
 		}
-		log.Debugf("Incremented count for model %s, now %d clients", modelID, existing.Count)
+		log.Debugf("Incremented count for model %s, now %d clients", providerModelKey, existing.Count)
 		return
 	}
 
@@ -350,12 +373,18 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 	if provider != "" {
 		registration.Providers = map[string]int{provider: 1}
 	}
-	r.models[modelID] = registration
-	log.Debugf("Registered new model %s from provider %s", modelID, provider)
+	r.models[providerModelKey] = registration
+	log.Debugf("Registered new model %s from provider %s", providerModelKey, provider)
 }
 
 func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider string, now time.Time) {
-	registration, exists := r.models[modelID]
+	// Create provider-specific model key to match addModelRegistration
+	providerModelKey := modelID
+	if provider != "" {
+		providerModelKey = provider + ":" + modelID
+	}
+
+	registration, exists := r.models[providerModelKey]
 	if !exists {
 		return
 	}
@@ -379,10 +408,10 @@ func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider stri
 			}
 		}
 	}
-	log.Debugf("Decremented count for model %s, now %d clients", modelID, registration.Count)
+	log.Debugf("Decremented count for model %s, now %d clients", providerModelKey, registration.Count)
 	if registration.Count <= 0 {
-		delete(r.models, modelID)
-		log.Debugf("Removed model %s as no clients remain", modelID)
+		delete(r.models, providerModelKey)
+		log.Debugf("Removed model %s as no clients remain", providerModelKey)
 	}
 }
 
@@ -546,12 +575,17 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.
+// It handles model IDs with provider prefixes (e.g., "[Gemini CLI] gemini-2.5-flash").
 func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
 	modelID = strings.TrimSpace(modelID)
 	if clientID == "" || modelID == "" {
 		return false
 	}
+
+	// Normalize model ID to remove any provider prefix
+	normalizer := NewModelIDNormalizer()
+	cleanModelID := normalizer.NormalizeModelID(modelID)
 
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
@@ -562,7 +596,7 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	}
 
 	for _, id := range models {
-		if strings.EqualFold(strings.TrimSpace(id), modelID) {
+		if strings.EqualFold(strings.TrimSpace(id), cleanModelID) {
 			return true
 		}
 	}
@@ -615,12 +649,34 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 
 		// Include models that have available clients, or those solely cooling down.
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
-			model := r.convertModelToMap(registration.Info, handlerType)
-			if model != nil {
-				models = append(models, model)
+			// If show-provider-prefixes is enabled, show the model for each provider
+			if r.showProviderPrefixes && len(registration.Providers) > 0 {
+				// Create a copy of ModelInfo for each provider
+				for providerType := range registration.Providers {
+					modelInfoCopy := *registration.Info
+					modelInfoCopy.Type = providerType
+
+					model := r.convertModelToMap(&modelInfoCopy, handlerType)
+					if model != nil {
+						models = append(models, model)
+					}
+				}
+			} else {
+				// No providers tracked or prefixes disabled - show once with original type
+				model := r.convertModelToMap(registration.Info, handlerType)
+				if model != nil {
+					models = append(models, model)
+				}
 			}
 		}
 	}
+
+	// Sort models alphabetically by ID
+	sort.Slice(models, func(i, j int) bool {
+		idI, _ := models[i]["id"].(string)
+		idJ, _ := models[j]["id"].(string)
+		return idI < idJ
+	})
 
 	return models
 }
@@ -794,62 +850,251 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	registration, exists := r.models[modelID]
-	if !exists || registration == nil || len(registration.Providers) == 0 {
-		return nil
-	}
+	log.Debugf("GetModelProviders: searching for modelID=%s, total models in registry=%d", modelID, len(r.models))
 
-	type providerCount struct {
-		name  string
-		count int
-	}
-	providers := make([]providerCount, 0, len(registration.Providers))
-	// suspendedByProvider := make(map[string]int)
-	// if registration.SuspendedClients != nil {
-	// 	for clientID := range registration.SuspendedClients {
-	// 		if provider, ok := r.clientProviders[clientID]; ok && provider != "" {
-	// 			suspendedByProvider[provider]++
-	// 		}
-	// 	}
-	// }
-	for name, count := range registration.Providers {
-		if count <= 0 {
+	// Search for provider-specific model keys (provider:modelID)
+	var foundProviders []string
+	for key, registration := range r.models {
+		if registration == nil {
 			continue
 		}
-		// adjusted := count - suspendedByProvider[name]
-		// if adjusted <= 0 {
-		// 	continue
-		// }
-		// providers = append(providers, providerCount{name: name, count: adjusted})
-		providers = append(providers, providerCount{name: name, count: count})
-	}
-	if len(providers) == 0 {
-		return nil
-	}
 
-	sort.Slice(providers, func(i, j int) bool {
-		if providers[i].count == providers[j].count {
-			return providers[i].name < providers[j].name
+		// Check if this key matches our model (either direct match or provider:modelID format)
+		if key == modelID {
+			// Direct match - collect all providers
+			for provider := range registration.Providers {
+				if registration.Providers[provider] > 0 {
+					foundProviders = append(foundProviders, provider)
+				}
+			}
+		} else if strings.Contains(key, ":") {
+			// Provider-specific key format: "provider:modelID"
+			parts := strings.SplitN(key, ":", 2)
+			if len(parts) == 2 && parts[1] == modelID {
+				provider := parts[0]
+				if registration.Count > 0 {
+					foundProviders = append(foundProviders, provider)
+					log.Debugf("GetModelProviders: found provider=%s for model=%s (key=%s)", provider, modelID, key)
+				}
+			}
 		}
-		return providers[i].count > providers[j].count
-	})
-
-	result := make([]string, 0, len(providers))
-	for _, item := range providers {
-		result = append(result, item.name)
 	}
-	return result
+
+	log.Debugf("GetModelProviders: result for modelID=%s: %v", modelID, foundProviders)
+	return foundProviders
 }
 
 // GetModelInfo returns the registered ModelInfo for the given model ID, if present.
 // Returns nil if the model is unknown to the registry.
+// This function searches both direct model IDs and provider-prefixed keys (provider:modelID).
+// It also handles display format prefixes like "[Antigravity] gemini-2.5-flash".
 func (r *ModelRegistry) GetModelInfo(modelID string) *ModelInfo {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
+
+	// Strip display prefix if present (e.g., "[Antigravity] gemini-2.5-flash" -> "gemini-2.5-flash")
+	cleanModelID := modelID
+	if idx := strings.Index(modelID, "] "); idx != -1 {
+		cleanModelID = modelID[idx+2:]
+	}
+
+	var info *ModelInfo
+
+	// First, try direct lookup with original ID (for backward compatibility)
 	if reg, ok := r.models[modelID]; ok && reg != nil {
-		return reg.Info
+		info = reg.Info
+	}
+
+	// Try direct lookup with cleaned ID
+	if info == nil && cleanModelID != modelID {
+		if reg, ok := r.models[cleanModelID]; ok && reg != nil {
+			info = reg.Info
+		}
+	}
+
+	// Search through all registered models for provider-prefixed keys
+	// Models are stored as "provider:modelID", so we need to check all keys
+	// that end with ":modelID"
+	if info == nil {
+		suffix := ":" + cleanModelID
+		for key, reg := range r.models {
+			if strings.HasSuffix(key, suffix) && reg != nil {
+				info = reg.Info
+				break
+			}
+		}
+	}
+
+	// If found, enrich with static data if dynamic data is missing
+	// If not found, try to find in static definitions directly
+	if info != nil {
+		// Clone to avoid modifying the registry copy
+		clone := *info
+		r.enrichWithStaticInfo(&clone, cleanModelID)
+		return &clone
+	} else {
+		// Try to find purely static model
+		static := r.findStaticModel(cleanModelID)
+		return static
+	}
+}
+
+// findStaticModel searches all static model lists for a match
+func (r *ModelRegistry) findStaticModel(id string) *ModelInfo {
+	lists := [][]*ModelInfo{
+		GetClaudeModels(),
+		GetGeminiModels(),
+		GetGeminiVertexModels(),
+		GetGeminiCLIModels(),
+		GetAIStudioModels(),
+		GetOpenAIModels(),
+		GetQwenModels(),
+		GetIFlowModels(),
+		GetClineModels(),
+		GetGitHubCopilotModels(),
+		GetKiroModels(),
+		GetAmazonQModels(),
+	}
+
+	for _, list := range lists {
+		for _, m := range list {
+			if m.ID == id {
+				return m
+			}
+		}
 	}
 	return nil
+}
+
+// enrichWithStaticInfo fills in missing fields from static definition
+func (r *ModelRegistry) enrichWithStaticInfo(dynamic *ModelInfo, id string) {
+	static := r.findStaticModel(id)
+	if static == nil {
+		return
+	}
+
+	if dynamic.ContextLength == 0 {
+		dynamic.ContextLength = static.ContextLength
+	}
+	if dynamic.InputTokenLimit == 0 {
+		dynamic.InputTokenLimit = static.InputTokenLimit
+	}
+	if dynamic.OutputTokenLimit == 0 {
+		dynamic.OutputTokenLimit = static.OutputTokenLimit
+	}
+	if dynamic.MaxCompletionTokens == 0 {
+		dynamic.MaxCompletionTokens = static.MaxCompletionTokens
+	}
+	if dynamic.Thinking == nil && static.Thinking != nil {
+		dynamic.Thinking = static.Thinking
+	}
+
+	// Normalize cross-platform fields
+	if dynamic.ContextLength == 0 && dynamic.InputTokenLimit > 0 {
+		dynamic.ContextLength = dynamic.InputTokenLimit
+	}
+	if dynamic.MaxCompletionTokens == 0 && dynamic.OutputTokenLimit > 0 {
+		dynamic.MaxCompletionTokens = dynamic.OutputTokenLimit
+	}
+}
+
+// providerDisplayNames maps provider type keys to human-readable display names.
+// This is the single source of truth for provider naming across the registry.
+// CLI versions use OAuth authentication, others use API keys.
+var providerDisplayNames = map[string]string{
+	"gemini-cli":  "Gemini CLI",
+	"gemini":      "Gemini",
+	"vertex":      "Vertex AI",
+	"aistudio":    "AI Studio",
+	"claude":      "Claude",
+	"codex":       "Codex",
+	"qwen":        "Qwen",
+	"iflow":       "iFlow",
+	"cline":       "Cline",
+	"kiro":        "Kiro",
+	"copilot":     "Copilot",
+	"antigravity": "Antigravity",
+	"openai":      "OpenAI",
+	"anthropic":   "Anthropic",
+	"google":      "Google",
+}
+
+// displayNameToProvider is the reverse mapping of providerDisplayNames.
+// Built once at init time for efficient lookups.
+var displayNameToProvider map[string]string
+
+func init() {
+	displayNameToProvider = make(map[string]string, len(providerDisplayNames))
+	for provider, displayName := range providerDisplayNames {
+		displayNameToProvider[displayName] = provider
+	}
+}
+
+// ModelIDNormalizer provides centralized model ID normalization and prefix handling.
+type ModelIDNormalizer struct{}
+
+// NewModelIDNormalizer creates a new model ID normalizer.
+func NewModelIDNormalizer() *ModelIDNormalizer {
+	return &ModelIDNormalizer{}
+}
+
+// NormalizeModelID removes provider prefix and returns clean internal model ID.
+// Examples: "[Gemini CLI] gemini-2.5-flash" -> "gemini-2.5-flash"
+//
+//	"gemini-2.5-flash" -> "gemini-2.5-flash"
+func (n *ModelIDNormalizer) NormalizeModelID(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if strings.HasPrefix(modelID, "[") {
+		if idx := strings.Index(modelID, "] "); idx != -1 {
+			return strings.TrimSpace(modelID[idx+2:])
+		}
+	}
+	return modelID
+}
+
+// ExtractProviderFromPrefixedID extracts provider type from prefixed model ID.
+// Examples: "[Gemini CLI] gemini-2.5-flash" -> "gemini-cli"
+//
+//	"[Antigravity] model" -> "antigravity"
+//	"gemini-2.5-flash" -> ""
+func (n *ModelIDNormalizer) ExtractProviderFromPrefixedID(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if strings.HasPrefix(modelID, "[") {
+		if idx := strings.Index(modelID, "] "); idx != -1 {
+			displayName := strings.TrimSpace(modelID[1:idx])
+			if provider, exists := displayNameToProvider[displayName]; exists {
+				return provider
+			}
+		}
+	}
+	return ""
+}
+
+// StripProviderPrefix removes the provider prefix from a model ID if present.
+// Deprecated: Use NormalizeModelID instead.
+func StripProviderPrefix(modelID string) string {
+	normalizer := NewModelIDNormalizer()
+	return normalizer.NormalizeModelID(modelID)
+}
+
+// formatProviderPrefix creates a visual prefix for a model based on its type.
+// Returns empty string if prefixes are disabled or type is empty.
+func (r *ModelRegistry) formatProviderPrefix(modelType string) string {
+	if !r.showProviderPrefixes || modelType == "" {
+		return ""
+	}
+
+	typeLower := strings.ToLower(strings.TrimSpace(modelType))
+	if displayName, exists := providerDisplayNames[typeLower]; exists {
+		return "[" + displayName + "] "
+	}
+
+	// Fallback: capitalize first letter of type
+	if len(typeLower) > 0 {
+		return "[" + strings.ToUpper(typeLower[:1]) + typeLower[1:] + "] "
+	}
+
+	return ""
 }
 
 // convertModelToMap converts ModelInfo to the appropriate format for different handler types
@@ -858,10 +1103,13 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		return nil
 	}
 
+	// Generate provider prefix if enabled
+	prefix := r.formatProviderPrefix(model.Type)
+
 	switch handlerType {
 	case "openai":
 		result := map[string]any{
-			"id":       model.ID,
+			"id":       prefix + model.ID,
 			"object":   "model",
 			"owned_by": model.OwnedBy,
 		}
@@ -893,7 +1141,7 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 
 	case "claude":
 		result := map[string]any{
-			"id":       model.ID,
+			"id":       prefix + model.ID,
 			"object":   "model",
 			"owned_by": model.OwnedBy,
 		}
@@ -911,9 +1159,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 	case "gemini":
 		result := map[string]any{}
 		if model.Name != "" {
-			result["name"] = model.Name
+			result["name"] = prefix + model.Name
 		} else {
-			result["name"] = model.ID
+			result["name"] = prefix + model.ID
 		}
 		if model.Version != "" {
 			result["version"] = model.Version
@@ -938,7 +1186,7 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 	default:
 		// Generic format
 		result := map[string]any{
-			"id":     model.ID,
+			"id":     prefix + model.ID,
 			"object": "model",
 		}
 		if model.OwnedBy != "" {

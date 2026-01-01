@@ -20,6 +20,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/sjson"
 	"golang.org/x/net/context"
 )
 
@@ -322,10 +323,14 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, errMsg
 	}
+
+	// Normalize model in payload to remove provider prefix (e.g., "[Cline] x-ai/grok" -> "x-ai/grok")
+	normalizedPayload := normalizeModelInPayload(rawJSON, normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
+
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: normalizedPayload,
 	}
 	if cloned := cloneMetadata(metadata); cloned != nil {
 		req.Metadata = cloned
@@ -363,10 +368,14 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if errMsg != nil {
 		return nil, errMsg
 	}
+
+	// Normalize model in payload to remove provider prefix
+	normalizedPayload := normalizeModelInPayload(rawJSON, normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
+
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: normalizedPayload,
 	}
 	if cloned := cloneMetadata(metadata); cloned != nil {
 		req.Metadata = cloned
@@ -407,10 +416,14 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, errChan
 	}
+
+	// Normalize model in payload to remove provider prefix
+	normalizedPayload := normalizeModelInPayload(rawJSON, normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
+
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: normalizedPayload,
 	}
 	if cloned := cloneMetadata(metadata); cloned != nil {
 		req.Metadata = cloned
@@ -538,19 +551,31 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// Resolve "auto" model to an actual available model first
 	resolvedModelName := util.ResolveAutoModel(modelName)
 
-	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
-	normalizedModel, metadata = normalizeModelMetadata(resolvedModelName)
+	// Check if user specified a specific provider via prefix (e.g., "[Gemini CLI] model-name")
+	specifiedProvider := util.ExtractProviderFromPrefixedModelID(resolvedModelName)
 
-	// Use the normalizedModel to get the provider name.
-	providers = util.GetProviderName(normalizedModel)
-	if len(providers) == 0 && metadata != nil {
-		if originalRaw, ok := metadata[util.ThinkingOriginalModelMetadataKey]; ok {
-			if originalModel, okStr := originalRaw.(string); okStr {
-				originalModel = strings.TrimSpace(originalModel)
-				if originalModel != "" && !strings.EqualFold(originalModel, normalizedModel) {
-					if altProviders := util.GetProviderName(originalModel); len(altProviders) > 0 {
-						providers = altProviders
-						normalizedModel = originalModel
+	// Normalize model ID - this is the single point of model ID normalization for all requests
+	// This removes provider prefixes like "[Kiro]", "[Gemini]", etc.
+	cleanModelName := util.NormalizeIncomingModelID(resolvedModelName)
+
+	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
+	normalizedModel, metadata = normalizeModelMetadata(cleanModelName)
+
+	if specifiedProvider != "" {
+		// User specified a specific provider via prefix - use ONLY that provider
+		providers = []string{specifiedProvider}
+	} else {
+		// No specific provider requested - get all available providers for this model
+		providers = util.GetProviderName(normalizedModel)
+		if len(providers) == 0 && metadata != nil {
+			if originalRaw, ok := metadata[util.ThinkingOriginalModelMetadataKey]; ok {
+				if originalModel, okStr := originalRaw.(string); okStr {
+					originalModel = strings.TrimSpace(originalModel)
+					if originalModel != "" && !strings.EqualFold(originalModel, normalizedModel) {
+						if altProviders := util.GetProviderName(originalModel); len(altProviders) > 0 {
+							providers = altProviders
+							normalizedModel = originalModel
+						}
 					}
 				}
 			}
@@ -560,10 +585,6 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	if len(providers) == 0 {
 		return nil, "", nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
-
-	// If it's a dynamic model, the normalizedModel was already set to extractedModelName.
-	// If it's a non-dynamic model, normalizedModel was set by normalizeModelMetadata.
-	// So, normalizedModel is already correctly set at this point.
 
 	return providers, normalizedModel, metadata, nil
 }
@@ -661,3 +682,19 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.
 // It can optionally accept parameters, which are used for logging the response.
 type APIHandlerCancelFunc func(params ...interface{})
+
+// normalizeModelInPayload replaces the model field in JSON payload with the normalized model name.
+// This removes provider prefixes like "[Cline] " from the model field before sending to upstream APIs.
+func normalizeModelInPayload(rawJSON []byte, normalizedModel string) []byte {
+	if len(rawJSON) == 0 || normalizedModel == "" {
+		return cloneBytes(rawJSON)
+	}
+
+	// Use sjson to replace the model field with the normalized model
+	result, err := sjson.SetBytes(rawJSON, "model", normalizedModel)
+	if err != nil {
+		// If setting fails, return original payload
+		return cloneBytes(rawJSON)
+	}
+	return result
+}

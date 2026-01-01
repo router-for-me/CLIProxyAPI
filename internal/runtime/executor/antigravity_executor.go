@@ -12,17 +12,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -31,6 +30,10 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// Note: This executor uses "antigravity" format for old translator compatibility.
+// The old translator treats "antigravity" and "gemini-cli" identically.
+// When UseCanonicalTranslator is enabled, TranslateToGeminiCLI handles the conversion.
 
 const (
 	antigravityBaseURLDaily        = "https://daily-cloudcode-pa.googleapis.com"
@@ -47,10 +50,8 @@ const (
 	refreshSkew                    = 3000 * time.Second
 )
 
-var (
-	randSource      = rand.New(rand.NewSource(time.Now().UnixNano()))
-	randSourceMutex sync.Mutex
-)
+// Note: We use crypto/rand via uuid package for thread-safe random generation
+// instead of math/rand which requires mutex protection
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
 type AntigravityExecutor struct {
@@ -94,7 +95,18 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
-	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+
+	// Translate request: new translator if enabled, otherwise old translator
+	var translated []byte
+	if e.cfg != nil && e.cfg.UseCanonicalTranslator {
+		var errTranslate error
+		translated, errTranslate = TranslateToGeminiCLI(e.cfg, from, req.Model, bytes.Clone(req.Payload), false, req.Metadata)
+		if errTranslate != nil {
+			return resp, fmt.Errorf("failed to translate request: %w", errTranslate)
+		}
+	} else {
+		translated = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	}
 
 	translated = ApplyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 	translated = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, translated)
@@ -156,6 +168,24 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		}
 
 		reporter.publish(ctx, parseAntigravityUsage(bodyBytes))
+
+		// Use new translator if enabled (no fallback)
+		if e.cfg != nil && e.cfg.UseCanonicalTranslator {
+			translatedResp, errTranslate := TranslateGeminiCLIResponseNonStream(e.cfg, from, bodyBytes, req.Model)
+			if errTranslate != nil {
+				return resp, fmt.Errorf("failed to translate response: %w", errTranslate)
+			}
+			if translatedResp != nil {
+				resp = cliproxyexecutor.Response{Payload: translatedResp}
+			} else {
+				// New translator returned nil - pass through raw response
+				resp = cliproxyexecutor.Response{Payload: bodyBytes}
+			}
+			reporter.ensurePublished(ctx)
+			return resp, nil
+		}
+
+		// Old translator (only when UseCanonicalTranslator is disabled)
 		var param any
 		converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bodyBytes, &param)
 		resp = cliproxyexecutor.Response{Payload: []byte(converted)}
@@ -521,16 +551,25 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	isClaude := strings.Contains(strings.ToLower(req.Model), "claude")
-
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
-	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+
+	// Translate request: new translator if enabled, otherwise old translator
+	var translated []byte
+	if e.cfg != nil && e.cfg.UseCanonicalTranslator {
+		var errTranslate error
+		translated, errTranslate = TranslateToGeminiCLI(e.cfg, from, req.Model, bytes.Clone(req.Payload), true, req.Metadata)
+		if errTranslate != nil {
+			return nil, fmt.Errorf("failed to translate request: %w", errTranslate)
+		}
+	} else {
+		translated = sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	}
 
 	translated = ApplyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 	translated = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, translated)
 	translated = util.ApplyDefaultThinkingIfNeededCLI(req.Model, req.Metadata, translated)
-	translated = normalizeAntigravityThinking(req.Model, translated, isClaude)
+	translated = normalizeAntigravityThinking(req.Model, translated, false)
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
@@ -591,7 +630,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		}
 
 		out := make(chan cliproxyexecutor.StreamChunk)
-		stream = out
 		go func(resp *http.Response) {
 			defer close(out)
 			defer func() {
@@ -601,6 +639,16 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}()
 			scanner := bufio.NewScanner(resp.Body)
 			scanner.Buffer(nil, streamScannerBuffer)
+
+			// Initialize streaming state (only if new translator is enabled)
+			useNewTranslator := e.cfg != nil && e.cfg.UseCanonicalTranslator
+			var streamState *GeminiCLIStreamState
+			if useNewTranslator {
+				// Create state with schema context from original request for tool call normalization
+				streamState = NewAntigravityStreamState(opts.OriginalRequest)
+			}
+			messageID := "chatcmpl-" + req.Model
+
 			var param any
 			for scanner.Scan() {
 				line := scanner.Bytes()
@@ -608,25 +656,44 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 				// Filter usage metadata for all models
 				// Only retain usage statistics in the terminal chunk
-				line = FilterSSEUsageMetadata(line)
+				filteredLine := FilterSSEUsageMetadata(line)
 
-				payload := jsonPayload(line)
-				if payload == nil {
+				payload := jsonPayload(filteredLine)
+				if payload != nil {
+					if detail, ok := parseAntigravityStreamUsage(payload); ok {
+						reporter.publish(ctx, detail)
+					}
+				}
+
+				// Use new translator if enabled (no fallback)
+				if useNewTranslator {
+					translatedChunks, errTranslate := TranslateGeminiCLIResponseStream(e.cfg, from, bytes.Clone(line), req.Model, messageID, streamState)
+					if errTranslate != nil {
+						out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("failed to translate chunk: %w", errTranslate)}
+						continue
+					}
+					for _, chunk := range translatedChunks {
+						out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+					}
 					continue
 				}
 
-				if detail, ok := parseAntigravityStreamUsage(payload); ok {
-					reporter.publish(ctx, detail)
+				// Old translator (only when UseCanonicalTranslator is disabled)
+				if payload == nil {
+					continue
 				}
-
 				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bytes.Clone(payload), &param)
 				for i := range chunks {
 					out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 				}
 			}
-			tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, []byte("[DONE]"), &param)
-			for i := range tail {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(tail[i])}
+
+			// Send [DONE] only if using old translator (new translator handles finish events internally)
+			if !useNewTranslator {
+				tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, []byte("[DONE]"), &param)
+				for i := range tail {
+					out <- cliproxyexecutor.StreamChunk{Payload: []byte(tail[i])}
+				}
 			}
 			if errScan := scanner.Err(); errScan != nil {
 				recordAPIResponseError(ctx, e.cfg, errScan)
@@ -679,8 +746,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	to := sdktranslator.FromString("antigravity")
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 
-	isClaude := strings.Contains(strings.ToLower(req.Model), "claude")
-
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
@@ -699,7 +764,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		payload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 		payload = ApplyThinkingMetadataCLI(payload, req.Metadata, req.Model)
 		payload = util.ApplyDefaultThinkingIfNeededCLI(req.Model, req.Metadata, payload)
-		payload = normalizeAntigravityThinking(req.Model, payload, isClaude)
+		payload = normalizeAntigravityThinking(req.Model, payload, false)
 		payload = deleteJSONField(payload, "project")
 		payload = deleteJSONField(payload, "model")
 		payload = deleteJSONField(payload, "request.safetySettings")
@@ -882,6 +947,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 						modelInfo.MaxCompletionTokens = cfg.MaxCompletionTokens
 					}
 				}
+
 				models = append(models, modelInfo)
 			}
 		}
@@ -1159,10 +1225,12 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
 		return []string{base}
 	}
+	// Production endpoint first for better compatibility with standard GCP projects
+	// Staging/sandbox endpoints require special API enablement
 	return []string{
+		antigravityBaseURLProd,
 		antigravityBaseURLDaily,
 		antigravitySandboxBaseURLDaily,
-		antigravityBaseURLProd,
 	}
 }
 
@@ -1186,46 +1254,85 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
+// geminiToAntigravity converts Gemini CLI format to Antigravity format.
+// Optimized: single json.Unmarshal → in-memory modifications → single json.Marshal
+// The projectID parameter should be the real GCP project ID from auth metadata.
+// If empty, a random project ID will be generated (legacy fallback).
 func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
-	template, _ := sjson.Set(string(payload), "model", modelName)
-	template, _ = sjson.Set(template, "userAgent", "antigravity")
+	var root map[string]interface{}
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return payload
+	}
 
+	root["model"] = modelName
+	root["userAgent"] = "antigravity"
 	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
 	if projectID != "" {
-		template, _ = sjson.Set(template, "project", projectID)
+		root["project"] = projectID
 	} else {
-		template, _ = sjson.Set(template, "project", generateProjectID())
+		root["project"] = generateProjectID()
 	}
-	template, _ = sjson.Set(template, "requestId", generateRequestID())
-	template, _ = sjson.Set(template, "request.sessionId", generateStableSessionID(payload))
+	root["requestId"] = generateRequestID()
 
-	template, _ = sjson.Delete(template, "request.safetySettings")
-	template, _ = sjson.Set(template, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+	request, _ := root["request"].(map[string]interface{})
+	if request == nil {
+		request = make(map[string]interface{})
+		root["request"] = request
+	}
+	request["sessionId"] = generateStableSessionID(payload)
+	delete(request, "safetySettings")
 
-	if !strings.HasPrefix(modelName, "gemini-3-") {
-		if thinkingLevel := gjson.Get(template, "request.generationConfig.thinkingConfig.thinkingLevel"); thinkingLevel.Exists() {
-			template, _ = sjson.Delete(template, "request.generationConfig.thinkingConfig.thinkingLevel")
-			template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+	if genConfig, ok := request["generationConfig"].(map[string]interface{}); ok {
+		delete(genConfig, "maxOutputTokens")
+
+		// TODO: Fix GPT-OSS thinking mode - model gets stuck in infinite planning loops
+		// GPT-OSS models have issues with thinking mode - they repeatedly generate
+		// the same plan without executing actions. Temporarily disable thinking.
+		// See README_Fork.md "Antigravity Provider — UI Client Testing" for details.
+		if strings.HasPrefix(modelName, "gpt-oss") {
+			delete(genConfig, "thinkingConfig")
+		} else if !strings.HasPrefix(modelName, "gemini-3-") {
+			if tc, ok := genConfig["thinkingConfig"].(map[string]interface{}); ok {
+				if _, has := tc["thinkingLevel"]; has {
+					delete(tc, "thinkingLevel")
+					tc["thinkingBudget"] = -1
+				}
+			}
 		}
 	}
 
+	// Clean tools for Claude models
 	if strings.Contains(modelName, "claude") {
-		gjson.Get(template, "request.tools").ForEach(func(key, tool gjson.Result) bool {
-			tool.Get("functionDeclarations").ForEach(func(funKey, funcDecl gjson.Result) bool {
-				if funcDecl.Get("parametersJsonSchema").Exists() {
-					template, _ = sjson.SetRaw(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", key.Int(), funKey.Int()), funcDecl.Get("parametersJsonSchema").Raw)
-					template, _ = sjson.Delete(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters.$schema", key.Int(), funKey.Int()))
-					template, _ = sjson.Delete(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parametersJsonSchema", key.Int(), funKey.Int()))
+		if tools, ok := request["tools"].([]interface{}); ok {
+			for _, tool := range tools {
+				if tm, ok := tool.(map[string]interface{}); ok {
+					if fds, ok := tm["functionDeclarations"].([]interface{}); ok {
+						for _, fd := range fds {
+							if fdm, ok := fd.(map[string]interface{}); ok {
+								var schema map[string]interface{}
+								if s, ok := fdm["parametersJsonSchema"].(map[string]interface{}); ok {
+									schema = s
+								} else if s, ok := fdm["parameters"].(map[string]interface{}); ok {
+									schema = s
+								}
+								if schema != nil {
+									ir.CleanJsonSchemaForClaude(schema)
+									delete(schema, "$schema") // Must be after CleanJsonSchemaForClaude which adds $schema
+									fdm["parameters"] = schema
+									delete(fdm, "parametersJsonSchema")
+								}
+							}
+						}
+					}
 				}
-				return true
-			})
-			return true
-		})
-	} else {
-		template, _ = sjson.Delete(template, "request.generationConfig.maxOutputTokens")
+			}
+		}
 	}
 
-	return []byte(template)
+	if result, err := json.Marshal(root); err == nil {
+		return result
+	}
+	return payload
 }
 
 func generateRequestID() string {
@@ -1233,10 +1340,11 @@ func generateRequestID() string {
 }
 
 func generateSessionID() string {
-	randSourceMutex.Lock()
-	n := randSource.Int63n(9_000_000_000_000_000_000)
-	randSourceMutex.Unlock()
-	return "-" + strconv.FormatInt(n, 10)
+	// Use uuid for thread-safe random generation instead of math/rand
+	// Format: negative number string (mimics original behavior)
+	uuidStr := uuid.NewString()
+	// Convert first 16 hex chars to int64-like string
+	return "-" + uuidStr[:8] + uuidStr[9:13] + uuidStr[14:18]
 }
 
 func generateStableSessionID(payload []byte) string {
@@ -1259,10 +1367,10 @@ func generateStableSessionID(payload []byte) string {
 func generateProjectID() string {
 	adjectives := []string{"useful", "bright", "swift", "calm", "bold"}
 	nouns := []string{"fuze", "wave", "spark", "flow", "core"}
-	randSourceMutex.Lock()
-	adj := adjectives[randSource.Intn(len(adjectives))]
-	noun := nouns[randSource.Intn(len(nouns))]
-	randSourceMutex.Unlock()
+	// Use uuid bytes for thread-safe random selection
+	uuidBytes := []byte(uuid.NewString())
+	adj := adjectives[int(uuidBytes[0])%len(adjectives)]
+	noun := nouns[int(uuidBytes[1])%len(nouns)]
 	randomPart := strings.ToLower(uuid.NewString())[:5]
 	return adj + "-" + noun + "-" + randomPart
 }

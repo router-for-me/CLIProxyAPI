@@ -133,7 +133,10 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	body = util.ApplyDefaultThinkingIfNeeded(req.Model, body)
 	body = util.NormalizeGeminiThinkingBudget(req.Model, body)
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
-	body = fixGeminiImageAspectRatio(req.Model, body)
+	// Only apply fixGeminiImageAspectRatio if new translator is disabled (new translator handles it internally)
+	if e.cfg == nil || !e.cfg.UseCanonicalTranslator {
+		body = fixGeminiImageAspectRatio(req.Model, body)
+	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
 	body, _ = sjson.SetBytes(body, "model", req.Model)
 
@@ -335,7 +338,10 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 	body = util.ApplyDefaultThinkingIfNeeded(req.Model, body)
 	body = util.NormalizeGeminiThinkingBudget(req.Model, body)
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
-	body = fixGeminiImageAspectRatio(req.Model, body)
+	// Only apply fixGeminiImageAspectRatio if new translator is disabled (new translator handles it internally)
+	if e.cfg == nil || !e.cfg.UseCanonicalTranslator {
+		body = fixGeminiImageAspectRatio(req.Model, body)
+	}
 	body = applyPayloadConfig(e.cfg, req.Model, body)
 	body, _ = sjson.SetBytes(body, "model", req.Model)
 

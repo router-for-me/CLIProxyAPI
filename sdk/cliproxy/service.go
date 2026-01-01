@@ -105,6 +105,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewQwenAuthenticator(),
+		sdkAuth.NewClineAuthenticator(),
 	)
 }
 
@@ -379,6 +380,12 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "iflow":
 		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
+	case "cline":
+		s.coreManager.RegisterExecutor(executor.NewClineExecutor(s.cfg))
+	case "kiro":
+		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
+	case "copilot":
+		s.coreManager.RegisterExecutor(executor.NewGitHubCopilotExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -677,6 +684,7 @@ func (s *Service) ensureAuthDir() error {
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if a == nil || a.ID == "" {
+		log.Debugf("registerModelsForAuth: auth is nil or empty ID")
 		return
 	}
 	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
@@ -700,9 +708,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+	log.Debugf("registerModelsForAuth: normalized provider=%s", provider)
 	compatProviderKey, compatDisplayName, compatDetected := openAICompatInfoFromAuth(a)
 	if compatDetected {
 		provider = "openai-compatibility"
+		log.Debugf("registerModelsForAuth: detected compat provider key=%s, name=%s", compatProviderKey, compatDisplayName)
 	}
 	excluded := s.oauthExcludedModels(provider, authKind)
 	var models []*ModelInfo
@@ -765,8 +775,17 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "iflow":
 		models = registry.GetIFlowModels()
+	case "copilot":
+		models = registry.GetGitHubCopilotModels()
+		models = applyExcludedModels(models, excluded)
+	case "kiro":
+		models = registry.GetKiroModels()
+		models = applyExcludedModels(models, excluded)
+	case "cline":
+		models = registry.GetClineModels()
 		models = applyExcludedModels(models, excluded)
 	default:
+		log.Debugf("registerModelsForAuth: provider %s not matched, going to default", provider)
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
 			providerKey := provider

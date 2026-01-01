@@ -20,7 +20,7 @@ func NewGeminiAuthenticator() *GeminiAuthenticator {
 }
 
 func (a *GeminiAuthenticator) Provider() string {
-	return "gemini"
+	return "gemini-cli"
 }
 
 func (a *GeminiAuthenticator) RefreshLead() *time.Duration {

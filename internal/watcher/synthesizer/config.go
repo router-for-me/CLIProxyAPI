@@ -34,6 +34,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
+	// Kiro Keys
+	out = append(out, s.synthesizeKiroKeys(ctx)...)
 
 	return out, nil
 }
@@ -287,6 +289,63 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			Provider:   providerName,
 			Label:      "vertex-apikey",
 			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, nil, "apikey")
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeKiroKeys creates Auth entries for Kiro IDE keys from config.
+func (s *ConfigSynthesizer) synthesizeKiroKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.KiroKey))
+	for i := range cfg.KiroKey {
+		entry := cfg.KiroKey[i]
+		accessToken := strings.TrimSpace(entry.AccessToken)
+		refreshToken := strings.TrimSpace(entry.RefreshToken)
+		tokenFile := strings.TrimSpace(entry.TokenFile)
+
+		// Need at least one of: access token, refresh token, or token file
+		if accessToken == "" && refreshToken == "" && tokenFile == "" {
+			continue
+		}
+
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		idKind := "kiro:config"
+		id, token := idGen.Next(idKind, accessToken+refreshToken+tokenFile, "", proxyURL)
+
+		attrs := map[string]string{
+			"source": fmt.Sprintf("config:kiro-key[%s]", token),
+		}
+		if accessToken != "" {
+			attrs["access_token"] = accessToken
+		}
+		if refreshToken != "" {
+			attrs["refresh_token"] = refreshToken
+		}
+		if tokenFile != "" {
+			attrs["token_file"] = tokenFile
+		}
+		if entry.ProfileArn != "" {
+			attrs["profile_arn"] = entry.ProfileArn
+		}
+		if entry.Region != "" {
+			attrs["region"] = entry.Region
+		}
+
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "kiro",
+			Label:      "kiro-config",
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,

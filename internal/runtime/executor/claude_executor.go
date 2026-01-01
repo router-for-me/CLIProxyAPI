@@ -57,8 +57,23 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), stream)
-	body, _ = sjson.SetBytes(body, "model", model)
+	body, err := TranslateToClaude(e.cfg, from, req.Model, bytes.Clone(req.Payload), stream, req.Metadata)
+	if err != nil {
+		return resp, err
+	}
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
+	}
+	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
+		upstreamModel = modelOverride
+	} else if !strings.EqualFold(upstreamModel, req.Model) {
+		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+			upstreamModel = modelOverride
+		}
+	}
+	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	
 	// Inject thinking config based on model metadata for thinking variants
 	body = e.injectThinkingConfig(model, req.Metadata, body)
 
@@ -147,6 +162,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	} else {
 		reporter.publish(ctx, parseClaudeUsage(data))
 	}
+
+	// Try new translator first if enabled
+	if translatedResp, errTranslate := TranslateClaudeResponseNonStream(e.cfg, from, data, req.Model); errTranslate == nil && translatedResp != nil {
+		resp = cliproxyexecutor.Response{Payload: translatedResp}
+		return resp, nil
+	}
+
+	// Fallback to old translator
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: []byte(out)}
@@ -163,22 +186,36 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	defer reporter.trackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
-	model := req.Model
-	if override := e.resolveUpstreamModel(req.Model, auth); override != "" {
-		model = override
+	body, err := TranslateToClaude(e.cfg, from, req.Model, bytes.Clone(req.Payload), true, req.Metadata)
+	if err != nil {
+		return nil, err
 	}
-	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
-	body, _ = sjson.SetBytes(body, "model", model)
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
+	}
+	// model := req.Model  <-- Removed, using upstreamModel logic from HEAD
+	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
+		upstreamModel = modelOverride
+	} else if !strings.EqualFold(upstreamModel, req.Model) {
+		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+			upstreamModel = modelOverride
+		}
+	}
+	
+	// body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true) <-- Removed, using TranslateToClaude from HEAD
+	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	
 	// Inject thinking config based on model metadata for thinking variants
-	body = e.injectThinkingConfig(model, req.Metadata, body)
+	body = e.injectThinkingConfig(upstreamModel, req.Metadata, body)
 	body = checkSystemInstructions(body)
-	body = applyPayloadConfig(e.cfg, model, body)
+	body = applyPayloadConfig(e.cfg, upstreamModel, body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 
 	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
-	body = ensureMaxTokensForThinking(model, body)
+	body = ensureMaxTokensForThinking(upstreamModel, body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -271,12 +308,30 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+
+		// State for new translator
+		useNewTranslator := e.cfg != nil && e.cfg.UseCanonicalTranslator
+		messageID := "msg-" + req.Model
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := parseClaudeStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}
+
+			// Try new translator first if enabled
+			if useNewTranslator {
+				translatedChunks, errTranslate := TranslateClaudeResponseStream(e.cfg, from, bytes.Clone(line), req.Model, messageID, nil)
+				if errTranslate == nil && translatedChunks != nil {
+					for _, chunk := range translatedChunks {
+						out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+					}
+					continue
+				}
+			}
+
+			// Fallback to old translator
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(line), &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
@@ -302,14 +357,26 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	model := req.Model
-	if override := e.resolveUpstreamModel(req.Model, auth); override != "" {
-		model = override
+	body, err := TranslateToClaude(e.cfg, from, req.Model, bytes.Clone(req.Payload), stream, req.Metadata)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
 	}
-	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), stream)
-	body, _ = sjson.SetBytes(body, "model", model)
+	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
+	if upstreamModel == "" {
+		upstreamModel = req.Model
+	}
+	if modelOverride := e.resolveUpstreamModel(upstreamModel, auth); modelOverride != "" {
+		upstreamModel = modelOverride
+	} else if !strings.EqualFold(upstreamModel, req.Model) {
+		if modelOverride := e.resolveUpstreamModel(req.Model, auth); modelOverride != "" {
+			upstreamModel = modelOverride
+		}
+	}
+	
+	body = sdktranslator.TranslateRequest(from, to, upstreamModel, bytes.Clone(req.Payload), stream)
+	body, _ = sjson.SetBytes(body, "model", upstreamModel)
 
-	if !strings.HasPrefix(model, "claude-3-5-haiku") {
+	if !strings.HasPrefix(upstreamModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
 
@@ -683,6 +750,13 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		}
 	}
 
+	// Filter out context-1m beta feature only for OAuth authentication
+	// OAuth (free accounts) doesn't support long context, but API Key (paid) does
+	isOAuth := isOAuthAuthentication(auth)
+	if isOAuth {
+		baseBetas = filterContextBeta(baseBetas)
+	}
+
 	// Merge extra betas from request body
 	if len(extraBetas) > 0 {
 		existingSet := make(map[string]bool)
@@ -759,4 +833,39 @@ func checkSystemInstructions(payload []byte) []byte {
 		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
 	}
 	return payload
+}
+
+// isOAuthAuthentication checks if the auth is using OAuth (free account) vs API Key (paid).
+// OAuth uses access_token from Metadata, while API Key uses api_key from Attributes.
+func isOAuthAuthentication(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	// If api_key is set in Attributes, it's API Key authentication (paid)
+	if auth.Attributes != nil && auth.Attributes["api_key"] != "" {
+		return false
+	}
+	// If we're using access_token from Metadata, it's OAuth (free)
+	if auth.Metadata != nil {
+		if _, ok := auth.Metadata["access_token"].(string); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// filterContextBeta removes context-1m beta feature from comma-separated list.
+// This feature is incompatible with OAuth authentication style.
+func filterContextBeta(header string) string {
+	features := strings.Split(header, ",")
+	filtered := make([]string, 0, len(features))
+
+	for _, feature := range features {
+		trimmed := strings.TrimSpace(feature)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "context-1m") {
+			filtered = append(filtered, trimmed)
+		}
+	}
+
+	return strings.Join(filtered, ",")
 }

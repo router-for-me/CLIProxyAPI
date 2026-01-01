@@ -52,12 +52,14 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 	}
 	levelStr := fmt.Sprintf("%-5s", level)
 
+	// Handle nil Caller (can happen with some log entries)
 	var formatted string
 	if entry.Caller != nil {
 		formatted = fmt.Sprintf("[%s] [%s] [%s] [%s:%d] %s\n", timestamp, reqID, levelStr, filepath.Base(entry.Caller.File), entry.Caller.Line, message)
 	} else {
 		formatted = fmt.Sprintf("[%s] [%s] [%s] %s\n", timestamp, reqID, levelStr, message)
 	}
+	
 	buffer.WriteString(formatted)
 
 	return buffer.Bytes(), nil
@@ -68,6 +70,7 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 func SetupBaseLogger() {
 	setupOnce.Do(func() {
 		log.SetOutput(os.Stdout)
+		log.SetLevel(log.InfoLevel)
 		log.SetReportCaller(true)
 		log.SetFormatter(&LogFormatter{})
 
