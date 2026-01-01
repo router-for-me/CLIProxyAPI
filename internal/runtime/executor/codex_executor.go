@@ -56,13 +56,18 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), false)
 	body = ApplyReasoningEffortMetadata(body, req.Metadata, model, "reasoning.effort", false)
 	body = NormalizeThinkingConfig(body, model, false)
 	if errValidate := ValidateThinkingConfig(body, model); errValidate != nil {
 		return resp, errValidate
 	}
-	body = applyPayloadConfig(e.cfg, model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "model", model)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
@@ -156,6 +161,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
 
 	body = ApplyReasoningEffortMetadata(body, req.Metadata, model, "reasoning.effort", false)
@@ -163,7 +173,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if errValidate := ValidateThinkingConfig(body, model); errValidate != nil {
 		return nil, errValidate
 	}
-	body = applyPayloadConfig(e.cfg, model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.SetBytes(body, "model", model)
 

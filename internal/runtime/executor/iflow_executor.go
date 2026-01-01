@@ -56,6 +56,11 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
 	body, _ = sjson.SetBytes(body, "model", req.Model)
@@ -65,7 +70,7 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	body = applyIFlowThinkingConfig(body)
 	body = preserveReasoningContentInMessages(body)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
@@ -145,6 +150,11 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
 	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
@@ -160,7 +170,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if toolsResult.Exists() && toolsResult.IsArray() && len(toolsResult.Array()) == 0 {
 		body = ensureToolsArray(body)
 	}
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 

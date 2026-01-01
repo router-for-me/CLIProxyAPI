@@ -122,6 +122,11 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 	if budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(req.Model, req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
 		if budgetOverride != nil {
@@ -134,7 +139,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	body = util.NormalizeGeminiThinkingBudget(req.Model, body)
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
 	body = fixGeminiImageAspectRatio(req.Model, body)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "model", req.Model)
 
 	action := "generateContent"
@@ -225,6 +230,11 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), false)
 	if budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(model, req.Metadata); ok && util.ModelSupportsThinking(model) {
 		if budgetOverride != nil {
@@ -237,7 +247,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	body = util.NormalizeGeminiThinkingBudget(model, body)
 	body = util.StripThinkingConfigIfUnsupported(model, body)
 	body = fixGeminiImageAspectRatio(model, body)
-	body = applyPayloadConfig(e.cfg, model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "model", model)
 
 	action := "generateContent"
@@ -324,6 +334,11 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	if budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(req.Model, req.Metadata); ok && util.ModelSupportsThinking(req.Model) {
 		if budgetOverride != nil {
@@ -336,7 +351,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 	body = util.NormalizeGeminiThinkingBudget(req.Model, body)
 	body = util.StripThinkingConfigIfUnsupported(req.Model, body)
 	body = fixGeminiImageAspectRatio(req.Model, body)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "model", req.Model)
 
 	baseURL := vertexBaseURL(location)
@@ -444,6 +459,11 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
 	if budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(model, req.Metadata); ok && util.ModelSupportsThinking(model) {
 		if budgetOverride != nil {
@@ -456,7 +476,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	body = util.NormalizeGeminiThinkingBudget(model, body)
 	body = util.StripThinkingConfigIfUnsupported(model, body)
 	body = fixGeminiImageAspectRatio(model, body)
-	body = applyPayloadConfig(e.cfg, model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "model", model)
 
 	// For API key auth, use simpler URL format without project/location

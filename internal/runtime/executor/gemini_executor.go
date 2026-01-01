@@ -85,13 +85,18 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Official Gemini API via API key or OAuth bearer
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), false)
 	body = ApplyThinkingMetadata(body, req.Metadata, model)
 	body = util.ApplyDefaultThinkingIfNeeded(model, body)
 	body = util.NormalizeGeminiThinkingBudget(model, body)
 	body = util.StripThinkingConfigIfUnsupported(model, body)
 	body = fixGeminiImageAspectRatio(model, body)
-	body = applyPayloadConfig(e.cfg, model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "model", model)
 
 	action := "generateContent"
@@ -183,13 +188,18 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
 	body = ApplyThinkingMetadata(body, req.Metadata, model)
 	body = util.ApplyDefaultThinkingIfNeeded(model, body)
 	body = util.NormalizeGeminiThinkingBudget(model, body)
 	body = util.StripThinkingConfigIfUnsupported(model, body)
 	body = fixGeminiImageAspectRatio(model, body)
-	body = applyPayloadConfig(e.cfg, model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "model", model)
 
 	baseURL := resolveGeminiBaseURL(auth)

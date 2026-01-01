@@ -104,17 +104,11 @@ func ApplyReasoningEffortMetadata(payload []byte, metadata map[string]any, model
 	return payload
 }
 
-// applyPayloadConfig applies payload default and override rules from configuration
-// to the given JSON payload for the specified model.
-// Defaults only fill missing fields, while overrides always overwrite existing values.
-func applyPayloadConfig(cfg *config.Config, model string, payload []byte) []byte {
-	return applyPayloadConfigWithRoot(cfg, model, "", "", payload)
-}
-
 // applyPayloadConfigWithRoot behaves like applyPayloadConfig but treats all parameter
 // paths as relative to the provided root path (for example, "request" for Gemini CLI)
-// and restricts matches to the given protocol when supplied.
-func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload []byte) []byte {
+// and restricts matches to the given protocol when supplied. Defaults are checked
+// against the original payload when provided.
+func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
@@ -127,6 +121,11 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		return payload
 	}
 	out := payload
+	source := original
+	if len(source) == 0 {
+		source = payload
+	}
+	appliedDefaults := make(map[string]struct{})
 	// Apply default rules: first write wins per field across all matching rules.
 	for i := range rules.Default {
 		rule := &rules.Default[i]
@@ -138,7 +137,10 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			if fullPath == "" {
 				continue
 			}
-			if gjson.GetBytes(out, fullPath).Exists() {
+			if gjson.GetBytes(source, fullPath).Exists() {
+				continue
+			}
+			if _, ok := appliedDefaults[fullPath]; ok {
 				continue
 			}
 			updated, errSet := sjson.SetBytes(out, fullPath, value)
@@ -146,6 +148,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 				continue
 			}
 			out = updated
+			appliedDefaults[fullPath] = struct{}{}
 		}
 	}
 	// Apply override rules: last write wins per field across all matching rules.

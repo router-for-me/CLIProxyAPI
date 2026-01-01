@@ -77,6 +77,11 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
 	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 	basePayload = ApplyThinkingMetadataCLI(basePayload, req.Metadata, req.Model)
 	basePayload = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, basePayload)
@@ -84,7 +89,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	basePayload = util.NormalizeGeminiCLIThinkingBudget(req.Model, basePayload)
 	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
 	basePayload = fixGeminiCLIImageAspectRatio(req.Model, basePayload)
-	basePayload = applyPayloadConfigWithRoot(e.cfg, req.Model, "gemini", "request", basePayload)
+	basePayload = applyPayloadConfigWithRoot(e.cfg, req.Model, "gemini", "request", basePayload, originalTranslated)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -216,6 +221,11 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, true)
 	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	basePayload = ApplyThinkingMetadataCLI(basePayload, req.Metadata, req.Model)
 	basePayload = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, basePayload)
@@ -223,7 +233,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	basePayload = util.NormalizeGeminiCLIThinkingBudget(req.Model, basePayload)
 	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
 	basePayload = fixGeminiCLIImageAspectRatio(req.Model, basePayload)
-	basePayload = applyPayloadConfigWithRoot(e.cfg, req.Model, "gemini", "request", basePayload)
+	basePayload = applyPayloadConfigWithRoot(e.cfg, req.Model, "gemini", "request", basePayload, originalTranslated)
 
 	projectID := resolveGeminiProjectID(auth)
 
