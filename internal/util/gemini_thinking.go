@@ -251,9 +251,14 @@ func ThinkingBudgetToGemini3Level(model string, budget int) (string, bool) {
 
 // modelsWithDefaultThinking lists models that should have thinking enabled by default
 // when no explicit thinkingConfig is provided.
+// Note: Gemini 3 models are NOT included here because per Google's official documentation:
+//   - thinkingLevel defaults to "high" (dynamic thinking)
+//   - includeThoughts defaults to false
+//
+// We should not override these API defaults; let users explicitly configure if needed.
 var modelsWithDefaultThinking = map[string]bool{
-	"gemini-3-pro-preview":       true,
-	"gemini-3-pro-image-preview": true,
+	// "gemini-3-pro-preview":       true,
+	// "gemini-3-pro-image-preview": true,
 	// "gemini-3-flash-preview":     true,
 }
 
