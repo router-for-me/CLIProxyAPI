@@ -29,7 +29,7 @@ type authDirProvider interface {
 
 // writeExpectationSetter is implemented by stores that can receive write expectations.
 type writeExpectationSetter interface {
-	SetWriteExpectation(e interface{ ExpectWrite(path string, content []byte) })
+	SetWriteExpectation(e sdkAuth.WriteExpectation)
 }
 
 // Watcher manages file watching for configuration and authentication files
