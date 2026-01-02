@@ -2,6 +2,7 @@ package executor
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -151,8 +152,11 @@ func TestAppendToolsAsContentForCounting_PreservesOriginalContent(t *testing.T) 
 
 	// Verify tools are in the last content
 	lastText := contents[3].Get("parts.0.text").String()
-	if len(lastText) < 20 {
-		t.Errorf("expected tools content, got: %s", lastText)
+	if !strings.HasPrefix(lastText, toolDefinitionsPrefix) {
+		t.Fatalf("expected last content to have tool definitions prefix, got: %s", lastText)
+	}
+	if !gjson.Valid(lastText[len(toolDefinitionsPrefix):]) {
+		t.Errorf("expected tools JSON in last content text to be valid")
 	}
 }
 
