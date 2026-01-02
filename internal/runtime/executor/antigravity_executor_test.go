@@ -97,10 +97,10 @@ func TestAppendToolsAsContentForCounting(t *testing.T) {
 					t.Errorf("expected tools JSON in last content text")
 				}
 			} else {
-				// Should have only original content
-				inputContents := gjson.GetBytes([]byte(tt.input), "request.contents").Array()
-				if len(contentsArray) != len(inputContents) {
-					t.Errorf("expected %d content items, got %d", len(inputContents), len(contentsArray))
+				// Should have only original content - compare raw JSON to ensure unchanged
+				inputContentsRaw := gjson.GetBytes([]byte(tt.input), "request.contents").Raw
+				if contents.Raw != inputContentsRaw {
+					t.Errorf("expected contents to be unchanged, but was modified. got: %s, want: %s", contents.Raw, inputContentsRaw)
 				}
 			}
 		})
