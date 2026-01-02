@@ -1420,10 +1420,12 @@ func appendToolsAsContentForCounting(payload []byte) []byte {
 	contents := gjson.GetBytes(payload, "request.contents")
 	var contentsList []any
 	if contents.Exists() {
-		if err := json.Unmarshal([]byte(contents.Raw), &contentsList); err != nil {
-			log.Warnf("antigravity executor: failed to unmarshal request.contents for token counting, tools will not be counted. err: %v", err)
+		parsedContents, ok := contents.Value().([]any)
+		if !ok {
+			log.Warnf("antigravity executor: request.contents is not an array for token counting, tools will not be counted. contents: %s", contents.Raw)
 			return payload
 		}
+		contentsList = parsedContents
 	}
 	contentsList = append(contentsList, newPart)
 
