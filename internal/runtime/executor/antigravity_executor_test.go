@@ -126,15 +126,16 @@ func TestAppendToolsAsContentForCounting_PreservesOriginalContent(t *testing.T) 
 		t.Fatalf("expected 4 content items (3 original + 1 tools), got %d", len(contents))
 	}
 
-	// Verify original contents are preserved
-	if contents[0].Get("parts.0.text").String() != "first message" {
-		t.Errorf("first message not preserved")
-	}
-	if contents[1].Get("parts.0.text").String() != "response" {
-		t.Errorf("response not preserved")
-	}
-	if contents[2].Get("parts.0.text").String() != "second message" {
-		t.Errorf("second message not preserved")
+	// Verify original contents are preserved by comparing key fields
+	// Note: Raw JSON comparison doesn't work due to field reordering during serialization
+	inputContents := gjson.GetBytes([]byte(input), "request.contents").Array()
+	for i, expected := range inputContents {
+		if contents[i].Get("role").String() != expected.Get("role").String() {
+			t.Errorf("content at index %d role not preserved. got %s, want %s", i, contents[i].Get("role").String(), expected.Get("role").String())
+		}
+		if contents[i].Get("parts.0.text").String() != expected.Get("parts.0.text").String() {
+			t.Errorf("content at index %d text not preserved. got %s, want %s", i, contents[i].Get("parts.0.text").String(), expected.Get("parts.0.text").String())
+		}
 	}
 
 	// Verify tools are in the last content
