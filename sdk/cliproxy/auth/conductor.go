@@ -246,6 +246,41 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return auth.Clone(), nil
 }
 
+// UpdateFromFileChange updates auth state from external file changes.
+// Unlike Update(), this does NOT persist back to file to avoid write loops.
+// Use this when the update originates from fsnotify events.
+func (m *Manager) UpdateFromFileChange(ctx context.Context, auth *Auth) (*Auth, error) {
+	if auth == nil || auth.ID == "" {
+		return nil, nil
+	}
+	m.mu.Lock()
+	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
+		// Preserve runtime state that is not persisted to file
+		if !auth.indexAssigned && auth.Index == "" {
+			auth.Index = existing.Index
+			auth.indexAssigned = existing.indexAssigned
+		}
+		auth.LastRefreshedAt = existing.LastRefreshedAt
+		auth.NextRefreshAfter = existing.NextRefreshAfter
+		if auth.Runtime == nil {
+			auth.Runtime = existing.Runtime
+		}
+		if len(existing.ModelStates) > 0 && len(auth.ModelStates) == 0 {
+			copiedStates := make(map[string]*ModelState, len(existing.ModelStates))
+			for k, v := range existing.ModelStates {
+				copiedStates[k] = v.Clone()
+			}
+			auth.ModelStates = copiedStates
+		}
+	}
+	auth.EnsureIndex()
+	m.auths[auth.ID] = auth.Clone()
+	m.mu.Unlock()
+	// Do NOT call persist() - the file was just updated externally
+	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	return auth.Clone(), nil
+}
+
 // Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
 	m.mu.Lock()

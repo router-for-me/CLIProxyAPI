@@ -98,6 +98,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		// Wait briefly; if the path exists again, treat as an update instead of removal.
 		time.Sleep(replaceCheckDelay)
 		if _, statErr := os.Stat(event.Name); statErr == nil {
+			// File exists - check if this is our own write
+			if w.checkAndSkipSelfWrite(event.Name) {
+				return
+			}
 			if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
 				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 				return
@@ -115,6 +119,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+		// Check if this is our own write
+		if w.checkAndSkipSelfWrite(event.Name) {
+			return
+		}
 		if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
 			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 			return
@@ -122,6 +130,24 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 		w.addOrUpdateClient(event.Name)
 	}
+}
+
+// checkAndSkipSelfWrite reads the file and checks if content matches an expected write.
+// Returns true if this was a self-triggered write that should be skipped.
+func (w *Watcher) checkAndSkipSelfWrite(path string) bool {
+	if w.expectedWrites == nil {
+		return false
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || len(content) == 0 {
+		return false
+	}
+	normalized := w.normalizeAuthPath(path)
+	if w.expectedWrites.ConsumeIfExpected(normalized, content) {
+		log.Debugf("skipping self-triggered event for %s (content hash matched)", filepath.Base(path))
+		return true
+	}
+	return false
 }
 
 func (w *Watcher) authFileUnchanged(path string) (bool, error) {

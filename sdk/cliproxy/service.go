@@ -290,7 +290,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 			}
 			auth.ModelStates = copiedStates
 		}
-		if _, err := s.coreManager.Update(ctx, auth); err != nil {
+		if _, err := s.coreManager.UpdateFromFileChange(ctx, auth); err != nil {
 			log.Errorf("failed to update auth %s: %v", auth.ID, err)
 		}
 		return

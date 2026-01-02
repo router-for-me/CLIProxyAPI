@@ -14,17 +14,31 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+// WriteExpectation is called before writing to notify watchers about expected content.
+// This allows watchers to skip processing self-triggered fsnotify events.
+type WriteExpectation interface {
+	ExpectWrite(path string, content []byte)
+}
+
 // FileTokenStore persists token records and auth metadata using the filesystem as backing storage.
 type FileTokenStore struct {
-	mu      sync.Mutex
-	dirLock sync.RWMutex
-	baseDir string
+	mu               sync.Mutex
+	dirLock          sync.RWMutex
+	baseDir          string
+	writeExpectation WriteExpectation
 }
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
 // TokenStorage implementation embedded in the token record.
 func NewFileTokenStore() *FileTokenStore {
 	return &FileTokenStore{}
+}
+
+// SetWriteExpectation sets the callback to notify watchers before writing files.
+func (s *FileTokenStore) SetWriteExpectation(e WriteExpectation) {
+	s.mu.Lock()
+	s.writeExpectation = e
+	s.mu.Unlock()
 }
 
 // SetBaseDir updates the default directory used for auth JSON persistence when no explicit path is provided.
@@ -79,6 +93,10 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			}
 		} else if errRead != nil && !os.IsNotExist(errRead) {
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
+		}
+		// Register expected content hash BEFORE writing, so watcher can skip self-triggered events
+		if s.writeExpectation != nil {
+			s.writeExpectation.ExpectWrite(path, raw)
 		}
 		tmp := path + ".tmp"
 		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
@@ -295,9 +313,9 @@ func metadataEqualIgnoringTimestamps(a, b []byte) bool {
 
 	// Fields to ignore: these change on every refresh but don't affect authentication logic.
 	// - timestamp, expired, expires_in, last_refresh: time-related fields that change on refresh
-	// - access_token: Google OAuth returns a new access_token on each refresh, this is expected
-	//   and shouldn't trigger file writes (the new token will be fetched again when needed)
-	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh", "access_token"}
+	// Note: access_token and refresh_token must NOT be ignored, as they need to be persisted
+	// to disk along with the new expiry time to prevent infinite refresh loops.
+	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh"}
 	for _, field := range ignoredFields {
 		delete(objA, field)
 		delete(objB, field)

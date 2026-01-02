@@ -27,6 +27,11 @@ type authDirProvider interface {
 	AuthDir() string
 }
 
+// writeExpectationSetter is implemented by stores that can receive write expectations.
+type writeExpectationSetter interface {
+	SetWriteExpectation(e interface{ ExpectWrite(path string, content []byte) })
+}
+
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
 	configPath        string
@@ -51,6 +56,7 @@ type Watcher struct {
 	storePersister    storePersister
 	mirroredAuthDir   string
 	oldConfigYaml     []byte
+	expectedWrites    *ExpectedWriteTracker
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -89,6 +95,7 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 		reloadCallback: reloadCallback,
 		watcher:        watcher,
 		lastAuthHashes: make(map[string]string),
+		expectedWrites: NewExpectedWriteTracker(),
 	}
 	w.dispatchCond = sync.NewCond(&w.dispatchMu)
 	if store := sdkAuth.GetTokenStore(); store != nil {
@@ -101,6 +108,11 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 				w.mirroredAuthDir = fixed
 				log.Debugf("mirrored auth directory locked to %s", fixed)
 			}
+		}
+		// Register watcher as write expectation receiver to skip self-triggered events
+		if setter, ok := store.(writeExpectationSetter); ok {
+			setter.SetWriteExpectation(w)
+			log.Debug("registered watcher as write expectation receiver for token store")
 		}
 	}
 	return w, nil
@@ -144,4 +156,25 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	cfg := w.config
 	w.clientsMutex.RUnlock()
 	return snapshotCoreAuths(cfg, w.authDir)
+}
+
+// ExpectWrite registers an expected file write by content hash.
+// Call this BEFORE writing to the file. When watcher receives the fsnotify event,
+// it will check if the content matches an expected hash and skip processing if so.
+func (w *Watcher) ExpectWrite(path string, content []byte) {
+	if w == nil || w.expectedWrites == nil {
+		return
+	}
+	normalized := w.normalizeAuthPath(path)
+	w.expectedWrites.ExpectContent(normalized, content)
+}
+
+// ConsumeExpectedWrite checks if file content matches an expected write.
+// Returns true if this was a self-triggered write (and consumes the expectation).
+func (w *Watcher) ConsumeExpectedWrite(path string, content []byte) bool {
+	if w == nil || w.expectedWrites == nil {
+		return false
+	}
+	normalized := w.normalizeAuthPath(path)
+	return w.expectedWrites.ConsumeIfExpected(normalized, content)
 }
