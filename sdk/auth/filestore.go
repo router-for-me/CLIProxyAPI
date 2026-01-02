@@ -295,9 +295,9 @@ func metadataEqualIgnoringTimestamps(a, b []byte) bool {
 
 	// Fields to ignore: these change on every refresh but don't affect authentication logic.
 	// - timestamp, expired, expires_in, last_refresh: time-related fields that change on refresh
-	// - access_token: Google OAuth returns a new access_token on each refresh, this is expected
-	//   and shouldn't trigger file writes (the new token will be fetched again when needed)
-	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh", "access_token"}
+	// Note: access_token and refresh_token must NOT be ignored, as they need to be persisted
+	// to disk along with the new expiry time to prevent infinite refresh loops.
+	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh"}
 	for _, field := range ignoredFields {
 		delete(objA, field)
 		delete(objB, field)
