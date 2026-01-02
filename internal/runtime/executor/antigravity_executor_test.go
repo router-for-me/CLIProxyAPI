@@ -93,7 +93,7 @@ func TestAppendToolsAsContentForCounting(t *testing.T) {
 				if lastText == "" {
 					t.Errorf("expected last content to have text with tools, got empty")
 				}
-				if !gjson.Valid(lastText[len("[Tool Definitions]\n"):]) {
+				if !gjson.Valid(lastText[len(toolDefinitionsPrefix):]) {
 					t.Errorf("expected tools JSON in last content text")
 				}
 			} else {

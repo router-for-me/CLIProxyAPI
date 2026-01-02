@@ -45,6 +45,9 @@ const (
 	defaultAntigravityAgent        = "antigravity/1.104.0 darwin/arm64"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
+
+	// toolDefinitionsPrefix is the prefix used when appending tools as content for token counting.
+	toolDefinitionsPrefix = "[Tool Definitions]\n"
 )
 
 var (
@@ -1409,7 +1412,7 @@ func appendToolsAsContentForCounting(payload []byte) []byte {
 	newPart := map[string]any{
 		"role": "user",
 		"parts": []map[string]any{
-			{"text": "[Tool Definitions]\n" + toolsText},
+			{"text": toolDefinitionsPrefix + toolsText},
 		},
 	}
 
