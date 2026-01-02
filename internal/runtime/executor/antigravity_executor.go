@@ -1418,6 +1418,7 @@ func appendToolsAsContentForCounting(payload []byte) []byte {
 	var contentsList []any
 	if contents.Exists() {
 		if err := json.Unmarshal([]byte(contents.Raw), &contentsList); err != nil {
+			log.Warnf("antigravity executor: failed to unmarshal request.contents for token counting, tools will not be counted. err: %v", err)
 			return payload
 		}
 	}
@@ -1426,11 +1427,15 @@ func appendToolsAsContentForCounting(payload []byte) []byte {
 	// Update payload with new contents
 	updated, err := sjson.SetBytes(payload, "request.contents", contentsList)
 	if err != nil {
+		log.Warnf("antigravity executor: failed to set updated request.contents for token counting, tools will not be counted. err: %v", err)
 		return payload
 	}
 
 	// Remove original tools field (already counted as content)
-	updated, _ = sjson.DeleteBytes(updated, "request.tools")
+	updated, errDel := sjson.DeleteBytes(updated, "request.tools")
+	if errDel != nil {
+		log.Warnf("antigravity executor: failed to delete original request.tools field: %v", errDel)
+	}
 
 	return updated
 }

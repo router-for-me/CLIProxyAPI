@@ -46,6 +46,17 @@ func TestAppendToolsAsContentForCounting(t *testing.T) {
 			wantToolsInContent:    false,
 			wantToolsFieldRemoved: false,
 		},
+		{
+			name: "payload with invalid contents type - should return unchanged",
+			input: `{
+				"request": {
+					"contents": "not-an-array",
+					"tools": [{"functionDeclarations": [{"name": "test_tool"}]}]
+				}
+			}`,
+			wantToolsInContent:    false,
+			wantToolsFieldRemoved: false,
+		},
 	}
 
 	for _, tt := range tests {
