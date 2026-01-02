@@ -137,21 +137,21 @@ func TestExpectedWriteTracker_Concurrent(t *testing.T) {
 	// Concurrent writes
 	for i := range iterations {
 		wg.Add(1)
-		go func() {
+		go func(n int) {
 			defer wg.Done()
-			content := []byte{byte(i)}
+			content := []byte{byte(n)}
 			tracker.ExpectContent(testPathCredentials, content)
-		}()
+		}(i)
 	}
 
 	// Concurrent reads/consumes
 	for i := range iterations {
 		wg.Add(1)
-		go func() {
+		go func(n int) {
 			defer wg.Done()
-			content := []byte{byte(i)}
+			content := []byte{byte(n)}
 			tracker.ConsumeIfExpected(testPathCredentials, content)
-		}()
+		}(i)
 	}
 
 	// Concurrent clears

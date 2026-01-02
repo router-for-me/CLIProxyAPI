@@ -280,10 +280,6 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	s.registerModelsForAuth(auth)
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok && existing != nil {
 		auth.CreatedAt = existing.CreatedAt
-		auth.LastRefreshedAt = existing.LastRefreshedAt
-		auth.NextRefreshAfter = existing.NextRefreshAfter
-		// Preserve runtime state that is not persisted to file (deep copy)
-		auth.ModelStates = coreauth.CloneModelStates(existing.ModelStates)
 		if _, err := s.coreManager.UpdateFromFileChange(ctx, auth); err != nil {
 			log.Errorf("failed to update auth %s: %v", auth.ID, err)
 		}
