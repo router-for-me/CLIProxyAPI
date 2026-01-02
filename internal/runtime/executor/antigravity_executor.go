@@ -1431,12 +1431,15 @@ func appendToolsAsContentForCounting(payload []byte) []byte {
 		return payload
 	}
 
-	// Remove original tools field (already counted as content)
-	updated, errDel := sjson.DeleteBytes(updated, "request.tools")
+	// Remove original tools field (already counted as content).
+	// On failure, return 'updated' (with tools appended) rather than 'payload' (original).
+	// This ensures token counting remains accurate since the API currently ignores
+	// the tools field anyway. Returning 'payload' would discard our appended content.
+	result, errDel := sjson.DeleteBytes(updated, "request.tools")
 	if errDel != nil {
-		log.Warnf("antigravity executor: failed to delete original request.tools for token counting, tools will not be counted. err: %v", errDel)
-		return payload
+		log.Warnf("antigravity executor: failed to delete original request.tools for token counting. The field will be left in, which may cause issues with future API versions. err: %v", errDel)
+		return updated
 	}
 
-	return updated
+	return result
 }
