@@ -45,117 +45,31 @@ func TestParseAntigravityRetryDelay_LargeDuration(t *testing.T) {
 	}
 }
 
-func TestParseAntigravityRetryDelay_EmptyBody(t *testing.T) {
-	result := parseAntigravityRetryDelay(nil)
-	if result != nil {
-		t.Errorf("Expected nil for empty body, got %v", *result)
+func TestParseAntigravityRetryDelay_NegativeCases(t *testing.T) {
+	testCases := []struct {
+		name string
+		body []byte
+	}{
+		{"nil body", nil},
+		{"empty body", []byte{}},
+		{"no details field", []byte(`{"error": {"code": 429, "message": "Resource exhausted"}}`)},
+		{"empty details array", []byte(`{"error": {"details": []}}`)},
+		{"wrong @type", []byte(`{"error": {"details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT"}]}}`)},
+		{"empty retryDelay", []byte(`{"error": {"details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": ""}]}}`)},
+		{"invalid duration format", []byte(`{"error": {"details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "invalid"}]}}`)},
+		{"zero duration", []byte(`{"error": {"details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0s"}]}}`)},
+		{"negative duration", []byte(`{"error": {"details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "-5s"}]}}`)},
+		{"invalid json", []byte(`{invalid json`)},
+		{"details not array", []byte(`{"error": {"details": "not an array"}}`)},
 	}
 
-	result = parseAntigravityRetryDelay([]byte{})
-	if result != nil {
-		t.Errorf("Expected nil for empty byte slice, got %v", *result)
-	}
-}
-
-func TestParseAntigravityRetryDelay_NoErrorDetails(t *testing.T) {
-	body := []byte(`{
-		"error": {
-			"code": 429,
-			"message": "Resource exhausted"
-		}
-	}`)
-
-	result := parseAntigravityRetryDelay(body)
-	if result != nil {
-		t.Errorf("Expected nil when no details field, got %v", *result)
-	}
-}
-
-func TestParseAntigravityRetryDelay_EmptyDetails(t *testing.T) {
-	body := []byte(`{
-		"error": {
-			"details": []
-		}
-	}`)
-
-	result := parseAntigravityRetryDelay(body)
-	if result != nil {
-		t.Errorf("Expected nil for empty details array, got %v", *result)
-	}
-}
-
-func TestParseAntigravityRetryDelay_WrongType(t *testing.T) {
-	body := []byte(`{
-		"error": {
-			"details": [
-				{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT"}
-			]
-		}
-	}`)
-
-	result := parseAntigravityRetryDelay(body)
-	if result != nil {
-		t.Errorf("Expected nil when @type doesn't match RetryInfo, got %v", *result)
-	}
-}
-
-func TestParseAntigravityRetryDelay_EmptyRetryDelay(t *testing.T) {
-	body := []byte(`{
-		"error": {
-			"details": [
-				{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": ""}
-			]
-		}
-	}`)
-
-	result := parseAntigravityRetryDelay(body)
-	if result != nil {
-		t.Errorf("Expected nil for empty retryDelay, got %v", *result)
-	}
-}
-
-func TestParseAntigravityRetryDelay_InvalidDurationFormat(t *testing.T) {
-	body := []byte(`{
-		"error": {
-			"details": [
-				{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "invalid"}
-			]
-		}
-	}`)
-
-	result := parseAntigravityRetryDelay(body)
-	if result != nil {
-		t.Errorf("Expected nil for invalid duration format, got %v", *result)
-	}
-}
-
-func TestParseAntigravityRetryDelay_ZeroDuration(t *testing.T) {
-	body := []byte(`{
-		"error": {
-			"details": [
-				{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0s"}
-			]
-		}
-	}`)
-
-	result := parseAntigravityRetryDelay(body)
-	if result != nil {
-		t.Errorf("Expected nil for zero duration, got %v", *result)
-	}
-}
-
-func TestParseAntigravityRetryDelay_NegativeDuration(t *testing.T) {
-	body := []byte(`{
-		"error": {
-			"details": [
-				{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "-5s"}
-			]
-		}
-	}`)
-
-	result := parseAntigravityRetryDelay(body)
-	if result != nil {
-		t.Errorf("Expected nil for negative duration, got %v", *result)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := parseAntigravityRetryDelay(tc.body)
+			if result != nil {
+				t.Errorf("Expected nil, got %v", *result)
+			}
+		})
 	}
 }
 
@@ -177,28 +91,6 @@ func TestParseAntigravityRetryDelay_MultipleDetails(t *testing.T) {
 	expected := 30 * time.Second
 	if *result != expected {
 		t.Errorf("Expected %v, got %v", expected, *result)
-	}
-}
-
-func TestParseAntigravityRetryDelay_InvalidJSON(t *testing.T) {
-	body := []byte(`{invalid json`)
-
-	result := parseAntigravityRetryDelay(body)
-	if result != nil {
-		t.Errorf("Expected nil for invalid JSON, got %v", *result)
-	}
-}
-
-func TestParseAntigravityRetryDelay_DetailsNotArray(t *testing.T) {
-	body := []byte(`{
-		"error": {
-			"details": "not an array"
-		}
-	}`)
-
-	result := parseAntigravityRetryDelay(body)
-	if result != nil {
-		t.Errorf("Expected nil when details is not an array, got %v", *result)
 	}
 }
 

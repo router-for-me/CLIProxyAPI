@@ -139,7 +139,11 @@ func (w *Watcher) checkAndSkipSelfWrite(path string) bool {
 		return false
 	}
 	content, err := os.ReadFile(path)
-	if err != nil || len(content) == 0 {
+	if err != nil {
+		log.Debugf("watcher: failed to read file for self-write check on %s: %v", filepath.Base(path), err)
+		return false
+	}
+	if len(content) == 0 {
 		return false
 	}
 	normalized := w.normalizeAuthPath(path)

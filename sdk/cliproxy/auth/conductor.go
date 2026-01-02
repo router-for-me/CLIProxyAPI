@@ -230,12 +230,8 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			auth.indexAssigned = existing.indexAssigned
 		}
 		// Preserve runtime state that is not persisted (deep copy)
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-			copiedStates := make(map[string]*ModelState, len(existing.ModelStates))
-			for k, v := range existing.ModelStates {
-				copiedStates[k] = v.Clone()
-			}
-			auth.ModelStates = copiedStates
+		if len(auth.ModelStates) == 0 {
+			auth.ModelStates = CloneModelStates(existing.ModelStates)
 		}
 	}
 	auth.EnsureIndex()
@@ -265,12 +261,8 @@ func (m *Manager) UpdateFromFileChange(ctx context.Context, auth *Auth) (*Auth, 
 		if auth.Runtime == nil {
 			auth.Runtime = existing.Runtime
 		}
-		if len(existing.ModelStates) > 0 && len(auth.ModelStates) == 0 {
-			copiedStates := make(map[string]*ModelState, len(existing.ModelStates))
-			for k, v := range existing.ModelStates {
-				copiedStates[k] = v.Clone()
-			}
-			auth.ModelStates = copiedStates
+		if len(auth.ModelStates) == 0 {
+			auth.ModelStates = CloneModelStates(existing.ModelStates)
 		}
 	}
 	auth.EnsureIndex()

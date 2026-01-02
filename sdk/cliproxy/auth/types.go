@@ -180,6 +180,19 @@ func (m *ModelState) Clone() *ModelState {
 	return &copyState
 }
 
+// CloneModelStates creates a deep copy of a ModelStates map.
+// Returns nil if the input map is empty or nil.
+func CloneModelStates(states map[string]*ModelState) map[string]*ModelState {
+	if len(states) == 0 {
+		return nil
+	}
+	copied := make(map[string]*ModelState, len(states))
+	for k, v := range states {
+		copied[k] = v.Clone()
+	}
+	return copied
+}
+
 func (a *Auth) ProxyInfo() string {
 	if a == nil {
 		return ""
