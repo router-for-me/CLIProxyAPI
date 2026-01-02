@@ -57,6 +57,17 @@ func TestAppendToolsAsContentForCounting(t *testing.T) {
 			wantToolsInContent:    false,
 			wantToolsFieldRemoved: false,
 		},
+		{
+			name: "payload with null contents - should append tools",
+			input: `{
+				"request": {
+					"contents": null,
+					"tools": [{"functionDeclarations": [{"name": "test_tool"}]}]
+				}
+			}`,
+			wantToolsInContent:    true,
+			wantToolsFieldRemoved: true,
+		},
 	}
 
 	for _, tt := range tests {

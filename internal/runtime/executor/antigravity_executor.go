@@ -1419,7 +1419,7 @@ func appendToolsAsContentForCounting(payload []byte) []byte {
 	// Append to existing contents
 	contents := gjson.GetBytes(payload, "request.contents")
 	var contentsList []any
-	if contents.Exists() {
+	if contents.Exists() && contents.Type != gjson.Null {
 		parsedContents, ok := contents.Value().([]any)
 		if !ok {
 			log.Warnf("antigravity executor: request.contents is not an array for token counting, tools will not be counted. contents: %s", contents.Raw)
