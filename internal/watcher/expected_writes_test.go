@@ -135,7 +135,7 @@ func TestExpectedWriteTracker_Concurrent(t *testing.T) {
 	iterations := 100
 
 	// Concurrent writes
-	for i := range iterations {
+	for i := 0; i < iterations; i++ {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -145,7 +145,7 @@ func TestExpectedWriteTracker_Concurrent(t *testing.T) {
 	}
 
 	// Concurrent reads/consumes
-	for i := range iterations {
+	for i := 0; i < iterations; i++ {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -155,7 +155,7 @@ func TestExpectedWriteTracker_Concurrent(t *testing.T) {
 	}
 
 	// Concurrent clears
-	for range 10 {
+	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
