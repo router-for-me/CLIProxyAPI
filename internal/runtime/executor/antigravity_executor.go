@@ -1400,7 +1400,7 @@ func antigravityMinThinkingBudget(model string) int {
 // See: https://github.com/router-for-me/CLIProxyAPI/issues/840
 func appendToolsAsContentForCounting(payload []byte) []byte {
 	tools := gjson.GetBytes(payload, "request.tools")
-	if !tools.Exists() || len(tools.Array()) == 0 {
+	if !tools.Exists() || !tools.IsArray() || tools.Get("#").Int() == 0 {
 		return payload
 	}
 
