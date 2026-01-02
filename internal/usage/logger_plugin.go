@@ -187,6 +187,14 @@ var defaultRequestStatistics = NewRequestStatistics()
 // GetRequestStatistics returns the shared statistics store.
 func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics }
 
+// SaveStatistics writes the shared statistics store to disk.
+func SaveStatistics() error {
+	if defaultRequestStatistics == nil {
+		return nil
+	}
+	return defaultRequestStatistics.Save(statsFileName)
+}
+
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
