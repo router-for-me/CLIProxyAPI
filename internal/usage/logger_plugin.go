@@ -5,6 +5,8 @@ package usage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -21,6 +23,7 @@ import (
 )
 
 var statisticsEnabled atomic.Bool
+var statisticsRedactDetails atomic.Bool
 
 // statsFileName defines the location of the stats file.
 const statsFileName = "usage_stats.json"
@@ -28,6 +31,7 @@ const maxRequestDetails = 500
 
 func init() {
 	statisticsEnabled.Store(true)
+	statisticsRedactDetails.Store(false)
 	coreusage.RegisterPlugin(NewLoggerPlugin())
 
 	// Automatically load existing data if the file exists
@@ -84,6 +88,17 @@ func SetStatisticsEnabled(enabled bool) { statisticsEnabled.Store(enabled) }
 
 // StatisticsEnabled reports the current recording state.
 func StatisticsEnabled() bool { return statisticsEnabled.Load() }
+
+// SetStatisticsRedactDetails toggles whether sensitive request details are redacted.
+func SetStatisticsRedactDetails(enabled bool) {
+	previous := statisticsRedactDetails.Swap(enabled)
+	if enabled && !previous {
+		defaultRequestStatistics.RedactSensitiveDetails()
+	}
+}
+
+// StatisticsRedactDetails reports the current redaction state.
+func StatisticsRedactDetails() bool { return statisticsRedactDetails.Load() }
 
 // RequestStatistics maintains aggregated request metrics in memory.
 type RequestStatistics struct {
@@ -199,9 +214,9 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	detail := normaliseDetail(record.Detail)
 	totalTokens := detail.TotalTokens
-	statsKey := record.APIKey
-	if statsKey == "" {
-		statsKey = resolveAPIIdentifier(ctx, record)
+	statsKey := resolveStatisticsKey(ctx, record)
+	if statisticsRedactDetails.Load() {
+		statsKey = redactAPIIdentifier(statsKey)
 	}
 	failed := record.Failed
 	if !failed {
@@ -232,13 +247,18 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		stats = &apiStats{Models: make(map[string]*modelStats)}
 		s.apis[statsKey] = stats
 	}
-	s.updateAPIStats(stats, modelName, RequestDetail{
+	requestDetail := RequestDetail{
 		Timestamp: timestamp,
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
 		Tokens:    detail,
 		Failed:    failed,
-	})
+	}
+	if statisticsRedactDetails.Load() {
+		requestDetail.Source = ""
+		requestDetail.AuthIndex = ""
+	}
+	s.updateAPIStats(stats, modelName, requestDetail)
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
@@ -278,7 +298,11 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	result.TotalTokens = s.totalTokens
 
 	result.APIs = make(map[string]APISnapshot, len(s.apis))
+	redact := statisticsRedactDetails.Load()
 	for apiName, stats := range s.apis {
+		if redact {
+			apiName = redactAPIIdentifier(apiName)
+		}
 		apiSnapshot := APISnapshot{
 			TotalRequests: stats.TotalRequests,
 			TotalTokens:   stats.TotalTokens,
@@ -287,6 +311,12 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		for modelName, modelStatsValue := range stats.Models {
 			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
 			copy(requestDetails, modelStatsValue.Details)
+			if redact {
+				for i := range requestDetails {
+					requestDetails[i].Source = ""
+					requestDetails[i].AuthIndex = ""
+				}
+			}
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
@@ -469,7 +499,7 @@ func (s *RequestStatistics) Save(filename string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filename, data, 0644)
+	return os.WriteFile(filename, data, 0600)
 }
 
 // Load reads statistics from a JSON file and restores the state.
@@ -570,6 +600,13 @@ func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
 	return "unknown"
 }
 
+func resolveStatisticsKey(ctx context.Context, record coreusage.Record) string {
+	if record.APIKey != "" {
+		return record.APIKey
+	}
+	return resolveAPIIdentifier(ctx, record)
+}
+
 func resolveSuccess(ctx context.Context) bool {
 	if ctx == nil {
 		return true
@@ -625,6 +662,65 @@ func trimRequestDetails(details []RequestDetail) []RequestDetail {
 	trimmed := make([]RequestDetail, maxRequestDetails)
 	copy(trimmed, details[start:])
 	return trimmed
+}
+
+func redactAPIIdentifier(identifier string) string {
+	if strings.HasPrefix(identifier, "redacted-") {
+		return identifier
+	}
+	sum := sha256.Sum256([]byte(identifier))
+	return "redacted-" + hex.EncodeToString(sum[:])
+}
+
+// RedactSensitiveDetails removes sensitive identifiers from stored usage statistics.
+func (s *RequestStatistics) RedactSensitiveDetails() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	redactedAPIs := make(map[string]*apiStats, len(s.apis))
+	for apiName, stats := range s.apis {
+		redactedKey := redactAPIIdentifier(apiName)
+		if stats == nil {
+			continue
+		}
+		for _, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			for i := range modelStatsValue.Details {
+				modelStatsValue.Details[i].Source = ""
+				modelStatsValue.Details[i].AuthIndex = ""
+			}
+		}
+		existing, ok := redactedAPIs[redactedKey]
+		if !ok {
+			redactedAPIs[redactedKey] = stats
+			continue
+		}
+		existing.TotalRequests += stats.TotalRequests
+		existing.TotalTokens += stats.TotalTokens
+		if existing.Models == nil {
+			existing.Models = make(map[string]*modelStats)
+		}
+		for modelName, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			existingModel, ok := existing.Models[modelName]
+			if !ok {
+				existing.Models[modelName] = modelStatsValue
+				continue
+			}
+			existingModel.TotalRequests += modelStatsValue.TotalRequests
+			existingModel.TotalTokens += modelStatsValue.TotalTokens
+			existingModel.Details = append(existingModel.Details, modelStatsValue.Details...)
+			existingModel.Details = trimRequestDetails(existingModel.Details)
+		}
+	}
+	s.apis = redactedAPIs
 }
 
 func formatHour(hour int) string {

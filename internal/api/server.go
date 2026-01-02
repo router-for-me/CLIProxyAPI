@@ -881,6 +881,15 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
+	if oldCfg == nil || oldCfg.UsageStatisticsRedactDetails != cfg.UsageStatisticsRedactDetails {
+		usage.SetStatisticsRedactDetails(cfg.UsageStatisticsRedactDetails)
+		if oldCfg != nil {
+			log.Debugf("usage_statistics_redact_details updated from %t to %t", oldCfg.UsageStatisticsRedactDetails, cfg.UsageStatisticsRedactDetails)
+		} else {
+			log.Debugf("usage_statistics_redact_details toggled to %t", cfg.UsageStatisticsRedactDetails)
+		}
+	}
+
 	if oldCfg == nil || oldCfg.DisableCooling != cfg.DisableCooling {
 		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 		if oldCfg != nil {
