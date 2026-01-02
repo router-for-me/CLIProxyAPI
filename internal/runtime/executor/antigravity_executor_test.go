@@ -80,9 +80,11 @@ func TestAppendToolsAsContentForCounting(t *testing.T) {
 
 			contentsArray := contents.Array()
 			if tt.wantToolsInContent {
-				// Should have 2 content items: original + tools
-				if len(contentsArray) < 2 {
-					t.Errorf("expected at least 2 content items, got %d", len(contentsArray))
+				// Should have original content items + tools
+				inputContents := gjson.GetBytes([]byte(tt.input), "request.contents").Array()
+				expectedLen := len(inputContents) + 1
+				if len(contentsArray) != expectedLen {
+					t.Errorf("expected %d content items, got %d", expectedLen, len(contentsArray))
 				}
 
 				// Last content item should contain tool definitions
