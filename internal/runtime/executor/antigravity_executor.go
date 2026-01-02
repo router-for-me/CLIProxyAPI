@@ -719,6 +719,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		payload = deleteJSONField(payload, "model")
 		payload = deleteJSONField(payload, "request.safetySettings")
 
+		// Append tools as content text so the API counts their tokens
+		// See: https://github.com/router-for-me/CLIProxyAPI/issues/840
+		payload = appendToolsAsContentForCounting(payload)
+
 		base := strings.TrimSuffix(baseURL, "/")
 		if base == "" {
 			base = buildBaseURL(auth)
@@ -1385,4 +1389,48 @@ func antigravityMinThinkingBudget(model string) int {
 		return modelInfo.Thinking.Min
 	}
 	return -1
+}
+
+// appendToolsAsContentForCounting extracts tools from the payload and appends
+// them as a text content part so the Antigravity API counts their tokens.
+// The API's countTokens endpoint only counts contents, ignoring the tools field.
+// See: https://github.com/router-for-me/CLIProxyAPI/issues/840
+func appendToolsAsContentForCounting(payload []byte) []byte {
+	tools := gjson.GetBytes(payload, "request.tools")
+	if !tools.Exists() || len(tools.Array()) == 0 {
+		return payload
+	}
+
+	// Serialize tools to JSON text
+	toolsText := tools.Raw
+
+	// Create a new content part with tools as text
+	// Use "user" role with a prefix to clearly identify this as tool definitions
+	newPart := map[string]any{
+		"role": "user",
+		"parts": []map[string]any{
+			{"text": "[Tool Definitions]\n" + toolsText},
+		},
+	}
+
+	// Append to existing contents
+	contents := gjson.GetBytes(payload, "request.contents")
+	var contentsList []any
+	if contents.Exists() {
+		if err := json.Unmarshal([]byte(contents.Raw), &contentsList); err != nil {
+			return payload
+		}
+	}
+	contentsList = append(contentsList, newPart)
+
+	// Update payload with new contents
+	updated, err := sjson.SetBytes(payload, "request.contents", contentsList)
+	if err != nil {
+		return payload
+	}
+
+	// Remove original tools field (already counted as content)
+	updated, _ = sjson.DeleteBytes(updated, "request.tools")
+
+	return updated
 }
