@@ -39,9 +39,12 @@ func (w *Watcher) start(ctx context.Context) error {
 	}
 	log.Debugf("watching auth directory: %s", w.authDir)
 
-	go w.processEvents(ctx)
-
+	// Initialize hash cache BEFORE starting event processing to avoid race condition.
+	// Otherwise, fsnotify events triggered by adding watches may arrive before
+	// lastAuthHashes is populated, causing spurious "auth file changed" logs.
 	w.reloadClients(true, nil, false)
+
+	go w.processEvents(ctx)
 	return nil
 }
 
