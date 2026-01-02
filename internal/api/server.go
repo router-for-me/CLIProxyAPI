@@ -494,6 +494,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-statistics-enabled", s.mgmt.GetUsageStatisticsEnabled)
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
+		
+		mgmt.GET("/usage-statistics-redact-details", s.mgmt.GetUsageStatisticsRedactDetails)
+		mgmt.PUT("/usage-statistics-redact-details", s.mgmt.PutUsageStatisticsRedactDetails)
+		mgmt.PATCH("/usage-statistics-redact-details", s.mgmt.PutUsageStatisticsRedactDetails)
 
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
