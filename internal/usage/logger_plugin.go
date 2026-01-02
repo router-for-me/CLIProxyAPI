@@ -442,14 +442,7 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 		s.successCount++
 	}
 	s.totalTokens += totalTokens
-
 	s.updateAPIStats(stats, modelName, detail)
-	if stats != nil && stats.Models != nil {
-		if modelStatsValue, ok := stats.Models[modelName]; ok && modelStatsValue != nil {
-			modelStatsValue.Details = trimRequestDetails(modelStatsValue.Details)
-		}
-	}
-
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()
 	minuteKey := detail.Timestamp.Format("2006-01-02 15:04")
