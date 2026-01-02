@@ -534,8 +534,8 @@ func (s *RequestStatistics) Restore(snapshot StatisticsSnapshot) {
 			Models:        make(map[string]*modelStats),
 		}
 		for modelName, modelSnap := range apiSnap.Models {
-			// Details from file are nil due to optimization.
-			// Initialize empty slice to collect new requests in memory.
+			// Details from the file are a trimmed list of recent requests due to optimization.
+			// Initialize a new slice for details to ensure the loaded stats are independent.
 			details := make([]RequestDetail, 0)
 			if len(modelSnap.Details) > 0 {
 				details = make([]RequestDetail, len(modelSnap.Details))
