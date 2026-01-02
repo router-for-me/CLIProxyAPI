@@ -1,11 +1,12 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	baseauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth"
@@ -15,8 +16,8 @@ import (
 type Auth struct {
 	// ID uniquely identifies the auth record across restarts.
 	ID string `json:"id"`
-	// Index is a monotonically increasing runtime identifier used for diagnostics.
-	Index uint64 `json:"-"`
+	// Index is a stable runtime identifier derived from auth metadata (not persisted).
+	Index string `json:"-"`
 	// Provider is the upstream provider key (e.g. "gemini", "claude").
 	Provider string `json:"provider"`
 	// Prefix optionally namespaces models for routing (e.g., "teamA/gemini-3-pro-preview").
@@ -94,12 +95,6 @@ type ModelState struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-var authIndexCounter atomic.Uint64
-
-func nextAuthIndex() uint64 {
-	return authIndexCounter.Add(1) - 1
-}
-
 // Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.
 func (a *Auth) Clone() *Auth {
 	if a == nil {
@@ -128,15 +123,41 @@ func (a *Auth) Clone() *Auth {
 	return &copyAuth
 }
 
-// EnsureIndex returns the global index, assigning one if it was not set yet.
-func (a *Auth) EnsureIndex() uint64 {
-	if a == nil {
-		return 0
+func stableAuthIndex(seed string) string {
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		return ""
 	}
-	if a.indexAssigned {
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:8])
+}
+
+// EnsureIndex returns a stable index derived from the auth file name or API key.
+func (a *Auth) EnsureIndex() string {
+	if a == nil {
+		return ""
+	}
+	if a.indexAssigned && a.Index != "" {
 		return a.Index
 	}
-	idx := nextAuthIndex()
+
+	seed := strings.TrimSpace(a.FileName)
+	if seed != "" {
+		seed = "file:" + seed
+	} else if a.Attributes != nil {
+		if apiKey := strings.TrimSpace(a.Attributes["api_key"]); apiKey != "" {
+			seed = "api_key:" + apiKey
+		}
+	}
+	if seed == "" {
+		if id := strings.TrimSpace(a.ID); id != "" {
+			seed = "id:" + id
+		} else {
+			return ""
+		}
+	}
+
+	idx := stableAuthIndex(seed)
 	a.Index = idx
 	a.indexAssigned = true
 	return idx

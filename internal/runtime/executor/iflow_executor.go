@@ -56,18 +56,21 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" {
-		body, _ = sjson.SetBytes(body, "model", upstreamModel)
-	}
-	body = NormalizeThinkingConfig(body, upstreamModel, false)
-	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
+	body, _ = sjson.SetBytes(body, "model", req.Model)
+	body = NormalizeThinkingConfig(body, req.Model, false)
+	if errValidate := ValidateThinkingConfig(body, req.Model); errValidate != nil {
 		return resp, errValidate
 	}
 	body = applyIFlowThinkingConfig(body)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = preserveReasoningContentInMessages(body)
+	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
@@ -147,24 +150,27 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 
 	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" {
-		body, _ = sjson.SetBytes(body, "model", upstreamModel)
-	}
-	body = NormalizeThinkingConfig(body, upstreamModel, false)
-	if errValidate := ValidateThinkingConfig(body, upstreamModel); errValidate != nil {
+	body, _ = sjson.SetBytes(body, "model", req.Model)
+	body = NormalizeThinkingConfig(body, req.Model, false)
+	if errValidate := ValidateThinkingConfig(body, req.Model); errValidate != nil {
 		return nil, errValidate
 	}
 	body = applyIFlowThinkingConfig(body)
+	body = preserveReasoningContentInMessages(body)
 	// Ensure tools array exists to avoid provider quirks similar to Qwen's behaviour.
 	toolsResult := gjson.GetBytes(body, "tools")
 	if toolsResult.Exists() && toolsResult.IsArray() && len(toolsResult.Array()) == 0 {
 		body = ensureToolsArray(body)
 	}
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
@@ -445,20 +451,85 @@ func ensureToolsArray(body []byte) []byte {
 	return updated
 }
 
-// applyIFlowThinkingConfig converts normalized reasoning_effort to iFlow chat_template_kwargs.enable_thinking.
+// preserveReasoningContentInMessages checks if reasoning_content from assistant messages
+// is preserved in conversation history for iFlow models that support thinking.
+// This is helpful for multi-turn conversations where the model may benefit from seeing
+// its previous reasoning to maintain coherent thought chains.
+//
+// For GLM-4.6/4.7 and MiniMax M2/M2.1, it is recommended to include the full assistant
+// response (including reasoning_content) in message history for better context continuity.
+func preserveReasoningContentInMessages(body []byte) []byte {
+	model := strings.ToLower(gjson.GetBytes(body, "model").String())
+
+	// Only apply to models that support thinking with history preservation
+	needsPreservation := strings.HasPrefix(model, "glm-4") || strings.HasPrefix(model, "minimax-m2")
+
+	if !needsPreservation {
+		return body
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	// Check if any assistant message already has reasoning_content preserved
+	hasReasoningContent := false
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		role := msg.Get("role").String()
+		if role == "assistant" {
+			rc := msg.Get("reasoning_content")
+			if rc.Exists() && rc.String() != "" {
+				hasReasoningContent = true
+				return false // stop iteration
+			}
+		}
+		return true
+	})
+
+	// If reasoning content is already present, the messages are properly formatted
+	// No need to modify - the client has correctly preserved reasoning in history
+	if hasReasoningContent {
+		log.Debugf("iflow executor: reasoning_content found in message history for %s", model)
+	}
+
+	return body
+}
+
+// applyIFlowThinkingConfig converts normalized reasoning_effort to model-specific thinking configurations.
 // This should be called after NormalizeThinkingConfig has processed the payload.
-// iFlow only supports boolean enable_thinking, so any non-"none" effort enables thinking.
+//
+// Model-specific handling:
+//   - GLM-4.6/4.7: Uses chat_template_kwargs.enable_thinking (boolean) and chat_template_kwargs.clear_thinking=false
+//   - MiniMax M2/M2.1: Uses reasoning_split=true for OpenAI-style reasoning separation
 func applyIFlowThinkingConfig(body []byte) []byte {
 	effort := gjson.GetBytes(body, "reasoning_effort")
 	if !effort.Exists() {
 		return body
 	}
 
+	model := strings.ToLower(gjson.GetBytes(body, "model").String())
 	val := strings.ToLower(strings.TrimSpace(effort.String()))
 	enableThinking := val != "none" && val != ""
 
+	// Remove reasoning_effort as we'll convert to model-specific format
 	body, _ = sjson.DeleteBytes(body, "reasoning_effort")
-	body, _ = sjson.SetBytes(body, "chat_template_kwargs.enable_thinking", enableThinking)
+	body, _ = sjson.DeleteBytes(body, "thinking")
+
+	// GLM-4.6/4.7: Use chat_template_kwargs
+	if strings.HasPrefix(model, "glm-4") {
+		body, _ = sjson.SetBytes(body, "chat_template_kwargs.enable_thinking", enableThinking)
+		if enableThinking {
+			body, _ = sjson.SetBytes(body, "chat_template_kwargs.clear_thinking", false)
+		}
+		return body
+	}
+
+	// MiniMax M2/M2.1: Use reasoning_split
+	if strings.HasPrefix(model, "minimax-m2") {
+		body, _ = sjson.SetBytes(body, "reasoning_split", enableThinking)
+		return body
+	}
 
 	return body
 }

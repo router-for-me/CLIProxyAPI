@@ -53,20 +53,21 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// Translate inbound request to OpenAI format
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), opts.Stream)
 	modelOverride := e.resolveUpstreamModel(req.Model, auth)
 	if modelOverride != "" {
 		translated = e.overrideModel(translated, modelOverride)
 	}
-	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
+	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated, originalTranslated)
 	allowCompat := e.allowCompatReasoningEffort(req.Model, auth)
 	translated = ApplyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" && modelOverride == "" {
-		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
-	}
-	translated = NormalizeThinkingConfig(translated, upstreamModel, allowCompat)
-	if errValidate := ValidateThinkingConfig(translated, upstreamModel); errValidate != nil {
+	translated = NormalizeThinkingConfig(translated, req.Model, allowCompat)
+	if errValidate := ValidateThinkingConfig(translated, req.Model); errValidate != nil {
 		return resp, errValidate
 	}
 
@@ -149,20 +150,21 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	modelOverride := e.resolveUpstreamModel(req.Model, auth)
 	if modelOverride != "" {
 		translated = e.overrideModel(translated, modelOverride)
 	}
-	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated)
+	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", translated, originalTranslated)
 	allowCompat := e.allowCompatReasoningEffort(req.Model, auth)
 	translated = ApplyReasoningEffortMetadata(translated, req.Metadata, req.Model, "reasoning_effort", allowCompat)
-	upstreamModel := util.ResolveOriginalModel(req.Model, req.Metadata)
-	if upstreamModel != "" && modelOverride == "" {
-		translated, _ = sjson.SetBytes(translated, "model", upstreamModel)
-	}
-	translated = NormalizeThinkingConfig(translated, upstreamModel, allowCompat)
-	if errValidate := ValidateThinkingConfig(translated, upstreamModel); errValidate != nil {
+	translated = NormalizeThinkingConfig(translated, req.Model, allowCompat)
+	if errValidate := ValidateThinkingConfig(translated, req.Model); errValidate != nil {
 		return nil, errValidate
 	}
 

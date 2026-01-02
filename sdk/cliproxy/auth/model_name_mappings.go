@@ -65,17 +65,14 @@ func (m *Manager) SetOAuthModelMappings(mappings map[string][]internalconfig.Mod
 	m.modelNameMappings.Store(table)
 }
 
-func (m *Manager) applyOAuthModelMappingMetadata(auth *Auth, requestedModel string, metadata map[string]any) map[string]any {
-	original := m.resolveOAuthUpstreamModel(auth, requestedModel)
-	if original == "" {
-		return metadata
-	}
-	if metadata != nil {
-		if v, ok := metadata[util.ModelMappingOriginalModelMetadataKey]; ok {
-			if s, okStr := v.(string); okStr && strings.EqualFold(s, original) {
-				return metadata
-			}
-		}
+// applyOAuthModelMapping resolves the upstream model from OAuth model mappings
+// and returns the resolved model along with updated metadata. If a mapping exists,
+// the returned model is the upstream model and metadata contains the original
+// requested model for response translation.
+func (m *Manager) applyOAuthModelMapping(auth *Auth, requestedModel string, metadata map[string]any) (string, map[string]any) {
+	upstreamModel := m.resolveOAuthUpstreamModel(auth, requestedModel)
+	if upstreamModel == "" {
+		return requestedModel, metadata
 	}
 	out := make(map[string]any, 1)
 	if len(metadata) > 0 {
@@ -84,8 +81,10 @@ func (m *Manager) applyOAuthModelMappingMetadata(auth *Auth, requestedModel stri
 			out[k] = v
 		}
 	}
-	out[util.ModelMappingOriginalModelMetadataKey] = original
-	return out
+	// Store the requested alias (e.g., "gp") so downstream can use it to look up
+	// model metadata from the global registry where it was registered under this alias.
+	out[util.ModelMappingOriginalModelMetadataKey] = requestedModel
+	return upstreamModel, out
 }
 
 func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) string {

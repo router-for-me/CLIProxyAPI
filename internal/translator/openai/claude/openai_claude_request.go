@@ -118,76 +118,125 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			// Handle content
 			if contentResult.Exists() && contentResult.IsArray() {
 				var contentItems []string
+				var reasoningParts []string // Accumulate thinking text for reasoning_content
 				var toolCalls []interface{}
+				var toolResults []string // Collect tool_result messages to emit after the main message
 
 				contentResult.ForEach(func(_, part gjson.Result) bool {
 					partType := part.Get("type").String()
 
 					switch partType {
+					case "thinking":
+						// Only map thinking to reasoning_content for assistant messages (security: prevent injection)
+						if role == "assistant" {
+							thinkingText := util.GetThinkingText(part)
+							// Skip empty or whitespace-only thinking
+							if strings.TrimSpace(thinkingText) != "" {
+								reasoningParts = append(reasoningParts, thinkingText)
+							}
+						}
+						// Ignore thinking in user/system roles (AC4)
+
+					case "redacted_thinking":
+						// Explicitly ignore redacted_thinking - never map to reasoning_content (AC2)
+
 					case "text", "image":
 						if contentItem, ok := convertClaudeContentPart(part); ok {
 							contentItems = append(contentItems, contentItem)
 						}
 
 					case "tool_use":
-						// Convert to OpenAI tool call format
-						toolCallJSON := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
-						toolCallJSON, _ = sjson.Set(toolCallJSON, "id", part.Get("id").String())
-						toolCallJSON, _ = sjson.Set(toolCallJSON, "function.name", part.Get("name").String())
+						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
+						if role == "assistant" {
+							toolCallJSON := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
+							toolCallJSON, _ = sjson.Set(toolCallJSON, "id", part.Get("id").String())
+							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.name", part.Get("name").String())
 
-						// Convert input to arguments JSON string
-						if input := part.Get("input"); input.Exists() {
-							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.arguments", input.Raw)
-						} else {
-							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.arguments", "{}")
+							// Convert input to arguments JSON string
+							if input := part.Get("input"); input.Exists() {
+								toolCallJSON, _ = sjson.Set(toolCallJSON, "function.arguments", input.Raw)
+							} else {
+								toolCallJSON, _ = sjson.Set(toolCallJSON, "function.arguments", "{}")
+							}
+
+							toolCalls = append(toolCalls, gjson.Parse(toolCallJSON).Value())
 						}
 
-						toolCalls = append(toolCalls, gjson.Parse(toolCallJSON).Value())
-
 					case "tool_result":
-						// Convert to OpenAI tool message format and add immediately to preserve order
+						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
 						toolResultJSON := `{"role":"tool","tool_call_id":"","content":""}`
 						toolResultJSON, _ = sjson.Set(toolResultJSON, "tool_call_id", part.Get("tool_use_id").String())
-						toolResultJSON, _ = sjson.Set(toolResultJSON, "content", part.Get("content").String())
-						messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(toolResultJSON).Value())
+						toolResultJSON, _ = sjson.Set(toolResultJSON, "content", convertClaudeToolResultContentToString(part.Get("content")))
+						toolResults = append(toolResults, toolResultJSON)
 					}
 					return true
 				})
 
-				// Emit text/image content as one message
-				if len(contentItems) > 0 {
-					msgJSON := `{"role":"","content":""}`
-					msgJSON, _ = sjson.Set(msgJSON, "role", role)
-
-					contentArrayJSON := "[]"
-					for _, contentItem := range contentItems {
-						contentArrayJSON, _ = sjson.SetRaw(contentArrayJSON, "-1", contentItem)
-					}
-					msgJSON, _ = sjson.SetRaw(msgJSON, "content", contentArrayJSON)
-
-					contentValue := gjson.Get(msgJSON, "content")
-					hasContent := false
-					switch {
-					case !contentValue.Exists():
-						hasContent = false
-					case contentValue.Type == gjson.String:
-						hasContent = contentValue.String() != ""
-					case contentValue.IsArray():
-						hasContent = len(contentValue.Array()) > 0
-					default:
-						hasContent = contentValue.Raw != "" && contentValue.Raw != "null"
-					}
-
-					if hasContent {
-						messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(msgJSON).Value())
-					}
+				// Build reasoning content string
+				reasoningContent := ""
+				if len(reasoningParts) > 0 {
+					reasoningContent = strings.Join(reasoningParts, "\n\n")
 				}
 
-				// Emit tool calls in a separate assistant message
-				if role == "assistant" && len(toolCalls) > 0 {
-					toolCallMsgJSON := `{"role":"assistant","tool_calls":[]}`
-					toolCallMsgJSON, _ = sjson.Set(toolCallMsgJSON, "tool_calls", toolCalls)
-					messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(toolCallMsgJSON).Value())
+				hasContent := len(contentItems) > 0
+				hasReasoning := reasoningContent != ""
+				hasToolCalls := len(toolCalls) > 0
+				hasToolResults := len(toolResults) > 0
+
+				// OpenAI requires: tool messages MUST immediately follow the assistant message with tool_calls.
+				// Therefore, we emit tool_result messages FIRST (they respond to the previous assistant's tool_calls),
+				// then emit the current message's content.
+				for _, toolResultJSON := range toolResults {
+					messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(toolResultJSON).Value())
+				}
+
+				// For assistant messages: emit a single unified message with content, tool_calls, and reasoning_content
+				// This avoids splitting into multiple assistant messages which breaks OpenAI tool-call adjacency
+				if role == "assistant" {
+					if hasContent || hasReasoning || hasToolCalls {
+						msgJSON := `{"role":"assistant"}`
+
+						// Add content (as array if we have items, empty string if reasoning-only)
+						if hasContent {
+							contentArrayJSON := "[]"
+							for _, contentItem := range contentItems {
+								contentArrayJSON, _ = sjson.SetRaw(contentArrayJSON, "-1", contentItem)
+							}
+							msgJSON, _ = sjson.SetRaw(msgJSON, "content", contentArrayJSON)
+						} else {
+							// Ensure content field exists for OpenAI compatibility
+							msgJSON, _ = sjson.Set(msgJSON, "content", "")
+						}
+
+						// Add reasoning_content if present
+						if hasReasoning {
+							msgJSON, _ = sjson.Set(msgJSON, "reasoning_content", reasoningContent)
+						}
+
+						// Add tool_calls if present (in same message as content)
+						if hasToolCalls {
+							msgJSON, _ = sjson.Set(msgJSON, "tool_calls", toolCalls)
+						}
+
+						messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(msgJSON).Value())
+					}
+				} else {
+					// For non-assistant roles: emit content message if we have content
+					// If the message only contains tool_results (no text/image), we still processed them above
+					if hasContent {
+						msgJSON := `{"role":""}`
+						msgJSON, _ = sjson.Set(msgJSON, "role", role)
+
+						contentArrayJSON := "[]"
+						for _, contentItem := range contentItems {
+							contentArrayJSON, _ = sjson.SetRaw(contentArrayJSON, "-1", contentItem)
+						}
+						msgJSON, _ = sjson.SetRaw(msgJSON, "content", contentArrayJSON)
+
+						messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(msgJSON).Value())
+					} else if hasToolResults && !hasContent {
+						// tool_results already emitted above, no additional user message needed
+					}
 				}
 
 			} else if contentResult.Exists() && contentResult.Type == gjson.String {
@@ -306,4 +355,44 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func convertClaudeToolResultContentToString(content gjson.Result) string {
+	if !content.Exists() {
+		return ""
+	}
+
+	if content.Type == gjson.String {
+		return content.String()
+	}
+
+	if content.IsArray() {
+		var parts []string
+		content.ForEach(func(_, item gjson.Result) bool {
+			switch {
+			case item.Type == gjson.String:
+				parts = append(parts, item.String())
+			case item.IsObject() && item.Get("text").Exists() && item.Get("text").Type == gjson.String:
+				parts = append(parts, item.Get("text").String())
+			default:
+				parts = append(parts, item.Raw)
+			}
+			return true
+		})
+
+		joined := strings.Join(parts, "\n\n")
+		if strings.TrimSpace(joined) != "" {
+			return joined
+		}
+		return content.Raw
+	}
+
+	if content.IsObject() {
+		if text := content.Get("text"); text.Exists() && text.Type == gjson.String {
+			return text.String()
+		}
+		return content.Raw
+	}
+
+	return content.Raw
 }

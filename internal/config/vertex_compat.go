@@ -42,6 +42,9 @@ type VertexCompatModel struct {
 	Alias string `yaml:"alias" json:"alias"`
 }
 
+func (m VertexCompatModel) GetName() string  { return m.Name }
+func (m VertexCompatModel) GetAlias() string { return m.Alias }
+
 // SanitizeVertexCompatKeys deduplicates and normalizes Vertex-compatible API key credentials.
 func (cfg *Config) SanitizeVertexCompatKeys() {
 	if cfg == nil {

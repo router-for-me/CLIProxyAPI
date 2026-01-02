@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -459,7 +458,7 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 			continue
 		}
 		auth.EnsureIndex()
-		if strconv.FormatUint(auth.Index, 10) == authIndex {
+		if auth.Index == authIndex {
 			return auth
 		}
 	}
