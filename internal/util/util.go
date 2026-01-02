@@ -4,8 +4,8 @@
 package util
 
 import (
+	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -93,36 +93,23 @@ func ResolveAuthDir(authDir string) (string, error) {
 	return filepath.Clean(authDir), nil
 }
 
-// CountAuthFiles returns the number of JSON auth files located under the provided directory.
-// The function resolves leading tildes to the user's home directory and performs a case-insensitive
-// match on the ".json" suffix so that files saved with uppercase extensions are also counted.
-func CountAuthFiles(authDir string) int {
-	dir, err := ResolveAuthDir(authDir)
+// CountAuthFiles returns the number of auth records available through the provided Store.
+// For filesystem-backed stores, this reflects the number of JSON auth files under the configured directory.
+func CountAuthFiles[T any](ctx context.Context, store interface {
+	List(context.Context) ([]T, error)
+}) int {
+	if store == nil {
+		return 0
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	entries, err := store.List(ctx)
 	if err != nil {
-		log.Debugf("countAuthFiles: failed to resolve auth directory: %v", err)
+		log.Debugf("countAuthFiles: failed to list auth records: %v", err)
 		return 0
 	}
-	if dir == "" {
-		return 0
-	}
-	count := 0
-	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			log.Debugf("countAuthFiles: error accessing %s: %v", path, err)
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
-			count++
-		}
-		return nil
-	})
-	if walkErr != nil {
-		log.Debugf("countAuthFiles: walk error: %v", walkErr)
-	}
-	return count
+	return len(entries)
 }
 
 // WritablePath returns the cleaned WRITABLE_PATH environment variable when it is set.

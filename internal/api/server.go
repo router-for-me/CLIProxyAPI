@@ -33,6 +33,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
@@ -987,8 +988,12 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		log.Warnf("amp module is nil, skipping config update")
 	}
 
-	// Count client sources from configuration and auth directory
-	authFiles := util.CountAuthFiles(cfg.AuthDir)
+	// Count client sources from configuration and auth store.
+	tokenStore := sdkAuth.GetTokenStore()
+	if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok {
+		dirSetter.SetBaseDir(cfg.AuthDir)
+	}
+	authEntries := util.CountAuthFiles(context.Background(), tokenStore)
 	geminiAPIKeyCount := len(cfg.GeminiKey)
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
 	codexAPIKeyCount := len(cfg.CodexKey)
@@ -999,10 +1004,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
-	total := authFiles + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth files + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
+	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
+	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
 		total,
-		authFiles,
+		authEntries,
 		geminiAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,

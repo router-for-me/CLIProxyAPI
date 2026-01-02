@@ -4,6 +4,7 @@
 package registry
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -84,6 +85,13 @@ type ModelRegistration struct {
 	SuspendedClients map[string]string
 }
 
+// ModelRegistryHook provides optional callbacks for external integrations to track model list changes.
+// Hook implementations must be non-blocking and resilient; calls are executed asynchronously and panics are recovered.
+type ModelRegistryHook interface {
+	OnModelsRegistered(ctx context.Context, provider, clientID string, models []*ModelInfo)
+	OnModelsUnregistered(ctx context.Context, provider, clientID string)
+}
+
 // ModelRegistry manages the global registry of available models
 type ModelRegistry struct {
 	// models maps model ID to registration information
@@ -97,6 +105,8 @@ type ModelRegistry struct {
 	clientProviders map[string]string
 	// mutex ensures thread-safe access to the registry
 	mutex *sync.RWMutex
+	// hook is an optional callback sink for model registration changes
+	hook ModelRegistryHook
 }
 
 // Global model registry instance
@@ -115,6 +125,53 @@ func GetGlobalRegistry() *ModelRegistry {
 		}
 	})
 	return globalRegistry
+}
+
+// SetHook sets an optional hook for observing model registration changes.
+func (r *ModelRegistry) SetHook(hook ModelRegistryHook) {
+	if r == nil {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.hook = hook
+}
+
+const defaultModelRegistryHookTimeout = 5 * time.Second
+
+func (r *ModelRegistry) triggerModelsRegistered(provider, clientID string, models []*ModelInfo) {
+	hook := r.hook
+	if hook == nil {
+		return
+	}
+	modelsCopy := cloneModelInfosUnique(models)
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Errorf("model registry hook OnModelsRegistered panic: %v", recovered)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
+		defer cancel()
+		hook.OnModelsRegistered(ctx, provider, clientID, modelsCopy)
+	}()
+}
+
+func (r *ModelRegistry) triggerModelsUnregistered(provider, clientID string) {
+	hook := r.hook
+	if hook == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Errorf("model registry hook OnModelsUnregistered panic: %v", recovered)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
+		defer cancel()
+		hook.OnModelsUnregistered(ctx, provider, clientID)
+	}()
 }
 
 // RegisterClient registers a client and its supported models
@@ -177,6 +234,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		} else {
 			delete(r.clientProviders, clientID)
 		}
+		r.triggerModelsRegistered(provider, clientID, models)
 		log.Debugf("Registered client %s from provider %s with %d models", clientID, clientProvider, len(rawModelIDs))
 		misc.LogCredentialSeparator()
 		return
@@ -310,6 +368,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		delete(r.clientProviders, clientID)
 	}
 
+	r.triggerModelsRegistered(provider, clientID, models)
 	if len(added) == 0 && len(removed) == 0 && !providerChanged {
 		// Only metadata (e.g., display name) changed; skip separator when no log output.
 		return
@@ -400,6 +459,25 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	return &copyModel
 }
 
+func cloneModelInfosUnique(models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+	cloned := make([]*ModelInfo, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil || model.ID == "" {
+			continue
+		}
+		if _, exists := seen[model.ID]; exists {
+			continue
+		}
+		seen[model.ID] = struct{}{}
+		cloned = append(cloned, cloneModelInfo(model))
+	}
+	return cloned
+}
+
 // UnregisterClient removes a client and decrements counts for its models
 // Parameters:
 //   - clientID: Unique identifier for the client to remove
@@ -460,6 +538,7 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 	log.Debugf("Unregistered client %s", clientID)
 	// Separator line after completing client unregistration (after the summary line)
 	misc.LogCredentialSeparator()
+	r.triggerModelsUnregistered(provider, clientID)
 }
 
 // SetModelQuotaExceeded marks a model as quota exceeded for a specific client
