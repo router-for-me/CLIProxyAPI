@@ -14,18 +14,21 @@ import (
 // When watcher receives an event, it checks if the hash matches an expected write.
 type ExpectedWriteTracker struct {
 	mu       sync.Mutex
-	expected map[string]map[string]struct{} // normalized path -> set of expected hashes
+	expected map[string]string // normalized path -> expected content hash
 }
 
 // NewExpectedWriteTracker creates a new tracker instance.
 func NewExpectedWriteTracker() *ExpectedWriteTracker {
 	return &ExpectedWriteTracker{
-		expected: make(map[string]map[string]struct{}),
+		expected: make(map[string]string),
 	}
 }
 
 // ExpectContent registers an expected file content hash.
 // Call this BEFORE writing the file.
+// This replaces any previous hash for the path, ensuring that:
+// 1. Multiple fsnotify events from the same write all match
+// 2. Old hashes are automatically cleaned up on new writes
 func (t *ExpectedWriteTracker) ExpectContent(normalizedPath string, content []byte) {
 	if t == nil {
 		return
@@ -35,15 +38,16 @@ func (t *ExpectedWriteTracker) ExpectContent(normalizedPath string, content []by
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if t.expected[normalizedPath] == nil {
-		t.expected[normalizedPath] = make(map[string]struct{})
-	}
-	t.expected[normalizedPath][hash] = struct{}{}
+	// Replace: only keep the latest hash for this path.
+	t.expected[normalizedPath] = hash
 }
 
 // ConsumeIfExpected checks if the content hash was expected.
-// Returns true if this was our own write (and consumes the expectation).
-// Returns false if this was an external change.
+// Returns true if this was our own write, false if this was an external change.
+// The hash is NOT removed on match, allowing multiple fsnotify events from
+// the same write operation (e.g., WRITE then CREATE) to all be recognized
+// as self-triggered. The hash is only replaced when a new ExpectContent call
+// occurs for the same path.
 func (t *ExpectedWriteTracker) ConsumeIfExpected(normalizedPath string, content []byte) bool {
 	if t == nil {
 		return false
@@ -53,15 +57,10 @@ func (t *ExpectedWriteTracker) ConsumeIfExpected(normalizedPath string, content 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if hashes, ok := t.expected[normalizedPath]; ok {
-		if _, exists := hashes[hash]; exists {
-			// Found expected hash - consume it
-			delete(hashes, hash)
-			if len(hashes) == 0 {
-				delete(t.expected, normalizedPath)
-			}
-			return true
-		}
+	if expected, ok := t.expected[normalizedPath]; ok && expected == hash {
+		// Match found - do NOT delete the hash.
+		// Multiple events from the same write should all match.
+		return true
 	}
 	return false
 }

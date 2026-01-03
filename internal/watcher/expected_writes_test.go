@@ -48,8 +48,9 @@ func TestExpectedWriteTracker_ConsumeIfExpected_NoMatch(t *testing.T) {
 	}
 }
 
-// TestExpectedWriteTracker_ConsumeIfExpected_RemovesHash verifies hash is removed after consumption
-func TestExpectedWriteTracker_ConsumeIfExpected_RemovesHash(t *testing.T) {
+// TestExpectedWriteTracker_ConsumeIfExpected_DoesNotRemoveHash verifies hash is NOT removed after consumption
+// This allows multiple fsnotify events from the same write to all match
+func TestExpectedWriteTracker_ConsumeIfExpected_DoesNotRemoveHash(t *testing.T) {
 	tracker := NewExpectedWriteTracker()
 	content := []byte(`{"key": "value"}`)
 
@@ -60,30 +61,46 @@ func TestExpectedWriteTracker_ConsumeIfExpected_RemovesHash(t *testing.T) {
 		t.Error("First consume should succeed")
 	}
 
-	// Second consume should fail - hash already consumed
-	if tracker.ConsumeIfExpected(testPathCredentials, content) {
-		t.Error("Second consume should fail - hash already consumed")
+	// Second consume should also succeed - hash is retained for multiple events
+	if !tracker.ConsumeIfExpected(testPathCredentials, content) {
+		t.Error("Second consume should also succeed - hash should be retained")
+	}
+
+	// Third consume should also succeed
+	if !tracker.ConsumeIfExpected(testPathCredentials, content) {
+		t.Error("Third consume should also succeed")
 	}
 }
 
-// TestExpectedWriteTracker_ConsumeIfExpected_CleansUpEmptyMaps verifies map cleanup when all hashes consumed
-func TestExpectedWriteTracker_ConsumeIfExpected_CleansUpEmptyMaps(t *testing.T) {
+// TestExpectedWriteTracker_HashReplacedOnNewWrite verifies hash is replaced when new write occurs
+func TestExpectedWriteTracker_HashReplacedOnNewWrite(t *testing.T) {
 	tracker := NewExpectedWriteTracker()
-	content := []byte(`{"key": "value"}`)
+	content1 := []byte(`{"key": "value1"}`)
+	content2 := []byte(`{"key": "value2"}`)
 
-	tracker.ExpectContent(testPathCredentials, content)
-	tracker.ConsumeIfExpected(testPathCredentials, content)
+	tracker.ExpectContent(testPathCredentials, content1)
 
-	// Verify internal map is cleaned up
-	tracker.mu.Lock()
-	defer tracker.mu.Unlock()
-	if _, exists := tracker.expected[testPathCredentials]; exists {
-		t.Error("Path should be removed from map when all hashes consumed")
+	// First content should match
+	if !tracker.ConsumeIfExpected(testPathCredentials, content1) {
+		t.Error("First content should match")
+	}
+
+	// New write replaces the old hash
+	tracker.ExpectContent(testPathCredentials, content2)
+
+	// Old content should no longer match
+	if tracker.ConsumeIfExpected(testPathCredentials, content1) {
+		t.Error("Old content should not match after new ExpectContent")
+	}
+
+	// New content should match
+	if !tracker.ConsumeIfExpected(testPathCredentials, content2) {
+		t.Error("New content should match")
 	}
 }
 
-// TestExpectedWriteTracker_MultipleHashesSamePath verifies multiple hashes can be tracked for same path
-func TestExpectedWriteTracker_MultipleHashesSamePath(t *testing.T) {
+// TestExpectedWriteTracker_NewWriteReplacesOldHash verifies new ExpectContent replaces old hash
+func TestExpectedWriteTracker_NewWriteReplacesOldHash(t *testing.T) {
 	tracker := NewExpectedWriteTracker()
 	content1 := []byte(`{"version": 1}`)
 	content2 := []byte(`{"version": 2}`)
@@ -91,12 +108,12 @@ func TestExpectedWriteTracker_MultipleHashesSamePath(t *testing.T) {
 	tracker.ExpectContent(testPathCredentials, content1)
 	tracker.ExpectContent(testPathCredentials, content2)
 
-	// Both hashes should be consumable
-	if !tracker.ConsumeIfExpected(testPathCredentials, content1) {
-		t.Error("Should consume first hash")
+	// Only the latest hash (content2) should match
+	if tracker.ConsumeIfExpected(testPathCredentials, content1) {
+		t.Error("First hash should have been replaced by second")
 	}
 	if !tracker.ConsumeIfExpected(testPathCredentials, content2) {
-		t.Error("Should consume second hash")
+		t.Error("Second (latest) hash should match")
 	}
 }
 
