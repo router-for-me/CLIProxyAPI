@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coresession "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/session"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -34,6 +35,7 @@ type Handler struct {
 	attemptsMu          sync.Mutex
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
+	sessionManager      *coresession.Manager
 	usageStats          *usage.RequestStatistics
 	tokenStore          coreauth.Store
 	localPassword       string
@@ -69,6 +71,9 @@ func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
 func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = manager }
+
+// SetSessionManager updates the session manager reference used by management endpoints.
+func (h *Handler) SetSessionManager(manager *coresession.Manager) { h.sessionManager = manager }
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
