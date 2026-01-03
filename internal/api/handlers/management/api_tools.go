@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -251,6 +252,10 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		token, errToken := h.refreshGeminiOAuthAccessToken(ctx, auth)
 		return token, errToken
 	}
+	if provider == "codex" {
+		token, errToken := h.refreshCodexAccessToken(ctx, auth)
+		return token, errToken
+	}
 
 	return tokenValueForAuth(auth), nil
 }
@@ -323,6 +328,66 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 		updater(fields)
 	}
 	return strings.TrimSpace(currentToken.AccessToken), nil
+}
+
+func (h *Handler) refreshCodexAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+
+	// Check if token is still valid
+	if auth.Metadata != nil {
+		if expiredStr, ok := auth.Metadata["expired"].(string); ok && expiredStr != "" {
+			if expiry, err := time.Parse(time.RFC3339, expiredStr); err == nil {
+				if time.Now().Before(expiry) {
+					// Token still valid, return current access_token
+					if accessToken, ok := auth.Metadata["access_token"].(string); ok && accessToken != "" {
+						return accessToken, nil
+					}
+				}
+			}
+		}
+	}
+
+	// Token expired or not found, refresh it
+	var refreshToken string
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["refresh_token"].(string); ok && v != "" {
+			refreshToken = v
+		}
+	}
+	if refreshToken == "" {
+		return tokenValueForAuth(auth), nil
+	}
+
+	svc := codexauth.NewCodexAuth(h.cfg)
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	if err != nil {
+		return "", err
+	}
+
+	// Update auth metadata with new tokens
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["id_token"] = td.IDToken
+	auth.Metadata["access_token"] = td.AccessToken
+	if td.RefreshToken != "" {
+		auth.Metadata["refresh_token"] = td.RefreshToken
+	}
+	if td.AccountID != "" {
+		auth.Metadata["account_id"] = td.AccountID
+	}
+	auth.Metadata["email"] = td.Email
+	auth.Metadata["expired"] = td.Expire
+	auth.Metadata["type"] = "codex"
+	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+
+	log.Debugf("codex api-call: token refreshed for %s", td.Email)
+	return td.AccessToken, nil
 }
 
 func geminiOAuthMetadata(auth *coreauth.Auth) (map[string]any, func(map[string]any)) {
