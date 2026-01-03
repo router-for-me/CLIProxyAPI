@@ -196,6 +196,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create gin engine
 	engine := gin.New()
+	engine.RemoveExtraSlash = true // Normalize paths like //messages to /messages
 	if optionState.engineConfigurator != nil {
 		optionState.engineConfigurator(engine)
 	}
@@ -348,6 +349,14 @@ func (s *Server) setupRoutes() {
 		})
 	})
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
+
+	// Root-level Claude routes (aliases for /v1/messages) to allow unified Base URL
+	rootClaude := s.engine.Group("")
+	rootClaude.Use(AuthMiddleware(s.accessManager))
+	{
+		rootClaude.POST("/messages", claudeCodeHandlers.ClaudeMessages)
+		rootClaude.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
+	}
 
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
