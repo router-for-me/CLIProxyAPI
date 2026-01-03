@@ -69,7 +69,32 @@ func (rw *ResponseRewriter) Flush() {
 var modelFieldPaths = []string{"model", "modelVersion", "response.modelVersion", "message.model"}
 
 // rewriteModelInResponse replaces all occurrences of the mapped model with the original model in JSON
+// It also suppresses "thinking" blocks if "tool_use" is present to ensure Amp client compatibility
 func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
+	// 1. Amp Compatibility: Suppress thinking blocks if tool use is detected
+	// The Amp client struggles when both thinking and tool_use blocks are present
+	// 1. Amp Compatibility: Suppress thinking blocks if tool use is detected
+	// The Amp client struggles when both thinking and tool_use blocks are present
+	if gjson.GetBytes(data, `content.#(type=="tool_use")`).Exists() {
+		filtered := gjson.GetBytes(data, `content.#(type!="thinking")#`)
+		if filtered.Exists() {
+			originalCount := gjson.GetBytes(data, "content.#").Int()
+			filteredCount := filtered.Get("#").Int()
+
+			if originalCount > filteredCount {
+				var err error
+				data, err = sjson.SetBytes(data, "content", filtered.Value())
+				if err != nil {
+					log.Warnf("Amp ResponseRewriter: failed to suppress thinking blocks: %v", err)
+				} else {
+					log.Debugf("Amp ResponseRewriter: Suppressed %d thinking blocks due to tool usage", originalCount-filteredCount)
+					// Log the result for verification
+					log.Debugf("Amp ResponseRewriter: Resulting content: %s", gjson.GetBytes(data, "content").String())
+				}
+			}
+		}
+	}
+
 	if rw.originalModel == "" {
 		return data
 	}
