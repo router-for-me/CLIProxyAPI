@@ -52,6 +52,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsageStatisticsRedactDetails removes detailed identifiers (source, auth index, API identifiers) from usage data.
+	UsageStatisticsRedactDetails bool `yaml:"usage-statistics-redact-details" json:"usage-statistics-redact-details"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -432,6 +435,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsageStatisticsRedactDetails = false
 	cfg.DisableCooling = false
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository

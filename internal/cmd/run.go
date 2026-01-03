@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -42,6 +43,13 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 			keepAliveCancel()
 		}))
 	}
+
+	go func() {
+		<-ctxSignal.Done()
+		if err := usage.SaveStatistics(); err != nil {
+			log.Warnf("Failed to save usage stats to %s: %v", "usage_stats.json", err)
+		}
+	}()
 
 	service, err := builder.Build()
 	if err != nil {
