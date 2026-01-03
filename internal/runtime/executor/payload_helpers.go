@@ -14,32 +14,54 @@ import (
 // ApplyThinkingMetadata applies thinking config from model suffix metadata (e.g., (high), (8192))
 // for standard Gemini format payloads. It normalizes the budget when the model supports thinking.
 func ApplyThinkingMetadata(payload []byte, metadata map[string]any, model string) []byte {
-	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(model, metadata)
+	// Use the alias from metadata if available, as it's registered in the global registry
+	// with thinking metadata; the upstream model name may not be registered.
+	lookupModel := util.ResolveOriginalModel(model, metadata)
+
+	// Determine which model to use for thinking support check.
+	// If the alias (lookupModel) is not in the registry, fall back to the upstream model.
+	thinkingModel := lookupModel
+	if !util.ModelSupportsThinking(lookupModel) && util.ModelSupportsThinking(model) {
+		thinkingModel = model
+	}
+
+	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(thinkingModel, metadata)
 	if !ok || (budgetOverride == nil && includeOverride == nil) {
 		return payload
 	}
-	if !util.ModelSupportsThinking(model) {
+	if !util.ModelSupportsThinking(thinkingModel) {
 		return payload
 	}
 	if budgetOverride != nil {
-		norm := util.NormalizeThinkingBudget(model, *budgetOverride)
+		norm := util.NormalizeThinkingBudget(thinkingModel, *budgetOverride)
 		budgetOverride = &norm
 	}
 	return util.ApplyGeminiThinkingConfig(payload, budgetOverride, includeOverride)
 }
 
-// applyThinkingMetadataCLI applies thinking config from model suffix metadata (e.g., (high), (8192))
+// ApplyThinkingMetadataCLI applies thinking config from model suffix metadata (e.g., (high), (8192))
 // for Gemini CLI format payloads (nested under "request"). It normalizes the budget when the model supports thinking.
-func applyThinkingMetadataCLI(payload []byte, metadata map[string]any, model string) []byte {
-	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(model, metadata)
+func ApplyThinkingMetadataCLI(payload []byte, metadata map[string]any, model string) []byte {
+	// Use the alias from metadata if available, as it's registered in the global registry
+	// with thinking metadata; the upstream model name may not be registered.
+	lookupModel := util.ResolveOriginalModel(model, metadata)
+
+	// Determine which model to use for thinking support check.
+	// If the alias (lookupModel) is not in the registry, fall back to the upstream model.
+	thinkingModel := lookupModel
+	if !util.ModelSupportsThinking(lookupModel) && util.ModelSupportsThinking(model) {
+		thinkingModel = model
+	}
+
+	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(thinkingModel, metadata)
 	if !ok || (budgetOverride == nil && includeOverride == nil) {
 		return payload
 	}
-	if !util.ModelSupportsThinking(model) {
+	if !util.ModelSupportsThinking(thinkingModel) {
 		return payload
 	}
 	if budgetOverride != nil {
-		norm := util.NormalizeThinkingBudget(model, *budgetOverride)
+		norm := util.NormalizeThinkingBudget(thinkingModel, *budgetOverride)
 		budgetOverride = &norm
 	}
 	return util.ApplyGeminiCLIThinkingConfig(payload, budgetOverride, includeOverride)
@@ -82,17 +104,11 @@ func ApplyReasoningEffortMetadata(payload []byte, metadata map[string]any, model
 	return payload
 }
 
-// applyPayloadConfig applies payload default and override rules from configuration
-// to the given JSON payload for the specified model.
-// Defaults only fill missing fields, while overrides always overwrite existing values.
-func applyPayloadConfig(cfg *config.Config, model string, payload []byte) []byte {
-	return applyPayloadConfigWithRoot(cfg, model, "", "", payload)
-}
-
 // applyPayloadConfigWithRoot behaves like applyPayloadConfig but treats all parameter
 // paths as relative to the provided root path (for example, "request" for Gemini CLI)
-// and restricts matches to the given protocol when supplied.
-func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload []byte) []byte {
+// and restricts matches to the given protocol when supplied. Defaults are checked
+// against the original payload when provided.
+func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
@@ -105,6 +121,11 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		return payload
 	}
 	out := payload
+	source := original
+	if len(source) == 0 {
+		source = payload
+	}
+	appliedDefaults := make(map[string]struct{})
 	// Apply default rules: first write wins per field across all matching rules.
 	for i := range rules.Default {
 		rule := &rules.Default[i]
@@ -116,7 +137,10 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			if fullPath == "" {
 				continue
 			}
-			if gjson.GetBytes(out, fullPath).Exists() {
+			if gjson.GetBytes(source, fullPath).Exists() {
+				continue
+			}
+			if _, ok := appliedDefaults[fullPath]; ok {
 				continue
 			}
 			updated, errSet := sjson.SetBytes(out, fullPath, value)
@@ -124,6 +148,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 				continue
 			}
 			out = updated
+			appliedDefaults[fullPath] = struct{}{}
 		}
 	}
 	// Apply override rules: last write wins per field across all matching rules.

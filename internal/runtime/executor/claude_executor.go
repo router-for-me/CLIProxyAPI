@@ -57,6 +57,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), stream)
 	body, _ = sjson.SetBytes(body, "model", model)
 	// Inject thinking config based on model metadata for thinking variants
@@ -65,7 +70,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
-	body = applyPayloadConfig(e.cfg, model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -167,12 +172,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if override := e.resolveUpstreamModel(req.Model, auth); override != "" {
 		model = override
 	}
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
 	body, _ = sjson.SetBytes(body, "model", model)
 	// Inject thinking config based on model metadata for thinking variants
 	body = e.injectThinkingConfig(model, req.Metadata, body)
 	body = checkSystemInstructions(body)
-	body = applyPayloadConfig(e.cfg, model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)

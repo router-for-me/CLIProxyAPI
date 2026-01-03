@@ -81,7 +81,9 @@ func (m *Manager) applyOAuthModelMapping(auth *Auth, requestedModel string, meta
 			out[k] = v
 		}
 	}
-	out[util.ModelMappingOriginalModelMetadataKey] = upstreamModel
+	// Store the requested alias (e.g., "gp") so downstream can use it to look up
+	// model metadata from the global registry where it was registered under this alias.
+	out[util.ModelMappingOriginalModelMetadataKey] = requestedModel
 	return upstreamModel, out
 }
 

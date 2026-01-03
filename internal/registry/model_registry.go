@@ -4,6 +4,7 @@
 package registry
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -84,6 +85,13 @@ type ModelRegistration struct {
 	SuspendedClients map[string]string
 }
 
+// ModelRegistryHook provides optional callbacks for external integrations to track model list changes.
+// Hook implementations must be non-blocking and resilient; calls are executed asynchronously and panics are recovered.
+type ModelRegistryHook interface {
+	OnModelsRegistered(ctx context.Context, provider, clientID string, models []*ModelInfo)
+	OnModelsUnregistered(ctx context.Context, provider, clientID string)
+}
+
 // ModelRegistry manages the global registry of available models
 type ModelRegistry struct {
 	// models maps model ID to registration information
@@ -97,6 +105,8 @@ type ModelRegistry struct {
 	clientProviders map[string]string
 	// mutex ensures thread-safe access to the registry
 	mutex *sync.RWMutex
+	// hook is an optional callback sink for model registration changes
+	hook ModelRegistryHook
 }
 
 // Global model registry instance
@@ -115,6 +125,53 @@ func GetGlobalRegistry() *ModelRegistry {
 		}
 	})
 	return globalRegistry
+}
+
+// SetHook sets an optional hook for observing model registration changes.
+func (r *ModelRegistry) SetHook(hook ModelRegistryHook) {
+	if r == nil {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.hook = hook
+}
+
+const defaultModelRegistryHookTimeout = 5 * time.Second
+
+func (r *ModelRegistry) triggerModelsRegistered(provider, clientID string, models []*ModelInfo) {
+	hook := r.hook
+	if hook == nil {
+		return
+	}
+	modelsCopy := cloneModelInfosUnique(models)
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Errorf("model registry hook OnModelsRegistered panic: %v", recovered)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
+		defer cancel()
+		hook.OnModelsRegistered(ctx, provider, clientID, modelsCopy)
+	}()
+}
+
+func (r *ModelRegistry) triggerModelsUnregistered(provider, clientID string) {
+	hook := r.hook
+	if hook == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Errorf("model registry hook OnModelsUnregistered panic: %v", recovered)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
+		defer cancel()
+		hook.OnModelsUnregistered(ctx, provider, clientID)
+	}()
 }
 
 // RegisterClient registers a client and its supported models
@@ -177,6 +234,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		} else {
 			delete(r.clientProviders, clientID)
 		}
+		r.triggerModelsRegistered(provider, clientID, models)
 		log.Debugf("Registered client %s from provider %s with %d models", clientID, clientProvider, len(rawModelIDs))
 		misc.LogCredentialSeparator()
 		return
@@ -310,6 +368,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		delete(r.clientProviders, clientID)
 	}
 
+	r.triggerModelsRegistered(provider, clientID, models)
 	if len(added) == 0 && len(removed) == 0 && !providerChanged {
 		// Only metadata (e.g., display name) changed; skip separator when no log output.
 		return
@@ -400,6 +459,25 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	return &copyModel
 }
 
+func cloneModelInfosUnique(models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+	cloned := make([]*ModelInfo, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil || model.ID == "" {
+			continue
+		}
+		if _, exists := seen[model.ID]; exists {
+			continue
+		}
+		seen[model.ID] = struct{}{}
+		cloned = append(cloned, cloneModelInfo(model))
+	}
+	return cloned
+}
+
 // UnregisterClient removes a client and decrements counts for its models
 // Parameters:
 //   - clientID: Unique identifier for the client to remove
@@ -460,6 +538,7 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 	log.Debugf("Unregistered client %s", clientID)
 	// Separator line after completing client unregistration (after the summary line)
 	misc.LogCredentialSeparator()
+	r.triggerModelsUnregistered(provider, clientID)
 }
 
 // SetModelQuotaExceeded marks a model as quota exceeded for a specific client
@@ -623,6 +702,131 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 	}
 
 	return models
+}
+
+// GetAvailableModelsByProvider returns models available for the given provider identifier.
+// Parameters:
+//   - provider: Provider identifier (e.g., "codex", "gemini", "antigravity")
+//
+// Returns:
+//   - []*ModelInfo: List of available models for the provider
+func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelInfo {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	type providerModel struct {
+		count int
+		info  *ModelInfo
+	}
+
+	providerModels := make(map[string]*providerModel)
+
+	for clientID, clientProvider := range r.clientProviders {
+		if clientProvider != provider {
+			continue
+		}
+		modelIDs := r.clientModels[clientID]
+		if len(modelIDs) == 0 {
+			continue
+		}
+		clientInfos := r.clientModelInfos[clientID]
+		for _, modelID := range modelIDs {
+			modelID = strings.TrimSpace(modelID)
+			if modelID == "" {
+				continue
+			}
+			entry := providerModels[modelID]
+			if entry == nil {
+				entry = &providerModel{}
+				providerModels[modelID] = entry
+			}
+			entry.count++
+			if entry.info == nil {
+				if clientInfos != nil {
+					if info := clientInfos[modelID]; info != nil {
+						entry.info = info
+					}
+				}
+				if entry.info == nil {
+					if reg, ok := r.models[modelID]; ok && reg != nil && reg.Info != nil {
+						entry.info = reg.Info
+					}
+				}
+			}
+		}
+	}
+
+	if len(providerModels) == 0 {
+		return nil
+	}
+
+	quotaExpiredDuration := 5 * time.Minute
+	now := time.Now()
+	result := make([]*ModelInfo, 0, len(providerModels))
+
+	for modelID, entry := range providerModels {
+		if entry == nil || entry.count <= 0 {
+			continue
+		}
+		registration, ok := r.models[modelID]
+
+		expiredClients := 0
+		cooldownSuspended := 0
+		otherSuspended := 0
+		if ok && registration != nil {
+			if registration.QuotaExceededClients != nil {
+				for clientID, quotaTime := range registration.QuotaExceededClients {
+					if clientID == "" {
+						continue
+					}
+					if p, okProvider := r.clientProviders[clientID]; !okProvider || p != provider {
+						continue
+					}
+					if quotaTime != nil && now.Sub(*quotaTime) < quotaExpiredDuration {
+						expiredClients++
+					}
+				}
+			}
+			if registration.SuspendedClients != nil {
+				for clientID, reason := range registration.SuspendedClients {
+					if clientID == "" {
+						continue
+					}
+					if p, okProvider := r.clientProviders[clientID]; !okProvider || p != provider {
+						continue
+					}
+					if strings.EqualFold(reason, "quota") {
+						cooldownSuspended++
+						continue
+					}
+					otherSuspended++
+				}
+			}
+		}
+
+		availableClients := entry.count
+		effectiveClients := availableClients - expiredClients - otherSuspended
+		if effectiveClients < 0 {
+			effectiveClients = 0
+		}
+
+		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+			if entry.info != nil {
+				result = append(result, entry.info)
+				continue
+			}
+			if ok && registration != nil && registration.Info != nil {
+				result = append(result, registration.Info)
+			}
+		}
+	}
+
+	return result
 }
 
 // GetModelCount returns the number of available clients for a specific model

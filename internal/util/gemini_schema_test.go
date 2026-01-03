@@ -127,8 +127,10 @@ func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_SmartSelection(t *testing
 				"type": "object",
 				"description": "Accepts: null | object",
 				"properties": {
+					"_": { "type": "boolean" },
 					"kind": { "type": "string" }
-				}
+				},
+				"required": ["_"]
 			}
 		}
 	}`
