@@ -157,11 +157,14 @@ type RoutingConfig struct {
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 }
 
-// ModelNameMapping defines a model ID rename mapping for a specific channel.
-// It maps the original model name (Name) to the client-visible alias (Alias).
+// ModelNameMapping defines a model ID mapping for a specific channel.
+// It maps the upstream model name (Name) to the client-visible alias (Alias).
+// When Fork is true, the alias is added as an additional model in listings while
+// keeping the original model ID available.
 type ModelNameMapping struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
+	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -596,7 +599,7 @@ func (cfg *Config) SanitizeOAuthModelMappings() {
 			}
 			seenName[nameKey] = struct{}{}
 			seenAlias[aliasKey] = struct{}{}
-			clean = append(clean, ModelNameMapping{Name: name, Alias: alias})
+			clean = append(clean, ModelNameMapping{Name: name, Alias: alias, Fork: mapping.Fork})
 		}
 		if len(clean) > 0 {
 			out[channel] = clean

@@ -221,6 +221,7 @@ ws-auth: false
 #   gemini-cli:
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
+#       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
 #   vertex:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
