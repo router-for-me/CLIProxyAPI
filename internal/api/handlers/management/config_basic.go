@@ -202,6 +202,26 @@ func (h *Handler) PutLoggingToFile(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.LoggingToFile = v })
 }
 
+// LogsMaxTotalSizeMB
+func (h *Handler) GetLogsMaxTotalSizeMB(c *gin.Context) {
+	c.JSON(200, gin.H{"logs-max-total-size-mb": h.cfg.LogsMaxTotalSizeMB})
+}
+func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
+	var body struct {
+		Value *int `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	value := *body.Value
+	if value < 0 {
+		value = 0
+	}
+	h.cfg.LogsMaxTotalSizeMB = value
+	h.persist(c)
+}
+
 // Request log
 func (h *Handler) GetRequestLog(c *gin.Context) { c.JSON(200, gin.H{"request-log": h.cfg.RequestLog}) }
 func (h *Handler) PutRequestLog(c *gin.Context) {
@@ -230,6 +250,52 @@ func (h *Handler) GetMaxRetryInterval(c *gin.Context) {
 }
 func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.MaxRetryInterval = v })
+}
+
+// ForceModelPrefix
+func (h *Handler) GetForceModelPrefix(c *gin.Context) {
+	c.JSON(200, gin.H{"force-model-prefix": h.cfg.ForceModelPrefix})
+}
+func (h *Handler) PutForceModelPrefix(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.ForceModelPrefix = v })
+}
+
+func normalizeRoutingStrategy(strategy string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(strategy))
+	switch normalized {
+	case "", "round-robin", "roundrobin", "rr":
+		return "round-robin", true
+	case "fill-first", "fillfirst", "ff":
+		return "fill-first", true
+	default:
+		return "", false
+	}
+}
+
+// RoutingStrategy
+func (h *Handler) GetRoutingStrategy(c *gin.Context) {
+	strategy, ok := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
+	if !ok {
+		c.JSON(200, gin.H{"strategy": strings.TrimSpace(h.cfg.Routing.Strategy)})
+		return
+	}
+	c.JSON(200, gin.H{"strategy": strategy})
+}
+func (h *Handler) PutRoutingStrategy(c *gin.Context) {
+	var body struct {
+		Value *string `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	normalized, ok := normalizeRoutingStrategy(*body.Value)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid strategy"})
+		return
+	}
+	h.cfg.Routing.Strategy = normalized
+	h.persist(c)
 }
 
 // Proxy URL
