@@ -299,17 +299,16 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				inputTokens = promptTokens.Int()
 				outputTokens = completionTokens.Int()
 			}
+			// Send message_delta with usage
+			messageDeltaJSON := `{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
+			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(param.FinishReason))
+			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.input_tokens", inputTokens)
+			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.output_tokens", outputTokens)
+			results = append(results, "event: message_delta\ndata: "+messageDeltaJSON+"\n\n")
+			param.MessageDeltaSent = true
+
+			emitMessageStopIfNeeded(param, &results)
 		}
-		// Send message_delta with usage
-		messageDeltaJSON := `{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
-		messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(param.FinishReason))
-		messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.input_tokens", inputTokens)
-		messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.output_tokens", outputTokens)
-		results = append(results, "event: message_delta\ndata: "+messageDeltaJSON+"\n\n")
-		param.MessageDeltaSent = true
-
-		emitMessageStopIfNeeded(param, &results)
-
 	}
 
 	return results

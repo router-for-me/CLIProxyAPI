@@ -45,6 +45,7 @@ const (
 	defaultAntigravityAgent        = "antigravity/1.104.0 darwin/arm64"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
+	tokenRefreshTimeout            = 30 * time.Second
 )
 
 var (
@@ -914,7 +915,13 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 	if accessToken != "" && expiry.After(time.Now().Add(refreshSkew)) {
 		return accessToken, nil, nil
 	}
-	updated, errRefresh := e.refreshToken(ctx, auth.Clone())
+	refreshCtx := context.Background()
+	if ctx != nil {
+		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+			refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
+		}
+	}
+	updated, errRefresh := e.refreshToken(refreshCtx, auth.Clone())
 	if errRefresh != nil {
 		return "", nil, errRefresh
 	}
@@ -944,7 +951,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	httpReq.Header.Set("User-Agent", defaultAntigravityAgent)
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, tokenRefreshTimeout)
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		return auth, errDo
