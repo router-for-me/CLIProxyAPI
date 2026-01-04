@@ -97,7 +97,7 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
@@ -197,7 +197,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)

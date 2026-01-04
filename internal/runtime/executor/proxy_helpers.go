@@ -14,6 +14,15 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+const defaultRequestTimeout = 10 * time.Minute
+
+func resolveRequestTimeout(cfg *config.Config) time.Duration {
+	if cfg == nil || cfg.RequestTimeout <= 0 {
+		return defaultRequestTimeout
+	}
+	return time.Duration(cfg.RequestTimeout) * time.Second
+}
+
 // newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
 // 2. Use cfg.ProxyURL if auth proxy is not configured

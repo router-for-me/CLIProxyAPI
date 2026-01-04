@@ -65,6 +65,9 @@ request-retry: 3
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
+# Maximum duration in seconds for upstream provider requests. Set to 0 to use the default (10 minutes).
+request-timeout: 600
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded

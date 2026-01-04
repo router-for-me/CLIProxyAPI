@@ -109,7 +109,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated, originalTranslated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 
 	var lastStatus int
 	var lastBody []byte
@@ -209,7 +209,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated, originalTranslated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 
 	var lastStatus int
 	var lastBody []byte
@@ -550,7 +550,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated, originalTranslated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 
 	var lastStatus int
 	var lastBody []byte
@@ -698,7 +698,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	isClaude := strings.Contains(strings.ToLower(req.Model), "claude")
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -819,7 +819,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	}
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, resolveRequestTimeout(cfg))
 
 	for idx, baseURL := range baseURLs {
 		modelsURL := baseURL + antigravityModelsPath
