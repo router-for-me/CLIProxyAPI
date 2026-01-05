@@ -416,11 +416,12 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	usage.StartDefault(ctx)
-
-	// Initialize and load persisted usage statistics.
+	// Initialize and load persisted usage statistics before usage tracking starts,
+	// ensuring we begin recording from a clean baseline.
 	internalusage.SetPersistPath(s.configPath)
 	internalusage.LoadStatistics()
+
+	usage.StartDefault(ctx)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()

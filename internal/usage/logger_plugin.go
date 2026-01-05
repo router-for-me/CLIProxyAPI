@@ -19,6 +19,11 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const (
+	usageStatsFilename = "usage_stats.json"
+	usageStatsFileMode = 0o600
+)
+
 var statisticsEnabled atomic.Bool
 
 func init() {
@@ -345,7 +350,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 					continue
 				}
 				seen[key] = struct{}{}
-				s.recordImported(apiName, modelName, stats, detail)
+				s.recordImported(modelName, stats, detail)
 				result.Added++
 			}
 		}
@@ -354,7 +359,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	return result
 }
 
-func (s *RequestStatistics) recordImported(apiName, modelName string, stats *apiStats, detail RequestDetail) {
+func (s *RequestStatistics) recordImported(modelName string, stats *apiStats, detail RequestDetail) {
 	totalTokens := detail.Tokens.TotalTokens
 	if totalTokens < 0 {
 		totalTokens = 0
@@ -483,7 +488,7 @@ func SetPersistPath(configPath string) {
 	if configPath == "" {
 		return
 	}
-	persistPath = filepath.Join(filepath.Dir(configPath), "usage_stats.json")
+	persistPath = filepath.Join(filepath.Dir(configPath), usageStatsFilename)
 }
 
 // LoadStatistics loads usage statistics from the persistence file.
@@ -518,9 +523,48 @@ func SaveStatistics() {
 		log.Warnf("usage: failed to serialize statistics: %v", err)
 		return
 	}
-	if err := os.WriteFile(persistPath, data, 0o600); err != nil {
+	if err := writeFileAtomic(persistPath, data, usageStatsFileMode); err != nil {
 		log.Warnf("usage: failed to save statistics: %v", err)
 		return
 	}
 	log.Infof("usage: saved statistics (requests=%d)", snapshot.TotalRequests)
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	tmpFile, err := os.CreateTemp(dir, base+".tmp-*")
+	if err != nil {
+		return err
+	}
+
+	tmpPath := tmpFile.Name()
+	renamed := false
+	defer func() {
+		_ = tmpFile.Close()
+		if !renamed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmpFile.Chmod(perm); err != nil {
+		return err
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+
+	renamed = true
+	return nil
 }
