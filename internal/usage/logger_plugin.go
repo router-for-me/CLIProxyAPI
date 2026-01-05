@@ -5,7 +5,10 @@ package usage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 var statisticsEnabled atomic.Bool
@@ -469,4 +473,54 @@ func formatHour(hour int) string {
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+// Persistence related variables and functions.
+var persistPath string
+
+// SetPersistPath sets the file path for persisting usage statistics.
+func SetPersistPath(configPath string) {
+	if configPath == "" {
+		return
+	}
+	persistPath = filepath.Join(filepath.Dir(configPath), "usage_stats.json")
+}
+
+// LoadStatistics loads usage statistics from the persistence file.
+func LoadStatistics() {
+	if persistPath == "" {
+		return
+	}
+	data, err := os.ReadFile(persistPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Warnf("usage: failed to load statistics: %v", err)
+		}
+		return
+	}
+	var snapshot StatisticsSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		log.Warnf("usage: failed to parse statistics: %v", err)
+		return
+	}
+	result := defaultRequestStatistics.MergeSnapshot(snapshot)
+	log.Infof("usage: loaded statistics (added=%d, skipped=%d)", result.Added, result.Skipped)
+}
+
+// SaveStatistics persists usage statistics to the file.
+func SaveStatistics() {
+	if persistPath == "" {
+		return
+	}
+	snapshot := defaultRequestStatistics.Snapshot()
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		log.Warnf("usage: failed to serialize statistics: %v", err)
+		return
+	}
+	if err := os.WriteFile(persistPath, data, 0o600); err != nil {
+		log.Warnf("usage: failed to save statistics: %v", err)
+		return
+	}
+	log.Infof("usage: saved statistics (requests=%d)", snapshot.TotalRequests)
 }
