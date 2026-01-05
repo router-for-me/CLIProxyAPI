@@ -482,17 +482,23 @@ func formatHour(hour int) string {
 
 // Persistence related variables and functions.
 var persistPath string
+var persistPathMu sync.RWMutex
 
 // SetPersistPath sets the file path for persisting usage statistics.
 func SetPersistPath(configPath string) {
 	if configPath == "" {
 		return
 	}
-	persistPath = filepath.Join(filepath.Dir(configPath), usageStatsFilename)
+	path := filepath.Join(filepath.Dir(configPath), usageStatsFilename)
+	persistPathMu.Lock()
+	defer persistPathMu.Unlock()
+	persistPath = path
 }
 
 // LoadStatistics loads usage statistics from the persistence file.
 func LoadStatistics() {
+	persistPathMu.RLock()
+	defer persistPathMu.RUnlock()
 	if persistPath == "" {
 		return
 	}
@@ -514,6 +520,8 @@ func LoadStatistics() {
 
 // SaveStatistics persists usage statistics to the file.
 func SaveStatistics() {
+	persistPathMu.RLock()
+	defer persistPathMu.RUnlock()
 	if persistPath == "" {
 		return
 	}
@@ -534,6 +542,10 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
 
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
 	tmpFile, err := os.CreateTemp(dir, base+".tmp-*")
 	if err != nil {
 		return err
@@ -541,8 +553,11 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 
 	tmpPath := tmpFile.Name()
 	renamed := false
+	closed := false
 	defer func() {
-		_ = tmpFile.Close()
+		if !closed {
+			_ = tmpFile.Close()
+		}
 		if !renamed {
 			_ = os.Remove(tmpPath)
 		}
@@ -560,6 +575,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := tmpFile.Close(); err != nil {
 		return err
 	}
+	closed = true
 
 	if err := os.Rename(tmpPath, path); err != nil {
 		return err
