@@ -81,11 +81,17 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		template, _ = sjson.Set(template, "id", responseIDResult.String())
 	}
 
-	// Extract and set the finish reason.
-	if finishReasonResult := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finishReasonResult.Exists() {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", strings.ToLower(finishReasonResult.String()))
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", strings.ToLower(finishReasonResult.String()))
+	// Extract the finish reason (set after payload processing).
+	finishReason := ""
+	if stopReasonResult := gjson.GetBytes(rawJSON, "stop_reason"); stopReasonResult.Exists() {
+		finishReason = stopReasonResult.String()
 	}
+	if finishReason == "" {
+		if finishReasonResult := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finishReasonResult.Exists() {
+			finishReason = finishReasonResult.String()
+		}
+	}
+	finishReason = strings.ToLower(finishReason)
 
 	// Extract and set usage metadata (token counts).
 	if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
@@ -199,6 +205,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	if hasFunctionCall {
 		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
 		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
+	} else if finishReason != "" && (*param).(*convertGeminiResponseToOpenAIChatParams).FunctionIndex == 0 {
+		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
+		template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReason)
 	}
 
 	return []string{template}
