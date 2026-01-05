@@ -101,13 +101,14 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.completed" {
 		template = `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
 		p := (*param).(*bool)
-		stopReason := rootResult.Get("response.stop_reason").String()
-		if stopReason != "" {
-			template, _ = sjson.Set(template, "delta.stop_reason", stopReason)
-		} else if *p {
+		if *p {
 			template, _ = sjson.Set(template, "delta.stop_reason", "tool_use")
 		} else {
-			template, _ = sjson.Set(template, "delta.stop_reason", "end_turn")
+			stopReason := rootResult.Get("response.stop_reason").String()
+			// Only pass through specific stop reasons
+			if stopReason == "max_tokens" || stopReason == "stop" || stopReason == "end_turn" {
+				template, _ = sjson.Set(template, "delta.stop_reason", stopReason)
+			}
 		}
 		template, _ = sjson.Set(template, "usage.input_tokens", rootResult.Get("response.usage.input_tokens").Int())
 		template, _ = sjson.Set(template, "usage.output_tokens", rootResult.Get("response.usage.output_tokens").Int())

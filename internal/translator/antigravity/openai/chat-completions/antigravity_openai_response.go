@@ -205,8 +205,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
 		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
 	} else if finishReason != "" && (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex == 0 {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReason)
+		// Only pass through specific finish reasons
+		if finishReason == "max_tokens" || finishReason == "stop" {
+			template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
+			template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReason)
+		}
 	}
 
 	return []string{template}
