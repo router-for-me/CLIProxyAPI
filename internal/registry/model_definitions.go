@@ -704,6 +704,62 @@ func GetQwenModels() []*ModelInfo {
 	}
 }
 
+// GetCopilotModels returns the supported models for GitHub Copilot API.
+// Includes OpenAI, Claude, Gemini, and other models accessible via Copilot subscription.
+func GetCopilotModels() []*ModelInfo {
+	entries := []struct {
+		ID          string
+		DisplayName string
+		Description string
+		Created     int64
+		Thinking    *ThinkingSupport
+	}{
+		// OpenAI Models
+		{ID: "gpt-4o", DisplayName: "GPT-4o", Description: "OpenAI GPT-4o (via Copilot)", Created: 1715299200},
+		{ID: "gpt-4o-mini", DisplayName: "GPT-4o Mini", Description: "OpenAI GPT-4o Mini (via Copilot)", Created: 1721088000},
+		{ID: "gpt-4.1", DisplayName: "GPT-4.1", Description: "OpenAI GPT-4.1 (via Copilot)", Created: 1730419200},
+		{ID: "gpt-4.1-mini", DisplayName: "GPT-4.1 Mini", Description: "OpenAI GPT-4.1 Mini (via Copilot)", Created: 1730419200},
+		{ID: "gpt-5", DisplayName: "GPT-5", Description: "OpenAI GPT-5 (via Copilot)", Created: 1735689600},
+		{ID: "gpt-5-mini", DisplayName: "GPT-5 Mini", Description: "OpenAI GPT-5 Mini (via Copilot)", Created: 1735689600},
+
+		// OpenAI Reasoning Models
+		{ID: "o1", DisplayName: "O1", Description: "OpenAI O1 reasoning model (via Copilot)", Created: 1725926400},
+		{ID: "o1-mini", DisplayName: "O1 Mini", Description: "OpenAI O1 Mini reasoning model (via Copilot)", Created: 1725926400},
+		{ID: "o3-mini", DisplayName: "O3 Mini", Description: "OpenAI O3 Mini reasoning model (via Copilot)", Created: 1735689600},
+
+		// Anthropic Claude Models
+		{ID: "claude-sonnet-4", DisplayName: "Claude Sonnet 4", Description: "Anthropic Claude Sonnet 4 (via Copilot)", Created: 1730419200},
+		{ID: "claude-sonnet-4.5", DisplayName: "Claude Sonnet 4.5", Description: "Anthropic Claude Sonnet 4.5 (via Copilot)", Created: 1735689600},
+		{ID: "claude-haiku-4.5", DisplayName: "Claude Haiku 4.5", Description: "Anthropic Claude Haiku 4.5 (via Copilot)", Created: 1735689600},
+		{ID: "claude-opus-4.1", DisplayName: "Claude Opus 4.1", Description: "Anthropic Claude Opus 4.1 (via Copilot)", Created: 1730419200},
+		{ID: "claude-opus-4-5-20251101", DisplayName: "Claude Opus 4.5", Description: "Anthropic Claude Opus 4.5 20251101 (via Copilot)", Created: 1730419200},
+		{ID: "claude-sonnet-4-5-20250929", DisplayName: "Claude Sonnet 4.5 20250929", Description: "Anthropic Claude Sonnet 4.5 20250929 (via Copilot)", Created: 1727568000},
+
+		// Google Gemini Models
+		{ID: "gemini-2.5-pro", DisplayName: "Gemini 2.5 Pro", Description: "Google Gemini 2.5 Pro (via Copilot)", Created: 1735689600},
+		{ID: "gemini-2.5-flash", DisplayName: "Gemini 2.5 Flash", Description: "Google Gemini 2.5 Flash (via Copilot)", Created: 1735689600},
+		{ID: "gemini-3-pro", DisplayName: "Gemini 3 Pro", Description: "Google Gemini 3 Pro (via Copilot)", Created: 1735689600},
+		{ID: "gemini-3-flash-preview", DisplayName: "Gemini 3 Flash Preview", Description: "Google Gemini 3 Flash Preview (via Copilot)", Created: 1735689600},
+
+		// xAI Models
+		{ID: "grok-code-fast-1", DisplayName: "Grok Code Fast 1", Description: "xAI Grok Code Fast 1 (via Copilot)", Created: 1735689600},
+	}
+	models := make([]*ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, &ModelInfo{
+			ID:          entry.ID,
+			Object:      "model",
+			Created:     entry.Created,
+			OwnedBy:     "copilot",
+			Type:        "copilot",
+			DisplayName: entry.DisplayName,
+			Description: entry.Description,
+			Thinking:    entry.Thinking,
+		})
+	}
+	return models
+}
+
 // iFlowThinkingSupport is a shared ThinkingSupport configuration for iFlow models
 // that support thinking mode via chat_template_kwargs.enable_thinking (boolean toggle).
 // Uses level-based configuration so standard normalization flows apply before conversion.
@@ -796,6 +852,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetAIStudioModels(),
 		GetOpenAIModels(),
 		GetQwenModels(),
+		GetCopilotModels(),
 		GetIFlowModels(),
 	}
 	for _, models := range allModels {

@@ -60,6 +60,7 @@ func main() {
 	var qwenLogin bool
 	var iflowLogin bool
 	var iflowCookie bool
+	var copilotLogin bool
 	var noBrowser bool
 	var antigravityLogin bool
 	var projectID string
@@ -74,6 +75,7 @@ func main() {
 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
 	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
+	flag.BoolVar(&copilotLogin, "copilot-login", false, "Login to GitHub Copilot using OAuth")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
@@ -461,6 +463,8 @@ func main() {
 		cmd.DoClaudeLogin(cfg, options)
 	} else if qwenLogin {
 		cmd.DoQwenLogin(cfg, options)
+	} else if copilotLogin {
+		cmd.DoCopilotLogin(cfg, options)
 	} else if iflowLogin {
 		cmd.DoIFlowLogin(cfg, options)
 	} else if iflowCookie {

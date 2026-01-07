@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
@@ -1718,6 +1719,208 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
+func (h *Handler) RequestCopilotAuthURL(c *gin.Context) {
+	ctx := context.Background()
+
+	fmt.Println("Initializing GitHub Copilot authentication...")
+
+	// Initialize Copilot auth service
+	copilotAuth := copilot.NewCopilotAuth(h.cfg)
+
+	// Generate device code for OAuth Device Flow
+	deviceFlow, err := copilotAuth.InitiateDeviceFlow(ctx)
+	if err != nil {
+		log.Errorf("Failed to initiate device flow: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initiate device flow"})
+		return
+	}
+
+	// Return device code details for frontend to handle the OAuth flow
+	c.JSON(200, gin.H{
+		"status":            "ok",
+		"device_code":       deviceFlow.DeviceCode,
+		"user_code":         deviceFlow.UserCode,
+		"verification_uri":  deviceFlow.VerificationURI,
+		"expires_in":        deviceFlow.ExpiresIn,
+		"interval":          deviceFlow.Interval,
+		"message":           "Visit the URL and enter the code to authorize GitHub Copilot",
+	})
+}
+
+// RequestCopilotTokenStatus polls GitHub for device authorization status
+func (h *Handler) RequestCopilotTokenStatus(c *gin.Context) {
+	ctx := context.Background()
+	deviceCode := c.Query("device_code")
+	if deviceCode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "device_code is required"})
+		return
+	}
+
+	// Poll GitHub API once to check status
+	data := url.Values{}
+	data.Set("client_id", copilot.GitHubClientID)
+	data.Set("device_code", deviceCode)
+	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+
+	req, err := http.NewRequest("POST", copilot.GitHubAccessTokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		c.JSON(200, gin.H{"status": "error", "error": "failed to create request"})
+		return
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.JSON(200, gin.H{"status": "error", "error": "failed to check authorization status"})
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(200, gin.H{"status": "error", "error": "failed to read response"})
+		return
+	}
+
+	var tokenResp copilot.GitHubTokenResponse
+	if err = json.Unmarshal(body, &tokenResp); err != nil {
+		c.JSON(200, gin.H{"status": "error", "error": "failed to parse response"})
+		return
+	}
+
+	// Check for errors
+	if tokenResp.Error != "" {
+		switch tokenResp.Error {
+		case "authorization_pending":
+			c.JSON(200, gin.H{"status": "wait"})
+			return
+		case "slow_down":
+			c.JSON(200, gin.H{"status": "wait"})
+			return
+		case "expired_token":
+			c.JSON(200, gin.H{"status": "error", "error": "device code expired. Please restart the authentication process"})
+			return
+		case "access_denied":
+			c.JSON(200, gin.H{"status": "error", "error": "authorization denied by user"})
+			return
+		default:
+			c.JSON(200, gin.H{"status": "error", "error": fmt.Sprintf("authentication failed: %s", tokenResp.Error)})
+			return
+		}
+	}
+
+	// Success! Got the GitHub token
+	githubToken := tokenResp.AccessToken
+	if githubToken == "" {
+		c.JSON(200, gin.H{"status": "error", "error": "no access token received"})
+		return
+	}
+
+	copilotAuth := copilot.NewCopilotAuth(h.cfg)
+
+	// Got the GitHub token, now exchange it for Copilot token
+	copilotTokenData, err := copilotAuth.RefreshCopilotToken(ctx, githubToken)
+	if err != nil {
+		log.Errorf("Failed to exchange GitHub token for Copilot token: %v", err)
+		c.JSON(200, gin.H{"status": "error", "error": "failed to get Copilot token or no subscription"})
+		return
+	}
+
+	// Create token storage and save
+	tokenStorage := copilotAuth.CreateTokenStorage(copilotTokenData)
+	tokenStorage.GitHubToken = githubToken
+	tokenStorage.Email = fmt.Sprintf("copilot-%d", time.Now().UnixMilli())
+
+	record := &coreauth.Auth{
+		ID:       fmt.Sprintf("copilot-%s.json", tokenStorage.Email),
+		Provider: "copilot",
+		FileName: fmt.Sprintf("copilot-%s.json", tokenStorage.Email),
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"email": tokenStorage.Email,
+			"sku":   tokenStorage.SKU,
+		},
+	}
+
+	savedPath, errSave := h.saveTokenRecord(ctx, record)
+	if errSave != nil {
+		log.Errorf("Failed to save Copilot token: %v", errSave)
+		c.JSON(200, gin.H{"status": "error", "error": "failed to save token"})
+		return
+	}
+
+	log.Infof("Copilot token saved successfully to %s", savedPath)
+	c.JSON(200, gin.H{
+		"status":     "ok",
+		"saved_path": savedPath,
+		"email":      tokenStorage.Email,
+	})
+}
+
+func (h *Handler) RequestCopilotToken(c *gin.Context) {
+	ctx := context.Background()
+
+	// Frontend completes GitHub OAuth Device Flow and sends the GitHub token
+	var req struct {
+		GitHubToken string `json:"github_token" binding:"required"`
+		Email       string `json:"email"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "github_token is required"})
+		return
+	}
+
+	fmt.Println("Validating GitHub token and exchanging for Copilot token...")
+
+	copilotAuth := copilot.NewCopilotAuth(h.cfg)
+
+	// Validate GitHub token by exchanging it for Copilot token
+	copilotTokenData, err := copilotAuth.RefreshCopilotToken(ctx, req.GitHubToken)
+	if err != nil {
+		log.Errorf("Failed to exchange GitHub token for Copilot token: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid GitHub token or no Copilot subscription"})
+		return
+	}
+
+	// Create token storage
+	tokenStorage := copilotAuth.CreateTokenStorage(copilotTokenData)
+
+	if req.Email != "" {
+		tokenStorage.Email = req.Email
+	} else {
+		tokenStorage.Email = fmt.Sprintf("copilot-%d", time.Now().UnixMilli())
+	}
+
+	record := &coreauth.Auth{
+		ID:       fmt.Sprintf("copilot-%s.json", tokenStorage.Email),
+		Provider: "copilot",
+		FileName: fmt.Sprintf("copilot-%s.json", tokenStorage.Email),
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"email": tokenStorage.Email,
+			"sku":   tokenStorage.SKU,
+		},
+	}
+
+	savedPath, errSave := h.saveTokenRecord(ctx, record)
+	if errSave != nil {
+		log.Errorf("Failed to save authentication tokens: %v", errSave)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save token"})
+		return
+	}
+
+	fmt.Printf("GitHub Copilot token saved! (SKU: %s, Path: %s)\n", tokenStorage.SKU, savedPath)
+
+	c.JSON(200, gin.H{
+		"status": "ok",
+		"sku":    tokenStorage.SKU,
+		"email":  tokenStorage.Email,
+		"path":   savedPath,
+	})
 }
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
