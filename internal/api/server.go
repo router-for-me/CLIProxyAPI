@@ -626,8 +626,8 @@ func (s *Server) registerManagementRoutes() {
 		// Backup management routes
 		mgmt.GET("/backups", s.mgmt.ListBackups)
 		mgmt.POST("/backups", s.mgmt.CreateBackup)
-		mgmt.DELETE("/backups", s.mgmt.DeleteBackup)
-		mgmt.GET("/backups/download", s.mgmt.DownloadBackup)
+		mgmt.DELETE("/backups/:name", s.mgmt.DeleteBackup)
+		mgmt.GET("/backups/download/:name", s.mgmt.DownloadBackup)
 		mgmt.POST("/backups/restore", s.mgmt.RestoreBackup)
 		mgmt.POST("/backups/upload", s.mgmt.UploadAndRestoreBackup)
 	}

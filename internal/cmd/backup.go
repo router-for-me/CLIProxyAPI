@@ -52,11 +52,8 @@ func DoBackup(cfg *config.Config, configPath string, opts *BackupOptions) {
 	// Determine backup directory (CLI allows absolute paths)
 	backupDir := backup.ValidateBackupPathCLI(opts.BackupPath, wd)
 
-	// Determine auth directory
-	authDir := cfg.AuthDir
-	if authDir == "" {
-		authDir = filepath.Join(wd, "auths")
-	}
+	// Determine auth directory using centralized helper
+	authDir := backup.ResolveAuthDir(cfg.AuthDir, wd)
 
 	// Create backup using shared package
 	backupOpts := backup.BackupOptions{
@@ -123,11 +120,8 @@ func DoRestore(cfg *config.Config, configPath string, backupFile string, opts *R
 		return
 	}
 
-	// Determine auth directory
-	authDir := cfg.AuthDir
-	if authDir == "" {
-		authDir = filepath.Join(wd, "auths")
-	}
+	// Determine auth directory using centralized helper
+	authDir := backup.ResolveAuthDir(cfg.AuthDir, wd)
 
 	// Restore using shared package
 	restoreOpts := backup.RestoreOptions{
@@ -148,7 +142,11 @@ func DoRestore(cfg *config.Config, configPath string, backupFile string, opts *R
 
 // ListBackups lists all available backups
 func ListBackups(backupPath string) {
-	wd, _ := os.Getwd()
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Errorf("failed to get working directory: %v", err)
+		return
+	}
 	backupDir := backup.ValidateBackupPathCLI(backupPath, wd)
 
 	backups, err := backup.ListBackups(backupDir)

@@ -52,14 +52,13 @@ func (h *Handler) getBackupDir() string {
 	return filepath.Join(wd, "backup")
 }
 
-// getAuthDir returns the auth directory path
+// getAuthDir returns the auth directory path using the centralized helper
 func (h *Handler) getAuthDir() string {
-	authDir := h.cfg.AuthDir
-	if authDir == "" {
-		wd, _ := os.Getwd()
-		authDir = filepath.Join(wd, "auths")
+	wd, err := os.Getwd()
+	if err != nil {
+		wd = filepath.Dir(h.configFilePath)
 	}
-	return authDir
+	return backup.ResolveAuthDir(h.cfg.AuthDir, wd)
 }
 
 // ListBackups returns a list of all available backups
@@ -81,7 +80,11 @@ func (h *Handler) ListBackups(c *gin.Context) {
 	// Convert to API response format
 	var response []BackupMetadataResponse
 	for _, b := range backups {
-		dateTime, _ := time.Parse(time.RFC3339, b.Date)
+		dateTime, err := time.Parse(time.RFC3339, b.Date)
+		if err != nil {
+			// Use zero time if parsing fails, but still include the backup
+			dateTime = time.Time{}
+		}
 		response = append(response, BackupMetadataResponse{
 			Name:    b.Name,
 			Date:    dateTime,
@@ -115,7 +118,11 @@ func (h *Handler) CreateBackup(c *gin.Context) {
 		req.Content.Auths = true
 	}
 
-	wd, _ := os.Getwd()
+	wd, err := os.Getwd()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get working directory"})
+		return
+	}
 
 	// Validate backup path (no absolute paths allowed for API)
 	backupDir, err := backup.ValidateBackupPath(req.BackupPath, wd)
@@ -160,7 +167,7 @@ func (h *Handler) CreateBackup(c *gin.Context) {
 
 // DeleteBackup deletes a backup
 func (h *Handler) DeleteBackup(c *gin.Context) {
-	name := c.Query("name")
+	name := c.Param("name")
 	if name == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "backup name is required"})
 		return
@@ -187,7 +194,7 @@ func (h *Handler) DeleteBackup(c *gin.Context) {
 
 // DownloadBackup downloads a backup file
 func (h *Handler) DownloadBackup(c *gin.Context) {
-	name := c.Query("name")
+	name := c.Param("name")
 	if name == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "backup name is required"})
 		return
@@ -239,7 +246,11 @@ func (h *Handler) RestoreBackup(c *gin.Context) {
 	}
 
 	backupDir := h.getBackupDir()
-	wd, _ := os.Getwd()
+	wd, err := os.Getwd()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get working directory"})
+		return
+	}
 
 	// Sanitize name
 	name := filepath.Base(req.Name)
@@ -322,7 +333,11 @@ func (h *Handler) UploadAndRestoreBackup(c *gin.Context) {
 		return
 	}
 
-	wd, _ := os.Getwd()
+	wd, err := os.Getwd()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get working directory"})
+		return
+	}
 
 	// Restore using shared package
 	opts := backup.RestoreOptions{

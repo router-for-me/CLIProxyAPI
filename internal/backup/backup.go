@@ -389,7 +389,11 @@ func ListBackups(backupDir string) ([]BackupMetadata, error) {
 		metadata, err := ReadBackupMetadata(zipPath)
 		if err != nil {
 			// If we can't read metadata, create basic info from file
-			info, _ := entry.Info()
+			info, errInfo := entry.Info()
+			if errInfo != nil {
+				// Cannot get file info, skip this backup entry
+				continue
+			}
 			metadata = BackupMetadata{
 				Name: entry.Name(),
 				Date: info.ModTime().Format(time.RFC3339),
@@ -487,4 +491,14 @@ func ValidateBackupPathCLI(customPath, workDir string) string {
 	}
 
 	return filepath.Join(workDir, customPath)
+}
+
+// ResolveAuthDir returns the auth directory path, using the provided configAuthDir
+// if set, otherwise defaulting to "auths" under the working directory.
+// This centralizes the auth directory resolution logic used by both CLI and API.
+func ResolveAuthDir(configAuthDir, workDir string) string {
+	if configAuthDir != "" {
+		return configAuthDir
+	}
+	return filepath.Join(workDir, "auths")
 }
