@@ -66,6 +66,15 @@ func main() {
 	var vertexImport string
 	var configPath string
 	var password string
+	var backupCreate bool
+	var backupRestore string
+	var backupList bool
+	var backupName string
+	var backupPath string
+	var backupEnv bool
+	var backupConfig bool
+	var backupAuths bool
+	var restoreAuthsMode string
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -80,6 +89,17 @@ func main() {
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&password, "password", "", "")
+
+	// Backup and restore flags
+	flag.BoolVar(&backupCreate, "backup", false, "Create a backup")
+	flag.StringVar(&backupRestore, "restore", "", "Restore from a backup file")
+	flag.BoolVar(&backupList, "list-backups", false, "List available backups")
+	flag.StringVar(&backupName, "backup-name", "", "Custom backup name")
+	flag.StringVar(&backupPath, "backup-path", "", "Custom backup directory")
+	flag.BoolVar(&backupEnv, "backup-env", false, "Include .env in backup")
+	flag.BoolVar(&backupConfig, "backup-config", true, "Include config.yaml in backup")
+	flag.BoolVar(&backupAuths, "backup-auths", true, "Include auths folder in backup")
+	flag.StringVar(&restoreAuthsMode, "restore-auths-mode", "overwrite", "Auths restore mode: overwrite or incremental")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -444,7 +464,25 @@ func main() {
 
 	// Handle different command modes based on the provided flags.
 
-	if vertexImport != "" {
+	if backupList {
+		// List available backups
+		cmd.ListBackups(backupPath)
+	} else if backupCreate {
+		// Create a backup
+		cmd.DoBackup(cfg, configFilePath, &cmd.BackupOptions{
+			Name:          backupName,
+			BackupPath:    backupPath,
+			IncludeEnv:    backupEnv,
+			IncludeConfig: backupConfig,
+			IncludeAuths:  backupAuths,
+		})
+	} else if backupRestore != "" {
+		// Restore from a backup
+		cmd.DoRestore(cfg, configFilePath, backupRestore, &cmd.RestoreOptions{
+			BackupPath: backupPath,
+			AuthsMode:  restoreAuthsMode,
+		})
+	} else if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport)
 	} else if login {

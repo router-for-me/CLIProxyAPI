@@ -622,6 +622,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		// Backup management routes
+		mgmt.GET("/backups", s.mgmt.ListBackups)
+		mgmt.POST("/backups", s.mgmt.CreateBackup)
+		mgmt.DELETE("/backups", s.mgmt.DeleteBackup)
+		mgmt.GET("/backups/download", s.mgmt.DownloadBackup)
+		mgmt.POST("/backups/restore", s.mgmt.RestoreBackup)
+		mgmt.POST("/backups/upload", s.mgmt.UploadAndRestoreBackup)
 	}
 }
 
