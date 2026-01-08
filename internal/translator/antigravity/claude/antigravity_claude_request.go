@@ -42,6 +42,24 @@ func deriveSessionID(rawJSON []byte) string {
 	return ""
 }
 
+func detectWebSearchTool(rawJSON []byte) bool {
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := strings.ToLower(tool.Get("type").String())
+		if toolType == "web_search" || toolType == "web_search_20250305" || toolType == "google_search" {
+			return true
+		}
+		toolName := strings.ToLower(tool.Get("name").String())
+		if toolName == "web_search" || toolName == "google_search" {
+			return true
+		}
+	}
+	return false
+}
+
 // ConvertClaudeRequestToAntigravity parses and transforms a Claude Code API request into Gemini CLI API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini CLI API.

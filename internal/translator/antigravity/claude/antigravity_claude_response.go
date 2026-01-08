@@ -272,6 +272,32 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		}
 	}
 
+	groundingResult := gjson.GetBytes(rawJSON, "response.candidates.0.groundingMetadata")
+	if groundingResult.Exists() {
+		log.Debugf("[Claude-Response] Found groundingMetadata: %s", groundingResult.Raw[:min(200, len(groundingResult.Raw))])
+	}
+	if groundingResult.Exists() && groundingResult.IsObject() {
+		groundingText := extractGroundingText(groundingResult)
+		if groundingText != "" {
+			if params.ResponseType != 0 {
+				output = output + "event: content_block_stop\n"
+				output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+				output = output + "\n\n\n"
+				params.ResponseIndex++
+				params.ResponseType = 0
+			}
+			output = output + "event: content_block_start\n"
+			output = output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex)
+			output = output + "\n\n\n"
+			output = output + "event: content_block_delta\n"
+			data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex), "delta.text", groundingText)
+			output = output + fmt.Sprintf("data: %s\n\n\n", data)
+			params.ResponseType = 1
+			params.HasContent = true
+			log.Debugf("[Claude-Response] Injected grounding text (%d chars)", len(groundingText))
+		}
+	}
+
 	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
 		params.HasFinishReason = true
 		params.FinishReason = finishReasonResult.String()
@@ -358,6 +384,45 @@ func resolveStopReason(params *Params) string {
 	}
 
 	return "end_turn"
+}
+
+func extractGroundingText(groundingResult gjson.Result) string {
+	var groundingText strings.Builder
+
+	queries := groundingResult.Get("webSearchQueries")
+	if queries.IsArray() && len(queries.Array()) > 0 {
+		groundingText.WriteString("\n\n---\n**🔍 已为您搜索：** ")
+		var queryList []string
+		for _, q := range queries.Array() {
+			queryList = append(queryList, q.String())
+		}
+		groundingText.WriteString(strings.Join(queryList, ", "))
+	}
+
+	chunks := groundingResult.Get("groundingChunks")
+	if chunks.IsArray() && len(chunks.Array()) > 0 {
+		var links []string
+		for i, chunk := range chunks.Array() {
+			web := chunk.Get("web")
+			if web.Exists() {
+				title := web.Get("title").String()
+				if title == "" {
+					title = "网页来源"
+				}
+				uri := web.Get("uri").String()
+				if uri == "" {
+					uri = "#"
+				}
+				links = append(links, fmt.Sprintf("[%d] [%s](%s)", i+1, title, uri))
+			}
+		}
+		if len(links) > 0 {
+			groundingText.WriteString("\n\n**🌐 来源引文：**\n")
+			groundingText.WriteString(strings.Join(links, "\n"))
+		}
+	}
+
+	return groundingText.String()
 }
 
 // ConvertAntigravityResponseToClaudeNonStream converts a non-streaming Gemini CLI response to a non-streaming Claude response.
