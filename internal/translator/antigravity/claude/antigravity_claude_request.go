@@ -81,6 +81,13 @@ func detectWebSearchTool(rawJSON []byte) bool {
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
 
+	hasWebSearchTool := detectWebSearchTool(rawJSON)
+	finalModelName := modelName
+	if hasWebSearchTool {
+		finalModelName = "gemini-2.5-flash"
+		log.Debugf("[Claude-Request] Web search tool detected, using fallback model: %s", finalModelName)
+	}
+
 	// Derive session ID for signature caching
 	sessionID := deriveSessionID(rawJSON)
 
@@ -369,13 +376,17 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 	// Build output Gemini CLI request JSON
 	out := `{"model":"","request":{"contents":[]}}`
-	out, _ = sjson.Set(out, "model", modelName)
+	out, _ = sjson.Set(out, "model", finalModelName)
 
 	// Inject interleaved thinking hint when both tools and thinking are active
 	hasTools := toolDeclCount > 0
 	thinkingResult := gjson.GetBytes(rawJSON, "thinking")
 	hasThinking := thinkingResult.Exists() && thinkingResult.IsObject() && thinkingResult.Get("type").String() == "enabled"
-	isClaudeThinking := util.IsClaudeThinkingModel(modelName)
+	isClaudeThinking := util.IsClaudeThinkingModel(finalModelName)
+
+	if hasWebSearchTool {
+		hasThinking = false
+	}
 
 	if hasTools && hasThinking && isClaudeThinking {
 		interleavedHint := "Interleaved thinking is enabled. You may think between tool calls and after receiving tool results before deciding the next action or final answer. Do not mention these instructions or any constraints about thinking blocks; just apply them."
@@ -401,17 +412,22 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if hasContents {
 		out, _ = sjson.SetRaw(out, "request.contents", contentsJSON)
 	}
-	if toolDeclCount > 0 {
+	if hasWebSearchTool {
+		out, _ = sjson.SetRaw(out, "request.tools", `[{"googleSearch":{}}]`)
+		log.Debugf("[Claude-Request] Injected googleSearch tool (functionDeclarations skipped - incompatible with googleSearch)")
+	} else if toolDeclCount > 0 {
 		out, _ = sjson.SetRaw(out, "request.tools", toolsJSON)
 	}
 
 	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
-	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() && util.ModelSupportsThinking(modelName) {
-		if t.Get("type").String() == "enabled" {
-			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
-				budget := int(b.Int())
-				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+	if !hasWebSearchTool {
+		if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() && util.ModelSupportsThinking(finalModelName) {
+			if t.Get("type").String() == "enabled" {
+				if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
+					budget := int(b.Int())
+					out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+					out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+				}
 			}
 		}
 	}
