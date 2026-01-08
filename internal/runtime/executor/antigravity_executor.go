@@ -1047,7 +1047,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		payload = []byte(strJSON)
 	}
 
-	if strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") {
+	if strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-preview") {
 		systemInstructionPartsResult := gjson.GetBytes(payload, "request.systemInstruction.parts")
 
 		payload, _ = sjson.SetBytes(payload, "request.systemInstruction.role", "user")
