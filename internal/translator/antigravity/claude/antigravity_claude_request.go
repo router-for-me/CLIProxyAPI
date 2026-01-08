@@ -42,6 +42,24 @@ func deriveSessionID(rawJSON []byte) string {
 	return ""
 }
 
+func detectWebSearchTool(rawJSON []byte) bool {
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := strings.ToLower(tool.Get("type").String())
+		if toolType == "web_search" || toolType == "web_search_20250305" || toolType == "google_search" {
+			return true
+		}
+		toolName := strings.ToLower(tool.Get("name").String())
+		if toolName == "web_search" || toolName == "google_search" {
+			return true
+		}
+	}
+	return false
+}
+
 // ConvertClaudeRequestToAntigravity parses and transforms a Claude Code API request into Gemini CLI API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini CLI API.
@@ -62,6 +80,13 @@ func deriveSessionID(rawJSON []byte) string {
 //   - []byte: The transformed request data in Gemini CLI API format
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
+
+	hasWebSearchTool := detectWebSearchTool(rawJSON)
+	finalModelName := modelName
+	if hasWebSearchTool {
+		finalModelName = "gemini-2.5-flash"
+		log.Debugf("[Claude-Request] Web search tool detected, using fallback model: %s", finalModelName)
+	}
 
 	// Derive session ID for signature caching
 	sessionID := deriveSessionID(rawJSON)
@@ -97,10 +122,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	hasContents := false
 
 	messagesResult := gjson.GetBytes(rawJSON, "messages")
-	// Also support OpenAI Responses format "input" field
-	if !messagesResult.IsArray() {
-		messagesResult = gjson.GetBytes(rawJSON, "input")
-	}
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
 		numMessages := len(messageResults)
@@ -178,14 +199,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
-						prompt := contentResult.Get("text").String()
-						partJSON := `{}`
-						if prompt != "" {
-							partJSON, _ = sjson.Set(partJSON, "text", prompt)
-						}
-						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
-					} else if contentTypeResult.Type == gjson.String && (contentTypeResult.String() == "output_text" || contentTypeResult.String() == "input_text") {
-						// Handle OpenAI Responses format text types
 						prompt := contentResult.Get("text").String()
 						partJSON := `{}`
 						if prompt != "" {
@@ -363,13 +376,17 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 	// Build output Gemini CLI request JSON
 	out := `{"model":"","request":{"contents":[]}}`
-	out, _ = sjson.Set(out, "model", modelName)
+	out, _ = sjson.Set(out, "model", finalModelName)
 
 	// Inject interleaved thinking hint when both tools and thinking are active
 	hasTools := toolDeclCount > 0
 	thinkingResult := gjson.GetBytes(rawJSON, "thinking")
 	hasThinking := thinkingResult.Exists() && thinkingResult.IsObject() && thinkingResult.Get("type").String() == "enabled"
-	isClaudeThinking := util.IsClaudeThinkingModel(modelName)
+	isClaudeThinking := util.IsClaudeThinkingModel(finalModelName)
+
+	if hasWebSearchTool {
+		hasThinking = false
+	}
 
 	if hasTools && hasThinking && isClaudeThinking {
 		interleavedHint := "Interleaved thinking is enabled. You may think between tool calls and after receiving tool results before deciding the next action or final answer. Do not mention these instructions or any constraints about thinking blocks; just apply them."
@@ -395,15 +412,25 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if hasContents {
 		out, _ = sjson.SetRaw(out, "request.contents", contentsJSON)
 	}
-	if toolDeclCount > 0 {
+	if hasWebSearchTool {
+		out, _ = sjson.SetRaw(out, "request.tools", `[{"googleSearch":{}}]`)
+		log.Debugf("[Claude-Request] Injected googleSearch tool (functionDeclarations skipped - incompatible with googleSearch)")
+	} else if toolDeclCount > 0 {
 		out, _ = sjson.SetRaw(out, "request.tools", toolsJSON)
 	}
 
-	// NOTE: Antigravity API does NOT support thinkingConfig for claude-opus-4-5-thinking model.
-	// Sending thinkingConfig results in 400 INVALID_ARGUMENT.
-	// The thinking model provides thinking output without explicit thinkingConfig.
-	// Therefore, we intentionally skip setting thinkingConfig for Antigravity provider.
-	// See: https://github.com/google-gemini/gemini-cli/issues/1953
+	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
+	if !hasWebSearchTool {
+		if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() && util.ModelSupportsThinking(finalModelName) {
+			if t.Get("type").String() == "enabled" {
+				if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
+					budget := int(b.Int())
+					out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+					out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+				}
+			}
+		}
+	}
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {
 		out, _ = sjson.Set(out, "request.generationConfig.temperature", v.Num)
 	}

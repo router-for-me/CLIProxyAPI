@@ -1202,7 +1202,12 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 }
 
 func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
-	template, _ := sjson.Set(string(payload), "model", modelName)
+	existingModel := gjson.GetBytes(payload, "model").String()
+	finalModel := modelName
+	if existingModel != "" {
+		finalModel = existingModel
+	}
+	template, _ := sjson.Set(string(payload), "model", finalModel)
 	template, _ = sjson.Set(template, "userAgent", "antigravity")
 
 	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
