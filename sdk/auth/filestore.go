@@ -74,7 +74,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		if existing, errRead := os.ReadFile(path); errRead == nil {
 			// Use metadataEqualIgnoringTimestamps to skip writes when only timestamp fields change.
 			// This prevents the token refresh loop caused by timestamp/expired/expires_in changes.
-			if metadataEqualIgnoringTimestamps(existing, raw) {
+			if metadataEqualIgnoringTimestamps(existing, raw, auth.Provider) {
 				return path, nil
 			}
 		} else if errRead != nil && !os.IsNotExist(errRead) {
@@ -284,7 +284,10 @@ func jsonEqual(a, b []byte) bool {
 // ignoring fields that change on every refresh but don't affect functionality.
 // This prevents unnecessary file writes that would trigger watcher events and
 // create refresh loops.
-func metadataEqualIgnoringTimestamps(a, b []byte) bool {
+// The provider parameter controls whether access_token is ignored: providers like
+// Google OAuth (gemini, gemini-cli) can re-fetch tokens when needed, while others
+// like iFlow require the refreshed token to be persisted.
+func metadataEqualIgnoringTimestamps(a, b []byte, provider string) bool {
 	var objA, objB map[string]any
 	if err := json.Unmarshal(a, &objA); err != nil {
 		return false
@@ -295,9 +298,15 @@ func metadataEqualIgnoringTimestamps(a, b []byte) bool {
 
 	// Fields to ignore: these change on every refresh but don't affect authentication logic.
 	// - timestamp, expired, expires_in, last_refresh: time-related fields that change on refresh
-	// - access_token: Google OAuth returns a new access_token on each refresh, this is expected
-	//   and shouldn't trigger file writes (the new token will be fetched again when needed)
-	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh", "access_token"}
+	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh"}
+
+	// For providers that can re-fetch tokens when needed (e.g., Google OAuth),
+	// we ignore access_token to avoid unnecessary file writes.
+	switch provider {
+	case "gemini", "gemini-cli":
+		ignoredFields = append(ignoredFields, "access_token")
+	}
+
 	for _, field := range ignoredFields {
 		delete(objA, field)
 		delete(objB, field)
