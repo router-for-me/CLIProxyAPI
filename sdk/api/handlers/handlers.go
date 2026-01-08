@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/alias"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -20,6 +21,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -49,6 +51,99 @@ const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
 )
+
+// aliasTarget holds a single provider+model pair from an alias resolution.
+type aliasTarget struct {
+	provider string
+	model    string
+}
+
+// aliasInfo holds all alias targets and the initially selected index.
+type aliasInfo struct {
+	targets       []aliasTarget
+	selectedIdx   int
+	selectedModel string // the model name that was selected for the initial request
+}
+
+// isAliasFallbackEligible returns true if the error warrants trying the next alias target.
+func isAliasFallbackEligible(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := 0
+	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+		status = se.StatusCode()
+	}
+	switch status {
+	case http.StatusTooManyRequests, // 429 - rate limited
+		http.StatusServiceUnavailable,   // 503 - service unavailable
+		http.StatusGatewayTimeout,       // 504 - gateway timeout
+		http.StatusBadGateway:           // 502 - bad gateway
+		return true
+	default:
+		return false
+	}
+}
+
+// executeFn is the function signature for executing a request.
+type executeFn func(ctx context.Context, providers []string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error)
+
+// tryAliasFallback attempts fallback to other alias targets when the initial request fails.
+func (h *BaseAPIHandler) tryAliasFallback(ctx context.Context, info *aliasInfo, rawJSON []byte, metadata map[string]any, opts coreexecutor.Options, execute executeFn) (coreexecutor.Response, error) {
+	var resp coreexecutor.Response
+	var err error
+
+	for i, target := range info.targets {
+		if i == info.selectedIdx {
+			continue // skip the one we already tried
+		}
+		log.Debugf("alias fallback: trying target %d/%d: provider=%s model=%s",
+			i+1, len(info.targets), target.provider, target.model)
+
+		// Get providers for this target's model
+		targetProviders := util.GetProviderName(target.model)
+		if len(targetProviders) == 0 {
+			continue
+		}
+
+		// Build request with target's model
+		targetReq := coreexecutor.Request{
+			Model:    target.model,
+			Payload:  cloneBytes(rawJSON),
+			Metadata: cloneMetadata(metadata),
+		}
+
+		resp, err = execute(ctx, targetProviders, targetReq, opts)
+		if err == nil {
+			log.Debugf("alias fallback: succeeded with provider=%s model=%s", target.provider, target.model)
+			return resp, nil
+		}
+
+		// If this error is not fallback-eligible, stop trying
+		if !isAliasFallbackEligible(err) {
+			break
+		}
+	}
+
+	return resp, err
+}
+
+// buildErrorMessage creates an ErrorMessage from an error with proper status code and headers.
+func buildErrorMessage(err error) *interfaces.ErrorMessage {
+	status := http.StatusInternalServerError
+	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+		if code := se.StatusCode(); code > 0 {
+			status = code
+		}
+	}
+	var addon http.Header
+	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+		if hdr := he.Headers(); hdr != nil {
+			addon = hdr.Clone()
+		}
+	}
+	return &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+}
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
@@ -319,7 +414,16 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	providers, normalizedModel, metadata, errMsg := h.getRequestDetails(modelName)
+	// Check if this is an alias with multiple fallback targets
+	aliasInfo := h.getAliasTargets(modelName)
+
+	// If alias, use the selected model for initial request; otherwise use original
+	effectiveModel := modelName
+	if aliasInfo != nil {
+		effectiveModel = aliasInfo.selectedModel
+	}
+
+	providers, normalizedModel, metadata, errMsg := h.getRequestDetails(effectiveModel)
 	if errMsg != nil {
 		return nil, errMsg
 	}
@@ -339,20 +443,17 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	opts.Metadata = mergeMetadata(cloneMetadata(metadata), reqMeta)
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+
+	// If we have alias fallback targets and the error is fallback-eligible, try them
+	if err != nil && aliasInfo != nil && isAliasFallbackEligible(err) {
+		resp, err = h.tryAliasFallback(ctx, aliasInfo, rawJSON, metadata, opts,
+			func(ctx context.Context, providers []string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+				return h.AuthManager.Execute(ctx, providers, req, opts)
+			})
+	}
+
 	if err != nil {
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		return nil, buildErrorMessage(err)
 	}
 	return cloneBytes(resp.Payload), nil
 }
@@ -360,7 +461,16 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	providers, normalizedModel, metadata, errMsg := h.getRequestDetails(modelName)
+	// Check if this is an alias with multiple fallback targets
+	aliasInfo := h.getAliasTargets(modelName)
+
+	// If alias, use the selected model for initial request; otherwise use original
+	effectiveModel := modelName
+	if aliasInfo != nil {
+		effectiveModel = aliasInfo.selectedModel
+	}
+
+	providers, normalizedModel, metadata, errMsg := h.getRequestDetails(effectiveModel)
 	if errMsg != nil {
 		return nil, errMsg
 	}
@@ -380,20 +490,17 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	opts.Metadata = mergeMetadata(cloneMetadata(metadata), reqMeta)
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
+
+	// If we have alias fallback targets and the error is fallback-eligible, try them
+	if err != nil && aliasInfo != nil && isAliasFallbackEligible(err) {
+		resp, err = h.tryAliasFallback(ctx, aliasInfo, rawJSON, metadata, opts,
+			func(ctx context.Context, providers []string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+				return h.AuthManager.ExecuteCount(ctx, providers, req, opts)
+			})
+	}
+
 	if err != nil {
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		return nil, buildErrorMessage(err)
 	}
 	return cloneBytes(resp.Payload), nil
 }
@@ -576,6 +683,50 @@ func cloneBytes(src []byte) []byte {
 	dst := make([]byte, len(src))
 	copy(dst, src)
 	return dst
+}
+
+// getAliasTargets returns all alias targets for a model if it's an alias.
+// Returns nil if the model is not an alias or has no valid fallback targets.
+func (h *BaseAPIHandler) getAliasTargets(modelName string) *aliasInfo {
+	resolvedModelName := util.ResolveAutoModel(modelName)
+	resolved := alias.GetGlobalResolver().Resolve(resolvedModelName)
+	if resolved == nil || len(resolved.Providers) == 0 {
+		return nil
+	}
+
+	selected := alias.GetGlobalResolver().SelectProvider(resolved)
+	if selected == nil {
+		return nil
+	}
+
+	// Build filtered targets list and track selected index in the filtered list
+	targets := make([]aliasTarget, 0, len(resolved.Providers))
+	selectedIdxInTargets := -1
+	for _, p := range resolved.Providers {
+		if providerNames := util.GetProviderName(p.Model); len(providerNames) > 0 {
+			if p.Provider == selected.Provider && p.Model == selected.Model {
+				selectedIdxInTargets = len(targets)
+			}
+			targets = append(targets, aliasTarget{
+				provider: p.Provider,
+				model:    p.Model,
+			})
+		}
+	}
+
+	if len(targets) <= 1 {
+		return nil
+	}
+
+	if selectedIdxInTargets == -1 {
+		return nil
+	}
+
+	return &aliasInfo{
+		targets:       targets,
+		selectedIdx:   selectedIdxInTargets,
+		selectedModel: selected.Model,
+	}
 }
 
 func normalizeModelMetadata(modelName string) (string, map[string]any) {

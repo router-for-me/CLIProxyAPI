@@ -17,6 +17,7 @@ import (
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/alias"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -410,6 +411,9 @@ func main() {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
+
+	// Initialize global model alias resolver
+	alias.InitGlobalResolver(&cfg.ModelAliases)
 
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool

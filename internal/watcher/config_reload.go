@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/alias"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
@@ -113,6 +114,9 @@ func (w *Watcher) reloadConfig() bool {
 	if oldConfig != nil && oldConfig.Debug != newConfig.Debug {
 		log.Debugf("log level updated - debug mode changed from %t to %t", oldConfig.Debug, newConfig.Debug)
 	}
+
+	// Update global model alias resolver
+	alias.UpdateGlobalResolver(&newConfig.ModelAliases)
 
 	if oldConfig != nil {
 		details := diff.BuildConfigChangeDetails(oldConfig, newConfig)
