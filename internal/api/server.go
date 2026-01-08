@@ -326,6 +326,7 @@ func (s *Server) setupRoutes() {
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
+		v1.POST("/images/generations", openaiHandlers.ImageGenerations)
 	}
 
 	// Gemini compatible API routes
@@ -344,6 +345,7 @@ func (s *Server) setupRoutes() {
 			"endpoints": []string{
 				"POST /v1/chat/completions",
 				"POST /v1/completions",
+				"POST /v1/images/generations",
 				"GET /v1/models",
 			},
 		})

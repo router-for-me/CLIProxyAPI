@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -667,4 +668,210 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
 		},
 	})
+}
+
+// ImageGenerations handles the /v1/images/generations endpoint.
+// It converts OpenAI image generation requests to chat completions format
+// and lets the system route to the appropriate image generation model.
+//
+// OpenAI format:
+//
+//	{
+//	  "model": "gemini-2.5-flash-image-preview",
+//	  "prompt": "A white siamese cat",
+//	  "n": 1,
+//	  "size": "1024x1024",
+//	  "response_format": "url" | "b64_json"
+//	}
+//
+// Parameters:
+//   - c: The Gin context containing the HTTP request and response
+func (h *OpenAIAPIHandler) ImageGenerations(c *gin.Context) {
+	rawJSON, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	// Extract parameters from OpenAI format
+	prompt := gjson.GetBytes(rawJSON, "prompt").String()
+	if prompt == "" {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "prompt is required",
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	// Get model from request - no default mapping, let the system handle routing
+	model := gjson.GetBytes(rawJSON, "model").String()
+	if model == "" {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "model is required",
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	// Get response format
+	responseFormat := gjson.GetBytes(rawJSON, "response_format").String()
+	if responseFormat == "" {
+		responseFormat = "b64_json"
+	}
+
+	// Get number of images
+	n := gjson.GetBytes(rawJSON, "n").Int()
+	if n == 0 {
+		n = 1
+	}
+
+	// Build chat completions request with image generation config
+	// The system will route based on model name and handle translation
+	chatReq := `{"model":"","messages":[{"role":"user","content":""}]}`
+	chatReq, _ = sjson.Set(chatReq, "model", model)
+	chatReq, _ = sjson.Set(chatReq, "messages.0.content", prompt)
+
+	// Add modalities for image generation - this tells the translator to set responseModalities
+	chatReq, _ = sjson.Set(chatReq, "modalities", []string{"image", "text"})
+
+	// Map size to aspect ratio for image_config
+	if size := gjson.GetBytes(rawJSON, "size"); size.Exists() {
+		sizeStr := size.String()
+		aspectRatio := "1:1" // default square
+		switch sizeStr {
+		case "1024x1024", "512x512", "256x256":
+			aspectRatio = "1:1"
+		case "1792x1024", "1536x1024", "1280x720":
+			aspectRatio = "16:9"
+		case "1024x1792", "1024x1536", "720x1280":
+			aspectRatio = "9:16"
+		}
+		chatReq, _ = sjson.Set(chatReq, "image_config.aspect_ratio", aspectRatio)
+	}
+
+	// Map quality to image_size for Gemini 3 Pro Image
+	// OpenAI quality: "standard" (default), "hd"
+	// Gemini image_size: "1K" (default), "2K", "4K"
+	if quality := gjson.GetBytes(rawJSON, "quality"); quality.Exists() {
+		switch quality.String() {
+		case "hd":
+			chatReq, _ = sjson.Set(chatReq, "image_config.image_size", "2K")
+		case "4k", "ultra":
+			chatReq, _ = sjson.Set(chatReq, "image_config.image_size", "4K")
+		}
+	}
+
+	// Use non-streaming for image generation
+	h.handleImageGenerationRequest(c, []byte(chatReq), int(n), responseFormat)
+}
+
+// handleImageGenerationRequest handles the actual image generation request
+func (h *OpenAIAPIHandler) handleImageGenerationRequest(c *gin.Context, chatReq []byte, n int, responseFormat string) {
+	ctx, cancel := h.GetContextWithCancel(h, c, c.Request.Context())
+	defer cancel()
+
+	model := gjson.GetBytes(chatReq, "model").String()
+
+	// Generate images (we only support n=1 for now due to Gemini limitations)
+	var images []map[string]interface{}
+
+	for i := 0; i < n; i++ {
+		// Use ExecuteWithAuthManager for non-streaming request
+		responseJSON, errMsg := h.ExecuteWithAuthManager(ctx, OpenAI, model, chatReq, "")
+		if errMsg != nil {
+			h.WriteErrorResponse(c, errMsg)
+			return
+		}
+
+		// Try to find image in the response
+		imageData := ""
+
+		// Check for images array (Gemini format)
+		imagesResult := gjson.GetBytes(responseJSON, "choices.0.message.images")
+		if imagesResult.Exists() && imagesResult.IsArray() && len(imagesResult.Array()) > 0 {
+			// Get first image
+			firstImage := imagesResult.Array()[0]
+			if firstImage.Get("b64_json").Exists() {
+				imageData = firstImage.Get("b64_json").String()
+			} else if firstImage.Get("data").Exists() {
+				imageData = firstImage.Get("data").String()
+			} else if firstImage.Get("image_url.url").Exists() {
+				// Handle format: {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}
+				urlData := firstImage.Get("image_url.url").String()
+				// Extract base64 data from data URL format
+				if strings.HasPrefix(urlData, "data:") {
+					if idx := strings.Index(urlData, ";base64,"); idx != -1 {
+						imageData = urlData[idx+8:] // Skip ";base64,"
+					}
+				}
+			}
+		}
+
+		// If no image found in images array, check content for base64 data
+		if imageData == "" {
+			content := gjson.GetBytes(responseJSON, "choices.0.message.content").String()
+			// Check if content looks like base64 image data
+			if len(content) > 100 && !containsAlphaText(content) {
+				imageData = content
+			}
+		}
+
+		if imageData == "" {
+			// Return the text response as error if no image was generated
+			textContent := gjson.GetBytes(responseJSON, "choices.0.message.content").String()
+			c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("No image was generated. Model response: %s", textContent),
+					Type:    "api_error",
+				},
+			})
+			return
+		}
+
+		imageObj := map[string]interface{}{
+			"revised_prompt": gjson.GetBytes(chatReq, "messages.0.content").String(),
+		}
+
+		if responseFormat == "url" {
+			// For URL format, we'd need to host the image somewhere
+			// For now, return as data URL
+			imageObj["url"] = "data:image/png;base64," + imageData
+		} else {
+			imageObj["b64_json"] = imageData
+		}
+
+		images = append(images, imageObj)
+	}
+
+	// Return OpenAI-compatible response
+	c.JSON(http.StatusOK, gin.H{
+		"created": gjson.GetBytes(chatReq, "created").Int(),
+		"data":    images,
+	})
+}
+
+// containsAlphaText checks if a string contains regular text (not just base64)
+func containsAlphaText(s string) bool {
+	// Base64 typically doesn't have spaces or common words
+	if len(s) < 50 {
+		return true
+	}
+	// Check for common text patterns
+	spaceCount := 0
+	for _, c := range s {
+		if c == ' ' || c == '\n' || c == '\t' {
+			spaceCount++
+		}
+	}
+	// If more than 5% spaces, likely text
+	return float64(spaceCount)/float64(len(s)) > 0.05
 }
