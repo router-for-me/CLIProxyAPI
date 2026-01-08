@@ -386,11 +386,12 @@ func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example str
 }
 
 func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
-	if err := os.RemoveAll(s.authDir); err != nil {
-		return fmt.Errorf("object store: reset auth directory: %w", err)
-	}
+	// NOTE: We intentionally do NOT use os.RemoveAll here.
+	// Wiping the directory triggers file watcher delete events, which then
+	// propagate deletions to the remote object store (race condition).
+	// Instead, we just ensure the directory exists and overwrite files incrementally.
 	if err := os.MkdirAll(s.authDir, 0o700); err != nil {
-		return fmt.Errorf("object store: recreate auth directory: %w", err)
+		return fmt.Errorf("object store: create auth directory: %w", err)
 	}
 
 	prefix := s.prefixedKey(objectStoreAuthPrefix + "/")
