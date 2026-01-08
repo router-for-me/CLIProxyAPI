@@ -350,14 +350,12 @@ func resolveStopReason(params *Params) string {
 		return "tool_use"
 	}
 
-	switch params.FinishReason {
-	case "MAX_TOKENS":
+	if params.FinishReason == "MAX_TOKENS" {
 		return "max_tokens"
-	case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
-		return "end_turn"
 	}
 
 	return "end_turn"
+
 }
 
 // ConvertAntigravityResponseToClaudeNonStream converts a non-streaming Gemini CLI response to a non-streaming Claude response.
@@ -498,13 +496,8 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		stopReason = "tool_use"
 	} else {
 		if finish := root.Get("response.candidates.0.finishReason"); finish.Exists() {
-			switch finish.String() {
-			case "MAX_TOKENS":
+			if finish.String() == "MAX_TOKENS" {
 				stopReason = "max_tokens"
-			case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
-				stopReason = "end_turn"
-			default:
-				stopReason = "end_turn"
 			}
 		}
 	}
