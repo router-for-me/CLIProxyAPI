@@ -1,10 +1,12 @@
 package executor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -38,13 +40,55 @@ type cursorCompletionResult struct {
 	usage      usage.Detail
 }
 
+type cursorStreamEvent struct {
+	Type      string          `json:"type"`
+	Subtype   string          `json:"subtype,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	SessionID string          `json:"session_id,omitempty"`
+	Message   *cursorMessage  `json:"message,omitempty"`
+	ToolCall  json.RawMessage `json:"tool_call,omitempty"`
+	Result    string          `json:"result,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+}
+
+type cursorMessage struct {
+	Role    string              `json:"role"`
+	Content []cursorContentPart `json:"content"`
+}
+
+type cursorContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type cursorStreamState struct {
+	id          string
+	created     int64
+	model       string
+	toolCallIdx int
+	toolCallIDs map[string]int
+	sentRole    bool
+}
+
+type cursorStreamReader struct {
+	io.Reader
+	cmd    *exec.Cmd
+	cancel context.CancelFunc
+}
+
+func (r *cursorStreamReader) Close() error {
+	r.cancel()
+	_ = r.cmd.Wait()
+	return nil
+}
+
 func (e *CursorExecutor) getCursorAgentCompletion(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cursorCompletionResult, error) {
-	apiKey := cursorAPIKey(auth)
+	apiKey := cursorAPIKey(auth, e.cfg)
 	if apiKey == "" {
 		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing Cursor API key (set CURSOR_API_KEY or provide api_key in auth)"}
 	}
 
-	binary, err := cursorAgentBinary()
+	binary, err := cursorAgentBinary(e.cfg)
 	if err != nil {
 		return nil, statusErr{code: http.StatusBadGateway, msg: err.Error()}
 	}
@@ -213,64 +257,305 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	result, err := e.getCursorAgentCompletion(ctx, auth, req, opts)
-	if err != nil {
-		return nil, err
+	apiKey := cursorAPIKey(auth, e.cfg)
+	if apiKey == "" {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing Cursor API key (set CURSOR_API_KEY or provide api_key in auth)"}
 	}
 
-	reporter.publish(ctx, result.usage)
+	binary, err := cursorAgentBinary(e.cfg)
+	if err != nil {
+		return nil, statusErr{code: http.StatusBadGateway, msg: err.Error()}
+	}
+
+	model := req.Model
+	if override := e.resolveUpstreamModel(req.Model, auth); override != "" {
+		model = override
+	}
+
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("openai")
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, model, originalPayload, true)
+	translated := sdktranslator.TranslateRequest(from, to, model, bytes.Clone(req.Payload), true)
+	translated = applyPayloadConfigWithRoot(e.cfg, model, "cursor", "", translated, originalTranslated)
+
+	prompt := cursorPromptFromOpenAI(translated)
+	if strings.TrimSpace(prompt) == "" {
+		return nil, statusErr{code: http.StatusBadRequest, msg: "cursor executor: empty prompt"}
+	}
+
+	upstreamModel := cursorUpstreamModel(model)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+
+	reqHeaders := make(http.Header)
+	reqHeaders.Set("X-Cursor-Model", upstreamModel)
+	reqHeaders.Set("X-Cursor-Stream", "true")
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       binary,
+		Method:    "EXEC",
+		Headers:   reqHeaders,
+		Body:      []byte(prompt),
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	stdout, _, err := runCursorAgentStream(ctx, binary, upstreamModel, prompt, apiKey)
+	if err != nil {
+		return nil, statusErr{code: http.StatusBadGateway, msg: err.Error()}
+	}
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go e.streamCursorEvents(ctx, stdout, out, req, opts, translated, reporter)
+
+	return out, nil
+}
+
+func runCursorAgentStream(ctx context.Context, binary, model, prompt, apiKey string) (io.ReadCloser, context.CancelFunc, error) {
+	args := []string{
+		"--output-format", "stream-json",
+		"--stream-partial-output",
+		"--model", cursorAgentModelName(model),
+		"-p", prompt,
+	}
+
+	cmdCtx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(cmdCtx, binary, args...)
+
+	env := os.Environ()
+	if apiKey != "" {
+		env = append(env, "CURSOR_API_KEY="+apiKey)
+	}
+	cmd.Env = env
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, nil, err
+	}
+
+	return &cursorStreamReader{
+		Reader: stdout,
+		cmd:    cmd,
+		cancel: cancel,
+	}, cancel, nil
+}
+
+func (e *CursorExecutor) streamCursorEvents(
+	ctx context.Context,
+	stdout io.ReadCloser,
+	out chan<- cliproxyexecutor.StreamChunk,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	translated []byte,
+	reporter *usageReporter,
+) {
+	defer close(out)
+	defer stdout.Close()
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 
-	out := make(chan cliproxyexecutor.StreamChunk)
-	go func() {
-		defer close(out)
+	state := &cursorStreamState{
+		id:          "chatcmpl-" + uuid.NewString(),
+		created:     time.Now().Unix(),
+		model:       req.Model,
+		toolCallIDs: make(map[string]int),
+	}
 
-		id := "chatcmpl-" + uuid.NewString()
-		created := time.Now().Unix()
-		var param any
+	var param any
 
-		chunk1 := map[string]any{
-			"id":      id,
-			"object":  "chat.completion.chunk",
-			"created": created,
-			"model":   req.Model,
-			"choices": []any{map[string]any{
-				"index": 0,
-				"delta": map[string]any{"role": "assistant", "content": result.resultText},
-			}},
-		}
-		chunk2 := map[string]any{
-			"id":      id,
-			"object":  "chat.completion.chunk",
-			"created": created,
-			"model":   req.Model,
-			"choices": []any{map[string]any{
-				"index":         0,
-				"delta":         map[string]any{},
-				"finish_reason": "stop",
-			}},
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(nil, 10_485_760)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		appendAPIResponseChunk(ctx, e.cfg, line)
+
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
 		}
 
-		writeChunk := func(payload any) {
-			data, _ := json.Marshal(payload)
-			line := append([]byte("data: "), data...)
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), result.translated, line, &param)
-			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+		var event cursorStreamEvent
+		if err := json.Unmarshal(line, &event); err != nil {
+			continue
+		}
+
+		chunks := e.translateCursorEvent(state, &event, req.Model)
+		for _, chunk := range chunks {
+			sseChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, chunk, &param)
+			for _, sseChunk := range sseChunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: []byte(sseChunk)}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 
-		writeChunk(chunk1)
-		writeChunk(chunk2)
-		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), result.translated, []byte("data: [DONE]"), &param)
-		for i := range doneChunks {
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte(doneChunks[i])}
+		if event.Type == "result" {
+			if event.Subtype == "success" {
+				_, usageDetail := buildOpenAIChatCompletionResponse(req.Model, event.Result, translated, cursorTokenizerModel(req.Model))
+				reporter.publish(ctx, usageDetail)
+			}
+			break
 		}
-	}()
+	}
 
-	return out, nil
+	if err := scanner.Err(); err != nil {
+		log.Warnf("cursor stream: scanner error: %v", err)
+		recordAPIResponseError(ctx, e.cfg, err)
+		return
+	}
+
+	finishChunk := makeStreamChunk(state.id, state.created, state.model, map[string]any{}, "stop")
+	finishSSE := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, finishChunk, &param)
+	for _, chunk := range finishSSE {
+		select {
+		case out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk)}:
+		case <-ctx.Done():
+			return
+		}
+	}
+
+	doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, []byte("data: [DONE]"), &param)
+	for _, chunk := range doneChunks {
+		select {
+		case out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk)}:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (e *CursorExecutor) translateCursorEvent(state *cursorStreamState, event *cursorStreamEvent, model string) [][]byte {
+	var chunks [][]byte
+
+	switch event.Type {
+	case "assistant":
+		if !state.sentRole {
+			roleChunk := makeStreamChunk(state.id, state.created, model, map[string]any{"role": "assistant"}, "")
+			chunks = append(chunks, roleChunk)
+			state.sentRole = true
+		}
+		if event.Message != nil {
+			for _, part := range event.Message.Content {
+				if part.Type == "text" && part.Text != "" {
+					chunk := makeStreamChunk(state.id, state.created, model, map[string]any{"content": part.Text}, "")
+					chunks = append(chunks, chunk)
+				}
+			}
+		}
+
+	case "tool_call":
+		if event.Subtype == "started" {
+			toolName, toolArgs := parseCursorToolCall(event.ToolCall)
+			if toolName == "" {
+				return nil
+			}
+
+			callID := sanitizeToolCallID(event.CallID)
+			idx := state.toolCallIdx
+			state.toolCallIDs[callID] = idx
+			state.toolCallIdx++
+
+			if !state.sentRole {
+				roleChunk := makeStreamChunk(state.id, state.created, model, map[string]any{"role": "assistant"}, "")
+				chunks = append(chunks, roleChunk)
+				state.sentRole = true
+			}
+
+			toolCallDelta := map[string]any{
+				"tool_calls": []any{
+					map[string]any{
+						"index": idx,
+						"id":    callID,
+						"type":  "function",
+						"function": map[string]any{
+							"name":      toolName,
+							"arguments": toolArgs,
+						},
+					},
+				},
+			}
+			chunk := makeStreamChunk(state.id, state.created, model, toolCallDelta, "")
+			chunks = append(chunks, chunk)
+		}
+	}
+
+	return chunks
+}
+
+func makeStreamChunk(id string, created int64, model string, delta map[string]any, finishReason string) []byte {
+	choice := map[string]any{
+		"index": 0,
+		"delta": delta,
+	}
+	if finishReason != "" {
+		choice["finish_reason"] = finishReason
+	}
+	chunk := map[string]any{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []any{choice},
+	}
+	data, _ := json.Marshal(chunk)
+	return append([]byte("data: "), data...)
+}
+
+func parseCursorToolCall(raw json.RawMessage) (name string, args string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+	parsed := gjson.ParseBytes(raw)
+
+	if r := parsed.Get("readToolCall"); r.Exists() {
+		argsJSON, _ := json.Marshal(r.Get("args").Value())
+		return "read_file", string(argsJSON)
+	}
+	if w := parsed.Get("writeToolCall"); w.Exists() {
+		argsJSON, _ := json.Marshal(w.Get("args").Value())
+		return "write_file", string(argsJSON)
+	}
+	if b := parsed.Get("bashToolCall"); b.Exists() {
+		argsJSON, _ := json.Marshal(b.Get("args").Value())
+		return "bash", string(argsJSON)
+	}
+	if g := parsed.Get("grepToolCall"); g.Exists() {
+		argsJSON, _ := json.Marshal(g.Get("args").Value())
+		return "grep", string(argsJSON)
+	}
+	if l := parsed.Get("listToolCall"); l.Exists() {
+		argsJSON, _ := json.Marshal(l.Get("args").Value())
+		return "list_directory", string(argsJSON)
+	}
+	if f := parsed.Get("function"); f.Exists() {
+		return f.Get("name").String(), f.Get("arguments").String()
+	}
+
+	return "", ""
+}
+
+func sanitizeToolCallID(callID string) string {
+	return strings.ReplaceAll(callID, "\n", "_")
 }
 
 func (e *CursorExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -301,21 +586,33 @@ func (e *CursorExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 
 func (e *CursorExecutor) resolveUpstreamModel(alias string, auth *cliproxyauth.Auth) string {
 	trimmed := strings.TrimSpace(alias)
-	if trimmed == "" || auth == nil || auth.Metadata == nil {
+	if trimmed == "" {
 		return ""
 	}
 
-	if overrides, ok := auth.Metadata["model_overrides"].(map[string]any); ok {
-		if override, found := overrides[trimmed]; found {
-			if overrideStr, isStr := override.(string); isStr && strings.TrimSpace(overrideStr) != "" {
-				return strings.TrimSpace(overrideStr)
+	if e.cfg != nil {
+		for _, ck := range e.cfg.CursorKey {
+			for _, m := range ck.Models {
+				if strings.EqualFold(m.Alias, trimmed) {
+					return m.Name
+				}
 			}
 		}
 	}
 
-	if upstream, ok := auth.Metadata["upstream_model"].(string); ok {
-		if u := strings.TrimSpace(upstream); u != "" {
-			return u
+	if auth != nil && auth.Metadata != nil {
+		if overrides, ok := auth.Metadata["model_overrides"].(map[string]any); ok {
+			if override, found := overrides[trimmed]; found {
+				if overrideStr, isStr := override.(string); isStr && strings.TrimSpace(overrideStr) != "" {
+					return strings.TrimSpace(overrideStr)
+				}
+			}
+		}
+
+		if upstream, ok := auth.Metadata["upstream_model"].(string); ok {
+			if u := strings.TrimSpace(upstream); u != "" {
+				return u
+			}
 		}
 	}
 
@@ -346,7 +643,7 @@ func cursorStatusError(msg string) error {
 	return statusErr{code: status, msg: msg}
 }
 
-func cursorAPIKey(auth *cliproxyauth.Auth) string {
+func cursorAPIKey(auth *cliproxyauth.Auth, cfg *config.Config) string {
 	if auth != nil {
 		if auth.Attributes != nil {
 			if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
@@ -363,6 +660,13 @@ func cursorAPIKey(auth *cliproxyauth.Auth) string {
 				if trimmed := strings.TrimSpace(v); trimmed != "" {
 					return trimmed
 				}
+			}
+		}
+	}
+	if cfg != nil {
+		for _, ck := range cfg.CursorKey {
+			if v := strings.TrimSpace(ck.APIKey); v != "" {
+				return v
 			}
 		}
 	}
@@ -431,7 +735,16 @@ func cursorUpstreamModel(alias string) string {
 	return trimmed
 }
 
-func cursorAgentBinary() (string, error) {
+func cursorAgentBinary(cfg *config.Config) (string, error) {
+	if cfg != nil {
+		for _, ck := range cfg.CursorKey {
+			if v := strings.TrimSpace(ck.AgentPath); v != "" {
+				if info, err := os.Stat(v); err == nil && !info.IsDir() {
+					return v, nil
+				}
+			}
+		}
+	}
 	if v := strings.TrimSpace(os.Getenv("CURSOR_AGENT_PATH")); v != "" {
 		if info, err := os.Stat(v); err == nil && !info.IsDir() {
 			return v, nil

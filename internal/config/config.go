@@ -78,6 +78,9 @@ type Config struct {
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
+	// CursorKey defines a list of Cursor API key configurations for cursor-agent CLI.
+	CursorKey []CursorKey `yaml:"cursor-api-key" json:"cursor-api-key"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
@@ -312,6 +315,40 @@ type CodexModel struct {
 func (m CodexModel) GetName() string  { return m.Name }
 func (m CodexModel) GetAlias() string { return m.Alias }
 
+// CursorKey represents the configuration for a Cursor API key,
+// including the API key itself and optional settings for the cursor-agent CLI.
+type CursorKey struct {
+	// APIKey is the authentication key for accessing Cursor Agent services.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Prefix optionally namespaces models for this credential (e.g., "teamA/cursor-auto").
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// AgentPath optionally overrides the cursor-agent binary path.
+	AgentPath string `yaml:"agent-path,omitempty" json:"agent-path,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines upstream model names and aliases for request routing.
+	Models []CursorModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+}
+
+// CursorModel describes a mapping between an alias and the actual upstream model name.
+type CursorModel struct {
+	// Name is the upstream model identifier used when issuing requests to cursor-agent.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the client-facing model name that maps to Name.
+	Alias string `yaml:"alias" json:"alias"`
+}
+
+func (m CursorModel) GetName() string  { return m.Name }
+func (m CursorModel) GetAlias() string { return m.Alias }
+
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {
@@ -494,6 +531,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
 
+	// Sanitize Cursor keys: deduplicate and normalize
+	cfg.SanitizeCursorKeys()
+
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
@@ -618,6 +658,31 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
+}
+
+func (cfg *Config) SanitizeCursorKeys() {
+	if cfg == nil || len(cfg.CursorKey) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(cfg.CursorKey))
+	out := cfg.CursorKey[:0]
+	for i := range cfg.CursorKey {
+		entry := cfg.CursorKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		if entry.APIKey == "" {
+			continue
+		}
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.AgentPath = strings.TrimSpace(entry.AgentPath)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		if _, exists := seen[entry.APIKey]; exists {
+			continue
+		}
+		seen[entry.APIKey] = struct{}{}
+		out = append(out, entry)
+	}
+	cfg.CursorKey = out
 }
 
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.
