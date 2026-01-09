@@ -165,6 +165,8 @@ func OAuthModelMappingChannel(provider, authKind string) string {
 		return "codex"
 	case "gemini-cli", "aistudio", "antigravity", "qwen", "iflow":
 		return provider
+	case "kiro":
+		return provider
 	default:
 		return ""
 	}
