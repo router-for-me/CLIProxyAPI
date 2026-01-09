@@ -72,6 +72,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
 
+	// Rename blocked tool names to avoid Claude Code OAuth validation errors
+	body = renameBlockedToolNames(body)
+
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 
@@ -142,6 +145,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
+	// Restore blocked tool names in response so clients can match their tool definitions.
+	data = restoreBlockedToolNames(data)
 	if stream {
 		lines := bytes.Split(data, []byte("\n"))
 		for _, line := range lines {
@@ -183,6 +188,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = e.injectThinkingConfig(model, req.Metadata, body)
 	body = checkSystemInstructions(body)
 	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
+
+	// Rename blocked tool names to avoid Claude Code OAuth validation errors
+	body = renameBlockedToolNames(body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -263,6 +271,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if detail, ok := parseClaudeStreamUsage(line); ok {
 					reporter.publish(ctx, detail)
 				}
+				// Restore blocked tool names in response so clients can match their tool definitions.
+				line = restoreBlockedToolNames(line)
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
@@ -769,4 +779,16 @@ func checkSystemInstructions(payload []byte) []byte {
 		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
 	}
 	return payload
+}
+
+// renameBlockedToolNames renames tool names blocked by Anthropic's Claude Code OAuth validation.
+// The tool name "glob" is blocked, but "Glob" (capitalized) works.
+func renameBlockedToolNames(payload []byte) []byte {
+	return bytes.ReplaceAll(payload, []byte(`"name":"glob"`), []byte(`"name":"Glob"`))
+}
+
+// restoreBlockedToolNames reverses the tool name renaming in responses so clients can match
+// their tool definitions.
+func restoreBlockedToolNames(data []byte) []byte {
+	return bytes.ReplaceAll(data, []byte(`"name":"Glob"`), []byte(`"name":"glob"`))
 }
