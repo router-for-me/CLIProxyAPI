@@ -759,6 +759,69 @@ func GetIFlowModels() []*ModelInfo {
 	return models
 }
 
+type cursorModelEntry struct {
+	ID                  string
+	DisplayName         string
+	Description         string
+	ContextLength       int
+	MaxCompletionTokens int
+	Thinking            *ThinkingSupport
+}
+
+func GetCursorModels() []*ModelInfo {
+	const cursorCreated = 1767225600
+
+	claudeThinking := &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true}
+	geminiThinking := &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true}
+	gptThinking := &ThinkingSupport{Levels: []string{"minimal", "low", "medium", "high"}}
+
+	entries := []cursorModelEntry{
+		{ID: "cursor-auto", DisplayName: "Cursor Auto", Description: "Automatic model selection - Cursor selects the best-fit premium model based on task requirements and reliability", ContextLength: 200000, MaxCompletionTokens: 64000},
+		{ID: "cursor-composer-1", DisplayName: "Composer 1", Description: "Cursor Composer 1 (cursor-agent: composer-1)", ContextLength: 200000, MaxCompletionTokens: 64000},
+
+		{ID: "cursor-sonnet-4.5", DisplayName: "Sonnet 4.5", Description: "Cursor Agent Sonnet 4.5 (cursor-agent: sonnet-4.5)", ContextLength: 200000, MaxCompletionTokens: 1000000, Thinking: claudeThinking},
+		{ID: "cursor-sonnet-4.5-thinking", DisplayName: "Sonnet 4.5 Thinking", Description: "Cursor Agent Sonnet 4.5 Thinking (cursor-agent: sonnet-4.5-thinking)", ContextLength: 200000, MaxCompletionTokens: 1000000, Thinking: claudeThinking},
+		{ID: "cursor-opus-4.5", DisplayName: "Opus 4.5", Description: "Cursor Agent Opus 4.5 (cursor-agent: opus-4.5)", ContextLength: 200000, MaxCompletionTokens: 200000, Thinking: claudeThinking},
+		{ID: "cursor-opus-4.5-thinking", DisplayName: "Opus 4.5 Thinking", Description: "Cursor Agent Opus 4.5 Thinking (cursor-agent: opus-4.5-thinking)", ContextLength: 200000, MaxCompletionTokens: 200000, Thinking: claudeThinking},
+		{ID: "cursor-opus-4.1", DisplayName: "Opus 4.1", Description: "Cursor Agent Opus 4.1 (cursor-agent: opus-4.1)", ContextLength: 200000, MaxCompletionTokens: 32000, Thinking: claudeThinking},
+
+		{ID: "cursor-gemini-3-pro", DisplayName: "Gemini 3 Pro", Description: "Cursor Agent Gemini 3 Pro (cursor-agent: gemini-3-pro)", ContextLength: 200000, MaxCompletionTokens: 1000000, Thinking: geminiThinking},
+		{ID: "cursor-gemini-3-flash", DisplayName: "Gemini 3 Flash", Description: "Cursor Agent Gemini 3 Flash (cursor-agent: gemini-3-flash)", ContextLength: 200000, MaxCompletionTokens: 1000000, Thinking: geminiThinking},
+
+		{ID: "cursor-gpt-5.2", DisplayName: "GPT-5.2", Description: "Cursor Agent GPT-5.2 (cursor-agent: gpt-5.2)", ContextLength: 272000, MaxCompletionTokens: 128000, Thinking: gptThinking},
+		{ID: "cursor-gpt-5.2-high", DisplayName: "GPT-5.2 High", Description: "Cursor Agent GPT-5.2 High (cursor-agent: gpt-5.2-high)", ContextLength: 272000, MaxCompletionTokens: 128000, Thinking: gptThinking},
+		{ID: "cursor-gpt-5.1", DisplayName: "GPT-5.1", Description: "Cursor Agent GPT-5.1 (cursor-agent: gpt-5.1)", ContextLength: 272000, MaxCompletionTokens: 128000, Thinking: gptThinking},
+		{ID: "cursor-gpt-5.1-high", DisplayName: "GPT-5.1 High", Description: "Cursor Agent GPT-5.1 High (cursor-agent: gpt-5.1-high)", ContextLength: 272000, MaxCompletionTokens: 128000, Thinking: gptThinking},
+		{ID: "cursor-gpt-5.1-codex", DisplayName: "GPT-5.1 Codex", Description: "Cursor Agent GPT-5.1 Codex (cursor-agent: gpt-5.1-codex)", ContextLength: 272000, MaxCompletionTokens: 128000, Thinking: gptThinking},
+		{ID: "cursor-gpt-5.1-codex-high", DisplayName: "GPT-5.1 Codex High", Description: "Cursor Agent GPT-5.1 Codex High (cursor-agent: gpt-5.1-codex-high)", ContextLength: 272000, MaxCompletionTokens: 128000, Thinking: gptThinking},
+		{ID: "cursor-gpt-5.1-codex-max", DisplayName: "GPT-5.1 Codex Max", Description: "Cursor Agent GPT-5.1 Codex Max (cursor-agent: gpt-5.1-codex-max)", ContextLength: 272000, MaxCompletionTokens: 128000, Thinking: gptThinking},
+		{ID: "cursor-gpt-5.1-codex-max-high", DisplayName: "GPT-5.1 Codex Max High", Description: "Cursor Agent GPT-5.1 Codex Max High (cursor-agent: gpt-5.1-codex-max-high)", ContextLength: 272000, MaxCompletionTokens: 128000, Thinking: gptThinking},
+
+		{ID: "cursor-grok", DisplayName: "Grok", Description: "Cursor Agent Grok (cursor-agent: grok)", ContextLength: 256000, MaxCompletionTokens: 128000},
+		{ID: "cursor-grok-code", DisplayName: "Grok Code", Description: "Alias for Grok (cursor-agent: grok)", ContextLength: 256000, MaxCompletionTokens: 128000},
+
+		{ID: "cursor-claude-opus-4.5", DisplayName: "Claude 4.5 Opus", Description: "Anthropic Claude 4.5 Opus - Premium model combining maximum intelligence with practical performance", ContextLength: 200000, MaxCompletionTokens: 200000, Thinking: claudeThinking},
+		{ID: "cursor-claude-sonnet-4.5", DisplayName: "Claude 4.5 Sonnet", Description: "Anthropic Claude 4.5 Sonnet - Balanced intelligence and speed", ContextLength: 200000, MaxCompletionTokens: 1000000, Thinking: claudeThinking},
+	}
+
+	models := make([]*ModelInfo, 0, len(entries))
+	for _, e := range entries {
+		models = append(models, &ModelInfo{
+			ID:                  e.ID,
+			Object:              "model",
+			Created:             cursorCreated,
+			OwnedBy:             "cursor",
+			Type:                "cursor",
+			DisplayName:         e.DisplayName,
+			Description:         e.Description,
+			ContextLength:       e.ContextLength,
+			MaxCompletionTokens: e.MaxCompletionTokens,
+			Thinking:            e.Thinking,
+		})
+	}
+	return models
+}
+
 // AntigravityModelConfig captures static antigravity model overrides, including
 // Thinking budget limits and provider max completion tokens.
 type AntigravityModelConfig struct {
@@ -797,6 +860,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetOpenAIModels(),
 		GetQwenModels(),
 		GetIFlowModels(),
+		GetCursorModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {
