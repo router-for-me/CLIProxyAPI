@@ -81,6 +81,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	body = prefixClaudeToolNames(body)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -142,6 +143,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
+	clientData := stripClaudeToolNamesFromResponse(data)
 	if stream {
 		lines := bytes.Split(data, []byte("\n"))
 		for _, line := range lines {
@@ -153,7 +155,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		reporter.publish(ctx, parseClaudeUsage(data))
 	}
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, clientData, &param)
 	resp = cliproxyexecutor.Response{Payload: []byte(out)}
 	return resp, nil
 }
@@ -193,6 +195,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	body = prefixClaudeToolNames(body)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -263,6 +266,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if detail, ok := parseClaudeStreamUsage(line); ok {
 					reporter.publish(ctx, detail)
 				}
+				line = stripClaudeToolNamePrefixFromStream(line)
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
@@ -287,6 +291,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if detail, ok := parseClaudeStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}
+			line = stripClaudeToolNamePrefixFromStream(line)
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(line), &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
@@ -326,6 +331,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	body = prefixClaudeToolNames(body)
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -685,29 +691,47 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
-	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
-		baseBetas = val
-		if !strings.Contains(val, "oauth") {
-			baseBetas += ",oauth-2025-04-20"
+	splitBetas := func(raw string) []string {
+		if raw == "" {
+			return nil
 		}
-	}
-
-	// Merge extra betas from request body
-	if len(extraBetas) > 0 {
-		existingSet := make(map[string]bool)
-		for _, b := range strings.Split(baseBetas, ",") {
-			existingSet[strings.TrimSpace(b)] = true
-		}
-		for _, beta := range extraBetas {
-			beta = strings.TrimSpace(beta)
-			if beta != "" && !existingSet[beta] {
-				baseBetas += "," + beta
-				existingSet[beta] = true
+		parts := strings.Split(raw, ",")
+		out := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if s := strings.TrimSpace(part); s != "" {
+				out = append(out, s)
 			}
 		}
+		return out
 	}
-	r.Header.Set("Anthropic-Beta", baseBetas)
+
+	baseBetas := []string{
+		"claude-code-20250219",
+		"oauth-2025-04-20",
+		"interleaved-thinking-2025-05-14",
+		"fine-grained-tool-streaming-2025-05-14",
+	}
+	betaList := append([]string{}, baseBetas...)
+	existingSet := make(map[string]bool, len(betaList))
+	for _, b := range betaList {
+		existingSet[b] = true
+	}
+	addBetas := func(values []string) {
+		for _, beta := range values {
+			beta = strings.TrimSpace(beta)
+			if beta == "" || existingSet[beta] {
+				continue
+			}
+			betaList = append(betaList, beta)
+			existingSet[beta] = true
+		}
+	}
+	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
+		addBetas(splitBetas(val))
+	}
+	addBetas([]string{"claude-code-20250219", "oauth-2025-04-20"})
+	addBetas(extraBetas)
+	r.Header.Set("Anthropic-Beta", strings.Join(betaList, ","))
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
@@ -734,6 +758,82 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+const claudeToolNamePrefix = "cli_"
+
+func prefixClaudeToolNames(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	updated := body
+	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
+		tools.ForEach(func(key, tool gjson.Result) bool {
+			name := tool.Get("name").String()
+			if name != "" && !strings.HasPrefix(name, claudeToolNamePrefix) {
+				updated, _ = sjson.SetBytes(updated, fmt.Sprintf("tools.%d.name", key.Int()), claudeToolNamePrefix+name)
+			}
+			return true
+		})
+	}
+	if name := gjson.GetBytes(updated, "tool_choice.name").String(); name != "" && !strings.HasPrefix(name, claudeToolNamePrefix) {
+		updated, _ = sjson.SetBytes(updated, "tool_choice.name", claudeToolNamePrefix+name)
+	}
+	return updated
+}
+
+func stripClaudeToolNamesFromResponse(data []byte) []byte {
+	if !gjson.ValidBytes(data) {
+		return data
+	}
+	updated := data
+	if content := gjson.GetBytes(data, "content"); content.IsArray() {
+		content.ForEach(func(key, item gjson.Result) bool {
+			if item.Get("type").String() == "tool_use" {
+				name := item.Get("name").String()
+				if strings.HasPrefix(name, claudeToolNamePrefix) {
+					updated, _ = sjson.SetBytes(updated, fmt.Sprintf("content.%d.name", key.Int()), strings.TrimPrefix(name, claudeToolNamePrefix))
+				}
+			}
+			return true
+		})
+	}
+	return updated
+}
+
+func stripClaudeToolNamePrefixFromStream(line []byte) []byte {
+	if !bytes.HasPrefix(line, []byte("data: ")) {
+		return line
+	}
+	payload := bytes.TrimPrefix(line, []byte("data: "))
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return line
+	}
+	if !gjson.ValidBytes(payload) {
+		return bytes.ReplaceAll(line, []byte(`"name":"`+claudeToolNamePrefix), []byte(`"name":"`))
+	}
+	updated := payload
+	if gjson.GetBytes(payload, "content_block.type").String() == "tool_use" {
+		name := gjson.GetBytes(payload, "content_block.name").String()
+		if strings.HasPrefix(name, claudeToolNamePrefix) {
+			updated, _ = sjson.SetBytes(updated, "content_block.name", strings.TrimPrefix(name, claudeToolNamePrefix))
+		}
+	}
+	if content := gjson.GetBytes(payload, "message.content"); content.IsArray() {
+		content.ForEach(func(key, item gjson.Result) bool {
+			if item.Get("type").String() == "tool_use" {
+				name := item.Get("name").String()
+				if strings.HasPrefix(name, claudeToolNamePrefix) {
+					updated, _ = sjson.SetBytes(updated, fmt.Sprintf("message.content.%d.name", key.Int()), strings.TrimPrefix(name, claudeToolNamePrefix))
+				}
+			}
+			return true
+		})
+	}
+	if bytes.Equal(updated, payload) {
+		return line
+	}
+	return append([]byte("data: "), updated...)
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
