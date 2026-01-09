@@ -134,6 +134,15 @@ ws-auth: false
 #       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
 #       - "*-thinking"               # wildcard matching suffix (e.g. claude-opus-4-5-thinking)
 #       - "*haiku*"                  # wildcard matching substring (e.g. claude-3-5-haiku-20241022)
+#     cloak:                         # optional: request cloaking for non-Claude-Code clients
+#       mode: "auto"                 # "auto" (default): cloak only when client is not Claude Code
+#                                    # "always": always apply cloaking
+#                                    # "never": never apply cloaking
+#       strict-mode: false           # false (default): prepend Claude Code prompt to user system messages
+#                                    # true: strip all user system messages, keep only Claude Code prompt
+#       sensitive-words:             # optional: words to obfuscate with zero-width characters
+#         - "API"
+#         - "proxy"
 
 # OpenAI compatibility providers
 # openai-compatibility:
