@@ -767,7 +767,7 @@ func prefixClaudeToolNames(body []byte) []byte {
 		return body
 	}
 	updated := body
-	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
+	if tools := gjson.GetBytes(updated, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(key, tool gjson.Result) bool {
 			name := tool.Get("name").String()
 			if name != "" && !strings.HasPrefix(name, claudeToolNamePrefix) {
@@ -787,7 +787,7 @@ func stripClaudeToolNamesFromResponse(data []byte) []byte {
 		return data
 	}
 	updated := data
-	if content := gjson.GetBytes(data, "content"); content.IsArray() {
+	if content := gjson.GetBytes(updated, "content"); content.IsArray() {
 		content.ForEach(func(key, item gjson.Result) bool {
 			if item.Get("type").String() == "tool_use" {
 				name := item.Get("name").String()
@@ -813,13 +813,13 @@ func stripClaudeToolNamePrefixFromStream(line []byte) []byte {
 		return bytes.ReplaceAll(line, []byte(`"name":"`+claudeToolNamePrefix), []byte(`"name":"`))
 	}
 	updated := payload
-	if gjson.GetBytes(payload, "content_block.type").String() == "tool_use" {
-		name := gjson.GetBytes(payload, "content_block.name").String()
+	if gjson.GetBytes(updated, "content_block.type").String() == "tool_use" {
+		name := gjson.GetBytes(updated, "content_block.name").String()
 		if strings.HasPrefix(name, claudeToolNamePrefix) {
 			updated, _ = sjson.SetBytes(updated, "content_block.name", strings.TrimPrefix(name, claudeToolNamePrefix))
 		}
 	}
-	if content := gjson.GetBytes(payload, "message.content"); content.IsArray() {
+	if content := gjson.GetBytes(updated, "message.content"); content.IsArray() {
 		content.ForEach(func(key, item gjson.Result) bool {
 			if item.Get("type").String() == "tool_use" {
 				name := item.Get("name").String()
