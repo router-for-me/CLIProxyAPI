@@ -80,6 +80,9 @@ func summarizeOAuthModelMappingList(list []config.ModelNameMapping) OAuthModelMa
 			continue
 		}
 		key := name + "->" + alias
+		if mapping.Fork {
+			key += "|fork"
+		}
 		if _, exists := seen[key]; exists {
 			continue
 		}
