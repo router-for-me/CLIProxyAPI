@@ -26,10 +26,16 @@ const (
 
 	// MinValidSignatureLen is the minimum length for a signature to be considered valid
 	MinValidSignatureLen = 50
+
+	// SessionCleanupInterval controls how often stale sessions are purged
+	SessionCleanupInterval = 10 * time.Minute
 )
 
 // signatureCache stores signatures by sessionId -> textHash -> SignatureEntry
 var signatureCache sync.Map
+
+// sessionCleanupOnce ensures the background cleanup goroutine starts only once
+var sessionCleanupOnce sync.Once
 
 // sessionCache is the inner map type
 type sessionCache struct {
@@ -45,12 +51,49 @@ func hashText(text string) string {
 
 // getOrCreateSession gets or creates a session cache
 func getOrCreateSession(sessionID string) *sessionCache {
+	// Start background cleanup on first access
+	sessionCleanupOnce.Do(startSessionCleanup)
+
 	if val, ok := signatureCache.Load(sessionID); ok {
 		return val.(*sessionCache)
 	}
 	sc := &sessionCache{entries: make(map[string]SignatureEntry)}
 	actual, _ := signatureCache.LoadOrStore(sessionID, sc)
 	return actual.(*sessionCache)
+}
+
+// startSessionCleanup launches a background goroutine that periodically
+// removes sessions where all entries have expired.
+func startSessionCleanup() {
+	go func() {
+		ticker := time.NewTicker(SessionCleanupInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			purgeExpiredSessions()
+		}
+	}()
+}
+
+// purgeExpiredSessions removes sessions with no valid (non-expired) entries.
+func purgeExpiredSessions() {
+	now := time.Now()
+	signatureCache.Range(func(key, value any) bool {
+		sc := value.(*sessionCache)
+		sc.mu.Lock()
+		// Remove expired entries
+		for k, entry := range sc.entries {
+			if now.Sub(entry.Timestamp) > SignatureCacheTTL {
+				delete(sc.entries, k)
+			}
+		}
+		isEmpty := len(sc.entries) == 0
+		sc.mu.Unlock()
+		// Remove session if empty
+		if isEmpty {
+			signatureCache.Delete(key)
+		}
+		return true
+	})
 }
 
 // CacheSignature stores a thinking signature for a given session and text.

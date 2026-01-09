@@ -129,8 +129,6 @@ var modelFieldPaths = []string{"model", "modelVersion", "response.modelVersion",
 func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 	// 1. Amp Compatibility: Suppress thinking blocks if tool use is detected
 	// The Amp client struggles when both thinking and tool_use blocks are present
-	// 1. Amp Compatibility: Suppress thinking blocks if tool use is detected
-	// The Amp client struggles when both thinking and tool_use blocks are present
 	if gjson.GetBytes(data, `content.#(type=="tool_use")`).Exists() {
 		filtered := gjson.GetBytes(data, `content.#(type!="thinking")#`)
 		if filtered.Exists() {

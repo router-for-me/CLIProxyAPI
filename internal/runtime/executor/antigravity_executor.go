@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -125,6 +126,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
 			recordAPIResponseError(ctx, e.cfg, errDo)
+			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+				return resp, errDo
+			}
 			lastStatus = 0
 			lastBody = nil
 			lastErr = errDo
@@ -237,6 +241,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
 			recordAPIResponseError(ctx, e.cfg, errDo)
+			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+				return resp, errDo
+			}
 			lastStatus = 0
 			lastBody = nil
 			lastErr = errDo
@@ -255,6 +262,14 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			}
 			if errRead != nil {
 				recordAPIResponseError(ctx, e.cfg, errRead)
+				if errors.Is(errRead, context.Canceled) || errors.Is(errRead, context.DeadlineExceeded) {
+					err = errRead
+					return resp, err
+				}
+				if errCtx := ctx.Err(); errCtx != nil {
+					err = errCtx
+					return resp, err
+				}
 				lastStatus = 0
 				lastBody = nil
 				lastErr = errRead
@@ -590,6 +605,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
 			recordAPIResponseError(ctx, e.cfg, errDo)
+			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+				return nil, errDo
+			}
 			lastStatus = 0
 			lastBody = nil
 			lastErr = errDo
@@ -608,6 +626,14 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 			if errRead != nil {
 				recordAPIResponseError(ctx, e.cfg, errRead)
+				if errors.Is(errRead, context.Canceled) || errors.Is(errRead, context.DeadlineExceeded) {
+					err = errRead
+					return nil, err
+				}
+				if errCtx := ctx.Err(); errCtx != nil {
+					err = errCtx
+					return nil, err
+				}
 				lastStatus = 0
 				lastBody = nil
 				lastErr = errRead
@@ -796,6 +822,9 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
 			recordAPIResponseError(ctx, e.cfg, errDo)
+			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+				return cliproxyexecutor.Response{}, errDo
+			}
 			lastStatus = 0
 			lastBody = nil
 			lastErr = errDo
@@ -884,6 +913,9 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
+			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+				return nil
+			}
 			if idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: models request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue

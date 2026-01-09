@@ -14,7 +14,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -136,14 +135,14 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						if sessionID != "" && thinkingText != "" {
 							if cachedSig := cache.GetCachedSignature(sessionID, thinkingText); cachedSig != "" {
 								signature = cachedSig
-								log.Debugf("Using cached signature for thinking block")
+								// log.Debugf("Using cached signature for thinking block")
 							}
 						}
 
 						// Fallback to client signature only if cache miss and client signature is valid
 						if signature == "" && cache.HasValidSignature(clientSignature) {
 							signature = clientSignature
-							log.Debugf("Using client-provided signature for thinking block")
+							// log.Debugf("Using client-provided signature for thinking block")
 						}
 
 						// Store for subsequent tool_use in the same message
@@ -158,8 +157,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						// Claude requires assistant messages to start with thinking blocks when thinking is enabled
 						// Converting to text would break this requirement
 						if isUnsigned {
-							// TypeScript plugin approach: drop unsigned thinking blocks entirely
-							log.Debugf("Dropping unsigned thinking block (no valid signature)")
+							// log.Debugf("Dropping unsigned thinking block (no valid signature)")
 							continue
 						}
 
@@ -183,7 +181,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_use" {
 						// NOTE: Do NOT inject dummy thinking blocks here.
 						// Antigravity API validates signatures, so dummy values are rejected.
-						// The TypeScript plugin removes unsigned thinking blocks instead of injecting dummies.
 
 						functionName := contentResult.Get("name").String()
 						argsResult := contentResult.Get("input")

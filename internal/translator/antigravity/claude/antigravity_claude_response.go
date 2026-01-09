@@ -136,11 +136,11 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				// Process thinking content (internal reasoning)
 				if partResult.Get("thought").Bool() {
 					if thoughtSignature := partResult.Get("thoughtSignature"); thoughtSignature.Exists() && thoughtSignature.String() != "" {
-						log.Debug("Branch: signature_delta")
+						// log.Debug("Branch: signature_delta")
 
 						if params.SessionID != "" && params.CurrentThinkingText.Len() > 0 {
 							cache.CacheSignature(params.SessionID, params.CurrentThinkingText.String(), thoughtSignature.String())
-							log.Debugf("Cached signature for thinking block (sessionID=%s, textLen=%d)", params.SessionID, params.CurrentThinkingText.Len())
+							// log.Debugf("Cached signature for thinking block (sessionID=%s, textLen=%d)", params.SessionID, params.CurrentThinkingText.Len())
 							params.CurrentThinkingText.Reset()
 						}
 

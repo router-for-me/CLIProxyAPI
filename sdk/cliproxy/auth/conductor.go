@@ -1611,7 +1611,6 @@ func formatOauthIdentity(auth *Auth, provider string, accountInfo string) string
 	if auth == nil {
 		return ""
 	}
-	authIndex := auth.EnsureIndex()
 	// Prefer the auth's provider when available.
 	providerName := strings.TrimSpace(auth.Provider)
 	if providerName == "" {
@@ -1633,16 +1632,10 @@ func formatOauthIdentity(auth *Auth, provider string, accountInfo string) string
 	if authFile != "" {
 		parts = append(parts, "auth_file="+authFile)
 	}
-	if authIndex != "" {
-		parts = append(parts, "auth_index="+authIndex)
-	}
 	if len(parts) == 0 {
 		return accountInfo
 	}
-	if accountInfo == "" {
-		return strings.Join(parts, " ")
-	}
-	return strings.Join(parts, " ") + " account=" + strconv.Quote(accountInfo)
+	return strings.Join(parts, " ")
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.

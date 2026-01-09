@@ -24,7 +24,14 @@ import (
 type attemptInfo struct {
 	count        int
 	blockedUntil time.Time
+	lastActivity time.Time // track last activity for cleanup
 }
+
+// attemptCleanupInterval controls how often stale IP entries are purged
+const attemptCleanupInterval = 1 * time.Hour
+
+// attemptMaxIdleTime controls how long an IP can be idle before cleanup
+const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
@@ -47,7 +54,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envSecret = strings.TrimSpace(envSecret)
 
-	return &Handler{
+	h := &Handler{
 		cfg:                 cfg,
 		configFilePath:      configFilePath,
 		failedAttempts:      make(map[string]*attemptInfo),
@@ -56,6 +63,38 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+	}
+	h.startAttemptCleanup()
+	return h
+}
+
+// startAttemptCleanup launches a background goroutine that periodically
+// removes stale IP entries from failedAttempts to prevent memory leaks.
+func (h *Handler) startAttemptCleanup() {
+	go func() {
+		ticker := time.NewTicker(attemptCleanupInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			h.purgeStaleAttempts()
+		}
+	}()
+}
+
+// purgeStaleAttempts removes IP entries that have been idle beyond attemptMaxIdleTime
+// and whose ban (if any) has expired.
+func (h *Handler) purgeStaleAttempts() {
+	now := time.Now()
+	h.attemptsMu.Lock()
+	defer h.attemptsMu.Unlock()
+	for ip, ai := range h.failedAttempts {
+		// Skip if still banned
+		if !ai.blockedUntil.IsZero() && now.Before(ai.blockedUntil) {
+			continue
+		}
+		// Remove if idle too long
+		if now.Sub(ai.lastActivity) > attemptMaxIdleTime {
+			delete(h.failedAttempts, ip)
+		}
 	}
 }
 
@@ -149,6 +188,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 					h.failedAttempts[clientIP] = aip
 				}
 				aip.count++
+				aip.lastActivity = time.Now()
 				if aip.count >= maxFailures {
 					aip.blockedUntil = time.Now().Add(banDuration)
 					aip.count = 0
