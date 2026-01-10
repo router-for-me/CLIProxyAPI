@@ -63,8 +63,36 @@ func NewGitHubCopilotExecutor(cfg *config.Config) *GitHubCopilotExecutor {
 func (e *GitHubCopilotExecutor) Identifier() string { return githubCopilotAuthType }
 
 // PrepareRequest implements ProviderExecutor.
-func (e *GitHubCopilotExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error {
+func (e *GitHubCopilotExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	if req == nil {
+		return nil
+	}
+	ctx := req.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	apiToken, errToken := e.ensureAPIToken(ctx, auth)
+	if errToken != nil {
+		return errToken
+	}
+	e.applyHeaders(req, apiToken)
 	return nil
+}
+
+// HttpRequest injects GitHub Copilot credentials into the request and executes it.
+func (e *GitHubCopilotExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("github-copilot executor: request is nil")
+	}
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	httpReq := req.WithContext(ctx)
+	if errPrepare := e.PrepareRequest(httpReq, auth); errPrepare != nil {
+		return nil, errPrepare
+	}
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	return httpClient.Do(httpReq)
 }
 
 // Execute handles non-streaming requests to GitHub Copilot.
