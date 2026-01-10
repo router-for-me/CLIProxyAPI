@@ -138,7 +138,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		models = append([]string{req.Model}, models...)
 	}
 
-	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 
 	var authID, authLabel, authType, authValue string
@@ -276,7 +276,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		models = append([]string{req.Model}, models...)
 	}
 
-	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 
 	var authID, authLabel, authType, authValue string
@@ -448,7 +448,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		models = append([]string{req.Model}, models...)
 	}
 
-	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 
 	var authID, authLabel, authType, authValue string
@@ -587,7 +587,7 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 	}
 
 	ctxToken := ctx
-	if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
+	if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, resolveRequestTimeout(cfg)); httpClient != nil {
 		ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 	}
 
