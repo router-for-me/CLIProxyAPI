@@ -55,8 +55,38 @@ func NewGeminiExecutor(cfg *config.Config) *GeminiExecutor {
 // Identifier returns the executor identifier.
 func (e *GeminiExecutor) Identifier() string { return "gemini" }
 
-// PrepareRequest prepares the HTTP request for execution (no-op for Gemini).
-func (e *GeminiExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
+// PrepareRequest injects Gemini credentials into the outgoing HTTP request.
+func (e *GeminiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	if req == nil {
+		return nil
+	}
+	apiKey, bearer := geminiCreds(auth)
+	if apiKey != "" {
+		req.Header.Set("x-goog-api-key", apiKey)
+		req.Header.Del("Authorization")
+	} else if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		req.Header.Del("x-goog-api-key")
+	}
+	applyGeminiHeaders(req, auth)
+	return nil
+}
+
+// HttpRequest injects Gemini credentials into the request and executes it.
+func (e *GeminiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("gemini executor: request is nil")
+	}
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	httpReq := req.WithContext(ctx)
+	if err := e.PrepareRequest(httpReq, auth); err != nil {
+		return nil, err
+	}
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	return httpClient.Do(httpReq)
+}
 
 // Execute performs a non-streaming request to the Gemini API.
 // It translates the request to Gemini format, sends it to the API, and translates

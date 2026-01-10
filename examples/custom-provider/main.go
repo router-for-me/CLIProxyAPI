@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -122,7 +123,9 @@ func (MyExecutor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Re
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Inject credentials via PrepareRequest hook.
-	_ = (MyExecutor{}).PrepareRequest(httpReq, a)
+	if errPrep := (MyExecutor{}).PrepareRequest(httpReq, a); errPrep != nil {
+		return clipexec.Response{}, errPrep
+	}
 
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {
@@ -130,11 +133,26 @@ func (MyExecutor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Re
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
-			// Best-effort close; log if needed in real projects.
+			fmt.Fprintf(os.Stderr, "close response body error: %v\n", errClose)
 		}
 	}()
 	body, _ := io.ReadAll(resp.Body)
 	return clipexec.Response{Payload: body}, nil
+}
+
+func (MyExecutor) HttpRequest(ctx context.Context, a *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("myprov executor: request is nil")
+	}
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	httpReq := req.WithContext(ctx)
+	if errPrep := (MyExecutor{}).PrepareRequest(httpReq, a); errPrep != nil {
+		return nil, errPrep
+	}
+	client := buildHTTPClient(a)
+	return client.Do(httpReq)
 }
 
 func (MyExecutor) CountTokens(context.Context, *coreauth.Auth, clipexec.Request, clipexec.Options) (clipexec.Response, error) {
@@ -199,8 +217,8 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := svc.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		panic(err)
+	if errRun := svc.Run(ctx); errRun != nil && !errors.Is(errRun, context.Canceled) {
+		panic(errRun)
 	}
 	_ = os.Stderr // keep os import used (demo only)
 	_ = time.Second

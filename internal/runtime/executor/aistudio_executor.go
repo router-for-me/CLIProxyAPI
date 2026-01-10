@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -48,6 +49,64 @@ func (e *AIStudioExecutor) Identifier() string { return "aistudio" }
 // PrepareRequest prepares the HTTP request for execution (no-op for AI Studio).
 func (e *AIStudioExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error {
 	return nil
+}
+
+// HttpRequest forwards an arbitrary HTTP request through the websocket relay.
+func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("aistudio executor: request is nil")
+	}
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	if e.relay == nil {
+		return nil, fmt.Errorf("aistudio executor: ws relay is nil")
+	}
+	if auth == nil || auth.ID == "" {
+		return nil, fmt.Errorf("aistudio executor: missing auth")
+	}
+	httpReq := req.WithContext(ctx)
+	if httpReq.URL == nil || strings.TrimSpace(httpReq.URL.String()) == "" {
+		return nil, fmt.Errorf("aistudio executor: request URL is empty")
+	}
+
+	var body []byte
+	if httpReq.Body != nil {
+		b, errRead := io.ReadAll(httpReq.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		body = b
+		httpReq.Body = io.NopCloser(bytes.NewReader(b))
+	}
+
+	wsReq := &wsrelay.HTTPRequest{
+		Method:  httpReq.Method,
+		URL:     httpReq.URL.String(),
+		Headers: httpReq.Header.Clone(),
+		Body:    body,
+	}
+	wsResp, errRelay := e.relay.NonStream(ctx, auth.ID, wsReq)
+	if errRelay != nil {
+		return nil, errRelay
+	}
+	if wsResp == nil {
+		return nil, fmt.Errorf("aistudio executor: ws response is nil")
+	}
+
+	statusText := http.StatusText(wsResp.Status)
+	if statusText == "" {
+		statusText = "Unknown"
+	}
+	resp := &http.Response{
+		StatusCode:    wsResp.Status,
+		Status:        fmt.Sprintf("%d %s", wsResp.Status, statusText),
+		Header:        wsResp.Headers.Clone(),
+		Body:          io.NopCloser(bytes.NewReader(wsResp.Body)),
+		ContentLength: int64(len(wsResp.Body)),
+		Request:       httpReq,
+	}
+	return resp, nil
 }
 
 // Execute performs a non-streaming request to the AI Studio API.

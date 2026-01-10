@@ -50,9 +50,47 @@ func NewGeminiVertexExecutor(cfg *config.Config) *GeminiVertexExecutor {
 // Identifier returns the executor identifier.
 func (e *GeminiVertexExecutor) Identifier() string { return "vertex" }
 
-// PrepareRequest prepares the HTTP request for execution (no-op for Vertex).
-func (e *GeminiVertexExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error {
+// PrepareRequest injects Vertex credentials into the outgoing HTTP request.
+func (e *GeminiVertexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	if req == nil {
+		return nil
+	}
+	apiKey, _ := vertexAPICreds(auth)
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("x-goog-api-key", apiKey)
+		req.Header.Del("Authorization")
+		return nil
+	}
+	_, _, saJSON, errCreds := vertexCreds(auth)
+	if errCreds != nil {
+		return errCreds
+	}
+	token, errToken := vertexAccessToken(req.Context(), e.cfg, auth, saJSON)
+	if errToken != nil {
+		return errToken
+	}
+	if strings.TrimSpace(token) == "" {
+		return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Del("x-goog-api-key")
 	return nil
+}
+
+// HttpRequest injects Vertex credentials into the request and executes it.
+func (e *GeminiVertexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("vertex executor: request is nil")
+	}
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	httpReq := req.WithContext(ctx)
+	if err := e.PrepareRequest(httpReq, auth); err != nil {
+		return nil, err
+	}
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	return httpClient.Do(httpReq)
 }
 
 // Execute performs a non-streaming request to the Vertex AI API.
