@@ -15,7 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -417,6 +417,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	usage.StartDefault(ctx)
+	internalusage.StartPersistence(ctx)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -652,6 +653,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		usage.StopDefault()
+		internalusage.StopPersistence()
 	})
 	return shutdownErr
 }

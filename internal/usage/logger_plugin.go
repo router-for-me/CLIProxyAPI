@@ -6,6 +6,9 @@ package usage
 import (
 	"context"
 	"fmt"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,9 +16,22 @@ import (
 
 	"github.com/gin-gonic/gin"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 var statisticsEnabled atomic.Bool
+
+const (
+	statisticsFileName        = "usage_statistics.json"
+	defaultPersistenceInterval = 5 * time.Minute
+)
+
+var (
+	persistencePath     atomic.Value // string
+	persistenceCancel   context.CancelFunc
+	persistenceOnce     sync.Once
+	persistenceStopOnce sync.Once
+)
 
 func init() {
 	statisticsEnabled.Store(true)
@@ -469,4 +485,160 @@ func formatHour(hour int) string {
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+// SetPersistencePath configures the directory where usage statistics will be persisted.
+// This should be called before StartPersistence.
+func SetPersistencePath(path string) {
+	path = strings.TrimSpace(path)
+	if path != "" {
+		persistencePath.Store(path)
+	}
+}
+
+// GetPersistencePath returns the configured persistence directory.
+func GetPersistencePath() string {
+	if v := persistencePath.Load(); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// resolvePersistenceFilePath returns the full path to the statistics file.
+func resolvePersistenceFilePath() string {
+	basePath := GetPersistencePath()
+	if basePath == "" {
+		return ""
+	}
+	return filepath.Join(basePath, statisticsFileName)
+}
+
+// SaveStatistics persists the current statistics to disk.
+// It returns an error if persistence path is not configured or write fails.
+func SaveStatistics() error {
+	filePath := resolvePersistenceFilePath()
+	if filePath == "" {
+		return nil // persistence not configured, silently skip
+	}
+
+	stats := GetRequestStatistics()
+	if stats == nil {
+		return nil
+	}
+
+	snapshot := stats.Snapshot()
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal statistics: %w", err)
+	}
+
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("failed to create statistics directory: %w", err)
+	}
+
+	// Write to temp file first, then rename for atomicity
+	tmpFile := filePath + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write statistics file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, filePath); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to finalize statistics file: %w", err)
+	}
+
+	log.Debugf("usage statistics saved to %s", filePath)
+	return nil
+}
+
+// LoadStatistics loads previously saved statistics from disk and merges them into memory.
+// It returns an error if the file exists but cannot be read or parsed.
+func LoadStatistics() error {
+	filePath := resolvePersistenceFilePath()
+	if filePath == "" {
+		return nil // persistence not configured, silently skip
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Debug("no existing usage statistics file found, starting fresh")
+			return nil
+		}
+		return fmt.Errorf("failed to read statistics file: %w", err)
+	}
+
+	if len(data) == 0 {
+		return nil
+	}
+
+	var snapshot StatisticsSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return fmt.Errorf("failed to parse statistics file: %w", err)
+	}
+
+	stats := GetRequestStatistics()
+	if stats == nil {
+		return nil
+	}
+
+	result := stats.MergeSnapshot(snapshot)
+	log.Infof("loaded usage statistics from disk: added=%d, skipped=%d", result.Added, result.Skipped)
+	return nil
+}
+
+// StartPersistence starts a background goroutine that periodically saves statistics to disk.
+// It also loads existing statistics on startup. Safe to call multiple times.
+func StartPersistence(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	persistenceOnce.Do(func() {
+		// Load existing statistics on startup
+		if err := LoadStatistics(); err != nil {
+			log.Warnf("failed to load usage statistics: %v", err)
+		}
+
+		var persistCtx context.Context
+		persistCtx, persistenceCancel = context.WithCancel(ctx)
+
+		go runPersistenceLoop(persistCtx)
+		log.Info("usage statistics persistence started")
+	})
+}
+
+// StopPersistence stops the background persistence goroutine and saves final statistics.
+func StopPersistence() {
+	persistenceStopOnce.Do(func() {
+		if persistenceCancel != nil {
+			persistenceCancel()
+		}
+
+		// Final save on shutdown
+		if err := SaveStatistics(); err != nil {
+			log.Warnf("failed to save usage statistics on shutdown: %v", err)
+		} else {
+			log.Info("usage statistics saved on shutdown")
+		}
+	})
+}
+
+func runPersistenceLoop(ctx context.Context) {
+	ticker := time.NewTicker(defaultPersistenceInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := SaveStatistics(); err != nil {
+				log.Warnf("failed to persist usage statistics: %v", err)
+			}
+		}
+	}
 }

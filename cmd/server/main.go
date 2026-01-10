@@ -47,6 +47,21 @@ func init() {
 	buildinfo.BuildDate = BuildDate
 }
 
+// resolveUsagePersistencePath determines the directory for usage statistics persistence.
+// Priority: WRITABLE_PATH env var > working directory > config file directory.
+func resolveUsagePersistencePath(writableBase, workDir, configFilePath string) string {
+	if writableBase != "" {
+		return writableBase
+	}
+	if workDir != "" {
+		return workDir
+	}
+	if configFilePath != "" {
+		return filepath.Dir(configFilePath)
+	}
+	return ""
+}
+
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
@@ -403,6 +418,12 @@ func main() {
 		}
 	}
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+
+	// Configure usage statistics persistence path
+	if usagePersistPath := resolveUsagePersistencePath(writableBase, wd, configFilePath); usagePersistPath != "" {
+		usage.SetPersistencePath(usagePersistPath)
+	}
+	
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
