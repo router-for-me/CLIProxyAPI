@@ -87,10 +87,6 @@ type modelStats struct {
 	Details       []RequestDetail
 }
 
-// maxDetailsPerModel limits the number of request details retained per model
-// to prevent unbounded memory growth. Oldest entries are dropped when exceeded.
-const maxDetailsPerModel = 1000
-
 // RequestDetail stores the timestamp and token usage for a single request.
 type RequestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
@@ -225,11 +221,6 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
-	// Prevent unbounded growth by dropping oldest entries when limit exceeded
-	if len(modelStatsValue.Details) > maxDetailsPerModel {
-		excess := len(modelStatsValue.Details) - maxDetailsPerModel
-		modelStatsValue.Details = modelStatsValue.Details[excess:]
-	}
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
