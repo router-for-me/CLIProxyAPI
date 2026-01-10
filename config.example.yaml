@@ -215,7 +215,7 @@ ws-auth: false
 
 # Global OAuth model name mappings (per channel)
 # These mappings rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 # NOTE: Mappings do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # oauth-model-mappings:
 #   gemini-cli:
@@ -246,6 +246,9 @@ ws-auth: false
 #   kiro:
 #     - name: "kiro-claude-opus-4-5"
 #       alias: "op45"
+#   github-copilot:
+#     - name: "gpt-5"
+#       alias: "copilot-gpt5"
 
 # OAuth provider excluded models
 # oauth-excluded-models:
