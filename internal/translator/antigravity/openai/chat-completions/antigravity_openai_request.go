@@ -113,6 +113,13 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetBytes(out, "request.generationConfig.maxOutputTokens", maxTok.Num)
 	}
 
+	// Candidate count (OpenAI 'n' parameter)
+	if n := gjson.GetBytes(rawJSON, "n"); n.Exists() && n.Type == gjson.Number {
+		if val := n.Int(); val > 1 {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.candidateCount", val)
+		}
+	}
+
 	// Map OpenAI modalities -> Gemini CLI request.generationConfig.responseModalities
 	// e.g. "modalities": ["image", "text"] -> ["IMAGE", "TEXT"]
 	if mods := gjson.GetBytes(rawJSON, "modalities"); mods.Exists() && mods.IsArray() {
