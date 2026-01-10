@@ -18,8 +18,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/session"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -154,12 +156,126 @@ func mergeMetadata(base, overlay map[string]any) map[string]any {
 	return out
 }
 
+// extractSessionID extracts the X-Session-ID header from the Gin context.
+func extractSessionID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return strings.TrimSpace(ginCtx.GetHeader("X-Session-ID"))
+	}
+	return ""
+}
+
+// loadOrCreateSession loads an existing session or creates a new one if requested.
+func loadOrCreateSession(ctx context.Context, mgr *coresession.Manager, sessionID string) (*coresession.Session, error) {
+	if mgr == nil || sessionID == "" {
+		return nil, nil
+	}
+	return mgr.GetOrCreate(ctx, sessionID)
+}
+
+// injectSessionHistory modifies the request payload to include session message history.
+func injectSessionHistory(requestJSON []byte, session *coresession.Session) ([]byte, error) {
+	if session == nil {
+		return requestJSON, nil
+	}
+	return coresession.InjectHistory(requestJSON, session)
+}
+
+// saveAssistantMessage extracts the assistant's response and appends it to the session.
+func saveAssistantMessage(ctx context.Context, mgr *coresession.Manager, sessionID string, responseJSON []byte, provider, model string) {
+	if mgr == nil || sessionID == "" || len(responseJSON) == 0 {
+		return
+	}
+
+	msg, err := coresession.ExtractAssistantMessage(responseJSON, provider, model)
+	if err != nil {
+		log.WithError(err).Warn("Failed to extract assistant message from response")
+		return
+	}
+	if msg == nil {
+		return
+	}
+
+	if err := mgr.AppendMessage(ctx, sessionID, *msg); err != nil {
+		log.WithError(err).Warn("Failed to append message to session")
+	}
+}
+
+// extractProviderFromMetadata extracts the provider from response metadata.
+func extractProviderFromMetadata(metadata map[string]any) string {
+	if metadata == nil {
+		return "unknown"
+	}
+	if provider, ok := metadata["provider"].(string); ok && provider != "" {
+		return provider
+	}
+	return "unknown"
+}
+
+// sessionContext holds session-related data for request processing
+type sessionContext struct {
+	SessionID string
+	Session   *coresession.Session
+	Payload   []byte // Modified payload with history injected
+}
+
+// prepareSessionContext loads/creates session and prepares the request payload with history.
+// This consolidates the duplicated session handling logic from Execute methods.
+func prepareSessionContext(ctx context.Context, mgr *coresession.Manager, rawJSON []byte) *sessionContext {
+	sc := &sessionContext{
+		Payload: rawJSON,
+	}
+
+	// Extract session ID from request context
+	sc.SessionID = extractSessionID(ctx)
+	if sc.SessionID == "" {
+		return sc
+	}
+
+	// Load or create session
+	session, err := loadOrCreateSession(ctx, mgr, sc.SessionID)
+	if err != nil {
+		log.WithError(err).Warn("Failed to load session")
+		return sc
+	}
+	sc.Session = session
+
+	// Inject conversation history into request payload
+	if sc.Session != nil {
+		injected, err := injectSessionHistory(rawJSON, sc.Session)
+		if err != nil {
+			log.WithError(err).Warn("Failed to inject session history")
+		} else {
+			sc.Payload = injected
+		}
+	}
+
+	return sc
+}
+
+// applySessionAffinity adds the preferred provider to metadata for session affinity.
+func (sc *sessionContext) applySessionAffinity(metadata map[string]any) map[string]any {
+	if sc.Session == nil || sc.Session.Metadata.PreferredProvider == "" {
+		return metadata
+	}
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	metadata["session_preferred_provider"] = sc.Session.Metadata.PreferredProvider
+	return metadata
+}
+
 // BaseAPIHandler contains the handlers for API endpoints.
 // It holds a pool of clients to interact with the backend service and manages
 // load balancing, client selection, and configuration.
 type BaseAPIHandler struct {
 	// AuthManager manages auth lifecycle and execution in the new architecture.
 	AuthManager *coreauth.Manager
+
+	// SessionManager manages conversation session continuity (optional).
+	SessionManager *coresession.Manager
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
@@ -322,10 +438,16 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, errMsg
 	}
+
+	// Session continuity: Prepare session context (load/create session, inject history)
+	sc := prepareSessionContext(ctx, h.SessionManager, rawJSON)
+
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta = sc.applySessionAffinity(reqMeta)
+
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: cloneBytes(sc.Payload),
 	}
 	if cloned := cloneMetadata(metadata); cloned != nil {
 		req.Metadata = cloned
@@ -353,6 +475,14 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		}
 		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
+
+	// Session continuity: Save assistant response to session history
+	if sc.Session != nil && len(resp.Payload) > 0 {
+		// Extract provider from response metadata (set by conductor)
+		provider := extractProviderFromMetadata(resp.Metadata)
+		saveAssistantMessage(ctx, h.SessionManager, sc.SessionID, resp.Payload, provider, normalizedModel)
+	}
+
 	return cloneBytes(resp.Payload), nil
 }
 
@@ -363,10 +493,16 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if errMsg != nil {
 		return nil, errMsg
 	}
+
+	// Session continuity: Prepare session context (load/create session, inject history)
+	sc := prepareSessionContext(ctx, h.SessionManager, rawJSON)
+
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta = sc.applySessionAffinity(reqMeta)
+
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: cloneBytes(sc.Payload),
 	}
 	if cloned := cloneMetadata(metadata); cloned != nil {
 		req.Metadata = cloned
@@ -394,6 +530,13 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		}
 		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
+
+	// Session continuity: Save assistant response to session history
+	if sc.Session != nil && len(resp.Payload) > 0 {
+		provider := extractProviderFromMetadata(resp.Metadata)
+		saveAssistantMessage(ctx, h.SessionManager, sc.SessionID, resp.Payload, provider, normalizedModel)
+	}
+
 	return cloneBytes(resp.Payload), nil
 }
 
