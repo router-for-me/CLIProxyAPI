@@ -251,6 +251,7 @@ ws-auth: false
 #       alias: "copilot-gpt5"
 
 # OAuth provider excluded models
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 # oauth-excluded-models:
 #   gemini-cli:
 #     - "gemini-2.5-pro"     # exclude specific models (exact match)
@@ -271,6 +272,10 @@ ws-auth: false
 #     - "vision-model"
 #   iflow:
 #     - "tstars2.0"
+#   kiro:
+#     - "kiro-claude-haiku-4-5"
+#   github-copilot:
+#     - "raptor-mini"
 
 # Optional payload configuration
 # payload:
