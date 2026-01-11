@@ -32,6 +32,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/live"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -311,6 +312,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 func (s *Server) setupRoutes() {
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
+	openaiAudioHandlers := openai.NewOpenAIAudioHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -326,7 +328,12 @@ func (s *Server) setupRoutes() {
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
+		v1.POST("/audio/speech", openaiAudioHandlers.Speech)
 	}
+
+	// Live API WebSocket endpoint for real-time audio/video
+	liveHandler := live.NewLiveHandler()
+	s.engine.GET("/v1/realtime", liveHandler.HandleWebSocket)
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")

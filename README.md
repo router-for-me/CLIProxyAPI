@@ -36,6 +36,8 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 ## Overview
 
 - OpenAI/Gemini/Claude compatible API endpoints for CLI models
+- **Text-to-Speech (TTS)** - OpenAI-compatible `/v1/audio/speech` endpoint using Gemini TTS
+- **Live API** - Real-time bidirectional audio/video via WebSocket (`/v1/realtime`)
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
 - Qwen Code support via OAuth login
@@ -43,7 +45,7 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - Amp CLI and IDE extensions support with provider routing
 - Streaming and non-streaming responses
 - Function calling/tools support
-- Multimodal input support (text and images)
+- Multimodal input support (text, images, audio, video)
 - Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Qwen and iFlow)
 - Simple CLI authentication flows (Gemini, OpenAI, Claude, Qwen and iFlow)
 - Generative Language API Key support
@@ -82,6 +84,7 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 - Advanced (executors & translators): [docs/sdk-advanced.md](docs/sdk-advanced.md)
 - Access: [docs/sdk-access.md](docs/sdk-access.md)
 - Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
+- **TTS & Live Audio**: [docs/TTS-SETUP.md](docs/TTS-SETUP.md)
 - Custom Provider Example: `examples/custom-provider`
 
 ## Contributing

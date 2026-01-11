@@ -1,67 +1,65 @@
 #!/bin/bash
 # TTS Helper Script for CLIProxyAPI
-# Usage: ./tts.sh "Text to speak" [voice]
-# Voices: Kore, Zephyr, Charon, Puck, Leda, etc.
+# Uses the OpenAI-compatible /v1/audio/speech endpoint
+#
+# Usage: ./tts.sh "Text to speak" [voice] [model] [format]
+#
+# Examples:
+#   ./tts.sh "Hello world"
+#   ./tts.sh "Hello world" Kore
+#   ./tts.sh "Hello world" alloy tts-1 mp3
+#
+# Voices (OpenAI): alloy, echo, fable, nova, onyx, shimmer
+# Voices (Gemini): Kore, Puck, Charon, Zephyr, Leda, Aoede, etc.
+# Models: tts-1, tts-1-hd, gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts
+# Formats: mp3, wav, opus, aac, flac, pcm
 
 set -e
 
 TEXT="${1:-Hello world}"
 VOICE="${2:-Kore}"
-MODEL="${3:-gemini-2.5-flash-preview-tts}"
+MODEL="${3:-tts-1}"
+FORMAT="${4:-mp3}"
 API_URL="http://localhost:8317"
 API_KEY="sk-proxy"
 
-# Create temp directory for this session
-TMP_DIR=$(mktemp -d)
-trap "rm -rf $TMP_DIR" EXIT
+# Output file
+OUTPUT="/tmp/tts_output.${FORMAT}"
 
-# Build request JSON
-REQUEST_JSON=$(cat <<EOF
-{
-  "contents": [{"parts": [{"text": "$TEXT"}]}],
-  "generationConfig": {
-    "responseModalities": ["AUDIO"],
-    "speechConfig": {
-      "voiceConfig": {
-        "prebuiltVoiceConfig": {"voiceName": "$VOICE"}
-      }
-    }
-  }
-}
-EOF
-)
+echo "Speaking: \"$TEXT\""
+echo "Voice: $VOICE | Model: $MODEL | Format: $FORMAT"
 
-echo "Speaking: \"$TEXT\" (voice: $VOICE)"
-
-# Call TTS API
-RESPONSE=$(curl -s -X POST "$API_URL/v1beta/models/$MODEL:generateContent" \
+# Call OpenAI-compatible TTS endpoint
+HTTP_CODE=$(curl -s -w "%{http_code}" -X POST "$API_URL/v1/audio/speech" \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d "$REQUEST_JSON")
+  -d "{\"model\":\"$MODEL\",\"input\":\"$TEXT\",\"voice\":\"$VOICE\",\"response_format\":\"$FORMAT\"}" \
+  -o "$OUTPUT")
 
-# Check for error
-if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
-  echo "Error: $(echo "$RESPONSE" | jq -r '.error.message // .error')"
+# Check response
+if [ "$HTTP_CODE" != "200" ]; then
+  echo "Error: HTTP $HTTP_CODE"
+  cat "$OUTPUT"
   exit 1
 fi
 
-# Extract and decode audio
-AUDIO_DATA=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].inlineData.data')
-
-if [ -z "$AUDIO_DATA" ] || [ "$AUDIO_DATA" = "null" ]; then
-  echo "Error: No audio data in response"
-  echo "$RESPONSE" | jq '.'
+# Check if output file has content
+if [ ! -s "$OUTPUT" ]; then
+  echo "Error: Empty response"
   exit 1
 fi
 
-# Decode base64 to PCM
-echo "$AUDIO_DATA" | base64 -d > "$TMP_DIR/audio.pcm"
+echo "Audio saved to: $OUTPUT"
 
-# Convert PCM to WAV (24kHz, 16-bit, mono)
-ffmpeg -y -f s16le -ar 24000 -ac 1 -i "$TMP_DIR/audio.pcm" "$TMP_DIR/audio.wav" 2>/dev/null
-
-# Play audio
-afplay "$TMP_DIR/audio.wav"
+# Play audio (macOS: afplay, Linux: aplay or paplay)
+if command -v afplay &> /dev/null; then
+  afplay "$OUTPUT"
+elif command -v paplay &> /dev/null; then
+  paplay "$OUTPUT"
+elif command -v aplay &> /dev/null; then
+  aplay "$OUTPUT"
+else
+  echo "No audio player found. File saved to $OUTPUT"
+fi
 
 echo "Done!"
-# Temp files auto-cleaned by trap on EXIT

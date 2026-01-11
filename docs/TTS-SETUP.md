@@ -1,311 +1,328 @@
-# CLIProxyAPI TTS (Text-to-Speech) Setup Guide
+# CLIProxyAPI TTS & Live Audio Guide
 
-This document explains how to enable and use Gemini TTS models through CLIProxyAPI.
+This document covers Text-to-Speech and real-time audio features in CLIProxyAPI.
 
 **Tested on:** CLIProxyAPI v6.6.98
 
 ## Overview
 
-CLIProxyAPI can proxy Google's Gemini TTS models, allowing you to generate speech from text through the same API interface used for chat completions.
+CLIProxyAPI provides two audio interfaces:
+1. **TTS API** (`/v1/audio/speech`) - OpenAI-compatible text-to-speech
+2. **Live API** (`/v1/realtime`) - Real-time bidirectional audio/video via WebSocket
 
-### Supported TTS Models
+Both use Gemini models through AI Studio (free) - no API costs.
 
-| Model ID | Description | Best For |
-|----------|-------------|----------|
-| `gemini-2.5-flash-preview-tts` | Fast TTS model | Real-time applications, low latency |
-| `gemini-2.5-pro-preview-tts` | High-quality TTS model | Quality/expressivity, professional audio |
-| `gemini-2.5-flash-native-audio-preview` | Multimodal audio model | Audio input/output, conversations |
+---
 
-### Available Voices
+## Part 1: Text-to-Speech (TTS)
 
-28 prebuilt voices including:
-- **Female:** Kore, Zephyr, Leda, Aoede, Sulafat, and more
-- **Male:** Charon, Puck, Enceladus, Iapetus, and more
-
-## Prerequisites
-
-1. CLIProxyAPI installed and running
-2. AI Studio WebSocket connection configured (for `aistudio` provider)
-3. `ffmpeg` installed (for audio conversion)
-
-## Setup
-
-### 1. Add TTS Model Definitions
-
-The TTS models must be added to CLIProxyAPI's model definitions. Edit:
+### Endpoint
 
 ```
-internal/registry/model_definitions.go
+POST /v1/audio/speech
 ```
 
-Add the following to `GetGeminiModels()`, `GetGeminiCLIModels()`, and `GetAIStudioModels()`:
-
-```go
-// TTS (Text-to-Speech) models
-{
-    ID:                         "gemini-2.5-flash-preview-tts",
-    Object:                     "model",
-    Created:                    1762300800,
-    OwnedBy:                    "google",
-    Type:                       "gemini",
-    Name:                       "models/gemini-2.5-flash-preview-tts",
-    Version:                    "2.5",
-    DisplayName:                "Gemini 2.5 Flash TTS",
-    Description:                "Text-to-speech model optimized for low latency.",
-    InputTokenLimit:            32768,
-    OutputTokenLimit:           8192,
-    SupportedGenerationMethods: []string{"generateContent"},
-},
-{
-    ID:                         "gemini-2.5-pro-preview-tts",
-    Object:                     "model",
-    Created:                    1762300800,
-    OwnedBy:                    "google",
-    Type:                       "gemini",
-    Name:                       "models/gemini-2.5-pro-preview-tts",
-    Version:                    "2.5",
-    DisplayName:                "Gemini 2.5 Pro TTS",
-    Description:                "Text-to-speech model optimized for quality.",
-    InputTokenLimit:            32768,
-    OutputTokenLimit:           8192,
-    SupportedGenerationMethods: []string{"generateContent"},
-},
-{
-    ID:                         "gemini-2.5-flash-native-audio-preview",
-    Object:                     "model",
-    Created:                    1762300800,
-    OwnedBy:                    "google",
-    Type:                       "gemini",
-    Name:                       "models/gemini-2.5-flash-native-audio-preview",
-    Version:                    "2.5",
-    DisplayName:                "Gemini 2.5 Flash Native Audio",
-    Description:                "Multimodal model with native audio capabilities.",
-    InputTokenLimit:            1048576,
-    OutputTokenLimit:           8192,
-    SupportedGenerationMethods: []string{"generateContent"},
-},
-```
-
-### 2. Rebuild CLIProxyAPI
+### OpenAI-Compatible Request
 
 ```bash
-cd /Users/kyin/CLIProxyAPI
-go build -o cli-proxy-api ./cmd/server
-```
-
-### 3. Restart Server & Reconnect AI Studio
-
-```bash
-# Kill existing server
-pkill -9 -f 'cli-proxy-api'
-
-# Start server
-./cli-proxy-api &
-```
-
-**Important:** After restarting, you must reconnect your AI Studio WebSocket for the new models to appear. The TTS models are only exposed through the `aistudio` provider.
-
-### 4. Verify Models
-
-```bash
-curl -s http://localhost:8317/v1/models -H "Authorization: Bearer sk-proxy" | \
-  jq '.data[] | select(.id | test("tts|audio"))'
-```
-
-Expected output:
-```json
-{"id": "gemini-2.5-flash-preview-tts", ...}
-{"id": "gemini-2.5-pro-preview-tts", ...}
-{"id": "gemini-2.5-flash-native-audio-preview", ...}
-```
-
-## Usage
-
-### API Request Format
-
-TTS uses the Gemini native API format (not OpenAI format):
-
-```bash
-curl -X POST "http://localhost:8317/v1beta/models/gemini-2.5-flash-preview-tts:generateContent" \
+curl -X POST http://localhost:8317/v1/audio/speech \
   -H "Authorization: Bearer sk-proxy" \
   -H "Content-Type: application/json" \
   -d '{
-    "contents": [{"parts": [{"text": "Hello, this is a test."}]}],
-    "generationConfig": {
-      "responseModalities": ["AUDIO"],
-      "speechConfig": {
-        "voiceConfig": {
-          "prebuiltVoiceConfig": {"voiceName": "Kore"}
+    "model": "tts-1",
+    "input": "Hello, world!",
+    "voice": "alloy",
+    "response_format": "mp3"
+  }' \
+  --output speech.mp3
+```
+
+### Supported Models
+
+| Request Model | Maps To | Description |
+|---------------|---------|-------------|
+| `tts-1` | `gemini-2.5-flash-preview-tts` | Fast, low latency |
+| `tts-1-hd` | `gemini-2.5-pro-preview-tts` | High quality |
+| `gemini-2.5-flash-preview-tts` | (native) | Direct Gemini access |
+| `gemini-2.5-pro-preview-tts` | (native) | Direct Gemini access |
+
+### Voice Mapping
+
+| OpenAI Voice | Gemini Voice | Characteristics |
+|--------------|--------------|-----------------|
+| `alloy` | Puck | Upbeat, energetic (default) |
+| `echo` | Charon | Informative, clear |
+| `fable` | Kore | Firm, confident |
+| `nova` | Aoede | Breezy, light |
+| `onyx` | Fenrir | Excitable, dynamic |
+| `shimmer` | Leda | Youthful, energetic |
+
+You can also use Gemini voices directly: Zephyr, Sulafat, Enceladus, Iapetus, etc.
+
+### Output Formats
+
+| Format | MIME Type | Use Case |
+|--------|-----------|----------|
+| `mp3` | audio/mpeg | Default, general use |
+| `wav` | audio/wav | Low latency |
+| `opus` | audio/ogg | Streaming, low bandwidth |
+| `aac` | audio/aac | Mobile apps |
+| `flac` | audio/flac | Lossless |
+| `pcm` | audio/pcm | Raw 24kHz 16-bit |
+
+### Advanced Features
+
+#### Emotion Tags
+
+Gemini supports emotion tags in the input text:
+
+```bash
+curl -X POST http://localhost:8317/v1/audio/speech \
+  -H "Authorization: Bearer sk-proxy" \
+  -d '{
+    "model": "gemini-2.5-pro-preview-tts",
+    "input": "[excited] Wow, this is amazing! [whispering] But keep it a secret.",
+    "voice": "Puck"
+  }' --output emotion.mp3
+```
+
+Supported tags: `[excited]`, `[sad]`, `[angry]`, `[whispering]`, `[laughing]`, `[sighing]`, etc.
+
+#### Multi-Speaker
+
+```bash
+curl -X POST http://localhost:8317/v1/audio/speech \
+  -H "Authorization: Bearer sk-proxy" \
+  -d '{
+    "model": "gemini-2.5-pro-preview-tts",
+    "input": "Alice: Hi Bob! Bob: Hello Alice, how are you?",
+    "speakers": [
+      {"name": "Alice", "voice": "Kore"},
+      {"name": "Bob", "voice": "Charon"}
+    ]
+  }' --output dialog.mp3
+```
+
+#### SSML Support
+
+```bash
+curl -X POST http://localhost:8317/v1/audio/speech \
+  -H "Authorization: Bearer sk-proxy" \
+  -d '{
+    "model": "gemini-2.5-flash-preview-tts",
+    "input": "Hello <break time=\"1s\"/> world. <prosody rate=\"slow\">This is slow.</prosody>",
+    "voice": "Kore"
+  }' --output ssml.mp3
+```
+
+### Python Example
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8317/v1",
+    api_key="sk-proxy"
+)
+
+response = client.audio.speech.create(
+    model="tts-1",
+    voice="alloy",
+    input="Hello from Python!"
+)
+
+response.stream_to_file("output.mp3")
+```
+
+---
+
+## Part 2: Live API (Real-Time Audio/Video)
+
+### Endpoint
+
+```
+WebSocket ws://localhost:8317/v1/realtime
+```
+
+### Overview
+
+The Live API provides bidirectional real-time communication with Gemini's native audio model. Features:
+- Real-time audio input/output
+- Video frame input (1 FPS)
+- Voice Activity Detection (VAD)
+- "Deep Think" reasoning capability
+- 10-minute session limit
+
+### Connection
+
+```javascript
+const ws = new WebSocket('ws://localhost:8317/v1/realtime?key=YOUR_API_KEY');
+
+// Send setup message
+ws.send(JSON.stringify({
+  setup: {
+    model: "models/gemini-2.5-flash-native-audio-preview",
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName: "Puck" }
         }
       }
     }
-  }'
+  }
+}));
+
+// Wait for setupComplete, then send audio
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.setupComplete) {
+    console.log("Ready for audio!");
+  }
+};
 ```
 
-### Response Format
+### Audio Format
 
-The response contains base64-encoded PCM audio:
+| Direction | Format | Sample Rate | Channels |
+|-----------|--------|-------------|----------|
+| Input | PCM 16-bit LE | 16 kHz | Mono |
+| Output | PCM 16-bit LE | 24 kHz | Mono |
 
-```json
-{
-  "candidates": [{
-    "content": {
-      "parts": [{
-        "inlineData": {
-          "mimeType": "audio/pcm",
-          "data": "BASE64_ENCODED_PCM_AUDIO..."
-        }
-      }]
+### Sending Audio
+
+```javascript
+// Send audio chunk (base64 encoded PCM)
+ws.send(JSON.stringify({
+  realtimeInput: {
+    mediaChunks: [{
+      mimeType: "audio/pcm;rate=16000",
+      data: base64AudioData
+    }]
+  }
+}));
+```
+
+### Sending Video Frame
+
+```javascript
+// Send video frame (base64 encoded JPEG)
+ws.send(JSON.stringify({
+  realtimeInput: {
+    mediaChunks: [{
+      mimeType: "image/jpeg",
+      data: base64JpegData
+    }]
+  }
+}));
+```
+
+### Receiving Audio
+
+```javascript
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.serverContent?.modelTurn?.parts) {
+    for (const part of msg.serverContent.modelTurn.parts) {
+      if (part.inlineData?.mimeType?.startsWith("audio/")) {
+        // Decode and play audio
+        const audioData = atob(part.inlineData.data);
+        playAudio(audioData);
+      }
     }
-  }]
-}
+  }
+};
 ```
 
-### Audio Specifications
-
-- **Format:** PCM (base64 encoded)
-- **Sample Rate:** 24,000 Hz
-- **Channels:** Mono (1)
-- **Bit Depth:** 16-bit signed
-
-### Converting to Playable Audio
+### CLI Testing
 
 ```bash
-# Extract base64 data and decode to PCM
-echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].inlineData.data' | base64 -d > audio.pcm
+# Install websocat
+brew install websocat
 
-# Convert PCM to WAV
-ffmpeg -f s16le -ar 24000 -ac 1 -i audio.pcm audio.wav
-
-# Play (macOS)
-afplay audio.wav
+# Connect to Live API
+websocat ws://localhost:8317/v1/realtime?key=YOUR_API_KEY
 ```
 
-## Helper Script
+---
 
-A convenience script is provided at `scripts/tts.sh`:
+## Prerequisites
+
+1. **CLIProxyAPI** running on port 8317
+2. **AI Studio WebSocket** connected (for free access)
+3. **ffmpeg** installed (for TTS format conversion)
 
 ```bash
-# Basic usage
-./scripts/tts.sh "Your text here"
+# macOS
+brew install ffmpeg
 
-# With specific voice
-./scripts/tts.sh "Your text here" Kore
-
-# With specific model
-./scripts/tts.sh "Your text here" Kore gemini-2.5-pro-preview-tts
+# Ubuntu
+sudo apt install ffmpeg
 ```
 
-The script automatically:
-- Calls the TTS API
-- Decodes the base64 audio
-- Converts to WAV
-- Plays the audio
-- Cleans up temp files
+---
 
-## Git Setup (Private Fork)
+## Helper Scripts
 
-To maintain TTS changes while staying updated with upstream:
-
-### Repository Structure
-
-| Remote | URL | Purpose |
-|--------|-----|---------|
-| `origin` | github.com/router-for-me/CLIProxyAPI | Upstream (official) |
-| `fork` | github.com/yinkev/CLIProxyAPI | Your private fork |
-
-### Branches
-
-- `main` - Tracks upstream
-- `tts-models` - Your TTS changes (on fork)
-
-### Update Workflow
-
-When upstream releases a new version (e.g., updating from v6.6.98 to v6.6.100):
-
-```bash
-# 1. Fetch latest tags
-git fetch origin --tags
-
-# 2. Check current base version
-git describe --tags --always
-# Output: v6.6.98-5-gb5b24a3 means you're on v6.6.98 + 5 commits
-
-# 3. Rebase TTS commits onto new version
-# Syntax: git rebase --onto <new-base> <old-base> <branch>
-git rebase --onto v6.6.100 v6.6.98 tts-models
-
-# 4. Push to your fork (force needed after rebase)
-git push fork tts-models --force
-
-# 5. Rebuild
-go build -o cli-proxy-api ./cmd/server
-```
-
-**Note:** Git will automatically skip commits already in the new version. Only your TTS commits will be reapplied.
-
-### Quick Update Script
+### scripts/tts.sh
 
 ```bash
 #!/bin/bash
-# update-cliproxy.sh
-# Usage: ./update-cliproxy.sh v6.6.100
+# Usage: ./scripts/tts.sh "Your text" [voice] [model] [format]
 
-set -e
-cd /Users/kyin/CLIProxyAPI
+TEXT="${1:-Hello world}"
+VOICE="${2:-Kore}"
+MODEL="${3:-tts-1}"
+FORMAT="${4:-mp3}"
+OUTPUT="/tmp/tts_output.${FORMAT}"
 
-NEW_VERSION=${1:?Usage: $0 <new-version>}
-CURRENT_BASE=$(git describe --tags --abbrev=0)
+curl -s -X POST http://localhost:8317/v1/audio/speech \
+  -H "Authorization: Bearer sk-proxy" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"${MODEL}\",\"input\":\"${TEXT}\",\"voice\":\"${VOICE}\",\"response_format\":\"${FORMAT}\"}" \
+  -o "$OUTPUT"
 
-echo "Updating from $CURRENT_BASE to $NEW_VERSION..."
-
-git fetch origin --tags
-git rebase --onto "$NEW_VERSION" "$CURRENT_BASE" tts-models
-git push fork tts-models --force
-go build -o cli-proxy-api ./cmd/server
-
-echo "Done! Now at $(git describe --tags --always)"
-echo "Restart the server to apply changes."
+afplay "$OUTPUT" 2>/dev/null || aplay "$OUTPUT" 2>/dev/null || echo "Audio saved to $OUTPUT"
 ```
+
+---
 
 ## Troubleshooting
 
-### TTS models not showing in /v1/models
+### TTS returns empty/error
 
-1. Verify models are in `model_definitions.go`
-2. Rebuild: `go build -o cli-proxy-api ./cmd/server`
-3. Restart server
-4. **Reconnect AI Studio WebSocket** (models only load when aistudio connects)
+1. Check AI Studio WebSocket is connected
+2. Verify model is available: `curl http://localhost:8317/v1/models -H "Authorization: Bearer sk-proxy" | grep tts`
+3. Check server logs for errors
 
-### No audio in response
+### Live API connection fails
 
-- Ensure `responseModalities: ["AUDIO"]` is set
-- Check voice name is valid (e.g., "Kore", "Zephyr")
+1. Provide API key via `?key=` query parameter
+2. Check WebSocket upgrade is not blocked by proxy
+3. Verify model name includes `models/` prefix
 
-### Audio plays but sounds wrong
+### Audio sounds wrong
 
-- Verify ffmpeg conversion uses correct parameters:
-  - Sample rate: 24000 Hz
-  - Channels: 1 (mono)
-  - Format: s16le (signed 16-bit little-endian)
+- Ensure ffmpeg uses correct parameters:
+  - TTS output: 24 kHz, mono, 16-bit
+  - Live input: 16 kHz, mono, 16-bit
+  - Live output: 24 kHz, mono, 16-bit
 
-### Rebase conflicts
+---
 
-If `git rebase origin/main` has conflicts in `model_definitions.go`:
-1. Open the file and resolve conflicts (keep both upstream changes and your TTS additions)
-2. `git add internal/registry/model_definitions.go`
-3. `git rebase --continue`
+## Files Added/Modified
 
-## Files Modified
-
-| File | Changes |
+| File | Purpose |
 |------|---------|
-| `internal/registry/model_definitions.go` | Added TTS model definitions |
-| `scripts/tts.sh` | Helper script for TTS |
+| `sdk/api/handlers/openai/audio_handlers.go` | OpenAI-compatible TTS endpoint |
+| `sdk/api/handlers/live/live_handler.go` | Live API WebSocket relay |
+| `internal/api/server.go` | Route registration |
 | `docs/TTS-SETUP.md` | This documentation |
+
+---
 
 ## References
 
 - [Gemini TTS Documentation](https://ai.google.dev/gemini-api/docs/speech-generation)
-- [CLIProxyAPI GitHub](https://github.com/router-for-me/CLIProxyAPI)
-- [Your Fork](https://github.com/yinkev/CLIProxyAPI)
+- [Gemini Live API](https://ai.google.dev/gemini-api/docs/live)
+- [OpenAI Audio API](https://platform.openai.com/docs/guides/text-to-speech)
