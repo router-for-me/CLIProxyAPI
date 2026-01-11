@@ -7,12 +7,77 @@ import (
 	"embed"
 	_ "embed"
 	"strings"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 //go:embed codex_instructions
 var codexInstructionsDir embed.FS
 
-func CodexInstructionsForModel(modelName, systemInstructions string) (bool, string) {
+//go:embed opencode_codex_instructions.txt
+var opencodeCodexInstructions string
+
+const (
+	codexUserAgentKey  = "__cpa_user_agent"
+	userAgentOpenAISDK = "ai-sdk/openai/"
+)
+
+func InjectCodexUserAgent(raw []byte, userAgent string) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	trimmed := strings.TrimSpace(userAgent)
+	if trimmed == "" {
+		return raw
+	}
+	updated, err := sjson.SetBytes(raw, codexUserAgentKey, trimmed)
+	if err != nil {
+		return raw
+	}
+	return updated
+}
+
+func ExtractCodexUserAgent(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(gjson.GetBytes(raw, codexUserAgentKey).String())
+}
+
+func StripCodexUserAgent(raw []byte) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	if !gjson.GetBytes(raw, codexUserAgentKey).Exists() {
+		return raw
+	}
+	updated, err := sjson.DeleteBytes(raw, codexUserAgentKey)
+	if err != nil {
+		return raw
+	}
+	return updated
+}
+
+func codexInstructionsForOpenCode(systemInstructions string) (bool, string) {
+	if opencodeCodexInstructions == "" {
+		return false, ""
+	}
+	if strings.HasPrefix(systemInstructions, opencodeCodexInstructions) {
+		return true, ""
+	}
+	return false, opencodeCodexInstructions
+}
+
+func useOpenCodeInstructions(userAgent string) bool {
+	return strings.Contains(strings.ToLower(userAgent), userAgentOpenAISDK)
+}
+
+func IsOpenCodeUserAgent(userAgent string) bool {
+	return useOpenCodeInstructions(userAgent)
+}
+
+func codexInstructionsForCodex(modelName, systemInstructions string) (bool, string) {
 	entries, _ := codexInstructionsDir.ReadDir("codex_instructions")
 
 	lastPrompt := ""
@@ -56,4 +121,11 @@ func CodexInstructionsForModel(modelName, systemInstructions string) (bool, stri
 	} else {
 		return false, lastPrompt
 	}
+}
+
+func CodexInstructionsForModel(modelName, systemInstructions, userAgent string) (bool, string) {
+	if IsOpenCodeUserAgent(userAgent) {
+		return codexInstructionsForOpenCode(systemInstructions)
+	}
+	return codexInstructionsForCodex(modelName, systemInstructions)
 }

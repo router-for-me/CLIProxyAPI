@@ -3,7 +3,6 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"sort"
 	"sync"
 	"time"
 )
@@ -16,10 +15,7 @@ type SignatureEntry struct {
 
 const (
 	// SignatureCacheTTL is how long signatures are valid
-	SignatureCacheTTL = 1 * time.Hour
-
-	// MaxEntriesPerSession limits memory usage per session
-	MaxEntriesPerSession = 100
+	SignatureCacheTTL = 3 * time.Hour
 
 	// SignatureTextHashLen is the length of the hash key (16 hex chars = 64-bit key space)
 	SignatureTextHashLen = 16
@@ -112,43 +108,6 @@ func CacheSignature(sessionID, text, signature string) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	// Evict expired entries if at capacity
-	if len(sc.entries) >= MaxEntriesPerSession {
-		now := time.Now()
-		for key, entry := range sc.entries {
-			if now.Sub(entry.Timestamp) > SignatureCacheTTL {
-				delete(sc.entries, key)
-			}
-		}
-		// If still at capacity, remove oldest entries
-		if len(sc.entries) >= MaxEntriesPerSession {
-			// Find and remove oldest quarter
-			oldest := make([]struct {
-				key string
-				ts  time.Time
-			}, 0, len(sc.entries))
-			for key, entry := range sc.entries {
-				oldest = append(oldest, struct {
-					key string
-					ts  time.Time
-				}{key, entry.Timestamp})
-			}
-			// Sort by timestamp (oldest first) using sort.Slice
-			sort.Slice(oldest, func(i, j int) bool {
-				return oldest[i].ts.Before(oldest[j].ts)
-			})
-
-			toRemove := len(oldest) / 4
-			if toRemove < 1 {
-				toRemove = 1
-			}
-
-			for i := 0; i < toRemove; i++ {
-				delete(sc.entries, oldest[i].key)
-			}
-		}
-	}
-
 	sc.entries[textHash] = SignatureEntry{
 		Signature: signature,
 		Timestamp: time.Now(),
@@ -170,21 +129,24 @@ func GetCachedSignature(sessionID, text string) string {
 
 	textHash := hashText(text)
 
-	sc.mu.RLock()
-	entry, exists := sc.entries[textHash]
-	sc.mu.RUnlock()
+	now := time.Now()
 
+	sc.mu.Lock()
+	entry, exists := sc.entries[textHash]
 	if !exists {
+		sc.mu.Unlock()
 		return ""
 	}
-
-	// Check if expired
-	if time.Since(entry.Timestamp) > SignatureCacheTTL {
-		sc.mu.Lock()
+	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
 		delete(sc.entries, textHash)
 		sc.mu.Unlock()
 		return ""
 	}
+
+	// Refresh TTL on access (sliding expiration).
+	entry.Timestamp = now
+	sc.entries[textHash] = entry
+	sc.mu.Unlock()
 
 	return entry.Signature
 }

@@ -38,11 +38,12 @@ import (
 //   - []byte: The transformed request data in Codex API format
 func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
+	userAgent := misc.ExtractCodexUserAgent(rawJSON)
 	// Base template
 	out := `{"model":"","instructions":"","input":[]}`
 
 	// Inject standard Codex instructions
-	_, instructions := misc.CodexInstructionsForModel(modelName, "")
+	_, instructions := misc.CodexInstructionsForModel(modelName, "", userAgent)
 	out, _ = sjson.Set(out, "instructions", instructions)
 
 	root := gjson.ParseBytes(rawJSON)
