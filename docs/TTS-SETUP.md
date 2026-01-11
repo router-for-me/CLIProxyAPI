@@ -2,6 +2,8 @@
 
 This document explains how to enable and use Gemini TTS models through CLIProxyAPI.
 
+**Tested on:** CLIProxyAPI v6.6.98
+
 ## Overview
 
 CLIProxyAPI can proxy Google's Gemini TTS models, allowing you to generate speech from text through the same API interface used for chat completions.
@@ -219,52 +221,51 @@ To maintain TTS changes while staying updated with upstream:
 
 ### Update Workflow
 
-When upstream has new updates:
+When upstream releases a new version (e.g., updating from v6.6.98 to v6.6.100):
 
 ```bash
-# Fetch upstream changes
-git fetch origin
+# 1. Fetch latest tags
+git fetch origin --tags
 
-# Switch to your TTS branch
-git checkout tts-models
+# 2. Check current base version
+git describe --tags --always
+# Output: v6.6.98-5-gb5b24a3 means you're on v6.6.98 + 5 commits
 
-# Rebase on top of upstream
-git rebase origin/main
+# 3. Rebase TTS commits onto new version
+# Syntax: git rebase --onto <new-base> <old-base> <branch>
+git rebase --onto v6.6.100 v6.6.98 tts-models
 
-# If conflicts, resolve them, then:
-# git add <resolved-files>
-# git rebase --continue
-
-# Push to your fork (force needed after rebase)
+# 4. Push to your fork (force needed after rebase)
 git push fork tts-models --force
 
-# Rebuild
+# 5. Rebuild
 go build -o cli-proxy-api ./cmd/server
 ```
+
+**Note:** Git will automatically skip commits already in the new version. Only your TTS commits will be reapplied.
 
 ### Quick Update Script
 
 ```bash
 #!/bin/bash
 # update-cliproxy.sh
+# Usage: ./update-cliproxy.sh v6.6.100
 
 set -e
 cd /Users/kyin/CLIProxyAPI
 
-echo "Fetching upstream..."
-git fetch origin
+NEW_VERSION=${1:?Usage: $0 <new-version>}
+CURRENT_BASE=$(git describe --tags --abbrev=0)
 
-echo "Rebasing TTS changes..."
-git checkout tts-models
-git rebase origin/main
+echo "Updating from $CURRENT_BASE to $NEW_VERSION..."
 
-echo "Pushing to fork..."
+git fetch origin --tags
+git rebase --onto "$NEW_VERSION" "$CURRENT_BASE" tts-models
 git push fork tts-models --force
-
-echo "Rebuilding..."
 go build -o cli-proxy-api ./cmd/server
 
-echo "Done! Restart the server to apply changes."
+echo "Done! Now at $(git describe --tags --always)"
+echo "Restart the server to apply changes."
 ```
 
 ## Troubleshooting
