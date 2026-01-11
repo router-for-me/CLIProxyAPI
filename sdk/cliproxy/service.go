@@ -769,6 +769,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "iflow":
 		models = registry.GetIFlowModels()
+		models = applyExcludedModels(models, excluded)
 	case "github-copilot":
 		models = registry.GetGitHubCopilotModels()
 		models = applyExcludedModels(models, excluded)
