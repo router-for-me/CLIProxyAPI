@@ -25,6 +25,9 @@ type SDKConfig struct {
 
 	// Streaming configures server-side streaming behavior (keep-alives and safe bootstrap retries).
 	Streaming StreamingConfig `yaml:"streaming" json:"streaming"`
+
+	// Session configures conversation session continuity and history management.
+	Session SessionConfig `yaml:"session" json:"session"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
@@ -37,6 +40,24 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+}
+
+// SessionConfig holds conversation session continuity configuration.
+type SessionConfig struct {
+	// Enabled toggles session management functionality.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// StorageDir is the directory where session files are stored.
+	// Defaults to ~/.cli-proxy-api/sessions if not specified.
+	StorageDir string `yaml:"storage-dir,omitempty" json:"storage-dir,omitempty"`
+
+	// DefaultTTLHours is the default session expiration time in hours.
+	// Defaults to 24 hours if not specified or <= 0.
+	DefaultTTLHours int `yaml:"default-ttl-hours,omitempty" json:"default-ttl-hours,omitempty"`
+
+	// CleanupIntervalHours is how often to run expired session cleanup in hours.
+	// Defaults to 1 hour if not specified. Set to 0 to disable automatic cleanup.
+	CleanupIntervalHours int `yaml:"cleanup-interval-hours,omitempty" json:"cleanup-interval-hours,omitempty"`
 }
 
 // AccessConfig groups request authentication providers.
