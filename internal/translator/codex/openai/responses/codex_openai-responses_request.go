@@ -12,6 +12,8 @@ import (
 
 func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
+	userAgent := misc.ExtractCodexUserAgent(rawJSON)
+	rawJSON = misc.StripCodexUserAgent(rawJSON)
 
 	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
@@ -32,7 +34,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 		originalInstructionsText = originalInstructionsResult.String()
 	}
 
-	hasOfficialInstructions, instructions := misc.CodexInstructionsForModel(modelName, originalInstructionsResult.String())
+	hasOfficialInstructions, instructions := misc.CodexInstructionsForModel(modelName, originalInstructionsResult.String(), userAgent)
 
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	var inputResults []gjson.Result

@@ -202,6 +202,7 @@ ws-auth: false
 # These mappings rename model IDs for both model listing and request routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow.
 # NOTE: Mappings do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-mappings:
 #   gemini-cli:
 #     - name: "gemini-2.5-pro"          # original model name under this channel

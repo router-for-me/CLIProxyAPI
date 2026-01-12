@@ -1237,7 +1237,7 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 		fork  bool
 	}
 
-	forward := make(map[string]mappingEntry, len(mappings))
+	forward := make(map[string][]mappingEntry, len(mappings))
 	for i := range mappings {
 		name := strings.TrimSpace(mappings[i].Name)
 		alias := strings.TrimSpace(mappings[i].Alias)
@@ -1248,14 +1248,12 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 			continue
 		}
 		key := strings.ToLower(name)
-		if _, exists := forward[key]; exists {
-			continue
-		}
-		forward[key] = mappingEntry{alias: alias, fork: mappings[i].Fork}
+		forward[key] = append(forward[key], mappingEntry{alias: alias, fork: mappings[i].Fork})
 	}
 	if len(forward) == 0 {
 		return models
 	}
+
 	out := make([]*ModelInfo, 0, len(models))
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
@@ -1267,17 +1265,8 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 			continue
 		}
 		key := strings.ToLower(id)
-		entry, ok := forward[key]
-		if !ok {
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, model)
-			continue
-		}
-		mappedID := strings.TrimSpace(entry.alias)
-		if mappedID == "" {
+		entries := forward[key]
+		if len(entries) == 0 {
 			if _, exists := seen[key]; exists {
 				continue
 			}
@@ -1286,10 +1275,28 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 			continue
 		}
 
-		if entry.fork {
+		keepOriginal := false
+		for _, entry := range entries {
+			if entry.fork {
+				keepOriginal = true
+				break
+			}
+		}
+		if keepOriginal {
 			if _, exists := seen[key]; !exists {
 				seen[key] = struct{}{}
 				out = append(out, model)
+			}
+		}
+
+		addedAlias := false
+		for _, entry := range entries {
+			mappedID := strings.TrimSpace(entry.alias)
+			if mappedID == "" {
+				continue
+			}
+			if strings.EqualFold(mappedID, id) {
+				continue
 			}
 			aliasKey := strings.ToLower(mappedID)
 			if _, exists := seen[aliasKey]; exists {
@@ -1302,24 +1309,16 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 				clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
 			}
 			out = append(out, &clone)
-			continue
+			addedAlias = true
 		}
 
-		uniqueKey := strings.ToLower(mappedID)
-		if _, exists := seen[uniqueKey]; exists {
-			continue
-		}
-		seen[uniqueKey] = struct{}{}
-		if mappedID == id {
+		if !keepOriginal && !addedAlias {
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
 			out = append(out, model)
-			continue
 		}
-		clone := *model
-		clone.ID = mappedID
-		if clone.Name != "" {
-			clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
-		}
-		out = append(out, &clone)
 	}
 	return out
 }
