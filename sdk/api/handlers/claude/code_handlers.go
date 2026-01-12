@@ -146,10 +146,12 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 	c.Header("Content-Type", "application/json")
 	alt := h.GetAlt(c)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 
 	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
+	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -159,13 +161,18 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 	// Decompress gzipped responses - Claude API sometimes returns gzip without Content-Encoding header
 	// This fixes title generation and other non-streaming responses that arrive compressed
 	if len(resp) >= 2 && resp[0] == 0x1f && resp[1] == 0x8b {
-		gzReader, err := gzip.NewReader(bytes.NewReader(resp))
-		if err != nil {
-			log.Warnf("failed to decompress gzipped Claude response: %v", err)
+		gzReader, errGzip := gzip.NewReader(bytes.NewReader(resp))
+		if errGzip != nil {
+			log.Warnf("failed to decompress gzipped Claude response: %v", errGzip)
 		} else {
-			defer gzReader.Close()
-			if decompressed, err := io.ReadAll(gzReader); err != nil {
-				log.Warnf("failed to read decompressed Claude response: %v", err)
+			defer func() {
+				if errClose := gzReader.Close(); errClose != nil {
+					log.Warnf("failed to close Claude gzip reader: %v", errClose)
+				}
+			}()
+			decompressed, errRead := io.ReadAll(gzReader)
+			if errRead != nil {
+				log.Warnf("failed to read decompressed Claude response: %v", errRead)
 			} else {
 				resp = decompressed
 			}

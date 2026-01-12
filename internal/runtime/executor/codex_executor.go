@@ -106,6 +106,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, _ = sjson.SetBytes(body, "model", model)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -214,6 +215,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	body = applyPayloadConfigWithRoot(e.cfg, model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.SetBytes(body, "model", model)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -316,6 +318,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	body = ApplyReasoningEffortMetadata(body, req.Metadata, model, "reasoning.effort", false)
 	body, _ = sjson.SetBytes(body, "model", model)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.SetBytes(body, "stream", false)
 
 	enc, err := tokenizerForCodexModel(model)
