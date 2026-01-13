@@ -1539,6 +1539,15 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if updated.Runtime == nil {
 		updated.Runtime = auth.Runtime
 	}
+	// Preserve Disabled and Status from the current state to avoid race conditions
+	// where a concurrent update (e.g., from watcher) sets Disabled=true but refresh
+	// overwrites it with the old Disabled=false value.
+	m.mu.RLock()
+	if current := m.auths[id]; current != nil {
+		updated.Disabled = current.Disabled
+		updated.Status = current.Status
+	}
+	m.mu.RUnlock()
 	updated.LastRefreshedAt = now
 	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
