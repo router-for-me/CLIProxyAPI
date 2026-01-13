@@ -96,6 +96,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 
 		a := &coreauth.Auth{
 			ID:       id,
+			FileName: name,
 			Provider: provider,
 			Label:    label,
 			Prefix:   prefix,
