@@ -103,10 +103,69 @@ type Config struct {
 	// Disabled auth files will not be used for routing requests.
 	DisabledAuthFiles []string `yaml:"disabled-auth-files,omitempty" json:"disabled-auth-files,omitempty"`
 
+	// WatcherIgnoreFields lists config field names that should not trigger watcher reload when changed.
+	// Default ignored fields: disabled-auth-files
+	// Example: ["disabled-auth-files", "debug"]
+	WatcherIgnoreFields []string `yaml:"watcher-ignore-fields,omitempty" json:"watcher-ignore-fields,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// DefaultWatcherIgnoreFields returns the default list of fields that should not trigger watcher reload.
+func DefaultWatcherIgnoreFields() []string {
+	return []string{"disabled-auth-files"}
+}
+
+// GetWatcherIgnoreFields returns the effective list of watcher-ignored fields.
+// If WatcherIgnoreFields is empty, returns the default list.
+func (c *Config) GetWatcherIgnoreFields() []string {
+	if len(c.WatcherIgnoreFields) > 0 {
+		return c.WatcherIgnoreFields
+	}
+	return DefaultWatcherIgnoreFields()
+}
+
+// ClearWatcherIgnoredFields clears fields that should not trigger watcher reload.
+func ClearWatcherIgnoredFields(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	fields := cfg.GetWatcherIgnoreFields()
+	for _, field := range fields {
+		clearFieldByName(cfg, field)
+	}
+}
+
+// CopyWatcherIgnoredFields copies watcher-ignored fields from src to dst.
+func CopyWatcherIgnoredFields(dst, src *Config) {
+	if dst == nil || src == nil {
+		return
+	}
+	fields := src.GetWatcherIgnoreFields()
+	for _, field := range fields {
+		copyFieldByName(dst, src, field)
+	}
+}
+
+func clearFieldByName(cfg *Config, fieldName string) {
+	switch fieldName {
+	case "disabled-auth-files":
+		cfg.DisabledAuthFiles = nil
+	case "watcher-ignore-fields":
+		cfg.WatcherIgnoreFields = nil
+	}
+}
+
+func copyFieldByName(dst, src *Config, fieldName string) {
+	switch fieldName {
+	case "disabled-auth-files":
+		dst.DisabledAuthFiles = src.DisabledAuthFiles
+	case "watcher-ignore-fields":
+		dst.WatcherIgnoreFields = src.WatcherIgnoreFields
+	}
 }
 
 // TLSConfig holds HTTPS server settings.
