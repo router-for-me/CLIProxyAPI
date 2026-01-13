@@ -2339,6 +2339,16 @@ func (h *Handler) SetAuthFileDisabled(c *gin.Context) {
 		return
 	}
 
+	fileKey := auth.FileName
+	if fileKey == "" {
+		fileKey = auth.ID
+	}
+
+	h.updateDisabledAuthFiles(fileKey, *body.Disabled)
+	if !h.persist(c) {
+		return
+	}
+
 	auth.Disabled = *body.Disabled
 	if *body.Disabled {
 		auth.Status = coreauth.StatusDisabled
@@ -2395,4 +2405,30 @@ func (h *Handler) SetAuthFileDisabled(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": auth.Disabled})
+}
+
+func (h *Handler) updateDisabledAuthFiles(fileKey string, disabled bool) {
+	if h.cfg == nil || fileKey == "" {
+		return
+	}
+	fileKey = strings.TrimSpace(fileKey)
+	existing := make(map[string]struct{}, len(h.cfg.DisabledAuthFiles))
+	for _, f := range h.cfg.DisabledAuthFiles {
+		existing[strings.TrimSpace(f)] = struct{}{}
+	}
+	if disabled {
+		if _, ok := existing[fileKey]; !ok {
+			h.cfg.DisabledAuthFiles = append(h.cfg.DisabledAuthFiles, fileKey)
+		}
+	} else {
+		if _, ok := existing[fileKey]; ok {
+			newList := make([]string, 0, len(h.cfg.DisabledAuthFiles))
+			for _, f := range h.cfg.DisabledAuthFiles {
+				if strings.TrimSpace(f) != fileKey {
+					newList = append(newList, f)
+				}
+			}
+			h.cfg.DisabledAuthFiles = newList
+		}
+	}
 }

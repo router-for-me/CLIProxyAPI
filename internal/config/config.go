@@ -99,6 +99,10 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelMappings map[string][]ModelNameMapping `yaml:"oauth-model-mappings,omitempty" json:"oauth-model-mappings,omitempty"`
 
+	// DisabledAuthFiles lists auth file names (relative to auth-dir) that are disabled.
+	// Disabled auth files will not be used for routing requests.
+	DisabledAuthFiles []string `yaml:"disabled-auth-files,omitempty" json:"disabled-auth-files,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 

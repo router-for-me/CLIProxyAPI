@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -86,10 +87,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			}
 		}
 
-		disabled := false
-		if d, ok := metadata["disabled"].(bool); ok {
-			disabled = d
-		}
+		disabled := isAuthFileDisabled(cfg, id, name)
 
 		status := coreauth.StatusActive
 		if disabled {
@@ -232,4 +230,22 @@ func buildGeminiVirtualID(baseID, projectID string) string {
 	}
 	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_")
 	return fmt.Sprintf("%s::%s", baseID, replacer.Replace(project))
+}
+
+func isAuthFileDisabled(cfg *config.Config, id, fileName string) bool {
+	if cfg == nil || len(cfg.DisabledAuthFiles) == 0 {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	fileName = strings.TrimSpace(fileName)
+	for _, f := range cfg.DisabledAuthFiles {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if f == id || f == fileName {
+			return true
+		}
+	}
+	return false
 }

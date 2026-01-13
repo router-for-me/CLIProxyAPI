@@ -61,6 +61,26 @@ func (w *Watcher) reloadConfigIfChanged() {
 		log.Debugf("config file content unchanged (hash match), skipping reload")
 		return
 	}
+
+	newConfig, errLoadConfig := config.LoadConfig(w.configPath)
+	if errLoadConfig != nil {
+		log.Errorf("failed to load config for change detection: %v", errLoadConfig)
+		return
+	}
+
+	w.clientsMutex.RLock()
+	oldConfig := w.config
+	w.clientsMutex.RUnlock()
+
+	if oldConfig != nil && onlyDisabledAuthFilesChanged(oldConfig, newConfig) {
+		log.Debugf("only disabled-auth-files changed, updating config without full reload")
+		w.clientsMutex.Lock()
+		w.config.DisabledAuthFiles = newConfig.DisabledAuthFiles
+		w.lastConfigHash = newHash
+		w.clientsMutex.Unlock()
+		return
+	}
+
 	log.Infof("config file changed, reloading: %s", w.configPath)
 	if w.reloadConfig() {
 		finalHash := newHash
@@ -75,6 +95,22 @@ func (w *Watcher) reloadConfigIfChanged() {
 		w.clientsMutex.Unlock()
 		w.persistConfigAsync()
 	}
+}
+
+func onlyDisabledAuthFilesChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	oldCopy := *oldCfg
+	newCopy := *newCfg
+	oldCopy.DisabledAuthFiles = nil
+	newCopy.DisabledAuthFiles = nil
+	oldYaml, err1 := yaml.Marshal(&oldCopy)
+	newYaml, err2 := yaml.Marshal(&newCopy)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return string(oldYaml) == string(newYaml)
 }
 
 func (w *Watcher) reloadConfig() bool {
