@@ -24,4 +24,16 @@ const (
 	MessageTypePing = "ping"
 	// MessageTypePong represents pong responses back to clients.
 	MessageTypePong = "pong"
+
+	// WebSocket tunneling message types for Live API relay
+	// MessageTypeWSConnect requests AI Studio Build to open a WebSocket to Gemini Live API.
+	MessageTypeWSConnect = "ws_connect"
+	// MessageTypeWSConnected confirms WebSocket connection established.
+	MessageTypeWSConnected = "ws_connected"
+	// MessageTypeWSMessage relays a WebSocket message (text or binary via base64).
+	MessageTypeWSMessage = "ws_message"
+	// MessageTypeWSClose requests closing the tunneled WebSocket.
+	MessageTypeWSClose = "ws_close"
+	// MessageTypeWSClosed confirms the tunneled WebSocket was closed.
+	MessageTypeWSClosed = "ws_closed"
 )

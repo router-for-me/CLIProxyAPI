@@ -152,11 +152,26 @@ The Live API provides bidirectional real-time communication with Gemini's native
 - Voice Activity Detection (VAD)
 - "Deep Think" reasoning capability
 - 10-minute session limit
+- **Routes through AI Studio Build** - no API key needed!
+
+### How It Works
+
+Live API now tunnels through your AI Studio Build connection:
+
+```
+Client WS ↔ CLIProxyAPI ↔ AI Studio Build ↔ Gemini Live API
+           (wsrelay)       (browser)        (native audio)
+```
+
+**Requirements:**
+1. AI Studio Build app connected (WS: CONNECTED)
+2. Add the Live API relay code to your AI Studio Build app (see `docs/aistudio-build-live-api.js`)
 
 ### Connection
 
 ```javascript
-const ws = new WebSocket('ws://localhost:8317/v1/realtime?key=YOUR_API_KEY');
+// No API key needed - routes through AI Studio Build!
+const ws = new WebSocket('ws://localhost:8317/v1/realtime');
 
 // Send setup message
 ws.send(JSON.stringify({
@@ -240,8 +255,11 @@ ws.onmessage = (event) => {
 # Install websocat
 brew install websocat
 
-# Connect to Live API
-websocat ws://localhost:8317/v1/realtime?key=YOUR_API_KEY
+# Connect to Live API (no API key needed!)
+websocat ws://localhost:8317/v1/realtime
+
+# Optional: specify model and voice
+websocat "ws://localhost:8317/v1/realtime?model=gemini-2.5-flash-native-audio-preview&voice=Puck"
 ```
 
 ---

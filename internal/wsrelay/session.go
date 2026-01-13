@@ -109,14 +109,25 @@ func (s *session) dispatch(msg Message) {
 		case req.ch <- msg:
 		default:
 		}
-		if msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd {
+		// Terminal message types that close the request
+		// Note: WSConnected is NOT terminal - the channel must stay open for subsequent ws_message and ws_closed
+		isTerminal := msg.Type == MessageTypeHTTPResp ||
+			msg.Type == MessageTypeError ||
+			msg.Type == MessageTypeStreamEnd ||
+			msg.Type == MessageTypeWSClosed
+		if isTerminal {
 			if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
 				actual.(*pendingRequest).close()
 			}
 		}
 		return
 	}
-	if msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd {
+	// Log unknown terminal messages
+	isTerminal := msg.Type == MessageTypeHTTPResp ||
+		msg.Type == MessageTypeError ||
+		msg.Type == MessageTypeStreamEnd ||
+		msg.Type == MessageTypeWSClosed
+	if isTerminal {
 		s.manager.logDebugf("wsrelay: received terminal message for unknown id %s (provider=%s)", msg.ID, s.provider)
 	}
 }

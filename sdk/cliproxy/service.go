@@ -309,6 +309,27 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	}
 }
 
+// selectAIStudioProvider returns the ID of an active AI Studio Build provider.
+// This is used by the Live API handler to route WebSocket tunneling through AI Studio Build.
+func (s *Service) selectAIStudioProvider() string {
+	if s == nil || s.coreManager == nil {
+		return ""
+	}
+	// Look for an active AI Studio provider (starts with "aistudio-")
+	for _, auth := range s.coreManager.List() {
+		if auth == nil || auth.Disabled || auth.Status != coreauth.StatusActive {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(auth.ID), "aistudio-") {
+			return auth.ID
+		}
+		if strings.EqualFold(auth.Provider, "aistudio") {
+			return auth.ID
+		}
+	}
+	return ""
+}
+
 func (s *Service) applyRetryConfig(cfg *config.Config) {
 	if s == nil || s.coreManager == nil || cfg == nil {
 		return
@@ -466,6 +487,8 @@ func (s *Service) Run(ctx context.Context) error {
 	s.ensureWebsocketGateway()
 	if s.server != nil && s.wsGateway != nil {
 		s.server.AttachWebsocketRoute(s.wsGateway.Path(), s.wsGateway.Handler())
+		// Configure Live API to route through AI Studio Build WebSocket tunnel
+		s.server.SetLiveAPIRelay(s.wsGateway, s.selectAIStudioProvider)
 		s.server.SetWebsocketAuthChangeHandler(func(oldEnabled, newEnabled bool) {
 			if oldEnabled == newEnabled {
 				return

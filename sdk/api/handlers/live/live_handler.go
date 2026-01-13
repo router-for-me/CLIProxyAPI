@@ -1,24 +1,22 @@
 // Package live provides WebSocket handlers for Gemini Live API.
-// It implements bidirectional WebSocket relay for real-time audio/video communication.
+// It implements bidirectional WebSocket relay for real-time audio/video communication
+// through AI Studio Build proxy.
 package live
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	// Gemini Live API endpoint
-	geminiLiveAPIURL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-
 	// WebSocket configuration
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
@@ -36,9 +34,11 @@ var upgrader = websocket.Upgrader{
 
 // LiveHandler handles WebSocket connections for Gemini Live API relay.
 type LiveHandler struct {
-	// APIKey is used for authenticating with Gemini API
-	// In production, this would come from auth manager
-	APIKey string
+	// WSRelay is the WebSocket relay manager for AI Studio Build connections
+	WSRelay *wsrelay.Manager
+
+	// ProviderSelector selects which AI Studio Build provider to use
+	ProviderSelector func() string
 
 	// DefaultModel is the default Live API model
 	DefaultModel string
@@ -51,20 +51,18 @@ type LiveHandler struct {
 }
 
 // NewLiveHandler creates a new Live API handler.
-func NewLiveHandler() *LiveHandler {
+func NewLiveHandler(relay *wsrelay.Manager, providerSelector func() string) *LiveHandler {
 	return &LiveHandler{
-		DefaultModel:   "gemini-2.5-flash-native-audio-preview",
-		DefaultVoice:   "Puck",
-		ThinkingBudget: 1024,
+		WSRelay:          relay,
+		ProviderSelector: providerSelector,
+		DefaultModel:     "gemini-2.5-flash-native-audio-preview",
+		DefaultVoice:     "Puck",
+		ThinkingBudget:   1024,
 	}
 }
 
-// SetAPIKey sets the API key for Gemini authentication.
-func (h *LiveHandler) SetAPIKey(key string) {
-	h.APIKey = key
-}
-
 // HandleWebSocket handles the /v1/realtime WebSocket endpoint.
+// Routes through AI Studio Build proxy instead of direct Gemini connection.
 func (h *LiveHandler) HandleWebSocket(c *gin.Context) {
 	// Upgrade HTTP connection to WebSocket
 	clientConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -76,49 +74,76 @@ func (h *LiveHandler) HandleWebSocket(c *gin.Context) {
 
 	log.Info("Client connected to Live API relay")
 
-	// Extract API key from query or header
-	apiKey := c.Query("key")
-	if apiKey == "" {
-		apiKey = c.GetHeader("X-API-Key")
-	}
-	if apiKey == "" {
-		apiKey = h.APIKey
-	}
-
-	if apiKey == "" {
-		h.sendError(clientConn, "API key required. Provide via ?key= query parameter or X-API-Key header")
+	// Check if relay is available
+	if h.WSRelay == nil {
+		h.sendError(clientConn, "Live API relay not configured. AI Studio Build connection required.")
 		return
 	}
 
-	// Connect to Gemini Live API
-	geminiURL := fmt.Sprintf("%s?key=%s", geminiLiveAPIURL, apiKey)
-	geminiConn, _, err := websocket.DefaultDialer.Dial(geminiURL, nil)
-	if err != nil {
-		log.Errorf("Failed to connect to Gemini Live API: %v", err)
-		h.sendError(clientConn, fmt.Sprintf("Failed to connect to Gemini: %v", err))
+	// Get provider - check query param first, then fall back to selector
+	provider := c.Query("provider")
+	if provider == "" && h.ProviderSelector != nil {
+		provider = h.ProviderSelector()
+	}
+	log.Infof("Live API provider: '%s' (from query: %v)", provider, c.Query("provider") != "")
+	if provider == "" {
+		h.sendError(clientConn, "No AI Studio Build provider available. Connect AI Studio Build first.")
 		return
 	}
-	defer geminiConn.Close()
 
-	log.Info("Connected to Gemini Live API")
+	// Extract configuration from query params
+	model := c.Query("model")
+	if model == "" {
+		model = h.DefaultModel
+	}
+	voice := c.Query("voice")
+	if voice == "" {
+		voice = h.DefaultVoice
+	}
+
+	// Create WebSocket tunnel config
+	config := &wsrelay.WSConfig{
+		Model:              model,
+		Voice:              voice,
+		ResponseModalities: []string{"AUDIO"},
+	}
+
+	// Parse system instruction if provided
+	if sysInstr := c.Query("system_instruction"); sysInstr != "" {
+		config.SystemInstruction = sysInstr
+	}
 
 	// Create context for managing goroutines
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(c.Request.Context())
 	defer cancel()
+
+	// Connect through AI Studio Build
+	log.Infof("Connecting to Live API via AI Studio Build (provider=%s, model=%s)", provider, model)
+	tunnel, err := h.WSRelay.ConnectWS(ctx, provider, config)
+	if err != nil {
+		log.Errorf("Failed to establish Live API tunnel: %v", err)
+		h.sendError(clientConn, "Failed to connect to Live API via AI Studio Build: "+err.Error())
+		return
+	}
+	defer tunnel.Close()
+
+	log.Info("Live API tunnel established through AI Studio Build")
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Client -> Gemini relay
+	// Client -> AI Studio Build relay
 	go func() {
 		defer wg.Done()
-		h.relayMessages(ctx, clientConn, geminiConn, "client->gemini")
+		defer cancel()
+		h.relayClientToTunnel(ctx, clientConn, tunnel)
 	}()
 
-	// Gemini -> Client relay
+	// AI Studio Build -> Client relay
 	go func() {
 		defer wg.Done()
-		h.relayMessages(ctx, geminiConn, clientConn, "gemini->client")
+		defer cancel()
+		h.relayTunnelToClient(ctx, tunnel, clientConn)
 	}()
 
 	// Wait for either direction to close
@@ -126,33 +151,82 @@ func (h *LiveHandler) HandleWebSocket(c *gin.Context) {
 	log.Info("Live API session ended")
 }
 
-// relayMessages relays WebSocket messages from src to dst.
-func (h *LiveHandler) relayMessages(ctx context.Context, src, dst *websocket.Conn, direction string) {
+// relayClientToTunnel relays messages from client WebSocket to AI Studio Build tunnel.
+func (h *LiveHandler) relayClientToTunnel(ctx context.Context, client *websocket.Conn, tunnel *wsrelay.WSTunnel) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			messageType, message, err := src.ReadMessage()
+			messageType, message, err := client.ReadMessage()
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					log.Debugf("[%s] Connection closed normally", direction)
+					log.Debug("[client->tunnel] Connection closed normally")
 				} else {
-					log.Errorf("[%s] Read error: %v", direction, err)
+					log.Errorf("[client->tunnel] Read error: %v", err)
 				}
 				return
 			}
 
-			// Log message type for debugging (truncate large messages)
+			// Log message for debugging (truncate large messages)
 			logMsg := string(message)
 			if len(logMsg) > 200 {
 				logMsg = logMsg[:200] + "..."
 			}
-			log.Debugf("[%s] Message: %s", direction, logMsg)
+			log.Debugf("[client->tunnel] Message: %s", logMsg)
 
-			// Forward message
-			if err := dst.WriteMessage(messageType, message); err != nil {
-				log.Errorf("[%s] Write error: %v", direction, err)
+			// Forward to tunnel
+			var sendErr error
+			if messageType == websocket.BinaryMessage {
+				sendErr = tunnel.SendBinary(ctx, message)
+			} else {
+				sendErr = tunnel.SendText(ctx, message)
+			}
+			if sendErr != nil {
+				log.Errorf("[client->tunnel] Send error: %v", sendErr)
+				return
+			}
+		}
+	}
+}
+
+// relayTunnelToClient relays messages from AI Studio Build tunnel to client WebSocket.
+func (h *LiveHandler) relayTunnelToClient(ctx context.Context, tunnel *wsrelay.WSTunnel, client *websocket.Conn) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-tunnel.Receive():
+			if !ok {
+				// Tunnel closed
+				if err := tunnel.Err(); err != nil {
+					log.Errorf("[tunnel->client] Tunnel error: %v", err)
+				} else {
+					log.Debug("[tunnel->client] Tunnel closed normally")
+				}
+				return
+			}
+
+			if msg.Err != nil {
+				log.Errorf("[tunnel->client] Message error: %v", msg.Err)
+				h.sendError(client, msg.Err.Error())
+				return
+			}
+
+			// Log message for debugging (truncate large messages)
+			logMsg := string(msg.Data)
+			if len(logMsg) > 200 {
+				logMsg = logMsg[:200] + "..."
+			}
+			log.Debugf("[tunnel->client] Message: %s", logMsg)
+
+			// Forward to client
+			messageType := websocket.TextMessage
+			if msg.Type == "binary" {
+				messageType = websocket.BinaryMessage
+			}
+			if err := client.WriteMessage(messageType, msg.Data); err != nil {
+				log.Errorf("[tunnel->client] Write error: %v", err)
 				return
 			}
 		}
@@ -185,7 +259,7 @@ func (h *LiveHandler) SetupMessage(model, voice string, thinkingBudget int) map[
 
 	return map[string]any{
 		"setup": map[string]any{
-			"model": fmt.Sprintf("models/%s", model),
+			"model": "models/" + model,
 			"generationConfig": map[string]any{
 				"responseModalities": []string{"AUDIO"},
 				"speechConfig": map[string]any{
