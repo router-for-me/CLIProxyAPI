@@ -1030,6 +1030,13 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 	s.wsAuthChanged = fn
 }
 
+func (s *Server) SetAuthEnableCallback(cb managementHandlers.AuthEnableCallback) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetAuthEnableCallback(cb)
+}
+
 // (management handlers moved to internal/api/handlers/management)
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests

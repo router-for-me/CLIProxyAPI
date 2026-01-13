@@ -1599,6 +1599,9 @@ func (h *Handler) syncProviderKeyDisabledState(provider string, index int, disab
 		} else {
 			auth.Status = coreauth.StatusActive
 			auth.StatusMessage = ""
+			if h.onAuthEnabled != nil {
+				h.onAuthEnabled(auth)
+			}
 		}
 		auth.UpdatedAt = time.Now()
 		_, _ = h.authManager.Update(ctx, auth)

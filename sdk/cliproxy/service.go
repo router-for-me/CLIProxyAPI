@@ -463,6 +463,15 @@ func (s *Service) Run(ctx context.Context) error {
 		s.authManager = newDefaultAuthManager()
 	}
 
+	if s.server != nil {
+		s.server.SetAuthEnableCallback(func(auth *coreauth.Auth) {
+			if auth == nil {
+				return
+			}
+			s.registerModelsForAuth(auth)
+		})
+	}
+
 	s.ensureWebsocketGateway()
 	if s.server != nil && s.wsGateway != nil {
 		s.server.AttachWebsocketRoute(s.wsGateway.Path(), s.wsGateway.Handler())

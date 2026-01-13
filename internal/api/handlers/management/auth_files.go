@@ -2339,44 +2339,6 @@ func (h *Handler) SetAuthFileDisabled(c *gin.Context) {
 		return
 	}
 
-	authPath := ""
-	if auth.Attributes != nil {
-		authPath = auth.Attributes["path"]
-	}
-	if authPath == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "auth file path not found"})
-		return
-	}
-
-	data, err := os.ReadFile(authPath)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read auth file: %v", err)})
-		return
-	}
-
-	var metadata map[string]any
-	if err := json.Unmarshal(data, &metadata); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to parse auth file: %v", err)})
-		return
-	}
-
-	if *body.Disabled {
-		metadata["disabled"] = true
-	} else {
-		delete(metadata, "disabled")
-	}
-
-	newData, err := json.MarshalIndent(metadata, "", "  ")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to serialize auth file: %v", err)})
-		return
-	}
-
-	if err := os.WriteFile(authPath, newData, 0644); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to write auth file: %v", err)})
-		return
-	}
-
 	auth.Disabled = *body.Disabled
 	if *body.Disabled {
 		auth.Status = coreauth.StatusDisabled
@@ -2405,6 +2367,27 @@ func (h *Handler) SetAuthFileDisabled(c *gin.Context) {
 						virtualAuth.StatusMessage = "parent disabled via management API"
 						virtualAuth.UpdatedAt = time.Now()
 						_, _ = h.authManager.Update(ctx, virtualAuth)
+					}
+				}
+			}
+		}
+	} else {
+		if h.onAuthEnabled != nil {
+			h.onAuthEnabled(auth)
+		}
+		if auth.Attributes != nil {
+			if children := strings.TrimSpace(auth.Attributes["virtual_children"]); children != "" {
+				for _, projectID := range strings.Split(children, ",") {
+					virtualID := fmt.Sprintf("%s::%s", auth.ID, strings.TrimSpace(projectID))
+					if virtualAuth, ok := h.authManager.GetByID(virtualID); ok && virtualAuth != nil {
+						virtualAuth.Disabled = false
+						virtualAuth.Status = coreauth.StatusActive
+						virtualAuth.StatusMessage = ""
+						virtualAuth.UpdatedAt = time.Now()
+						_, _ = h.authManager.Update(ctx, virtualAuth)
+						if h.onAuthEnabled != nil {
+							h.onAuthEnabled(virtualAuth)
+						}
 					}
 				}
 			}

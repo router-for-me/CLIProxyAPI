@@ -33,6 +33,9 @@ const attemptCleanupInterval = 1 * time.Hour
 // attemptMaxIdleTime controls how long an IP can be idle before cleanup
 const attemptMaxIdleTime = 2 * time.Hour
 
+// AuthEnableCallback is called when an auth is re-enabled to trigger model re-registration.
+type AuthEnableCallback func(auth *coreauth.Auth)
+
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
 	cfg                 *config.Config
@@ -47,6 +50,7 @@ type Handler struct {
 	allowRemoteOverride bool
 	envSecret           string
 	logDir              string
+	onAuthEnabled       AuthEnableCallback
 }
 
 // NewHandler creates a new management handler instance.
@@ -126,6 +130,14 @@ func (h *Handler) SetLogDirectory(dir string) {
 		}
 	}
 	h.logDir = dir
+}
+
+// SetAuthEnableCallback sets the callback invoked when an auth is re-enabled.
+func (h *Handler) SetAuthEnableCallback(cb AuthEnableCallback) {
+	if h == nil {
+		return
+	}
+	h.onAuthEnabled = cb
 }
 
 // Middleware enforces access control for management endpoints.
