@@ -37,10 +37,11 @@ import (
 //   - []byte: The transformed request data in internal client format
 func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
+	userAgent := misc.ExtractCodexUserAgent(rawJSON)
 
 	template := `{"model":"","instructions":"","input":[]}`
 
-	_, instructions := misc.CodexInstructionsForModel(modelName, "")
+	_, instructions := misc.CodexInstructionsForModel(modelName, "", userAgent)
 	template, _ = sjson.Set(template, "instructions", instructions)
 
 	rootResult := gjson.ParseBytes(rawJSON)

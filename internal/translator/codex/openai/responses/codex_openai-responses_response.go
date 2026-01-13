@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -18,7 +19,10 @@ func ConvertCodexResponseToOpenAIResponses(ctx context.Context, modelName string
 		if typeResult := gjson.GetBytes(rawJSON, "type"); typeResult.Exists() {
 			typeStr := typeResult.String()
 			if typeStr == "response.created" || typeStr == "response.in_progress" || typeStr == "response.completed" {
-				rawJSON, _ = sjson.SetBytes(rawJSON, "response.instructions", gjson.GetBytes(originalRequestRawJSON, "instructions").String())
+				if gjson.GetBytes(rawJSON, "response.instructions").Exists() {
+					instructions := selectInstructions(originalRequestRawJSON, requestRawJSON)
+					rawJSON, _ = sjson.SetBytes(rawJSON, "response.instructions", instructions)
+				}
 			}
 		}
 		out := fmt.Sprintf("data: %s", string(rawJSON))
@@ -37,6 +41,16 @@ func ConvertCodexResponseToOpenAIResponsesNonStream(_ context.Context, modelName
 	}
 	responseResult := rootResult.Get("response")
 	template := responseResult.Raw
-	template, _ = sjson.Set(template, "instructions", gjson.GetBytes(originalRequestRawJSON, "instructions").String())
+	if responseResult.Get("instructions").Exists() {
+		template, _ = sjson.Set(template, "instructions", selectInstructions(originalRequestRawJSON, requestRawJSON))
+	}
 	return template
+}
+
+func selectInstructions(originalRequestRawJSON, requestRawJSON []byte) string {
+	userAgent := misc.ExtractCodexUserAgent(originalRequestRawJSON)
+	if misc.IsOpenCodeUserAgent(userAgent) {
+		return gjson.GetBytes(requestRawJSON, "instructions").String()
+	}
+	return gjson.GetBytes(originalRequestRawJSON, "instructions").String()
 }

@@ -231,10 +231,11 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		AmpCode:                config.AmpCode{UpstreamAPIKey: "keep", RestrictManagementToLocalhost: false},
 		RemoteManagement:       config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
 		SDKConfig: sdkconfig.SDKConfig{
-			RequestLog:       false,
-			ProxyURL:         "http://old-proxy",
-			APIKeys:          []string{"key-1"},
-			ForceModelPrefix: false,
+			RequestLog:                 false,
+			ProxyURL:                   "http://old-proxy",
+			APIKeys:                    []string{"key-1"},
+			ForceModelPrefix:           false,
+			NonStreamKeepAliveInterval: 0,
 		},
 	}
 	newCfg := &config.Config{
@@ -267,10 +268,11 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			SecretKey:             "",
 		},
 		SDKConfig: sdkconfig.SDKConfig{
-			RequestLog:       true,
-			ProxyURL:         "http://new-proxy",
-			APIKeys:          []string{" key-1 ", "key-2"},
-			ForceModelPrefix: true,
+			RequestLog:                 true,
+			ProxyURL:                   "http://new-proxy",
+			APIKeys:                    []string{" key-1 ", "key-2"},
+			ForceModelPrefix:           true,
+			NonStreamKeepAliveInterval: 5,
 		},
 	}
 
@@ -285,6 +287,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, details, "ws-auth: false -> true")
 	expectContains(t, details, "force-model-prefix: false -> true")
+	expectContains(t, details, "nonstream-keepalive-interval: 0 -> 5")
 	expectContains(t, details, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, details, "quota-exceeded.switch-preview-model: false -> true")
 	expectContains(t, details, "api-keys count: 1 -> 2")
