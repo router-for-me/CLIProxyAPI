@@ -72,10 +72,10 @@ func (w *Watcher) reloadConfigIfChanged() {
 	oldConfig := w.config
 	w.clientsMutex.RUnlock()
 
-	if oldConfig != nil && onlyWatcherIgnoredFieldsChanged(oldConfig, newConfig) {
-		log.Debugf("only watcher-ignored fields changed, updating config without full reload")
+	if oldConfig != nil && onlyDisabledAuthFilesChanged(oldConfig, newConfig) {
+		log.Debugf("only disabled-auth-files changed, updating config without full reload")
 		w.clientsMutex.Lock()
-		config.CopyWatcherIgnoredFields(w.config, newConfig)
+		w.config.DisabledAuthFiles = newConfig.DisabledAuthFiles
 		w.lastConfigHash = newHash
 		w.clientsMutex.Unlock()
 		return
@@ -97,14 +97,14 @@ func (w *Watcher) reloadConfigIfChanged() {
 	}
 }
 
-func onlyWatcherIgnoredFieldsChanged(oldCfg, newCfg *config.Config) bool {
+func onlyDisabledAuthFilesChanged(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
 	oldCopy := *oldCfg
 	newCopy := *newCfg
-	config.ClearWatcherIgnoredFields(&oldCopy)
-	config.ClearWatcherIgnoredFields(&newCopy)
+	oldCopy.DisabledAuthFiles = nil
+	newCopy.DisabledAuthFiles = nil
 	oldYaml, err1 := yaml.Marshal(&oldCopy)
 	newYaml, err2 := yaml.Marshal(&newCopy)
 	if err1 != nil || err2 != nil {
