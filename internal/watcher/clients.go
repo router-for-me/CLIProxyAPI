@@ -214,20 +214,28 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	codexAPIKeyCount := 0
 	openAICompatCount := 0
 
-	if len(cfg.GeminiKey) > 0 {
-		geminiAPIKeyCount += len(cfg.GeminiKey)
+	for _, key := range cfg.GeminiKey {
+		if !key.Disabled {
+			geminiAPIKeyCount++
+		}
 	}
-	if len(cfg.VertexCompatAPIKey) > 0 {
-		vertexCompatAPIKeyCount += len(cfg.VertexCompatAPIKey)
+	for _, key := range cfg.VertexCompatAPIKey {
+		if !key.Disabled {
+			vertexCompatAPIKeyCount++
+		}
 	}
-	if len(cfg.ClaudeKey) > 0 {
-		claudeAPIKeyCount += len(cfg.ClaudeKey)
+	for _, key := range cfg.ClaudeKey {
+		if !key.Disabled {
+			claudeAPIKeyCount++
+		}
 	}
-	if len(cfg.CodexKey) > 0 {
-		codexAPIKeyCount += len(cfg.CodexKey)
+	for _, key := range cfg.CodexKey {
+		if !key.Disabled {
+			codexAPIKeyCount++
+		}
 	}
-	if len(cfg.OpenAICompatibility) > 0 {
-		for _, compatConfig := range cfg.OpenAICompatibility {
+	for _, compatConfig := range cfg.OpenAICompatibility {
+		if !compatConfig.Disabled {
 			openAICompatCount += len(compatConfig.APIKeyEntries)
 		}
 	}

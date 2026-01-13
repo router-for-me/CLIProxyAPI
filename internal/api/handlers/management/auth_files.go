@@ -2292,3 +2292,124 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
 }
+
+func (h *Handler) SetAuthFileDisabled(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+	ctx := c.Request.Context()
+
+	var body struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if body.Disabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "disabled field is required"})
+		return
+	}
+
+	authID := strings.TrimSpace(body.ID)
+	if authID == "" {
+		authID = strings.TrimSpace(body.Name)
+	}
+	if authID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id or name is required"})
+		return
+	}
+
+	auth, ok := h.authManager.GetByID(authID)
+	if !ok {
+		auths := h.authManager.List()
+		for _, a := range auths {
+			if a.FileName == authID || a.FileName == body.Name {
+				auth = a
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok || auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+
+	authPath := ""
+	if auth.Attributes != nil {
+		authPath = auth.Attributes["path"]
+	}
+	if authPath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth file path not found"})
+		return
+	}
+
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read auth file: %v", err)})
+		return
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to parse auth file: %v", err)})
+		return
+	}
+
+	if *body.Disabled {
+		metadata["disabled"] = true
+	} else {
+		delete(metadata, "disabled")
+	}
+
+	newData, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to serialize auth file: %v", err)})
+		return
+	}
+
+	if err := os.WriteFile(authPath, newData, 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to write auth file: %v", err)})
+		return
+	}
+
+	auth.Disabled = *body.Disabled
+	if *body.Disabled {
+		auth.Status = coreauth.StatusDisabled
+		auth.StatusMessage = "disabled via management API"
+	} else {
+		auth.Status = coreauth.StatusActive
+		auth.StatusMessage = ""
+	}
+	auth.UpdatedAt = time.Now()
+
+	if _, err := h.authManager.Update(ctx, auth); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+
+	if *body.Disabled {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		if auth.Attributes != nil {
+			if children := strings.TrimSpace(auth.Attributes["virtual_children"]); children != "" {
+				for _, projectID := range strings.Split(children, ",") {
+					virtualID := fmt.Sprintf("%s::%s", auth.ID, strings.TrimSpace(projectID))
+					registry.GetGlobalRegistry().UnregisterClient(virtualID)
+					if virtualAuth, ok := h.authManager.GetByID(virtualID); ok && virtualAuth != nil {
+						virtualAuth.Disabled = true
+						virtualAuth.Status = coreauth.StatusDisabled
+						virtualAuth.StatusMessage = "parent disabled via management API"
+						virtualAuth.UpdatedAt = time.Now()
+						_, _ = h.authManager.Update(ctx, virtualAuth)
+					}
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": auth.Disabled})
+}

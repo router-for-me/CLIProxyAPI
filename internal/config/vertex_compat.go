@@ -30,6 +30,9 @@ type VertexCompatKey struct {
 
 	// Models defines the model configurations including aliases for routing.
 	Models []VertexCompatModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Disabled indicates whether this API key is disabled.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 // VertexCompatModel represents a model configuration for Vertex compatibility,

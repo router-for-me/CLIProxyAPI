@@ -47,6 +47,9 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 	out := make([]*coreauth.Auth, 0, len(cfg.GeminiKey))
 	for i := range cfg.GeminiKey {
 		entry := cfg.GeminiKey[i]
+		if entry.Disabled {
+			continue
+		}
 		key := strings.TrimSpace(entry.APIKey)
 		if key == "" {
 			continue
@@ -92,6 +95,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 	out := make([]*coreauth.Auth, 0, len(cfg.ClaudeKey))
 	for i := range cfg.ClaudeKey {
 		ck := cfg.ClaudeKey[i]
+		if ck.Disabled {
+			continue
+		}
 		key := strings.TrimSpace(ck.APIKey)
 		if key == "" {
 			continue
@@ -137,6 +143,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 	out := make([]*coreauth.Auth, 0, len(cfg.CodexKey))
 	for i := range cfg.CodexKey {
 		ck := cfg.CodexKey[i]
+		if ck.Disabled {
+			continue
+		}
 		key := strings.TrimSpace(ck.APIKey)
 		if key == "" {
 			continue
@@ -181,6 +190,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 	out := make([]*coreauth.Auth, 0)
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
 		prefix := strings.TrimSpace(compat.Prefix)
 		providerName := strings.ToLower(strings.TrimSpace(compat.Name))
 		if providerName == "" {
@@ -262,6 +274,9 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 	out := make([]*coreauth.Auth, 0, len(cfg.VertexCompatAPIKey))
 	for i := range cfg.VertexCompatAPIKey {
 		compat := &cfg.VertexCompatAPIKey[i]
+		if compat.Disabled {
+			continue
+		}
 		providerName := "vertex"
 		base := strings.TrimSpace(compat.BaseURL)
 

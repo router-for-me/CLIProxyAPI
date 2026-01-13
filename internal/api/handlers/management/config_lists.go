@@ -1,12 +1,16 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // Generic helpers for list[string]
@@ -1362,4 +1366,241 @@ func normalizeAPIKeysList(keys []string) []string {
 		return nil
 	}
 	return out
+}
+
+func (h *Handler) SetGeminiKeyDisabled(c *gin.Context) {
+	var body struct {
+		Index    *int   `json:"index"`
+		Match    string `json:"match"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Disabled == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.GeminiKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != "" {
+		match := strings.TrimSpace(body.Match)
+		for i := range h.cfg.GeminiKey {
+			if h.cfg.GeminiKey[i].APIKey == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+	h.cfg.GeminiKey[targetIndex].Disabled = *body.Disabled
+	if h.persist(c) {
+		h.syncProviderKeyDisabledState("gemini", targetIndex, *body.Disabled)
+	}
+}
+
+func (h *Handler) SetClaudeKeyDisabled(c *gin.Context) {
+	var body struct {
+		Index    *int   `json:"index"`
+		Match    string `json:"match"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Disabled == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.ClaudeKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != "" {
+		match := strings.TrimSpace(body.Match)
+		for i := range h.cfg.ClaudeKey {
+			if h.cfg.ClaudeKey[i].APIKey == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+	h.cfg.ClaudeKey[targetIndex].Disabled = *body.Disabled
+	if h.persist(c) {
+		h.syncProviderKeyDisabledState("claude", targetIndex, *body.Disabled)
+	}
+}
+
+func (h *Handler) SetCodexKeyDisabled(c *gin.Context) {
+	var body struct {
+		Index    *int   `json:"index"`
+		Match    string `json:"match"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Disabled == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodexKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != "" {
+		match := strings.TrimSpace(body.Match)
+		for i := range h.cfg.CodexKey {
+			if h.cfg.CodexKey[i].APIKey == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+	h.cfg.CodexKey[targetIndex].Disabled = *body.Disabled
+	if h.persist(c) {
+		h.syncProviderKeyDisabledState("codex", targetIndex, *body.Disabled)
+	}
+}
+
+func (h *Handler) SetOpenAICompatDisabled(c *gin.Context) {
+	var body struct {
+		Index    *int   `json:"index"`
+		Name     string `json:"name"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Disabled == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.OpenAICompatibility) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Name != "" {
+		match := strings.TrimSpace(body.Name)
+		for i := range h.cfg.OpenAICompatibility {
+			if h.cfg.OpenAICompatibility[i].Name == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+	providerName := strings.ToLower(strings.TrimSpace(h.cfg.OpenAICompatibility[targetIndex].Name))
+	if providerName == "" {
+		providerName = "openai-compatibility"
+	}
+	h.cfg.OpenAICompatibility[targetIndex].Disabled = *body.Disabled
+	if h.persist(c) {
+		h.syncProviderKeyDisabledState(providerName, targetIndex, *body.Disabled)
+	}
+}
+
+func (h *Handler) SetVertexCompatKeyDisabled(c *gin.Context) {
+	var body struct {
+		Index    *int   `json:"index"`
+		Match    string `json:"match"`
+		Disabled *bool  `json:"disabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Disabled == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.VertexCompatAPIKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != "" {
+		match := strings.TrimSpace(body.Match)
+		for i := range h.cfg.VertexCompatAPIKey {
+			if h.cfg.VertexCompatAPIKey[i].APIKey == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+	h.cfg.VertexCompatAPIKey[targetIndex].Disabled = *body.Disabled
+	if h.persist(c) {
+		h.syncProviderKeyDisabledState("vertex", targetIndex, *body.Disabled)
+	}
+}
+
+func (h *Handler) syncProviderKeyDisabledState(provider string, index int, disabled bool) {
+	if h.authManager == nil {
+		return
+	}
+	ctx := context.Background()
+
+	var targetAPIKey string
+	var matchByProvider bool
+	switch provider {
+	case "gemini":
+		if index >= 0 && index < len(h.cfg.GeminiKey) {
+			targetAPIKey = h.cfg.GeminiKey[index].APIKey
+		}
+	case "claude":
+		if index >= 0 && index < len(h.cfg.ClaudeKey) {
+			targetAPIKey = h.cfg.ClaudeKey[index].APIKey
+		}
+	case "codex":
+		if index >= 0 && index < len(h.cfg.CodexKey) {
+			targetAPIKey = h.cfg.CodexKey[index].APIKey
+		}
+	case "vertex":
+		if index >= 0 && index < len(h.cfg.VertexCompatAPIKey) {
+			targetAPIKey = h.cfg.VertexCompatAPIKey[index].APIKey
+		}
+	default:
+		matchByProvider = true
+	}
+
+	auths := h.authManager.List()
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+
+		matched := false
+		if matchByProvider {
+			if auth.Provider == provider {
+				matched = true
+			}
+		} else {
+			apiKey := ""
+			if auth.Attributes != nil {
+				apiKey = auth.Attributes["api_key"]
+			}
+			if apiKey != "" && apiKey == targetAPIKey {
+				matched = true
+			}
+		}
+
+		if !matched {
+			continue
+		}
+
+		auth.Disabled = disabled
+		if disabled {
+			auth.Status = coreauth.StatusDisabled
+			auth.StatusMessage = "disabled via management API"
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		} else {
+			auth.Status = coreauth.StatusActive
+			auth.StatusMessage = ""
+		}
+		auth.UpdatedAt = time.Now()
+		_, _ = h.authManager.Update(ctx, auth)
+	}
 }
