@@ -97,9 +97,6 @@ func compressToolDescription(description string, targetLength int) string {
 
 	// Find a safe truncation point (UTF-8 boundary)
 	truncLen := targetLength - 3 // Leave room for "..."
-	if truncLen < kirocommon.MinToolDescriptionLength-3 {
-		truncLen = kirocommon.MinToolDescriptionLength - 3
-	}
 
 	// Ensure we don't cut in the middle of a UTF-8 character
 	for truncLen > 0 && !utf8.RuneStart(description[truncLen]) {
@@ -164,29 +161,26 @@ func compressToolsIfNeeded(tools []KiroToolWrapper) []KiroToolWrapper {
 	}
 
 	// Step 2: Compress descriptions proportionally
-	// Calculate the compression ratio needed
-	compressionRatio := float64(kirocommon.ToolCompressionTargetSize) / float64(sizeAfterSchemaSimplification)
-	if compressionRatio > 1.0 {
-		compressionRatio = 1.0
-	}
-
-	// Calculate total description length and target
-	totalDescLen := 0
+	sizeToReduce := float64(sizeAfterSchemaSimplification - kirocommon.ToolCompressionTargetSize)
+	var totalDescLen float64
 	for _, tool := range compressedTools {
-		totalDescLen += len(tool.ToolSpecification.Description)
+		totalDescLen += float64(len(tool.ToolSpecification.Description))
 	}
 
-	// Estimate how much we need to reduce descriptions
-	// Assume descriptions account for roughly 50% of the payload
-	targetDescRatio := compressionRatio * 0.8 // Be more aggressive with description compression
-
-	for i := range compressedTools {
-		desc := compressedTools[i].ToolSpecification.Description
-		targetLen := int(float64(len(desc)) * targetDescRatio)
-		if targetLen < kirocommon.MinToolDescriptionLength {
-			targetLen = kirocommon.MinToolDescriptionLength
+	if totalDescLen > 0 {
+		// Assume size reduction comes primarily from descriptions.
+		keepRatio := 1.0 - (sizeToReduce / totalDescLen)
+		if keepRatio > 1.0 {
+			keepRatio = 1.0
+		} else if keepRatio < 0 {
+			keepRatio = 0
 		}
-		compressedTools[i].ToolSpecification.Description = compressToolDescription(desc, targetLen)
+
+		for i := range compressedTools {
+			desc := compressedTools[i].ToolSpecification.Description
+			targetLen := int(float64(len(desc)) * keepRatio)
+			compressedTools[i].ToolSpecification.Description = compressToolDescription(desc, targetLen)
+		}
 	}
 
 	finalSize := calculateToolsSize(compressedTools)
