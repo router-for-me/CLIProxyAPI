@@ -520,7 +520,7 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 			log.Debugf("kiro: tool '%s' has empty description, using default: %s", name, description)
 		}
 
-		// Truncate long descriptions
+		// Truncate long descriptions (individual tool limit)
 		if len(description) > kirocommon.KiroMaxToolDescLen {
 			truncLen := kirocommon.KiroMaxToolDescLen - 30
 			for truncLen > 0 && !utf8.RuneStart(description[truncLen]) {
@@ -537,6 +537,10 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 			},
 		})
 	}
+
+	// Apply dynamic compression if total tools size exceeds threshold
+	// This prevents 500 errors when Claude Code sends too many tools
+	kiroTools = compressToolsIfNeeded(kiroTools)
 
 	return kiroTools
 }
