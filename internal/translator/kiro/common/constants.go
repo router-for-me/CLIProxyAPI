@@ -6,6 +6,14 @@ const (
 	// Kiro API limit is 10240 bytes, leave room for "..."
 	KiroMaxToolDescLen = 10237
 
+	// ToolCompressionTargetSize is the target total size for compressed tools (20KB).
+	// If tools exceed this size, compression will be applied.
+	ToolCompressionTargetSize = 20 * 1024 // 20KB
+
+	// MinToolDescriptionLength is the minimum description length after compression.
+	// Descriptions will not be shortened below this length.
+	MinToolDescriptionLength = 50
+
 	// ThinkingStartTag is the start tag for thinking blocks in responses.
 	ThinkingStartTag = "<thinking>"
 
