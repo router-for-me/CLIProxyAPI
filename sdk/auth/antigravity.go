@@ -60,6 +60,11 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		opts = &LoginOptions{}
 	}
 
+	callbackPort := antigravityCallbackPort
+	if opts.CallbackPort > 0 {
+		callbackPort = opts.CallbackPort
+	}
+
 	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
 
 	state, err := misc.GenerateRandomState()
@@ -67,7 +72,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		return nil, fmt.Errorf("antigravity: failed to generate state: %w", err)
 	}
 
-	srv, port, cbChan, errServer := startAntigravityCallbackServer()
+	srv, port, cbChan, errServer := startAntigravityCallbackServer(callbackPort)
 	if errServer != nil {
 		return nil, fmt.Errorf("antigravity: failed to start callback server: %w", errServer)
 	}
@@ -224,13 +229,16 @@ type callbackResult struct {
 	State string
 }
 
-func startAntigravityCallbackServer() (*http.Server, int, <-chan callbackResult, error) {
-	addr := fmt.Sprintf(":%d", antigravityCallbackPort)
+func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbackResult, error) {
+	if port <= 0 {
+		port = antigravityCallbackPort
+	}
+	addr := fmt.Sprintf(":%d", port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
+	port = listener.Addr().(*net.TCPAddr).Port
 	resultCh := make(chan callbackResult, 1)
 
 	mux := http.NewServeMux()

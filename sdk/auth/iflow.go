@@ -42,9 +42,14 @@ func (a *IFlowAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		opts = &LoginOptions{}
 	}
 
+	callbackPort := iflow.CallbackPort
+	if opts.CallbackPort > 0 {
+		callbackPort = opts.CallbackPort
+	}
+
 	authSvc := iflow.NewIFlowAuth(cfg)
 
-	oauthServer := iflow.NewOAuthServer(iflow.CallbackPort)
+	oauthServer := iflow.NewOAuthServer(callbackPort)
 	if err := oauthServer.Start(); err != nil {
 		if strings.Contains(err.Error(), "already in use") {
 			return nil, fmt.Errorf("iflow authentication server port in use: %w", err)
@@ -64,21 +69,21 @@ func (a *IFlowAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		return nil, fmt.Errorf("iflow auth: failed to generate state: %w", err)
 	}
 
-	authURL, redirectURI := authSvc.AuthorizationURL(state, iflow.CallbackPort)
+	authURL, redirectURI := authSvc.AuthorizationURL(state, callbackPort)
 
 	if !opts.NoBrowser {
 		fmt.Println("Opening browser for iFlow authentication")
 		if !browser.IsAvailable() {
 			log.Warn("No browser available; please open the URL manually")
-			util.PrintSSHTunnelInstructions(iflow.CallbackPort)
+			util.PrintSSHTunnelInstructions(callbackPort)
 			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
 		} else if err = browser.OpenURL(authURL); err != nil {
 			log.Warnf("Failed to open browser automatically: %v", err)
-			util.PrintSSHTunnelInstructions(iflow.CallbackPort)
+			util.PrintSSHTunnelInstructions(callbackPort)
 			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
 		}
 	} else {
-		util.PrintSSHTunnelInstructions(iflow.CallbackPort)
+		util.PrintSSHTunnelInstructions(callbackPort)
 		fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
 	}
 

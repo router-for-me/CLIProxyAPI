@@ -74,6 +74,7 @@ func main() {
 	var iflowLogin bool
 	var iflowCookie bool
 	var noBrowser bool
+	var oauthCallbackPort int
 	var antigravityLogin bool
 	var kiroLogin bool
 	var kiroGoogleLogin bool
@@ -96,6 +97,7 @@ func main() {
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
 	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
+	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&useIncognito, "incognito", false, "Open browser in incognito/private mode for OAuth (useful for multiple accounts)")
 	flag.BoolVar(&noIncognito, "no-incognito", false, "Force disable incognito mode (uses existing browser session)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
@@ -454,7 +456,8 @@ func main() {
 
 	// Create login options to be used in authentication flows.
 	options := &cmd.LoginOptions{
-		NoBrowser: noBrowser,
+		NoBrowser:    noBrowser,
+		CallbackPort: oauthCallbackPort,
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.
