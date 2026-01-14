@@ -139,7 +139,7 @@ func modelMappingChannel(auth *Auth) string {
 // and auth kind. Returns empty string if the provider/authKind combination doesn't support
 // OAuth model mappings (e.g., API key authentication).
 //
-// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow.
+// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 func OAuthModelMappingChannel(provider, authKind string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	authKind = strings.ToLower(strings.TrimSpace(authKind))
@@ -164,6 +164,8 @@ func OAuthModelMappingChannel(provider, authKind string) string {
 		}
 		return "codex"
 	case "gemini-cli", "aistudio", "antigravity", "qwen", "iflow":
+		return provider
+	case "kiro", "github-copilot":
 		return provider
 	default:
 		return ""

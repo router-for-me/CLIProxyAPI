@@ -261,7 +261,8 @@ func performGeminiCLISetup(ctx context.Context, httpClient *http.Client, storage
 			finalProjectID := projectID
 			if responseProjectID != "" {
 				if explicitProject && !strings.EqualFold(responseProjectID, projectID) {
-					log.Warnf("Gemini onboarding returned project %s instead of requested %s; keeping requested project ID.", responseProjectID, projectID)
+					log.Warnf("Gemini onboarding returned project %s instead of requested %s; using response project ID.", responseProjectID, projectID)
+					finalProjectID = responseProjectID
 				} else {
 					finalProjectID = responseProjectID
 				}

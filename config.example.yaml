@@ -43,6 +43,11 @@ debug: false
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 
+# Open OAuth URLs in incognito/private browser mode.
+# Useful when you want to login with a different account without logging out from your current session.
+# Default: false (but Kiro auth defaults to true for multi-account support)
+incognito-browser: true
+
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 
@@ -138,6 +143,16 @@ nonstream-keepalive-interval: 0
 #       - "*-thinking"               # wildcard matching suffix (e.g. claude-opus-4-5-thinking)
 #       - "*haiku*"                  # wildcard matching substring (e.g. claude-3-5-haiku-20241022)
 
+# Kiro (AWS CodeWhisperer) configuration
+# Note: Kiro API currently only operates in us-east-1 region
+#kiro:
+#  - token-file: "~/.aws/sso/cache/kiro-auth-token.json" # path to Kiro token file
+#    agent-task-type: "" # optional: "vibe" or empty (API default)
+#  - access-token: "aoaAAAAA..." # or provide tokens directly
+#    refresh-token: "aorAAAAA..."
+#    profile-arn: "arn:aws:codewhisperer:us-east-1:..."
+#    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy override
+
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
@@ -203,7 +218,7 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name mappings (per channel)
 # These mappings rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 # NOTE: Mappings do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-mappings:
@@ -232,8 +247,15 @@ nonstream-keepalive-interval: 0
 #   iflow:
 #     - name: "glm-4.7"
 #       alias: "glm-god"
+#   kiro:
+#     - name: "kiro-claude-opus-4-5"
+#       alias: "op45"
+#   github-copilot:
+#     - name: "gpt-5"
+#       alias: "copilot-gpt5"
 
 # OAuth provider excluded models
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 # oauth-excluded-models:
 #   gemini-cli:
 #     - "gemini-2.5-pro"     # exclude specific models (exact match)
@@ -254,6 +276,10 @@ nonstream-keepalive-interval: 0
 #     - "vision-model"
 #   iflow:
 #     - "tstars2.0"
+#   kiro:
+#     - "kiro-claude-haiku-4-5"
+#   github-copilot:
+#     - "raptor-mini"
 
 # Optional payload configuration
 # payload:
