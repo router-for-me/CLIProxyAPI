@@ -27,7 +27,7 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4.5 Sonnet",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
 			ID:                  "claude-opus-4-5-20251101",
@@ -39,7 +39,7 @@ func GetClaudeModels() []*ModelInfo {
 			Description:         "Premium model combining maximum intelligence with practical performance",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
 			ID:                  "claude-opus-4-1-20250805",
@@ -50,7 +50,7 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4.1 Opus",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
 			ID:                  "claude-opus-4-20250514",
@@ -61,7 +61,7 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4 Opus",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
 			ID:                  "claude-sonnet-4-20250514",
@@ -72,7 +72,7 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4 Sonnet",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
 			ID:                  "claude-3-7-sonnet-20250219",
@@ -83,7 +83,7 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 3.7 Sonnet",
 			ContextLength:       128000,
 			MaxCompletionTokens: 8192,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
 			ID:                  "claude-3-5-haiku-20241022",
