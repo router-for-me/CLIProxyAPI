@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "title": "Voila AI Credentials",
+  "description": "Resource type for Voila AI (ChatGPT wrapper) credentials",
+  "required": ["auth_token", "email", "user_uuid", "base_url"],
+  "properties": {
+    "auth_token": {
+      "type": "string",
+      "description": "Voila authentication token",
+      "format": "password"
+    },
+    "email": {
+      "type": "string",
+      "description": "Voila account email",
+      "format": "email"
+    },
+    "user_uuid": {
+      "type": "string",
+      "description": "Voila user UUID",
+      "format": "uuid"
+    },
+    "base_url": {
+      "type": "string",
+      "description": "Voila API base URL",
+      "default": "https://chat.getvoila.ai/api/v1/prompts/chat",
+      "format": "uri"
+    },
+    "language": {
+      "type": "string",
+      "description": "Response language preference",
+      "default": "vi",
+      "enum": ["vi", "en", "ja", "ko", "zh", "fr", "de", "es"]
+    },
+    "version": {
+      "type": "string",
+      "description": "Voila client version",
+      "default": "1.7.6"
+    },
+    "model": {
+      "type": "string",
+      "description": "Default model to use",
+      "default": "gpt-4",
+      "enum": [
+        "gpt-4",
+        "gpt-4-turbo",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4.1",
+        "gpt-3.5-turbo",
+        "o1",
+        "o1-mini",
+        "o1-preview",
+        "o3-mini"
+      ]
+    },
+    "conversation": {
+      "type": "string",
+      "description": "Default conversation ID (optional)",
+      "default": ""
+    }
+  },
+  "example": {
+    "auth_token": "yq9RyhfEUTC...",
+    "email": "user@example.com",
+    "user_uuid": "41106249-8fab-43e6-9e01-59423948905f",
+    "base_url": "https://chat.getvoila.ai/api/v1/prompts/chat",
+    "language": "vi",
+    "version": "1.7.6",
+    "model": "gpt-4",
+    "conversation": ""
+  }
+}
