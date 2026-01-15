@@ -145,8 +145,11 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponseViaChat(c *gin.Con
 	var param any
 	converted := responsesconverter.ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(cliCtx, modelName, originalResponsesJSON, originalResponsesJSON, resp, &param)
 	if converted == "" {
-		_, _ = c.Writer.Write(resp)
-		cliCancel()
+		h.WriteErrorResponse(c, &interfaces.ErrorMessage{
+			StatusCode: http.StatusInternalServerError,
+			Error:      fmt.Errorf("failed to convert chat completion response to responses format"),
+		})
+		cliCancel(fmt.Errorf("response conversion failed"))
 		return
 	}
 	_, _ = c.Writer.Write([]byte(converted))

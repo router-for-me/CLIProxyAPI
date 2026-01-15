@@ -536,7 +536,12 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponseViaResponses(c *gin.Context
 	}
 	converted := convertResponsesObjectToChatCompletion(cliCtx, modelName, originalChatJSON, rawJSON, resp)
 	if converted == nil {
-		converted = resp
+		h.WriteErrorResponse(c, &interfaces.ErrorMessage{
+			StatusCode: http.StatusInternalServerError,
+			Error:      fmt.Errorf("failed to convert response to chat completion format"),
+		})
+		cliCancel(fmt.Errorf("response conversion failed"))
+		return
 	}
 	_, _ = c.Writer.Write(converted)
 	cliCancel()
