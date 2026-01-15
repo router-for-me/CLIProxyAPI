@@ -13,6 +13,10 @@ type VertexCompatKey struct {
 	// Maps to the x-goog-api-key header.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Priority controls selection preference when multiple credentials match.
+	// Higher values are preferred; defaults to 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
 	// Prefix optionally namespaces model aliases for this credential (e.g., "teamA/vertex-pro").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
