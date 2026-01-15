@@ -4,7 +4,7 @@
 //
 // Usage:
 //   POST https://js.chip.com.vn/api/w/chipvn/jobs/run_wait_result/p/f/voila/chat_completions_stream
-//   Body: { "voila": "$res:u/chipvn/chatgpt", "request": { ..., "stream": true } }
+//   Body: { "voila": "$res:f/voila/chatgpt", "request": { ..., "stream": true } }
 //
 // Returns: Server-Sent Events (SSE) stream
 

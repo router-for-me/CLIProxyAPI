@@ -4,13 +4,13 @@
 //
 // Usage:
 //   POST https://js.chip.com.vn/api/w/chipvn/jobs/run_wait_result/p/f/voila/chat_completions
-//   Body: { "voila": "$res:u/chipvn/chatgpt", "request": { ... } }
+//   Body: { "voila": "$res:f/voila/chatgpt", "request": { ... } }
 
 // ============================================================================
 // TYPES
 // ============================================================================
 
-// Voila Resource Type (from Windmill Resource: u/chipvn/chatgpt)
+// Voila Resource Type (from Windmill Resource: f/voila/chatgpt)
 type VoilaResource = {
   auth_token: string;
   email: string;
@@ -97,7 +97,7 @@ interface OpenAIChatResponse {
 // ============================================================================
 
 export async function main(
-  voila: VoilaResource, // Resource: u/chipvn/chatgpt
+  voila: VoilaResource, // Resource: f/voila/chatgpt
   request: OpenAIChatRequest
 ): Promise<OpenAIChatResponse> {
   // Validate request
