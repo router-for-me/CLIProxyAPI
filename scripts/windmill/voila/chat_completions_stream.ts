@@ -2,11 +2,20 @@
 // OpenAI-compatible /v1/chat/completions endpoint (streaming SSE)
 // Path in Windmill: f/voila/chat_completions_stream
 //
-// Usage:
-//   POST https://js.chip.com.vn/api/w/chipvn/jobs/run_wait_result/p/f/voila/chat_completions_stream
-//   Body: { "voila": "$res:f/voila/chatgpt", "request": { ..., "stream": true } }
+// Usage via HTTP Route:
+//   POST https://js.chip.com.vn/api/r/v1/chat/completions
+//   Body: { "model": "gpt-4", "messages": [...], "stream": true }
 //
 // Returns: Server-Sent Events (SSE) stream
+
+import * as wmill from "windmill-client@1";
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+// Resource path for Voila credentials
+const VOILA_RESOURCE_PATH = "f/voila/chatgpt";
 
 // ============================================================================
 // TYPES
@@ -33,14 +42,6 @@ interface ContentPart {
   text?: string;
 }
 
-interface OpenAIChatRequest {
-  model: string;
-  messages: OpenAIMessage[];
-  stream?: boolean;
-  max_tokens?: number;
-  temperature?: number;
-}
-
 interface VoilaChatMessage {
   role: string;
   content: string;
@@ -49,31 +50,50 @@ interface VoilaChatMessage {
 }
 
 // ============================================================================
-// MAIN FUNCTION - Returns AsyncGenerator for streaming
+// MAIN FUNCTION - Receives OpenAI request body directly
 // ============================================================================
 
 export async function* main(
-  voila: VoilaResource,
-  request: OpenAIChatRequest
+  // OpenAI request fields (received directly from HTTP Route body)
+  model: string,
+  messages: OpenAIMessage[],
+  stream?: boolean,
+  max_tokens?: number,
+  temperature?: number,
+  top_p?: number,
+  n?: number,
+  stop?: string | string[],
+  presence_penalty?: number,
+  frequency_penalty?: number,
+  user?: string
 ): AsyncGenerator<string, void, unknown> {
+
+  // Load Voila resource
+  const voila = (await wmill.getResource(VOILA_RESOURCE_PATH)) as VoilaResource;
+
+  if (!voila) {
+    yield formatSSEError(`Resource not found: ${VOILA_RESOURCE_PATH}`);
+    return;
+  }
+
   // Validate
-  if (!request.messages || request.messages.length === 0) {
+  if (!messages || messages.length === 0) {
     yield formatSSEError("Messages array is required");
     return;
   }
 
   const responseId = `chatcmpl-${generateId()}`;
-  const model = request.model || voila.model || "gpt-4";
+  const modelToUse = model || voila.model || "gpt-4";
   const created = Math.floor(Date.now() / 1000);
 
   // Convert messages
-  const voilaChat = convertMessagesToVoilaChat(request.messages);
+  const voilaChat = convertMessagesToVoilaChat(messages);
 
   // Build Voila request
   const voilaRequest = {
     chat: voilaChat,
     email: voila.email,
-    model: model,
+    model: modelToUse,
     auth_token: voila.auth_token,
     client_date: new Date().toISOString(),
     language: voila.language || "vi",
@@ -116,10 +136,10 @@ export async function* main(
 
   if (contentType.includes("text/event-stream")) {
     // Handle SSE stream from Voila
-    yield* handleVoilaSSEStream(response, responseId, model, created);
+    yield* handleVoilaSSEStream(response, responseId, modelToUse, created);
   } else {
     // Handle non-streaming response (convert to single SSE chunk)
-    yield* handleVoilaNonStreamResponse(response, responseId, model, created);
+    yield* handleVoilaNonStreamResponse(response, responseId, modelToUse, created);
   }
 
   // Send [DONE] signal

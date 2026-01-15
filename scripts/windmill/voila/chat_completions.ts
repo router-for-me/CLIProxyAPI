@@ -2,15 +2,28 @@
 // OpenAI-compatible /v1/chat/completions endpoint (non-streaming)
 // Path in Windmill: f/voila/chat_completions
 //
-// Usage:
+// Usage via HTTP Route:
+//   POST https://js.chip.com.vn/api/r/v1/chat/completions
+//   Body: { "model": "gpt-4", "messages": [...], "stream": false }
+//
+// Usage via direct script call:
 //   POST https://js.chip.com.vn/api/w/chipvn/jobs/run_wait_result/p/f/voila/chat_completions
-//   Body: { "voila": "$res:f/voila/chatgpt", "request": { ... } }
+//   Body: { "model": "gpt-4", "messages": [...] }
+
+import * as wmill from "windmill-client@1";
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+// Resource path for Voila credentials
+const VOILA_RESOURCE_PATH = "f/voila/chatgpt";
 
 // ============================================================================
 // TYPES
 // ============================================================================
 
-// Voila Resource Type (from Windmill Resource: f/voila/chatgpt)
+// Voila Resource Type
 type VoilaResource = {
   auth_token: string;
   email: string;
@@ -93,26 +106,44 @@ interface OpenAIChatResponse {
 }
 
 // ============================================================================
-// MAIN FUNCTION
+// MAIN FUNCTION - Receives OpenAI request body directly
 // ============================================================================
 
 export async function main(
-  voila: VoilaResource, // Resource: f/voila/chatgpt
-  request: OpenAIChatRequest
+  // OpenAI request fields (received directly from HTTP Route body)
+  model: string,
+  messages: OpenAIMessage[],
+  stream?: boolean,
+  max_tokens?: number,
+  temperature?: number,
+  top_p?: number,
+  n?: number,
+  stop?: string | string[],
+  presence_penalty?: number,
+  frequency_penalty?: number,
+  user?: string
 ): Promise<OpenAIChatResponse> {
-  // Validate request
-  if (!request.messages || request.messages.length === 0) {
+
+  // Load Voila resource
+  const voila = (await wmill.getResource(VOILA_RESOURCE_PATH)) as VoilaResource;
+
+  if (!voila) {
+    throw new Error(`Resource not found: ${VOILA_RESOURCE_PATH}`);
+  }
+
+  // Validate messages
+  if (!messages || messages.length === 0) {
     throw new Error("Messages array is required and cannot be empty");
   }
 
   // Convert OpenAI messages to Voila chat format
-  const voilaChat = convertMessagesToVoilaChat(request.messages);
+  const voilaChat = convertMessagesToVoilaChat(messages);
 
   // Build Voila request payload
   const voilaRequest: VoilaRequest = {
     chat: voilaChat,
     email: voila.email,
-    model: request.model || voila.model || "gpt-4",
+    model: model || voila.model || "gpt-4",
     auth_token: voila.auth_token,
     client_date: new Date().toISOString(),
     language: voila.language || "vi",
@@ -157,7 +188,7 @@ export async function main(
     id: `chatcmpl-${generateId()}`,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
-    model: request.model || voila.model || "gpt-4",
+    model: model || voila.model || "gpt-4",
     choices: [
       {
         index: 0,
