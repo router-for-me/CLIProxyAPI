@@ -37,7 +37,7 @@ This wrapper converts OpenAI-format API calls to Voila's proprietary format, all
 
 1. Go to Windmill Dashboard → Resources → Create Resource
 2. Select type: `Custom` or create new type using `resource_type.json`
-3. Name: `u/chipvn/chatgpt` (or your preferred name)
+3. Name: `f/voila/chatgpt`
 4. Fill in your Voila credentials:
 
 ```json
@@ -108,7 +108,7 @@ curl -X POST "https://js.chip.com.vn/api/w/chipvn/jobs/run_wait_result/p/f/voila
   -H "Authorization: Bearer YOUR_WINDMILL_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "voila": "$res:u/chipvn/chatgpt",
+    "voila": "$res:f/voila/chatgpt",
     "request": {
       "model": "gpt-4",
       "messages": [
@@ -126,7 +126,7 @@ curl -X POST "https://js.chip.com.vn/api/w/chipvn/jobs/run_wait_result/p/f/voila
   -H "Authorization: Bearer YOUR_WINDMILL_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "voila": "$res:u/chipvn/chatgpt",
+    "voila": "$res:f/voila/chatgpt",
     "request": {
       "model": "gpt-4",
       "messages": [
