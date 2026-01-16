@@ -1222,6 +1222,9 @@ func rewriteModelInfoName(name, oldID, newID string) string {
 	if strings.EqualFold(oldID, newID) {
 		return name
 	}
+	if strings.EqualFold(trimmed, oldID) {
+		return newID
+	}
 	if strings.HasSuffix(trimmed, "/"+oldID) {
 		prefix := strings.TrimSuffix(trimmed, oldID)
 		return prefix + newID

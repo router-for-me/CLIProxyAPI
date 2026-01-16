@@ -25,6 +25,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	if model == "" {
 		return payload
 	}
+	candidates := payloadModelCandidates(cfg, model, protocol)
 	out := payload
 	source := original
 	if len(source) == 0 {
@@ -34,7 +35,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply default rules: first write wins per field across all matching rules.
 	for i := range rules.Default {
 		rule := &rules.Default[i]
-		if !payloadRuleMatchesModel(rule, model, protocol) {
+		if !payloadRuleMatchesModels(rule, protocol, candidates) {
 			continue
 		}
 		for path, value := range rule.Params {
@@ -59,7 +60,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply default raw rules: first write wins per field across all matching rules.
 	for i := range rules.DefaultRaw {
 		rule := &rules.DefaultRaw[i]
-		if !payloadRuleMatchesModel(rule, model, protocol) {
+		if !payloadRuleMatchesModels(rule, protocol, candidates) {
 			continue
 		}
 		for path, value := range rule.Params {
@@ -88,7 +89,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply override rules: last write wins per field across all matching rules.
 	for i := range rules.Override {
 		rule := &rules.Override[i]
-		if !payloadRuleMatchesModel(rule, model, protocol) {
+		if !payloadRuleMatchesModels(rule, protocol, candidates) {
 			continue
 		}
 		for path, value := range rule.Params {
@@ -106,7 +107,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply override raw rules: last write wins per field across all matching rules.
 	for i := range rules.OverrideRaw {
 		rule := &rules.OverrideRaw[i]
-		if !payloadRuleMatchesModel(rule, model, protocol) {
+		if !payloadRuleMatchesModels(rule, protocol, candidates) {
 			continue
 		}
 		for path, value := range rule.Params {
@@ -126,6 +127,18 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 	}
 	return out
+}
+
+func payloadRuleMatchesModels(rule *config.PayloadRule, protocol string, models []string) bool {
+	if rule == nil || len(models) == 0 {
+		return false
+	}
+	for _, model := range models {
+		if payloadRuleMatchesModel(rule, model, protocol) {
+			return true
+		}
+	}
+	return false
 }
 
 func payloadRuleMatchesModel(rule *config.PayloadRule, model, protocol string) bool {
@@ -148,6 +161,65 @@ func payloadRuleMatchesModel(rule *config.PayloadRule, model, protocol string) b
 		}
 	}
 	return false
+}
+
+func payloadModelCandidates(cfg *config.Config, model, protocol string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	candidates := []string{model}
+	if cfg == nil {
+		return candidates
+	}
+	aliases := payloadModelAliases(cfg, model, protocol)
+	if len(aliases) == 0 {
+		return candidates
+	}
+	seen := map[string]struct{}{strings.ToLower(model): struct{}{}}
+	for _, alias := range aliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, alias)
+	}
+	return candidates
+}
+
+func payloadModelAliases(cfg *config.Config, model, protocol string) []string {
+	if cfg == nil {
+		return nil
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	channel := strings.ToLower(strings.TrimSpace(protocol))
+	if channel == "" {
+		return nil
+	}
+	entries := cfg.OAuthModelAlias[channel]
+	if len(entries) == 0 {
+		return nil
+	}
+	aliases := make([]string, 0, 2)
+	for _, entry := range entries {
+		if !strings.EqualFold(strings.TrimSpace(entry.Name), model) {
+			continue
+		}
+		alias := strings.TrimSpace(entry.Alias)
+		if alias == "" {
+			continue
+		}
+		aliases = append(aliases, alias)
+	}
+	return aliases
 }
 
 // buildPayloadPath combines an optional root path with a relative parameter path.

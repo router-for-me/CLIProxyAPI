@@ -52,7 +52,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	systemsResult := rootResult.Get("system")
 	if systemsResult.IsArray() {
 		systemResults := systemsResult.Array()
-		message := `{"type":"message","role":"user","content":[]}`
+		message := `{"type":"message","role":"developer","content":[]}`
 		for i := 0; i < len(systemResults); i++ {
 			systemResult := systemResults[i]
 			systemTypeResult := systemResult.Get("type")
@@ -245,21 +245,23 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.Set(template, "include", []string{"reasoning.encrypted_content"})
 
 	// Add a first message to ignore system instructions and ensure proper execution.
-	inputResult := gjson.Get(template, "input")
-	if inputResult.Exists() && inputResult.IsArray() {
-		inputResults := inputResult.Array()
-		newInput := "[]"
-		for i := 0; i < len(inputResults); i++ {
-			if i == 0 {
-				firstText := inputResults[i].Get("content.0.text")
-				firstInstructions := "EXECUTE ACCORDING TO THE FOLLOWING INSTRUCTIONS!!!"
-				if firstText.Exists() && firstText.String() != firstInstructions {
-					newInput, _ = sjson.SetRaw(newInput, "-1", `{"type":"message","role":"user","content":[{"type":"input_text","text":"EXECUTE ACCORDING TO THE FOLLOWING INSTRUCTIONS!!!"}]}`)
+	if misc.GetCodexInstructionsEnabled() {
+		inputResult := gjson.Get(template, "input")
+		if inputResult.Exists() && inputResult.IsArray() {
+			inputResults := inputResult.Array()
+			newInput := "[]"
+			for i := 0; i < len(inputResults); i++ {
+				if i == 0 {
+					firstText := inputResults[i].Get("content.0.text")
+					firstInstructions := "EXECUTE ACCORDING TO THE FOLLOWING INSTRUCTIONS!!!"
+					if firstText.Exists() && firstText.String() != firstInstructions {
+						newInput, _ = sjson.SetRaw(newInput, "-1", `{"type":"message","role":"user","content":[{"type":"input_text","text":"EXECUTE ACCORDING TO THE FOLLOWING INSTRUCTIONS!!!"}]}`)
+					}
 				}
+				newInput, _ = sjson.SetRaw(newInput, "-1", inputResults[i].Raw)
 			}
-			newInput, _ = sjson.SetRaw(newInput, "-1", inputResults[i].Raw)
+			template, _ = sjson.SetRaw(template, "input", newInput)
 		}
-		template, _ = sjson.SetRaw(template, "input", newInput)
 	}
 
 	return []byte(template)

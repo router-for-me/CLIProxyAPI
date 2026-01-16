@@ -517,8 +517,8 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 		}
 		if usageResult := responseNode.Get("usageMetadata"); usageResult.Exists() {
 			usageRaw = usageResult.Raw
-		} else if usageResult := root.Get("usageMetadata"); usageResult.Exists() {
-			usageRaw = usageResult.Raw
+		} else if usageMetadataResult := root.Get("usageMetadata"); usageMetadataResult.Exists() {
+			usageRaw = usageMetadataResult.Raw
 		}
 
 		if partsResult := responseNode.Get("candidates.0.content.parts"); partsResult.IsArray() {
@@ -642,7 +642,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			err = errReq
 			return nil, err
 		}
-
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
 			recordAPIResponseError(ctx, e.cfg, errDo)
@@ -1004,10 +1003,10 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			case "chat_20706", "chat_23310", "gemini-2.5-flash-thinking", "gemini-3-pro-low", "gemini-2.5-pro":
 				continue
 			}
-			cfg := modelConfig[modelID]
+			modelCfg := modelConfig[modelID]
 			modelName := modelID
-			if cfg != nil && cfg.Name != "" {
-				modelName = cfg.Name
+			if modelCfg != nil && modelCfg.Name != "" {
+				modelName = modelCfg.Name
 			}
 			modelInfo := &registry.ModelInfo{
 				ID:          modelID,
@@ -1021,12 +1020,12 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				Type:        antigravityAuthType,
 			}
 			// Look up Thinking support from static config using upstream model name.
-			if cfg != nil {
-				if cfg.Thinking != nil {
-					modelInfo.Thinking = cfg.Thinking
+			if modelCfg != nil {
+				if modelCfg.Thinking != nil {
+					modelInfo.Thinking = modelCfg.Thinking
 				}
-				if cfg.MaxCompletionTokens > 0 {
-					modelInfo.MaxCompletionTokens = cfg.MaxCompletionTokens
+				if modelCfg.MaxCompletionTokens > 0 {
+					modelInfo.MaxCompletionTokens = modelCfg.MaxCompletionTokens
 				}
 			}
 			models = append(models, modelInfo)
