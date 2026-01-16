@@ -240,9 +240,13 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// Process messages and build history
 	history, currentUserMsg, currentToolResults := processMessages(messages, modelID, origin)
 
-	// Build content with system prompt
+	// Build content with system prompt (only on first turn to avoid re-injection)
 	if currentUserMsg != nil {
-		currentUserMsg.Content = buildFinalContent(currentUserMsg.Content, systemPrompt, currentToolResults)
+		effectiveSystemPrompt := systemPrompt
+		if len(history) > 0 {
+			effectiveSystemPrompt = "" // Don't re-inject on subsequent turns
+		}
+		currentUserMsg.Content = buildFinalContent(currentUserMsg.Content, effectiveSystemPrompt, currentToolResults)
 
 		// Deduplicate currentToolResults
 		currentToolResults = deduplicateToolResults(currentToolResults)
