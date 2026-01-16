@@ -98,7 +98,7 @@ var kiroEndpointConfigs = []kiroEndpointConfig{
 		Name:      "CodeWhisperer",
 	},
 	{
-		URL:       "https://q.us-east-1.amazonaws.com/",
+		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
 		Origin:    "CLI",
 		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
 		Name:      "AmazonQ",
