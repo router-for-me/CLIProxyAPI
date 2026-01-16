@@ -223,7 +223,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		recordAPIResponseError(ctx, e.cfg, errDo)
@@ -326,7 +326,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		recordAPIResponseError(ctx, e.cfg, errDo)
@@ -424,7 +424,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		recordAPIResponseError(ctx, e.cfg, errDo)
@@ -543,7 +543,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		recordAPIResponseError(ctx, e.cfg, errDo)
@@ -651,7 +651,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		recordAPIResponseError(ctx, e.cfg, errDo)
@@ -735,7 +735,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, resolveRequestTimeout(e.cfg))
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		recordAPIResponseError(ctx, e.cfg, errDo)
@@ -830,7 +830,7 @@ func vertexBaseURL(location string) string {
 }
 
 func vertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, saJSON []byte) (string, error) {
-	if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
+	if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, resolveRequestTimeout(cfg)); httpClient != nil {
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 	}
 	// Use cloud-platform scope for Vertex AI.
