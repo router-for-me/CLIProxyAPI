@@ -23,6 +23,7 @@ import (
 const (
 	githubCopilotBaseURL       = "https://api.githubcopilot.com"
 	githubCopilotChatPath      = "/chat/completions"
+	githubCopilotResponsesPath = "/responses"
 	githubCopilotAuthType      = "github-copilot"
 	githubCopilotTokenCacheTTL = 25 * time.Minute
 	// tokenExpiryBuffer is the time before expiry when we should refresh the token.
@@ -106,7 +107,11 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
+	useResponses := useGitHubCopilotResponsesEndpoint(from)
 	to := sdktranslator.FromString("openai")
+	if useResponses {
+		to = sdktranslator.FromString("openai-response")
+	}
 	originalPayload := bytes.Clone(req.Payload)
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = bytes.Clone(opts.OriginalRequest)
@@ -117,7 +122,11 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "stream", false)
 
-	url := githubCopilotBaseURL + githubCopilotChatPath
+	path := githubCopilotChatPath
+	if useResponses {
+		path = githubCopilotResponsesPath
+	}
+	url := githubCopilotBaseURL + path
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
@@ -172,6 +181,9 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	appendAPIResponseChunk(ctx, e.cfg, data)
 
 	detail := parseOpenAIUsage(data)
+	if useResponses && detail.TotalTokens == 0 {
+		detail = parseOpenAIResponsesUsage(data)
+	}
 	if detail.TotalTokens > 0 {
 		reporter.publish(ctx, detail)
 	}
@@ -194,7 +206,11 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
+	useResponses := useGitHubCopilotResponsesEndpoint(from)
 	to := sdktranslator.FromString("openai")
+	if useResponses {
+		to = sdktranslator.FromString("openai-response")
+	}
 	originalPayload := bytes.Clone(req.Payload)
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = bytes.Clone(opts.OriginalRequest)
@@ -205,9 +221,15 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	// Enable stream options for usage stats in stream
-	body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
+	if !useResponses {
+		body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
+	}
 
-	url := githubCopilotBaseURL + githubCopilotChatPath
+	path := githubCopilotChatPath
+	if useResponses {
+		path = githubCopilotResponsesPath
+	}
+	url := githubCopilotBaseURL + path
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -283,6 +305,10 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 				}
 				if detail, ok := parseOpenAIStreamUsage(line); ok {
 					reporter.publish(ctx, detail)
+				} else if useResponses {
+					if detail, ok := parseOpenAIResponsesStreamUsage(line); ok {
+						reporter.publish(ctx, detail)
+					}
 				}
 			}
 
@@ -391,6 +417,10 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string) {
 // Model mapping should be done at the registry level if needed.
 func (e *GitHubCopilotExecutor) normalizeModel(_ string, body []byte) []byte {
 	return body
+}
+
+func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format) bool {
+	return sourceFormat.String() == "openai-response"
 }
 
 // isHTTPSuccess checks if the status code indicates success (2xx).

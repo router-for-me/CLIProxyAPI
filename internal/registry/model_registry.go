@@ -47,6 +47,8 @@ type ModelInfo struct {
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// SupportedParameters lists supported parameters
 	SupportedParameters []string `json:"supported_parameters,omitempty"`
+	// SupportedEndpoints lists supported API endpoints (e.g., "/chat/completions", "/responses").
+	SupportedEndpoints []string `json:"supported_endpoints,omitempty"`
 
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
@@ -475,6 +477,9 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	}
 	if len(model.SupportedParameters) > 0 {
 		copyModel.SupportedParameters = append([]string(nil), model.SupportedParameters...)
+	}
+	if len(model.SupportedEndpoints) > 0 {
+		copyModel.SupportedEndpoints = append([]string(nil), model.SupportedEndpoints...)
 	}
 	return &copyModel
 }
@@ -987,6 +992,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = model.SupportedParameters
+		}
+		if len(model.SupportedEndpoints) > 0 {
+			result["supported_endpoints"] = model.SupportedEndpoints
 		}
 		return result
 
