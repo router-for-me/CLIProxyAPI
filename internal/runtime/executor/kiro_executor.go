@@ -53,6 +53,7 @@ const (
 	kiroIDEUserAgent     = "aws-sdk-js/1.0.18 ua/2.1 os/darwin#25.0.0 lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1"
 	kiroIDEAmzUserAgent  = "aws-sdk-js/1.0.18 KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1"
 	kiroIDEAgentModeSpec = "spec"
+	kiroAgentModeVibe    = "vibe"
 )
 
 // Real-time usage estimation configuration
@@ -98,7 +99,7 @@ var kiroEndpointConfigs = []kiroEndpointConfig{
 		Name:      "CodeWhisperer",
 	},
 	{
-		URL:       "https://q.us-east-1.amazonaws.com/",
+		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
 		Origin:    "CLI",
 		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
 		Name:      "AmazonQ",
@@ -232,7 +233,9 @@ func (e *KiroExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 	} else {
 		req.Header.Set("User-Agent", kiroUserAgent)
 		req.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+		req.Header.Set("x-amzn-kiro-agent-mode", kiroAgentModeVibe)
 	}
+	req.Header.Set("x-amzn-codewhisperer-optout", "true")
 	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 	req.Header.Set("Authorization", "Bearer "+accessToken)
@@ -350,7 +353,9 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			} else {
 				httpReq.Header.Set("User-Agent", kiroUserAgent)
 				httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+				httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroAgentModeVibe)
 			}
+			httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 
@@ -683,7 +688,9 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			} else {
 				httpReq.Header.Set("User-Agent", kiroUserAgent)
 				httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+				httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroAgentModeVibe)
 			}
+			httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 
