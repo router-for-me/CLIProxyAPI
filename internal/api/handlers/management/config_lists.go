@@ -703,21 +703,21 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 	h.persist(c)
 }
 
-// oauth-model-mappings: map[string][]ModelNameMapping
-func (h *Handler) GetOAuthModelMappings(c *gin.Context) {
-	c.JSON(200, gin.H{"oauth-model-mappings": sanitizedOAuthModelMappings(h.cfg.OAuthModelMappings)})
+// oauth-model-alias: map[string][]OAuthModelAlias
+func (h *Handler) GetOAuthModelAlias(c *gin.Context) {
+	c.JSON(200, gin.H{"oauth-model-alias": sanitizedOAuthModelAlias(h.cfg.OAuthModelAlias)})
 }
 
-func (h *Handler) PutOAuthModelMappings(c *gin.Context) {
+func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
-	var entries map[string][]config.ModelNameMapping
+	var entries map[string][]config.OAuthModelAlias
 	if err = json.Unmarshal(data, &entries); err != nil {
 		var wrapper struct {
-			Items map[string][]config.ModelNameMapping `json:"items"`
+			Items map[string][]config.OAuthModelAlias `json:"items"`
 		}
 		if err2 := json.Unmarshal(data, &wrapper); err2 != nil {
 			c.JSON(400, gin.H{"error": "invalid body"})
@@ -725,15 +725,15 @@ func (h *Handler) PutOAuthModelMappings(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
-	h.cfg.OAuthModelMappings = sanitizedOAuthModelMappings(entries)
+	h.cfg.OAuthModelAlias = sanitizedOAuthModelAlias(entries)
 	h.persist(c)
 }
 
-func (h *Handler) PatchOAuthModelMappings(c *gin.Context) {
+func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 	var body struct {
-		Provider *string                   `json:"provider"`
-		Channel  *string                   `json:"channel"`
-		Mappings []config.ModelNameMapping `json:"mappings"`
+		Provider *string                  `json:"provider"`
+		Channel  *string                  `json:"channel"`
+		Aliases  []config.OAuthModelAlias `json:"aliases"`
 	}
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
@@ -751,32 +751,32 @@ func (h *Handler) PatchOAuthModelMappings(c *gin.Context) {
 		return
 	}
 
-	normalizedMap := sanitizedOAuthModelMappings(map[string][]config.ModelNameMapping{channel: body.Mappings})
+	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
 	normalized := normalizedMap[channel]
 	if len(normalized) == 0 {
-		if h.cfg.OAuthModelMappings == nil {
+		if h.cfg.OAuthModelAlias == nil {
 			c.JSON(404, gin.H{"error": "channel not found"})
 			return
 		}
-		if _, ok := h.cfg.OAuthModelMappings[channel]; !ok {
+		if _, ok := h.cfg.OAuthModelAlias[channel]; !ok {
 			c.JSON(404, gin.H{"error": "channel not found"})
 			return
 		}
-		delete(h.cfg.OAuthModelMappings, channel)
-		if len(h.cfg.OAuthModelMappings) == 0 {
-			h.cfg.OAuthModelMappings = nil
+		delete(h.cfg.OAuthModelAlias, channel)
+		if len(h.cfg.OAuthModelAlias) == 0 {
+			h.cfg.OAuthModelAlias = nil
 		}
 		h.persist(c)
 		return
 	}
-	if h.cfg.OAuthModelMappings == nil {
-		h.cfg.OAuthModelMappings = make(map[string][]config.ModelNameMapping)
+	if h.cfg.OAuthModelAlias == nil {
+		h.cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
 	}
-	h.cfg.OAuthModelMappings[channel] = normalized
+	h.cfg.OAuthModelAlias[channel] = normalized
 	h.persist(c)
 }
 
-func (h *Handler) DeleteOAuthModelMappings(c *gin.Context) {
+func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 	channel := strings.ToLower(strings.TrimSpace(c.Query("channel")))
 	if channel == "" {
 		channel = strings.ToLower(strings.TrimSpace(c.Query("provider")))
@@ -785,17 +785,17 @@ func (h *Handler) DeleteOAuthModelMappings(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
-	if h.cfg.OAuthModelMappings == nil {
+	if h.cfg.OAuthModelAlias == nil {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
 	}
-	if _, ok := h.cfg.OAuthModelMappings[channel]; !ok {
+	if _, ok := h.cfg.OAuthModelAlias[channel]; !ok {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
 	}
-	delete(h.cfg.OAuthModelMappings, channel)
-	if len(h.cfg.OAuthModelMappings) == 0 {
-		h.cfg.OAuthModelMappings = nil
+	delete(h.cfg.OAuthModelAlias, channel)
+	if len(h.cfg.OAuthModelAlias) == 0 {
+		h.cfg.OAuthModelAlias = nil
 	}
 	h.persist(c)
 }
@@ -1042,26 +1042,26 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 	entry.Models = normalized
 }
 
-func sanitizedOAuthModelMappings(entries map[string][]config.ModelNameMapping) map[string][]config.ModelNameMapping {
+func sanitizedOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[string][]config.OAuthModelAlias {
 	if len(entries) == 0 {
 		return nil
 	}
-	copied := make(map[string][]config.ModelNameMapping, len(entries))
-	for channel, mappings := range entries {
-		if len(mappings) == 0 {
+	copied := make(map[string][]config.OAuthModelAlias, len(entries))
+	for channel, aliases := range entries {
+		if len(aliases) == 0 {
 			continue
 		}
-		copied[channel] = append([]config.ModelNameMapping(nil), mappings...)
+		copied[channel] = append([]config.OAuthModelAlias(nil), aliases...)
 	}
 	if len(copied) == 0 {
 		return nil
 	}
-	cfg := config.Config{OAuthModelMappings: copied}
-	cfg.SanitizeOAuthModelMappings()
-	if len(cfg.OAuthModelMappings) == 0 {
+	cfg := config.Config{OAuthModelAlias: copied}
+	cfg.SanitizeOAuthModelAlias()
+	if len(cfg.OAuthModelAlias) == 0 {
 		return nil
 	}
-	return cfg.OAuthModelMappings
+	return cfg.OAuthModelAlias
 }
 
 // GetAmpCode returns the complete ampcode configuration.

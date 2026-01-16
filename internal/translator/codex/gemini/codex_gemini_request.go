@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -93,7 +95,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	// System instruction -> as a user message with input_text parts
 	sysParts := root.Get("system_instruction.parts")
 	if sysParts.IsArray() {
-		msg := `{"type":"message","role":"user","content":[]}`
+		msg := `{"type":"message","role":"developer","content":[]}`
 		arr := sysParts.Array()
 		for i := 0; i < len(arr); i++ {
 			p := arr[i]
@@ -251,10 +253,11 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	reasoningEffort := "medium" // default
 	if genConfig := root.Get("generationConfig"); genConfig.Exists() {
 		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
-			if util.ModelUsesThinkingLevels(modelName) {
+			modelInfo := registry.LookupModelInfo(modelName)
+			if modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0 {
 				if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
 					budget := int(thinkingBudget.Int())
-					if effort, ok := util.ThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
+					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
 						reasoningEffort = effort
 					}
 				}

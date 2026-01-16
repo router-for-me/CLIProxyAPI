@@ -7,10 +7,26 @@ import (
 	"embed"
 	_ "embed"
 	"strings"
+	"sync/atomic"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// codexInstructionsEnabled controls whether CodexInstructionsForModel returns official instructions.
+// When false (default), CodexInstructionsForModel returns (true, "") immediately.
+// Set via SetCodexInstructionsEnabled from config.
+var codexInstructionsEnabled atomic.Bool
+
+// SetCodexInstructionsEnabled sets whether codex instructions processing is enabled.
+func SetCodexInstructionsEnabled(enabled bool) {
+	codexInstructionsEnabled.Store(enabled)
+}
+
+// GetCodexInstructionsEnabled returns whether codex instructions processing is enabled.
+func GetCodexInstructionsEnabled() bool {
+	return codexInstructionsEnabled.Load()
+}
 
 //go:embed codex_instructions
 var codexInstructionsDir embed.FS
@@ -124,6 +140,9 @@ func codexInstructionsForCodex(modelName, systemInstructions string) (bool, stri
 }
 
 func CodexInstructionsForModel(modelName, systemInstructions, userAgent string) (bool, string) {
+	if !GetCodexInstructionsEnabled() {
+		return true, ""
+	}
 	if IsOpenCodeUserAgent(userAgent) {
 		return codexInstructionsForOpenCode(systemInstructions)
 	}

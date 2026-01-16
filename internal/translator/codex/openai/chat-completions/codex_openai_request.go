@@ -33,7 +33,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	rawJSON := bytes.Clone(inputRawJSON)
 	userAgent := misc.ExtractCodexUserAgent(rawJSON)
 	// Start with empty JSON object
-	out := `{}`
+	out := `{"instructions":""}`
 
 	// Stream must be set to true
 	out, _ = sjson.Set(out, "stream", stream)
@@ -98,7 +98,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Extract system instructions from first system message (string or text object)
 	messages := gjson.GetBytes(rawJSON, "messages")
 	_, instructions := misc.CodexInstructionsForModel(modelName, "", userAgent)
-	out, _ = sjson.Set(out, "instructions", instructions)
+	if misc.GetCodexInstructionsEnabled() {
+		out, _ = sjson.Set(out, "instructions", instructions)
+	}
 	// if messages.IsArray() {
 	// 	arr := messages.Array()
 	// 	for i := 0; i < len(arr); i++ {
@@ -141,7 +143,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				msg := `{}`
 				msg, _ = sjson.Set(msg, "type", "message")
 				if role == "system" {
-					msg, _ = sjson.Set(msg, "role", "user")
+					msg, _ = sjson.Set(msg, "role", "developer")
 				} else {
 					msg, _ = sjson.Set(msg, "role", role)
 				}

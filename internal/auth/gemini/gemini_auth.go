@@ -29,8 +29,9 @@ import (
 )
 
 const (
-	geminiOauthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	geminiOauthClientSecret = "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"
+	geminiOauthClientID       = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+	geminiOauthClientSecret   = "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"
+	geminiDefaultCallbackPort = 8085
 )
 
 var (
@@ -49,8 +50,9 @@ type GeminiAuth struct {
 
 // WebLoginOptions customizes the interactive OAuth flow.
 type WebLoginOptions struct {
-	NoBrowser bool
-	Prompt    func(string) (string, error)
+	NoBrowser    bool
+	CallbackPort int
+	Prompt       func(string) (string, error)
 }
 
 // NewGeminiAuth creates a new instance of GeminiAuth.
@@ -72,6 +74,12 @@ func NewGeminiAuth() *GeminiAuth {
 //   - *http.Client: An HTTP client configured with authentication
 //   - error: An error if the client configuration fails, nil otherwise
 func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiTokenStorage, cfg *config.Config, opts *WebLoginOptions) (*http.Client, error) {
+	callbackPort := geminiDefaultCallbackPort
+	if opts != nil && opts.CallbackPort > 0 {
+		callbackPort = opts.CallbackPort
+	}
+	callbackURL := fmt.Sprintf("http://localhost:%d/oauth2callback", callbackPort)
+
 	// Configure proxy settings for the HTTP client if a proxy URL is provided.
 	proxyURL, err := url.Parse(cfg.ProxyURL)
 	if err == nil {
@@ -106,7 +114,7 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 	conf := &oauth2.Config{
 		ClientID:     geminiOauthClientID,
 		ClientSecret: geminiOauthClientSecret,
-		RedirectURL:  "http://localhost:8085/oauth2callback", // This will be used by the local server.
+		RedirectURL:  callbackURL, // This will be used by the local server.
 		Scopes:       geminiOauthScopes,
 		Endpoint:     google.Endpoint,
 	}
@@ -218,14 +226,20 @@ func (g *GeminiAuth) createTokenStorage(ctx context.Context, config *oauth2.Conf
 //   - *oauth2.Token: The OAuth2 token obtained from the authorization flow
 //   - error: An error if the token acquisition fails, nil otherwise
 func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config, opts *WebLoginOptions) (*oauth2.Token, error) {
+	callbackPort := geminiDefaultCallbackPort
+	if opts != nil && opts.CallbackPort > 0 {
+		callbackPort = opts.CallbackPort
+	}
+	callbackURL := fmt.Sprintf("http://localhost:%d/oauth2callback", callbackPort)
+
 	// Use a channel to pass the authorization code from the HTTP handler to the main function.
 	codeChan := make(chan string, 1)
 	errChan := make(chan error, 1)
 
 	// Create a new HTTP server with its own multiplexer.
 	mux := http.NewServeMux()
-	server := &http.Server{Addr: ":8085", Handler: mux}
-	config.RedirectURL = "http://localhost:8085/oauth2callback"
+	server := &http.Server{Addr: fmt.Sprintf(":%d", callbackPort), Handler: mux}
+	config.RedirectURL = callbackURL
 
 	mux.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
 		if err := r.URL.Query().Get("error"); err != "" {
@@ -277,13 +291,13 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config,
 		// Check if browser is available
 		if !browser.IsAvailable() {
 			log.Warn("No browser available on this system")
-			util.PrintSSHTunnelInstructions(8085)
+			util.PrintSSHTunnelInstructions(callbackPort)
 			fmt.Printf("Please manually open this URL in your browser:\n\n%s\n", authURL)
 		} else {
 			if err := browser.OpenURL(authURL); err != nil {
 				authErr := codex.NewAuthenticationError(codex.ErrBrowserOpenFailed, err)
 				log.Warn(codex.GetUserFriendlyMessage(authErr))
-				util.PrintSSHTunnelInstructions(8085)
+				util.PrintSSHTunnelInstructions(callbackPort)
 				fmt.Printf("Please manually open this URL in your browser:\n\n%s\n", authURL)
 
 				// Log platform info for debugging
@@ -294,7 +308,7 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config,
 			}
 		}
 	} else {
-		util.PrintSSHTunnelInstructions(8085)
+		util.PrintSSHTunnelInstructions(callbackPort)
 		fmt.Printf("Please open this URL in your browser:\n\n%s\n", authURL)
 	}
 

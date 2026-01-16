@@ -9,7 +9,7 @@ import (
 	"bytes"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -61,23 +61,23 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	out, _ = sjson.Set(out, "stream", stream)
 
 	// Thinking: Convert Claude thinking.budget_tokens to OpenAI reasoning_effort
-	if thinking := root.Get("thinking"); thinking.Exists() && thinking.IsObject() {
-		if thinkingType := thinking.Get("type"); thinkingType.Exists() {
+	if thinkingConfig := root.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
+		if thinkingType := thinkingConfig.Get("type"); thinkingType.Exists() {
 			switch thinkingType.String() {
 			case "enabled":
-				if budgetTokens := thinking.Get("budget_tokens"); budgetTokens.Exists() {
+				if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
 					budget := int(budgetTokens.Int())
-					if effort, ok := util.ThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
+					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
 						out, _ = sjson.Set(out, "reasoning_effort", effort)
 					}
 				} else {
 					// No budget_tokens specified, default to "auto" for enabled thinking
-					if effort, ok := util.ThinkingBudgetToEffort(modelName, -1); ok && effort != "" {
+					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
 						out, _ = sjson.Set(out, "reasoning_effort", effort)
 					}
 				}
 			case "disabled":
-				if effort, ok := util.ThinkingBudgetToEffort(modelName, 0); ok && effort != "" {
+				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
 					out, _ = sjson.Set(out, "reasoning_effort", effort)
 				}
 			}
@@ -129,7 +129,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "thinking":
 						// Only map thinking to reasoning_content for assistant messages (security: prevent injection)
 						if role == "assistant" {
-							thinkingText := util.GetThinkingText(part)
+							thinkingText := thinking.GetThinkingText(part)
 							// Skip empty or whitespace-only thinking
 							if strings.TrimSpace(thinkingText) != "" {
 								reasoningParts = append(reasoningParts, thinkingText)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -134,10 +135,11 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		}
 
 		// Normalize model (handles dynamic thinking suffixes)
-		normalizedModel, thinkingMetadata := util.NormalizeThinkingModel(modelName)
+		suffixResult := thinking.ParseSuffix(modelName)
+		normalizedModel := suffixResult.ModelName
 		thinkingSuffix := ""
-		if thinkingMetadata != nil && strings.HasPrefix(modelName, normalizedModel) {
-			thinkingSuffix = modelName[len(normalizedModel):]
+		if suffixResult.HasSuffix {
+			thinkingSuffix = "(" + suffixResult.RawSuffix + ")"
 		}
 
 		resolveMappedModel := func() (string, []string) {
@@ -157,13 +159,13 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			// Preserve dynamic thinking suffix (e.g. "(xhigh)") when mapping applies, unless the target
 			// already specifies its own thinking suffix.
 			if thinkingSuffix != "" {
-				_, mappedThinkingMetadata := util.NormalizeThinkingModel(mappedModel)
-				if mappedThinkingMetadata == nil {
+				mappedSuffixResult := thinking.ParseSuffix(mappedModel)
+				if !mappedSuffixResult.HasSuffix {
 					mappedModel += thinkingSuffix
 				}
 			}
 
-			mappedBaseModel, _ := util.NormalizeThinkingModel(mappedModel)
+			mappedBaseModel := thinking.ParseSuffix(mappedModel).ModelName
 			mappedProviders := util.GetProviderName(mappedBaseModel)
 			if len(mappedProviders) == 0 {
 				return "", nil

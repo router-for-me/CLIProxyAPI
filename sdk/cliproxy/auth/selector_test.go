@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -53,6 +54,69 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 		if got.ID != id {
 			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
 		}
+	}
+}
+
+func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "c", Attributes: map[string]string{"priority": "0"}},
+		{ID: "a", Attributes: map[string]string{"priority": "10"}},
+		{ID: "b", Attributes: map[string]string{"priority": "10"}},
+	}
+
+	want := []string{"a", "b", "a", "b"}
+	for i, id := range want {
+		got, err := selector.Pick(context.Background(), "mixed", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+		if got.ID == "c" {
+			t.Fatalf("Pick() #%d unexpectedly selected lower priority auth", i)
+		}
+	}
+}
+
+func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	now := time.Now()
+	model := "test-model"
+
+	high := &Auth{
+		ID:         "high",
+		Attributes: map[string]string{"priority": "10"},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota: QuotaState{
+					Exceeded: true,
+				},
+			},
+		},
+	}
+	low := &Auth{ID: "low", Attributes: map[string]string{"priority": "0"}}
+
+	got, err := selector.Pick(context.Background(), "mixed", model, cliproxyexecutor.Options{}, []*Auth{high, low})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "low" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "low")
 	}
 }
 

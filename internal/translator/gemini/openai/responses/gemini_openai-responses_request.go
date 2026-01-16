@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -388,31 +387,19 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		out, _ = sjson.Set(out, "generationConfig.stopSequences", sequences)
 	}
 
-	// OpenAI official reasoning fields take precedence
-	// Only convert for models that use numeric budgets (not discrete levels).
-	hasOfficialThinking := root.Get("reasoning.effort").Exists()
-	if hasOfficialThinking && util.ModelSupportsThinking(modelName) && !util.ModelUsesThinkingLevels(modelName) {
-		reasoningEffort := root.Get("reasoning.effort")
-		out = string(util.ApplyReasoningEffortToGemini([]byte(out), reasoningEffort.String()))
-	}
-
-	// Cherry Studio extension (applies only when official fields are missing)
-	// Only apply for models that use numeric budgets, not discrete levels.
-	if !hasOfficialThinking && util.ModelSupportsThinking(modelName) && !util.ModelUsesThinkingLevels(modelName) {
-		if tc := root.Get("extra_body.google.thinking_config"); tc.Exists() && tc.IsObject() {
-			var setBudget bool
-			var budget int
-			if v := tc.Get("thinking_budget"); v.Exists() {
-				budget = int(v.Int())
-				out, _ = sjson.Set(out, "generationConfig.thinkingConfig.thinkingBudget", budget)
-				setBudget = true
-			}
-			if v := tc.Get("include_thoughts"); v.Exists() {
-				out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", v.Bool())
-			} else if setBudget {
-				if budget != 0 {
-					out, _ = sjson.Set(out, "generationConfig.thinkingConfig.include_thoughts", true)
-				}
+	// Apply thinking configuration: convert OpenAI Responses API reasoning.effort to Gemini thinkingConfig.
+	// Inline translation-only mapping; capability checks happen later in ApplyThinking.
+	re := root.Get("reasoning.effort")
+	if re.Exists() {
+		effort := strings.ToLower(strings.TrimSpace(re.String()))
+		if effort != "" {
+			thinkingPath := "generationConfig.thinkingConfig"
+			if effort == "auto" {
+				out, _ = sjson.Set(out, thinkingPath+".thinkingBudget", -1)
+				out, _ = sjson.Set(out, thinkingPath+".includeThoughts", true)
+			} else {
+				out, _ = sjson.Set(out, thinkingPath+".thinkingLevel", effort)
+				out, _ = sjson.Set(out, thinkingPath+".includeThoughts", effort != "none")
 			}
 		}
 	}

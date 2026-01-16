@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -111,7 +111,8 @@ func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 
 // Execute performs a non-streaming request to the AI Studio API.
 func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	translatedReq, body, err := e.translateRequest(req, opts, false)
@@ -119,7 +120,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		return resp, err
 	}
 
-	endpoint := e.buildEndpoint(req.Model, body.action, opts.Alt)
+	endpoint := e.buildEndpoint(baseModel, body.action, opts.Alt)
 	wsReq := &wsrelay.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     endpoint,
@@ -166,7 +167,8 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 
 // ExecuteStream performs a streaming request to the AI Studio API.
 func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	translatedReq, body, err := e.translateRequest(req, opts, true)
@@ -174,7 +176,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		return nil, err
 	}
 
-	endpoint := e.buildEndpoint(req.Model, body.action, opts.Alt)
+	endpoint := e.buildEndpoint(baseModel, body.action, opts.Alt)
 	wsReq := &wsrelay.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     endpoint,
@@ -315,6 +317,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 
 // CountTokens counts tokens for the given request using the AI Studio API.
 func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	_, body, err := e.translateRequest(req, opts, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -324,7 +327,7 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 	body.payload, _ = sjson.DeleteBytes(body.payload, "tools")
 	body.payload, _ = sjson.DeleteBytes(body.payload, "safetySettings")
 
-	endpoint := e.buildEndpoint(req.Model, "countTokens", "")
+	endpoint := e.buildEndpoint(baseModel, "countTokens", "")
 	wsReq := &wsrelay.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     endpoint,
@@ -380,22 +383,22 @@ type translatedPayload struct {
 }
 
 func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) ([]byte, translatedPayload, error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 	originalPayload := bytes.Clone(req.Payload)
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = bytes.Clone(opts.OriginalRequest)
 	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, stream)
-	payload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
-	payload = ApplyThinkingMetadata(payload, req.Metadata, req.Model)
-	payload = util.ApplyGemini3ThinkingLevelFromMetadata(req.Model, req.Metadata, payload)
-	payload = util.ApplyDefaultThinkingIfNeeded(req.Model, payload)
-	payload = util.ConvertThinkingLevelToBudget(payload, req.Model, true)
-	payload = util.NormalizeGeminiThinkingBudget(req.Model, payload, true)
-	payload = util.StripThinkingConfigIfUnsupported(req.Model, payload)
-	payload = fixGeminiImageAspectRatio(req.Model, payload)
-	payload = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", payload, originalTranslated)
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
+	payload := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), stream)
+	payload, err := thinking.ApplyThinking(payload, req.Model, "gemini")
+	if err != nil {
+		return nil, translatedPayload{}, err
+	}
+	payload = fixGeminiImageAspectRatio(baseModel, payload)
+	payload = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", payload, originalTranslated)
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.maxOutputTokens")
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseMimeType")
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseJsonSchema")

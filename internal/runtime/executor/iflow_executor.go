@@ -12,6 +12,7 @@ import (
 
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -67,6 +68,8 @@ func (e *IFlowExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 
 // Execute performs a non-streaming chat completion request.
 func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
 	apiKey, baseURL := iflowCreds(auth)
 	if strings.TrimSpace(apiKey) == "" {
 		err = fmt.Errorf("iflow executor: missing api key")
@@ -76,7 +79,7 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		baseURL = iflowauth.DefaultAPIBaseURL
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -85,17 +88,17 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = bytes.Clone(opts.OriginalRequest)
 	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
-	body, _ = sjson.SetBytes(body, "model", req.Model)
-	body = NormalizeThinkingConfig(body, req.Model, false)
-	if errValidate := ValidateThinkingConfig(body, req.Model); errValidate != nil {
-		return resp, errValidate
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+	body, _ = sjson.SetBytes(body, "model", baseModel)
+
+	body, err = thinking.ApplyThinking(body, req.Model, "iflow")
+	if err != nil {
+		return resp, err
 	}
-	body = applyIFlowThinkingConfig(body)
+
 	body = preserveReasoningContentInMessages(body)
-	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
@@ -154,6 +157,8 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	reporter.ensurePublished(ctx)
 
 	var param any
+	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
+	// the original model name in the response for client compatibility.
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: []byte(out)}
 	return resp, nil
@@ -161,6 +166,8 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 // ExecuteStream performs a streaming chat completion request.
 func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
 	apiKey, baseURL := iflowCreds(auth)
 	if strings.TrimSpace(apiKey) == "" {
 		err = fmt.Errorf("iflow executor: missing api key")
@@ -170,7 +177,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		baseURL = iflowauth.DefaultAPIBaseURL
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -179,23 +186,22 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = bytes.Clone(opts.OriginalRequest)
 	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
+	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	body = ApplyReasoningEffortMetadata(body, req.Metadata, req.Model, "reasoning_effort", false)
-	body, _ = sjson.SetBytes(body, "model", req.Model)
-	body = NormalizeThinkingConfig(body, req.Model, false)
-	if errValidate := ValidateThinkingConfig(body, req.Model); errValidate != nil {
-		return nil, errValidate
+	body, err = thinking.ApplyThinking(body, req.Model, "iflow")
+	if err != nil {
+		return nil, err
 	}
-	body = applyIFlowThinkingConfig(body)
+
 	body = preserveReasoningContentInMessages(body)
 	// Ensure tools array exists to avoid provider quirks similar to Qwen's behaviour.
 	toolsResult := gjson.GetBytes(body, "tools")
 	if toolsResult.Exists() && toolsResult.IsArray() && len(toolsResult.Array()) == 0 {
 		body = ensureToolsArray(body)
 	}
-	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
@@ -278,11 +284,13 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func (e *IFlowExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
 
-	enc, err := tokenizerForModel(req.Model)
+	enc, err := tokenizerForModel(baseModel)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("iflow executor: tokenizer init failed: %w", err)
 	}
@@ -516,44 +524,6 @@ func preserveReasoningContentInMessages(body []byte) []byte {
 	// No need to modify - the client has correctly preserved reasoning in history
 	if hasReasoningContent {
 		log.Debugf("iflow executor: reasoning_content found in message history for %s", model)
-	}
-
-	return body
-}
-
-// applyIFlowThinkingConfig converts normalized reasoning_effort to model-specific thinking configurations.
-// This should be called after NormalizeThinkingConfig has processed the payload.
-//
-// Model-specific handling:
-//   - GLM-4.6/4.7: Uses chat_template_kwargs.enable_thinking (boolean) and chat_template_kwargs.clear_thinking=false
-//   - MiniMax M2/M2.1: Uses reasoning_split=true for OpenAI-style reasoning separation
-func applyIFlowThinkingConfig(body []byte) []byte {
-	effort := gjson.GetBytes(body, "reasoning_effort")
-	if !effort.Exists() {
-		return body
-	}
-
-	model := strings.ToLower(gjson.GetBytes(body, "model").String())
-	val := strings.ToLower(strings.TrimSpace(effort.String()))
-	enableThinking := val != "none" && val != ""
-
-	// Remove reasoning_effort as we'll convert to model-specific format
-	body, _ = sjson.DeleteBytes(body, "reasoning_effort")
-	body, _ = sjson.DeleteBytes(body, "thinking")
-
-	// GLM-4.6/4.7: Use chat_template_kwargs
-	if strings.HasPrefix(model, "glm-4") {
-		body, _ = sjson.SetBytes(body, "chat_template_kwargs.enable_thinking", enableThinking)
-		if enableThinking {
-			body, _ = sjson.SetBytes(body, "chat_template_kwargs.clear_thinking", false)
-		}
-		return body
-	}
-
-	// MiniMax M2/M2.1: Use reasoning_split
-	if strings.HasPrefix(model, "minimax-m2") {
-		body, _ = sjson.SetBytes(body, "reasoning_split", enableThinking)
-		return body
 	}
 
 	return body

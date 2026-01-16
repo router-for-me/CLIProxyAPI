@@ -6,9 +6,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
-func TestApplyOAuthModelMappings_Rename(t *testing.T) {
+func TestApplyOAuthModelAlias_Rename(t *testing.T) {
 	cfg := &config.Config{
-		OAuthModelMappings: map[string][]config.ModelNameMapping{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
 			"codex": {
 				{Name: "gpt-5", Alias: "g5"},
 			},
@@ -18,7 +18,7 @@ func TestApplyOAuthModelMappings_Rename(t *testing.T) {
 		{ID: "gpt-5", Name: "models/gpt-5"},
 	}
 
-	out := applyOAuthModelMappings(cfg, "codex", "oauth", models)
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
 	if len(out) != 1 {
 		t.Fatalf("expected 1 model, got %d", len(out))
 	}
@@ -30,9 +30,9 @@ func TestApplyOAuthModelMappings_Rename(t *testing.T) {
 	}
 }
 
-func TestApplyOAuthModelMappings_ForkAddsAlias(t *testing.T) {
+func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 	cfg := &config.Config{
-		OAuthModelMappings: map[string][]config.ModelNameMapping{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
 			"codex": {
 				{Name: "gpt-5", Alias: "g5", Fork: true},
 			},
@@ -42,7 +42,7 @@ func TestApplyOAuthModelMappings_ForkAddsAlias(t *testing.T) {
 		{ID: "gpt-5", Name: "models/gpt-5"},
 	}
 
-	out := applyOAuthModelMappings(cfg, "codex", "oauth", models)
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
 	if len(out) != 2 {
 		t.Fatalf("expected 2 models, got %d", len(out))
 	}
@@ -57,9 +57,9 @@ func TestApplyOAuthModelMappings_ForkAddsAlias(t *testing.T) {
 	}
 }
 
-func TestApplyOAuthModelMappings_ForkAddsMultipleAliases(t *testing.T) {
+func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 	cfg := &config.Config{
-		OAuthModelMappings: map[string][]config.ModelNameMapping{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
 			"codex": {
 				{Name: "gpt-5", Alias: "g5", Fork: true},
 				{Name: "gpt-5", Alias: "g5-2", Fork: true},
@@ -70,7 +70,7 @@ func TestApplyOAuthModelMappings_ForkAddsMultipleAliases(t *testing.T) {
 		{ID: "gpt-5", Name: "models/gpt-5"},
 	}
 
-	out := applyOAuthModelMappings(cfg, "codex", "oauth", models)
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
 	if len(out) != 3 {
 		t.Fatalf("expected 3 models, got %d", len(out))
 	}

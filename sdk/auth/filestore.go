@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -77,15 +79,23 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			if metadataEqualIgnoringTimestamps(existing, raw) {
 				return path, nil
 			}
-		} else if errRead != nil && !os.IsNotExist(errRead) {
+			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+			if errOpen != nil {
+				return "", fmt.Errorf("auth filestore: open existing failed: %w", errOpen)
+			}
+			if _, errWrite := file.Write(raw); errWrite != nil {
+				_ = file.Close()
+				return "", fmt.Errorf("auth filestore: write existing failed: %w", errWrite)
+			}
+			if errClose := file.Close(); errClose != nil {
+				return "", fmt.Errorf("auth filestore: close existing failed: %w", errClose)
+			}
+			return path, nil
+		} else if !os.IsNotExist(errRead) {
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
-		tmp := path + ".tmp"
-		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-			return "", fmt.Errorf("auth filestore: write temp failed: %w", errWrite)
-		}
-		if errRename := os.Rename(tmp, path); errRename != nil {
-			return "", fmt.Errorf("auth filestore: rename failed: %w", errRename)
+		if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+			return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
 		}
 	default:
 		return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
@@ -178,6 +188,30 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if provider == "" {
 		provider = "unknown"
 	}
+	if provider == "antigravity" {
+		projectID := ""
+		if pid, ok := metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+		if projectID == "" {
+			accessToken := ""
+			if token, ok := metadata["access_token"].(string); ok {
+				accessToken = strings.TrimSpace(token)
+			}
+			if accessToken != "" {
+				fetchedProjectID, errFetch := FetchAntigravityProjectID(context.Background(), accessToken, http.DefaultClient)
+				if errFetch == nil && strings.TrimSpace(fetchedProjectID) != "" {
+					metadata["project_id"] = strings.TrimSpace(fetchedProjectID)
+					if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
+						if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
+							_, _ = file.Write(raw)
+							_ = file.Close()
+						}
+					}
+				}
+			}
+		}
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)
@@ -266,92 +300,28 @@ func (s *FileTokenStore) baseDirSnapshot() string {
 	return s.baseDir
 }
 
-// DEPRECATED: Use metadataEqualIgnoringTimestamps for comparing auth metadata.
-// This function is kept for backward compatibility but can cause refresh loops.
-func jsonEqual(a, b []byte) bool {
-	var objA any
-	var objB any
-	if err := json.Unmarshal(a, &objA); err != nil {
-		return false
-	}
-	if err := json.Unmarshal(b, &objB); err != nil {
-		return false
-	}
-	return deepEqualJSON(objA, objB)
-}
-
-// metadataEqualIgnoringTimestamps compares two metadata JSON blobs,
-// ignoring fields that change on every refresh but don't affect functionality.
-// This prevents unnecessary file writes that would trigger watcher events and
-// create refresh loops.
+// metadataEqualIgnoringTimestamps compares two metadata JSON blobs, ignoring volatile fields that
+// change on every refresh but don't affect authentication logic.
 func metadataEqualIgnoringTimestamps(a, b []byte) bool {
-	var objA, objB map[string]any
-	if err := json.Unmarshal(a, &objA); err != nil {
+	var objA map[string]any
+	var objB map[string]any
+	if errUnmarshalA := json.Unmarshal(a, &objA); errUnmarshalA != nil {
 		return false
 	}
-	if err := json.Unmarshal(b, &objB); err != nil {
+	if errUnmarshalB := json.Unmarshal(b, &objB); errUnmarshalB != nil {
 		return false
 	}
-
-	// Fields to ignore: these change on every refresh but don't affect authentication logic.
-	// - timestamp, expired, expires_in, last_refresh: time-related fields that change on refresh
-	// - access_token: Google OAuth returns a new access_token on each refresh, this is expected
-	//   and shouldn't trigger file writes (the new token will be fetched again when needed)
-	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh", "access_token"}
-	for _, field := range ignoredFields {
-		delete(objA, field)
-		delete(objB, field)
-	}
-
-	return deepEqualJSON(objA, objB)
+	stripVolatileMetadataFields(objA)
+	stripVolatileMetadataFields(objB)
+	return reflect.DeepEqual(objA, objB)
 }
 
-func deepEqualJSON(a, b any) bool {
-	switch valA := a.(type) {
-	case map[string]any:
-		valB, ok := b.(map[string]any)
-		if !ok || len(valA) != len(valB) {
-			return false
-		}
-		for key, subA := range valA {
-			subB, ok1 := valB[key]
-			if !ok1 || !deepEqualJSON(subA, subB) {
-				return false
-			}
-		}
-		return true
-	case []any:
-		sliceB, ok := b.([]any)
-		if !ok || len(valA) != len(sliceB) {
-			return false
-		}
-		for i := range valA {
-			if !deepEqualJSON(valA[i], sliceB[i]) {
-				return false
-			}
-		}
-		return true
-	case float64:
-		valB, ok := b.(float64)
-		if !ok {
-			return false
-		}
-		return valA == valB
-	case string:
-		valB, ok := b.(string)
-		if !ok {
-			return false
-		}
-		return valA == valB
-	case bool:
-		valB, ok := b.(bool)
-		if !ok {
-			return false
-		}
-		return valA == valB
-	case nil:
-		return b == nil
-	default:
-		return false
+func stripVolatileMetadataFields(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	// These fields change on refresh and would otherwise trigger watcher reload loops.
+	for _, field := range []string{"timestamp", "expired", "expires_in", "last_refresh", "access_token"} {
+		delete(metadata, field)
 	}
 }

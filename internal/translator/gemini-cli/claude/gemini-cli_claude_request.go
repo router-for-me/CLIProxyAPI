@@ -9,8 +9,8 @@ import (
 	"bytes"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -160,12 +160,15 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 	}
 
 	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
-	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() && util.ModelSupportsThinking(modelName) {
-		if t.Get("type").String() == "enabled" {
-			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
-				budget := int(b.Int())
-				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() {
+		modelInfo := registry.LookupModelInfo(modelName)
+		if modelInfo != nil && modelInfo.Thinking != nil {
+			if t.Get("type").String() == "enabled" {
+				if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
+					budget := int(b.Int())
+					out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+					out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.include_thoughts", true)
+				}
 			}
 		}
 	}

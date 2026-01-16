@@ -10,23 +10,23 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
-type OAuthModelMappingsSummary struct {
+type OAuthModelAliasSummary struct {
 	hash  string
 	count int
 }
 
-// SummarizeOAuthModelMappings summarizes OAuth model mappings per channel.
-func SummarizeOAuthModelMappings(entries map[string][]config.ModelNameMapping) map[string]OAuthModelMappingsSummary {
+// SummarizeOAuthModelAlias summarizes OAuth model alias per channel.
+func SummarizeOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[string]OAuthModelAliasSummary {
 	if len(entries) == 0 {
 		return nil
 	}
-	out := make(map[string]OAuthModelMappingsSummary, len(entries))
+	out := make(map[string]OAuthModelAliasSummary, len(entries))
 	for k, v := range entries {
 		key := strings.ToLower(strings.TrimSpace(k))
 		if key == "" {
 			continue
 		}
-		out[key] = summarizeOAuthModelMappingList(v)
+		out[key] = summarizeOAuthModelAliasList(v)
 	}
 	if len(out) == 0 {
 		return nil
@@ -34,10 +34,10 @@ func SummarizeOAuthModelMappings(entries map[string][]config.ModelNameMapping) m
 	return out
 }
 
-// DiffOAuthModelMappingChanges compares OAuth model mappings maps.
-func DiffOAuthModelMappingChanges(oldMap, newMap map[string][]config.ModelNameMapping) ([]string, []string) {
-	oldSummary := SummarizeOAuthModelMappings(oldMap)
-	newSummary := SummarizeOAuthModelMappings(newMap)
+// DiffOAuthModelAliasChanges compares OAuth model alias maps.
+func DiffOAuthModelAliasChanges(oldMap, newMap map[string][]config.OAuthModelAlias) ([]string, []string) {
+	oldSummary := SummarizeOAuthModelAlias(oldMap)
+	newSummary := SummarizeOAuthModelAlias(newMap)
 	keys := make(map[string]struct{}, len(oldSummary)+len(newSummary))
 	for k := range oldSummary {
 		keys[k] = struct{}{}
@@ -52,13 +52,13 @@ func DiffOAuthModelMappingChanges(oldMap, newMap map[string][]config.ModelNameMa
 		newInfo, okNew := newSummary[key]
 		switch {
 		case okOld && !okNew:
-			changes = append(changes, fmt.Sprintf("oauth-model-mappings[%s]: removed", key))
+			changes = append(changes, fmt.Sprintf("oauth-model-alias[%s]: removed", key))
 			affected = append(affected, key)
 		case !okOld && okNew:
-			changes = append(changes, fmt.Sprintf("oauth-model-mappings[%s]: added (%d entries)", key, newInfo.count))
+			changes = append(changes, fmt.Sprintf("oauth-model-alias[%s]: added (%d entries)", key, newInfo.count))
 			affected = append(affected, key)
 		case okOld && okNew && oldInfo.hash != newInfo.hash:
-			changes = append(changes, fmt.Sprintf("oauth-model-mappings[%s]: updated (%d -> %d entries)", key, oldInfo.count, newInfo.count))
+			changes = append(changes, fmt.Sprintf("oauth-model-alias[%s]: updated (%d -> %d entries)", key, oldInfo.count, newInfo.count))
 			affected = append(affected, key)
 		}
 	}
@@ -67,20 +67,20 @@ func DiffOAuthModelMappingChanges(oldMap, newMap map[string][]config.ModelNameMa
 	return changes, affected
 }
 
-func summarizeOAuthModelMappingList(list []config.ModelNameMapping) OAuthModelMappingsSummary {
+func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAliasSummary {
 	if len(list) == 0 {
-		return OAuthModelMappingsSummary{}
+		return OAuthModelAliasSummary{}
 	}
 	seen := make(map[string]struct{}, len(list))
 	normalized := make([]string, 0, len(list))
-	for _, mapping := range list {
-		name := strings.ToLower(strings.TrimSpace(mapping.Name))
-		alias := strings.ToLower(strings.TrimSpace(mapping.Alias))
-		if name == "" || alias == "" {
+	for _, alias := range list {
+		name := strings.ToLower(strings.TrimSpace(alias.Name))
+		aliasVal := strings.ToLower(strings.TrimSpace(alias.Alias))
+		if name == "" || aliasVal == "" {
 			continue
 		}
-		key := name + "->" + alias
-		if mapping.Fork {
+		key := name + "->" + aliasVal
+		if alias.Fork {
 			key += "|fork"
 		}
 		if _, exists := seen[key]; exists {
@@ -90,11 +90,11 @@ func summarizeOAuthModelMappingList(list []config.ModelNameMapping) OAuthModelMa
 		normalized = append(normalized, key)
 	}
 	if len(normalized) == 0 {
-		return OAuthModelMappingsSummary{}
+		return OAuthModelAliasSummary{}
 	}
 	sort.Strings(normalized)
 	sum := sha256.Sum256([]byte(strings.Join(normalized, "|")))
-	return OAuthModelMappingsSummary{
+	return OAuthModelAliasSummary{
 		hash:  hex.EncodeToString(sum[:]),
 		count: len(normalized),
 	}

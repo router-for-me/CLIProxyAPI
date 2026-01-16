@@ -12,7 +12,7 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -82,7 +82,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 			if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
 				budget := int(thinkingBudget.Int())
-				if effort, ok := util.ThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
+				if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
 					out, _ = sjson.Set(out, "reasoning_effort", effort)
 				}
 			}

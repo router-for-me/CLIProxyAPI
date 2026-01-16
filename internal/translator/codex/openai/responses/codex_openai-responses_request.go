@@ -74,6 +74,11 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	}
 
 	if hasOfficialInstructions {
+		newInput := "[]"
+		for _, item := range inputResults {
+			newInput, _ = sjson.SetRaw(newInput, "-1", item.Raw)
+		}
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(newInput))
 		return rawJSON
 	}
 	// log.Debugf("instructions not matched, %s\n", originalInstructions)
