@@ -71,6 +71,11 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
+	// CodexInstructionsEnabled controls whether custom Codex instructions are injected.
+	// When false (default), CodexInstructionsForModel returns immediately without modification.
+	// When true, the original instruction injection logic is used.
+	CodexInstructionsEnabled bool `yaml:"codex-instructions-enabled" json:"codex-instructions-enabled"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
