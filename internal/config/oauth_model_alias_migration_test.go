@@ -114,6 +114,23 @@ func TestMigrateOAuthModelAlias_ConvertsAntigravityModels(t *testing.T) {
 	if !strings.Contains(content, "gemini-3-pro-high") {
 		t.Fatal("expected gemini-3-pro-preview to be converted to gemini-3-pro-high")
 	}
+
+	// Verify missing default aliases were supplemented
+	if !strings.Contains(content, "gemini-3-pro-image") {
+		t.Fatal("expected missing default alias gemini-3-pro-image to be added")
+	}
+	if !strings.Contains(content, "gemini-3-flash") {
+		t.Fatal("expected missing default alias gemini-3-flash to be added")
+	}
+	if !strings.Contains(content, "claude-sonnet-4-5") {
+		t.Fatal("expected missing default alias claude-sonnet-4-5 to be added")
+	}
+	if !strings.Contains(content, "claude-sonnet-4-5-thinking") {
+		t.Fatal("expected missing default alias claude-sonnet-4-5-thinking to be added")
+	}
+	if !strings.Contains(content, "claude-opus-4-5-thinking") {
+		t.Fatal("expected missing default alias claude-opus-4-5-thinking to be added")
+	}
 }
 
 func TestMigrateOAuthModelAlias_AddsDefaultIfNeitherExists(t *testing.T) {

@@ -71,7 +71,7 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
-	// CodexInstructionsEnabled controls whether custom Codex instructions are injected.
+	// CodexInstructionsEnabled controls whether official Codex instructions are injected.
 	// When false (default), CodexInstructionsForModel returns immediately without modification.
 	// When true, the original instruction injection logic is used.
 	CodexInstructionsEnabled bool `yaml:"codex-instructions-enabled" json:"codex-instructions-enabled"`

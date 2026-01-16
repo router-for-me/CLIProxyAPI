@@ -122,6 +122,23 @@ func migrateFromOldField(configFile string, root *yaml.Node, rootMap *yaml.Node,
 		newAliases[channel] = converted
 	}
 
+	// For antigravity channel, supplement missing default aliases
+	if antigravityEntries, exists := newAliases["antigravity"]; exists {
+		// Build a set of already configured model names (upstream names)
+		configuredModels := make(map[string]bool, len(antigravityEntries))
+		for _, entry := range antigravityEntries {
+			configuredModels[entry.Name] = true
+		}
+
+		// Add missing default aliases
+		for _, defaultAlias := range defaultAntigravityAliases() {
+			if !configuredModels[defaultAlias.Name] {
+				antigravityEntries = append(antigravityEntries, defaultAlias)
+			}
+		}
+		newAliases["antigravity"] = antigravityEntries
+	}
+
 	// Build new node
 	newNode := buildOAuthModelAliasNode(newAliases)
 
