@@ -118,6 +118,7 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 	}
 
 	activatedProjects := make([]string, 0, len(projectSelections))
+	seenProjects := make(map[string]bool)
 	for _, candidateID := range projectSelections {
 		log.Infof("Activating project %s", candidateID)
 		if errSetup := performGeminiCLISetup(ctx, httpClient, storage, candidateID); errSetup != nil {
@@ -134,6 +135,13 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 		if finalID == "" {
 			finalID = candidateID
 		}
+
+		// Skip duplicates
+		if seenProjects[finalID] {
+			log.Infof("Project %s already activated, skipping", finalID)
+			continue
+		}
+		seenProjects[finalID] = true
 		activatedProjects = append(activatedProjects, finalID)
 	}
 
@@ -261,9 +269,41 @@ func performGeminiCLISetup(ctx context.Context, httpClient *http.Client, storage
 			finalProjectID := projectID
 			if responseProjectID != "" {
 				if explicitProject && !strings.EqualFold(responseProjectID, projectID) {
-					log.Warnf("Gemini onboarding returned project %s instead of requested %s; keeping requested project ID.", responseProjectID, projectID)
+					// Check if this is a free user (gen-lang-client projects or free/legacy tier)
+					isFreeUser := strings.HasPrefix(projectID, "gen-lang-client-") ||
+						strings.EqualFold(tierID, "FREE") ||
+						strings.EqualFold(tierID, "LEGACY")
+
+					if isFreeUser {
+						// Interactive prompt for free users
+						fmt.Printf("\n⚠️  Google returned a different project ID:\n")
+						fmt.Printf("    Requested (frontend): %s\n", projectID)
+						fmt.Printf("    Returned (backend):   %s\n\n", responseProjectID)
+						fmt.Printf("ℹ️   Backend project IDs have access to preview models (gemini-3-*).\n")
+						fmt.Printf("    This is normal for free tier users.\n\n")
+						fmt.Printf("Which project ID would you like to use?\n")
+						fmt.Printf("  [1] Backend (recommended): %s\n", responseProjectID)
+						fmt.Printf("  [2] Frontend: %s\n\n", projectID)
+						fmt.Printf("Enter choice [1]: ")
+
+						reader := bufio.NewReader(os.Stdin)
+						choice, _ := reader.ReadString('\n')
+						choice = strings.TrimSpace(choice)
+
+						if choice == "2" {
+							log.Infof("Using frontend project ID: %s", projectID)
+							fmt.Println("⚠️  Warning: Frontend project IDs may not have access to preview models.")
+							finalProjectID = projectID
+						} else {
+							log.Infof("Using backend project ID: %s (recommended)", responseProjectID)
+							finalProjectID = responseProjectID
+						}
+					} else {
+						// Pro users: keep requested project ID (original behavior)
+						log.Warnf("Gemini onboarding returned project %s instead of requested %s; keeping requested project ID.", responseProjectID, projectID)
+					}
 				} else {
-					finalProjectID = responseProjectID
+				finalProjectID = responseProjectID
 				}
 			}
 
