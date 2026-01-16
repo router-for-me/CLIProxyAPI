@@ -1021,6 +1021,18 @@ func GetKiroModels() []*ModelInfo {
 	return []*ModelInfo{
 		// --- Base Models ---
 		{
+			ID:                  "kiro-auto",
+			Object:              "model",
+			Created:             1732752000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Auto",
+			Description:         "Automatic model selection by Kiro",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
 			ID:                  "kiro-claude-opus-4-5",
 			Object:              "model",
 			Created:             1732752000,
