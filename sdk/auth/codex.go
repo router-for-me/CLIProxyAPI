@@ -191,7 +191,13 @@ waitForCallback:
 		return nil, fmt.Errorf("codex token storage missing account information")
 	}
 
-	fileName := fmt.Sprintf("codex-%s.json", tokenStorage.Email)
+	planType := ""
+	if tokenStorage.IDToken != "" {
+		if claims, errParse := codex.ParseJWTToken(tokenStorage.IDToken); errParse == nil && claims != nil {
+			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+		}
+	}
+	fileName := codex.CredentialFileName(tokenStorage.Email, planType, true)
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}
