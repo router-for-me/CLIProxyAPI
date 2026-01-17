@@ -485,7 +485,7 @@ func ConfigureSQLite(config SQLiteStoreConfig) error {
 		return err
 	}
 	sqliteStore = store
-	sqlitePlugin = NewSQLitePlugin(store)
+	sqlitePlugin = NewSQLitePlugin(store, 4) // 4 worker goroutines
 
 	// Start retention cleanup if configured
 	if config.RetentionDays > 0 {
@@ -523,6 +523,9 @@ func ImportToSQLite(snapshot StatisticsSnapshot) (MergeResult, error) {
 
 // CloseSQLite stops retention cleanup and closes the database connection.
 func CloseSQLite() {
+	if sqlitePlugin != nil {
+		sqlitePlugin.Close()
+	}
 	if sqliteStore != nil {
 		sqliteStore.Close()
 	}

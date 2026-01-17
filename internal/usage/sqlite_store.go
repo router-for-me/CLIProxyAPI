@@ -1,7 +1,9 @@
 package usage
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +30,7 @@ CREATE TABLE IF NOT EXISTS usage_requests (
 	cached_tokens INTEGER DEFAULT 0,
 	total_tokens INTEGER DEFAULT 0,
 	failed INTEGER DEFAULT 0,
+	dedup_hash TEXT NOT NULL UNIQUE,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -46,10 +49,16 @@ type SQLiteStoreConfig struct {
 type SQLiteStore struct {
 	db       *sql.DB
 	config   SQLiteStoreConfig
-	mu       sync.Mutex
 	stopChan chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+}
+
+// computeDedupHash generates a unique hash for a usage record to prevent duplicates.
+func computeDedupHash(apiKey, model string, detail RequestDetail) string {
+	key := dedupKey(apiKey, model, detail)
+	hash := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(hash[:])
 }
 
 // NewSQLiteStore creates a new SQLite-backed usage store.
@@ -85,26 +94,21 @@ func NewSQLiteStore(config SQLiteStoreConfig) (*SQLiteStore, error) {
 
 // Record inserts a single usage record into the database.
 func (s *SQLiteStore) Record(record RequestDetail, apiKey, model string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	hash := computeDedupHash(apiKey, model, record)
 	_, err := s.db.Exec(`
-		INSERT INTO usage_requests
+		INSERT OR IGNORE INTO usage_requests
 		(timestamp, api_key, model, source, auth_index,
-		 input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, failed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, failed, dedup_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.Timestamp, apiKey, model, record.Source, record.AuthIndex,
 		record.Tokens.InputTokens, record.Tokens.OutputTokens,
 		record.Tokens.ReasoningTokens, record.Tokens.CachedTokens,
-		record.Tokens.TotalTokens, boolToInt(record.Failed))
+		record.Tokens.TotalTokens, boolToInt(record.Failed), hash)
 	return err
 }
 
 // LoadSnapshot retrieves all usage data from the database and returns it as a snapshot.
 func (s *SQLiteStore) LoadSnapshot() (StatisticsSnapshot, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	rows, err := s.db.Query(`
 		SELECT timestamp, api_key, model, source, auth_index,
 		       input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, failed
@@ -199,9 +203,6 @@ func (s *SQLiteStore) LoadSnapshot() (StatisticsSnapshot, error) {
 // ImportSnapshot imports usage data from a snapshot into the database.
 // It uses deduplication to avoid inserting duplicate records.
 func (s *SQLiteStore) ImportSnapshot(snapshot StatisticsSnapshot) (added, skipped int64, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, 0, fmt.Errorf("usage sqlite: begin transaction: %w", err)
@@ -209,64 +210,34 @@ func (s *SQLiteStore) ImportSnapshot(snapshot StatisticsSnapshot) (added, skippe
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO usage_requests
+		INSERT OR IGNORE INTO usage_requests
 		(timestamp, api_key, model, source, auth_index,
-		 input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, failed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		 input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, failed, dedup_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("usage sqlite: prepare statement: %w", err)
 	}
 	defer stmt.Close()
 
-	seen := make(map[string]struct{})
-	rows, err := s.db.Query("SELECT timestamp, api_key, model, source, auth_index, failed, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens FROM usage_requests")
-	if err != nil {
-		return 0, 0, fmt.Errorf("usage sqlite: query existing records: %w", err)
-	}
-	for rows.Next() {
-		var timestamp time.Time
-		var apiKey, model, source, authIndex string
-		var failed int
-		var inputTokens, outputTokens, reasoningTokens, cachedTokens, totalTokens int64
-		if err := rows.Scan(&timestamp, &apiKey, &model, &source, &authIndex, &failed, &inputTokens, &outputTokens, &reasoningTokens, &cachedTokens, &totalTokens); err == nil {
-			detail := RequestDetail{
-				Timestamp: timestamp,
-				Source:    source,
-				AuthIndex: authIndex,
-				Tokens: TokenStats{
-					InputTokens:     inputTokens,
-					OutputTokens:    outputTokens,
-					ReasoningTokens: reasoningTokens,
-					CachedTokens:    cachedTokens,
-					TotalTokens:     totalTokens,
-				},
-				Failed: failed != 0,
-			}
-			seen[dedupKey(apiKey, model, detail)] = struct{}{}
-		}
-	}
-	rows.Close()
-
 	for apiKey, apiSnapshot := range snapshot.APIs {
 		for model, modelSnapshot := range apiSnapshot.Models {
 			for _, detail := range modelSnapshot.Details {
-				key := dedupKey(apiKey, model, detail)
-				if _, exists := seen[key]; exists {
-					skipped++
-					continue
-				}
-				seen[key] = struct{}{}
-
-				_, err := stmt.Exec(
+				hash := computeDedupHash(apiKey, model, detail)
+				result, err := stmt.Exec(
 					detail.Timestamp, apiKey, model, detail.Source, detail.AuthIndex,
 					detail.Tokens.InputTokens, detail.Tokens.OutputTokens,
 					detail.Tokens.ReasoningTokens, detail.Tokens.CachedTokens,
-					detail.Tokens.TotalTokens, boolToInt(detail.Failed))
+					detail.Tokens.TotalTokens, boolToInt(detail.Failed), hash)
 				if err != nil {
 					log.Warnf("usage sqlite: insert record: %v", err)
 					continue
 				}
-				added++
+				rows, _ := result.RowsAffected()
+				if rows > 0 {
+					added++
+				} else {
+					skipped++ // Duplicate detected by UNIQUE constraint
+				}
 			}
 		}
 	}
@@ -295,9 +266,7 @@ func (s *SQLiteStore) StartRetentionCleanup(interval time.Duration) {
 
 		cleanup := func() {
 			cutoff := time.Now().AddDate(0, 0, -s.config.RetentionDays)
-			s.mu.Lock()
 			result, err := s.db.Exec("DELETE FROM usage_requests WHERE timestamp < ?", cutoff)
-			s.mu.Unlock()
 
 			if err != nil {
 				log.Warnf("usage sqlite: retention cleanup failed: %v", err)

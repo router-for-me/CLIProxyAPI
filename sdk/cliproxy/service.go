@@ -86,6 +86,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// sqlitePlugin handles SQLite-based usage persistence (optional).
+	sqlitePlugin *internalusage.SQLitePlugin
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -420,13 +423,27 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// Configure SQLite persistence if enabled
 	if s.cfg.UsageStatisticsPersistence {
-		if err := internalusage.ConfigureSQLite(internalusage.SQLiteStoreConfig{
+		store, err := internalusage.NewSQLiteStore(internalusage.SQLiteStoreConfig{
 			AuthDir:       s.cfg.AuthDir,
 			RetentionDays: s.cfg.UsageStatisticsRetentionDays,
-		}); err != nil {
-			log.Warnf("failed to configure usage SQLite: %v", err)
-		} else if err := internalusage.LoadFromSQLite(); err != nil {
-			log.Warnf("failed to load usage from SQLite: %v", err)
+		})
+		if err != nil {
+			log.Warnf("failed to create SQLite store: %v", err)
+		} else {
+			s.sqlitePlugin = internalusage.NewSQLitePlugin(store, 4) // 4 workers
+
+			// Start retention cleanup if configured
+			if s.cfg.UsageStatisticsRetentionDays > 0 {
+				store.StartRetentionCleanup(24 * time.Hour)
+			}
+
+			// Register plugin for usage tracking
+			usage.RegisterPlugin(s.sqlitePlugin)
+
+			// Load persisted data
+			if err := s.sqlitePlugin.LoadFromDB(); err != nil {
+				log.Warnf("failed to load usage from SQLite: %v", err)
+			}
 		}
 	}
 
@@ -651,8 +668,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.authQueueStop = nil
 		}
 
-		// Close SQLite database
-		internalusage.CloseSQLite()
+		// Close SQLite plugin and database
+		if s.sqlitePlugin != nil {
+			s.sqlitePlugin.Close()
+		}
 
 		// no legacy clients to persist
 

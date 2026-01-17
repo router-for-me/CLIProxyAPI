@@ -72,8 +72,8 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	result := h.usageStats.MergeSnapshot(payload.Usage)
 
 	// Also persist to SQLite if enabled
-	if usage.IsSQLiteEnabled() {
-		sqliteResult, err := usage.ImportToSQLite(payload.Usage)
+	if h.sqlitePlugin != nil {
+		sqliteResult, err := h.sqlitePlugin.Import(payload.Usage)
 		if err != nil {
 			log.Warnf("failed to persist imported usage to SQLite: %v", err)
 		} else {
