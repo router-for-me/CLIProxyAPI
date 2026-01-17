@@ -192,6 +192,11 @@ waitForCallback:
 		return nil, fmt.Errorf("claude token storage missing account information")
 	}
 
+	// Set proxy URL if provided
+	if opts.ProxyURL != "" {
+		tokenStorage.ProxyURL = opts.ProxyURL
+	}
+
 	fileName := fmt.Sprintf("claude-%s.json", tokenStorage.Email)
 	metadata := map[string]any{
 		"email": tokenStorage.Email,

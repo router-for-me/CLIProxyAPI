@@ -42,6 +42,9 @@ func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 	if opts.ProjectID != "" {
 		ts.ProjectID = opts.ProjectID
 	}
+	if opts.ProxyURL != "" {
+		ts.ProxyURL = opts.ProxyURL
+	}
 
 	geminiAuth := gemini.NewGeminiAuth()
 	_, err := geminiAuth.GetAuthenticatedClient(ctx, &ts, cfg, &gemini.WebLoginOptions{

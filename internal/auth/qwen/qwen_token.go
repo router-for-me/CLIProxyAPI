@@ -30,6 +30,9 @@ type QwenTokenStorage struct {
 	Type string `json:"type"`
 	// Expire is the timestamp when the current access token expires.
 	Expire string `json:"expired"`
+
+	// ProxyURL is the proxy URL used for this authentication.
+	ProxyURL string `json:"proxy_url,omitempty"`
 }
 
 // SaveTokenToFile serializes the Qwen token storage to a JSON file.

@@ -162,6 +162,11 @@ waitForCallback:
 
 	tokenStorage := authSvc.CreateTokenStorage(tokenData)
 
+	// Set proxy URL if provided
+	if opts.ProxyURL != "" {
+		tokenStorage.ProxyURL = opts.ProxyURL
+	}
+
 	email := strings.TrimSpace(tokenStorage.Email)
 	if email == "" {
 		return nil, fmt.Errorf("iflow authentication failed: missing account identifier")

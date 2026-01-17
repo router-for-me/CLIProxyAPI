@@ -430,6 +430,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
+	if proxyURL := authProxyURL(auth); proxyURL != "" {
+		entry["proxy_url"] = proxyURL
+	}
 	return entry
 }
 
@@ -498,6 +501,26 @@ func authAttribute(auth *coreauth.Auth, key string) string {
 		return ""
 	}
 	return auth.Attributes[key]
+}
+
+func authProxyURL(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.ProxyURL != "" {
+		return auth.ProxyURL
+	}
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["proxy_url"].(string); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["proxy_url"]); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
@@ -809,6 +832,9 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	ctx := context.Background()
 
+	// Get proxy URL from query parameter
+	proxyURL := strings.TrimSpace(c.Query("proxy_url"))
+
 	fmt.Println("Initializing Claude authentication...")
 
 	// Generate PKCE codes
@@ -977,12 +1003,19 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 		// Create token storage
 		tokenStorage := anthropicAuth.CreateTokenStorage(bundle)
+		if proxyURL != "" {
+			tokenStorage.ProxyURL = proxyURL
+		}
+		recordMetadata := map[string]any{"email": tokenStorage.Email}
+		if proxyURL != "" {
+			recordMetadata["proxy_url"] = proxyURL
+		}
 		record := &coreauth.Auth{
 			ID:       fmt.Sprintf("claude-%s.json", tokenStorage.Email),
 			Provider: "claude",
 			FileName: fmt.Sprintf("claude-%s.json", tokenStorage.Email),
 			Storage:  tokenStorage,
-			Metadata: map[string]any{"email": tokenStorage.Email},
+			Metadata: recordMetadata,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
@@ -1010,6 +1043,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 	// Optional project ID from query
 	projectID := c.Query("project_id")
+
+	// Get proxy URL from query parameter
+	proxyURL := strings.TrimSpace(c.Query("proxy_url"))
 
 	fmt.Println("Initializing Google authentication...")
 
@@ -1160,6 +1196,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			Email:     email,
 			Auto:      requestedProjectID == "",
 		}
+		if proxyURL != "" {
+			ts.ProxyURL = proxyURL
+		}
 
 		// Initialize authenticated HTTP client via GeminiAuth to honor proxy settings
 		gemAuth := geminiAuth.NewGeminiAuth()
@@ -1221,6 +1260,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			"auto":       ts.Auto,
 			"checked":    ts.Checked,
 		}
+		if proxyURL != "" {
+			recordMetadata["proxy_url"] = proxyURL
+		}
 
 		fileName := geminiAuth.CredentialFileName(ts.Email, ts.ProjectID, true)
 		record := &coreauth.Auth{
@@ -1247,6 +1289,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
+
+	// Get proxy URL from query parameter
+	proxyURL := strings.TrimSpace(c.Query("proxy_url"))
 
 	fmt.Println("Initializing Codex authentication...")
 
@@ -1402,15 +1447,22 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		// Create token storage and persist
 		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
+		if proxyURL != "" {
+			tokenStorage.ProxyURL = proxyURL
+		}
+		recordMetadata := map[string]any{
+			"email":      tokenStorage.Email,
+			"account_id": tokenStorage.AccountID,
+		}
+		if proxyURL != "" {
+			recordMetadata["proxy_url"] = proxyURL
+		}
 		record := &coreauth.Auth{
 			ID:       fmt.Sprintf("codex-%s.json", tokenStorage.Email),
 			Provider: "codex",
 			FileName: fmt.Sprintf("codex-%s.json", tokenStorage.Email),
 			Storage:  tokenStorage,
-			Metadata: map[string]any{
-				"email":      tokenStorage.Email,
-				"account_id": tokenStorage.AccountID,
-			},
+			Metadata: recordMetadata,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
@@ -1445,6 +1497,9 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	}
 
 	ctx := context.Background()
+
+	// Get proxy URL from query parameter
+	proxyURL := strings.TrimSpace(c.Query("proxy_url"))
 
 	fmt.Println("Initializing Antigravity authentication...")
 
@@ -1638,6 +1693,9 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		if projectID != "" {
 			metadata["project_id"] = projectID
 		}
+		if proxyURL != "" {
+			metadata["proxy_url"] = proxyURL
+		}
 
 		fileName := sanitizeAntigravityFileName(email)
 		label := strings.TrimSpace(email)
@@ -1674,6 +1732,9 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 func (h *Handler) RequestQwenToken(c *gin.Context) {
 	ctx := context.Background()
 
+	// Get proxy URL from query parameter
+	proxyURL := strings.TrimSpace(c.Query("proxy_url"))
+
 	fmt.Println("Initializing Qwen authentication...")
 
 	state := fmt.Sprintf("gem-%d", time.Now().UnixNano())
@@ -1704,12 +1765,19 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 		tokenStorage := qwenAuth.CreateTokenStorage(tokenData)
 
 		tokenStorage.Email = fmt.Sprintf("%d", time.Now().UnixMilli())
+		if proxyURL != "" {
+			tokenStorage.ProxyURL = proxyURL
+		}
+		recordMetadata := map[string]any{"email": tokenStorage.Email}
+		if proxyURL != "" {
+			recordMetadata["proxy_url"] = proxyURL
+		}
 		record := &coreauth.Auth{
 			ID:       fmt.Sprintf("qwen-%s.json", tokenStorage.Email),
 			Provider: "qwen",
 			FileName: fmt.Sprintf("qwen-%s.json", tokenStorage.Email),
 			Storage:  tokenStorage,
-			Metadata: map[string]any{"email": tokenStorage.Email},
+			Metadata: recordMetadata,
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
@@ -1728,6 +1796,9 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	ctx := context.Background()
+
+	// Get proxy URL from query parameter
+	proxyURL := strings.TrimSpace(c.Query("proxy_url"))
 
 	fmt.Println("Initializing iFlow authentication...")
 
@@ -1811,12 +1882,19 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 			identifier = fmt.Sprintf("%d", time.Now().UnixMilli())
 			tokenStorage.Email = identifier
 		}
+		if proxyURL != "" {
+			tokenStorage.ProxyURL = proxyURL
+		}
+		recordMetadata := map[string]any{"email": identifier, "api_key": tokenStorage.APIKey}
+		if proxyURL != "" {
+			recordMetadata["proxy_url"] = proxyURL
+		}
 		record := &coreauth.Auth{
 			ID:         fmt.Sprintf("iflow-%s.json", identifier),
 			Provider:   "iflow",
 			FileName:   fmt.Sprintf("iflow-%s.json", identifier),
 			Storage:    tokenStorage,
-			Metadata:   map[string]any{"email": identifier, "api_key": tokenStorage.APIKey},
+			Metadata:   recordMetadata,
 			Attributes: map[string]string{"api_key": tokenStorage.APIKey},
 		}
 
@@ -1843,7 +1921,8 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 	ctx := context.Background()
 
 	var payload struct {
-		Cookie string `json:"cookie"`
+		Cookie   string `json:"cookie"`
+		ProxyURL string `json:"proxy_url"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "cookie is required"})
@@ -1899,20 +1978,29 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 
 	tokenStorage.Email = email
 	timestamp := time.Now().Unix()
+	proxyURL := strings.TrimSpace(payload.ProxyURL)
+	if proxyURL != "" {
+		tokenStorage.ProxyURL = proxyURL
+	}
+
+	recordMetadata := map[string]any{
+		"email":        email,
+		"api_key":      tokenStorage.APIKey,
+		"expired":      tokenStorage.Expire,
+		"cookie":       tokenStorage.Cookie,
+		"type":         tokenStorage.Type,
+		"last_refresh": tokenStorage.LastRefresh,
+	}
+	if proxyURL != "" {
+		recordMetadata["proxy_url"] = proxyURL
+	}
 
 	record := &coreauth.Auth{
 		ID:       fmt.Sprintf("%s-%d.json", fileName, timestamp),
 		Provider: "iflow",
 		FileName: fmt.Sprintf("%s-%d.json", fileName, timestamp),
 		Storage:  tokenStorage,
-		Metadata: map[string]any{
-			"email":        email,
-			"api_key":      tokenStorage.APIKey,
-			"expired":      tokenStorage.Expire,
-			"cookie":       tokenStorage.Cookie,
-			"type":         tokenStorage.Type,
-			"last_refresh": tokenStorage.LastRefresh,
-		},
+		Metadata: recordMetadata,
 		Attributes: map[string]string{
 			"api_key": tokenStorage.APIKey,
 		},
@@ -2293,4 +2381,188 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
+}
+
+// GetAuthFileProxy returns the proxy URL for a specific auth file.
+func (h *Handler) GetAuthFileProxy(c *gin.Context) {
+	name := strings.TrimSpace(c.Query("name"))
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	if h.authManager != nil {
+		auths := h.authManager.List()
+		for _, auth := range auths {
+			if auth.FileName == name || auth.ID == name {
+				proxyURL := authProxyURL(auth)
+				c.JSON(http.StatusOK, gin.H{"name": name, "proxy_url": proxyURL})
+				return
+			}
+		}
+	}
+
+	// Fall back to reading from file
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name must end with .json"})
+		return
+	}
+	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	data, err := os.ReadFile(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
+		}
+		return
+	}
+
+	proxyURL := gjson.GetBytes(data, "proxy_url").String()
+	c.JSON(http.StatusOK, gin.H{"name": name, "proxy_url": proxyURL})
+}
+
+// UpdateAuthFileProxy updates the proxy URL for a specific auth file.
+func (h *Handler) UpdateAuthFileProxy(c *gin.Context) {
+	var payload struct {
+		Name     string `json:"name"`
+		ProxyURL string `json:"proxy_url"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+	if strings.Contains(name, string(os.PathSeparator)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid name"})
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name must end with .json"})
+		return
+	}
+
+	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	data, err := os.ReadFile(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
+		}
+		return
+	}
+
+	var fileData map[string]any
+	if err = json.Unmarshal(data, &fileData); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse auth file"})
+		return
+	}
+
+	proxyURL := strings.TrimSpace(payload.ProxyURL)
+	if proxyURL == "" {
+		delete(fileData, "proxy_url")
+	} else {
+		fileData["proxy_url"] = proxyURL
+	}
+
+	newData, err := json.MarshalIndent(fileData, "", "  ")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode auth file"})
+		return
+	}
+
+	if err = os.WriteFile(full, newData, 0o600); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to write file: %v", err)})
+		return
+	}
+
+	// Update auth manager if available
+	if h.authManager != nil {
+		ctx := c.Request.Context()
+		authID := h.authIDForPath(full)
+		if auth, ok := h.authManager.GetByID(authID); ok {
+			auth.ProxyURL = proxyURL
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			if proxyURL == "" {
+				delete(auth.Metadata, "proxy_url")
+			} else {
+				auth.Metadata["proxy_url"] = proxyURL
+			}
+			auth.UpdatedAt = time.Now()
+			_, _ = h.authManager.Update(ctx, auth)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "name": name, "proxy_url": proxyURL})
+}
+
+// DeleteAuthFileProxy removes the proxy URL from a specific auth file.
+func (h *Handler) DeleteAuthFileProxy(c *gin.Context) {
+	name := strings.TrimSpace(c.Query("name"))
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+	if strings.Contains(name, string(os.PathSeparator)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid name"})
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name must end with .json"})
+		return
+	}
+
+	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	data, err := os.ReadFile(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
+		}
+		return
+	}
+
+	var fileData map[string]any
+	if err = json.Unmarshal(data, &fileData); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse auth file"})
+		return
+	}
+
+	delete(fileData, "proxy_url")
+
+	newData, err := json.MarshalIndent(fileData, "", "  ")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode auth file"})
+		return
+	}
+
+	if err = os.WriteFile(full, newData, 0o600); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to write file: %v", err)})
+		return
+	}
+
+	// Update auth manager if available
+	if h.authManager != nil {
+		ctx := c.Request.Context()
+		authID := h.authIDForPath(full)
+		if auth, ok := h.authManager.GetByID(authID); ok {
+			auth.ProxyURL = ""
+			if auth.Metadata != nil {
+				delete(auth.Metadata, "proxy_url")
+			}
+			auth.UpdatedAt = time.Now()
+			_, _ = h.authManager.Update(ctx, auth)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "name": name})
 }

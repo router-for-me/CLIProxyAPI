@@ -36,6 +36,9 @@ type ClaudeTokenStorage struct {
 
 	// Expire is the timestamp when the current access token expires.
 	Expire string `json:"expired"`
+
+	// ProxyURL is the proxy URL used for this authentication.
+	ProxyURL string `json:"proxy_url,omitempty"`
 }
 
 // SaveTokenToFile serializes the Claude token storage to a JSON file.

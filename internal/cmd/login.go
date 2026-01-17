@@ -70,6 +70,7 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 		NoBrowser:    options.NoBrowser,
 		ProjectID:    trimmedProjectID,
 		CallbackPort: options.CallbackPort,
+		ProxyURL:     options.ProxyURL,
 		Metadata:     map[string]string{},
 		Prompt:       callbackPrompt,
 	}

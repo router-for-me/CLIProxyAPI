@@ -191,6 +191,11 @@ waitForCallback:
 		return nil, fmt.Errorf("codex token storage missing account information")
 	}
 
+	// Set proxy URL if provided
+	if opts.ProxyURL != "" {
+		tokenStorage.ProxyURL = opts.ProxyURL
+	}
+
 	fileName := fmt.Sprintf("codex-%s.json", tokenStorage.Email)
 	metadata := map[string]any{
 		"email": tokenStorage.Email,

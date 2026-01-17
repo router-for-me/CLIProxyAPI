@@ -203,6 +203,9 @@ waitForCallback:
 	if projectID != "" {
 		metadata["project_id"] = projectID
 	}
+	if opts.ProxyURL != "" {
+		metadata["proxy_url"] = opts.ProxyURL
+	}
 
 	fileName := sanitizeAntigravityFileName(email)
 	label := email

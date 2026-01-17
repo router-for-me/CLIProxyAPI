@@ -17,6 +17,7 @@ type LoginOptions struct {
 	NoBrowser    bool
 	ProjectID    string
 	CallbackPort int
+	ProxyURL     string
 	Metadata     map[string]string
 	Prompt       func(prompt string) (string, error)
 }

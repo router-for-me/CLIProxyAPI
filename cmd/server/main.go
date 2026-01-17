@@ -67,6 +67,7 @@ func main() {
 	var vertexImport string
 	var configPath string
 	var password string
+	var proxyURL string
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -82,6 +83,7 @@ func main() {
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&password, "password", "", "")
+	flag.StringVar(&proxyURL, "proxy", "", "Proxy URL for OAuth login (e.g., http://user:pass@host:port)")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -429,6 +431,7 @@ func main() {
 	options := &cmd.LoginOptions{
 		NoBrowser:    noBrowser,
 		CallbackPort: oauthCallbackPort,
+		ProxyURL:     proxyURL,
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.

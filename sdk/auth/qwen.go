@@ -95,6 +95,11 @@ func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 
 	tokenStorage.Email = email
 
+	// Set proxy URL if provided
+	if opts.ProxyURL != "" {
+		tokenStorage.ProxyURL = opts.ProxyURL
+	}
+
 	// no legacy client construction
 
 	fileName := fmt.Sprintf("qwen-%s.json", tokenStorage.Email)
