@@ -470,3 +470,69 @@ func formatHour(hour int) string {
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
 }
+
+// SQLite persistence support
+var (
+	sqliteStore  *SQLiteStore
+	sqlitePlugin *SQLitePlugin
+)
+
+// ConfigureSQLite initializes SQLite-backed usage persistence.
+// It creates the database, starts retention cleanup, and replaces the default plugin.
+func ConfigureSQLite(config SQLiteStoreConfig) error {
+	store, err := NewSQLiteStore(config)
+	if err != nil {
+		return err
+	}
+	sqliteStore = store
+	sqlitePlugin = NewSQLitePlugin(store)
+
+	// Start retention cleanup if configured
+	if config.RetentionDays > 0 {
+		store.StartRetentionCleanup(24 * time.Hour)
+	}
+
+	// Replace default plugin with SQLite-backed one
+	coreusage.RegisterPlugin(sqlitePlugin)
+
+	return nil
+}
+
+// LoadFromSQLite loads persisted usage data from SQLite into memory.
+// Should be called after ConfigureSQLite during server startup.
+func LoadFromSQLite() error {
+	if sqlitePlugin == nil {
+		return nil
+	}
+	return sqlitePlugin.LoadFromDB()
+}
+
+// IsSQLiteEnabled returns true if SQLite persistence is configured.
+func IsSQLiteEnabled() bool {
+	return sqliteStore != nil
+}
+
+// ImportToSQLite persists an imported snapshot to the SQLite database.
+func ImportToSQLite(snapshot StatisticsSnapshot) (MergeResult, error) {
+	if sqliteStore == nil {
+		return MergeResult{}, nil
+	}
+	added, skipped, err := sqliteStore.ImportSnapshot(snapshot)
+	return MergeResult{Added: added, Skipped: skipped}, err
+}
+
+// CloseSQLite stops retention cleanup and closes the database connection.
+func CloseSQLite() {
+	if sqliteStore != nil {
+		sqliteStore.Close()
+	}
+}
+
+// GetSQLiteStats returns the in-memory statistics from the SQLite plugin.
+// If SQLite is not enabled, returns the default statistics store.
+func GetSQLiteStats() *RequestStatistics {
+	if sqlitePlugin != nil {
+		return sqlitePlugin.GetStats()
+	}
+	return defaultRequestStatistics
+}

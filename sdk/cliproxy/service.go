@@ -15,7 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -418,6 +418,18 @@ func (s *Service) Run(ctx context.Context) error {
 
 	usage.StartDefault(ctx)
 
+	// Configure SQLite persistence if enabled
+	if s.cfg.UsageStatisticsPersistence {
+		if err := internalusage.ConfigureSQLite(internalusage.SQLiteStoreConfig{
+			AuthDir:       s.cfg.AuthDir,
+			RetentionDays: s.cfg.UsageStatisticsRetentionDays,
+		}); err != nil {
+			log.Warnf("failed to configure usage SQLite: %v", err)
+		} else if err := internalusage.LoadFromSQLite(); err != nil {
+			log.Warnf("failed to load usage from SQLite: %v", err)
+		}
+	}
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	defer func() {
@@ -638,6 +650,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.authQueueStop()
 			s.authQueueStop = nil
 		}
+
+		// Close SQLite database
+		internalusage.CloseSQLite()
 
 		// no legacy clients to persist
 
