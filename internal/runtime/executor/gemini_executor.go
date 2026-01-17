@@ -120,7 +120,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
 
-	body, err = thinking.ApplyThinking(body, req.Model, "gemini")
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String())
 	if err != nil {
 		return resp, err
 	}
@@ -222,7 +222,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
 
-	body, err = thinking.ApplyThinking(body, req.Model, "gemini")
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String())
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +338,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	to := sdktranslator.FromString("gemini")
 	translatedReq := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
 
-	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, "gemini")
+	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, from.String(), to.String())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
