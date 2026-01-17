@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -54,23 +53,21 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	root := gjson.ParseBytes(rawJSON)
 
+	// Convert OpenAI Responses reasoning.effort to Claude thinking config.
 	if v := root.Get("reasoning.effort"); v.Exists() {
-		modelInfo := registry.LookupModelInfo(modelName)
-		if modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) == 0 {
-			effort := strings.ToLower(strings.TrimSpace(v.String()))
-			if effort != "" {
-				budget, ok := thinking.ConvertLevelToBudget(effort)
-				if ok {
-					switch budget {
-					case 0:
-						out, _ = sjson.Set(out, "thinking.type", "disabled")
-					case -1:
+		effort := strings.ToLower(strings.TrimSpace(v.String()))
+		if effort != "" {
+			budget, ok := thinking.ConvertLevelToBudget(effort)
+			if ok {
+				switch budget {
+				case 0:
+					out, _ = sjson.Set(out, "thinking.type", "disabled")
+				case -1:
+					out, _ = sjson.Set(out, "thinking.type", "enabled")
+				default:
+					if budget > 0 {
 						out, _ = sjson.Set(out, "thinking.type", "enabled")
-					default:
-						if budget > 0 {
-							out, _ = sjson.Set(out, "thinking.type", "enabled")
-							out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
-						}
+						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
 					}
 				}
 			}

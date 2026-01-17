@@ -9,64 +9,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// ClampBudget clamps a budget value to the model's supported range.
-//
-// Logging:
-//   - Warn when value=0 but ZeroAllowed=false
-//   - Debug when value is clamped to min/max
-//
-// Fields: provider, model, original_value, clamped_to, min, max
-func ClampBudget(value int, modelInfo *registry.ModelInfo, provider string) int {
-	model := "unknown"
-	support := (*registry.ThinkingSupport)(nil)
-	if modelInfo != nil {
-		if modelInfo.ID != "" {
-			model = modelInfo.ID
-		}
-		support = modelInfo.Thinking
-	}
-	if support == nil {
-		return value
-	}
-
-	// Auto value (-1) passes through without clamping.
-	if value == -1 {
-		return value
-	}
-
-	min := support.Min
-	max := support.Max
-	if value == 0 && !support.ZeroAllowed {
-		log.WithFields(log.Fields{
-			"provider":       provider,
-			"model":          model,
-			"original_value": value,
-			"clamped_to":     min,
-			"min":            min,
-			"max":            max,
-		}).Warn("thinking: budget zero not allowed |")
-		return min
-	}
-
-	// Some models are level-only and do not define numeric budget ranges.
-	if min == 0 && max == 0 {
-		return value
-	}
-
-	if value < min {
-		if value == 0 && support.ZeroAllowed {
-			return 0
-		}
-		logClamp(provider, model, value, min, min, max)
-		return min
-	}
-	if value > max {
-		logClamp(provider, model, value, max, min, max)
-		return max
-	}
-	return value
-}
-
 // ValidateConfig validates a thinking configuration against model capabilities.
 //
 // This function performs comprehensive validation:
@@ -74,10 +16,14 @@ func ClampBudget(value int, modelInfo *registry.ModelInfo, provider string) int 
 //   - Auto-converts between Budget and Level formats based on model capability
 //   - Validates that requested level is in the model's supported levels list
 //   - Clamps budget values to model's allowed range
+//   - When converting Budget -> Level for level-only models, clamps the derived standard level to the nearest supported level
+//     (special values none/auto are preserved)
 //
 // Parameters:
 //   - config: The thinking configuration to validate
 //   - support: Model's ThinkingSupport properties (nil means no thinking support)
+//   - fromFormat: Source provider format (used to determine strict validation rules)
+//   - toFormat: Target provider format
 //
 // Returns:
 //   - Normalized ThinkingConfig with clamped values
@@ -87,9 +33,9 @@ func ClampBudget(value int, modelInfo *registry.ModelInfo, provider string) int 
 //   - Budget-only model + Level config → Level converted to Budget
 //   - Level-only model + Budget config → Budget converted to Level
 //   - Hybrid model → preserve original format
-func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, provider string) (*ThinkingConfig, error) {
+func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFormat, toFormat string) (*ThinkingConfig, error) {
+	fromFormat, toFormat = strings.ToLower(strings.TrimSpace(fromFormat)), strings.ToLower(strings.TrimSpace(toFormat))
 	normalized := config
-
 	model := "unknown"
 	support := (*registry.ThinkingSupport)(nil)
 	if modelInfo != nil {
@@ -105,6 +51,9 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, provid
 		}
 		return &normalized, nil
 	}
+
+	allowClampUnsupported := isBudgetBasedProvider(fromFormat) && isLevelBasedProvider(toFormat)
+	strictBudget := fromFormat != "" && fromFormat == toFormat
 
 	capability := detectModelCapability(modelInfo)
 	switch capability {
@@ -127,8 +76,10 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, provid
 			if !ok {
 				return nil, NewThinkingError(ErrUnknownLevel, fmt.Sprintf("budget %d cannot be converted to a valid level", normalized.Budget))
 			}
+			// When converting Budget -> Level for level-only models, clamp the derived standard level
+			// to the nearest supported level. Special values (none/auto) are preserved.
 			normalized.Mode = ModeLevel
-			normalized.Level = ThinkingLevel(level)
+			normalized.Level = clampLevel(ThinkingLevel(level), modelInfo, toFormat)
 			normalized.Budget = 0
 		}
 	case CapabilityHybrid:
@@ -151,18 +102,35 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, provid
 
 	if len(support.Levels) > 0 && normalized.Mode == ModeLevel {
 		if !isLevelSupported(string(normalized.Level), support.Levels) {
-			validLevels := normalizeLevels(support.Levels)
-			message := fmt.Sprintf("level %q not supported, valid levels: %s", strings.ToLower(string(normalized.Level)), strings.Join(validLevels, ", "))
-			return nil, NewThinkingError(ErrLevelNotSupported, message)
+			if allowClampUnsupported {
+				normalized.Level = clampLevel(normalized.Level, modelInfo, toFormat)
+			}
+			if !isLevelSupported(string(normalized.Level), support.Levels) {
+				// User explicitly specified an unsupported level - return error
+				// (budget-derived levels may be clamped based on source format)
+				validLevels := normalizeLevels(support.Levels)
+				message := fmt.Sprintf("level %q not supported, valid levels: %s", strings.ToLower(string(normalized.Level)), strings.Join(validLevels, ", "))
+				return nil, NewThinkingError(ErrLevelNotSupported, message)
+			}
+		}
+	}
+
+	if strictBudget && normalized.Mode == ModeBudget {
+		min, max := support.Min, support.Max
+		if min != 0 || max != 0 {
+			if normalized.Budget < min || normalized.Budget > max || (normalized.Budget == 0 && !support.ZeroAllowed) {
+				message := fmt.Sprintf("budget %d out of range [%d,%d]", normalized.Budget, min, max)
+				return nil, NewThinkingError(ErrBudgetOutOfRange, message)
+			}
 		}
 	}
 
 	// Convert ModeAuto to mid-range if dynamic not allowed
 	if normalized.Mode == ModeAuto && !support.DynamicAllowed {
-		normalized = convertAutoToMidRange(normalized, support, provider, model)
+		normalized = convertAutoToMidRange(normalized, support, toFormat, model)
 	}
 
-	if normalized.Mode == ModeNone && provider == "claude" {
+	if normalized.Mode == ModeNone && toFormat == "claude" {
 		// Claude supports explicit disable via thinking.type="disabled".
 		// Keep Budget=0 so applier can omit budget_tokens.
 		normalized.Budget = 0
@@ -170,7 +138,7 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, provid
 	} else {
 		switch normalized.Mode {
 		case ModeBudget, ModeAuto, ModeNone:
-			normalized.Budget = ClampBudget(normalized.Budget, modelInfo, provider)
+			normalized.Budget = clampBudget(normalized.Budget, modelInfo, toFormat)
 		}
 
 		// ModeNone with clamped Budget > 0: set Level to lowest for Level-only/Hybrid models
@@ -181,23 +149,6 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, provid
 	}
 
 	return &normalized, nil
-}
-
-func isLevelSupported(level string, supported []string) bool {
-	for _, candidate := range supported {
-		if strings.EqualFold(level, strings.TrimSpace(candidate)) {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeLevels(levels []string) []string {
-	normalized := make([]string, 0, len(levels))
-	for _, level := range levels {
-		normalized = append(normalized, strings.ToLower(strings.TrimSpace(level)))
-	}
-	return normalized
 }
 
 // convertAutoToMidRange converts ModeAuto to a mid-range value when dynamic is not allowed.
@@ -246,7 +197,156 @@ func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupp
 	return config
 }
 
-// logClamp logs a debug message when budget clamping occurs.
+// standardLevelOrder defines the canonical ordering of thinking levels from lowest to highest.
+var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh}
+
+// clampLevel clamps the given level to the nearest supported level.
+// On tie, prefers the lower level.
+func clampLevel(level ThinkingLevel, modelInfo *registry.ModelInfo, provider string) ThinkingLevel {
+	model := "unknown"
+	var supported []string
+	if modelInfo != nil {
+		if modelInfo.ID != "" {
+			model = modelInfo.ID
+		}
+		if modelInfo.Thinking != nil {
+			supported = modelInfo.Thinking.Levels
+		}
+	}
+
+	if len(supported) == 0 || isLevelSupported(string(level), supported) {
+		return level
+	}
+
+	pos := levelIndex(string(level))
+	if pos == -1 {
+		return level
+	}
+	bestIdx, bestDist := -1, len(standardLevelOrder)+1
+
+	for _, s := range supported {
+		if idx := levelIndex(strings.TrimSpace(s)); idx != -1 {
+			if dist := abs(pos - idx); dist < bestDist || (dist == bestDist && idx < bestIdx) {
+				bestIdx, bestDist = idx, dist
+			}
+		}
+	}
+
+	if bestIdx >= 0 {
+		clamped := standardLevelOrder[bestIdx]
+		log.WithFields(log.Fields{
+			"provider":       provider,
+			"model":          model,
+			"original_level": string(level),
+			"clamped_to":     string(clamped),
+		}).Debug("thinking: level clamped |")
+		return clamped
+	}
+	return level
+}
+
+// clampBudget clamps a budget value to the model's supported range.
+func clampBudget(value int, modelInfo *registry.ModelInfo, provider string) int {
+	model := "unknown"
+	support := (*registry.ThinkingSupport)(nil)
+	if modelInfo != nil {
+		if modelInfo.ID != "" {
+			model = modelInfo.ID
+		}
+		support = modelInfo.Thinking
+	}
+	if support == nil {
+		return value
+	}
+
+	// Auto value (-1) passes through without clamping.
+	if value == -1 {
+		return value
+	}
+
+	min, max := support.Min, support.Max
+	if value == 0 && !support.ZeroAllowed {
+		log.WithFields(log.Fields{
+			"provider":       provider,
+			"model":          model,
+			"original_value": value,
+			"clamped_to":     min,
+			"min":            min,
+			"max":            max,
+		}).Warn("thinking: budget zero not allowed |")
+		return min
+	}
+
+	// Some models are level-only and do not define numeric budget ranges.
+	if min == 0 && max == 0 {
+		return value
+	}
+
+	if value < min {
+		if value == 0 && support.ZeroAllowed {
+			return 0
+		}
+		logClamp(provider, model, value, min, min, max)
+		return min
+	}
+	if value > max {
+		logClamp(provider, model, value, max, min, max)
+		return max
+	}
+	return value
+}
+
+func isLevelSupported(level string, supported []string) bool {
+	for _, s := range supported {
+		if strings.EqualFold(level, strings.TrimSpace(s)) {
+			return true
+		}
+	}
+	return false
+}
+
+func levelIndex(level string) int {
+	for i, l := range standardLevelOrder {
+		if strings.EqualFold(level, string(l)) {
+			return i
+		}
+	}
+	return -1
+}
+
+func normalizeLevels(levels []string) []string {
+	out := make([]string, len(levels))
+	for i, l := range levels {
+		out[i] = strings.ToLower(strings.TrimSpace(l))
+	}
+	return out
+}
+
+func isBudgetBasedProvider(provider string) bool {
+	switch provider {
+	case "gemini", "gemini-cli", "antigravity", "claude":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLevelBasedProvider(provider string) bool {
+	switch provider {
+	case "openai", "openai-response", "codex":
+		return true
+	default:
+		return false
+	}
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 func logClamp(provider, model string, original, clampedTo, min, max int) {
 	log.WithFields(log.Fields{
 		"provider":       provider,

@@ -92,7 +92,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), opts.Stream)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, "openai")
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String())
 	if err != nil {
 		return resp, err
 	}
@@ -187,7 +187,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, "openai")
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String())
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +297,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 
 	modelForCounting := baseModel
 
-	translated, err := thinking.ApplyThinking(translated, req.Model, "openai")
+	translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), to.String())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
