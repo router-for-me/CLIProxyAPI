@@ -818,3 +818,54 @@ func TestCleanJSONSchemaForAntigravity_MultipleFormats(t *testing.T) {
 		t.Errorf("date-time format hint should be added, got: %s", result)
 	}
 }
+
+func TestCleanJSONSchemaForAntigravity_NumericEnumToString(t *testing.T) {
+	// Gemini API requires enum values to be strings, not numbers
+	input := `{
+		"type": "object",
+		"properties": {
+			"priority": {"type": "integer", "enum": [0, 1, 2]},
+			"level": {"type": "number", "enum": [1.5, 2.5, 3.5]},
+			"status": {"type": "string", "enum": ["active", "inactive"]}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// Numeric enum values should be converted to strings
+	if strings.Contains(result, `"enum":[0,1,2]`) {
+		t.Errorf("Integer enum values should be converted to strings, got: %s", result)
+	}
+	if strings.Contains(result, `"enum":[1.5,2.5,3.5]`) {
+		t.Errorf("Float enum values should be converted to strings, got: %s", result)
+	}
+	// Should contain string versions
+	if !strings.Contains(result, `"0"`) || !strings.Contains(result, `"1"`) || !strings.Contains(result, `"2"`) {
+		t.Errorf("Integer enum values should be converted to string format, got: %s", result)
+	}
+	// String enum values should remain unchanged
+	if !strings.Contains(result, `"active"`) || !strings.Contains(result, `"inactive"`) {
+		t.Errorf("String enum values should remain unchanged, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_BooleanEnumToString(t *testing.T) {
+	// Boolean enum values should also be converted to strings
+	input := `{
+		"type": "object",
+		"properties": {
+			"enabled": {"type": "boolean", "enum": [true, false]}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// Boolean enum values should be converted to strings
+	if strings.Contains(result, `"enum":[true,false]`) {
+		t.Errorf("Boolean enum values should be converted to strings, got: %s", result)
+	}
+	// Should contain string versions "true" and "false"
+	if !strings.Contains(result, `"true"`) || !strings.Contains(result, `"false"`) {
+		t.Errorf("Boolean enum values should be converted to string format, got: %s", result)
+	}
+}
