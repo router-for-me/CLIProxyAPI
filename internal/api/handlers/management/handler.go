@@ -42,6 +42,7 @@ type Handler struct {
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
 	usageStats          *usage.RequestStatistics
+	sqlitePlugin        *usage.SQLitePlugin // optional SQLite persistence
 	tokenStore          coreauth.Store
 	localPassword       string
 	allowRemoteOverride bool
@@ -111,6 +112,9 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = ma
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
+
+// SetSQLitePlugin sets the SQLite plugin for usage persistence.
+func (h *Handler) SetSQLitePlugin(plugin *usage.SQLitePlugin) { h.sqlitePlugin = plugin }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }

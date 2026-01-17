@@ -54,6 +54,15 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsageStatisticsPersistence enables SQLite-based usage persistence.
+	// When true, usage data is automatically saved to a SQLite database and
+	// survives server restarts. The database is stored in the auth directory.
+	UsageStatisticsPersistence bool `yaml:"usage-statistics-persistence" json:"usage-statistics-persistence"`
+
+	// UsageStatisticsRetentionDays specifies how many days of usage data to retain.
+	// Records older than this are automatically deleted. 0 means no retention limit (keep forever).
+	UsageStatisticsRetentionDays int `yaml:"usage-statistics-retention-days" json:"usage-statistics-retention-days"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 

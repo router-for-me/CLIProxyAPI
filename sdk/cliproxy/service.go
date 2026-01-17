@@ -15,7 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -86,6 +86,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// sqlitePlugin handles SQLite-based usage persistence (optional).
+	sqlitePlugin *internalusage.SQLitePlugin
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -418,6 +421,32 @@ func (s *Service) Run(ctx context.Context) error {
 
 	usage.StartDefault(ctx)
 
+	// Configure SQLite persistence if enabled
+	if s.cfg.UsageStatisticsPersistence {
+		store, err := internalusage.NewSQLiteStore(internalusage.SQLiteStoreConfig{
+			AuthDir:       s.cfg.AuthDir,
+			RetentionDays: s.cfg.UsageStatisticsRetentionDays,
+		})
+		if err != nil {
+			log.Warnf("failed to create SQLite store: %v", err)
+		} else {
+			s.sqlitePlugin = internalusage.NewSQLitePlugin(store, 4) // 4 workers
+
+			// Start retention cleanup if configured
+			if s.cfg.UsageStatisticsRetentionDays > 0 {
+				store.StartRetentionCleanup(24 * time.Hour)
+			}
+
+			// Register plugin for usage tracking
+			usage.RegisterPlugin(s.sqlitePlugin)
+
+			// Load persisted data
+			if err := s.sqlitePlugin.LoadFromDB(); err != nil {
+				log.Warnf("failed to load usage from SQLite: %v", err)
+			}
+		}
+	}
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	defer func() {
@@ -637,6 +666,11 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.authQueueStop != nil {
 			s.authQueueStop()
 			s.authQueueStop = nil
+		}
+
+		// Close SQLite plugin and database
+		if s.sqlitePlugin != nil {
+			s.sqlitePlugin.Close()
 		}
 
 		// no legacy clients to persist
