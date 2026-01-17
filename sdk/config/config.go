@@ -20,6 +20,8 @@ type OAuthModelAlias = internalconfig.OAuthModelAlias
 type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadModelRule = internalconfig.PayloadModelRule
+type ModelRoutingConfig = internalconfig.ModelRoutingConfig
+type ModelRouteEntry = internalconfig.ModelRouteEntry
 
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey

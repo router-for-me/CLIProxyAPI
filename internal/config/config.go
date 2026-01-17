@@ -109,6 +109,9 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// ModelRouting defines intelligent model routing with fallback candidates.
+	ModelRouting ModelRoutingConfig `yaml:"model-routing,omitempty" json:"model-routing,omitempty"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -246,6 +249,43 @@ type PayloadModelRule struct {
 	Name string `yaml:"name" json:"name"`
 	// Protocol restricts the rule to a specific translator format (e.g., "gemini", "responses").
 	Protocol string `yaml:"protocol" json:"protocol"`
+}
+
+// ModelRoutingConfig defines intelligent model routing with fallback candidates.
+// When a request comes in for a virtual model name, the router will try each candidate
+// in order until one succeeds, supporting fuzzy matching and caching successful routes.
+type ModelRoutingConfig struct {
+	// Enabled toggles the model routing feature. When false, routing is bypassed.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// AutoSearch enables automatic fuzzy search across all providers when no explicit
+	// route is configured. When true, a request for "Claude-sonnet-20251124" will
+	// automatically search for all models containing "Claude-sonnet" across all providers.
+	AutoSearch bool `yaml:"auto-search,omitempty" json:"auto-search,omitempty"`
+
+	// CacheFile is the path (relative to auth-dir) for persisting successful model routes.
+	// If empty, defaults to "model-routing-cache.json".
+	CacheFile string `yaml:"cache-file,omitempty" json:"cache-file,omitempty"`
+
+	// Routes defines the routing rules mapping virtual model names to candidate models.
+	Routes []ModelRouteEntry `yaml:"routes,omitempty" json:"routes,omitempty"`
+}
+
+// ModelRouteEntry defines a single routing rule for a virtual model name.
+type ModelRouteEntry struct {
+	// Name is the virtual model name that triggers this route.
+	// For fuzzy matching, this is the pattern to match against incoming model names.
+	Name string `yaml:"name" json:"name"`
+
+	// Fuzzy enables fuzzy/contains matching for this route.
+	// When true, the route matches if the incoming model name contains Name (case-insensitive).
+	// When false (default), exact match is required.
+	Fuzzy bool `yaml:"fuzzy,omitempty" json:"fuzzy,omitempty"`
+
+	// Candidates lists the actual model names to try, in priority order.
+	// Supports wildcard patterns (e.g., "*sonnet-4*") which are resolved against
+	// the model registry at runtime.
+	Candidates []string `yaml:"candidates" json:"candidates"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,

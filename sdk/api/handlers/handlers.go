@@ -16,12 +16,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -178,6 +180,9 @@ type BaseAPIHandler struct {
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
+
+	// ModelRouter handles intelligent model routing with fallback candidates.
+	ModelRouter *routing.ModelRouter
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -379,7 +384,15 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
+// It supports intelligent model routing with fallback candidates when configured.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
+	// Check for model routing candidates
+	candidates := h.getRoutingCandidates(modelName)
+	if len(candidates) > 0 {
+		return h.executeWithRoutingCandidates(ctx, handlerType, modelName, rawJSON, alt, candidates, false)
+	}
+
+	// No routing configured, use standard execution
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, errMsg
@@ -455,7 +468,15 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
+// It supports intelligent model routing with fallback candidates when configured.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
+	// Check for model routing candidates
+	candidates := h.getRoutingCandidates(modelName)
+	if len(candidates) > 0 {
+		return h.executeStreamWithRoutingCandidates(ctx, handlerType, modelName, rawJSON, alt, candidates)
+	}
+
+	// No routing configured, use standard execution
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -712,3 +733,246 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.
 // It can optionally accept parameters, which are used for logging the response.
 type APIHandlerCancelFunc func(params ...interface{})
+
+// getRoutingCandidates returns the list of candidate models for intelligent routing.
+// Returns nil if no routing is configured or the model doesn't match any route.
+func (h *BaseAPIHandler) getRoutingCandidates(modelName string) []string {
+	if h.ModelRouter == nil || !h.ModelRouter.IsEnabled() {
+		return nil
+	}
+	return h.ModelRouter.GetCandidates(modelName)
+}
+
+// executeWithRoutingCandidates tries each candidate model in order until one succeeds.
+// It records the successful model for future routing optimization.
+func (h *BaseAPIHandler) executeWithRoutingCandidates(ctx context.Context, handlerType, originalModel string, rawJSON []byte, alt string, candidates []string, isCount bool) ([]byte, *interfaces.ErrorMessage) {
+	var lastErr *interfaces.ErrorMessage
+
+	for i, candidate := range candidates {
+		// Resolve fuzzy candidate pattern to actual model
+		actualModel := h.resolveCandidate(candidate)
+		if actualModel == "" {
+			log.Debugf("model routing: candidate %d/%d '%s' has no available provider, skipping", i+1, len(candidates), candidate)
+			continue
+		}
+
+		log.Debugf("model routing: trying candidate %d/%d '%s' (resolved: %s) for request '%s'", i+1, len(candidates), candidate, actualModel, originalModel)
+
+		// Get providers for the resolved model
+		providers, normalizedModel, errMsg := h.getRequestDetails(actualModel)
+		if errMsg != nil {
+			log.Debugf("model routing: candidate '%s' failed to get providers: %v", actualModel, errMsg.Error)
+			lastErr = errMsg
+			continue
+		}
+
+		reqMeta := requestExecutionMetadata(ctx)
+		req := coreexecutor.Request{
+			Model:   normalizedModel,
+			Payload: cloneBytes(rawJSON),
+		}
+		opts := coreexecutor.Options{
+			Stream:          false,
+			Alt:             alt,
+			OriginalRequest: cloneBytes(rawJSON),
+			SourceFormat:    sdktranslator.FromString(handlerType),
+		}
+		opts.Metadata = reqMeta
+
+		var resp coreexecutor.Response
+		var err error
+		if isCount {
+			resp, err = h.AuthManager.ExecuteCount(ctx, providers, req, opts)
+		} else {
+			resp, err = h.AuthManager.Execute(ctx, providers, req, opts)
+		}
+
+		if err != nil {
+			status := http.StatusInternalServerError
+			if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+				if code := se.StatusCode(); code > 0 {
+					status = code
+				}
+			}
+			var addon http.Header
+			if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+				if hdr := he.Headers(); hdr != nil {
+					addon = hdr.Clone()
+				}
+			}
+			lastErr = &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+			log.Debugf("model routing: candidate '%s' failed with status %d: %v", actualModel, status, err)
+			continue
+		}
+
+		// Success! Record for future routing
+		if h.ModelRouter != nil {
+			h.ModelRouter.RecordSuccess(originalModel, actualModel)
+		}
+		log.Debugf("model routing: candidate '%s' succeeded for request '%s'", actualModel, originalModel)
+		return cloneBytes(resp.Payload), nil
+	}
+
+	// All candidates failed
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("all routing candidates failed for model %s", originalModel)}
+}
+
+// executeStreamWithRoutingCandidates tries each candidate model for streaming until one succeeds.
+func (h *BaseAPIHandler) executeStreamWithRoutingCandidates(ctx context.Context, handlerType, originalModel string, rawJSON []byte, alt string, candidates []string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
+	for i, candidate := range candidates {
+		// Resolve fuzzy candidate pattern to actual model
+		actualModel := h.resolveCandidate(candidate)
+		if actualModel == "" {
+			log.Debugf("model routing stream: candidate %d/%d '%s' has no available provider, skipping", i+1, len(candidates), candidate)
+			continue
+		}
+
+		log.Debugf("model routing stream: trying candidate %d/%d '%s' (resolved: %s) for request '%s'", i+1, len(candidates), candidate, actualModel, originalModel)
+
+		// Get providers for the resolved model
+		providers, normalizedModel, errMsg := h.getRequestDetails(actualModel)
+		if errMsg != nil {
+			log.Debugf("model routing stream: candidate '%s' failed to get providers: %v", actualModel, errMsg.Error)
+			continue
+		}
+
+		reqMeta := requestExecutionMetadata(ctx)
+		req := coreexecutor.Request{
+			Model:   normalizedModel,
+			Payload: cloneBytes(rawJSON),
+		}
+		opts := coreexecutor.Options{
+			Stream:          true,
+			Alt:             alt,
+			OriginalRequest: cloneBytes(rawJSON),
+			SourceFormat:    sdktranslator.FromString(handlerType),
+		}
+		opts.Metadata = reqMeta
+
+		chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+		if err != nil {
+			log.Debugf("model routing stream: candidate '%s' failed to start stream: %v", actualModel, err)
+			continue
+		}
+
+		// Success! Record for future routing and wrap the stream
+		if h.ModelRouter != nil {
+			h.ModelRouter.RecordSuccess(originalModel, actualModel)
+		}
+		log.Debugf("model routing stream: candidate '%s' succeeded for request '%s'", actualModel, originalModel)
+
+		// Wrap the stream with the existing bootstrap retry logic
+		return h.wrapStreamWithBootstrapRetry(ctx, providers, req, opts, chunks, originalModel, actualModel, candidates, i)
+	}
+
+	// All candidates failed
+	errChan := make(chan *interfaces.ErrorMessage, 1)
+	errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("all routing candidates failed for model %s", originalModel)}
+	close(errChan)
+	return nil, errChan
+}
+
+// wrapStreamWithBootstrapRetry wraps a stream channel with bootstrap retry logic.
+// If the stream fails before sending any data, it may try the next candidate.
+func (h *BaseAPIHandler) wrapStreamWithBootstrapRetry(ctx context.Context, providers []string, req coreexecutor.Request, opts coreexecutor.Options, chunks <-chan coreexecutor.StreamChunk, originalModel, currentModel string, candidates []string, currentIdx int) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
+	dataChan := make(chan []byte)
+	errChan := make(chan *interfaces.ErrorMessage, 1)
+
+	go func() {
+		defer close(dataChan)
+		defer close(errChan)
+		sentPayload := false
+		bootstrapRetries := 0
+		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+
+		bootstrapEligible := func(err error) bool {
+			status := statusFromError(err)
+			if status == 0 {
+				return true
+			}
+			switch status {
+			case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
+				http.StatusRequestTimeout, http.StatusTooManyRequests:
+				return true
+			default:
+				return status >= http.StatusInternalServerError
+			}
+		}
+
+	outer:
+		for {
+			for {
+				var chunk coreexecutor.StreamChunk
+				var ok bool
+				if ctx != nil {
+					select {
+					case <-ctx.Done():
+						return
+					case chunk, ok = <-chunks:
+					}
+				} else {
+					chunk, ok = <-chunks
+				}
+				if !ok {
+					return
+				}
+				if chunk.Err != nil {
+					streamErr := chunk.Err
+					// Safe bootstrap recovery
+					if !sentPayload {
+						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
+							bootstrapRetries++
+							retryChunks, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+							if retryErr == nil {
+								chunks = retryChunks
+								continue outer
+							}
+							streamErr = retryErr
+						}
+					}
+
+					status := http.StatusInternalServerError
+					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
+						if code := se.StatusCode(); code > 0 {
+							status = code
+						}
+					}
+					var addon http.Header
+					if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
+						if hdr := he.Headers(); hdr != nil {
+							addon = hdr.Clone()
+						}
+					}
+					errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon}
+					return
+				}
+				if len(chunk.Payload) > 0 {
+					sentPayload = true
+					dataChan <- cloneBytes(chunk.Payload)
+				}
+			}
+		}
+	}()
+
+	return dataChan, errChan
+}
+
+// resolveCandidate resolves a candidate pattern to an actual available model.
+func (h *BaseAPIHandler) resolveCandidate(candidate string) string {
+	if h.ModelRouter != nil {
+		return h.ModelRouter.ResolveFuzzyCandidate(candidate)
+	}
+	// Fallback: check if model has providers directly
+	if len(util.GetProviderName(candidate)) > 0 {
+		return candidate
+	}
+	return ""
+}
+
+// SetModelRouter sets the model router for intelligent routing.
+func (h *BaseAPIHandler) SetModelRouter(router *routing.ModelRouter) {
+	h.ModelRouter = router
+}

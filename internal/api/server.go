@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -155,6 +156,9 @@ type Server struct {
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
+	// modelRouter handles intelligent model routing with fallback candidates
+	modelRouter *routing.ModelRouter
+
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
@@ -256,6 +260,14 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	misc.SetCodexInstructionsEnabled(cfg.CodexInstructionsEnabled)
+
+	// Initialize model router for intelligent routing with fallback candidates
+	if cfg.ModelRouting.Enabled {
+		s.modelRouter = routing.NewModelRouter(&cfg.ModelRouting, cfg.AuthDir)
+		s.handlers.SetModelRouter(s.modelRouter)
+		log.Infof("Model routing enabled with %d routes", len(cfg.ModelRouting.Routes))
+	}
+
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if optionState.localPassword != "" {
@@ -986,6 +998,22 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
+	}
+
+	// Update model router configuration (hot-reload support)
+	if cfg.ModelRouting.Enabled {
+		if s.modelRouter == nil {
+			s.modelRouter = routing.NewModelRouter(&cfg.ModelRouting, cfg.AuthDir)
+			s.handlers.SetModelRouter(s.modelRouter)
+			log.Infof("Model routing enabled with %d routes", len(cfg.ModelRouting.Routes))
+		} else {
+			s.modelRouter.UpdateConfig(&cfg.ModelRouting, cfg.AuthDir)
+			log.Debugf("Model routing config updated with %d routes", len(cfg.ModelRouting.Routes))
+		}
+	} else if s.modelRouter != nil {
+		// Disable model routing
+		s.modelRouter.UpdateConfig(nil, "")
+		log.Infof("Model routing disabled")
 	}
 
 	// Notify Amp module of config changes (for model mapping hot-reload)

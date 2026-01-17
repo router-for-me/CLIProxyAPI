@@ -74,6 +74,38 @@ quota-exceeded:
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
 
+# Intelligent model routing with fallback candidates.
+# When enabled, you can define virtual model names that map to multiple actual models.
+# The router will try each candidate in order until one succeeds.
+# model-routing:
+#   enabled: true
+#   auto-search: true  # Auto-search all providers for models matching the base name
+#                      # e.g., "Claude-sonnet-20251124" -> searches for all "*Claude-sonnet*" models
+#   cache-file: "model-routing-cache.json"  # Persists successful routes (relative to auth-dir)
+#   routes:
+#     # Explicit routes take priority over auto-search
+#     # Exact match: request "claude-sonnet" tries these models in order
+#     - name: "claude-sonnet"
+#       candidates:
+#         - "claude-sonnet-4-20250514"       # Try newest version first
+#         - "claude-3-5-sonnet-20241022"     # Fallback to older version
+#         - "gemini-claude-sonnet-4-5"       # Cross-provider fallback
+#
+#     # Fuzzy match: any request containing "sonnet" (case-insensitive)
+#     - name: "sonnet"
+#       fuzzy: true
+#       candidates:
+#         - "*sonnet-4*"    # Wildcard: matches any model with "sonnet-4" in name
+#         - "*sonnet*"      # Broader fallback
+#
+#     # Example: route "gpt" requests to available models
+#     - name: "gpt"
+#       fuzzy: true
+#       candidates:
+#         - "gpt-5-codex"
+#         - "gpt-4o"
+#         - "*gpt*"
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
