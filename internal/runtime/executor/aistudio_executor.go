@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/ratelimit"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -111,6 +112,11 @@ func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 
 // Execute performs a non-streaming request to the AI Studio API.
 func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	// Apply self-rate-limit delay if configured
+	if err := ratelimit.DelayBeforeRequest(ctx, e.Identifier()); err != nil {
+		return resp, err
+	}
+
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -167,6 +173,11 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 
 // ExecuteStream performs a streaming request to the AI Studio API.
 func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	// Apply self-rate-limit delay if configured
+	if err := ratelimit.DelayBeforeRequest(ctx, e.Identifier()); err != nil {
+		return nil, err
+	}
+
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -251,6 +262,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	stream = out
 	go func(first wsrelay.StreamEvent) {
 		defer close(out)
+		chunkDelayer := ratelimit.NewChunkDelayer(e.Identifier())
 		var param any
 		metadataLogged := false
 		processEvent := func(event wsrelay.StreamEvent) bool {
@@ -274,6 +286,10 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 						reporter.publish(ctx, detail)
 					}
 					lines := sdktranslator.TranslateStream(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), translatedReq, bytes.Clone(filtered), &param)
+					if err := chunkDelayer.DelayIfNeeded(ctx); err != nil {
+						out <- cliproxyexecutor.StreamChunk{Err: err}
+						return false
+					}
 					for i := range lines {
 						out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON([]byte(lines[i]))}
 					}
@@ -290,6 +306,10 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					appendAPIResponseChunk(ctx, e.cfg, bytes.Clone(event.Payload))
 				}
 				lines := sdktranslator.TranslateStream(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), translatedReq, bytes.Clone(event.Payload), &param)
+				if err := chunkDelayer.DelayIfNeeded(ctx); err != nil {
+					out <- cliproxyexecutor.StreamChunk{Err: err}
+					return false
+				}
 				for i := range lines {
 					out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON([]byte(lines[i]))}
 				}

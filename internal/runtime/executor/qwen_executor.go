@@ -12,6 +12,7 @@ import (
 
 	qwenauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/ratelimit"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -66,6 +67,11 @@ func (e *QwenExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 }
 
 func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	// Apply self-rate-limit delay if configured
+	if err := ratelimit.DelayBeforeRequest(ctx, e.Identifier()); err != nil {
+		return resp, err
+	}
+
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	token, baseURL := qwenCreds(auth)
@@ -152,6 +158,11 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 }
 
 func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	// Apply self-rate-limit delay if configured
+	if err := ratelimit.DelayBeforeRequest(ctx, e.Identifier()); err != nil {
+		return nil, err
+	}
+
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	token, baseURL := qwenCreds(auth)
@@ -231,6 +242,7 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	stream = out
 	go func() {
 		defer close(out)
+		chunkDelayer := ratelimit.NewChunkDelayer(e.Identifier())
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("qwen executor: close response body error: %v", errClose)
@@ -246,6 +258,10 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				reporter.publish(ctx, detail)
 			}
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(line), &param)
+			if err := chunkDelayer.DelayIfNeeded(ctx); err != nil {
+				out <- cliproxyexecutor.StreamChunk{Err: err}
+				return
+			}
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 			}

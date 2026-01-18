@@ -271,6 +271,43 @@ oauth-model-alias:
 #   iflow:
 #     - "tstars2.0"
 
+# Self-rate-limit: Add intentional delays to OAuth requests to appear more human-like.
+# This helps avoid detection as abusive by OAuth systems.
+# Per-provider settings allow different delays for different providers.
+# self-rate-limit:
+#   claude:
+#     min-delay-ms: 100      # Minimum delay in milliseconds before request
+#     max-delay-ms: 500      # Maximum delay in milliseconds before request (random value chosen)
+#     chunk-delay-ms: 30     # Delay in milliseconds between streaming chunks
+#   codex:
+#     min-delay-ms: 100
+#     max-delay-ms: 400
+#     chunk-delay-ms: 25
+#   gemini-cli:
+#     min-delay-ms: 150
+#     max-delay-ms: 600
+#     chunk-delay-ms: 40
+#   vertex:
+#     min-delay-ms: 100
+#     max-delay-ms: 500
+#     chunk-delay-ms: 30
+#   aistudio:
+#     min-delay-ms: 100
+#     max-delay-ms: 500
+#     chunk-delay-ms: 30
+#   antigravity:
+#     min-delay-ms: 100
+#     max-delay-ms: 500
+#     chunk-delay-ms: 30
+#   qwen:
+#     min-delay-ms: 100
+#     max-delay-ms: 400
+#     chunk-delay-ms: 25
+#   iflow:
+#     min-delay-ms: 100
+#     max-delay-ms: 400
+#     chunk-delay-ms: 25
+
 # Optional payload configuration
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.

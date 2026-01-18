@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/ratelimit"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -264,6 +265,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	logDir := logging.ResolveLogDirectory(cfg)
 	s.mgmt.SetLogDirectory(logDir)
 	s.localPassword = optionState.localPassword
+
+	// Wire up rate limit provider for delay helper
+	ratelimit.SetRateLimitProvider(s.mgmt)
 
 	// Setup routes
 	s.setupRoutes()
@@ -621,6 +625,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		// Self-rate-limit management
+		mgmt.GET("/self-rate-limit", s.mgmt.GetAllSelfRateLimits)
+		mgmt.GET("/self-rate-limit/:provider", s.mgmt.GetSelfRateLimit)
+		mgmt.PUT("/self-rate-limit/:provider", s.mgmt.PutSelfRateLimit)
+		mgmt.DELETE("/self-rate-limit/:provider", s.mgmt.DeleteSelfRateLimit)
 	}
 }
 

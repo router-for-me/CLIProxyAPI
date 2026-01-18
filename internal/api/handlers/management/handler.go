@@ -35,18 +35,20 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
+	cfg                    *config.Config
+	configFilePath         string
+	mu                     sync.Mutex
+	attemptsMu             sync.Mutex
+	failedAttempts         map[string]*attemptInfo // keyed by client IP
+	authManager            *coreauth.Manager
+	usageStats             *usage.RequestStatistics
+	tokenStore             coreauth.Store
+	localPassword          string
+	allowRemoteOverride    bool
+	envSecret              string
+	logDir                 string
+	selfRateLimitOverrides map[string]*config.ProviderRateLimit
+	selfRateLimitMu        sync.RWMutex
 }
 
 // NewHandler creates a new management handler instance.

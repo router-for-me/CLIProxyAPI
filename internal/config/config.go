@@ -20,6 +20,13 @@ import (
 
 const DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
+// ProviderRateLimit defines rate limiting settings for a single OAuth provider.
+type ProviderRateLimit struct {
+	MinDelayMs   int `yaml:"min-delay-ms" json:"min-delay-ms"`
+	MaxDelayMs   int `yaml:"max-delay-ms" json:"max-delay-ms"`
+	ChunkDelayMs int `yaml:"chunk-delay-ms" json:"chunk-delay-ms"`
+}
+
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	SDKConfig `yaml:",inline"`
@@ -108,6 +115,10 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	// SelfRateLimit defines per-provider rate limiting for OAuth request throttling.
+	// Key is the provider identifier (claude, codex, gemini-cli, vertex, aistudio, antigravity, qwen, iflow).
+	SelfRateLimit map[string]ProviderRateLimit `yaml:"self-rate-limit" json:"self-rate-limit"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
@@ -555,6 +566,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	// Validate self-rate-limit configuration entries.
+	cfg.SanitizeSelfRateLimit()
+
 	if cfg.legacyMigrationPending {
 		fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
 		if !optional && configFile != "" {
@@ -662,6 +676,34 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+// SanitizeSelfRateLimit validates and normalizes self-rate-limit configuration entries.
+// Invalid entries (min > max or negative values) are dropped with a log warning.
+// Provider names are normalized to lowercase.
+func (cfg *Config) SanitizeSelfRateLimit() {
+	if cfg == nil || len(cfg.SelfRateLimit) == 0 {
+		return
+	}
+	out := make(map[string]ProviderRateLimit, len(cfg.SelfRateLimit))
+	for rawProvider, limit := range cfg.SelfRateLimit {
+		provider := strings.ToLower(strings.TrimSpace(rawProvider))
+		if provider == "" {
+			continue
+		}
+		// Validate non-negative values
+		if limit.MinDelayMs < 0 || limit.MaxDelayMs < 0 || limit.ChunkDelayMs < 0 {
+			log.WithField("provider", provider).Warn("self-rate-limit dropped: negative delay values")
+			continue
+		}
+		// Validate min <= max
+		if limit.MinDelayMs > limit.MaxDelayMs {
+			log.WithField("provider", provider).Warn("self-rate-limit dropped: min-delay-ms > max-delay-ms")
+			continue
+		}
+		out[provider] = limit
+	}
+	cfg.SelfRateLimit = out
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
