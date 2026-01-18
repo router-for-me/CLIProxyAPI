@@ -17,6 +17,7 @@ type oaiToResponsesState struct {
 	ResponseID     string
 	Created        int64
 	Started        bool
+	CompletedSent  bool
 	ReasoningID    string
 	ReasoningIndex int
 	// aggregation buffers for response.output
@@ -67,6 +68,268 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	}
 	st := (*param).(*oaiToResponsesState)
 
+	nextSeq := func() int { st.Seq++; return st.Seq }
+
+	finalize := func() []string {
+		if st.CompletedSent {
+			return []string{}
+		}
+		st.CompletedSent = true
+
+		var out []string
+
+		// Emit message done events for all indices that started a message
+		if len(st.MsgItemAdded) > 0 {
+			// sort indices for deterministic order
+			idxs := make([]int, 0, len(st.MsgItemAdded))
+			for i := range st.MsgItemAdded {
+				idxs = append(idxs, i)
+			}
+			for i := 0; i < len(idxs); i++ {
+				for j := i + 1; j < len(idxs); j++ {
+					if idxs[j] < idxs[i] {
+						idxs[i], idxs[j] = idxs[j], idxs[i]
+					}
+				}
+			}
+			for _, i := range idxs {
+				if st.MsgItemAdded[i] && !st.MsgItemDone[i] {
+					fullText := ""
+					if b := st.MsgTextBuf[i]; b != nil {
+						fullText = b.String()
+					}
+					done := `{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`
+					done, _ = sjson.Set(done, "sequence_number", nextSeq())
+					done, _ = sjson.Set(done, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
+					done, _ = sjson.Set(done, "output_index", i)
+					done, _ = sjson.Set(done, "content_index", 0)
+					done, _ = sjson.Set(done, "text", fullText)
+					out = append(out, emitRespEvent("response.output_text.done", done))
+
+					partDone := `{"type":"response.content_part.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`
+					partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
+					partDone, _ = sjson.Set(partDone, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
+					partDone, _ = sjson.Set(partDone, "output_index", i)
+					partDone, _ = sjson.Set(partDone, "content_index", 0)
+					partDone, _ = sjson.Set(partDone, "part.text", fullText)
+					out = append(out, emitRespEvent("response.content_part.done", partDone))
+
+					itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}`
+					itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
+					itemDone, _ = sjson.Set(itemDone, "output_index", i)
+					itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
+					itemDone, _ = sjson.Set(itemDone, "item.content.0.text", fullText)
+					out = append(out, emitRespEvent("response.output_item.done", itemDone))
+					st.MsgItemDone[i] = true
+				}
+			}
+		}
+
+		if st.ReasoningID != "" {
+			// Emit reasoning done events
+			textDone := `{"type":"response.reasoning_summary_text.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`
+			textDone, _ = sjson.Set(textDone, "sequence_number", nextSeq())
+			textDone, _ = sjson.Set(textDone, "item_id", st.ReasoningID)
+			textDone, _ = sjson.Set(textDone, "output_index", st.ReasoningIndex)
+			out = append(out, emitRespEvent("response.reasoning_summary_text.done", textDone))
+			partDone := `{"type":"response.reasoning_summary_part.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`
+			partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
+			partDone, _ = sjson.Set(partDone, "item_id", st.ReasoningID)
+			partDone, _ = sjson.Set(partDone, "output_index", st.ReasoningIndex)
+			out = append(out, emitRespEvent("response.reasoning_summary_part.done", partDone))
+		}
+
+		// Emit function call done events for any active function calls
+		if len(st.FuncCallIDs) > 0 {
+			idxs := make([]int, 0, len(st.FuncCallIDs))
+			for i := range st.FuncCallIDs {
+				idxs = append(idxs, i)
+			}
+			for i := 0; i < len(idxs); i++ {
+				for j := i + 1; j < len(idxs); j++ {
+					if idxs[j] < idxs[i] {
+						idxs[i], idxs[j] = idxs[j], idxs[i]
+					}
+				}
+			}
+			for _, i := range idxs {
+				callID := st.FuncCallIDs[i]
+				if callID == "" || st.FuncItemDone[i] {
+					continue
+				}
+				args := "{}"
+				if b := st.FuncArgsBuf[i]; b != nil && b.Len() > 0 {
+					args = b.String()
+				}
+				fcDone := `{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`
+				fcDone, _ = sjson.Set(fcDone, "sequence_number", nextSeq())
+				fcDone, _ = sjson.Set(fcDone, "item_id", fmt.Sprintf("fc_%s", callID))
+				fcDone, _ = sjson.Set(fcDone, "output_index", i)
+				fcDone, _ = sjson.Set(fcDone, "arguments", args)
+				out = append(out, emitRespEvent("response.function_call_arguments.done", fcDone))
+
+				itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`
+				itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
+				itemDone, _ = sjson.Set(itemDone, "output_index", i)
+				itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("fc_%s", callID))
+				itemDone, _ = sjson.Set(itemDone, "item.arguments", args)
+				itemDone, _ = sjson.Set(itemDone, "item.call_id", callID)
+				itemDone, _ = sjson.Set(itemDone, "item.name", st.FuncNames[i])
+				out = append(out, emitRespEvent("response.output_item.done", itemDone))
+				st.FuncItemDone[i] = true
+				st.FuncArgsDone[i] = true
+			}
+		}
+
+		completed := `{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`
+		completed, _ = sjson.Set(completed, "sequence_number", nextSeq())
+		completed, _ = sjson.Set(completed, "response.id", st.ResponseID)
+		completed, _ = sjson.Set(completed, "response.created_at", st.Created)
+		// Inject original request fields into response as per docs/response.completed.json
+		if requestRawJSON != nil {
+			req := gjson.ParseBytes(requestRawJSON)
+			if v := req.Get("instructions"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.instructions", v.String())
+			}
+			if v := req.Get("max_output_tokens"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.max_output_tokens", v.Int())
+			}
+			if v := req.Get("max_tool_calls"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.max_tool_calls", v.Int())
+			}
+			if v := req.Get("model"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.model", v.String())
+			}
+			if v := req.Get("parallel_tool_calls"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.parallel_tool_calls", v.Bool())
+			}
+			if v := req.Get("previous_response_id"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.previous_response_id", v.String())
+			}
+			if v := req.Get("prompt_cache_key"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.prompt_cache_key", v.String())
+			}
+			if v := req.Get("reasoning"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.reasoning", v.Value())
+			}
+			if v := req.Get("safety_identifier"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.safety_identifier", v.String())
+			}
+			if v := req.Get("service_tier"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.service_tier", v.String())
+			}
+			if v := req.Get("store"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.store", v.Bool())
+			}
+			if v := req.Get("temperature"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.temperature", v.Float())
+			}
+			if v := req.Get("text"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.text", v.Value())
+			}
+			if v := req.Get("tool_choice"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.tool_choice", v.Value())
+			}
+			if v := req.Get("tools"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.tools", v.Value())
+			}
+			if v := req.Get("top_logprobs"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.top_logprobs", v.Int())
+			}
+			if v := req.Get("top_p"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.top_p", v.Float())
+			}
+			if v := req.Get("truncation"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.truncation", v.String())
+			}
+			if v := req.Get("user"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.user", v.Value())
+			}
+			if v := req.Get("metadata"); v.Exists() {
+				completed, _ = sjson.Set(completed, "response.metadata", v.Value())
+			}
+		}
+		// Build response.output using aggregated buffers
+		outputsWrapper := `{"arr":[]}`
+		if st.ReasoningBuf.Len() > 0 {
+			item := `{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`
+			item, _ = sjson.Set(item, "id", st.ReasoningID)
+			item, _ = sjson.Set(item, "summary.0.text", st.ReasoningBuf.String())
+			outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+		}
+		// Append message items in ascending index order
+		if len(st.MsgItemAdded) > 0 {
+			midxs := make([]int, 0, len(st.MsgItemAdded))
+			for i := range st.MsgItemAdded {
+				midxs = append(midxs, i)
+			}
+			for i := 0; i < len(midxs); i++ {
+				for j := i + 1; j < len(midxs); j++ {
+					if midxs[j] < midxs[i] {
+						midxs[i], midxs[j] = midxs[j], midxs[i]
+					}
+				}
+			}
+			for _, i := range midxs {
+				txt := ""
+				if b := st.MsgTextBuf[i]; b != nil {
+					txt = b.String()
+				}
+				item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
+				item, _ = sjson.Set(item, "id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
+				item, _ = sjson.Set(item, "content.0.text", txt)
+				outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+			}
+		}
+		if len(st.FuncArgsBuf) > 0 {
+			idxs := make([]int, 0, len(st.FuncArgsBuf))
+			for i := range st.FuncArgsBuf {
+				idxs = append(idxs, i)
+			}
+			// small-N sort without extra imports
+			for i := 0; i < len(idxs); i++ {
+				for j := i + 1; j < len(idxs); j++ {
+					if idxs[j] < idxs[i] {
+						idxs[i], idxs[j] = idxs[j], idxs[i]
+					}
+				}
+			}
+			for _, i := range idxs {
+				args := ""
+				if b := st.FuncArgsBuf[i]; b != nil {
+					args = b.String()
+				}
+				callID := st.FuncCallIDs[i]
+				name := st.FuncNames[i]
+				item := `{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`
+				item, _ = sjson.Set(item, "id", fmt.Sprintf("fc_%s", callID))
+				item, _ = sjson.Set(item, "arguments", args)
+				item, _ = sjson.Set(item, "call_id", callID)
+				item, _ = sjson.Set(item, "name", name)
+				outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+			}
+		}
+		if gjson.Get(outputsWrapper, "arr.#").Int() > 0 {
+			completed, _ = sjson.SetRaw(completed, "response.output", gjson.Get(outputsWrapper, "arr").Raw)
+		}
+		if st.UsageSeen {
+			completed, _ = sjson.Set(completed, "response.usage.input_tokens", st.PromptTokens)
+			completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
+			completed, _ = sjson.Set(completed, "response.usage.output_tokens", st.CompletionTokens)
+			if st.ReasoningTokens > 0 {
+				completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", st.ReasoningTokens)
+			}
+			total := st.TotalTokens
+			if total == 0 {
+				total = st.PromptTokens + st.CompletionTokens
+			}
+			completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
+		}
+		out = append(out, emitRespEvent("response.completed", completed))
+
+		return out
+	}
+
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
@@ -76,7 +339,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		return []string{}
 	}
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		return []string{}
+		// Upstream stream terminator. Some providers don't emit finish_reason.
+		// Mirror openai_claude_response.go: finalize on [DONE].
+		return finalize()
 	}
 
 	root := gjson.ParseBytes(rawJSON)
@@ -117,7 +382,6 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		}
 	}
 
-	nextSeq := func() int { st.Seq++; return st.Seq }
 	var out []string
 
 	if !st.Started {
@@ -136,6 +400,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.MsgItemDone = make(map[int]bool)
 		st.FuncArgsDone = make(map[int]bool)
 		st.FuncItemDone = make(map[int]bool)
+		st.CompletedSent = false
 		st.PromptTokens = 0
 		st.CachedTokens = 0
 		st.CompletionTokens = 0
@@ -313,253 +578,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			// finish_reason triggers finalization, including text done/content done/item done,
 			// reasoning done/part.done, function args done/item done, and completed
 			if fr := choice.Get("finish_reason"); fr.Exists() && fr.String() != "" {
-				// Emit message done events for all indices that started a message
-				if len(st.MsgItemAdded) > 0 {
-					// sort indices for deterministic order
-					idxs := make([]int, 0, len(st.MsgItemAdded))
-					for i := range st.MsgItemAdded {
-						idxs = append(idxs, i)
-					}
-					for i := 0; i < len(idxs); i++ {
-						for j := i + 1; j < len(idxs); j++ {
-							if idxs[j] < idxs[i] {
-								idxs[i], idxs[j] = idxs[j], idxs[i]
-							}
-						}
-					}
-					for _, i := range idxs {
-						if st.MsgItemAdded[i] && !st.MsgItemDone[i] {
-							fullText := ""
-							if b := st.MsgTextBuf[i]; b != nil {
-								fullText = b.String()
-							}
-							done := `{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`
-							done, _ = sjson.Set(done, "sequence_number", nextSeq())
-							done, _ = sjson.Set(done, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
-							done, _ = sjson.Set(done, "output_index", i)
-							done, _ = sjson.Set(done, "content_index", 0)
-							done, _ = sjson.Set(done, "text", fullText)
-							out = append(out, emitRespEvent("response.output_text.done", done))
-
-							partDone := `{"type":"response.content_part.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`
-							partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
-							partDone, _ = sjson.Set(partDone, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
-							partDone, _ = sjson.Set(partDone, "output_index", i)
-							partDone, _ = sjson.Set(partDone, "content_index", 0)
-							partDone, _ = sjson.Set(partDone, "part.text", fullText)
-							out = append(out, emitRespEvent("response.content_part.done", partDone))
-
-							itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}`
-							itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
-							itemDone, _ = sjson.Set(itemDone, "output_index", i)
-							itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
-							itemDone, _ = sjson.Set(itemDone, "item.content.0.text", fullText)
-							out = append(out, emitRespEvent("response.output_item.done", itemDone))
-							st.MsgItemDone[i] = true
-						}
-					}
-				}
-
-				if st.ReasoningID != "" {
-					// Emit reasoning done events
-					textDone := `{"type":"response.reasoning_summary_text.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`
-					textDone, _ = sjson.Set(textDone, "sequence_number", nextSeq())
-					textDone, _ = sjson.Set(textDone, "item_id", st.ReasoningID)
-					textDone, _ = sjson.Set(textDone, "output_index", st.ReasoningIndex)
-					out = append(out, emitRespEvent("response.reasoning_summary_text.done", textDone))
-					partDone := `{"type":"response.reasoning_summary_part.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`
-					partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
-					partDone, _ = sjson.Set(partDone, "item_id", st.ReasoningID)
-					partDone, _ = sjson.Set(partDone, "output_index", st.ReasoningIndex)
-					out = append(out, emitRespEvent("response.reasoning_summary_part.done", partDone))
-				}
-
-				// Emit function call done events for any active function calls
-				if len(st.FuncCallIDs) > 0 {
-					idxs := make([]int, 0, len(st.FuncCallIDs))
-					for i := range st.FuncCallIDs {
-						idxs = append(idxs, i)
-					}
-					for i := 0; i < len(idxs); i++ {
-						for j := i + 1; j < len(idxs); j++ {
-							if idxs[j] < idxs[i] {
-								idxs[i], idxs[j] = idxs[j], idxs[i]
-							}
-						}
-					}
-					for _, i := range idxs {
-						callID := st.FuncCallIDs[i]
-						if callID == "" || st.FuncItemDone[i] {
-							continue
-						}
-						args := "{}"
-						if b := st.FuncArgsBuf[i]; b != nil && b.Len() > 0 {
-							args = b.String()
-						}
-						fcDone := `{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`
-						fcDone, _ = sjson.Set(fcDone, "sequence_number", nextSeq())
-						fcDone, _ = sjson.Set(fcDone, "item_id", fmt.Sprintf("fc_%s", callID))
-						fcDone, _ = sjson.Set(fcDone, "output_index", i)
-						fcDone, _ = sjson.Set(fcDone, "arguments", args)
-						out = append(out, emitRespEvent("response.function_call_arguments.done", fcDone))
-
-						itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`
-						itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
-						itemDone, _ = sjson.Set(itemDone, "output_index", i)
-						itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("fc_%s", callID))
-						itemDone, _ = sjson.Set(itemDone, "item.arguments", args)
-						itemDone, _ = sjson.Set(itemDone, "item.call_id", callID)
-						itemDone, _ = sjson.Set(itemDone, "item.name", st.FuncNames[i])
-						out = append(out, emitRespEvent("response.output_item.done", itemDone))
-						st.FuncItemDone[i] = true
-						st.FuncArgsDone[i] = true
-					}
-				}
-				completed := `{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`
-				completed, _ = sjson.Set(completed, "sequence_number", nextSeq())
-				completed, _ = sjson.Set(completed, "response.id", st.ResponseID)
-				completed, _ = sjson.Set(completed, "response.created_at", st.Created)
-				// Inject original request fields into response as per docs/response.completed.json
-				if requestRawJSON != nil {
-					req := gjson.ParseBytes(requestRawJSON)
-					if v := req.Get("instructions"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.instructions", v.String())
-					}
-					if v := req.Get("max_output_tokens"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.max_output_tokens", v.Int())
-					}
-					if v := req.Get("max_tool_calls"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.max_tool_calls", v.Int())
-					}
-					if v := req.Get("model"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.model", v.String())
-					}
-					if v := req.Get("parallel_tool_calls"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.parallel_tool_calls", v.Bool())
-					}
-					if v := req.Get("previous_response_id"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.previous_response_id", v.String())
-					}
-					if v := req.Get("prompt_cache_key"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.prompt_cache_key", v.String())
-					}
-					if v := req.Get("reasoning"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.reasoning", v.Value())
-					}
-					if v := req.Get("safety_identifier"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.safety_identifier", v.String())
-					}
-					if v := req.Get("service_tier"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.service_tier", v.String())
-					}
-					if v := req.Get("store"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.store", v.Bool())
-					}
-					if v := req.Get("temperature"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.temperature", v.Float())
-					}
-					if v := req.Get("text"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.text", v.Value())
-					}
-					if v := req.Get("tool_choice"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.tool_choice", v.Value())
-					}
-					if v := req.Get("tools"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.tools", v.Value())
-					}
-					if v := req.Get("top_logprobs"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.top_logprobs", v.Int())
-					}
-					if v := req.Get("top_p"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.top_p", v.Float())
-					}
-					if v := req.Get("truncation"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.truncation", v.String())
-					}
-					if v := req.Get("user"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.user", v.Value())
-					}
-					if v := req.Get("metadata"); v.Exists() {
-						completed, _ = sjson.Set(completed, "response.metadata", v.Value())
-					}
-				}
-				// Build response.output using aggregated buffers
-				outputsWrapper := `{"arr":[]}`
-				if st.ReasoningBuf.Len() > 0 {
-					item := `{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`
-					item, _ = sjson.Set(item, "id", st.ReasoningID)
-					item, _ = sjson.Set(item, "summary.0.text", st.ReasoningBuf.String())
-					outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
-				}
-				// Append message items in ascending index order
-				if len(st.MsgItemAdded) > 0 {
-					midxs := make([]int, 0, len(st.MsgItemAdded))
-					for i := range st.MsgItemAdded {
-						midxs = append(midxs, i)
-					}
-					for i := 0; i < len(midxs); i++ {
-						for j := i + 1; j < len(midxs); j++ {
-							if midxs[j] < midxs[i] {
-								midxs[i], midxs[j] = midxs[j], midxs[i]
-							}
-						}
-					}
-					for _, i := range midxs {
-						txt := ""
-						if b := st.MsgTextBuf[i]; b != nil {
-							txt = b.String()
-						}
-						item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
-						item, _ = sjson.Set(item, "id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
-						item, _ = sjson.Set(item, "content.0.text", txt)
-						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
-					}
-				}
-				if len(st.FuncArgsBuf) > 0 {
-					idxs := make([]int, 0, len(st.FuncArgsBuf))
-					for i := range st.FuncArgsBuf {
-						idxs = append(idxs, i)
-					}
-					// small-N sort without extra imports
-					for i := 0; i < len(idxs); i++ {
-						for j := i + 1; j < len(idxs); j++ {
-							if idxs[j] < idxs[i] {
-								idxs[i], idxs[j] = idxs[j], idxs[i]
-							}
-						}
-					}
-					for _, i := range idxs {
-						args := ""
-						if b := st.FuncArgsBuf[i]; b != nil {
-							args = b.String()
-						}
-						callID := st.FuncCallIDs[i]
-						name := st.FuncNames[i]
-						item := `{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`
-						item, _ = sjson.Set(item, "id", fmt.Sprintf("fc_%s", callID))
-						item, _ = sjson.Set(item, "arguments", args)
-						item, _ = sjson.Set(item, "call_id", callID)
-						item, _ = sjson.Set(item, "name", name)
-						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
-					}
-				}
-				if gjson.Get(outputsWrapper, "arr.#").Int() > 0 {
-					completed, _ = sjson.SetRaw(completed, "response.output", gjson.Get(outputsWrapper, "arr").Raw)
-				}
-				if st.UsageSeen {
-					completed, _ = sjson.Set(completed, "response.usage.input_tokens", st.PromptTokens)
-					completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
-					completed, _ = sjson.Set(completed, "response.usage.output_tokens", st.CompletionTokens)
-					if st.ReasoningTokens > 0 {
-						completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", st.ReasoningTokens)
-					}
-					total := st.TotalTokens
-					if total == 0 {
-						total = st.PromptTokens + st.CompletionTokens
-					}
-					completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
-				}
-				out = append(out, emitRespEvent("response.completed", completed))
+				out = append(out, finalize()...)
 			}
 
 			return true
