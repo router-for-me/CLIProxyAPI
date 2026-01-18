@@ -114,14 +114,14 @@ func (h *Handler) PutSelfRateLimit(c *gin.Context) {
 func (h *Handler) DeleteSelfRateLimit(c *gin.Context) {
 	provider := strings.ToLower(strings.TrimSpace(c.Param("provider")))
 
-	// Check if provider exists in config or overrides
-	h.selfRateLimitMu.RLock()
+	h.selfRateLimitMu.Lock()
+	defer h.selfRateLimitMu.Unlock()
+
 	hasOverride := h.selfRateLimitOverrides != nil && h.selfRateLimitOverrides[provider] != nil
-	h.selfRateLimitMu.RUnlock()
 
 	cfg := h.getConfigInternal()
-	hasConfig := cfg != nil && cfg.SelfRateLimit != nil
-	if hasConfig {
+	hasConfig := false
+	if cfg != nil && cfg.SelfRateLimit != nil {
 		_, hasConfig = cfg.SelfRateLimit[provider]
 	}
 
@@ -130,13 +130,10 @@ func (h *Handler) DeleteSelfRateLimit(c *gin.Context) {
 		return
 	}
 
-	// Set override to nil to clear (overrides config value with "no delay")
-	h.selfRateLimitMu.Lock()
 	if h.selfRateLimitOverrides == nil {
 		h.selfRateLimitOverrides = make(map[string]*config.ProviderRateLimit)
 	}
 	h.selfRateLimitOverrides[provider] = nil
-	h.selfRateLimitMu.Unlock()
 
 	c.AbortWithStatus(http.StatusNoContent)
 }
