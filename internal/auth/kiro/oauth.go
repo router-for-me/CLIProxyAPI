@@ -227,6 +227,7 @@ func (o *KiroOAuth) exchangeCodeForToken(ctx context.Context, code, codeVerifier
 		ExpiresAt:    expiresAt.Format(time.RFC3339),
 		AuthMethod:   "social",
 		Provider:     "", // Caller should preserve original provider
+		Region:       "us-east-1",
 	}, nil
 }
 
@@ -285,6 +286,7 @@ func (o *KiroOAuth) RefreshToken(ctx context.Context, refreshToken string) (*Kir
 		ExpiresAt:    expiresAt.Format(time.RFC3339),
 		AuthMethod:   "social",
 		Provider:     "", // Caller should preserve original provider
+		Region:       "us-east-1",
 	}, nil
 }
 

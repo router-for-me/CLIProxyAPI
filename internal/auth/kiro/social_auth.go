@@ -9,7 +9,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,6 +33,9 @@ const (
 
 	// OAuth timeout
 	socialAuthTimeout = 10 * time.Minute
+
+	// Default callback port for social auth HTTP server
+	socialAuthCallbackPort = 9876
 )
 
 // SocialProvider represents the social login provider.
@@ -67,6 +72,13 @@ type RefreshTokenRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
+// WebCallbackResult contains the OAuth callback result from HTTP server.
+type WebCallbackResult struct {
+	Code  string
+	State string
+	Error string
+}
+
 // SocialAuthClient handles social authentication with Kiro.
 type SocialAuthClient struct {
 	httpClient      *http.Client
@@ -85,6 +97,83 @@ func NewSocialAuthClient(cfg *config.Config) *SocialAuthClient {
 		cfg:             cfg,
 		protocolHandler: NewProtocolHandler(),
 	}
+}
+
+// startWebCallbackServer starts a local HTTP server to receive the OAuth callback.
+// This is used instead of the kiro:// protocol handler to avoid redirect_mismatch errors.
+func (c *SocialAuthClient) startWebCallbackServer(ctx context.Context, expectedState string) (string, <-chan WebCallbackResult, error) {
+	// Try to find an available port - use localhost like Kiro does
+	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", socialAuthCallbackPort))
+	if err != nil {
+		// Try with dynamic port (RFC 8252 allows dynamic ports for native apps)
+		log.Warnf("kiro social auth: default port %d is busy, falling back to dynamic port", socialAuthCallbackPort)
+		listener, err = net.Listen("tcp", "localhost:0")
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to start callback server: %w", err)
+		}
+	}
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	// Use http scheme for local callback server
+	redirectURI := fmt.Sprintf("http://localhost:%d/oauth/callback", port)
+	resultChan := make(chan WebCallbackResult, 1)
+
+	server := &http.Server{
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		state := r.URL.Query().Get("state")
+		errParam := r.URL.Query().Get("error")
+
+		if errParam != "" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `<!DOCTYPE html>
+<html><head><title>Login Failed</title></head>
+<body><h1>Login Failed</h1><p>%s</p><p>You can close this window.</p></body></html>`, html.EscapeString(errParam))
+			resultChan <- WebCallbackResult{Error: errParam}
+			return
+		}
+
+		if state != expectedState {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `<!DOCTYPE html>
+<html><head><title>Login Failed</title></head>
+<body><h1>Login Failed</h1><p>Invalid state parameter</p><p>You can close this window.</p></body></html>`)
+			resultChan <- WebCallbackResult{Error: "state mismatch"}
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<!DOCTYPE html>
+<html><head><title>Login Successful</title></head>
+<body><h1>Login Successful!</h1><p>You can close this window and return to the terminal.</p>
+<script>window.close();</script></body></html>`)
+		resultChan <- WebCallbackResult{Code: code, State: state}
+	})
+
+	server.Handler = mux
+
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			log.Debugf("kiro social auth callback server error: %v", err)
+		}
+	}()
+
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-time.After(socialAuthTimeout):
+		case <-resultChan:
+		}
+		_ = server.Shutdown(context.Background())
+	}()
+
+	return redirectURI, resultChan, nil
 }
 
 // generatePKCE generates PKCE code verifier and challenge.
@@ -217,10 +306,12 @@ func (c *SocialAuthClient) RefreshSocialToken(ctx context.Context, refreshToken 
 		ExpiresAt:    expiresAt.Format(time.RFC3339),
 		AuthMethod:   "social",
 		Provider:     "", // Caller should preserve original provider
+		Region:       "us-east-1",
 	}, nil
 }
 
-// LoginWithSocial performs OAuth login with Google.
+// LoginWithSocial performs OAuth login with Google or GitHub.
+// Uses local HTTP callback server instead of custom protocol handler to avoid redirect_mismatch errors.
 func (c *SocialAuthClient) LoginWithSocial(ctx context.Context, provider SocialProvider) (*KiroTokenData, error) {
 	providerName := string(provider)
 
@@ -228,27 +319,9 @@ func (c *SocialAuthClient) LoginWithSocial(ctx context.Context, provider SocialP
 	fmt.Printf("║         Kiro Authentication (%s)                    ║\n", providerName)
 	fmt.Println("╚══════════════════════════════════════════════════════════╝")
 
-	// Step 1: Setup protocol handler
+	// Step 1: Start local HTTP callback server (instead of kiro:// protocol handler)
+	// This avoids redirect_mismatch errors with AWS Cognito
 	fmt.Println("\nSetting up authentication...")
-
-	// Start the local callback server
-	handlerPort, err := c.protocolHandler.Start(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to start callback server: %w", err)
-	}
-	defer c.protocolHandler.Stop()
-
-	// Ensure protocol handler is installed and set as default
-	if err := SetupProtocolHandlerIfNeeded(handlerPort); err != nil {
-		fmt.Println("\n⚠ Protocol handler setup failed. Trying alternative method...")
-		fmt.Println("  If you see a browser 'Open with' dialog, select your default browser.")
-		fmt.Println("  For manual setup instructions, run: cliproxy kiro --help-protocol")
-		log.Debugf("kiro: protocol handler setup error: %v", err)
-		// Continue anyway - user might have set it up manually or select browser manually
-	} else {
-		// Force set our handler as default (prevents "Open with" dialog)
-		forceDefaultProtocolHandler()
-	}
 
 	// Step 2: Generate PKCE codes
 	codeVerifier, codeChallenge, err := generatePKCE()
@@ -262,8 +335,15 @@ func (c *SocialAuthClient) LoginWithSocial(ctx context.Context, provider SocialP
 		return nil, fmt.Errorf("failed to generate state: %w", err)
 	}
 
-	// Step 4: Build the login URL (Kiro uses GET request with query params)
-	authURL := c.buildLoginURL(providerName, KiroRedirectURI, codeChallenge, state)
+	// Step 4: Start local HTTP callback server
+	redirectURI, resultChan, err := c.startWebCallbackServer(ctx, state)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start callback server: %w", err)
+	}
+	log.Debugf("kiro social auth: callback server started at %s", redirectURI)
+
+	// Step 5: Build the login URL using HTTP redirect URI
+	authURL := c.buildLoginURL(providerName, redirectURI, codeChallenge, state)
 
 	// Set incognito mode based on config (defaults to true for Kiro, can be overridden with --no-incognito)
 	// Incognito mode enables multi-account support by bypassing cached sessions
@@ -279,7 +359,7 @@ func (c *SocialAuthClient) LoginWithSocial(ctx context.Context, provider SocialP
 		log.Debug("kiro: using incognito mode for multi-account support (default)")
 	}
 
-	// Step 5: Open browser for user authentication
+	// Step 6: Open browser for user authentication
 	fmt.Println("\n════════════════════════════════════════════════════════════")
 	fmt.Printf("  Opening browser for %s authentication...\n", providerName)
 	fmt.Println("════════════════════════════════════════════════════════════")
@@ -295,80 +375,78 @@ func (c *SocialAuthClient) LoginWithSocial(ctx context.Context, provider SocialP
 
 	fmt.Println("\n  Waiting for authentication callback...")
 
-	// Step 6: Wait for callback
-	callback, err := c.protocolHandler.WaitForCallback(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to receive callback: %w", err)
-	}
-
-	if callback.Error != "" {
-		return nil, fmt.Errorf("authentication error: %s", callback.Error)
-	}
-
-	if callback.State != state {
-		// Log state values for debugging, but don't expose in user-facing error
-		log.Debugf("kiro: OAuth state mismatch - expected %s, got %s", state, callback.State)
-		return nil, fmt.Errorf("OAuth state validation failed - please try again")
-	}
-
-	if callback.Code == "" {
-		return nil, fmt.Errorf("no authorization code received")
-	}
-
-	fmt.Println("\n✓ Authorization received!")
-
-	// Step 7: Exchange code for tokens
-	fmt.Println("Exchanging code for tokens...")
-
-	tokenReq := &CreateTokenRequest{
-		Code:         callback.Code,
-		CodeVerifier: codeVerifier,
-		RedirectURI:  KiroRedirectURI,
-	}
-
-	tokenResp, err := c.CreateToken(ctx, tokenReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to exchange code for tokens: %w", err)
-	}
-
-	fmt.Println("\n✓ Authentication successful!")
-
-	// Close the browser window
-	if err := browser.CloseBrowser(); err != nil {
-		log.Debugf("Failed to close browser: %v", err)
-	}
-
-	// Validate ExpiresIn - use default 1 hour if invalid
-	expiresIn := tokenResp.ExpiresIn
-	if expiresIn <= 0 {
-		expiresIn = 3600
-	}
-	expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
-
-	// Try to extract email from JWT access token first
-	email := ExtractEmailFromJWT(tokenResp.AccessToken)
-	
-	// If no email in JWT, ask user for account label (only in interactive mode)
-	if email == "" && isInteractiveTerminal() {
-		fmt.Print("\n  Enter account label for file naming (optional, press Enter to skip): ")
-		reader := bufio.NewReader(os.Stdin)
-		var err error
-		email, err = reader.ReadString('\n')
-		if err != nil {
-			log.Debugf("Failed to read account label: %v", err)
+	// Step 7: Wait for callback from HTTP server
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(socialAuthTimeout):
+		return nil, fmt.Errorf("authentication timed out")
+	case callback := <-resultChan:
+		if callback.Error != "" {
+			return nil, fmt.Errorf("authentication error: %s", callback.Error)
 		}
-		email = strings.TrimSpace(email)
-	}
 
-	return &KiroTokenData{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		ProfileArn:   tokenResp.ProfileArn,
-		ExpiresAt:    expiresAt.Format(time.RFC3339),
-		AuthMethod:   "social",
-		Provider:     providerName,
-		Email:        email, // JWT email or user-provided label
-	}, nil
+		// State is already validated by the callback server
+		if callback.Code == "" {
+			return nil, fmt.Errorf("no authorization code received")
+		}
+
+		fmt.Println("\n✓ Authorization received!")
+
+		// Step 8: Exchange code for tokens
+		fmt.Println("Exchanging code for tokens...")
+
+		tokenReq := &CreateTokenRequest{
+			Code:         callback.Code,
+			CodeVerifier: codeVerifier,
+			RedirectURI:  redirectURI, // Use HTTP redirect URI, not kiro:// protocol
+		}
+
+		tokenResp, err := c.CreateToken(ctx, tokenReq)
+		if err != nil {
+			return nil, fmt.Errorf("failed to exchange code for tokens: %w", err)
+		}
+
+		fmt.Println("\n✓ Authentication successful!")
+
+		// Close the browser window
+		if err := browser.CloseBrowser(); err != nil {
+			log.Debugf("Failed to close browser: %v", err)
+		}
+
+		// Validate ExpiresIn - use default 1 hour if invalid
+		expiresIn := tokenResp.ExpiresIn
+		if expiresIn <= 0 {
+			expiresIn = 3600
+		}
+		expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
+
+		// Try to extract email from JWT access token first
+		email := ExtractEmailFromJWT(tokenResp.AccessToken)
+
+		// If no email in JWT, ask user for account label (only in interactive mode)
+		if email == "" && isInteractiveTerminal() {
+			fmt.Print("\n  Enter account label for file naming (optional, press Enter to skip): ")
+			reader := bufio.NewReader(os.Stdin)
+			var err error
+			email, err = reader.ReadString('\n')
+			if err != nil {
+				log.Debugf("Failed to read account label: %v", err)
+			}
+			email = strings.TrimSpace(email)
+		}
+
+		return &KiroTokenData{
+			AccessToken:  tokenResp.AccessToken,
+			RefreshToken: tokenResp.RefreshToken,
+			ProfileArn:   tokenResp.ProfileArn,
+			ExpiresAt:    expiresAt.Format(time.RFC3339),
+			AuthMethod:   "social",
+			Provider:     providerName,
+			Email:        email, // JWT email or user-provided label
+			Region:       "us-east-1",
+		}, nil
+	}
 }
 
 // LoginWithGoogle performs OAuth login with Google.
