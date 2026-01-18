@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -66,23 +65,21 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	root := gjson.ParseBytes(rawJSON)
 
+	// Convert OpenAI reasoning_effort to Claude thinking config.
 	if v := root.Get("reasoning_effort"); v.Exists() {
-		modelInfo := registry.LookupModelInfo(modelName)
-		if modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) == 0 {
-			effort := strings.ToLower(strings.TrimSpace(v.String()))
-			if effort != "" {
-				budget, ok := thinking.ConvertLevelToBudget(effort)
-				if ok {
-					switch budget {
-					case 0:
-						out, _ = sjson.Set(out, "thinking.type", "disabled")
-					case -1:
+		effort := strings.ToLower(strings.TrimSpace(v.String()))
+		if effort != "" {
+			budget, ok := thinking.ConvertLevelToBudget(effort)
+			if ok {
+				switch budget {
+				case 0:
+					out, _ = sjson.Set(out, "thinking.type", "disabled")
+				case -1:
+					out, _ = sjson.Set(out, "thinking.type", "enabled")
+				default:
+					if budget > 0 {
 						out, _ = sjson.Set(out, "thinking.type", "enabled")
-					default:
-						if budget > 0 {
-							out, _ = sjson.Set(out, "thinking.type", "enabled")
-							out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
-						}
+						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
 					}
 				}
 			}
@@ -141,17 +138,35 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		messageIndex := 0
+		systemMessageIndex := -1
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
 
 			switch role {
-			case "system", "user", "assistant":
-				// Create Claude Code message with appropriate role mapping
-				if role == "system" {
-					role = "user"
+			case "system":
+				if systemMessageIndex == -1 {
+					systemMsg := `{"role":"user","content":[]}`
+					out, _ = sjson.SetRaw(out, "messages.-1", systemMsg)
+					systemMessageIndex = messageIndex
+					messageIndex++
 				}
-
+				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
+					textPart := `{"type":"text","text":""}`
+					textPart, _ = sjson.Set(textPart, "text", contentResult.String())
+					out, _ = sjson.SetRaw(out, fmt.Sprintf("messages.%d.content.-1", systemMessageIndex), textPart)
+				} else if contentResult.Exists() && contentResult.IsArray() {
+					contentResult.ForEach(func(_, part gjson.Result) bool {
+						if part.Get("type").String() == "text" {
+							textPart := `{"type":"text","text":""}`
+							textPart, _ = sjson.Set(textPart, "text", part.Get("text").String())
+							out, _ = sjson.SetRaw(out, fmt.Sprintf("messages.%d.content.-1", systemMessageIndex), textPart)
+						}
+						return true
+					})
+				}
+			case "user", "assistant":
 				msg := `{"role":"","content":[]}`
 				msg, _ = sjson.Set(msg, "role", role)
 
@@ -230,6 +245,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				}
 
 				out, _ = sjson.SetRaw(out, "messages.-1", msg)
+				messageIndex++
 
 			case "tool":
 				// Handle tool result messages conversion
@@ -240,6 +256,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				msg, _ = sjson.Set(msg, "content.0.tool_use_id", toolCallID)
 				msg, _ = sjson.Set(msg, "content.0.content", content)
 				out, _ = sjson.SetRaw(out, "messages.-1", msg)
+				messageIndex++
 			}
 			return true
 		})

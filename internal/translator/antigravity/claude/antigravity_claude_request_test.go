@@ -343,8 +343,8 @@ func TestConvertClaudeRequestToAntigravity_ThinkingConfig(t *testing.T) {
 		if thinkingConfig.Get("thinkingBudget").Int() != 8000 {
 			t.Errorf("Expected thinkingBudget 8000, got %d", thinkingConfig.Get("thinkingBudget").Int())
 		}
-		if !thinkingConfig.Get("include_thoughts").Bool() {
-			t.Error("include_thoughts should be true")
+		if !thinkingConfig.Get("includeThoughts").Bool() {
+			t.Error("includeThoughts should be true")
 		}
 	} else {
 		t.Log("thinkingConfig not present - model may not be registered in test registry")

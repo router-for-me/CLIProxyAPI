@@ -393,7 +393,7 @@ func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts c
 	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	payload := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), stream)
-	payload, err := thinking.ApplyThinking(payload, req.Model, "gemini")
+	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String())
 	if err != nil {
 		return nil, translatedPayload{}, err
 	}

@@ -24,6 +24,10 @@ const (
 	// Example: using level with a budget-only model
 	ErrLevelNotSupported ErrorCode = "LEVEL_NOT_SUPPORTED"
 
+	// ErrBudgetOutOfRange indicates the budget value is outside model range.
+	// Example: budget 64000 exceeds max 20000
+	ErrBudgetOutOfRange ErrorCode = "BUDGET_OUT_OF_RANGE"
+
 	// ErrProviderMismatch indicates the provider does not match the model.
 	// Example: applying Claude format to a Gemini model
 	ErrProviderMismatch ErrorCode = "PROVIDER_MISMATCH"
