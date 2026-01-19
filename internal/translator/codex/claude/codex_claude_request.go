@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -218,18 +217,15 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	// Add additional configuration parameters for the Codex API.
 	template, _ = sjson.Set(template, "parallel_tool_calls", true)
 
-	// Convert thinking.budget_tokens to reasoning.effort for level-based models
-	reasoningEffort := "medium" // default
+	// Convert thinking.budget_tokens to reasoning.effort.
+	reasoningEffort := "medium"
 	if thinkingConfig := rootResult.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
-		modelInfo := registry.LookupModelInfo(modelName)
 		switch thinkingConfig.Get("type").String() {
 		case "enabled":
-			if modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0 {
-				if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
-					budget := int(budgetTokens.Int())
-					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
-						reasoningEffort = effort
-					}
+			if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
+				budget := int(budgetTokens.Int())
+				if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
+					reasoningEffort = effort
 				}
 			}
 		case "disabled":

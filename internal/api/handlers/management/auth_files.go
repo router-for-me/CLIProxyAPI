@@ -24,6 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
@@ -1707,7 +1708,7 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 		// Create token storage
 		tokenStorage := qwenAuth.CreateTokenStorage(tokenData)
 
-		tokenStorage.Email = fmt.Sprintf("qwen-%d", time.Now().UnixMilli())
+		tokenStorage.Email = fmt.Sprintf("%d", time.Now().UnixMilli())
 		record := &coreauth.Auth{
 			ID:       fmt.Sprintf("qwen-%s.json", tokenStorage.Email),
 			Provider: "qwen",
@@ -1812,7 +1813,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		tokenStorage := authSvc.CreateTokenStorage(tokenData)
 		identifier := strings.TrimSpace(tokenStorage.Email)
 		if identifier == "" {
-			identifier = fmt.Sprintf("iflow-%d", time.Now().UnixMilli())
+			identifier = fmt.Sprintf("%d", time.Now().UnixMilli())
 			tokenStorage.Email = identifier
 		}
 		record := &coreauth.Auth{
@@ -1841,6 +1842,89 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	}()
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
+func (h *Handler) RequestGitHubToken(c *gin.Context) {
+	ctx := context.Background()
+
+	fmt.Println("Initializing GitHub Copilot authentication...")
+
+	state := fmt.Sprintf("gh-%d", time.Now().UnixNano())
+
+	// Initialize Copilot auth service
+	// We need to import "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot" first if not present
+	// Assuming copilot package is imported as "copilot"
+	deviceClient := copilot.NewDeviceFlowClient(h.cfg)
+
+	// Initiate device flow
+	deviceCode, err := deviceClient.RequestDeviceCode(ctx)
+	if err != nil {
+		log.Errorf("Failed to initiate device flow: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initiate device flow"})
+		return
+	}
+
+	authURL := deviceCode.VerificationURI
+	userCode := deviceCode.UserCode
+
+	RegisterOAuthSession(state, "github")
+
+	go func() {
+		fmt.Printf("Please visit %s and enter code: %s\n", authURL, userCode)
+
+		tokenData, errPoll := deviceClient.PollForToken(ctx, deviceCode)
+		if errPoll != nil {
+			SetOAuthSessionError(state, "Authentication failed")
+			fmt.Printf("Authentication failed: %v\n", errPoll)
+			return
+		}
+
+		username, errUser := deviceClient.FetchUserInfo(ctx, tokenData.AccessToken)
+		if errUser != nil {
+			log.Warnf("Failed to fetch user info: %v", errUser)
+			username = "github-user"
+		}
+
+		tokenStorage := &copilot.CopilotTokenStorage{
+			AccessToken: tokenData.AccessToken,
+			TokenType:   tokenData.TokenType,
+			Scope:       tokenData.Scope,
+			Username:    username,
+			Type:        "github-copilot",
+		}
+
+		fileName := fmt.Sprintf("github-%s.json", username)
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "github",
+			FileName: fileName,
+			Storage:  tokenStorage,
+			Metadata: map[string]any{
+				"email":    username,
+				"username": username,
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use GitHub Copilot services through this CLI")
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("github")
+	}()
+
+	c.JSON(200, gin.H{
+		"status":           "ok",
+		"url":              authURL,
+		"state":            state,
+		"user_code":        userCode,
+		"verification_uri": authURL,
+	})
 }
 
 func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
@@ -1897,15 +1981,17 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 	fileName := iflowauth.SanitizeIFlowFileName(email)
 	if fileName == "" {
 		fileName = fmt.Sprintf("iflow-%d", time.Now().UnixMilli())
+	} else {
+		fileName = fmt.Sprintf("iflow-%s", fileName)
 	}
 
 	tokenStorage.Email = email
 	timestamp := time.Now().Unix()
 
 	record := &coreauth.Auth{
-		ID:       fmt.Sprintf("iflow-%s-%d.json", fileName, timestamp),
+		ID:       fmt.Sprintf("%s-%d.json", fileName, timestamp),
 		Provider: "iflow",
-		FileName: fmt.Sprintf("iflow-%s-%d.json", fileName, timestamp),
+		FileName: fmt.Sprintf("%s-%d.json", fileName, timestamp),
 		Storage:  tokenStorage,
 		Metadata: map[string]any{
 			"email":        email,

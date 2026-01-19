@@ -19,6 +19,7 @@ func CleanJSONSchemaForAntigravity(jsonStr string) string {
 	// Phase 1: Convert and add hints
 	jsonStr = convertRefsToHints(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
+	jsonStr = convertEnumValuesToStrings(jsonStr)
 	jsonStr = addEnumHints(jsonStr)
 	jsonStr = addAdditionalPropertiesHints(jsonStr)
 	jsonStr = moveConstraintsToDescription(jsonStr)
@@ -72,6 +73,33 @@ func convertConstToEnum(jsonStr string) string {
 		enumPath := trimSuffix(p, ".const") + ".enum"
 		if !gjson.Get(jsonStr, enumPath).Exists() {
 			jsonStr, _ = sjson.Set(jsonStr, enumPath, []interface{}{val.Value()})
+		}
+	}
+	return jsonStr
+}
+
+// convertEnumValuesToStrings ensures all enum values are strings.
+// Gemini API requires enum values to be of type string, not numbers or booleans.
+func convertEnumValuesToStrings(jsonStr string) string {
+	for _, p := range findPaths(jsonStr, "enum") {
+		arr := gjson.Get(jsonStr, p)
+		if !arr.IsArray() {
+			continue
+		}
+
+		var stringVals []string
+		needsConversion := false
+		for _, item := range arr.Array() {
+			// Check if any value is not a string
+			if item.Type != gjson.String {
+				needsConversion = true
+			}
+			stringVals = append(stringVals, item.String())
+		}
+
+		// Only update if we found non-string values
+		if needsConversion {
+			jsonStr, _ = sjson.Set(jsonStr, p, stringVals)
 		}
 	}
 	return jsonStr

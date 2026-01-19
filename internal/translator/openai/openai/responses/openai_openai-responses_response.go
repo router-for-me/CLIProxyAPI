@@ -12,6 +12,10 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+type oaiToResponsesStateReasoning struct {
+	ReasoningID   string
+	ReasoningData string
+}
 type oaiToResponsesState struct {
 	Seq            int
 	ResponseID     string
@@ -23,6 +27,7 @@ type oaiToResponsesState struct {
 	// Per-output message text buffers by index
 	MsgTextBuf   map[int]*strings.Builder
 	ReasoningBuf strings.Builder
+	Reasonings   []oaiToResponsesStateReasoning
 	FuncArgsBuf  map[int]*strings.Builder // index -> args
 	FuncNames    map[int]string           // index -> name
 	FuncCallIDs  map[int]string           // index -> call_id
@@ -63,6 +68,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			MsgItemDone:     make(map[int]bool),
 			FuncArgsDone:    make(map[int]bool),
 			FuncItemDone:    make(map[int]bool),
+			Reasonings:      make([]oaiToResponsesStateReasoning, 0),
 		}
 	}
 	st := (*param).(*oaiToResponsesState)
@@ -157,6 +163,31 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.Started = true
 	}
 
+	stopReasoning := func(text string) {
+		// Emit reasoning done events
+		textDone := `{"type":"response.reasoning_summary_text.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`
+		textDone, _ = sjson.Set(textDone, "sequence_number", nextSeq())
+		textDone, _ = sjson.Set(textDone, "item_id", st.ReasoningID)
+		textDone, _ = sjson.Set(textDone, "output_index", st.ReasoningIndex)
+		textDone, _ = sjson.Set(textDone, "text", text)
+		out = append(out, emitRespEvent("response.reasoning_summary_text.done", textDone))
+		partDone := `{"type":"response.reasoning_summary_part.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`
+		partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
+		partDone, _ = sjson.Set(partDone, "item_id", st.ReasoningID)
+		partDone, _ = sjson.Set(partDone, "output_index", st.ReasoningIndex)
+		partDone, _ = sjson.Set(partDone, "part.text", text)
+		out = append(out, emitRespEvent("response.reasoning_summary_part.done", partDone))
+		outputItemDone := `{"type":"response.output_item.done","item":{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]},"output_index":0,"sequence_number":0}`
+		outputItemDone, _ = sjson.Set(outputItemDone, "sequence_number", nextSeq())
+		outputItemDone, _ = sjson.Set(outputItemDone, "item.id", st.ReasoningID)
+		outputItemDone, _ = sjson.Set(outputItemDone, "output_index", st.ReasoningIndex)
+		outputItemDone, _ = sjson.Set(outputItemDone, "item.summary.text", text)
+		out = append(out, emitRespEvent("response.output_item.done", outputItemDone))
+
+		st.Reasonings = append(st.Reasonings, oaiToResponsesStateReasoning{ReasoningID: st.ReasoningID, ReasoningData: text})
+		st.ReasoningID = ""
+	}
+
 	// choices[].delta content / tool_calls / reasoning_content
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
 		choices.ForEach(func(_, choice gjson.Result) bool {
@@ -165,6 +196,10 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			if delta.Exists() {
 				if c := delta.Get("content"); c.Exists() && c.String() != "" {
 					// Ensure the message item and its first content part are announced before any text deltas
+					if st.ReasoningID != "" {
+						stopReasoning(st.ReasoningBuf.String())
+						st.ReasoningBuf.Reset()
+					}
 					if !st.MsgItemAdded[idx] {
 						item := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`
 						item, _ = sjson.Set(item, "sequence_number", nextSeq())
@@ -226,6 +261,10 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 
 				// tool calls
 				if tcs := delta.Get("tool_calls"); tcs.Exists() && tcs.IsArray() {
+					if st.ReasoningID != "" {
+						stopReasoning(st.ReasoningBuf.String())
+						st.ReasoningBuf.Reset()
+					}
 					// Before emitting any function events, if a message is open for this index,
 					// close its text/content to match Codex expected ordering.
 					if st.MsgItemAdded[idx] && !st.MsgItemDone[idx] {
@@ -361,17 +400,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				}
 
 				if st.ReasoningID != "" {
-					// Emit reasoning done events
-					textDone := `{"type":"response.reasoning_summary_text.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`
-					textDone, _ = sjson.Set(textDone, "sequence_number", nextSeq())
-					textDone, _ = sjson.Set(textDone, "item_id", st.ReasoningID)
-					textDone, _ = sjson.Set(textDone, "output_index", st.ReasoningIndex)
-					out = append(out, emitRespEvent("response.reasoning_summary_text.done", textDone))
-					partDone := `{"type":"response.reasoning_summary_part.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`
-					partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
-					partDone, _ = sjson.Set(partDone, "item_id", st.ReasoningID)
-					partDone, _ = sjson.Set(partDone, "output_index", st.ReasoningIndex)
-					out = append(out, emitRespEvent("response.reasoning_summary_part.done", partDone))
+					stopReasoning(st.ReasoningBuf.String())
+					st.ReasoningBuf.Reset()
 				}
 
 				// Emit function call done events for any active function calls
@@ -485,11 +515,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				}
 				// Build response.output using aggregated buffers
 				outputsWrapper := `{"arr":[]}`
-				if st.ReasoningBuf.Len() > 0 {
-					item := `{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`
-					item, _ = sjson.Set(item, "id", st.ReasoningID)
-					item, _ = sjson.Set(item, "summary.0.text", st.ReasoningBuf.String())
-					outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+				if len(st.Reasonings) > 0 {
+					for _, r := range st.Reasonings {
+						item := `{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`
+						item, _ = sjson.Set(item, "id", r.ReasoningID)
+						item, _ = sjson.Set(item, "summary.0.text", r.ReasoningData)
+						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+					}
 				}
 				// Append message items in ascending index order
 				if len(st.MsgItemAdded) > 0 {

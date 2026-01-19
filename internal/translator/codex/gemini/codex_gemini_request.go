@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
@@ -249,22 +248,28 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	// Fixed flags aligning with Codex expectations
 	out, _ = sjson.Set(out, "parallel_tool_calls", true)
 
-	// Convert thinkingBudget to reasoning.effort for level-based models
-	reasoningEffort := "medium" // default
+	// Convert Gemini thinkingConfig to Codex reasoning.effort.
+	effortSet := false
 	if genConfig := root.Get("generationConfig"); genConfig.Exists() {
 		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
-			modelInfo := registry.LookupModelInfo(modelName)
-			if modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0 {
-				if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
-					budget := int(thinkingBudget.Int())
-					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
-						reasoningEffort = effort
-					}
+			if thinkingLevel := thinkingConfig.Get("thinkingLevel"); thinkingLevel.Exists() {
+				effort := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
+				if effort != "" {
+					out, _ = sjson.Set(out, "reasoning.effort", effort)
+					effortSet = true
+				}
+			} else if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
+				if effort, ok := thinking.ConvertBudgetToLevel(int(thinkingBudget.Int())); ok {
+					out, _ = sjson.Set(out, "reasoning.effort", effort)
+					effortSet = true
 				}
 			}
 		}
 	}
-	out, _ = sjson.Set(out, "reasoning.effort", reasoningEffort)
+	if !effortSet {
+		// No thinking config, set default effort
+		out, _ = sjson.Set(out, "reasoning.effort", "medium")
+	}
 	out, _ = sjson.Set(out, "reasoning.summary", "auto")
 	out, _ = sjson.Set(out, "stream", true)
 	out, _ = sjson.Set(out, "store", false)
