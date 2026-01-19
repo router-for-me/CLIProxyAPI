@@ -88,7 +88,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	var messagesJSON = "[]"
 
 	// Handle system message first
-	systemMsgJSON := `{"role":"system","content":[{"type":"text","text":"Use ANY tool, the parameters MUST accord with RFC 8259 (The JavaScript Object Notation (JSON) Data Interchange Format), the keys and value MUST be enclosed in double quotes."}]}`
+	systemMsgJSON := `{"role":"system","content":[]}`
 	if system := root.Get("system"); system.Exists() {
 		if system.Type == gjson.String {
 			if system.String() != "" {

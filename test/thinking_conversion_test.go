@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // thinkingTestCase represents a common test case structure for both suffix and body tests.
@@ -2707,6 +2708,9 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				[]byte(tc.inputJSON),
 				true,
 			)
+			if applyTo == "claude" {
+				body, _ = sjson.SetBytes(body, "max_tokens", 200000)
+			}
 
 			body, err := thinking.ApplyThinking(body, tc.model, tc.from, applyTo)
 
