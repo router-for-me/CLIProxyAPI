@@ -66,13 +66,19 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, 
 		expiresAt = time.Now().Add(1 * time.Hour)
 	}
 
-	// Extract identifier for file naming
-	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn, tokenData.ClientID)
-
-	// Determine label based on auth method
-	label := fmt.Sprintf("kiro-%s", source)
+	// Determine label and identifier based on auth method
+	var label, idPart string
 	if tokenData.AuthMethod == "idc" {
 		label = "kiro-idc"
+		// For IDC auth, always use clientID as identifier
+		if tokenData.ClientID != "" {
+			idPart = kiroauth.SanitizeEmailForFilename(tokenData.ClientID)
+		} else {
+			idPart = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+		}
+	} else {
+		label = fmt.Sprintf("kiro-%s", source)
+		idPart = extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn, tokenData.ClientID)
 	}
 
 	now := time.Now()
