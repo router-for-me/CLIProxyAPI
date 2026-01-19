@@ -14,6 +14,10 @@ services:
     #   - .env
     environment:
       DEPLOY: ${DEPLOY:-}
+      # Postgres Token Store
+      PGSTORE_DSN: ${PGSTORE_DSN:-postgresql://cliproxy:cliproxy@postgres:5432/cliproxy}
+      PGSTORE_SCHEMA: ${PGSTORE_SCHEMA:-public}
+      PGSTORE_LOCAL_PATH: ${PGSTORE_LOCAL_PATH:-/var/lib/cliproxy}
     ports:
       - "8317:8317"
       - "8085:8085"
@@ -25,4 +29,28 @@ services:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      - pgstore_local:/var/lib/cliproxy
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: cli-proxy-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cliproxy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cliproxy}
+      POSTGRES_DB: ${POSTGRES_DB:-cliproxy}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cliproxy} -d ${POSTGRES_DB:-cliproxy}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  pgstore_local:
