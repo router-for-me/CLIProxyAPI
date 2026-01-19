@@ -53,7 +53,10 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		return &config, nil
 	}
 
-	allowClampUnsupported := isBudgetBasedProvider(fromFormat) && isLevelBasedProvider(toFormat)
+	// Allow clamping unsupported levels when converting between different provider families
+	// This handles cases like OpenAI (level-based) -> Antigravity (budget-based) where
+	// the source may request "medium" but target only supports "low"/"high"
+	allowClampUnsupported := fromFormat != "" && toFormat != "" && !isSameProviderFamily(fromFormat, toFormat)
 	strictBudget := !fromSuffix && fromFormat != "" && isSameProviderFamily(fromFormat, toFormat)
 	budgetDerivedFromLevel := false
 
