@@ -19,7 +19,7 @@ gitstore/*
 objectstore/*
 
 # Static assets
-static/*
+# static/*
 
 # Authentication data
 auths/*
