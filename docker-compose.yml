@@ -53,7 +53,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cliproxy} -d ${POSTGRES_DB:-cliproxy}"]
-      interval: 5s
+      interval: 60s
       timeout: 5s
       retries: 5
 
