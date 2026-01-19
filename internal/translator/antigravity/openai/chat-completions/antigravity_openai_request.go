@@ -169,7 +169,10 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					for _, item := range items {
 						switch item.Get("type").String() {
 						case "text":
-							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", item.Get("text").String())
+							text := item.Get("text").String()
+							if text != "" {
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
+							}
 							p++
 						case "image_url":
 							imageURL := item.Get("image_url.url").String()
@@ -213,7 +216,10 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					for _, item := range content.Array() {
 						switch item.Get("type").String() {
 						case "text":
-							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", item.Get("text").String())
+							text := item.Get("text").String()
+							if text != "" {
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
+							}
 							p++
 						case "image_url":
 							// If the assistant returned an inline data URL, preserve it for history fidelity.
