@@ -19,7 +19,7 @@ services:
       PGSTORE_SCHEMA: ${PGSTORE_SCHEMA:-public}
       PGSTORE_LOCAL_PATH: ${PGSTORE_LOCAL_PATH:-/var/lib/cliproxy}
     ports:
-      - "8317:8317"
+      - "${CLI_PROXY_PORT:-8317}:8317"
       - "8085:8085"
       - "1455:1455"
       - "54545:54545"
