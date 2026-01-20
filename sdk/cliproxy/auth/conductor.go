@@ -47,7 +47,7 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
+	refreshCheckInterval  = 30 * time.Second
 	refreshPendingBackoff = time.Minute
 	refreshFailureBackoff = 1 * time.Minute
 	quotaBackoffBase      = time.Second

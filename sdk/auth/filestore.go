@@ -217,11 +217,11 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	}
 	id := s.idFor(path, baseDir)
 
-	// Calculate NextRefreshAfter from expires_at (10 minutes before expiry)
+	// Calculate NextRefreshAfter from expires_at (20 minutes before expiry)
 	var nextRefreshAfter time.Time
 	if expiresAtStr, ok := metadata["expires_at"].(string); ok && expiresAtStr != "" {
 		if expiresAt, err := time.Parse(time.RFC3339, expiresAtStr); err == nil {
-			nextRefreshAfter = expiresAt.Add(-10 * time.Minute)
+			nextRefreshAfter = expiresAt.Add(-20 * time.Minute)
 		}
 	}
 

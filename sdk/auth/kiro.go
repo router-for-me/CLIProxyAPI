@@ -52,9 +52,9 @@ func (a *KiroAuthenticator) Provider() string {
 }
 
 // RefreshLead indicates how soon before expiry a refresh should be attempted.
-// Set to 10 minutes for proactive refresh before token expiry.
+// Set to 20 minutes for proactive refresh before token expiry.
 func (a *KiroAuthenticator) RefreshLead() *time.Duration {
-	d := 10 * time.Minute
+	d := 20 * time.Minute
 	return &d
 }
 
@@ -132,8 +132,8 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, 
 		UpdatedAt: now,
 		Metadata:  metadata,
 		Attributes: attributes,
-		// NextRefreshAfter: 10 minutes before expiry
-		NextRefreshAfter: expiresAt.Add(-10 * time.Minute),
+		// NextRefreshAfter: 20 minutes before expiry
+		NextRefreshAfter: expiresAt.Add(-20 * time.Minute),
 	}
 
 	if tokenData.Email != "" {
@@ -214,8 +214,8 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 			"source":      "aws-builder-id-authcode",
 			"email":       tokenData.Email,
 		},
-		// NextRefreshAfter: 10 minutes before expiry
-		NextRefreshAfter: expiresAt.Add(-10 * time.Minute),
+		// NextRefreshAfter: 20 minutes before expiry
+		NextRefreshAfter: expiresAt.Add(-20 * time.Minute),
 	}
 
 	if tokenData.Email != "" {
@@ -298,8 +298,8 @@ func (a *KiroAuthenticator) ImportFromKiroIDE(ctx context.Context, cfg *config.C
 			"email":       tokenData.Email,
 			"region":      tokenData.Region,
 		},
-		// NextRefreshAfter: 10 minutes before expiry
-		NextRefreshAfter: expiresAt.Add(-10 * time.Minute),
+		// NextRefreshAfter: 20 minutes before expiry
+		NextRefreshAfter: expiresAt.Add(-20 * time.Minute),
 	}
 
 	// Display the email if extracted
@@ -367,8 +367,8 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 	updated.Metadata["refresh_token"] = tokenData.RefreshToken
 	updated.Metadata["expires_at"] = tokenData.ExpiresAt
 	updated.Metadata["last_refresh"] = now.Format(time.RFC3339) // For double-check optimization
-	// NextRefreshAfter: 10 minutes before expiry
-	updated.NextRefreshAfter = expiresAt.Add(-10 * time.Minute)
+	// NextRefreshAfter: 20 minutes before expiry
+	updated.NextRefreshAfter = expiresAt.Add(-20 * time.Minute)
 
 	return updated, nil
 }
