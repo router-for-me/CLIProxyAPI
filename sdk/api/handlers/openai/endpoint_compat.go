@@ -11,7 +11,7 @@ func resolveEndpointOverride(modelName, requestedEndpoint string) (string, bool)
 	if modelName == "" {
 		return "", false
 	}
-	info := registry.GetGlobalRegistry().GetModelInfo(modelName)
+	info := registry.GetGlobalRegistry().GetModelInfo(modelName, "")
 	if info == nil || len(info.SupportedEndpoints) == 0 {
 		return "", false
 	}
