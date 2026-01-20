@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -85,6 +86,7 @@ func (h *OAuthWebHandler) RegisterRoutes(router gin.IRouter) {
 		oauth.GET("/social/callback", h.handleSocialCallback)
 		oauth.GET("/status", h.handleStatus)
 		oauth.POST("/import", h.handleImportToken)
+		oauth.POST("/refresh", h.handleManualRefresh)
 	}
 }
 
@@ -823,4 +825,158 @@ func (h *OAuthWebHandler) handleImportToken(c *gin.Context) {
 		"message":  "Token imported successfully",
 		"fileName": fileName,
 	})
+}
+
+// handleManualRefresh handles manual token refresh requests from the web UI.
+// This allows users to trigger a token refresh when needed, without waiting
+// for the automatic 5-second check and 10-minute-before-expiry refresh cycle.
+// Uses the same refresh logic as kiro_executor.Refresh for consistency.
+func (h *OAuthWebHandler) handleManualRefresh(c *gin.Context) {
+	authDir := ""
+	if h.cfg != nil && h.cfg.AuthDir != "" {
+		var err error
+		authDir, err = util.ResolveAuthDir(h.cfg.AuthDir)
+		if err != nil {
+			log.Errorf("OAuth Web: failed to resolve auth directory: %v", err)
+		}
+	}
+
+	if authDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error":   "Failed to get home directory",
+			})
+			return
+		}
+		authDir = filepath.Join(home, ".cli-proxy-api")
+	}
+
+	// Find all kiro token files in the auth directory
+	files, err := os.ReadDir(authDir)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to read auth directory: %v", err),
+		})
+		return
+	}
+
+	var refreshedCount int
+	var errors []string
+
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+		name := file.Name()
+		if !strings.HasPrefix(name, "kiro-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+
+		filePath := filepath.Join(authDir, name)
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: read error - %v", name, err))
+			continue
+		}
+
+		var storage KiroTokenStorage
+		if err := json.Unmarshal(data, &storage); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: parse error - %v", name, err))
+			continue
+		}
+
+		if storage.RefreshToken == "" {
+			errors = append(errors, fmt.Sprintf("%s: no refresh token", name))
+			continue
+		}
+
+		// Refresh token using the same logic as kiro_executor.Refresh
+		tokenData, err := h.refreshTokenData(c.Request.Context(), &storage)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: refresh failed - %v", name, err))
+			continue
+		}
+
+		// Update storage with new token data
+		storage.AccessToken = tokenData.AccessToken
+		if tokenData.RefreshToken != "" {
+			storage.RefreshToken = tokenData.RefreshToken
+		}
+		storage.ExpiresAt = tokenData.ExpiresAt
+		storage.LastRefresh = time.Now().Format(time.RFC3339)
+		if tokenData.ProfileArn != "" {
+			storage.ProfileArn = tokenData.ProfileArn
+		}
+
+		// Write updated token back to file
+		updatedData, err := json.MarshalIndent(storage, "", "  ")
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: marshal error - %v", name, err))
+			continue
+		}
+
+		tmpFile := filePath + ".tmp"
+		if err := os.WriteFile(tmpFile, updatedData, 0600); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: write error - %v", name, err))
+			continue
+		}
+		if err := os.Rename(tmpFile, filePath); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: rename error - %v", name, err))
+			continue
+		}
+
+		log.Infof("OAuth Web: manually refreshed token in %s, expires at %s", name, tokenData.ExpiresAt)
+		refreshedCount++
+
+		// Notify callback if set
+		if h.onTokenObtained != nil {
+			h.onTokenObtained(tokenData)
+		}
+	}
+
+	if refreshedCount == 0 && len(errors) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("All refresh attempts failed: %v", errors),
+		})
+		return
+	}
+
+	response := gin.H{
+		"success":        true,
+		"message":        fmt.Sprintf("Refreshed %d token(s)", refreshedCount),
+		"refreshedCount": refreshedCount,
+	}
+	if len(errors) > 0 {
+		response["warnings"] = errors
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// refreshTokenData refreshes a token using the appropriate method based on auth type.
+// This mirrors the logic in kiro_executor.Refresh for consistency.
+func (h *OAuthWebHandler) refreshTokenData(ctx context.Context, storage *KiroTokenStorage) (*KiroTokenData, error) {
+	ssoClient := NewSSOOIDCClient(h.cfg)
+
+	switch {
+	case storage.ClientID != "" && storage.ClientSecret != "" && storage.AuthMethod == "idc" && storage.Region != "":
+		// IDC refresh with region-specific endpoint
+		log.Debugf("OAuth Web: using SSO OIDC refresh for IDC (region=%s)", storage.Region)
+		return ssoClient.RefreshTokenWithRegion(ctx, storage.ClientID, storage.ClientSecret, storage.RefreshToken, storage.Region, storage.StartURL)
+
+	case storage.ClientID != "" && storage.ClientSecret != "" && storage.AuthMethod == "builder-id":
+		// Builder ID refresh with default endpoint
+		log.Debugf("OAuth Web: using SSO OIDC refresh for AWS Builder ID")
+		return ssoClient.RefreshToken(ctx, storage.ClientID, storage.ClientSecret, storage.RefreshToken)
+
+	default:
+		// Fallback to Kiro's OAuth refresh endpoint (for social auth: Google/GitHub)
+		log.Debugf("OAuth Web: using Kiro OAuth refresh endpoint")
+		oauth := NewKiroOAuth(h.cfg)
+		return oauth.RefreshToken(ctx, storage.RefreshToken)
+	}
 }

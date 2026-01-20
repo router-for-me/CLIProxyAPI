@@ -52,9 +52,9 @@ func (a *KiroAuthenticator) Provider() string {
 }
 
 // RefreshLead indicates how soon before expiry a refresh should be attempted.
-// Set to 5 minutes to match Antigravity and avoid frequent refresh checks while still ensuring timely token refresh.
+// Set to 10 minutes for proactive refresh before token expiry.
 func (a *KiroAuthenticator) RefreshLead() *time.Duration {
-	d := 5 * time.Minute
+	d := 10 * time.Minute
 	return &d
 }
 
@@ -66,13 +66,19 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, 
 		expiresAt = time.Now().Add(1 * time.Hour)
 	}
 
-	// Extract identifier for file naming
-	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn, tokenData.ClientID)
-
-	// Determine label based on auth method
-	label := fmt.Sprintf("kiro-%s", source)
+	// Determine label and identifier based on auth method
+	var label, idPart string
 	if tokenData.AuthMethod == "idc" {
 		label = "kiro-idc"
+		// For IDC auth, always use clientID as identifier
+		if tokenData.ClientID != "" {
+			idPart = kiroauth.SanitizeEmailForFilename(tokenData.ClientID)
+		} else {
+			idPart = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+		}
+	} else {
+		label = fmt.Sprintf("kiro-%s", source)
+		idPart = extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn, tokenData.ClientID)
 	}
 
 	now := time.Now()
@@ -126,8 +132,8 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, 
 		UpdatedAt: now,
 		Metadata:  metadata,
 		Attributes: attributes,
-		// NextRefreshAfter is aligned with RefreshLead (5min)
-		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
+		// NextRefreshAfter: 10 minutes before expiry
+		NextRefreshAfter: expiresAt.Add(-10 * time.Minute),
 	}
 
 	if tokenData.Email != "" {
@@ -208,8 +214,8 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 			"source":      "aws-builder-id-authcode",
 			"email":       tokenData.Email,
 		},
-		// NextRefreshAfter is aligned with RefreshLead (5min)
-		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
+		// NextRefreshAfter: 10 minutes before expiry
+		NextRefreshAfter: expiresAt.Add(-10 * time.Minute),
 	}
 
 	if tokenData.Email != "" {
@@ -292,8 +298,8 @@ func (a *KiroAuthenticator) ImportFromKiroIDE(ctx context.Context, cfg *config.C
 			"email":       tokenData.Email,
 			"region":      tokenData.Region,
 		},
-		// NextRefreshAfter is aligned with RefreshLead (5min)
-		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
+		// NextRefreshAfter: 10 minutes before expiry
+		NextRefreshAfter: expiresAt.Add(-10 * time.Minute),
 	}
 
 	// Display the email if extracted
@@ -361,8 +367,8 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 	updated.Metadata["refresh_token"] = tokenData.RefreshToken
 	updated.Metadata["expires_at"] = tokenData.ExpiresAt
 	updated.Metadata["last_refresh"] = now.Format(time.RFC3339) // For double-check optimization
-	// NextRefreshAfter is aligned with RefreshLead (5min)
-	updated.NextRefreshAfter = expiresAt.Add(-5 * time.Minute)
+	// NextRefreshAfter: 10 minutes before expiry
+	updated.NextRefreshAfter = expiresAt.Add(-10 * time.Minute)
 
 	return updated, nil
 }

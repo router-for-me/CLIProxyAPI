@@ -541,6 +541,9 @@ const (
         }
         .auth-btn.manual { background: #6c757d; }
         .auth-btn.manual:hover { background: #5a6268; }
+        .auth-btn.refresh { background: #17a2b8; }
+        .auth-btn.refresh:hover { background: #138496; }
+        .auth-btn.refresh:disabled { background: #7fb3bd; cursor: not-allowed; }
         .manual-form {
             background: #f8f9fa;
             padding: 20px;
@@ -606,6 +609,13 @@ const (
                 <span class="icon">📋</span>
                 Import RefreshToken from Kiro IDE
             </button>
+            
+            <button type="button" class="auth-btn refresh" onclick="manualRefresh()" id="refreshBtn">
+                <span class="icon">🔄</span>
+                Manual Refresh All Tokens
+            </button>
+            
+            <div class="status-message" id="refreshStatus"></div>
         </div>
         
         <div class="idc-form" id="idcForm">
@@ -724,6 +734,43 @@ const (
             } finally {
                 btn.disabled = false;
                 btn.textContent = '📥 Import Token';
+            }
+        }
+        
+        async function manualRefresh() {
+            const btn = document.getElementById('refreshBtn');
+            const statusEl = document.getElementById('refreshStatus');
+            
+            btn.disabled = true;
+            btn.innerHTML = '<span class="icon">⏳</span> Refreshing...';
+            statusEl.className = 'status-message';
+            statusEl.style.display = 'none';
+            
+            try {
+                const response = await fetch('/v0/oauth/kiro/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    statusEl.className = 'status-message success';
+                    let msg = '✅ ' + data.message;
+                    if (data.warnings && data.warnings.length > 0) {
+                        msg += ' (Warnings: ' + data.warnings.join('; ') + ')';
+                    }
+                    statusEl.textContent = msg;
+                } else {
+                    statusEl.className = 'status-message error';
+                    statusEl.textContent = '❌ ' + (data.error || data.message || 'Refresh failed');
+                }
+            } catch (error) {
+                statusEl.className = 'status-message error';
+                statusEl.textContent = '❌ Network error: ' + error.message;
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<span class="icon">🔄</span> Manual Refresh All Tokens';
             }
         }
     </script>
