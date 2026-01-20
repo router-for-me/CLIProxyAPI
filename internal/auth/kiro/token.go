@@ -26,13 +26,13 @@ type KiroTokenStorage struct {
 	// LastRefresh is the timestamp of the last token refresh
 	LastRefresh string `json:"last_refresh"`
 	// ClientID is the OAuth client ID (required for token refresh)
-	ClientID string `json:"clientId,omitempty"`
+	ClientID string `json:"client_id,omitempty"`
 	// ClientSecret is the OAuth client secret (required for token refresh)
-	ClientSecret string `json:"clientSecret,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
 	// Region is the AWS region
 	Region string `json:"region,omitempty"`
 	// StartURL is the AWS Identity Center start URL (for IDC auth)
-	StartURL string `json:"startUrl,omitempty"`
+	StartURL string `json:"start_url,omitempty"`
 	// Email is the user's email address
 	Email string `json:"email,omitempty"`
 }

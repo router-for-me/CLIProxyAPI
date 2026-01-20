@@ -3617,6 +3617,13 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	if tokenData.ClientSecret != "" {
 		updated.Metadata["client_secret"] = tokenData.ClientSecret
 	}
+	// Preserve region and start_url for IDC token refresh
+	if tokenData.Region != "" {
+		updated.Metadata["region"] = tokenData.Region
+	}
+	if tokenData.StartURL != "" {
+		updated.Metadata["start_url"] = tokenData.StartURL
+	}
 
 	if updated.Attributes == nil {
 		updated.Attributes = make(map[string]string)

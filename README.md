@@ -17,13 +17,28 @@ The Plus release stays in lockstep with the mainline features.
 
 - **OAuth Web Authentication**: Browser-based OAuth login for Kiro with beautiful web UI
 - **Rate Limiter**: Built-in request rate limiting to prevent API abuse
-- **Background Token Refresh**: Automatic token refresh in background to avoid expiration
+- **Background Token Refresh**: Automatic token refresh 10 minutes before expiration
 - **Metrics & Monitoring**: Request metrics collection for monitoring and debugging
 - **Device Fingerprint**: Device fingerprint generation for enhanced security
 - **Cooldown Management**: Smart cooldown mechanism for API rate limits
 - **Usage Checker**: Real-time usage monitoring and quota management
 - **Model Converter**: Unified model name conversion across providers
 - **UTF-8 Stream Processing**: Improved streaming response handling
+
+## Kiro Authentication
+
+### Web-based OAuth Login
+
+Access the Kiro OAuth web interface at:
+
+```
+http://your-server:8080/v0/oauth/kiro
+```
+
+This provides a browser-based OAuth flow for Kiro (AWS CodeWhisperer) authentication with:
+- AWS Builder ID login
+- AWS Identity Center (IDC) login
+- Token import from Kiro IDE
 
 ## Quick Deployment with Docker
 

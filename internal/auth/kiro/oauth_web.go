@@ -385,6 +385,7 @@ func (h *OAuthWebHandler) pollForToken(ctx context.Context, session *webAuthSess
 				ClientSecret: session.clientSecret,
 				Email:        email,
 				Region:       session.region,
+				StartURL:     session.startURL,
 			}
 
 			h.mu.Lock()
