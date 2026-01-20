@@ -77,7 +77,13 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			}
 		}
 
+		// Candidate count (OpenAI 'n' parameter)
+		if candidateCount := genConfig.Get("candidateCount"); candidateCount.Exists() {
+			out, _ = sjson.Set(out, "n", candidateCount.Int())
+		}
+
 		// Map Gemini thinkingConfig to OpenAI reasoning_effort.
+		// Always perform conversion to support allowCompat models that may not be in registry
 		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 			if thinkingLevel := thinkingConfig.Get("thinkingLevel"); thinkingLevel.Exists() {
 				effort := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))

@@ -80,6 +80,8 @@ type ThinkingSupport struct {
 type ModelRegistration struct {
 	// Info contains the model metadata
 	Info *ModelInfo
+	// InfoByProvider maps provider identifiers to specific ModelInfo to support differing capabilities.
+	InfoByProvider map[string]*ModelInfo
 	// Count is the number of active clients that can provide this model
 	Count int
 	// LastUpdated tracks when this registration was last modified
@@ -134,16 +136,19 @@ func GetGlobalRegistry() *ModelRegistry {
 	return globalRegistry
 }
 
-// LookupModelInfo searches the dynamic registry first, then falls back to static model definitions.
-//
-// This helper exists because some code paths only have a model ID and still need Thinking and
-// max completion token metadata even when the dynamic registry hasn't been populated.
-func LookupModelInfo(modelID string) *ModelInfo {
+// LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
+func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
 		return nil
 	}
-	if info := GetGlobalRegistry().GetModelInfo(modelID); info != nil {
+
+	p := ""
+	if len(provider) > 0 {
+		p = strings.ToLower(strings.TrimSpace(provider[0]))
+	}
+
+	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
 		return info
 	}
 	return LookupStaticModelInfo(modelID)
@@ -299,6 +304,9 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 				if count, okProv := reg.Providers[oldProvider]; okProv {
 					if count <= toRemove {
 						delete(reg.Providers, oldProvider)
+						if reg.InfoByProvider != nil {
+							delete(reg.InfoByProvider, oldProvider)
+						}
 					} else {
 						reg.Providers[oldProvider] = count - toRemove
 					}
@@ -348,6 +356,12 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		model := newModels[id]
 		if reg, ok := r.models[id]; ok {
 			reg.Info = cloneModelInfo(model)
+			if provider != "" {
+				if reg.InfoByProvider == nil {
+					reg.InfoByProvider = make(map[string]*ModelInfo)
+				}
+				reg.InfoByProvider[provider] = cloneModelInfo(model)
+			}
 			reg.LastUpdated = now
 			if reg.QuotaExceededClients != nil {
 				delete(reg.QuotaExceededClients, clientID)
@@ -411,11 +425,15 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 		if existing.SuspendedClients == nil {
 			existing.SuspendedClients = make(map[string]string)
 		}
+		if existing.InfoByProvider == nil {
+			existing.InfoByProvider = make(map[string]*ModelInfo)
+		}
 		if provider != "" {
 			if existing.Providers == nil {
 				existing.Providers = make(map[string]int)
 			}
 			existing.Providers[provider]++
+			existing.InfoByProvider[provider] = cloneModelInfo(model)
 		}
 		log.Debugf("Incremented count for model %s, now %d clients", modelID, existing.Count)
 		return
@@ -423,6 +441,7 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 
 	registration := &ModelRegistration{
 		Info:                 cloneModelInfo(model),
+		InfoByProvider:       make(map[string]*ModelInfo),
 		Count:                1,
 		LastUpdated:          now,
 		QuotaExceededClients: make(map[string]*time.Time),
@@ -430,6 +449,7 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 	}
 	if provider != "" {
 		registration.Providers = map[string]int{provider: 1}
+		registration.InfoByProvider[provider] = cloneModelInfo(model)
 	}
 	r.models[modelID] = registration
 	log.Debugf("Registered new model %s from provider %s", modelID, provider)
@@ -455,6 +475,9 @@ func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider stri
 		if count, ok := registration.Providers[provider]; ok {
 			if count <= 1 {
 				delete(registration.Providers, provider)
+				if registration.InfoByProvider != nil {
+					delete(registration.InfoByProvider, provider)
+				}
 			} else {
 				registration.Providers[provider] = count - 1
 			}
@@ -539,6 +562,9 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 				if count, ok := registration.Providers[provider]; ok {
 					if count <= 1 {
 						delete(registration.Providers, provider)
+						if registration.InfoByProvider != nil {
+							delete(registration.InfoByProvider, provider)
+						}
 					} else {
 						registration.Providers[provider] = count - 1
 					}
@@ -945,12 +971,22 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	return result
 }
 
-// GetModelInfo returns the registered ModelInfo for the given model ID, if present.
-// Returns nil if the model is unknown to the registry.
-func (r *ModelRegistry) GetModelInfo(modelID string) *ModelInfo {
+// GetModelInfo returns ModelInfo, prioritizing provider-specific definition if available.
+func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 	if reg, ok := r.models[modelID]; ok && reg != nil {
+		// Try provider specific definition first
+		if provider != "" && reg.InfoByProvider != nil {
+			if reg.Providers != nil {
+				if count, ok := reg.Providers[provider]; ok && count > 0 {
+					if info, ok := reg.InfoByProvider[provider]; ok && info != nil {
+						return info
+					}
+				}
+			}
+		}
+		// Fallback to global info (last registered)
 		return reg.Info
 	}
 	return nil
