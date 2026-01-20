@@ -75,10 +75,35 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	if hasOfficialInstructions {
 		newInput := "[]"
+		var systemContentBuilder strings.Builder
+
 		for _, item := range inputResults {
+			if strings.EqualFold(item.Get("role").String(), "system") {
+				if content := item.Get("content"); content.Exists() && content.IsArray() {
+					content.ForEach(func(_, contentItem gjson.Result) bool {
+						text := contentItem.Get("text").String()
+						if systemContentBuilder.Len() > 0 && text != "" {
+							systemContentBuilder.WriteByte('\n')
+						}
+						systemContentBuilder.WriteString(text)
+						return true
+					})
+				}
+				continue
+			}
 			newInput, _ = sjson.SetRaw(newInput, "-1", item.Raw)
 		}
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(newInput))
+
+		extractedSys := systemContentBuilder.String()
+		if extractedSys != "" {
+			currentInstructions := gjson.GetBytes(rawJSON, "instructions").String()
+			if currentInstructions != "" {
+				extractedSys = currentInstructions + "\n" + extractedSys
+			}
+			rawJSON, _ = sjson.SetBytes(rawJSON, "instructions", extractedSys)
+		}
+
 		return rawJSON
 	}
 	// log.Debugf("instructions not matched, %s\n", originalInstructions)
