@@ -109,6 +109,9 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// AutoWakeup configures automatic wakeup (warmup) scheduling for AI providers.
+	AutoWakeup AutoWakeupConfig `yaml:"auto-wakeup" json:"auto-wakeup"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -265,6 +268,40 @@ type CloakConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+}
+
+// AutoWakeupConfig holds automatic wakeup (warmup) scheduling configuration.
+type AutoWakeupConfig struct {
+	// Enabled globally enables or disables auto-wakeup.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Schedules is the list of wakeup schedules.
+	Schedules []WakeupSchedule `yaml:"schedules,omitempty" json:"schedules,omitempty"`
+}
+
+// WakeupSchedule defines a single wakeup schedule configuration.
+type WakeupSchedule struct {
+	// ID is the unique identifier for this schedule.
+	ID string `yaml:"id" json:"id"`
+	// Name is a human-readable name for this schedule.
+	Name string `yaml:"name" json:"name"`
+	// Enabled indicates whether this schedule is active.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Type specifies the scheduling pattern (daily, weekly, interval, cron).
+	Type string `yaml:"type" json:"type"`
+	// Time is used for daily/weekly schedules in "HH:MM" format.
+	Time string `yaml:"time,omitempty" json:"time,omitempty"`
+	// Weekdays specifies which days to run for weekly schedules (0=Sunday, 1=Monday, etc.).
+	Weekdays []int `yaml:"weekdays,omitempty" json:"weekdays,omitempty"`
+	// Interval specifies the duration between runs (e.g., "2h30m") for interval schedules.
+	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
+	// Cron is the crontab expression for cron-type schedules.
+	Cron string `yaml:"cron,omitempty" json:"cron,omitempty"`
+	// Provider specifies the target provider (e.g., "antigravity").
+	Provider string `yaml:"provider" json:"provider"`
+	// Models lists the models to warm up. Empty means use default model.
+	Models []string `yaml:"models,omitempty" json:"models,omitempty"`
+	// Accounts specifies which accounts to use. Empty means all available accounts.
+	Accounts []string `yaml:"accounts,omitempty" json:"accounts,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,

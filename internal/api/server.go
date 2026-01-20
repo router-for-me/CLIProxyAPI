@@ -29,6 +29,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/wakeup"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
@@ -152,6 +153,12 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
+	// wakeupHandler handles wakeup-related API endpoints
+	wakeupHandler *managementHandlers.WakeupHandler
+
+	// wakeupScheduler manages scheduled wakeup tasks
+	wakeupScheduler *wakeup.Scheduler
+
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
@@ -264,6 +271,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	logDir := logging.ResolveLogDirectory(cfg)
 	s.mgmt.SetLogDirectory(logDir)
 	s.localPassword = optionState.localPassword
+
+	// Initialize wakeup scheduler and handler
+	s.wakeupScheduler = wakeup.NewScheduler(cfg, authManager)
+	s.wakeupHandler = managementHandlers.NewWakeupHandler(s.wakeupScheduler)
+	// Start wakeup scheduler if enabled
+	if cfg.AutoWakeup.Enabled {
+		if err := s.wakeupScheduler.Start(context.Background()); err != nil {
+			log.Warnf("Failed to start wakeup scheduler: %v", err)
+		}
+	}
 
 	// Setup routes
 	s.setupRoutes()
@@ -621,6 +638,19 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		// Wakeup/warmup scheduling endpoints
+		if s.wakeupHandler != nil {
+			mgmt.GET("/wakeup", s.wakeupHandler.GetState)
+			mgmt.POST("/wakeup/trigger", s.wakeupHandler.Trigger)
+			mgmt.GET("/wakeup/schedules", s.wakeupHandler.GetSchedules)
+			mgmt.POST("/wakeup/schedules", s.wakeupHandler.CreateSchedule)
+			mgmt.GET("/wakeup/schedules/:id", s.wakeupHandler.GetSchedule)
+			mgmt.PUT("/wakeup/schedules/:id", s.wakeupHandler.UpdateSchedule)
+			mgmt.DELETE("/wakeup/schedules/:id", s.wakeupHandler.DeleteSchedule)
+			mgmt.GET("/wakeup/history", s.wakeupHandler.GetHistory)
+			mgmt.DELETE("/wakeup/history", s.wakeupHandler.ClearHistory)
+		}
 	}
 }
 
@@ -808,6 +838,13 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	// Stop wakeup scheduler
+	if s.wakeupScheduler != nil {
+		if err := s.wakeupScheduler.Stop(); err != nil {
+			log.Warnf("failed to stop wakeup scheduler: %v", err)
+		}
+	}
+
 	// Shutdown the HTTP server.
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
@@ -986,6 +1023,33 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
+	}
+
+	// Update wakeup scheduler configuration
+	if s.wakeupScheduler != nil {
+		s.wakeupScheduler.SetConfig(cfg)
+		s.wakeupScheduler.SetAuthManager(s.handlers.AuthManager)
+		// Handle auto-wakeup enabled/disabled state
+		wakeupWasEnabled := oldCfg != nil && oldCfg.AutoWakeup.Enabled
+		wakeupNowEnabled := cfg.AutoWakeup.Enabled
+		if !wakeupWasEnabled && wakeupNowEnabled {
+			if err := s.wakeupScheduler.Start(context.Background()); err != nil {
+				log.Warnf("Failed to start wakeup scheduler: %v", err)
+			} else {
+				log.Info("wakeup scheduler enabled")
+			}
+		} else if wakeupWasEnabled && !wakeupNowEnabled {
+			if err := s.wakeupScheduler.Stop(); err != nil {
+				log.Warnf("Failed to stop wakeup scheduler: %v", err)
+			} else {
+				log.Info("wakeup scheduler disabled")
+			}
+		} else if wakeupNowEnabled {
+			// Reload schedules if config changed
+			if err := s.wakeupScheduler.Reload(); err != nil {
+				log.Warnf("Failed to reload wakeup schedules: %v", err)
+			}
+		}
 	}
 
 	// Notify Amp module of config changes (for model mapping hot-reload)

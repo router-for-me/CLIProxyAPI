@@ -49,6 +49,17 @@ const (
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
 	systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
+
+	// Exported constants for reuse by other packages (e.g., wakeup)
+	AntigravityClientID          = antigravityClientID
+	AntigravityClientSecret      = antigravityClientSecret
+	AntigravityTokenURL          = "https://oauth2.googleapis.com/token"
+	AntigravitySandboxBaseURL    = antigravitySandboxBaseURLDaily
+	AntigravityDailyBaseURL      = antigravityBaseURLDaily
+	AntigravityProdBaseURL       = antigravityBaseURLProd
+	AntigravityStreamPath        = antigravityStreamPath
+	AntigravityGeneratePath      = antigravityGeneratePath
+	DefaultAntigravityUserAgent  = defaultAntigravityAgent
 )
 
 var (
@@ -1032,6 +1043,12 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	return nil
 }
 
+// EnsureAccessToken ensures a valid access token is available, refreshing if needed.
+// Exported for reuse by other packages (e.g., wakeup).
+func (e *AntigravityExecutor) EnsureAccessToken(ctx context.Context, auth *cliproxyauth.Auth) (string, *cliproxyauth.Auth, error) {
+	return e.ensureAccessToken(ctx, auth)
+}
+
 func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *cliproxyauth.Auth) (string, *cliproxyauth.Auth, error) {
 	if auth == nil {
 		return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
@@ -1359,6 +1376,12 @@ func resolveUserAgent(auth *cliproxyauth.Auth) string {
 	return defaultAntigravityAgent
 }
 
+// AntigravityBaseURLFallbackOrder returns the list of base URLs to try in order.
+// Exported for reuse by other packages (e.g., wakeup).
+func AntigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
+	return antigravityBaseURLFallbackOrder(auth)
+}
+
 func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
 		return []string{base}
@@ -1368,6 +1391,12 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 		antigravityBaseURLDaily,
 		antigravityBaseURLProd,
 	}
+}
+
+// ResolveCustomAntigravityBaseURL extracts a custom base URL from auth if configured.
+// Exported for reuse by other packages.
+func ResolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
+	return resolveCustomAntigravityBaseURL(auth)
 }
 
 func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {

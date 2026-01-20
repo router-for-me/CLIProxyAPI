@@ -70,6 +70,14 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthMo
 	m.oauthModelAlias.Store(table)
 }
 
+// ResolveUpstreamModel resolves the upstream model name from OAuth model alias.
+// If an alias exists, returns the original (upstream) model name that corresponds
+// to the requested alias. If no alias is found, returns the requested model unchanged.
+// This is the public API for model alias resolution used by external packages.
+func (m *Manager) ResolveUpstreamModel(auth *Auth, requestedModel string) string {
+	return m.applyOAuthModelAlias(auth, requestedModel)
+}
+
 // applyOAuthModelAlias resolves the upstream model from OAuth model alias.
 // If an alias exists, the returned model is the upstream model.
 func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string {
