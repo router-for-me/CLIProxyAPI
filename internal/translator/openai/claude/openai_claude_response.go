@@ -289,21 +289,17 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	// Only process if usage has actual values (not null)
 	if param.FinishReason != "" {
 		usage := root.Get("usage")
-		var inputTokens, outputTokens int64
+		var inputTokens, outputTokens, cachedTokens int64
 		if usage.Exists() && usage.Type != gjson.Null {
-			// Check if usage has actual token counts
-			promptTokens := usage.Get("prompt_tokens")
-			completionTokens := usage.Get("completion_tokens")
-
-			if promptTokens.Exists() && completionTokens.Exists() {
-				inputTokens = promptTokens.Int()
-				outputTokens = completionTokens.Int()
-			}
+			inputTokens, outputTokens, cachedTokens = extractOpenAIUsage(usage)
 			// Send message_delta with usage
 			messageDeltaJSON := `{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
 			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(param.FinishReason))
 			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.input_tokens", inputTokens)
 			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.output_tokens", outputTokens)
+			if cachedTokens > 0 {
+				messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.cache_read_input_tokens", cachedTokens)
+			}
 			results = append(results, "event: message_delta\ndata: "+messageDeltaJSON+"\n\n")
 			param.MessageDeltaSent = true
 
@@ -423,13 +419,12 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
 
 	// Set usage information
 	if usage := root.Get("usage"); usage.Exists() {
-		out, _ = sjson.Set(out, "usage.input_tokens", usage.Get("prompt_tokens").Int())
-		out, _ = sjson.Set(out, "usage.output_tokens", usage.Get("completion_tokens").Int())
-		reasoningTokens := int64(0)
-		if v := usage.Get("completion_tokens_details.reasoning_tokens"); v.Exists() {
-			reasoningTokens = v.Int()
+		inputTokens, outputTokens, cachedTokens := extractOpenAIUsage(usage)
+		out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
+		out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
+		if cachedTokens > 0 {
+			out, _ = sjson.Set(out, "usage.cache_read_input_tokens", cachedTokens)
 		}
-		out, _ = sjson.Set(out, "usage.reasoning_tokens", reasoningTokens)
 	}
 
 	return []string{out}
@@ -674,8 +669,12 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 	}
 
 	if respUsage := root.Get("usage"); respUsage.Exists() {
-		out, _ = sjson.Set(out, "usage.input_tokens", respUsage.Get("prompt_tokens").Int())
-		out, _ = sjson.Set(out, "usage.output_tokens", respUsage.Get("completion_tokens").Int())
+		inputTokens, outputTokens, cachedTokens := extractOpenAIUsage(respUsage)
+		out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
+		out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
+		if cachedTokens > 0 {
+			out, _ = sjson.Set(out, "usage.cache_read_input_tokens", cachedTokens)
+		}
 	}
 
 	if !stopReasonSet {
@@ -691,4 +690,24 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 func ClaudeTokenCount(ctx context.Context, count int64) string {
 	return fmt.Sprintf(`{"input_tokens":%d}`, count)
+}
+
+func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64) {
+	if !usage.Exists() || usage.Type == gjson.Null {
+		return 0, 0, 0
+	}
+
+	inputTokens := usage.Get("prompt_tokens").Int()
+	outputTokens := usage.Get("completion_tokens").Int()
+	cachedTokens := usage.Get("prompt_tokens_details.cached_tokens").Int()
+
+	if cachedTokens > 0 {
+		if inputTokens >= cachedTokens {
+			inputTokens -= cachedTokens
+		} else {
+			inputTokens = 0
+		}
+	}
+
+	return inputTokens, outputTokens, cachedTokens
 }
