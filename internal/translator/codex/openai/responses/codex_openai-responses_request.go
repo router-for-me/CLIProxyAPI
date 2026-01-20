@@ -10,6 +10,24 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// extractSystemContent extracts and concatenates text from a system message's content array
+func extractSystemContent(item gjson.Result) string {
+	content := item.Get("content")
+	if !content.Exists() || !content.IsArray() {
+		return ""
+	}
+	var builder strings.Builder
+	content.ForEach(func(_, contentItem gjson.Result) bool {
+		text := contentItem.Get("text").String()
+		if builder.Len() > 0 && text != "" {
+			builder.WriteByte('\n')
+		}
+		builder.WriteString(text)
+		return true
+	})
+	return builder.String()
+}
+
 func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
 	userAgent := misc.ExtractCodexUserAgent(rawJSON)
@@ -54,18 +72,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	if originalInstructions == "" && len(inputResults) > 0 {
 		for _, item := range inputResults {
 			if strings.EqualFold(item.Get("role").String(), "system") {
-				var builder strings.Builder
-				if content := item.Get("content"); content.Exists() && content.IsArray() {
-					content.ForEach(func(_, contentItem gjson.Result) bool {
-						text := contentItem.Get("text").String()
-						if builder.Len() > 0 && text != "" {
-							builder.WriteByte('\n')
-						}
-						builder.WriteString(text)
-						return true
-					})
-				}
-				originalInstructionsText = builder.String()
+				originalInstructionsText = extractSystemContent(item)
 				originalInstructions = strconv.Quote(originalInstructionsText)
 				extractedSystemInstructions = true
 				break
@@ -74,29 +81,24 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	}
 
 	if hasOfficialInstructions {
-		newInput := "[]"
-		var systemContentBuilder strings.Builder
+		var systemContentParts []string
+		var nonSystemItems []string
 
 		for _, item := range inputResults {
 			if strings.EqualFold(item.Get("role").String(), "system") {
-				if content := item.Get("content"); content.Exists() && content.IsArray() {
-					content.ForEach(func(_, contentItem gjson.Result) bool {
-						text := contentItem.Get("text").String()
-						if systemContentBuilder.Len() > 0 && text != "" {
-							systemContentBuilder.WriteByte('\n')
-						}
-						systemContentBuilder.WriteString(text)
-						return true
-					})
+				if sysContent := extractSystemContent(item); sysContent != "" {
+					systemContentParts = append(systemContentParts, sysContent)
 				}
 				continue
 			}
-			newInput, _ = sjson.SetRaw(newInput, "-1", item.Raw)
+			nonSystemItems = append(nonSystemItems, item.Raw)
 		}
+
+		newInput := "[" + strings.Join(nonSystemItems, ",") + "]"
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(newInput))
 
-		extractedSys := systemContentBuilder.String()
-		if extractedSys != "" {
+		if len(systemContentParts) > 0 {
+			extractedSys := strings.Join(systemContentParts, "\n")
 			currentInstructions := gjson.GetBytes(rawJSON, "instructions").String()
 			if currentInstructions != "" {
 				extractedSys = currentInstructions + "\n" + extractedSys
