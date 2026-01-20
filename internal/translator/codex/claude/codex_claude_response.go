@@ -117,8 +117,12 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		} else {
 			template, _ = sjson.Set(template, "delta.stop_reason", "end_turn")
 		}
-		template, _ = sjson.Set(template, "usage.input_tokens", rootResult.Get("response.usage.input_tokens").Int())
-		template, _ = sjson.Set(template, "usage.output_tokens", rootResult.Get("response.usage.output_tokens").Int())
+		inputTokens, outputTokens, cachedTokens := extractResponsesUsage(rootResult.Get("response.usage"))
+		template, _ = sjson.Set(template, "usage.input_tokens", inputTokens)
+		template, _ = sjson.Set(template, "usage.output_tokens", outputTokens)
+		if cachedTokens > 0 {
+			template, _ = sjson.Set(template, "usage.cache_read_input_tokens", cachedTokens)
+		}
 
 		output = "event: message_delta\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
@@ -204,8 +208,12 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", responseData.Get("id").String())
 	out, _ = sjson.Set(out, "model", responseData.Get("model").String())
-	out, _ = sjson.Set(out, "usage.input_tokens", responseData.Get("usage.input_tokens").Int())
-	out, _ = sjson.Set(out, "usage.output_tokens", responseData.Get("usage.output_tokens").Int())
+	inputTokens, outputTokens, cachedTokens := extractResponsesUsage(responseData.Get("usage"))
+	out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
+	out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
+	if cachedTokens > 0 {
+		out, _ = sjson.Set(out, "usage.cache_read_input_tokens", cachedTokens)
+	}
 
 	hasToolCall := false
 
@@ -308,12 +316,27 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 		out, _ = sjson.SetRaw(out, "stop_sequence", stopSequence.Raw)
 	}
 
-	if responseData.Get("usage.input_tokens").Exists() || responseData.Get("usage.output_tokens").Exists() {
-		out, _ = sjson.Set(out, "usage.input_tokens", responseData.Get("usage.input_tokens").Int())
-		out, _ = sjson.Set(out, "usage.output_tokens", responseData.Get("usage.output_tokens").Int())
+	return out
+}
+
+func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
+	if !usage.Exists() || usage.Type == gjson.Null {
+		return 0, 0, 0
 	}
 
-	return out
+	inputTokens := usage.Get("input_tokens").Int()
+	outputTokens := usage.Get("output_tokens").Int()
+	cachedTokens := usage.Get("input_tokens_details.cached_tokens").Int()
+
+	if cachedTokens > 0 {
+		if inputTokens >= cachedTokens {
+			inputTokens -= cachedTokens
+		} else {
+			inputTokens = 0
+		}
+	}
+
+	return inputTokens, outputTokens, cachedTokens
 }
 
 // buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.
