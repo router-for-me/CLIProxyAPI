@@ -1407,19 +1407,39 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	template, _ = sjson.Delete(template, "request.safetySettings")
 	template, _ = sjson.Set(template, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 
-	if strings.Contains(modelName, "claude") {
-		gjson.Get(template, "request.tools").ForEach(func(key, tool gjson.Result) bool {
-			tool.Get("functionDeclarations").ForEach(func(funKey, funcDecl gjson.Result) bool {
-				if funcDecl.Get("parametersJsonSchema").Exists() {
-					template, _ = sjson.SetRaw(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", key.Int(), funKey.Int()), funcDecl.Get("parametersJsonSchema").Raw)
-					template, _ = sjson.Delete(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters.$schema", key.Int(), funKey.Int()))
-					template, _ = sjson.Delete(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parametersJsonSchema", key.Int(), funKey.Int()))
+	// Clean tool parameters schema for all models (both Claude and Gemini)
+	// This handles unsupported keywords like anyOf, oneOf, $ref, complex type arrays, etc.
+	gjson.Get(template, "request.tools").ForEach(func(key, tool gjson.Result) bool {
+		tool.Get("functionDeclarations").ForEach(func(funKey, funcDecl gjson.Result) bool {
+			// Check both parametersJsonSchema and parameters fields
+			var paramsRaw string
+			var paramsPath string
+			if funcDecl.Get("parametersJsonSchema").Exists() {
+				paramsRaw = funcDecl.Get("parametersJsonSchema").Raw
+				paramsPath = fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parametersJsonSchema", key.Int(), funKey.Int())
+			} else if funcDecl.Get("parameters").Exists() {
+				paramsRaw = funcDecl.Get("parameters").Raw
+				paramsPath = fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", key.Int(), funKey.Int())
+			}
+
+			if paramsRaw != "" {
+				// Clean the schema to be compatible with Gemini API
+				cleanedSchema := util.CleanJSONSchemaForAntigravity(paramsRaw)
+				// Set to parameters field (Gemini API expects "parameters", not "parametersJsonSchema")
+				template, _ = sjson.SetRaw(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", key.Int(), funKey.Int()), cleanedSchema)
+				// Remove $schema if present
+				template, _ = sjson.Delete(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters.$schema", key.Int(), funKey.Int()))
+				// Remove parametersJsonSchema if it was the source
+				if paramsPath != fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", key.Int(), funKey.Int()) {
+					template, _ = sjson.Delete(template, paramsPath)
 				}
-				return true
-			})
+			}
 			return true
 		})
-	} else {
+		return true
+	})
+
+	if !strings.Contains(modelName, "claude") {
 		template, _ = sjson.Delete(template, "request.generationConfig.maxOutputTokens")
 	}
 
