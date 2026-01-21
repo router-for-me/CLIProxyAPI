@@ -50,14 +50,16 @@ func WithConcurrency(concurrency int) RefresherOption {
 }
 
 type BackgroundRefresher struct {
-	interval    time.Duration
-	batchSize   int
-	concurrency int
-	tokenRepo   TokenRepository
-	stopCh      chan struct{}
-	wg          sync.WaitGroup
-	oauth       *KiroOAuth
-	ssoClient   *SSOOIDCClient
+	interval         time.Duration
+	batchSize        int
+	concurrency      int
+	tokenRepo        TokenRepository
+	stopCh           chan struct{}
+	wg               sync.WaitGroup
+	oauth            *KiroOAuth
+	ssoClient        *SSOOIDCClient
+	callbackMu       sync.RWMutex                                    // 保护回调函数的并发访问
+	onTokenRefreshed func(tokenID string, tokenData *KiroTokenData) // 刷新成功回调
 }
 
 func NewBackgroundRefresher(repo TokenRepository, opts ...RefresherOption) *BackgroundRefresher {
@@ -81,6 +83,17 @@ func WithConfig(cfg *config.Config) RefresherOption {
 	return func(r *BackgroundRefresher) {
 		r.oauth = NewKiroOAuth(cfg)
 		r.ssoClient = NewSSOOIDCClient(cfg)
+	}
+}
+
+// WithOnTokenRefreshed sets the callback function to be called when a token is successfully refreshed.
+// The callback receives the token ID (filename) and the new token data.
+// This allows external components (e.g., Watcher) to be notified of token updates.
+func WithOnTokenRefreshed(callback func(tokenID string, tokenData *KiroTokenData)) RefresherOption {
+	return func(r *BackgroundRefresher) {
+		r.callbackMu.Lock()
+		r.onTokenRefreshed = callback
+		r.callbackMu.Unlock()
 	}
 }
 
@@ -188,5 +201,24 @@ func (r *BackgroundRefresher) refreshSingle(ctx context.Context, token *Token) {
 
 	if err := r.tokenRepo.UpdateToken(token); err != nil {
 		log.Printf("failed to update token %s: %v", token.ID, err)
+		return
+	}
+
+	// 方案 A: 刷新成功后触发回调，通知 Watcher 更新内存中的 Auth 对象
+	r.callbackMu.RLock()
+	callback := r.onTokenRefreshed
+	r.callbackMu.RUnlock()
+
+	if callback != nil {
+		// 使用 defer recover 隔离回调 panic，防止崩溃整个进程
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("background refresh: callback panic for token %s: %v", token.ID, rec)
+				}
+			}()
+			log.Printf("background refresh: notifying token refresh callback for %s", token.ID)
+			callback(token.ID, newTokenData)
+		}()
 	}
 }
