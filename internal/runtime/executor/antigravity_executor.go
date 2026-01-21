@@ -1200,7 +1200,12 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 	payload = geminiToAntigravity(modelName, payload, projectID)
-	payload, _ = sjson.SetBytes(payload, "model", modelName)
+	resolvedModel := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	if resolvedModel == "" {
+		resolvedModel = modelName
+	}
+	payload, _ = sjson.SetBytes(payload, "model", resolvedModel)
+	modelName = resolvedModel
 
 	if strings.Contains(modelName, "claude") {
 		strJSON := string(payload)
@@ -1391,9 +1396,43 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 }
 
 func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
-	template, _ := sjson.Set(string(payload), "model", modelName)
+	requestType := gjson.GetBytes(payload, "requestType").String()
+	if strings.TrimSpace(requestType) == "" {
+		if gjson.GetBytes(payload, "request.tools.0.googleSearch").Exists() {
+			requestType = "web_search"
+		} else {
+			requestType = "agent"
+		}
+	}
+	resolvedModel := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	if requestType == "web_search" {
+		if resolvedModel == "" {
+			resolvedModel = "gemini-2.5-flash"
+		}
+	}
+	if resolvedModel == "" {
+		resolvedModel = modelName
+	}
+
+	template, _ := sjson.Set(string(payload), "model", resolvedModel)
 	template, _ = sjson.Set(template, "userAgent", "antigravity")
-	template, _ = sjson.Set(template, "requestType", "agent")
+	template, _ = sjson.Set(template, "requestType", requestType)
+	if requestType == "web_search" {
+		if modelInfo := registry.LookupModelInfo(resolvedModel, "antigravity"); modelInfo != nil && modelInfo.Thinking != nil {
+			budgetResult := gjson.GetBytes([]byte(template), "request.generationConfig.thinkingConfig.thinkingBudget")
+			if budgetResult.Exists() {
+				budget := int(budgetResult.Int())
+				support := modelInfo.Thinking
+				if budget > 0 && support.Max > 0 && budget > support.Max {
+					template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", support.Max)
+				} else if budget == 0 && !support.ZeroAllowed && support.Min > 0 {
+					template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", support.Min)
+				} else if budget > 0 && support.Min > 0 && budget < support.Min {
+					template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", support.Min)
+				}
+			}
+		}
+	}
 
 	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
 	if projectID != "" {

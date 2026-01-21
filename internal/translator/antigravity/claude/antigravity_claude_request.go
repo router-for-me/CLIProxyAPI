@@ -71,6 +71,7 @@ func deriveSessionID(rawJSON []byte) string {
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	enableThoughtTranslate := true
 	rawJSON := bytes.Clone(inputRawJSON)
+	hasWebSearchTool := false
 
 	// Derive session ID for signature caching
 	sessionID := deriveSessionID(rawJSON)
@@ -346,6 +347,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
+			if toolResult.Get("type").String() == "web_search" || toolResult.Get("name").String() == "web_search" {
+				hasWebSearchTool = true
+				continue
+			}
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				// Sanitize the input schema for Antigravity API compatibility
@@ -361,6 +366,13 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				toolsJSON, _ = sjson.SetRaw(toolsJSON, "0.functionDeclarations.-1", tool)
 				toolDeclCount++
 			}
+		}
+	}
+	if hasWebSearchTool {
+		if toolsJSON == "" {
+			toolsJSON = `[{"googleSearch":{}}]`
+		} else {
+			toolsJSON, _ = sjson.SetRaw(toolsJSON, "0.googleSearch", `{}`)
 		}
 	}
 
@@ -401,6 +413,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if toolDeclCount > 0 {
 		out, _ = sjson.SetRaw(out, "request.tools", toolsJSON)
 	}
+	if hasWebSearchTool && toolDeclCount == 0 {
+		out, _ = sjson.SetRaw(out, "request.tools", toolsJSON)
+	}
 
 	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
 	if t := gjson.GetBytes(rawJSON, "thinking"); enableThoughtTranslate && t.Exists() && t.IsObject() {
@@ -423,6 +438,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 	if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() && v.Type == gjson.Number {
 		out, _ = sjson.Set(out, "request.generationConfig.maxOutputTokens", v.Num)
+	}
+	if hasWebSearchTool {
+		out, _ = sjson.Set(out, "model", "gemini-2.5-flash")
+		out, _ = sjson.Set(out, "request.generationConfig.candidateCount", 1)
+		out, _ = sjson.Set(out, "requestType", "web_search")
 	}
 
 	outBytes := []byte(out)
