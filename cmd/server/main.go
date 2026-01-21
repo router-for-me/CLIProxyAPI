@@ -17,6 +17,7 @@ import (
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -533,6 +534,13 @@ func main() {
 		}
 		// Start the main proxy service
 		managementasset.StartAutoUpdater(context.Background(), configFilePath)
+
+		// 初始化并启动 Kiro token 后台刷新
+		if cfg.AuthDir != "" {
+			kiro.InitializeAndStart(cfg.AuthDir, cfg)
+			defer kiro.StopGlobalRefreshManager()
+		}
+
 		cmd.StartService(cfg, configFilePath, password)
 	}
 }

@@ -581,18 +581,30 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 	// Check if token is expired before making request
 	if e.isTokenExpired(accessToken) {
-		log.Infof("kiro: access token expired, attempting refresh before request")
-		refreshedAuth, refreshErr := e.Refresh(ctx, auth)
-		if refreshErr != nil {
-			log.Warnf("kiro: pre-request token refresh failed: %v", refreshErr)
-		} else if refreshedAuth != nil {
-			auth = refreshedAuth
-			// Persist the refreshed auth to file so subsequent requests use it
-			if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
-				log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
-			}
+		log.Infof("kiro: access token expired, attempting recovery")
+
+		// 方案 B: 先尝试从文件重新加载 token（后台刷新器可能已更新文件）
+		reloadedAuth, reloadErr := e.reloadAuthFromFile(auth)
+		if reloadErr == nil && reloadedAuth != nil {
+			// 文件中有更新的 token，使用它
+			auth = reloadedAuth
 			accessToken, profileArn = kiroCredentials(auth)
-			log.Infof("kiro: token refreshed successfully before request")
+			log.Infof("kiro: recovered token from file (background refresh), expires_at: %v", auth.Metadata["expires_at"])
+		} else {
+			// 文件中的 token 也过期了，执行主动刷新
+			log.Debugf("kiro: file reload failed (%v), attempting active refresh", reloadErr)
+			refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+			if refreshErr != nil {
+				log.Warnf("kiro: pre-request token refresh failed: %v", refreshErr)
+			} else if refreshedAuth != nil {
+				auth = refreshedAuth
+				// Persist the refreshed auth to file so subsequent requests use it
+				if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+					log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+				}
+				accessToken, profileArn = kiroCredentials(auth)
+				log.Infof("kiro: token refreshed successfully before request")
+			}
 		}
 	}
 
@@ -979,18 +991,30 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Check if token is expired before making request
 	if e.isTokenExpired(accessToken) {
-		log.Infof("kiro: access token expired, attempting refresh before stream request")
-		refreshedAuth, refreshErr := e.Refresh(ctx, auth)
-		if refreshErr != nil {
-			log.Warnf("kiro: pre-request token refresh failed: %v", refreshErr)
-		} else if refreshedAuth != nil {
-			auth = refreshedAuth
-			// Persist the refreshed auth to file so subsequent requests use it
-			if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
-				log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
-			}
+		log.Infof("kiro: access token expired, attempting recovery before stream request")
+
+		// 方案 B: 先尝试从文件重新加载 token（后台刷新器可能已更新文件）
+		reloadedAuth, reloadErr := e.reloadAuthFromFile(auth)
+		if reloadErr == nil && reloadedAuth != nil {
+			// 文件中有更新的 token，使用它
+			auth = reloadedAuth
 			accessToken, profileArn = kiroCredentials(auth)
-			log.Infof("kiro: token refreshed successfully before stream request")
+			log.Infof("kiro: recovered token from file (background refresh) for stream, expires_at: %v", auth.Metadata["expires_at"])
+		} else {
+			// 文件中的 token 也过期了，执行主动刷新
+			log.Debugf("kiro: file reload failed (%v), attempting active refresh for stream", reloadErr)
+			refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+			if refreshErr != nil {
+				log.Warnf("kiro: pre-request token refresh failed: %v", refreshErr)
+			} else if refreshedAuth != nil {
+				auth = refreshedAuth
+				// Persist the refreshed auth to file so subsequent requests use it
+				if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+					log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+				}
+				accessToken, profileArn = kiroCredentials(auth)
+				log.Infof("kiro: token refreshed successfully before stream request")
+			}
 		}
 	}
 
@@ -3617,6 +3641,13 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	if tokenData.ClientSecret != "" {
 		updated.Metadata["client_secret"] = tokenData.ClientSecret
 	}
+	// Preserve region and start_url for IDC token refresh
+	if tokenData.Region != "" {
+		updated.Metadata["region"] = tokenData.Region
+	}
+	if tokenData.StartURL != "" {
+		updated.Metadata["start_url"] = tokenData.StartURL
+	}
 
 	if updated.Attributes == nil {
 		updated.Attributes = make(map[string]string)
@@ -3680,6 +3711,121 @@ func (e *KiroExecutor) persistRefreshedAuth(auth *cliproxyauth.Auth) error {
 
 	log.Debugf("kiro executor: persisted refreshed auth to %s", authPath)
 	return nil
+}
+
+// reloadAuthFromFile 从文件重新加载 auth 数据（方案 B: Fallback 机制）
+// 当内存中的 token 已过期时，尝试从文件读取最新的 token
+// 这解决了后台刷新器已更新文件但内存中 Auth 对象尚未同步的时间差问题
+func (e *KiroExecutor) reloadAuthFromFile(auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("kiro executor: cannot reload nil auth")
+	}
+
+	// 确定文件路径
+	var authPath string
+	if auth.Attributes != nil {
+		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
+			authPath = p
+		}
+	}
+	if authPath == "" {
+		fileName := strings.TrimSpace(auth.FileName)
+		if fileName == "" {
+			return nil, fmt.Errorf("kiro executor: auth has no file path or filename for reload")
+		}
+		if filepath.IsAbs(fileName) {
+			authPath = fileName
+		} else if e.cfg != nil && e.cfg.AuthDir != "" {
+			authPath = filepath.Join(e.cfg.AuthDir, fileName)
+		} else {
+			return nil, fmt.Errorf("kiro executor: cannot determine auth file path for reload")
+		}
+	}
+
+	// 读取文件
+	raw, err := os.ReadFile(authPath)
+	if err != nil {
+		return nil, fmt.Errorf("kiro executor: failed to read auth file %s: %w", authPath, err)
+	}
+
+	// 解析 JSON
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return nil, fmt.Errorf("kiro executor: failed to parse auth file %s: %w", authPath, err)
+	}
+
+	// 检查文件中的 token 是否比内存中的更新
+	fileExpiresAt, _ := metadata["expires_at"].(string)
+	fileAccessToken, _ := metadata["access_token"].(string)
+	memExpiresAt, _ := auth.Metadata["expires_at"].(string)
+	memAccessToken, _ := auth.Metadata["access_token"].(string)
+
+	// 文件中必须有有效的 access_token
+	if fileAccessToken == "" {
+		return nil, fmt.Errorf("kiro executor: auth file has no access_token field")
+	}
+
+	// 如果有 expires_at，检查是否过期
+	if fileExpiresAt != "" {
+		fileExpTime, parseErr := time.Parse(time.RFC3339, fileExpiresAt)
+		if parseErr == nil {
+			// 如果文件中的 token 也已过期，不使用它
+			if time.Now().After(fileExpTime) {
+				log.Debugf("kiro executor: file token also expired at %s, not using", fileExpiresAt)
+				return nil, fmt.Errorf("kiro executor: file token also expired")
+			}
+		}
+	}
+
+	// 判断文件中的 token 是否比内存中的更新
+	// 条件1: access_token 不同（说明已刷新）
+	// 条件2: expires_at 更新（说明已刷新）
+	isNewer := false
+
+	// 优先检查 access_token 是否变化
+	if fileAccessToken != memAccessToken {
+		isNewer = true
+		log.Debugf("kiro executor: file access_token differs from memory, using file token")
+	}
+
+	// 如果 access_token 相同，检查 expires_at
+	if !isNewer && fileExpiresAt != "" && memExpiresAt != "" {
+		fileExpTime, fileParseErr := time.Parse(time.RFC3339, fileExpiresAt)
+		memExpTime, memParseErr := time.Parse(time.RFC3339, memExpiresAt)
+		if fileParseErr == nil && memParseErr == nil && fileExpTime.After(memExpTime) {
+			isNewer = true
+			log.Debugf("kiro executor: file expires_at (%s) is newer than memory (%s)", fileExpiresAt, memExpiresAt)
+		}
+	}
+
+	// 如果文件中没有 expires_at 但 access_token 相同，无法判断是否更新
+	if !isNewer && fileExpiresAt == "" && fileAccessToken == memAccessToken {
+		return nil, fmt.Errorf("kiro executor: cannot determine if file token is newer (no expires_at, same access_token)")
+	}
+
+	if !isNewer {
+		log.Debugf("kiro executor: file token not newer than memory token")
+		return nil, fmt.Errorf("kiro executor: file token not newer")
+	}
+
+	// 创建更新后的 auth 对象
+	updated := auth.Clone()
+	updated.Metadata = metadata
+	updated.UpdatedAt = time.Now()
+
+	// 同步更新 Attributes
+	if updated.Attributes == nil {
+		updated.Attributes = make(map[string]string)
+	}
+	if accessToken, ok := metadata["access_token"].(string); ok {
+		updated.Attributes["access_token"] = accessToken
+	}
+	if profileArn, ok := metadata["profile_arn"].(string); ok {
+		updated.Attributes["profile_arn"] = profileArn
+	}
+
+	log.Infof("kiro executor: reloaded auth from file %s, new expires_at: %s", authPath, fileExpiresAt)
+	return updated, nil
 }
 
 // isTokenExpired checks if a JWT access token has expired.

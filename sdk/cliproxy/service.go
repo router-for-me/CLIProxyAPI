@@ -98,6 +98,16 @@ func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
 	usage.RegisterPlugin(plugin)
 }
 
+// GetWatcher returns the underlying WatcherWrapper instance.
+// This allows external components (e.g., RefreshManager) to interact with the watcher.
+// Returns nil if the service or watcher is not initialized.
+func (s *Service) GetWatcher() *WatcherWrapper {
+	if s == nil {
+		return nil
+	}
+	return s.watcher
+}
+
 // newDefaultAuthManager creates a default authentication manager with all supported providers.
 func newDefaultAuthManager() *sdkAuth.Manager {
 	return sdkAuth.NewManager(
@@ -574,6 +584,18 @@ func (s *Service) Run(ctx context.Context) error {
 		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 	}
 	watcherWrapper.SetConfig(s.cfg)
+
+	// 方案 A: 连接 Kiro 后台刷新器回调到 Watcher
+	// 当后台刷新器成功刷新 token 后，立即通知 Watcher 更新内存中的 Auth 对象
+	// 这解决了后台刷新与内存 Auth 对象之间的时间差问题
+	kiroauth.GetRefreshManager().SetOnTokenRefreshed(func(tokenID string, tokenData *kiroauth.KiroTokenData) {
+		if tokenData == nil || watcherWrapper == nil {
+			return
+		}
+		log.Debugf("kiro refresh callback: notifying watcher for token %s", tokenID)
+		watcherWrapper.NotifyTokenRefreshed(tokenID, tokenData.AccessToken, tokenData.RefreshToken, tokenData.ExpiresAt)
+	})
+	log.Debug("kiro: connected background refresh callback to watcher")
 
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	s.watcherCancel = watcherCancel
