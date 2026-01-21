@@ -280,6 +280,11 @@ func (k *KiroAuth) CreateTokenStorage(tokenData *KiroTokenData) *KiroTokenStorag
 		AuthMethod:   tokenData.AuthMethod,
 		Provider:     tokenData.Provider,
 		LastRefresh:  time.Now().Format(time.RFC3339),
+		ClientID:     tokenData.ClientID,
+		ClientSecret: tokenData.ClientSecret,
+		Region:       tokenData.Region,
+		StartURL:     tokenData.StartURL,
+		Email:        tokenData.Email,
 	}
 }
 
@@ -311,4 +316,19 @@ func (k *KiroAuth) UpdateTokenStorage(storage *KiroTokenStorage, tokenData *Kiro
 	storage.AuthMethod = tokenData.AuthMethod
 	storage.Provider = tokenData.Provider
 	storage.LastRefresh = time.Now().Format(time.RFC3339)
+	if tokenData.ClientID != "" {
+		storage.ClientID = tokenData.ClientID
+	}
+	if tokenData.ClientSecret != "" {
+		storage.ClientSecret = tokenData.ClientSecret
+	}
+	if tokenData.Region != "" {
+		storage.Region = tokenData.Region
+	}
+	if tokenData.StartURL != "" {
+		storage.StartURL = tokenData.StartURL
+	}
+	if tokenData.Email != "" {
+		storage.Email = tokenData.Email
+	}
 }

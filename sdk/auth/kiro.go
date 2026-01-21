@@ -12,9 +12,9 @@ import (
 )
 
 // extractKiroIdentifier extracts a meaningful identifier for file naming.
-// Returns account name if provided, otherwise profile ARN ID.
+// Returns account name if provided, otherwise profile ARN ID, then client ID.
 // All extracted values are sanitized to prevent path injection attacks.
-func extractKiroIdentifier(accountName, profileArn string) string {
+func extractKiroIdentifier(accountName, profileArn, clientID string) string {
 	// Priority 1: Use account name if provided
 	if accountName != "" {
 		return kiroauth.SanitizeEmailForFilename(accountName)
@@ -27,6 +27,11 @@ func extractKiroIdentifier(accountName, profileArn string) string {
 			// Sanitize the ARN component to prevent path traversal
 			return kiroauth.SanitizeEmailForFilename(parts[len(parts)-1])
 		}
+	}
+
+	// Priority 3: Use client ID (for IDC auth without email/profileArn)
+	if clientID != "" {
+		return kiroauth.SanitizeEmailForFilename(clientID)
 	}
 
 	// Fallback: timestamp
@@ -47,9 +52,9 @@ func (a *KiroAuthenticator) Provider() string {
 }
 
 // RefreshLead indicates how soon before expiry a refresh should be attempted.
-// Set to 5 minutes to match Antigravity and avoid frequent refresh checks while still ensuring timely token refresh.
+// Set to 20 minutes for proactive refresh before token expiry.
 func (a *KiroAuthenticator) RefreshLead() *time.Duration {
-	d := 5 * time.Minute
+	d := 20 * time.Minute
 	return &d
 }
 
@@ -61,13 +66,19 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, 
 		expiresAt = time.Now().Add(1 * time.Hour)
 	}
 
-	// Extract identifier for file naming
-	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
-
-	// Determine label based on auth method
-	label := fmt.Sprintf("kiro-%s", source)
+	// Determine label and identifier based on auth method
+	var label, idPart string
 	if tokenData.AuthMethod == "idc" {
 		label = "kiro-idc"
+		// For IDC auth, always use clientID as identifier
+		if tokenData.ClientID != "" {
+			idPart = kiroauth.SanitizeEmailForFilename(tokenData.ClientID)
+		} else {
+			idPart = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+		}
+	} else {
+		label = fmt.Sprintf("kiro-%s", source)
+		idPart = extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn, tokenData.ClientID)
 	}
 
 	now := time.Now()
@@ -121,8 +132,8 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, 
 		UpdatedAt: now,
 		Metadata:  metadata,
 		Attributes: attributes,
-		// NextRefreshAfter is aligned with RefreshLead (5min)
-		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
+		// NextRefreshAfter: 20 minutes before expiry
+		NextRefreshAfter: expiresAt.Add(-20 * time.Minute),
 	}
 
 	if tokenData.Email != "" {
@@ -173,7 +184,7 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 	}
 
 	// Extract identifier for file naming
-	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
+	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn, tokenData.ClientID)
 
 	now := time.Now()
 	fileName := fmt.Sprintf("kiro-aws-%s.json", idPart)
@@ -203,8 +214,8 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 			"source":      "aws-builder-id-authcode",
 			"email":       tokenData.Email,
 		},
-		// NextRefreshAfter is aligned with RefreshLead (5min)
-		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
+		// NextRefreshAfter: 20 minutes before expiry
+		NextRefreshAfter: expiresAt.Add(-20 * time.Minute),
 	}
 
 	if tokenData.Email != "" {
@@ -217,129 +228,17 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 }
 
 // LoginWithGoogle performs OAuth login for Kiro with Google.
-// This uses a custom protocol handler (kiro://) to receive the callback.
+// NOTE: Google login is not available for third-party applications due to AWS Cognito restrictions.
+// Please use AWS Builder ID or import your token from Kiro IDE.
 func (a *KiroAuthenticator) LoginWithGoogle(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("kiro auth: configuration is required")
-	}
-
-	oauth := kiroauth.NewKiroOAuth(cfg)
-
-	// Use Google OAuth flow with protocol handler
-	tokenData, err := oauth.LoginWithGoogle(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("google login failed: %w", err)
-	}
-
-	// Parse expires_at
-	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
-	if err != nil {
-		expiresAt = time.Now().Add(1 * time.Hour)
-	}
-
-	// Extract identifier for file naming
-	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
-
-	now := time.Now()
-	fileName := fmt.Sprintf("kiro-google-%s.json", idPart)
-
-	record := &coreauth.Auth{
-		ID:        fileName,
-		Provider:  "kiro",
-		FileName:  fileName,
-		Label:     "kiro-google",
-		Status:    coreauth.StatusActive,
-		CreatedAt: now,
-		UpdatedAt: now,
-		Metadata: map[string]any{
-			"type":          "kiro",
-			"access_token":  tokenData.AccessToken,
-			"refresh_token": tokenData.RefreshToken,
-			"profile_arn":   tokenData.ProfileArn,
-			"expires_at":    tokenData.ExpiresAt,
-			"auth_method":   tokenData.AuthMethod,
-			"provider":      tokenData.Provider,
-			"email":         tokenData.Email,
-		},
-		Attributes: map[string]string{
-			"profile_arn": tokenData.ProfileArn,
-			"source":      "google-oauth",
-			"email":       tokenData.Email,
-		},
-		// NextRefreshAfter is aligned with RefreshLead (5min)
-		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
-	}
-
-	if tokenData.Email != "" {
-		fmt.Printf("\n✓ Kiro Google authentication completed successfully! (Account: %s)\n", tokenData.Email)
-	} else {
-		fmt.Println("\n✓ Kiro Google authentication completed successfully!")
-	}
-
-	return record, nil
+	return nil, fmt.Errorf("Google login is not available for third-party applications due to AWS Cognito restrictions.\n\nAlternatives:\n  1. Use AWS Builder ID: cliproxy kiro --builder-id\n  2. Import token from Kiro IDE: cliproxy kiro --import\n\nTo get a token from Kiro IDE:\n  1. Open Kiro IDE and login with Google\n  2. Find: ~/.kiro/kiro-auth-token.json\n  3. Run: cliproxy kiro --import")
 }
 
 // LoginWithGitHub performs OAuth login for Kiro with GitHub.
-// This uses a custom protocol handler (kiro://) to receive the callback.
+// NOTE: GitHub login is not available for third-party applications due to AWS Cognito restrictions.
+// Please use AWS Builder ID or import your token from Kiro IDE.
 func (a *KiroAuthenticator) LoginWithGitHub(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("kiro auth: configuration is required")
-	}
-
-	oauth := kiroauth.NewKiroOAuth(cfg)
-
-	// Use GitHub OAuth flow with protocol handler
-	tokenData, err := oauth.LoginWithGitHub(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("github login failed: %w", err)
-	}
-
-	// Parse expires_at
-	expiresAt, err := time.Parse(time.RFC3339, tokenData.ExpiresAt)
-	if err != nil {
-		expiresAt = time.Now().Add(1 * time.Hour)
-	}
-
-	// Extract identifier for file naming
-	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
-
-	now := time.Now()
-	fileName := fmt.Sprintf("kiro-github-%s.json", idPart)
-
-	record := &coreauth.Auth{
-		ID:        fileName,
-		Provider:  "kiro",
-		FileName:  fileName,
-		Label:     "kiro-github",
-		Status:    coreauth.StatusActive,
-		CreatedAt: now,
-		UpdatedAt: now,
-		Metadata: map[string]any{
-			"type":          "kiro",
-			"access_token":  tokenData.AccessToken,
-			"refresh_token": tokenData.RefreshToken,
-			"profile_arn":   tokenData.ProfileArn,
-			"expires_at":    tokenData.ExpiresAt,
-			"auth_method":   tokenData.AuthMethod,
-			"provider":      tokenData.Provider,
-			"email":         tokenData.Email,
-		},
-		Attributes: map[string]string{
-			"profile_arn": tokenData.ProfileArn,
-			"source":      "github-oauth",
-			"email":       tokenData.Email,
-		},
-		// NextRefreshAfter is aligned with RefreshLead (5min)
-		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
-	}
-
-	if tokenData.Email != "" {
-		fmt.Printf("\n✓ Kiro GitHub authentication completed successfully! (Account: %s)\n", tokenData.Email)
-	} else {
-		fmt.Println("\n✓ Kiro GitHub authentication completed successfully!")
-	}
-
-	return record, nil
+	return nil, fmt.Errorf("GitHub login is not available for third-party applications due to AWS Cognito restrictions.\n\nAlternatives:\n  1. Use AWS Builder ID: cliproxy kiro --builder-id\n  2. Import token from Kiro IDE: cliproxy kiro --import\n\nTo get a token from Kiro IDE:\n  1. Open Kiro IDE and login with GitHub\n  2. Find: ~/.kiro/kiro-auth-token.json\n  3. Run: cliproxy kiro --import")
 }
 
 // ImportFromKiroIDE imports token from Kiro IDE's token file.
@@ -361,7 +260,7 @@ func (a *KiroAuthenticator) ImportFromKiroIDE(ctx context.Context, cfg *config.C
 	}
 
 	// Extract identifier for file naming
-	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn)
+	idPart := extractKiroIdentifier(tokenData.Email, tokenData.ProfileArn, tokenData.ClientID)
 	// Sanitize provider to prevent path traversal (defense-in-depth)
 	provider := kiroauth.SanitizeEmailForFilename(strings.ToLower(strings.TrimSpace(tokenData.Provider)))
 	if provider == "" {
@@ -387,15 +286,20 @@ func (a *KiroAuthenticator) ImportFromKiroIDE(ctx context.Context, cfg *config.C
 			"expires_at":    tokenData.ExpiresAt,
 			"auth_method":   tokenData.AuthMethod,
 			"provider":      tokenData.Provider,
+			"client_id":     tokenData.ClientID,
+			"client_secret": tokenData.ClientSecret,
 			"email":         tokenData.Email,
+			"region":        tokenData.Region,
+			"start_url":     tokenData.StartURL,
 		},
 		Attributes: map[string]string{
 			"profile_arn": tokenData.ProfileArn,
 			"source":      "kiro-ide-import",
 			"email":       tokenData.Email,
+			"region":      tokenData.Region,
 		},
-		// NextRefreshAfter is aligned with RefreshLead (5min)
-		NextRefreshAfter: expiresAt.Add(-5 * time.Minute),
+		// NextRefreshAfter: 20 minutes before expiry
+		NextRefreshAfter: expiresAt.Add(-20 * time.Minute),
 	}
 
 	// Display the email if extracted
@@ -463,8 +367,8 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 	updated.Metadata["refresh_token"] = tokenData.RefreshToken
 	updated.Metadata["expires_at"] = tokenData.ExpiresAt
 	updated.Metadata["last_refresh"] = now.Format(time.RFC3339) // For double-check optimization
-	// NextRefreshAfter is aligned with RefreshLead (5min)
-	updated.NextRefreshAfter = expiresAt.Add(-5 * time.Minute)
+	// NextRefreshAfter: 20 minutes before expiry
+	updated.NextRefreshAfter = expiresAt.Add(-20 * time.Minute)
 
 	return updated, nil
 }

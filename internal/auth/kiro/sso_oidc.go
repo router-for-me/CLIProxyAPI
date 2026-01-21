@@ -735,6 +735,7 @@ func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret
 		Provider:     "AWS",
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
+		Region:       defaultIDCRegion,
 	}, nil
 }
 
@@ -850,16 +851,17 @@ func (c *SSOOIDCClient) LoginWithBuilderID(ctx context.Context) (*KiroTokenData,
 				ClientID:     regResp.ClientID,
 				ClientSecret: regResp.ClientSecret,
 				Email:        email,
+				Region:       defaultIDCRegion,
 			}, nil
-		}
-	}
+			}
+			}
 
-	// Close browser on timeout for better UX
-	if err := browser.CloseBrowser(); err != nil {
-		log.Debugf("Failed to close browser on timeout: %v", err)
-	}
-	return nil, fmt.Errorf("authorization timed out")
-}
+			// Close browser on timeout for better UX
+			if err := browser.CloseBrowser(); err != nil {
+			log.Debugf("Failed to close browser on timeout: %v", err)
+			}
+			return nil, fmt.Errorf("authorization timed out")
+			}
 
 // FetchUserEmail retrieves the user's email from AWS SSO OIDC userinfo endpoint.
 // Falls back to JWT parsing if userinfo fails.
@@ -1366,6 +1368,7 @@ func (c *SSOOIDCClient) LoginWithBuilderIDAuthCode(ctx context.Context) (*KiroTo
 			ClientID:     regResp.ClientID,
 			ClientSecret: regResp.ClientSecret,
 			Email:        email,
+			Region:       defaultIDCRegion,
 		}, nil
 	}
 }

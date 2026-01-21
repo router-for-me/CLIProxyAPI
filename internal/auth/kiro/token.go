@@ -9,6 +9,8 @@ import (
 
 // KiroTokenStorage holds the persistent token data for Kiro authentication.
 type KiroTokenStorage struct {
+	// Type is the provider type for management UI recognition (must be "kiro")
+	Type string `json:"type"`
 	// AccessToken is the OAuth2 access token for API access
 	AccessToken string `json:"access_token"`
 	// RefreshToken is used to obtain new access tokens
@@ -23,6 +25,16 @@ type KiroTokenStorage struct {
 	Provider string `json:"provider"`
 	// LastRefresh is the timestamp of the last token refresh
 	LastRefresh string `json:"last_refresh"`
+	// ClientID is the OAuth client ID (required for token refresh)
+	ClientID string `json:"client_id,omitempty"`
+	// ClientSecret is the OAuth client secret (required for token refresh)
+	ClientSecret string `json:"client_secret,omitempty"`
+	// Region is the AWS region
+	Region string `json:"region,omitempty"`
+	// StartURL is the AWS Identity Center start URL (for IDC auth)
+	StartURL string `json:"start_url,omitempty"`
+	// Email is the user's email address
+	Email string `json:"email,omitempty"`
 }
 
 // SaveTokenToFile persists the token storage to the specified file path.
@@ -68,5 +80,10 @@ func (s *KiroTokenStorage) ToTokenData() *KiroTokenData {
 		ExpiresAt:    s.ExpiresAt,
 		AuthMethod:   s.AuthMethod,
 		Provider:     s.Provider,
+		ClientID:     s.ClientID,
+		ClientSecret: s.ClientSecret,
+		Region:       s.Region,
+		StartURL:     s.StartURL,
+		Email:        s.Email,
 	}
 }

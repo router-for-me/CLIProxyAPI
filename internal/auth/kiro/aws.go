@@ -5,10 +5,12 @@ package kiro
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // PKCECodes holds PKCE verification codes for OAuth2 PKCE flow
@@ -84,6 +86,87 @@ type KiroModel struct {
 
 // KiroIDETokenFile is the default path to Kiro IDE's token file
 const KiroIDETokenFile = ".aws/sso/cache/kiro-auth-token.json"
+
+// Default retry configuration for file reading
+const (
+	defaultTokenReadMaxAttempts = 10               // Maximum retry attempts
+	defaultTokenReadBaseDelay   = 50 * time.Millisecond // Base delay between retries
+)
+
+// isTransientFileError checks if the error is a transient file access error
+// that may be resolved by retrying (e.g., file locked by another process on Windows).
+func isTransientFileError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for OS-level file access errors (Windows sharing violation, etc.)
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		// Windows sharing violation (ERROR_SHARING_VIOLATION = 32)
+		// Windows lock violation (ERROR_LOCK_VIOLATION = 33)
+		errStr := pathErr.Err.Error()
+		if strings.Contains(errStr, "being used by another process") ||
+			strings.Contains(errStr, "sharing violation") ||
+			strings.Contains(errStr, "lock violation") {
+			return true
+		}
+	}
+
+	// Check error message for common transient patterns
+	errMsg := strings.ToLower(err.Error())
+	transientPatterns := []string{
+		"being used by another process",
+		"sharing violation",
+		"lock violation",
+		"access is denied",
+		"unexpected end of json",
+		"unexpected eof",
+	}
+	for _, pattern := range transientPatterns {
+		if strings.Contains(errMsg, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// LoadKiroIDETokenWithRetry loads token data from Kiro IDE's token file with retry logic.
+// This handles transient file access errors (e.g., file locked by Kiro IDE during write).
+// maxAttempts: maximum number of retry attempts (default 10 if <= 0)
+// baseDelay: base delay between retries with exponential backoff (default 50ms if <= 0)
+func LoadKiroIDETokenWithRetry(maxAttempts int, baseDelay time.Duration) (*KiroTokenData, error) {
+	if maxAttempts <= 0 {
+		maxAttempts = defaultTokenReadMaxAttempts
+	}
+	if baseDelay <= 0 {
+		baseDelay = defaultTokenReadBaseDelay
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		token, err := LoadKiroIDEToken()
+		if err == nil {
+			return token, nil
+		}
+		lastErr = err
+
+		// Only retry for transient errors
+		if !isTransientFileError(err) {
+			return nil, err
+		}
+
+		// Exponential backoff: delay * 2^attempt, capped at 500ms
+		delay := baseDelay * time.Duration(1<<uint(attempt))
+		if delay > 500*time.Millisecond {
+			delay = 500 * time.Millisecond
+		}
+		time.Sleep(delay)
+	}
+
+	return nil, fmt.Errorf("failed to read token file after %d attempts: %w", maxAttempts, lastErr)
+}
 
 // LoadKiroIDEToken loads token data from Kiro IDE's token file.
 func LoadKiroIDEToken() (*KiroTokenData, error) {

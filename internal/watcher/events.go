@@ -170,7 +170,9 @@ func (w *Watcher) handleKiroIDETokenChange(event fsnotify.Event) {
 		}
 	}
 
-	tokenData, err := kiroauth.LoadKiroIDEToken()
+	// Use retry logic to handle file lock contention (e.g., Kiro IDE writing the file)
+	// This prevents "being used by another process" errors on Windows
+	tokenData, err := kiroauth.LoadKiroIDETokenWithRetry(10, 50*time.Millisecond)
 	if err != nil {
 		log.Debugf("failed to load Kiro IDE token after change: %v", err)
 		return
