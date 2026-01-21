@@ -1200,7 +1200,12 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 	payload = geminiToAntigravity(modelName, payload, projectID)
-	payload, _ = sjson.SetBytes(payload, "model", modelName)
+	resolvedModel := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	if resolvedModel == "" {
+		resolvedModel = modelName
+	}
+	payload, _ = sjson.SetBytes(payload, "model", resolvedModel)
+	modelName = resolvedModel
 
 	if strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-high") {
 		strJSON := string(payload)
@@ -1391,9 +1396,43 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 }
 
 func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
-	template, _ := sjson.Set(string(payload), "model", modelName)
+	requestType := gjson.GetBytes(payload, "requestType").String()
+	if strings.TrimSpace(requestType) == "" {
+		if gjson.GetBytes(payload, "request.tools.0.googleSearch").Exists() {
+			requestType = "web_search"
+		} else {
+			requestType = "agent"
+		}
+	}
+	resolvedModel := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	if requestType == "web_search" {
+		if resolvedModel == "" {
+			resolvedModel = "gemini-2.5-flash"
+		}
+	}
+	if resolvedModel == "" {
+		resolvedModel = modelName
+	}
+
+	template, _ := sjson.Set(string(payload), "model", resolvedModel)
 	template, _ = sjson.Set(template, "userAgent", "antigravity")
-	template, _ = sjson.Set(template, "requestType", "agent")
+	template, _ = sjson.Set(template, "requestType", requestType)
+	if requestType == "web_search" {
+		if modelInfo := registry.LookupModelInfo(resolvedModel); modelInfo != nil && modelInfo.Thinking != nil {
+			budgetResult := gjson.GetBytes([]byte(template), "request.generationConfig.thinkingConfig.thinkingBudget")
+			if budgetResult.Exists() {
+				budget := int(budgetResult.Int())
+				support := modelInfo.Thinking
+				if budget > 0 && support.Max > 0 && budget > support.Max {
+					template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", support.Max)
+				} else if budget == 0 && !support.ZeroAllowed && support.Min > 0 {
+					template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", support.Min)
+				} else if budget > 0 && support.Min > 0 && budget < support.Min {
+					template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", support.Min)
+				}
+			}
+		}
+	}
 
 	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
 	if projectID != "" {
@@ -1407,19 +1446,38 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	template, _ = sjson.Delete(template, "request.safetySettings")
 	//	template, _ = sjson.Set(template, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 
-	if strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-high") {
-		gjson.Get(template, "request.tools").ForEach(func(key, tool gjson.Result) bool {
-			tool.Get("functionDeclarations").ForEach(func(funKey, funcDecl gjson.Result) bool {
-				if funcDecl.Get("parametersJsonSchema").Exists() {
-					template, _ = sjson.SetRaw(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", key.Int(), funKey.Int()), funcDecl.Get("parametersJsonSchema").Raw)
-					template, _ = sjson.Delete(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters.$schema", key.Int(), funKey.Int()))
-					template, _ = sjson.Delete(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parametersJsonSchema", key.Int(), funKey.Int()))
+	// Clean tool parameters schema for all models (both Claude and Gemini)
+	// This handles unsupported keywords like anyOf, oneOf, $ref, complex type arrays, etc.
+	gjson.Get(template, "request.tools").ForEach(func(key, tool gjson.Result) bool {
+		tool.Get("functionDeclarations").ForEach(func(funKey, funcDecl gjson.Result) bool {
+			// Check both parametersJsonSchema and parameters fields
+			var paramsRaw string
+			var paramsPath string
+			if funcDecl.Get("parametersJsonSchema").Exists() {
+				paramsRaw = funcDecl.Get("parametersJsonSchema").Raw
+				paramsPath = fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parametersJsonSchema", key.Int(), funKey.Int())
+			} else if funcDecl.Get("parameters").Exists() {
+				paramsRaw = funcDecl.Get("parameters").Raw
+				paramsPath = fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", key.Int(), funKey.Int())
+			}
+
+			if paramsRaw != "" {
+				// Clean the schema to be compatible with Gemini API
+				cleanedSchema := util.CleanJSONSchemaForAntigravity(paramsRaw)
+				// Set to parameters field (Gemini API expects "parameters", not "parametersJsonSchema")
+				template, _ = sjson.SetRaw(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", key.Int(), funKey.Int()), cleanedSchema)
+				// Remove $schema if present
+				template, _ = sjson.Delete(template, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters.$schema", key.Int(), funKey.Int()))
+				// Remove parametersJsonSchema if it was the source
+				if paramsPath != fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", key.Int(), funKey.Int()) {
+					template, _ = sjson.Delete(template, paramsPath)
 				}
-				return true
-			})
+			}
 			return true
 		})
-	}
+		return true
+	})
+>>>>>>> bc73710 (Add web search support and schema compatibility enhancements for Antigravity integrations)
 
 	if !strings.Contains(modelName, "claude") {
 		template, _ = sjson.Delete(template, "request.generationConfig.maxOutputTokens")

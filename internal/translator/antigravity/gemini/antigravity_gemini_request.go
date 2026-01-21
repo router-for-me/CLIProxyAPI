@@ -35,11 +35,24 @@ import (
 //   - []byte: The transformed request data in Gemini API format
 func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
+	hasWebSearchTool := false
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if tools.Exists() && tools.IsArray() {
+		for _, tool := range tools.Array() {
+			if tool.Get("googleSearch").Exists() {
+				hasWebSearchTool = true
+				break
+			}
+		}
+	}
 	template := ""
 	template = `{"project":"","request":{},"model":""}`
 	template, _ = sjson.SetRaw(template, "request", string(rawJSON))
 	template, _ = sjson.Set(template, "model", modelName)
 	template, _ = sjson.Delete(template, "request.model")
+	if hasWebSearchTool {
+		template, _ = sjson.Set(template, "requestType", "web_search")
+	}
 
 	template, errFixCLIToolResponse := fixCLIToolResponse(template)
 	if errFixCLIToolResponse != nil {
