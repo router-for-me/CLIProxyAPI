@@ -80,7 +80,64 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 
 	result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 	result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
+
+	// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint)
+	result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
 	return result, nil
+}
+
+// normalizeClaudeBudget applies Claude-specific constraints to ensure max_tokens > budget_tokens.
+// Anthropic API requires this constraint; violating it returns a 400 error.
+func (a *Applier) normalizeClaudeBudget(body []byte, budgetTokens int, modelInfo *registry.ModelInfo) []byte {
+	if budgetTokens <= 0 {
+		return body
+	}
+
+	// Ensure the request satisfies Claude constraints:
+	//  1) Determine effective max_tokens (request overrides model default)
+	//  2) If budget_tokens >= max_tokens, reduce budget_tokens to max_tokens-1
+	//  3) If the adjusted budget falls below the model minimum, leave the request unchanged
+	//  4) If max_tokens came from model default, write it back into the request
+
+	effectiveMax, setDefaultMax := a.effectiveMaxTokens(body, modelInfo)
+	if setDefaultMax && effectiveMax > 0 {
+		body, _ = sjson.SetBytes(body, "max_tokens", effectiveMax)
+	}
+
+	// Compute the budget we would apply after enforcing budget_tokens < max_tokens.
+	adjustedBudget := budgetTokens
+	if effectiveMax > 0 && adjustedBudget >= effectiveMax {
+		adjustedBudget = effectiveMax - 1
+	}
+
+	minBudget := 0
+	if modelInfo != nil && modelInfo.Thinking != nil {
+		minBudget = modelInfo.Thinking.Min
+	}
+	if minBudget > 0 && adjustedBudget > 0 && adjustedBudget < minBudget {
+		// If enforcing the max_tokens constraint would push the budget below the model minimum,
+		// leave the request unchanged.
+		return body
+	}
+
+	if adjustedBudget != budgetTokens {
+		body, _ = sjson.SetBytes(body, "thinking.budget_tokens", adjustedBudget)
+	}
+
+	return body
+}
+
+// effectiveMaxTokens returns the max tokens to cap thinking:
+// prefer request-provided max_tokens; otherwise fall back to model default.
+// The boolean indicates whether the value came from the model default (and thus should be written back).
+func (a *Applier) effectiveMaxTokens(body []byte, modelInfo *registry.ModelInfo) (max int, fromModel bool) {
+	if maxTok := gjson.GetBytes(body, "max_tokens"); maxTok.Exists() && maxTok.Int() > 0 {
+		return int(maxTok.Int()), false
+	}
+	if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+		return modelInfo.MaxCompletionTokens, true
+	}
+	return 0, false
 }
 
 func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
