@@ -1,6 +1,7 @@
 # Binaries
 cli-proxy-api
 *.exe
+.idea
 
 # Configuration
 config.yaml
