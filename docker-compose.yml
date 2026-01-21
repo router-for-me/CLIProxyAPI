@@ -2,13 +2,13 @@ services:
   cli-proxy-api:
     image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
     pull_policy: always
-#    build:
-#      context: .
-#      dockerfile: Dockerfile
-#      args:
-#        VERSION: ${VERSION:-dev}
-#        COMMIT: ${COMMIT:-none}
-#        BUILD_DATE: ${BUILD_DATE:-unknown}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: cli-proxy-api
     # env_file:
     #   - .env
