@@ -3513,14 +3513,14 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		// Also check if expires_at is now in the future with sufficient buffer
 		if expiresAt, ok := auth.Metadata["expires_at"].(string); ok {
 			if expTime, err := time.Parse(time.RFC3339, expiresAt); err == nil {
-				// If token expires more than 5 minutes from now, it's still valid
-				if time.Until(expTime) > 5*time.Minute {
+				// If token expires more than 20 minutes from now, it's still valid
+				if time.Until(expTime) > 20*time.Minute {
 					log.Debugf("kiro executor: token is still valid (expires in %v), skipping refresh", time.Until(expTime))
 					// CRITICAL FIX: Set NextRefreshAfter to prevent frequent refresh checks
-					// Without this, shouldRefresh() will return true again in 5 seconds
+					// Without this, shouldRefresh() will return true again in 30 seconds
 					updated := auth.Clone()
-					// Set next refresh to 5 minutes before expiry, or at least 30 seconds from now
-					nextRefresh := expTime.Add(-5 * time.Minute)
+					// Set next refresh to 20 minutes before expiry, or at least 30 seconds from now
+					nextRefresh := expTime.Add(-20 * time.Minute)
 					minNextRefresh := time.Now().Add(30 * time.Second)
 					if nextRefresh.Before(minNextRefresh) {
 						nextRefresh = minNextRefresh
@@ -3633,9 +3633,9 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		updated.Attributes["profile_arn"] = tokenData.ProfileArn
 	}
 
-	// NextRefreshAfter is aligned with RefreshLead (5min)
+	// NextRefreshAfter is aligned with RefreshLead (20min)
 	if expiresAt, parseErr := time.Parse(time.RFC3339, tokenData.ExpiresAt); parseErr == nil {
-		updated.NextRefreshAfter = expiresAt.Add(-5 * time.Minute)
+		updated.NextRefreshAfter = expiresAt.Add(-20 * time.Minute)
 	}
 
 	log.Infof("kiro executor: token refreshed successfully, expires at %s", tokenData.ExpiresAt)

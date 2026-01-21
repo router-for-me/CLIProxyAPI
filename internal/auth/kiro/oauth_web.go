@@ -377,18 +377,18 @@ func (h *OAuthWebHandler) pollForToken(ctx context.Context, session *webAuthSess
 			email := FetchUserEmailWithFallback(ctx, h.cfg, tokenResp.AccessToken)
 
 			tokenData := &KiroTokenData{
-				AccessToken:  tokenResp.AccessToken,
-				RefreshToken: tokenResp.RefreshToken,
-				ProfileArn:   profileArn,
-				ExpiresAt:    expiresAt.Format(time.RFC3339),
-				AuthMethod:   session.authMethod,
-				Provider:     "AWS",
-				ClientID:     session.clientID,
-				ClientSecret: session.clientSecret,
-				Email:        email,
-				Region:       session.region,
-				StartURL:     session.startURL,
-			}
+					AccessToken:  tokenResp.AccessToken,
+					RefreshToken: tokenResp.RefreshToken,
+					ProfileArn:   profileArn,
+					ExpiresAt:    expiresAt.Format(time.RFC3339),
+					AuthMethod:   session.authMethod,
+					Provider:     "AWS",
+					ClientID:     session.clientID,
+					ClientSecret: session.clientSecret,
+					Email:        email,
+					Region:       session.region,
+					StartURL:     session.startURL,
+				}
 
 			h.mu.Lock()
 			session.status = statusSuccess
@@ -829,7 +829,7 @@ func (h *OAuthWebHandler) handleImportToken(c *gin.Context) {
 
 // handleManualRefresh handles manual token refresh requests from the web UI.
 // This allows users to trigger a token refresh when needed, without waiting
-// for the automatic 5-second check and 10-minute-before-expiry refresh cycle.
+// for the automatic 30-second check and 20-minute-before-expiry refresh cycle.
 // Uses the same refresh logic as kiro_executor.Refresh for consistency.
 func (h *OAuthWebHandler) handleManualRefresh(c *gin.Context) {
 	authDir := ""
