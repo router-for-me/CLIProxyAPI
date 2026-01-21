@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -76,7 +75,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		if existing, errRead := os.ReadFile(path); errRead == nil {
 			// Use metadataEqualIgnoringTimestamps to skip writes when only timestamp fields change.
 			// This prevents the token refresh loop caused by timestamp/expired/expires_in changes.
-			if metadataEqualIgnoringTimestamps(existing, raw) {
+			if metadataEqualIgnoringTimestamps(existing, raw, auth.Provider) {
 				return path, nil
 			}
 			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -300,28 +299,101 @@ func (s *FileTokenStore) baseDirSnapshot() string {
 	return s.baseDir
 }
 
-// metadataEqualIgnoringTimestamps compares two metadata JSON blobs, ignoring volatile fields that
-// change on every refresh but don't affect authentication logic.
-func metadataEqualIgnoringTimestamps(a, b []byte) bool {
-	var objA map[string]any
-	var objB map[string]any
-	if errUnmarshalA := json.Unmarshal(a, &objA); errUnmarshalA != nil {
+// DEPRECATED: Use metadataEqualIgnoringTimestamps for comparing auth metadata.
+// This function is kept for backward compatibility but can cause refresh loops.
+func jsonEqual(a, b []byte) bool {
+	var objA any
+	var objB any
+	if err := json.Unmarshal(a, &objA); err != nil {
 		return false
 	}
-	if errUnmarshalB := json.Unmarshal(b, &objB); errUnmarshalB != nil {
+	if err := json.Unmarshal(b, &objB); err != nil {
 		return false
 	}
-	stripVolatileMetadataFields(objA)
-	stripVolatileMetadataFields(objB)
-	return reflect.DeepEqual(objA, objB)
+	return deepEqualJSON(objA, objB)
 }
 
-func stripVolatileMetadataFields(metadata map[string]any) {
-	if metadata == nil {
-		return
+// metadataEqualIgnoringTimestamps compares two metadata JSON blobs,
+// ignoring fields that change on every refresh but don't affect functionality.
+// This prevents unnecessary file writes that would trigger watcher events and
+// create refresh loops.
+// The provider parameter controls whether access_token is ignored: providers like
+// Google OAuth (gemini, gemini-cli) can re-fetch tokens when needed, while others
+// like iFlow require the refreshed token to be persisted.
+func metadataEqualIgnoringTimestamps(a, b []byte, provider string) bool {
+	var objA, objB map[string]any
+	if err := json.Unmarshal(a, &objA); err != nil {
+		return false
 	}
-	// These fields change on refresh and would otherwise trigger watcher reload loops.
-	for _, field := range []string{"timestamp", "expired", "expires_in", "last_refresh", "access_token"} {
-		delete(metadata, field)
+	if err := json.Unmarshal(b, &objB); err != nil {
+		return false
+	}
+
+	// Fields to ignore: these change on every refresh but don't affect authentication logic.
+	// - timestamp, expired, expires_in, last_refresh: time-related fields that change on refresh
+	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh"}
+
+	// For providers that can re-fetch tokens when needed (e.g., Google OAuth),
+	// we ignore access_token to avoid unnecessary file writes.
+	switch provider {
+	case "gemini", "gemini-cli", "antigravity":
+		ignoredFields = append(ignoredFields, "access_token")
+	}
+
+	for _, field := range ignoredFields {
+		delete(objA, field)
+		delete(objB, field)
+	}
+
+	return deepEqualJSON(objA, objB)
+}
+
+func deepEqualJSON(a, b any) bool {
+	switch valA := a.(type) {
+	case map[string]any:
+		valB, ok := b.(map[string]any)
+		if !ok || len(valA) != len(valB) {
+			return false
+		}
+		for key, subA := range valA {
+			subB, ok1 := valB[key]
+			if !ok1 || !deepEqualJSON(subA, subB) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		sliceB, ok := b.([]any)
+		if !ok || len(valA) != len(sliceB) {
+			return false
+		}
+		for i := range valA {
+			if !deepEqualJSON(valA[i], sliceB[i]) {
+				return false
+			}
+		}
+		return true
+	case float64:
+		valB, ok := b.(float64)
+		if !ok {
+			return false
+		}
+		return valA == valB
+	case string:
+		valB, ok := b.(string)
+		if !ok {
+			return false
+		}
+		return valA == valB
+	case bool:
+		valB, ok := b.(bool)
+		if !ok {
+			return false
+		}
+		return valA == valB
+	case nil:
+		return b == nil
+	default:
+		return false
 	}
 }

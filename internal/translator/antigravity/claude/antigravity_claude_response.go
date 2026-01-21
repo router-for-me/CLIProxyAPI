@@ -41,7 +41,6 @@ type Params struct {
 	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
 
 	// Signature caching support
-	SessionID           string          // Session ID derived from request for signature caching
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
 }
 
@@ -70,9 +69,9 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
-			SessionID:        deriveSessionID(originalRequestRawJSON),
 		}
 	}
+	modelName := gjson.GetBytes(requestRawJSON, "model").String()
 
 	params := (*param).(*Params)
 
@@ -138,14 +137,14 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 					if thoughtSignature := partResult.Get("thoughtSignature"); thoughtSignature.Exists() && thoughtSignature.String() != "" {
 						// log.Debug("Branch: signature_delta")
 
-						if params.SessionID != "" && params.CurrentThinkingText.Len() > 0 {
-							cache.CacheSignature(params.SessionID, params.CurrentThinkingText.String(), thoughtSignature.String())
+						if params.CurrentThinkingText.Len() > 0 {
+							cache.CacheSignature(modelName, params.CurrentThinkingText.String(), thoughtSignature.String())
 							// log.Debugf("Cached signature for thinking block (sessionID=%s, textLen=%d)", params.SessionID, params.CurrentThinkingText.Len())
 							params.CurrentThinkingText.Reset()
 						}
 
 						output = output + "event: content_block_delta\n"
-						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", thoughtSignature.String())
+						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), thoughtSignature.String()))
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
 						params.HasContent = true
 					} else if params.ResponseType == 2 { // Continue existing thinking block if already in thinking state
@@ -372,7 +371,7 @@ func resolveStopReason(params *Params) string {
 //   - string: A Claude-compatible JSON response.
 func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	_ = originalRequestRawJSON
-	_ = requestRawJSON
+	modelName := gjson.GetBytes(requestRawJSON, "model").String()
 
 	root := gjson.ParseBytes(rawJSON)
 	promptTokens := root.Get("response.usageMetadata.promptTokenCount").Int()
@@ -437,7 +436,7 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		block := `{"type":"thinking","thinking":""}`
 		block, _ = sjson.Set(block, "thinking", thinkingBuilder.String())
 		if thinkingSignature != "" {
-			block, _ = sjson.Set(block, "signature", thinkingSignature)
+			block, _ = sjson.Set(block, "signature", fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), thinkingSignature))
 		}
 		responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", block)
 		thinkingBuilder.Reset()

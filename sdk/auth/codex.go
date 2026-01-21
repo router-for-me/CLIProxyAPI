@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -191,7 +193,19 @@ waitForCallback:
 		return nil, fmt.Errorf("codex token storage missing account information")
 	}
 
-	fileName := fmt.Sprintf("codex-%s.json", tokenStorage.Email)
+	planType := ""
+	hashAccountID := ""
+	if tokenStorage.IDToken != "" {
+		if claims, errParse := codex.ParseJWTToken(tokenStorage.IDToken); errParse == nil && claims != nil {
+			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+			accountID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID)
+			if accountID != "" {
+				digest := sha256.Sum256([]byte(accountID))
+				hashAccountID = hex.EncodeToString(digest[:])[:8]
+			}
+		}
+	}
+	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}

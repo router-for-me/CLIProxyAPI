@@ -248,6 +248,25 @@ type PayloadModelRule struct {
 	Protocol string `yaml:"protocol" json:"protocol"`
 }
 
+// CloakConfig configures request cloaking for non-Claude-Code clients.
+// Cloaking disguises API requests to appear as originating from the official Claude Code CLI.
+type CloakConfig struct {
+	// Mode controls cloaking behavior: "auto" (default), "always", or "never".
+	// - "auto": cloak only when client is not Claude Code (based on User-Agent)
+	// - "always": always apply cloaking regardless of client
+	// - "never": never apply cloaking
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+
+	// StrictMode controls how system prompts are handled when cloaking.
+	// - false (default): prepend Claude Code prompt to user system messages
+	// - true: strip all user system messages, keep only Claude Code prompt
+	StrictMode bool `yaml:"strict-mode,omitempty" json:"strict-mode,omitempty"`
+
+	// SensitiveWords is a list of words to obfuscate with zero-width characters.
+	// This can help bypass certain content filters.
+	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+}
+
 // ClaudeKey represents the configuration for a Claude API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type ClaudeKey struct {
@@ -276,6 +295,9 @@ type ClaudeKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// Cloak configures request cloaking for non-Claude-Code clients.
+	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }

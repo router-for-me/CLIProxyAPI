@@ -96,7 +96,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = sdktranslator.TranslateRequest(from, to, baseModel, body, false)
 	body = misc.StripCodexUserAgent(body)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -208,7 +208,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = sdktranslator.TranslateRequest(from, to, baseModel, body, true)
 	body = misc.StripCodexUserAgent(body)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +316,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	body = sdktranslator.TranslateRequest(from, to, baseModel, body, false)
 	body = misc.StripCodexUserAgent(body)
 
-	body, err := thinking.ApplyThinking(body, req.Model, from.String(), to.String())
+	body, err := thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}

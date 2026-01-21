@@ -20,6 +20,7 @@ type geminiToResponsesState struct {
 
 	// message aggregation
 	MsgOpened    bool
+	MsgClosed    bool
 	MsgIndex     int
 	CurrentMsgID string
 	TextBuf      strings.Builder
@@ -29,6 +30,7 @@ type geminiToResponsesState struct {
 	ReasoningOpened bool
 	ReasoningIndex  int
 	ReasoningItemID string
+	ReasoningEnc    string
 	ReasoningBuf    strings.Builder
 	ReasoningClosed bool
 
@@ -37,6 +39,7 @@ type geminiToResponsesState struct {
 	FuncArgsBuf map[int]*strings.Builder
 	FuncNames   map[int]string
 	FuncCallIDs map[int]string
+	FuncDone    map[int]bool
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -44,6 +47,39 @@ var responseIDCounter uint64
 
 // funcCallIDCounter provides a process-wide unique counter for function call identifiers.
 var funcCallIDCounter uint64
+
+func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
+	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
+		return originalRequestRawJSON
+	}
+	if len(requestRawJSON) > 0 && gjson.ValidBytes(requestRawJSON) {
+		return requestRawJSON
+	}
+	return nil
+}
+
+func unwrapRequestRoot(root gjson.Result) gjson.Result {
+	req := root.Get("request")
+	if !req.Exists() {
+		return root
+	}
+	if req.Get("model").Exists() || req.Get("input").Exists() || req.Get("instructions").Exists() {
+		return req
+	}
+	return root
+}
+
+func unwrapGeminiResponseRoot(root gjson.Result) gjson.Result {
+	resp := root.Get("response")
+	if !resp.Exists() {
+		return root
+	}
+	// Vertex-style Gemini responses wrap the actual payload in a "response" object.
+	if resp.Get("candidates").Exists() || resp.Get("responseId").Exists() || resp.Get("usageMetadata").Exists() {
+		return resp
+	}
+	return root
+}
 
 func emitEvent(event string, payload string) string {
 	return fmt.Sprintf("event: %s\ndata: %s", event, payload)
@@ -56,18 +92,37 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			FuncArgsBuf: make(map[int]*strings.Builder),
 			FuncNames:   make(map[int]string),
 			FuncCallIDs: make(map[int]string),
+			FuncDone:    make(map[int]bool),
 		}
 	}
 	st := (*param).(*geminiToResponsesState)
+	if st.FuncArgsBuf == nil {
+		st.FuncArgsBuf = make(map[int]*strings.Builder)
+	}
+	if st.FuncNames == nil {
+		st.FuncNames = make(map[int]string)
+	}
+	if st.FuncCallIDs == nil {
+		st.FuncCallIDs = make(map[int]string)
+	}
+	if st.FuncDone == nil {
+		st.FuncDone = make(map[int]bool)
+	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
+	}
+
+	rawJSON = bytes.TrimSpace(rawJSON)
+	if len(rawJSON) == 0 || bytes.Equal(rawJSON, []byte("[DONE]")) {
+		return []string{}
 	}
 
 	root := gjson.ParseBytes(rawJSON)
 	if !root.Exists() {
 		return []string{}
 	}
+	root = unwrapGeminiResponseRoot(root)
 
 	var out []string
 	nextSeq := func() int { st.Seq++; return st.Seq }
@@ -98,19 +153,54 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
 		itemDone, _ = sjson.Set(itemDone, "item.id", st.ReasoningItemID)
 		itemDone, _ = sjson.Set(itemDone, "output_index", st.ReasoningIndex)
+		itemDone, _ = sjson.Set(itemDone, "item.encrypted_content", st.ReasoningEnc)
 		itemDone, _ = sjson.Set(itemDone, "item.summary.0.text", full)
 		out = append(out, emitEvent("response.output_item.done", itemDone))
 
 		st.ReasoningClosed = true
 	}
 
+	// Helper to finalize the assistant message in correct order.
+	// It emits response.output_text.done, response.content_part.done,
+	// and response.output_item.done exactly once.
+	finalizeMessage := func() {
+		if !st.MsgOpened || st.MsgClosed {
+			return
+		}
+		fullText := st.ItemTextBuf.String()
+		done := `{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`
+		done, _ = sjson.Set(done, "sequence_number", nextSeq())
+		done, _ = sjson.Set(done, "item_id", st.CurrentMsgID)
+		done, _ = sjson.Set(done, "output_index", st.MsgIndex)
+		done, _ = sjson.Set(done, "text", fullText)
+		out = append(out, emitEvent("response.output_text.done", done))
+		partDone := `{"type":"response.content_part.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`
+		partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
+		partDone, _ = sjson.Set(partDone, "item_id", st.CurrentMsgID)
+		partDone, _ = sjson.Set(partDone, "output_index", st.MsgIndex)
+		partDone, _ = sjson.Set(partDone, "part.text", fullText)
+		out = append(out, emitEvent("response.content_part.done", partDone))
+		final := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","text":""}],"role":"assistant"}}`
+		final, _ = sjson.Set(final, "sequence_number", nextSeq())
+		final, _ = sjson.Set(final, "output_index", st.MsgIndex)
+		final, _ = sjson.Set(final, "item.id", st.CurrentMsgID)
+		final, _ = sjson.Set(final, "item.content.0.text", fullText)
+		out = append(out, emitEvent("response.output_item.done", final))
+
+		st.MsgClosed = true
+	}
+
 	// Initialize per-response fields and emit created/in_progress once
 	if !st.Started {
-		if v := root.Get("responseId"); v.Exists() {
-			st.ResponseID = v.String()
+		st.ResponseID = root.Get("responseId").String()
+		if st.ResponseID == "" {
+			st.ResponseID = fmt.Sprintf("resp_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&responseIDCounter, 1))
+		}
+		if !strings.HasPrefix(st.ResponseID, "resp_") {
+			st.ResponseID = fmt.Sprintf("resp_%s", st.ResponseID)
 		}
 		if v := root.Get("createTime"); v.Exists() {
-			if t, err := time.Parse(time.RFC3339Nano, v.String()); err == nil {
+			if t, errParseCreateTime := time.Parse(time.RFC3339Nano, v.String()); errParseCreateTime == nil {
 				st.CreatedAt = t.Unix()
 			}
 		}
@@ -143,15 +233,21 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					// Ignore any late thought chunks after reasoning is finalized.
 					return true
 				}
+				if sig := part.Get("thoughtSignature"); sig.Exists() && sig.String() != "" && sig.String() != geminiResponsesThoughtSignature {
+					st.ReasoningEnc = sig.String()
+				} else if sig = part.Get("thought_signature"); sig.Exists() && sig.String() != "" && sig.String() != geminiResponsesThoughtSignature {
+					st.ReasoningEnc = sig.String()
+				}
 				if !st.ReasoningOpened {
 					st.ReasoningOpened = true
 					st.ReasoningIndex = st.NextIndex
 					st.NextIndex++
 					st.ReasoningItemID = fmt.Sprintf("rs_%s_%d", st.ResponseID, st.ReasoningIndex)
-					item := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","summary":[]}}`
+					item := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","encrypted_content":"","summary":[]}}`
 					item, _ = sjson.Set(item, "sequence_number", nextSeq())
 					item, _ = sjson.Set(item, "output_index", st.ReasoningIndex)
 					item, _ = sjson.Set(item, "item.id", st.ReasoningItemID)
+					item, _ = sjson.Set(item, "item.encrypted_content", st.ReasoningEnc)
 					out = append(out, emitEvent("response.output_item.added", item))
 					partAdded := `{"type":"response.reasoning_summary_part.added","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`
 					partAdded, _ = sjson.Set(partAdded, "sequence_number", nextSeq())
@@ -191,9 +287,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					partAdded, _ = sjson.Set(partAdded, "output_index", st.MsgIndex)
 					out = append(out, emitEvent("response.content_part.added", partAdded))
 					st.ItemTextBuf.Reset()
-					st.ItemTextBuf.WriteString(t.String())
 				}
 				st.TextBuf.WriteString(t.String())
+				st.ItemTextBuf.WriteString(t.String())
 				msg := `{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`
 				msg, _ = sjson.Set(msg, "sequence_number", nextSeq())
 				msg, _ = sjson.Set(msg, "item_id", st.CurrentMsgID)
@@ -205,8 +301,10 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 			// Function call
 			if fc := part.Get("functionCall"); fc.Exists() {
-				// Before emitting function-call outputs, finalize reasoning if open.
+				// Before emitting function-call outputs, finalize reasoning and the message (if open).
+				// Responses streaming requires message done events before the next output_item.added.
 				finalizeReasoning()
+				finalizeMessage()
 				name := fc.Get("name").String()
 				idx := st.NextIndex
 				st.NextIndex++
@@ -219,6 +317,14 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				}
 				st.FuncNames[idx] = name
 
+				argsJSON := "{}"
+				if args := fc.Get("args"); args.Exists() {
+					argsJSON = args.Raw
+				}
+				if st.FuncArgsBuf[idx].Len() == 0 && argsJSON != "" {
+					st.FuncArgsBuf[idx].WriteString(argsJSON)
+				}
+
 				// Emit item.added for function call
 				item := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`
 				item, _ = sjson.Set(item, "sequence_number", nextSeq())
@@ -228,16 +334,36 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				item, _ = sjson.Set(item, "item.name", name)
 				out = append(out, emitEvent("response.output_item.added", item))
 
-				// Emit arguments delta (full args in one chunk)
-				if args := fc.Get("args"); args.Exists() {
-					argsJSON := args.Raw
-					st.FuncArgsBuf[idx].WriteString(argsJSON)
+				// Emit arguments delta (full args in one chunk).
+				// When Gemini omits args, emit "{}" to keep Responses streaming event order consistent.
+				if argsJSON != "" {
 					ad := `{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`
 					ad, _ = sjson.Set(ad, "sequence_number", nextSeq())
 					ad, _ = sjson.Set(ad, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
 					ad, _ = sjson.Set(ad, "output_index", idx)
 					ad, _ = sjson.Set(ad, "delta", argsJSON)
 					out = append(out, emitEvent("response.function_call_arguments.delta", ad))
+				}
+
+				// Gemini emits the full function call payload at once, so we can finalize it immediately.
+				if !st.FuncDone[idx] {
+					fcDone := `{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`
+					fcDone, _ = sjson.Set(fcDone, "sequence_number", nextSeq())
+					fcDone, _ = sjson.Set(fcDone, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+					fcDone, _ = sjson.Set(fcDone, "output_index", idx)
+					fcDone, _ = sjson.Set(fcDone, "arguments", argsJSON)
+					out = append(out, emitEvent("response.function_call_arguments.done", fcDone))
+
+					itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`
+					itemDone, _ = sjson.Set(itemDone, "sequence_number", nextSeq())
+					itemDone, _ = sjson.Set(itemDone, "output_index", idx)
+					itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+					itemDone, _ = sjson.Set(itemDone, "item.arguments", argsJSON)
+					itemDone, _ = sjson.Set(itemDone, "item.call_id", st.FuncCallIDs[idx])
+					itemDone, _ = sjson.Set(itemDone, "item.name", st.FuncNames[idx])
+					out = append(out, emitEvent("response.output_item.done", itemDone))
+
+					st.FuncDone[idx] = true
 				}
 
 				return true
@@ -251,28 +377,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	if fr := root.Get("candidates.0.finishReason"); fr.Exists() && fr.String() != "" {
 		// Finalize reasoning first to keep ordering tight with last delta
 		finalizeReasoning()
-		// Close message output if opened
-		if st.MsgOpened {
-			fullText := st.ItemTextBuf.String()
-			done := `{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`
-			done, _ = sjson.Set(done, "sequence_number", nextSeq())
-			done, _ = sjson.Set(done, "item_id", st.CurrentMsgID)
-			done, _ = sjson.Set(done, "output_index", st.MsgIndex)
-			done, _ = sjson.Set(done, "text", fullText)
-			out = append(out, emitEvent("response.output_text.done", done))
-			partDone := `{"type":"response.content_part.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`
-			partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
-			partDone, _ = sjson.Set(partDone, "item_id", st.CurrentMsgID)
-			partDone, _ = sjson.Set(partDone, "output_index", st.MsgIndex)
-			partDone, _ = sjson.Set(partDone, "part.text", fullText)
-			out = append(out, emitEvent("response.content_part.done", partDone))
-			final := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","text":""}],"role":"assistant"}}`
-			final, _ = sjson.Set(final, "sequence_number", nextSeq())
-			final, _ = sjson.Set(final, "output_index", st.MsgIndex)
-			final, _ = sjson.Set(final, "item.id", st.CurrentMsgID)
-			final, _ = sjson.Set(final, "item.content.0.text", fullText)
-			out = append(out, emitEvent("response.output_item.done", final))
-		}
+		finalizeMessage()
 
 		// Close function calls
 		if len(st.FuncArgsBuf) > 0 {
@@ -289,6 +394,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				}
 			}
 			for _, idx := range idxs {
+				if st.FuncDone[idx] {
+					continue
+				}
 				args := "{}"
 				if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
 					args = b.String()
@@ -308,6 +416,8 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				itemDone, _ = sjson.Set(itemDone, "item.call_id", st.FuncCallIDs[idx])
 				itemDone, _ = sjson.Set(itemDone, "item.name", st.FuncNames[idx])
 				out = append(out, emitEvent("response.output_item.done", itemDone))
+
+				st.FuncDone[idx] = true
 			}
 		}
 
@@ -319,8 +429,8 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		completed, _ = sjson.Set(completed, "response.id", st.ResponseID)
 		completed, _ = sjson.Set(completed, "response.created_at", st.CreatedAt)
 
-		if requestRawJSON != nil {
-			req := gjson.ParseBytes(requestRawJSON)
+		if reqJSON := pickRequestJSON(originalRequestRawJSON, requestRawJSON); len(reqJSON) > 0 {
+			req := unwrapRequestRoot(gjson.ParseBytes(reqJSON))
 			if v := req.Get("instructions"); v.Exists() {
 				completed, _ = sjson.Set(completed, "response.instructions", v.String())
 			}
@@ -383,41 +493,34 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			}
 		}
 
-		// Compose outputs in encountered order: reasoning, message, function_calls
+		// Compose outputs in output_index order.
 		outputsWrapper := `{"arr":[]}`
-		if st.ReasoningOpened {
-			item := `{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`
-			item, _ = sjson.Set(item, "id", st.ReasoningItemID)
-			item, _ = sjson.Set(item, "summary.0.text", st.ReasoningBuf.String())
-			outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
-		}
-		if st.MsgOpened {
-			item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
-			item, _ = sjson.Set(item, "id", st.CurrentMsgID)
-			item, _ = sjson.Set(item, "content.0.text", st.TextBuf.String())
-			outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
-		}
-		if len(st.FuncArgsBuf) > 0 {
-			idxs := make([]int, 0, len(st.FuncArgsBuf))
-			for idx := range st.FuncArgsBuf {
-				idxs = append(idxs, idx)
+		for idx := 0; idx < st.NextIndex; idx++ {
+			if st.ReasoningOpened && idx == st.ReasoningIndex {
+				item := `{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]}`
+				item, _ = sjson.Set(item, "id", st.ReasoningItemID)
+				item, _ = sjson.Set(item, "encrypted_content", st.ReasoningEnc)
+				item, _ = sjson.Set(item, "summary.0.text", st.ReasoningBuf.String())
+				outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+				continue
 			}
-			for i := 0; i < len(idxs); i++ {
-				for j := i + 1; j < len(idxs); j++ {
-					if idxs[j] < idxs[i] {
-						idxs[i], idxs[j] = idxs[j], idxs[i]
-					}
-				}
+			if st.MsgOpened && idx == st.MsgIndex {
+				item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
+				item, _ = sjson.Set(item, "id", st.CurrentMsgID)
+				item, _ = sjson.Set(item, "content.0.text", st.TextBuf.String())
+				outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+				continue
 			}
-			for _, idx := range idxs {
-				args := ""
-				if b := st.FuncArgsBuf[idx]; b != nil {
+
+			if callID, ok := st.FuncCallIDs[idx]; ok && callID != "" {
+				args := "{}"
+				if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
 					args = b.String()
 				}
 				item := `{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`
-				item, _ = sjson.Set(item, "id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
+				item, _ = sjson.Set(item, "id", fmt.Sprintf("fc_%s", callID))
 				item, _ = sjson.Set(item, "arguments", args)
-				item, _ = sjson.Set(item, "call_id", st.FuncCallIDs[idx])
+				item, _ = sjson.Set(item, "call_id", callID)
 				item, _ = sjson.Set(item, "name", st.FuncNames[idx])
 				outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 			}
@@ -431,8 +534,8 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			// input tokens = prompt + thoughts
 			input := um.Get("promptTokenCount").Int() + um.Get("thoughtsTokenCount").Int()
 			completed, _ = sjson.Set(completed, "response.usage.input_tokens", input)
-			// cached_tokens not provided by Gemini; default to 0 for structure compatibility
-			completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", 0)
+			// cached token details: align with OpenAI "cached_tokens" semantics.
+			completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", um.Get("cachedContentTokenCount").Int())
 			// output tokens
 			if v := um.Get("candidatesTokenCount"); v.Exists() {
 				completed, _ = sjson.Set(completed, "response.usage.output_tokens", v.Int())
@@ -460,6 +563,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 // ConvertGeminiResponseToOpenAIResponsesNonStream aggregates Gemini response JSON into a single OpenAI Responses JSON object.
 func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	root := gjson.ParseBytes(rawJSON)
+	root = unwrapGeminiResponseRoot(root)
 
 	// Base response scaffold
 	resp := `{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`
@@ -478,15 +582,15 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	// created_at: map from createTime if available
 	createdAt := time.Now().Unix()
 	if v := root.Get("createTime"); v.Exists() {
-		if t, err := time.Parse(time.RFC3339Nano, v.String()); err == nil {
+		if t, errParseCreateTime := time.Parse(time.RFC3339Nano, v.String()); errParseCreateTime == nil {
 			createdAt = t.Unix()
 		}
 	}
 	resp, _ = sjson.Set(resp, "created_at", createdAt)
 
 	// Echo request fields when present; fallback model from response modelVersion
-	if len(requestRawJSON) > 0 {
-		req := gjson.ParseBytes(requestRawJSON)
+	if reqJSON := pickRequestJSON(originalRequestRawJSON, requestRawJSON); len(reqJSON) > 0 {
+		req := unwrapRequestRoot(gjson.ParseBytes(reqJSON))
 		if v := req.Get("instructions"); v.Exists() {
 			resp, _ = sjson.Set(resp, "instructions", v.String())
 		}
@@ -636,8 +740,8 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		// input tokens = prompt + thoughts
 		input := um.Get("promptTokenCount").Int() + um.Get("thoughtsTokenCount").Int()
 		resp, _ = sjson.Set(resp, "usage.input_tokens", input)
-		// cached_tokens not provided by Gemini; default to 0 for structure compatibility
-		resp, _ = sjson.Set(resp, "usage.input_tokens_details.cached_tokens", 0)
+		// cached token details: align with OpenAI "cached_tokens" semantics.
+		resp, _ = sjson.Set(resp, "usage.input_tokens_details.cached_tokens", um.Get("cachedContentTokenCount").Int())
 		// output tokens
 		if v := um.Get("candidatesTokenCount"); v.Exists() {
 			resp, _ = sjson.Set(resp, "usage.output_tokens", v.Int())

@@ -2712,7 +2712,7 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				body, _ = sjson.SetBytes(body, "max_tokens", 200000)
 			}
 
-			body, err := thinking.ApplyThinking(body, tc.model, tc.from, applyTo)
+			body, err := thinking.ApplyThinking(body, tc.model, tc.from, applyTo, applyTo)
 
 			if tc.expectErr {
 				if err == nil {
