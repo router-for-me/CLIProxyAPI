@@ -8,15 +8,14 @@ import (
 func TestCacheSignature_BasicStorageAndRetrieval(t *testing.T) {
 	ClearSignatureCache("")
 
-	sessionID := "test-session-1"
 	text := "This is some thinking text content"
 	signature := "abc123validSignature1234567890123456789012345678901234567890"
 
 	// Store signature
-	CacheSignature(sessionID, text, signature)
+	CacheSignature("test-model", text, signature)
 
 	// Retrieve signature
-	retrieved := GetCachedSignature(sessionID, text)
+	retrieved := GetCachedSignature("test-model", text)
 	if retrieved != signature {
 		t.Errorf("Expected signature '%s', got '%s'", signature, retrieved)
 	}
@@ -29,13 +28,13 @@ func TestCacheSignature_DifferentSessions(t *testing.T) {
 	sig1 := "signature1_1234567890123456789012345678901234567890123456"
 	sig2 := "signature2_1234567890123456789012345678901234567890123456"
 
-	CacheSignature("session-a", text, sig1)
-	CacheSignature("session-b", text, sig2)
+	CacheSignature("test-model", text, sig1)
+	CacheSignature("test-model", text, sig2)
 
-	if GetCachedSignature("session-a", text) != sig1 {
+	if GetCachedSignature("test-model", text) != sig1 {
 		t.Error("Session-a signature mismatch")
 	}
-	if GetCachedSignature("session-b", text) != sig2 {
+	if GetCachedSignature("test-model", text) != sig2 {
 		t.Error("Session-b signature mismatch")
 	}
 }
@@ -44,13 +43,13 @@ func TestCacheSignature_NotFound(t *testing.T) {
 	ClearSignatureCache("")
 
 	// Non-existent session
-	if got := GetCachedSignature("nonexistent", "some text"); got != "" {
+	if got := GetCachedSignature("test-model", "some text"); got != "" {
 		t.Errorf("Expected empty string for nonexistent session, got '%s'", got)
 	}
 
 	// Existing session but different text
-	CacheSignature("session-x", "text-a", "sigA12345678901234567890123456789012345678901234567890")
-	if got := GetCachedSignature("session-x", "text-b"); got != "" {
+	CacheSignature("test-model", "text-a", "sigA12345678901234567890123456789012345678901234567890")
+	if got := GetCachedSignature("test-model", "text-b"); got != "" {
 		t.Errorf("Expected empty string for different text, got '%s'", got)
 	}
 }
@@ -59,12 +58,12 @@ func TestCacheSignature_EmptyInputs(t *testing.T) {
 	ClearSignatureCache("")
 
 	// All empty/invalid inputs should be no-ops
-	CacheSignature("", "text", "sig12345678901234567890123456789012345678901234567890")
-	CacheSignature("session", "", "sig12345678901234567890123456789012345678901234567890")
-	CacheSignature("session", "text", "")
-	CacheSignature("session", "text", "short") // Too short
+	CacheSignature("test-model", "text", "sig12345678901234567890123456789012345678901234567890")
+	CacheSignature("test-model", "", "sig12345678901234567890123456789012345678901234567890")
+	CacheSignature("test-model", "text", "")
+	CacheSignature("test-model", "text", "short") // Too short
 
-	if got := GetCachedSignature("session", "text"); got != "" {
+	if got := GetCachedSignature("test-model", "text"); got != "" {
 		t.Errorf("Expected empty after invalid cache attempts, got '%s'", got)
 	}
 }
@@ -72,13 +71,12 @@ func TestCacheSignature_EmptyInputs(t *testing.T) {
 func TestCacheSignature_ShortSignatureRejected(t *testing.T) {
 	ClearSignatureCache("")
 
-	sessionID := "test-short-sig"
 	text := "Some text"
 	shortSig := "abc123" // Less than 50 chars
 
-	CacheSignature(sessionID, text, shortSig)
+	CacheSignature("test-model", text, shortSig)
 
-	if got := GetCachedSignature(sessionID, text); got != "" {
+	if got := GetCachedSignature("test-model", text); got != "" {
 		t.Errorf("Short signature should be rejected, got '%s'", got)
 	}
 }
@@ -87,15 +85,15 @@ func TestClearSignatureCache_SpecificSession(t *testing.T) {
 	ClearSignatureCache("")
 
 	sig := "validSig1234567890123456789012345678901234567890123456"
-	CacheSignature("session-1", "text", sig)
-	CacheSignature("session-2", "text", sig)
+	CacheSignature("test-model", "text", sig)
+	CacheSignature("test-model", "text", sig)
 
 	ClearSignatureCache("session-1")
 
-	if got := GetCachedSignature("session-1", "text"); got != "" {
+	if got := GetCachedSignature("test-model", "text"); got != "" {
 		t.Error("session-1 should be cleared")
 	}
-	if got := GetCachedSignature("session-2", "text"); got != sig {
+	if got := GetCachedSignature("test-model", "text"); got != sig {
 		t.Error("session-2 should still exist")
 	}
 }
@@ -104,15 +102,15 @@ func TestClearSignatureCache_AllSessions(t *testing.T) {
 	ClearSignatureCache("")
 
 	sig := "validSig1234567890123456789012345678901234567890123456"
-	CacheSignature("session-1", "text", sig)
-	CacheSignature("session-2", "text", sig)
+	CacheSignature("test-model", "text", sig)
+	CacheSignature("test-model", "text", sig)
 
 	ClearSignatureCache("")
 
-	if got := GetCachedSignature("session-1", "text"); got != "" {
+	if got := GetCachedSignature("test-model", "text"); got != "" {
 		t.Error("session-1 should be cleared")
 	}
-	if got := GetCachedSignature("session-2", "text"); got != "" {
+	if got := GetCachedSignature("test-model", "text"); got != "" {
 		t.Error("session-2 should be cleared")
 	}
 }
@@ -132,7 +130,7 @@ func TestHasValidSignature(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := HasValidSignature(tt.signature)
+			result := HasValidSignature("claude-sonnet-4-5-thinking", tt.signature)
 			if result != tt.expected {
 				t.Errorf("HasValidSignature(%q) = %v, expected %v", tt.signature, result, tt.expected)
 			}
@@ -143,21 +141,19 @@ func TestHasValidSignature(t *testing.T) {
 func TestCacheSignature_TextHashCollisionResistance(t *testing.T) {
 	ClearSignatureCache("")
 
-	sessionID := "hash-test-session"
-
 	// Different texts should produce different hashes
 	text1 := "First thinking text"
 	text2 := "Second thinking text"
 	sig1 := "signature1_1234567890123456789012345678901234567890123456"
 	sig2 := "signature2_1234567890123456789012345678901234567890123456"
 
-	CacheSignature(sessionID, text1, sig1)
-	CacheSignature(sessionID, text2, sig2)
+	CacheSignature("test-model", text1, sig1)
+	CacheSignature("test-model", text2, sig2)
 
-	if GetCachedSignature(sessionID, text1) != sig1 {
+	if GetCachedSignature("test-model", text1) != sig1 {
 		t.Error("text1 signature mismatch")
 	}
-	if GetCachedSignature(sessionID, text2) != sig2 {
+	if GetCachedSignature("test-model", text2) != sig2 {
 		t.Error("text2 signature mismatch")
 	}
 }
@@ -165,13 +161,12 @@ func TestCacheSignature_TextHashCollisionResistance(t *testing.T) {
 func TestCacheSignature_UnicodeText(t *testing.T) {
 	ClearSignatureCache("")
 
-	sessionID := "unicode-session"
 	text := "한글 텍스트와 이모지 🎉 그리고 特殊文字"
 	sig := "unicodeSig123456789012345678901234567890123456789012345"
 
-	CacheSignature(sessionID, text, sig)
+	CacheSignature("test-model", text, sig)
 
-	if got := GetCachedSignature(sessionID, text); got != sig {
+	if got := GetCachedSignature("test-model", text); got != sig {
 		t.Errorf("Unicode text signature retrieval failed, got '%s'", got)
 	}
 }
@@ -179,15 +174,14 @@ func TestCacheSignature_UnicodeText(t *testing.T) {
 func TestCacheSignature_Overwrite(t *testing.T) {
 	ClearSignatureCache("")
 
-	sessionID := "overwrite-session"
 	text := "Same text"
 	sig1 := "firstSignature12345678901234567890123456789012345678901"
 	sig2 := "secondSignature1234567890123456789012345678901234567890"
 
-	CacheSignature(sessionID, text, sig1)
-	CacheSignature(sessionID, text, sig2) // Overwrite
+	CacheSignature("test-model", text, sig1)
+	CacheSignature("test-model", text, sig2) // Overwrite
 
-	if got := GetCachedSignature(sessionID, text); got != sig2 {
+	if got := GetCachedSignature("test-model", text); got != sig2 {
 		t.Errorf("Expected overwritten signature '%s', got '%s'", sig2, got)
 	}
 }
@@ -199,14 +193,13 @@ func TestCacheSignature_ExpirationLogic(t *testing.T) {
 
 	// This test verifies the expiration check exists
 	// In a real scenario, we'd mock time.Now()
-	sessionID := "expiration-test"
 	text := "text"
 	sig := "validSig1234567890123456789012345678901234567890123456"
 
-	CacheSignature(sessionID, text, sig)
+	CacheSignature("test-model", text, sig)
 
 	// Fresh entry should be retrievable
-	if got := GetCachedSignature(sessionID, text); got != sig {
+	if got := GetCachedSignature("test-model", text); got != sig {
 		t.Errorf("Fresh entry should be retrievable, got '%s'", got)
 	}
 

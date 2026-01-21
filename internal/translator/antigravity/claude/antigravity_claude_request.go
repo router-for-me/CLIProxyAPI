@@ -7,8 +7,6 @@ package claude
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
@@ -18,37 +16,6 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
-
-// deriveSessionID generates a stable session ID from the request.
-// Uses the hash of the first user message to identify the conversation.
-func deriveSessionID(rawJSON []byte) string {
-	userIDResult := gjson.GetBytes(rawJSON, "metadata.user_id")
-	if userIDResult.Exists() {
-		userID := userIDResult.String()
-		idx := strings.Index(userID, "session_")
-		if idx != -1 {
-			return userID[idx+8:]
-		}
-	}
-	messages := gjson.GetBytes(rawJSON, "messages")
-	if !messages.IsArray() {
-		return ""
-	}
-	for _, msg := range messages.Array() {
-		if msg.Get("role").String() == "user" {
-			content := msg.Get("content").String()
-			if content == "" {
-				// Try to get text from content array
-				content = msg.Get("content.0.text").String()
-			}
-			if content != "" {
-				h := sha256.Sum256([]byte(content))
-				return hex.EncodeToString(h[:16])
-			}
-		}
-	}
-	return ""
-}
 
 // ConvertClaudeRequestToAntigravity parses and transforms a Claude Code API request into Gemini CLI API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
@@ -71,9 +38,6 @@ func deriveSessionID(rawJSON []byte) string {
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	enableThoughtTranslate := true
 	rawJSON := bytes.Clone(inputRawJSON)
-
-	// Derive session ID for signature caching
-	sessionID := deriveSessionID(rawJSON)
 
 	// system instruction
 	systemInstructionJSON := ""
@@ -137,8 +101,8 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						// Always try cached signature first (more reliable than client-provided)
 						// Client may send stale or invalid signatures from different sessions
 						signature := ""
-						if sessionID != "" && thinkingText != "" {
-							if cachedSig := cache.GetCachedSignature(modelName, sessionID, thinkingText); cachedSig != "" {
+						if thinkingText != "" {
+							if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
 								signature = cachedSig
 								// log.Debugf("Using cached signature for thinking block")
 							}
@@ -156,19 +120,19 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									}
 								}
 							}
-							if cache.HasValidSignature(clientSignature) {
+							if cache.HasValidSignature(modelName, clientSignature) {
 								signature = clientSignature
 							}
 							// log.Debugf("Using client-provided signature for thinking block")
 						}
 
 						// Store for subsequent tool_use in the same message
-						if cache.HasValidSignature(signature) {
+						if cache.HasValidSignature(modelName, signature) {
 							currentMessageThinkingSignature = signature
 						}
 
 						// Skip trailing unsigned thinking blocks on last assistant message
-						isUnsigned := !cache.HasValidSignature(signature)
+						isUnsigned := !cache.HasValidSignature(modelName, signature)
 
 						// If unsigned, skip entirely (don't convert to text)
 						// Claude requires assistant messages to start with thinking blocks when thinking is enabled
@@ -223,7 +187,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							// This is the approach used in opencode-google-antigravity-auth for Gemini
 							// and also works for Claude through Antigravity API
 							const skipSentinel = "skip_thought_signature_validator"
-							if cache.HasValidSignature(currentMessageThinkingSignature) {
+							if cache.HasValidSignature(modelName, currentMessageThinkingSignature) {
 								partJSON, _ = sjson.Set(partJSON, "thoughtSignature", currentMessageThinkingSignature)
 							} else {
 								// No valid signature - use skip sentinel to bypass validation
