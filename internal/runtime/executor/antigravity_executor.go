@@ -1418,7 +1418,7 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	template, _ = sjson.Set(template, "userAgent", "antigravity")
 	template, _ = sjson.Set(template, "requestType", requestType)
 	if requestType == "web_search" {
-		if modelInfo := registry.LookupModelInfo(resolvedModel); modelInfo != nil && modelInfo.Thinking != nil {
+		if modelInfo := registry.LookupModelInfo(resolvedModel, "antigravity"); modelInfo != nil && modelInfo.Thinking != nil {
 			budgetResult := gjson.GetBytes([]byte(template), "request.generationConfig.thinkingConfig.thinkingBudget")
 			if budgetResult.Exists() {
 				budget := int(budgetResult.Int())
@@ -1444,7 +1444,7 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	template, _ = sjson.Set(template, "request.sessionId", generateStableSessionID(payload))
 
 	template, _ = sjson.Delete(template, "request.safetySettings")
-	//	template, _ = sjson.Set(template, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+	template, _ = sjson.Set(template, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 
 	// Clean tool parameters schema for all models (both Claude and Gemini)
 	// This handles unsupported keywords like anyOf, oneOf, $ref, complex type arrays, etc.
@@ -1477,7 +1477,6 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 		})
 		return true
 	})
->>>>>>> bc73710 (Add web search support and schema compatibility enhancements for Antigravity integrations)
 
 	if !strings.Contains(modelName, "claude") {
 		template, _ = sjson.Delete(template, "request.generationConfig.maxOutputTokens")
