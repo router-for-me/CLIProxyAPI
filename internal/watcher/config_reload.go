@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"os"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	"gopkg.in/yaml.v3"
@@ -129,7 +131,42 @@ func (w *Watcher) reloadConfig() bool {
 	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir
 	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias))
 
+	// Load thinking level overrides from payload config
+	LoadThinkingOverrides(newConfig)
+
 	log.Infof("config successfully reloaded, triggering client reload")
 	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
 	return true
+}
+
+// LoadThinkingOverrides extracts thinking level overrides from the payload config
+// and registers them with the thinking module.
+func LoadThinkingOverrides(cfg *config.Config) {
+	thinking.ClearModelOverrides()
+	if cfg == nil {
+		return
+	}
+	for _, rule := range cfg.Payload.Override {
+		// Look for reasoning.effort parameter
+		effortVal, ok := rule.Params["reasoning.effort"]
+		if !ok {
+			continue
+		}
+		effort, ok := effortVal.(string)
+		if !ok {
+			continue
+		}
+		level := thinking.ThinkingLevel(strings.ToLower(effort))
+		// Register override for each model in the rule
+		for _, model := range rule.Models {
+			if model.Name == "" {
+				continue
+			}
+			thinking.RegisterModelOverride(model.Name, level)
+			log.WithFields(log.Fields{
+				"model": model.Name,
+				"level": level,
+			}).Debug("thinking: registered config override |")
+		}
+	}
 }

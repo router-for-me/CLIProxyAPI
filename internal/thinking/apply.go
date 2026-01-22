@@ -156,6 +156,18 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		}
 	}
 
+	// Check for config-based model override (takes precedence over request values)
+	if override, ok := GetModelOverride(baseModel); ok {
+		log.WithFields(log.Fields{
+			"provider":       providerFormat,
+			"model":          baseModel,
+			"original_level": config.Level,
+			"override_level": override.Level,
+		}).Debug("thinking: applying config override |")
+		config.Mode = ModeLevel
+		config.Level = override.Level
+	}
+
 	if !hasThinkingConfig(config) {
 		log.WithFields(log.Fields{
 			"provider": providerFormat,

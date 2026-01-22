@@ -91,6 +91,35 @@ type SuffixResult struct {
 	RawSuffix string
 }
 
+// ModelOverride represents a thinking level override for a specific model.
+type ModelOverride struct {
+	// Level is the thinking level to force for this model
+	Level ThinkingLevel
+}
+
+// modelOverrides stores model-specific thinking level overrides.
+// Key is the model name (exact match or pattern).
+var modelOverrides = make(map[string]ModelOverride)
+
+// RegisterModelOverride registers a thinking level override for a model.
+// This allows config-based overrides to take precedence over request values.
+func RegisterModelOverride(model string, level ThinkingLevel) {
+	modelOverrides[model] = ModelOverride{Level: level}
+}
+
+// ClearModelOverrides clears all registered model overrides.
+// Useful for testing or config reload.
+func ClearModelOverrides() {
+	modelOverrides = make(map[string]ModelOverride)
+}
+
+// GetModelOverride returns the override for a model if one exists.
+// Returns the override and true if found, or empty override and false if not.
+func GetModelOverride(model string) (ModelOverride, bool) {
+	override, ok := modelOverrides[model]
+	return override, ok
+}
+
 // ProviderApplier defines the interface for provider-specific thinking configuration application.
 //
 // Types implementing this interface are responsible for converting a unified ThinkingConfig

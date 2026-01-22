@@ -124,6 +124,8 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 	defer w.clientsMutex.Unlock()
 	w.config = cfg
 	w.oldConfigYaml, _ = yaml.Marshal(cfg)
+	// Load thinking level overrides on initial config set
+	LoadThinkingOverrides(cfg)
 }
 
 // SetAuthUpdateQueue sets the queue used to emit auth updates.
