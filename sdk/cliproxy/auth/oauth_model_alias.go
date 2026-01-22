@@ -3,8 +3,11 @@ package auth
 import (
 	"strings"
 
+	"github.com/tidwall/gjson"
+
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
 type modelAliasEntry interface {
@@ -12,9 +15,21 @@ type modelAliasEntry interface {
 	GetAlias() string
 }
 
+type oauthModelAliasEntry struct {
+	upstreamModel         string
+	toThinking            string
+	toNonThinking         string
+	stripThinkingResponse bool
+}
+
 type oauthModelAliasTable struct {
-	// reverse maps channel -> alias (lower) -> original upstream model name.
-	reverse map[string]map[string]string
+	reverse map[string]map[string]oauthModelAliasEntry
+}
+
+type OAuthModelAliasResult struct {
+	UpstreamModel         string
+	OriginalAlias         string
+	StripThinkingResponse bool
 }
 
 func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
@@ -22,14 +37,14 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 		return &oauthModelAliasTable{}
 	}
 	out := &oauthModelAliasTable{
-		reverse: make(map[string]map[string]string, len(aliases)),
+		reverse: make(map[string]map[string]oauthModelAliasEntry, len(aliases)),
 	}
 	for rawChannel, entries := range aliases {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
 		if channel == "" || len(entries) == 0 {
 			continue
 		}
-		rev := make(map[string]string, len(entries))
+		rev := make(map[string]oauthModelAliasEntry, len(entries))
 		for _, entry := range entries {
 			name := strings.TrimSpace(entry.Name)
 			alias := strings.TrimSpace(entry.Alias)
@@ -43,7 +58,12 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			if _, exists := rev[aliasKey]; exists {
 				continue
 			}
-			rev[aliasKey] = name
+			rev[aliasKey] = oauthModelAliasEntry{
+				upstreamModel:         name,
+				toThinking:            strings.TrimSpace(entry.ToThinking),
+				toNonThinking:         strings.TrimSpace(entry.ToNonThinking),
+				stripThinkingResponse: entry.StripThinkingResponse,
+			}
 		}
 		if len(rev) > 0 {
 			out.reverse[channel] = rev
@@ -139,22 +159,29 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 // the suffix is preserved in the returned model name. However, if the alias's
 // original name already contains a suffix, the config suffix takes priority.
 func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) string {
-	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, modelAliasChannel(auth))
+	result := resolveUpstreamModelFromAliasTableWithThinking(m, auth, requestedModel, modelAliasChannel(auth), false)
+	return result.UpstreamModel
 }
 
-func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, channel string) string {
+func (m *Manager) applyOAuthModelAliasWithThinking(auth *Auth, requestedModel string, thinkingEnabled bool) OAuthModelAliasResult {
+	result := resolveUpstreamModelFromAliasTableWithThinking(m, auth, requestedModel, modelAliasChannel(auth), thinkingEnabled)
+	if result.UpstreamModel == "" {
+		return OAuthModelAliasResult{UpstreamModel: requestedModel}
+	}
+	return result
+}
+
+func resolveUpstreamModelFromAliasTableWithThinking(m *Manager, auth *Auth, requestedModel, channel string, thinkingEnabled bool) OAuthModelAliasResult {
 	if m == nil || auth == nil {
-		return ""
+		return OAuthModelAliasResult{}
 	}
 	if channel == "" {
-		return ""
+		return OAuthModelAliasResult{}
 	}
 
-	// Extract thinking suffix from requested model using ParseSuffix
 	requestResult := thinking.ParseSuffix(requestedModel)
 	baseModel := requestResult.ModelName
 
-	// Candidate keys to match: base model and raw input (handles suffix-parsing edge cases).
 	candidates := []string{baseModel}
 	if baseModel != requestedModel {
 		candidates = append(candidates, requestedModel)
@@ -163,11 +190,11 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 	raw := m.oauthModelAlias.Load()
 	table, _ := raw.(*oauthModelAliasTable)
 	if table == nil || table.reverse == nil {
-		return ""
+		return OAuthModelAliasResult{}
 	}
 	rev := table.reverse[channel]
 	if rev == nil {
-		return ""
+		return OAuthModelAliasResult{}
 	}
 
 	for _, candidate := range candidates {
@@ -175,26 +202,59 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 		if key == "" {
 			continue
 		}
-		original := strings.TrimSpace(rev[key])
-		if original == "" {
+		entry, exists := rev[key]
+		if !exists {
 			continue
 		}
-		if strings.EqualFold(original, baseModel) {
-			return ""
+
+		targetModel, stripThinking := resolveThinkingTarget(entry, thinkingEnabled)
+		if targetModel == "" {
+			continue
 		}
 
-		// If config already has suffix, it takes priority.
-		if thinking.ParseSuffix(original).HasSuffix {
-			return original
+		if strings.EqualFold(targetModel, baseModel) {
+			if !stripThinking {
+				return OAuthModelAliasResult{}
+			}
+			return OAuthModelAliasResult{
+				UpstreamModel:         baseModel,
+				OriginalAlias:         requestedModel,
+				StripThinkingResponse: true,
+			}
 		}
-		// Preserve user's thinking suffix on the resolved model.
-		if requestResult.HasSuffix && requestResult.RawSuffix != "" {
-			return original + "(" + requestResult.RawSuffix + ")"
+
+		var upstreamModel string
+		if thinking.ParseSuffix(targetModel).HasSuffix {
+			upstreamModel = targetModel
+		} else if requestResult.HasSuffix && requestResult.RawSuffix != "" {
+			upstreamModel = targetModel + "(" + requestResult.RawSuffix + ")"
+		} else {
+			upstreamModel = targetModel
 		}
-		return original
+
+		return OAuthModelAliasResult{
+			UpstreamModel:         upstreamModel,
+			OriginalAlias:         requestedModel,
+			StripThinkingResponse: stripThinking,
+		}
 	}
 
-	return ""
+	return OAuthModelAliasResult{}
+}
+
+func resolveThinkingTarget(entry oauthModelAliasEntry, thinkingEnabled bool) (string, bool) {
+	if thinkingEnabled {
+		if entry.toThinking != "" {
+			return entry.toThinking, false
+		}
+		return entry.upstreamModel, false
+	}
+
+	if entry.toNonThinking != "" {
+		return entry.toNonThinking, entry.stripThinkingResponse
+	}
+
+	return entry.upstreamModel, entry.stripThinkingResponse
 }
 
 // modelAliasChannel extracts the OAuth model alias channel from an Auth object.
@@ -250,4 +310,153 @@ func OAuthModelAliasChannel(provider, authKind string) string {
 	default:
 		return ""
 	}
+}
+
+func isThinkingEnabledInPayload(payload []byte, format sdktranslator.Format) bool {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+
+	formatName := strings.ToLower(strings.TrimSpace(format.String()))
+	if enabled, ok := thinkingEnabledByFormat(payload, formatName); ok {
+		return enabled
+	}
+
+	if enabled, ok := thinkingEnabledFromModelSuffix(payload); ok {
+		return enabled
+	}
+
+	return false
+}
+
+func thinkingEnabledByFormat(payload []byte, formatName string) (bool, bool) {
+	switch formatName {
+	case "claude":
+		return thinkingEnabledFromClaude(payload)
+	case "openai":
+		if enabled, ok := thinkingEnabledFromOpenAI(payload, "reasoning_effort"); ok {
+			return enabled, true
+		}
+		return thinkingEnabledFromOpenAI(payload, "reasoning.effort")
+	case "openai-response", "codex":
+		if enabled, ok := thinkingEnabledFromOpenAI(payload, "reasoning.effort"); ok {
+			return enabled, true
+		}
+		return thinkingEnabledFromOpenAI(payload, "reasoning_effort")
+	case "gemini", "gemini-cli", "antigravity":
+		if enabled, ok := thinkingEnabledFromGemini(payload, "generationConfig.thinkingConfig"); ok {
+			return enabled, true
+		}
+		return thinkingEnabledFromGemini(payload, "request.generationConfig.thinkingConfig")
+	default:
+		return false, false
+	}
+}
+
+func thinkingEnabledFromClaude(payload []byte) (bool, bool) {
+	thinkingResult := gjson.GetBytes(payload, "thinking")
+	if !thinkingResult.Exists() || !thinkingResult.IsObject() {
+		return false, false
+	}
+
+	thinkingType := strings.ToLower(strings.TrimSpace(thinkingResult.Get("type").String()))
+	if thinkingType == "disabled" {
+		return false, true
+	}
+
+	if budget := thinkingResult.Get("budget_tokens"); budget.Exists() {
+		value := budget.Int()
+		switch value {
+		case 0:
+			return false, true
+		case -1:
+			return true, true
+		default:
+			return value > 0, true
+		}
+	}
+
+	if thinkingType == "enabled" {
+		return true, true
+	}
+
+	return false, false
+}
+
+func thinkingEnabledFromOpenAI(payload []byte, path string) (bool, bool) {
+	effort := gjson.GetBytes(payload, path)
+	if !effort.Exists() {
+		return false, false
+	}
+	value := strings.ToLower(strings.TrimSpace(effort.String()))
+	if value == "" || value == "none" {
+		return false, true
+	}
+	return true, true
+}
+
+func thinkingEnabledFromGemini(payload []byte, basePath string) (bool, bool) {
+	level := gjson.GetBytes(payload, basePath+".thinkingLevel")
+	if level.Exists() {
+		value := strings.ToLower(strings.TrimSpace(level.String()))
+		if value == "none" || value == "" {
+			return false, true
+		}
+		return true, true
+	}
+
+	budget := gjson.GetBytes(payload, basePath+".thinkingBudget")
+	if budget.Exists() {
+		value := budget.Int()
+		switch value {
+		case 0:
+			return false, true
+		case -1:
+			return true, true
+		default:
+			return value > 0, true
+		}
+	}
+
+	includeThoughts := gjson.GetBytes(payload, basePath+".includeThoughts")
+	if includeThoughts.Exists() {
+		return includeThoughts.Bool(), true
+	}
+	includeThoughts = gjson.GetBytes(payload, basePath+".include_thoughts")
+	if includeThoughts.Exists() {
+		return includeThoughts.Bool(), true
+	}
+
+	return false, false
+}
+
+func thinkingEnabledFromModelSuffix(payload []byte) (bool, bool) {
+	model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	if model == "" {
+		return false, false
+	}
+	result := thinking.ParseSuffix(model)
+	if !result.HasSuffix || result.RawSuffix == "" {
+		return false, false
+	}
+
+	if mode, ok := thinking.ParseSpecialSuffix(result.RawSuffix); ok {
+		if mode == thinking.ModeNone {
+			return false, true
+		}
+		return true, true
+	}
+
+	if budget, ok := thinking.ParseNumericSuffix(result.RawSuffix); ok {
+		if budget == 0 {
+			return false, true
+		}
+		return true, true
+	}
+
+	if _, ok := thinking.ParseLevelSuffix(result.RawSuffix); ok {
+		return true, true
+	}
+
+	return false, false
 }
