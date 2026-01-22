@@ -190,6 +190,9 @@ func LoadKiroIDEToken() (*KiroTokenData, error) {
 		return nil, fmt.Errorf("access token is empty in Kiro IDE token file")
 	}
 
+	// Normalize AuthMethod to lowercase (Kiro IDE uses "IdC" but we expect "idc")
+	token.AuthMethod = strings.ToLower(token.AuthMethod)
+
 	return &token, nil
 }
 
@@ -218,6 +221,9 @@ func LoadKiroTokenFromPath(tokenPath string) (*KiroTokenData, error) {
 	if token.AccessToken == "" {
 		return nil, fmt.Errorf("access token is empty in token file")
 	}
+
+	// Normalize AuthMethod to lowercase (Kiro IDE uses "IdC" but we expect "idc")
+	token.AuthMethod = strings.ToLower(token.AuthMethod)
 
 	return &token, nil
 }
