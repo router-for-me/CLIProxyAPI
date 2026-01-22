@@ -68,24 +68,13 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
 					budget := int(budgetTokens.Int())
 					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
-						// Normalize effort to standard OpenAI values (low, medium, high)
-						switch effort {
-						case "minimal":
-							effort = "low"
-						case "xhigh":
-							effort = "high"
-						case "auto":
-							effort = "medium"
-						}
-
-						// Only set if it's a valid value (none/low/medium/high)
-						if effort == "none" || effort == "low" || effort == "medium" || effort == "high" {
-							out, _ = sjson.Set(out, "reasoning_effort", effort)
-						}
+						out, _ = sjson.Set(out, "reasoning_effort", effort)
 					}
 				} else {
-					// No budget_tokens specified, default to "medium" for enabled thinking
-					out, _ = sjson.Set(out, "reasoning_effort", "medium")
+					// No budget_tokens specified, default to "auto" for enabled thinking
+					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
+						out, _ = sjson.Set(out, "reasoning_effort", effort)
+					}
 				}
 			case "disabled":
 				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
