@@ -177,6 +177,9 @@ type RoutingConfig struct {
 // When Fork is true, the alias is added as an additional model in listings while
 // keeping the original model ID available.
 //
+// When ForceMapping is true, responses will have the model name rewritten to match
+// the alias instead of showing the upstream model name.
+//
 // Thinking-aware mapping fields allow routing to different models based on whether
 // the request has thinking enabled:
 //   - ToThinking: target for requests with thinking.type=enabled
@@ -186,6 +189,8 @@ type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
+
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
 	ToThinking            string `yaml:"to-thinking,omitempty" json:"to-thinking,omitempty"`
 	ToNonThinking         string `yaml:"to-non-thinking,omitempty" json:"to-non-thinking,omitempty"`
@@ -728,6 +733,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 				Name:                  name,
 				Alias:                 alias,
 				Fork:                  entry.Fork,
+				ForceMapping:          entry.ForceMapping,
 				ToThinking:            toThinking,
 				ToNonThinking:         toNonThinking,
 				StripThinkingResponse: entry.StripThinkingResponse,

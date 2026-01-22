@@ -15,21 +15,26 @@ type modelAliasEntry interface {
 	GetAlias() string
 }
 
+// oauthModelAliasEntry stores the upstream model name and mapping flags for an alias.
 type oauthModelAliasEntry struct {
 	upstreamModel         string
+	forceMapping          bool
 	toThinking            string
 	toNonThinking         string
 	stripThinkingResponse bool
 }
 
 type oauthModelAliasTable struct {
+	// reverse maps channel -> alias (lower) -> entry with upstream model and flags.
 	reverse map[string]map[string]oauthModelAliasEntry
 }
 
+// OAuthModelAliasResult contains the resolved upstream model and mapping metadata.
 type OAuthModelAliasResult struct {
-	UpstreamModel         string
-	OriginalAlias         string
-	StripThinkingResponse bool
+	UpstreamModel         string // resolved upstream model name (empty if no mapping found)
+	ForceMapping          bool   // whether to rewrite model name in responses
+	OriginalAlias         string // the original requested alias (for response rewriting)
+	StripThinkingResponse bool   // whether to strip thinking blocks from response
 }
 
 func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
@@ -60,6 +65,7 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			}
 			rev[aliasKey] = oauthModelAliasEntry{
 				upstreamModel:         name,
+				forceMapping:          entry.ForceMapping,
 				toThinking:            strings.TrimSpace(entry.ToThinking),
 				toNonThinking:         strings.TrimSpace(entry.ToNonThinking),
 				stripThinkingResponse: entry.StripThinkingResponse,
@@ -171,6 +177,10 @@ func (m *Manager) applyOAuthModelAliasWithThinking(auth *Auth, requestedModel st
 	return result
 }
 
+func (m *Manager) applyOAuthModelAliasWithResult(auth *Auth, requestedModel string) OAuthModelAliasResult {
+	return m.applyOAuthModelAliasWithThinking(auth, requestedModel, false)
+}
+
 func resolveUpstreamModelFromAliasTableWithThinking(m *Manager, auth *Auth, requestedModel, channel string, thinkingEnabled bool) OAuthModelAliasResult {
 	if m == nil || auth == nil {
 		return OAuthModelAliasResult{}
@@ -213,13 +223,14 @@ func resolveUpstreamModelFromAliasTableWithThinking(m *Manager, auth *Auth, requ
 		}
 
 		if strings.EqualFold(targetModel, baseModel) {
-			if !stripThinking {
+			if !stripThinking && !entry.forceMapping {
 				return OAuthModelAliasResult{}
 			}
 			return OAuthModelAliasResult{
 				UpstreamModel:         baseModel,
+				ForceMapping:          entry.forceMapping,
 				OriginalAlias:         requestedModel,
-				StripThinkingResponse: true,
+				StripThinkingResponse: stripThinking,
 			}
 		}
 
@@ -234,6 +245,7 @@ func resolveUpstreamModelFromAliasTableWithThinking(m *Manager, auth *Auth, requ
 
 		return OAuthModelAliasResult{
 			UpstreamModel:         upstreamModel,
+			ForceMapping:          entry.forceMapping,
 			OriginalAlias:         requestedModel,
 			StripThinkingResponse: stripThinking,
 		}

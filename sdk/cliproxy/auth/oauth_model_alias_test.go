@@ -175,3 +175,59 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
 	}
 }
+
+func TestApplyOAuthModelAliasWithResult_ForceMapping(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"antigravity": {{
+			Name:         "claude-sonnet-4-5",
+			Alias:        "gemini-claude-sonnet-4-5",
+			Fork:         true,
+			ForceMapping: true,
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := createAuthForChannel("antigravity")
+
+	result := mgr.applyOAuthModelAliasWithResult(auth, "gemini-claude-sonnet-4-5")
+	if result.UpstreamModel != "claude-sonnet-4-5" {
+		t.Errorf("UpstreamModel = %q, want %q", result.UpstreamModel, "claude-sonnet-4-5")
+	}
+	if !result.ForceMapping {
+		t.Error("ForceMapping should be true")
+	}
+	if result.OriginalAlias != "gemini-claude-sonnet-4-5" {
+		t.Errorf("OriginalAlias = %q, want %q", result.OriginalAlias, "gemini-claude-sonnet-4-5")
+	}
+}
+
+func TestApplyOAuthModelAliasWithResult_NoForceMapping(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"gemini-cli": {{
+			Name:         "gemini-2.5-pro-exp-03-25",
+			Alias:        "gemini-2.5-pro",
+			ForceMapping: false,
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := createAuthForChannel("gemini-cli")
+
+	result := mgr.applyOAuthModelAliasWithResult(auth, "gemini-2.5-pro")
+	if result.UpstreamModel != "gemini-2.5-pro-exp-03-25" {
+		t.Errorf("UpstreamModel = %q, want %q", result.UpstreamModel, "gemini-2.5-pro-exp-03-25")
+	}
+	if result.ForceMapping {
+		t.Error("ForceMapping should be false")
+	}
+}
