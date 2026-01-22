@@ -117,17 +117,17 @@ func (r *ModelRouter) GetCandidates(modelName string) []string {
 				return candidates
 			}
 			// Also include auto-search results after cached model
-			autoResults := r.autoSearchModels(modelName)
-			if len(autoResults) > 0 {
-				candidates := make([]string, 0, len(autoResults)+1)
-				candidates = append(candidates, cached)
-				for _, m := range autoResults {
-					if m != cached {
-						candidates = append(candidates, m)
-					}
-				}
-				return candidates
-			}
+			// autoResults := r.autoSearchModels(modelName)
+			// if len(autoResults) > 0 {
+			// 	candidates := make([]string, 0, len(autoResults)+1)
+			// 	candidates = append(candidates, cached)
+			// 	for _, m := range autoResults {
+			// 		if m != cached {
+			// 			candidates = append(candidates, m)
+			// 		}
+			// 	}
+			// 	return candidates
+			// }
 			return []string{cached}
 		}
 	}
