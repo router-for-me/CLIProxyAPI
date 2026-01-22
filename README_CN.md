@@ -53,8 +53,25 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 - 支持 Qwen Code 多账户轮询
 - 支持 iFlow 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
-- 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
+- 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter、Cerebras）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
+
+## Cerebras（OpenAI 兼容）接入
+
+在 `config.yaml` 中配置 `openai-compatibility`（示例）：
+
+```yaml
+openai-compatibility:
+  - name: "cerebras"
+    base-url: "https://api.cerebras.ai/v1"
+    api-key-entries:
+      - api-key: "csk-..."
+    models:
+      - name: "zai-glm-4.7"
+        alias: "zai-glm-4.7"
+```
+
+GLM 系列（例如 `zai-glm-4.7`）不支持 `reasoning_effort`，如需关闭推理请传 `disable_reasoning: true`（或使用模型后缀 `(none)`）。
 
 ## 新手入门
 

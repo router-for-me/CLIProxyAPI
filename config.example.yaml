@@ -165,6 +165,18 @@ codex-instructions-enabled: false
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.
+#
+#   - name: "cerebras"
+#     base-url: "https://api.cerebras.ai/v1"
+#     api-key-entries:
+#       - api-key: "csk-..."
+#     models:
+#       # NOTE: "zai-glm-4.7" is only registered for provider key "cerebras".
+#       # If you configure the same alias under other OpenAI-compatible providers, it will be ignored.
+#       - name: "zai-glm-4.7"
+#         alias: "zai-glm-4.7"
+#       - name: "gpt-oss-120b"
+#         alias: "gpt-oss-120b"
 
 # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
 # vertex-api-key:

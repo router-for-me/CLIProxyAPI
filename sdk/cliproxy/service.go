@@ -819,6 +819,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						if modelID == "" {
 							modelID = m.Name
 						}
+						if strings.EqualFold(modelID, "zai-glm-4.7") && !strings.EqualFold(providerKey, "cerebras") {
+							continue
+						}
 						ms = append(ms, &ModelInfo{
 							ID:          modelID,
 							Object:      "model",

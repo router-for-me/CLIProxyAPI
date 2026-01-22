@@ -95,7 +95,12 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		fromFormat = providerFormat
 	}
 	// 1. Route check: Get provider applier
-	applier := GetProviderApplier(providerFormat)
+	// Try provider-specific applier first (e.g., "cerebras"), fallback to format applier (e.g., "openai")
+	// This allows providers like Cerebras (which use OpenAI format) to have custom thinking behavior
+	applier := GetProviderApplier(providerKey)
+	if applier == nil {
+		applier = GetProviderApplier(providerFormat)
+	}
 	if applier == nil {
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
@@ -114,7 +119,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	// Unknown models are treated as user-defined so thinking config can still be applied.
 	// The upstream service is responsible for validating the configuration.
 	if IsUserDefinedModel(modelInfo) {
-		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult)
+		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, providerKey, suffixResult)
 	}
 	if modelInfo.Thinking == nil {
 		config := extractThinkingConfig(body, providerFormat)
@@ -242,7 +247,7 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 
 // applyUserDefinedModel applies thinking configuration for user-defined models
 // without ThinkingSupport validation.
-func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat string, suffixResult SuffixResult) ([]byte, error) {
+func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat, providerKey string, suffixResult SuffixResult) ([]byte, error) {
 	// Get model ID for logging
 	modelID := ""
 	if modelInfo != nil {
@@ -267,17 +272,22 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		return body, nil
 	}
 
-	applier := GetProviderApplier(toFormat)
+	applier := GetProviderApplier(providerKey)
+	if applier == nil {
+		applier = GetProviderApplier(toFormat)
+	}
 	if applier == nil {
 		log.WithFields(log.Fields{
 			"model":    modelID,
 			"provider": toFormat,
+			"key":      providerKey,
 		}).Debug("thinking: user-defined model, passthrough (unknown provider) |")
 		return body, nil
 	}
 
 	log.WithFields(log.Fields{
 		"provider": toFormat,
+		"key":      providerKey,
 		"model":    modelID,
 		"mode":     config.Mode,
 		"budget":   config.Budget,
