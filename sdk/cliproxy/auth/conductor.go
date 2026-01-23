@@ -574,6 +574,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
+		// Check if context is cancelled before trying next provider
+		select {
+		case <-ctx.Done():
+			return cliproxyexecutor.Response{}, ctx.Err()
+		default:
+		}
+
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
