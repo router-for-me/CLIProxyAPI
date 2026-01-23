@@ -98,7 +98,8 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	body = preserveReasoningContentInMessages(body)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
@@ -201,7 +202,8 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if toolsResult.Exists() && toolsResult.IsArray() && len(toolsResult.Array()) == 0 {
 		body = ensureToolsArray(body)
 	}
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 

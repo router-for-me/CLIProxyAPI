@@ -101,7 +101,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
@@ -213,7 +214,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")

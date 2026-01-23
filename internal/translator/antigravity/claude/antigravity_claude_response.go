@@ -139,7 +139,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 
 						if params.CurrentThinkingText.Len() > 0 {
 							cache.CacheSignature(modelName, params.CurrentThinkingText.String(), thoughtSignature.String())
-							// log.Debugf("Cached signature for thinking block (sessionID=%s, textLen=%d)", params.SessionID, params.CurrentThinkingText.Len())
+							// log.Debugf("Cached signature for thinking block (textLen=%d)", params.CurrentThinkingText.Len())
 							params.CurrentThinkingText.Reset()
 						}
 
