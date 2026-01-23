@@ -298,6 +298,15 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 				functionContent, _ = sjson.SetRaw(functionContent, "parts.-1", functionResponse)
 				out, _ = sjson.SetRaw(out, "contents.-1", functionContent)
+
+			case "reasoning":
+				thoughtContent := `{"role":"model","parts":[]}`
+				thought := `{"text":"","thoughtSignature":"","thought":true}`
+				thought, _ = sjson.Set(thought, "text", item.Get("summary.0.text").String())
+				thought, _ = sjson.Set(thought, "thoughtSignature", item.Get("encrypted_content").String())
+
+				thoughtContent, _ = sjson.SetRaw(thoughtContent, "parts.-1", thought)
+				out, _ = sjson.SetRaw(out, "contents.-1", thoughtContent)
 			}
 		}
 	} else if input.Exists() && input.Type == gjson.String {
