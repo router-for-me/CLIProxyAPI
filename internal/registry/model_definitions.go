@@ -1017,3 +1017,24 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 
 	return nil
 }
+
+// GetAllStaticModels returns all static model definitions from all providers.
+// This is useful for pricing configuration where all models should be available.
+func GetAllStaticModels() []*ModelInfo {
+	allModelSets := [][]*ModelInfo{
+		GetClaudeModels(),
+		GetGeminiModels(),
+		GetGeminiVertexModels(),
+		GetGeminiCLIModels(),
+		GetAIStudioModels(),
+		GetOpenAIModels(),
+		GetQwenModels(),
+		GetIFlowModels(),
+	}
+
+	var result []*ModelInfo
+	for _, models := range allModelSets {
+		result = append(result, models...)
+	}
+	return result
+}

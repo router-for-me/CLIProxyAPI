@@ -316,6 +316,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/pricing-config.html", s.servePricingConfig)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	openaiAudioHandlers := openai.NewOpenAIAudioHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
@@ -634,6 +635,7 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
+		mgmt.GET("/models/all", s.mgmt.GetAllModels)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
@@ -685,6 +687,22 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		return
 	}
 
+	c.File(filePath)
+}
+
+func (s *Server) servePricingConfig(c *gin.Context) {
+	cfg := s.cfg
+	if cfg == nil || cfg.RemoteManagement.DisableControlPanel {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	// Serve from static directory
+	staticDir := managementasset.StaticDir(s.configFilePath)
+	filePath := filepath.Join(staticDir, "pricing-config.html")
+	if _, err := os.Stat(filePath); err != nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
 	c.File(filePath)
 }
 

@@ -278,11 +278,40 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	c.JSON(200, gin.H{"files": files})
 }
 
-// GetAuthFileModels returns the models supported by a specific auth file
+// GetAuthFileModels returns the models supported by a specific auth file.
+// If name is empty or "all", returns all available models from all providers.
 func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	name := c.Query("name")
-	if name == "" {
-		c.JSON(400, gin.H{"error": "name is required"})
+
+	// If no name or "all", return all static models for pricing configuration
+	if name == "" || name == "all" {
+		models := registry.GetAllStaticModels()
+		result := make([]gin.H, 0, len(models))
+		for _, m := range models {
+			if m == nil {
+				continue
+			}
+			entry := gin.H{
+				"id": m.ID,
+			}
+			if m.DisplayName != "" {
+				entry["display_name"] = m.DisplayName
+			}
+			if m.Type != "" {
+				entry["type"] = m.Type
+			}
+			if m.OwnedBy != "" {
+				entry["owned_by"] = m.OwnedBy
+			}
+			if m.Thinking != nil {
+				entry["has_reasoning"] = true
+				if len(m.Thinking.Levels) > 0 {
+					entry["reasoning_levels"] = m.Thinking.Levels
+				}
+			}
+			result = append(result, entry)
+		}
+		c.JSON(200, gin.H{"models": result})
 		return
 	}
 
@@ -319,6 +348,39 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		}
 		if m.OwnedBy != "" {
 			entry["owned_by"] = m.OwnedBy
+		}
+		result = append(result, entry)
+	}
+
+	c.JSON(200, gin.H{"models": result})
+}
+
+// GetAllModels returns all available models from all providers for pricing configuration
+func (h *Handler) GetAllModels(c *gin.Context) {
+	models := registry.GetAllStaticModels()
+
+	result := make([]gin.H, 0, len(models))
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		entry := gin.H{
+			"id": m.ID,
+		}
+		if m.DisplayName != "" {
+			entry["display_name"] = m.DisplayName
+		}
+		if m.Type != "" {
+			entry["type"] = m.Type
+		}
+		if m.OwnedBy != "" {
+			entry["owned_by"] = m.OwnedBy
+		}
+		if m.Thinking != nil {
+			entry["has_reasoning"] = true
+			if len(m.Thinking.Levels) > 0 {
+				entry["reasoning_levels"] = m.Thinking.Levels
+			}
 		}
 		result = append(result, entry)
 	}
