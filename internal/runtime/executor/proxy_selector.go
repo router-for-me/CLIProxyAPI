@@ -26,13 +26,6 @@ type ProxySelector struct {
 // The proxies slice is copied to prevent external mutation.
 // Returns nil if proxies is nil.
 func NewProxySelector(proxies []string) *ProxySelector {
-	if proxies == nil {
-		return &ProxySelector{
-			proxies:        nil,
-			providerCounts: make(map[string][]int),
-			assignments:    make(map[string]int),
-		}
-	}
 	// Copy the proxies slice to prevent external mutation
 	copied := make([]string, len(proxies))
 	copy(copied, proxies)

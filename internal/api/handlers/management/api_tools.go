@@ -642,8 +642,8 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 		}
 	}
 	if h != nil && h.cfg != nil {
-		if proxyStr := strings.TrimSpace(h.cfg.ProxyURL); proxyStr != "" {
-			proxyCandidates = append(proxyCandidates, proxyStr)
+		if proxies := h.cfg.ParseProxyURLs(); len(proxies) > 0 {
+			proxyCandidates = append(proxyCandidates, proxies[0])
 		}
 	}
 

@@ -48,7 +48,9 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// Priority 3: Use cfg.ProxyURL if auth proxy is not configured (global proxy fallback)
 	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+		if proxies := cfg.ParseProxyURLs(); len(proxies) > 0 {
+			proxyURL = proxies[0]
+		}
 	}
 
 	// If we have a proxy URL configured, set up the transport
