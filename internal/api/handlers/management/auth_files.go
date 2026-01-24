@@ -32,6 +32,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/oauth2"
@@ -2382,4 +2384,247 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
+}
+
+// ModelHealth represents the health status of a model
+type ModelHealth struct {
+	ModelID     string `json:"model_id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Status      string `json:"status"` // "healthy", "unhealthy"
+	Message     string `json:"message,omitempty"`
+	Latency     int64  `json:"latency_ms,omitempty"`
+}
+
+// CheckAuthFileModelsHealth performs health checks on all models supported by an auth file
+// Mimics Cherry Studio's implementation: sends actual generation request and aborts after first chunk
+// Automatically uses proxy if configured in auth.ProxyURL
+func (h *Handler) CheckAuthFileModelsHealth(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	name := c.Query("name")
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	// Parse optional query parameters (like Cherry Studio)
+	isConcurrent := c.DefaultQuery("concurrent", "false") == "true"
+	timeoutSeconds := 15
+	if ts := c.Query("timeout"); ts != "" {
+		if parsed, err := strconv.Atoi(ts); err == nil && parsed >= 5 && parsed <= 60 {
+			timeoutSeconds = parsed
+		}
+	}
+
+	// Find auth by name or ID
+	var targetAuth *coreauth.Auth
+	if auth, ok := h.authManager.GetByID(name); ok {
+		targetAuth = auth
+	} else {
+		auths := h.authManager.List()
+		for _, auth := range auths {
+			if auth.FileName == name || auth.ID == name {
+				targetAuth = auth
+				break
+			}
+		}
+	}
+
+	if targetAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+
+	// Get models from registry
+	reg := registry.GetGlobalRegistry()
+	models := reg.GetModelsForClient(targetAuth.ID)
+
+	if len(models) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"auth_id":        targetAuth.ID,
+			"status":         "healthy",
+			"healthy_count":  0,
+			"unhealthy_count": 0,
+			"total_count":    0,
+			"models":         []ModelHealth{},
+		})
+		return
+	}
+
+	// Prepare health check results
+	results := make([]ModelHealth, 0, len(models))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	checkModel := func(model *registry.ModelInfo) {
+		defer wg.Done()
+
+		startTime := time.Now()
+		checkCtx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSeconds)*time.Second)
+		defer cancel()
+
+		// Build minimal OpenAI-format request for health check (mimicking Cherry Studio)
+		// This will be translated by the executor to the appropriate provider format
+		openAIRequest := map[string]interface{}{
+			"model":    model.ID,
+			"messages": []map[string]interface{}{
+				{"role": "user", "content": "hi"},
+				{"role": "system", "content": "test"},
+			},
+			"stream":     true,
+			"max_tokens": 1,
+		}
+
+		requestJSON, err := json.Marshal(openAIRequest)
+		if err != nil {
+			mu.Lock()
+			results = append(results, ModelHealth{
+				ModelID:     model.ID,
+				DisplayName: model.DisplayName,
+				Status:      "unhealthy",
+				Message:     fmt.Sprintf("failed to build request: %v", err),
+			})
+			mu.Unlock()
+			return
+		}
+
+		// Build executor request
+		req := cliproxyexecutor.Request{
+			Model:   model.ID,
+			Payload: requestJSON,
+			Format:  sdktranslator.FormatOpenAI,
+		}
+
+		opts := cliproxyexecutor.Options{
+			Stream:         true,
+			SourceFormat:   sdktranslator.FormatOpenAI,
+			OriginalRequest: requestJSON,
+		}
+
+		// Execute stream directly with the specific auth (not load-balanced)
+		// This ensures we're testing this exact auth file, not any random auth of the same provider
+		stream, err := h.authManager.ExecuteStreamWithAuth(checkCtx, targetAuth, req, opts)
+		if err != nil {
+			mu.Lock()
+			results = append(results, ModelHealth{
+				ModelID:     model.ID,
+				DisplayName: model.DisplayName,
+				Status:      "unhealthy",
+				Message:     err.Error(),
+			})
+			mu.Unlock()
+			return
+		}
+
+		// Wait for first chunk or timeout
+		select {
+		case chunk, ok := <-stream:
+			if ok {
+				// Check for error in chunk
+				if chunk.Err != nil {
+					mu.Lock()
+					results = append(results, ModelHealth{
+						ModelID:     model.ID,
+						DisplayName: model.DisplayName,
+						Status:      "unhealthy",
+						Message:     chunk.Err.Error(),
+					})
+					mu.Unlock()
+					cancel()
+					// Drain remaining chunks
+					go func() {
+						for range stream {
+						}
+					}()
+					return
+				}
+
+				// Got first chunk - model is healthy
+				latency := time.Since(startTime).Milliseconds()
+				cancel() // Cancel immediately after first chunk
+				// Drain remaining chunks in background
+				go func() {
+					for range stream {
+					}
+				}()
+
+				mu.Lock()
+				results = append(results, ModelHealth{
+					ModelID:     model.ID,
+					DisplayName: model.DisplayName,
+					Status:      "healthy",
+					Latency:     latency,
+				})
+				mu.Unlock()
+			} else {
+				// Stream closed without data
+				mu.Lock()
+				results = append(results, ModelHealth{
+					ModelID:     model.ID,
+					DisplayName: model.DisplayName,
+					Status:      "unhealthy",
+					Message:     "stream closed without data",
+				})
+				mu.Unlock()
+			}
+		case <-checkCtx.Done():
+			// Timeout
+			mu.Lock()
+			results = append(results, ModelHealth{
+				ModelID:     model.ID,
+				DisplayName: model.DisplayName,
+				Status:      "unhealthy",
+				Message:     "health check timeout",
+			})
+			mu.Unlock()
+		}
+	}
+
+	// Execute health checks
+	if isConcurrent {
+		// Concurrent execution
+		for _, model := range models {
+			wg.Add(1)
+			go checkModel(model)
+		}
+	} else {
+		// Sequential execution
+		for _, model := range models {
+			wg.Add(1)
+			checkModel(model)
+		}
+	}
+
+	wg.Wait()
+
+	// Count results
+	healthyCount := 0
+	unhealthyCount := 0
+	for _, result := range results {
+		if result.Status == "healthy" {
+			healthyCount++
+		} else {
+			unhealthyCount++
+		}
+	}
+
+	// Determine overall status
+	overallStatus := "healthy"
+	if unhealthyCount > 0 && healthyCount == 0 {
+		overallStatus = "unhealthy"
+	} else if unhealthyCount > 0 {
+		overallStatus = "partial"
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"auth_id":        targetAuth.ID,
+		"status":         overallStatus,
+		"healthy_count":  healthyCount,
+		"unhealthy_count": unhealthyCount,
+		"total_count":    len(results),
+		"models":         results,
+	})
 }

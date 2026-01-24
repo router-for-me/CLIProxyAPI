@@ -2204,3 +2204,98 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	}
 	return exec.HttpRequest(ctx, auth, req)
 }
+
+// GetExecutor returns the registered ProviderExecutor for the given provider key.
+// Returns nil if no executor is registered for the provider.
+// This enables external packages to directly invoke provider-specific execution logic.
+func (m *Manager) GetExecutor(provider string) ProviderExecutor {
+	return m.executorFor(provider)
+}
+
+// ExecuteStreamWithAuth performs a streaming execution using a specific auth directly.
+// Unlike ExecuteStream which performs load balancing across auths of the same provider,
+// this method targets a specific auth entry - useful for health checks and diagnostics.
+// The method handles model rewriting, proxy/RoundTripper setup, and proper request translation.
+func (m *Manager) ExecuteStreamWithAuth(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+	if m == nil {
+		return nil, &Error{Code: "manager_nil", Message: "auth manager is nil"}
+	}
+	if auth == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "auth is nil"}
+	}
+
+	// Determine provider key from auth
+	providerKey := executorKeyFromAuth(auth)
+	if providerKey == "" {
+		return nil, &Error{Code: "provider_not_found", Message: "auth provider is empty"}
+	}
+
+	// Get the executor for this provider
+	executor := m.executorFor(providerKey)
+	if executor == nil {
+		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
+	}
+
+	// Setup execution context with RoundTripper (proxy support)
+	execCtx := ctx
+	if rt := m.roundTripperFor(auth); rt != nil {
+		execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+		execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+	}
+
+	// Apply model rewriting if configured
+	routeModel := req.Model
+	execReq := req
+	execReq.Model = rewriteModelForAuth(routeModel, auth)
+	execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+	execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+	// Ensure requested model metadata is set
+	opts = ensureRequestedModelMetadata(opts, routeModel)
+
+	// Execute the stream request directly with the specified auth
+	return executor.ExecuteStream(execCtx, auth, execReq, opts)
+}
+
+// ExecuteWithAuth performs a non-streaming execution using a specific auth directly.
+// This is the non-streaming counterpart to ExecuteStreamWithAuth.
+func (m *Manager) ExecuteWithAuth(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if m == nil {
+		return cliproxyexecutor.Response{}, &Error{Code: "manager_nil", Message: "auth manager is nil"}
+	}
+	if auth == nil {
+		return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "auth is nil"}
+	}
+
+	// Determine provider key from auth
+	providerKey := executorKeyFromAuth(auth)
+	if providerKey == "" {
+		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "auth provider is empty"}
+	}
+
+	// Get the executor for this provider
+	executor := m.executorFor(providerKey)
+	if executor == nil {
+		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
+	}
+
+	// Setup execution context with RoundTripper (proxy support)
+	execCtx := ctx
+	if rt := m.roundTripperFor(auth); rt != nil {
+		execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+		execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+	}
+
+	// Apply model rewriting if configured
+	routeModel := req.Model
+	execReq := req
+	execReq.Model = rewriteModelForAuth(routeModel, auth)
+	execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+	execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
+	// Ensure requested model metadata is set
+	opts = ensureRequestedModelMetadata(opts, routeModel)
+
+	// Execute the request directly with the specified auth
+	return executor.Execute(execCtx, auth, execReq, opts)
+}
