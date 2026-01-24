@@ -1204,10 +1204,25 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	}
 	payload = geminiToAntigravity(modelName, payload, projectID)
 
-	// If this is a request to the standard Gemini API (generativelanguage.googleapis.com),
-	// we must remove the custom Antigravity fields that are injected by geminiToAntigravity.
-	if u, err := url.Parse(requestURL.String()); err == nil && u.Host == "generativelanguage.googleapis.com" {
-		payload = stripNonStandardFields(payload)
+	// If this is NOT a request to the internal Antigravity API, we must remove the custom fields.
+	// This ensures compatibility with standard Gemini API, Vertex AI, and other endpoints.
+	if u, err := url.Parse(requestURL.String()); err == nil {
+		isInternal := false
+		internalHosts := []string{
+			"daily-cloudcode-pa.googleapis.com",
+			"daily-cloudcode-pa.sandbox.googleapis.com",
+			"cloudcode-pa.googleapis.com",
+		}
+		for _, host := range internalHosts {
+			if u.Host == host {
+				isInternal = true
+				break
+			}
+		}
+
+		if !isInternal {
+			payload = stripNonStandardFields(payload)
+		}
 	}
 
 	payload, _ = sjson.SetBytes(payload, "model", modelName)
