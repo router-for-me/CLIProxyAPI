@@ -29,7 +29,10 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	if auth == nil {
 		return nil
 	}
-	proxyStr := strings.TrimSpace(auth.ProxyURL)
+	proxyStr := strings.TrimSpace(auth.ResolvedProxyURL)
+	if proxyStr == "" {
+		proxyStr = strings.TrimSpace(auth.ProxyURL)
+	}
 	if proxyStr == "" {
 		return nil
 	}

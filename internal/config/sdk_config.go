@@ -4,6 +4,13 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"net/url"
+	"strings"
+
+	log "github.com/sirupsen/logrus"
+)
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -74,6 +81,66 @@ const (
 	// DefaultAccessProviderName is applied when no provider name is supplied.
 	DefaultAccessProviderName = "config-inline"
 )
+
+// ParseProxyURLs parses the ProxyURL field as a comma-separated list of proxy URLs.
+// It validates each URL's format and scheme (only http, https, socks5 are allowed).
+// Invalid URLs are logged and skipped. Returns an empty slice if ProxyURL is empty.
+// Single proxy configurations return a slice of length 1 for backward compatibility.
+func (c *SDKConfig) ParseProxyURLs() []string {
+	if c == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(c.ProxyURL)
+	if raw == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+
+		u, err := url.Parse(p)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"proxy_url": p,
+				"error":     err,
+			}).Warn("Skipping invalid proxy URL: parse error")
+			continue
+		}
+
+		scheme := strings.ToLower(u.Scheme)
+		if scheme != "http" && scheme != "https" && scheme != "socks5" {
+			log.WithFields(log.Fields{
+				"proxy_url": p,
+				"scheme":    u.Scheme,
+			}).Warn("Skipping unsupported proxy scheme (only http/https/socks5 allowed)")
+			continue
+		}
+
+		out = append(out, p)
+	}
+
+	if len(out) > 0 {
+		log.WithField("count", len(out)).Debug("Parsed proxy URLs from configuration")
+	}
+
+	return out
+}
+
+// GetProxyURLCount returns the number of valid proxy URLs configured.
+func (c *SDKConfig) GetProxyURLCount() int {
+	return len(c.ParseProxyURLs())
+}
+
+// IsMultiProxyEnabled returns true if more than one proxy URL is configured.
+func (c *SDKConfig) IsMultiProxyEnabled() bool {
+	return c.GetProxyURLCount() > 1
+}
 
 // ConfigAPIKeyProvider returns the first inline API key provider if present.
 func (c *SDKConfig) ConfigAPIKeyProvider() *AccessProvider {

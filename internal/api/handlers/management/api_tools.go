@@ -634,6 +634,9 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	var proxyCandidates []string
 	if auth != nil {
+		if proxyStr := strings.TrimSpace(auth.ResolvedProxyURL); proxyStr != "" {
+			proxyCandidates = append(proxyCandidates, proxyStr)
+		}
 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
 			proxyCandidates = append(proxyCandidates, proxyStr)
 		}

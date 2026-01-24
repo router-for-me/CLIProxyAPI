@@ -38,6 +38,10 @@ type Auth struct {
 	Unavailable bool `json:"unavailable"`
 	// ProxyURL overrides the global proxy setting for this auth if provided.
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// ResolvedProxyURL caches the final proxy URL computed at runtime by ProxySelector.
+	// This field is set during credential synthesis and used directly during HTTP requests
+	// to avoid repeated computation. It is not persisted (json:"-").
+	ResolvedProxyURL string `json:"-"`
 	// Attributes stores provider specific metadata needed by executors (immutable configuration).
 	Attributes map[string]string `json:"attributes,omitempty"`
 	// Metadata stores runtime mutable provider state (e.g. tokens, cookies).
@@ -101,6 +105,7 @@ func (a *Auth) Clone() *Auth {
 		return nil
 	}
 	copyAuth := *a
+	// ResolvedProxyURL is copied via the struct copy above (string is value type)
 	if len(a.Attributes) > 0 {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		for key, value := range a.Attributes {

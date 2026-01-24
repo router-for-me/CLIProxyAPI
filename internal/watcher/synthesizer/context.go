@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 )
 
 // SynthesisContext provides the context needed for auth synthesis.
@@ -16,4 +17,6 @@ type SynthesisContext struct {
 	Now time.Time
 	// IDGenerator generates stable IDs for auth entries
 	IDGenerator *StableIDGenerator
+	// ProxySelector provides runtime proxy selection logic (optional).
+	ProxySelector *executor.ProxySelector
 }

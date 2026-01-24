@@ -118,6 +118,9 @@ func newHTTPClient(proxyURL string) *http.Client {
 	client := &http.Client{Timeout: 15 * time.Second}
 
 	sdkCfg := &sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}
+	if proxies := sdkCfg.ParseProxyURLs(); len(proxies) > 0 {
+		sdkCfg.ProxyURL = proxies[0]
+	}
 	util.SetProxy(sdkCfg, client)
 
 	return client

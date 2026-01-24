@@ -15,9 +15,10 @@ import (
 )
 
 // newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
-// 1. Use auth.ProxyURL if configured (highest priority)
-// 2. Use cfg.ProxyURL if auth proxy is not configured
-// 3. Use RoundTripper from context if neither are configured
+// 1. Use auth.ResolvedProxyURL if set (pre-computed by proxy pool, highest priority)
+// 2. Use auth.ProxyURL if configured (per-credential proxy)
+// 3. Use cfg.ProxyURL if auth proxy is not configured (global proxy)
+// 4. Use RoundTripper from context if no proxy is configured
 //
 // Parameters:
 //   - ctx: The context containing optional RoundTripper
@@ -33,13 +34,19 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
-	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
-	if auth != nil {
+
+	// Priority 1: Use auth.ResolvedProxyURL if set (pre-computed by proxy pool)
+	if auth != nil && auth.ResolvedProxyURL != "" {
+		proxyURL = auth.ResolvedProxyURL
+	}
+
+	// Priority 2: Use auth.ProxyURL if configured (per-credential proxy)
+	if proxyURL == "" && auth != nil {
 		proxyURL = strings.TrimSpace(auth.ProxyURL)
 	}
 
-	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
+	// Priority 3: Use cfg.ProxyURL if auth proxy is not configured (global proxy fallback)
 	if proxyURL == "" && cfg != nil {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}

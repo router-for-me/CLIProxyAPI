@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -106,5 +107,46 @@ func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string)
 			continue
 		}
 		attrs["header:"+key] = val
+	}
+}
+
+// ResolveProxies assigns proxy URLs to auth entries using the given ProxySelector.
+// It implements the following priority:
+// 1. If auth.ProxyURL is non-empty, use it directly (highest priority)
+// 2. If selector is provided, use AssignProxy to get a proxy from the pool
+// 3. Otherwise, leave ResolvedProxyURL empty (no proxy)
+//
+// The function sorts auth entries by ID before assignment to ensure deterministic
+// results across restarts. This is important because the selector uses a
+// round-robin-like algorithm based on provider-specific usage counts.
+func ResolveProxies(auths []*coreauth.Auth, selector *executor.ProxySelector) {
+	if len(auths) == 0 {
+		return
+	}
+
+	// Sort by ID to ensure deterministic assignment order across restarts
+	sort.Slice(auths, func(i, j int) bool {
+		return auths[i].ID < auths[j].ID
+	})
+
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+
+		// Priority 1: Use credential-specific proxy if configured
+		if auth.ProxyURL != "" {
+			auth.ResolvedProxyURL = auth.ProxyURL
+			continue
+		}
+
+		// Priority 2: Use proxy selector if available
+		if selector != nil && selector.Len() > 0 {
+			auth.ResolvedProxyURL = selector.AssignProxy(auth.ID, auth.Provider)
+			continue
+		}
+
+		// Priority 3: No proxy (empty string)
+		auth.ResolvedProxyURL = ""
 	}
 }

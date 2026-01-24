@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -250,11 +251,18 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 }
 
 func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
+	// Initialize ProxySelector if proxy pool is configured
+	var proxySelector *executor.ProxySelector
+	if proxies := cfg.ParseProxyURLs(); len(proxies) > 0 {
+		proxySelector = executor.NewProxySelector(proxies)
+	}
+
 	ctx := &synthesizer.SynthesisContext{
-		Config:      cfg,
-		AuthDir:     authDir,
-		Now:         time.Now(),
-		IDGenerator: synthesizer.NewStableIDGenerator(),
+		Config:        cfg,
+		AuthDir:       authDir,
+		Now:           time.Now(),
+		IDGenerator:   synthesizer.NewStableIDGenerator(),
+		ProxySelector: proxySelector,
 	}
 
 	var out []*coreauth.Auth
@@ -268,6 +276,9 @@ func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
 	if auths, err := fileSynth.Synthesize(ctx); err == nil {
 		out = append(out, auths...)
 	}
+
+	// Resolve proxies for all auths using the shared selector
+	synthesizer.ResolveProxies(out, proxySelector)
 
 	return out
 }
