@@ -39,18 +39,24 @@ func (e *OpenAICompatExecutor) Identifier() string { return e.provider }
 
 // detectEndpoint determines the correct OpenAI API endpoint based on the request payload.
 // It returns the endpoint path (e.g., "/chat/completions", "/embeddings", "/completions").
+// Priority: messages > input > prompt to ensure correct classification.
 func detectEndpoint(payload []byte) string {
-	// Check for embeddings request (has "input" field instead of "messages")
-	if gjson.GetBytes(payload, "input").Exists() && !gjson.GetBytes(payload, "messages").Exists() {
+	// Prioritize checking for "messages" to correctly identify chat completion requests.
+	if gjson.GetBytes(payload, "messages").Exists() {
+		return "/chat/completions"
+	}
+
+	// Check for embeddings request (has "input" field).
+	if gjson.GetBytes(payload, "input").Exists() {
 		return "/embeddings"
 	}
 
-	// Check for completions request (has "prompt" field)
+	// Check for legacy completions request (has "prompt" field).
 	if gjson.GetBytes(payload, "prompt").Exists() {
 		return "/completions"
 	}
 
-	// Default to chat completions
+	// Default to chat completions as a fallback for ambiguous or malformed requests.
 	return "/chat/completions"
 }
 
