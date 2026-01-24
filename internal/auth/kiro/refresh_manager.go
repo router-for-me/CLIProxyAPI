@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -47,6 +48,14 @@ func (m *RefreshManager) Initialize(baseDir string, cfg *config.Config) error {
 	if baseDir == "" {
 		log.Warn("refresh manager: base directory not provided, skipping initialization")
 		return nil
+	}
+
+	resolvedBaseDir, err := util.ResolveAuthDir(baseDir)
+	if err != nil {
+		log.Warnf("refresh manager: failed to resolve auth directory %s: %v", baseDir, err)
+	}
+	if resolvedBaseDir != "" {
+		baseDir = resolvedBaseDir
 	}
 
 	// 创建 token 存储库
