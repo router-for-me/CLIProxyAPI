@@ -1203,6 +1203,13 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 	payload = geminiToAntigravity(modelName, payload, projectID)
+
+	// If this is a request to the standard Gemini API (generativelanguage.googleapis.com),
+	// we must remove the custom Antigravity fields that are injected by geminiToAntigravity.
+	if strings.Contains(requestURL.String(), "generativelanguage.googleapis.com") {
+		payload = stripNonStandardFields(payload)
+	}
+
 	payload, _ = sjson.SetBytes(payload, "model", modelName)
 
 	if strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-high") {
@@ -1468,4 +1475,13 @@ func generateProjectID() string {
 	randSourceMutex.Unlock()
 	randomPart := strings.ToLower(uuid.NewString())[:5]
 	return adj + "-" + noun + "-" + randomPart
+}
+
+func stripNonStandardFields(payload []byte) []byte {
+	payload, _ = sjson.DeleteBytes(payload, "userAgent")
+	payload, _ = sjson.DeleteBytes(payload, "requestType")
+	payload, _ = sjson.DeleteBytes(payload, "requestId")
+	payload, _ = sjson.DeleteBytes(payload, "project")
+	payload, _ = sjson.DeleteBytes(payload, "request.sessionId")
+	return payload
 }
