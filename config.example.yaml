@@ -152,6 +152,8 @@ codex-instructions-enabled: false
 #         - "proxy"
 
 # OpenAI compatibility providers
+# Supports chat completions (/v1/chat/completions), completions (/v1/completions),
+# and embeddings (/v1/embeddings) endpoints
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
@@ -165,6 +167,15 @@ codex-instructions-enabled: false
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.
+#   - name: "ollama-embeddings" # Example: Ollama for embeddings
+#     base-url: "http://localhost:11434/v1"
+#     api-key-entries:
+#       - api-key: "ollama" # Ollama doesn't require a real API key
+#     models:
+#       - name: "nomic-embed-text" # Embedding model
+#         alias: "nomic-embed-text"
+#       - name: "mxbai-embed-large"
+#         alias: "mxbai-embed-large"
 
 # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
 # vertex-api-key:
