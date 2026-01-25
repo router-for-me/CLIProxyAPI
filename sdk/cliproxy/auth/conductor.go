@@ -1561,15 +1561,21 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	providerSet := make(map[string]struct{}, len(providers))
+	// Normalize providers while preserving order for priority-based selection.
+	normalizedProviders := make([]string, 0, len(providers))
+	providerSeen := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
 		p := strings.TrimSpace(strings.ToLower(provider))
 		if p == "" {
 			continue
 		}
-		providerSet[p] = struct{}{}
+		if _, seen := providerSeen[p]; seen {
+			continue
+		}
+		providerSeen[p] = struct{}{}
+		normalizedProviders = append(normalizedProviders, p)
 	}
-	if len(providerSet) == 0 {
+	if len(normalizedProviders) == 0 {
 		return nil, nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
@@ -1584,27 +1590,27 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
-	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
-			continue
-		}
-		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
-		if providerKey == "" {
-			continue
-		}
-		if _, ok := providerSet[providerKey]; !ok {
-			continue
-		}
-		if _, used := tried[candidate.ID]; used {
-			continue
-		}
+	// Iterate by provider order to preserve priority (e.g., native provider first).
+	for _, providerKey := range normalizedProviders {
 		if _, ok := m.executors[providerKey]; !ok {
 			continue
 		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
-			continue
+		for _, candidate := range m.auths {
+			if candidate == nil || candidate.Disabled {
+				continue
+			}
+			candidateProvider := strings.TrimSpace(strings.ToLower(candidate.Provider))
+			if candidateProvider != providerKey {
+				continue
+			}
+			if _, used := tried[candidate.ID]; used {
+				continue
+			}
+			if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+				continue
+			}
+			candidates = append(candidates, candidate)
 		}
-		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
