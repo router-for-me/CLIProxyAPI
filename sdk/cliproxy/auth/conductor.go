@@ -1415,7 +1415,7 @@ func statusCodeFromResult(err *Error) int {
 	return err.StatusCode()
 }
 
-var defaultAutoDeleteStatusCodes = []int{401, 403}
+var DefaultAutoDeleteStatusCodes = []int{401, 403}
 
 type autoDeleteRequest struct {
 	authID       string
@@ -1424,23 +1424,30 @@ type autoDeleteRequest struct {
 }
 
 func (m *Manager) shouldAutoDeleteCredential(auth *Auth, statusCode int, now time.Time) *autoDeleteRequest {
-	if auth == nil || auth.FileName == "" {
+	if auth == nil {
+		log.Debug("auto-delete skip: auth is nil")
+		return nil
+	}
+	if auth.FileName == "" {
+		log.Debugf("auto-delete skip: empty filename for auth_id=%s provider=%s", auth.ID, auth.Provider)
 		return nil
 	}
 
 	cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config)
 	if !ok || cfg == nil {
+		log.Debug("auto-delete skip: no runtime config")
 		return nil
 	}
 
 	rule, ok := cfg.AutoDelete.Providers[strings.ToLower(auth.Provider)]
 	if !ok || !rule.Enabled {
+		log.Debugf("auto-delete skip: provider=%q not configured or disabled", auth.Provider)
 		return nil
 	}
 
 	statusCodes := rule.StatusCodes
 	if len(statusCodes) == 0 {
-		statusCodes = defaultAutoDeleteStatusCodes
+		statusCodes = DefaultAutoDeleteStatusCodes
 	}
 
 	if !slices.Contains(statusCodes, statusCode) {
@@ -1494,6 +1501,19 @@ func (m *Manager) executeAutoDelete(ctx context.Context, req *autoDeleteRequest)
 	registry.GetGlobalRegistry().UnregisterClient(req.authID)
 
 	return nil
+}
+
+func (m *Manager) RequestAutoDelete(ctx context.Context, authID, filename string, decisionTime time.Time) {
+	if m == nil {
+		return
+	}
+	req := &autoDeleteRequest{
+		authID:       authID,
+		filename:     filename,
+		decisionTime: decisionTime,
+	}
+	// executeAutoDelete handles its own error logging; caller doesn't need the error.
+	_ = m.executeAutoDelete(ctx, req)
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
