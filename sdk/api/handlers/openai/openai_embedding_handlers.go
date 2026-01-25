@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,11 +18,22 @@ import (
 
 // embeddingModelMapping maps OpenAI embedding models to Gemini embedding models.
 var embeddingModelMapping = map[string]string{
-	"text-embedding-ada-002":   "text-embedding-004",
-	"text-embedding-3-small":   "text-embedding-004",
-	"text-embedding-3-large":   "text-embedding-004",
-	"text-embedding-004":       "text-embedding-004",
-	"embedding-001":            "embedding-001",
+	"text-embedding-ada-002": "text-embedding-004",
+	"text-embedding-3-small": "text-embedding-004",
+	"text-embedding-3-large": "text-embedding-004",
+	"text-embedding-004":     "text-embedding-004",
+	"embedding-001":          "embedding-001",
+}
+
+// embeddingHTTPClient is a shared HTTP client for embedding requests.
+// It is safe for concurrent use and configured with reasonable timeouts.
+var embeddingHTTPClient = &http.Client{
+	Timeout: 60 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	},
 }
 
 // Embeddings handles the /v1/embeddings endpoint.
@@ -74,7 +86,7 @@ func (h *OpenAIAPIHandler) Embeddings(c *gin.Context) {
 	}
 
 	// 2. Get API key from Authorization header
-	apiKey := extractAPIKey(c)
+	apiKey := extractEmbeddingAPIKey(c)
 	if apiKey == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error": gin.H{
@@ -91,24 +103,36 @@ func (h *OpenAIAPIHandler) Embeddings(c *gin.Context) {
 		geminiModel = mapped
 	}
 
-	// 4. Execute embedding requests concurrently
+	// 4. Execute embedding requests concurrently with cancellation support
 	respData := make([]EmbeddingData, len(inputs))
 	var wg sync.WaitGroup
 	var errMutex sync.Mutex
-	var lastErr error
-	var totalTokens int
+	var firstErr error
+	var totalTokens int64
 
-	ctx := c.Request.Context()
+	// Create cancellable context - cancel all requests on first error
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
 
 	for i, text := range inputs {
 		wg.Add(1)
 		go func(idx int, txt string) {
 			defer wg.Done()
 
-			values, err := callGeminiEmbedContent(ctx, geminiModel, apiKey, txt)
+			// Check if context is already cancelled
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			values, err := callGeminiEmbedContentWithClient(ctx, embeddingHTTPClient, geminiModel, apiKey, txt)
 			if err != nil {
 				errMutex.Lock()
-				lastErr = err
+				if firstErr == nil {
+					firstErr = err
+					cancel() // Cancel other ongoing requests
+				}
 				errMutex.Unlock()
 				return
 			}
@@ -126,18 +150,16 @@ func (h *OpenAIAPIHandler) Embeddings(c *gin.Context) {
 				localTokens = 1
 			}
 
-			errMutex.Lock()
-			totalTokens += localTokens
-			errMutex.Unlock()
+			atomic.AddInt64(&totalTokens, int64(localTokens))
 		}(i, text)
 	}
 
 	wg.Wait()
 
-	if lastErr != nil {
+	if firstErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": gin.H{
-				"message": fmt.Sprintf("Upstream error: %v", lastErr),
+				"message": fmt.Sprintf("Upstream error: %v", firstErr),
 				"type":    "api_error",
 			},
 		})
@@ -150,16 +172,16 @@ func (h *OpenAIAPIHandler) Embeddings(c *gin.Context) {
 		Data:   respData,
 		Model:  req.Model,
 		Usage: EmbeddingUsage{
-			PromptTokens: totalTokens,
-			TotalTokens:  totalTokens,
+			PromptTokens: int(totalTokens),
+			TotalTokens:  int(totalTokens),
 		},
 	}
 
 	c.JSON(http.StatusOK, response)
 }
 
-// extractAPIKey extracts the API key from the Authorization header or query parameter.
-func extractAPIKey(c *gin.Context) string {
+// extractEmbeddingAPIKey extracts the API key from the Authorization header or query parameter.
+func extractEmbeddingAPIKey(c *gin.Context) string {
 	// Try Authorization header first
 	authHeader := c.GetHeader("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") {
@@ -179,8 +201,8 @@ func extractAPIKey(c *gin.Context) string {
 	return ""
 }
 
-// callGeminiEmbedContent calls the Gemini embedContent API for a single text input.
-func callGeminiEmbedContent(ctx context.Context, model, apiKey, text string) ([]float64, error) {
+// callGeminiEmbedContentWithClient calls the Gemini embedContent API using a shared HTTP client.
+func callGeminiEmbedContentWithClient(ctx context.Context, client *http.Client, model, apiKey, text string) ([]float64, error) {
 	// Build Gemini API URL
 	baseURL := "https://generativelanguage.googleapis.com"
 	url := fmt.Sprintf("%s/v1beta/models/%s:embedContent?key=%s", baseURL, model, apiKey)
@@ -198,17 +220,20 @@ func callGeminiEmbedContent(ctx context.Context, model, apiKey, text string) ([]
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Create HTTP request
+	// Create HTTP request with context
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Execute request
-	client := &http.Client{Timeout: 30 * time.Second}
+	// Execute request using shared client
 	resp, err := client.Do(httpReq)
 	if err != nil {
+		// Check if cancelled
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
