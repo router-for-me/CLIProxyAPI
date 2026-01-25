@@ -791,28 +791,28 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				_ = httpResp.Body.Close()
 				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
-				if attempt < maxRetries {
-					log.Warnf("kiro: received 401 error, attempting token refresh and retry (attempt %d/%d)", attempt+1, maxRetries+1)
+				log.Warnf("kiro: received 401 error, attempting token refresh")
+				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+				if refreshErr != nil {
+					log.Errorf("kiro: token refresh failed: %v", refreshErr)
+					return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+				}
 
-					refreshedAuth, refreshErr := e.Refresh(ctx, auth)
-					if refreshErr != nil {
-						log.Errorf("kiro: token refresh failed: %v", refreshErr)
-						return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+				if refreshedAuth != nil {
+					auth = refreshedAuth
+					// Persist the refreshed auth to file so subsequent requests use it
+					if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+						log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+						// Continue anyway - the token is valid for this request
 					}
-
-					if refreshedAuth != nil {
-						auth = refreshedAuth
-						// Persist the refreshed auth to file so subsequent requests use it
-						if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
-							log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
-							// Continue anyway - the token is valid for this request
-						}
-						accessToken, profileArn = kiroCredentials(auth)
-						// Rebuild payload with new profile ARN if changed
-						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
-						log.Infof("kiro: token refreshed successfully, retrying request")
+					accessToken, profileArn = kiroCredentials(auth)
+					// Rebuild payload with new profile ARN if changed
+					kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
+					if attempt < maxRetries {
+						log.Infof("kiro: token refreshed successfully, retrying request (attempt %d/%d)", attempt+1, maxRetries+1)
 						continue
 					}
+					log.Infof("kiro: token refreshed successfully, no retries remaining")
 				}
 
 				log.Warnf("kiro request error, status: 401, body: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
@@ -1199,28 +1199,28 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				_ = httpResp.Body.Close()
 				appendAPIResponseChunk(ctx, e.cfg, respBody)
 
-				if attempt < maxRetries {
-					log.Warnf("kiro: stream received 401 error, attempting token refresh and retry (attempt %d/%d)", attempt+1, maxRetries+1)
+				log.Warnf("kiro: stream received 401 error, attempting token refresh")
+				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+				if refreshErr != nil {
+					log.Errorf("kiro: token refresh failed: %v", refreshErr)
+					return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+				}
 
-					refreshedAuth, refreshErr := e.Refresh(ctx, auth)
-					if refreshErr != nil {
-						log.Errorf("kiro: token refresh failed: %v", refreshErr)
-						return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
+				if refreshedAuth != nil {
+					auth = refreshedAuth
+					// Persist the refreshed auth to file so subsequent requests use it
+					if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
+						log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
+						// Continue anyway - the token is valid for this request
 					}
-
-					if refreshedAuth != nil {
-						auth = refreshedAuth
-						// Persist the refreshed auth to file so subsequent requests use it
-						if persistErr := e.persistRefreshedAuth(auth); persistErr != nil {
-							log.Warnf("kiro: failed to persist refreshed auth: %v", persistErr)
-							// Continue anyway - the token is valid for this request
-						}
-						accessToken, profileArn = kiroCredentials(auth)
-						// Rebuild payload with new profile ARN if changed
-						kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
-						log.Infof("kiro: token refreshed successfully, retrying stream request")
+					accessToken, profileArn = kiroCredentials(auth)
+					// Rebuild payload with new profile ARN if changed
+					kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
+					if attempt < maxRetries {
+						log.Infof("kiro: token refreshed successfully, retrying stream request (attempt %d/%d)", attempt+1, maxRetries+1)
 						continue
 					}
+					log.Infof("kiro: token refreshed successfully, no retries remaining")
 				}
 
 				log.Warnf("kiro stream error, status: 401, body: %s", string(respBody))
