@@ -997,7 +997,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		now := time.Now().Unix()
 		modelConfig := registry.GetAntigravityModelConfig()
 		models := make([]*registry.ModelInfo, 0, len(result.Map()))
-		for originalName := range result.Map() {
+		for originalName, modelData := range result.Map() {
 			modelID := strings.TrimSpace(originalName)
 			if modelID == "" {
 				continue
@@ -1007,12 +1007,18 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				continue
 			}
 			modelCfg := modelConfig[modelID]
-			modelName := modelID
+
+			// Extract displayName from upstream response, fallback to modelID
+			displayName := modelData.Get("displayName").String()
+			if displayName == "" {
+				displayName = modelID
+			}
+
 			modelInfo := &registry.ModelInfo{
 				ID:          modelID,
-				Name:        modelName,
-				Description: modelID,
-				DisplayName: modelID,
+				Name:        modelID,
+				Description: displayName,
+				DisplayName: displayName,
 				Version:     modelID,
 				Object:      "model",
 				Created:     now,

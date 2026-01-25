@@ -181,11 +181,11 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 			result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
 			resultJSON := gjson.ParseBytes(result)
 
-			// Find the relevant message (skip system message at index 0)
+			// Find the relevant message
 			messages := resultJSON.Get("messages").Array()
-			if len(messages) < 2 {
+			if len(messages) < 1 {
 				if tt.wantHasReasoningContent || tt.wantHasContent {
-					t.Fatalf("Expected at least 2 messages (system + user/assistant), got %d", len(messages))
+					t.Fatalf("Expected at least 1 message, got %d", len(messages))
 				}
 				return
 			}
@@ -272,15 +272,15 @@ func TestConvertClaudeRequestToOpenAI_ThinkingOnlyMessagePreserved(t *testing.T)
 
 	messages := resultJSON.Get("messages").Array()
 
-	// Should have: system (auto-added) + user + assistant (thinking-only) + user = 4 messages
-	if len(messages) != 4 {
-		t.Fatalf("Expected 4 messages, got %d. Messages: %v", len(messages), resultJSON.Get("messages").Raw)
+	// Should have: user + assistant (thinking-only) + user = 3 messages
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %v", len(messages), resultJSON.Get("messages").Raw)
 	}
 
-	// Check the assistant message (index 2) has reasoning_content
-	assistantMsg := messages[2]
+	// Check the assistant message (index 1) has reasoning_content
+	assistantMsg := messages[1]
 	if assistantMsg.Get("role").String() != "assistant" {
-		t.Errorf("Expected message[2] to be assistant, got %s", assistantMsg.Get("role").String())
+		t.Errorf("Expected message[1] to be assistant, got %s", assistantMsg.Get("role").String())
 	}
 
 	if !assistantMsg.Get("reasoning_content").Exists() {
@@ -289,6 +289,104 @@ func TestConvertClaudeRequestToOpenAI_ThinkingOnlyMessagePreserved(t *testing.T)
 
 	if assistantMsg.Get("reasoning_content").String() != "Let me calculate: 2+2=4" {
 		t.Errorf("Unexpected reasoning_content: %s", assistantMsg.Get("reasoning_content").String())
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
+	tests := []struct {
+		name        string
+		inputJSON   string
+		wantHasSys  bool
+		wantSysText string
+	}{
+		{
+			name: "No system field",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantHasSys: false,
+		},
+		{
+			name: "Empty string system field",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"system": "",
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantHasSys: false,
+		},
+		{
+			name: "String system field",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"system": "Be helpful",
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantHasSys:  true,
+			wantSysText: "Be helpful",
+		},
+		{
+			name: "Array system field with text",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"system": [{"type": "text", "text": "Array system"}],
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantHasSys:  true,
+			wantSysText: "Array system",
+		},
+		{
+			name: "Array system field with multiple text blocks",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"system": [
+					{"type": "text", "text": "Block 1"},
+					{"type": "text", "text": "Block 2"}
+				],
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantHasSys:  true,
+			wantSysText: "Block 2", // We will update the test logic to check all blocks or specifically the second one
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+			resultJSON := gjson.ParseBytes(result)
+			messages := resultJSON.Get("messages").Array()
+
+			hasSys := false
+			var sysMsg gjson.Result
+			if len(messages) > 0 && messages[0].Get("role").String() == "system" {
+				hasSys = true
+				sysMsg = messages[0]
+			}
+
+			if hasSys != tt.wantHasSys {
+				t.Errorf("got hasSystem = %v, want %v", hasSys, tt.wantHasSys)
+			}
+
+			if tt.wantHasSys {
+				// Check content - it could be string or array in OpenAI
+				content := sysMsg.Get("content")
+				var gotText string
+				if content.IsArray() {
+					arr := content.Array()
+					if len(arr) > 0 {
+						// Get the last element's text for validation
+						gotText = arr[len(arr)-1].Get("text").String()
+					}
+				} else {
+					gotText = content.String()
+				}
+
+				if tt.wantSysText != "" && gotText != tt.wantSysText {
+					t.Errorf("got system text = %q, want %q", gotText, tt.wantSysText)
+				}
+			}
+		})
 	}
 }
 
@@ -318,39 +416,35 @@ func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 	messages := resultJSON.Get("messages").Array()
 
 	// OpenAI requires: tool messages MUST immediately follow assistant(tool_calls).
-	// Correct order: system + assistant(tool_calls) + tool(result) + user(before+after)
-	if len(messages) != 4 {
-		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	// Correct order: assistant(tool_calls) + tool(result) + user(before+after)
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
-	if messages[0].Get("role").String() != "system" {
-		t.Fatalf("Expected messages[0] to be system, got %s", messages[0].Get("role").String())
-	}
-
-	if messages[1].Get("role").String() != "assistant" || !messages[1].Get("tool_calls").Exists() {
-		t.Fatalf("Expected messages[1] to be assistant tool_calls, got %s: %s", messages[1].Get("role").String(), messages[1].Raw)
+	if messages[0].Get("role").String() != "assistant" || !messages[0].Get("tool_calls").Exists() {
+		t.Fatalf("Expected messages[0] to be assistant tool_calls, got %s: %s", messages[0].Get("role").String(), messages[0].Raw)
 	}
 
 	// tool message MUST immediately follow assistant(tool_calls) per OpenAI spec
-	if messages[2].Get("role").String() != "tool" {
-		t.Fatalf("Expected messages[2] to be tool (must follow tool_calls), got %s", messages[2].Get("role").String())
+	if messages[1].Get("role").String() != "tool" {
+		t.Fatalf("Expected messages[1] to be tool (must follow tool_calls), got %s", messages[1].Get("role").String())
 	}
-	if got := messages[2].Get("tool_call_id").String(); got != "call_1" {
+	if got := messages[1].Get("tool_call_id").String(); got != "call_1" {
 		t.Fatalf("Expected tool_call_id %q, got %q", "call_1", got)
 	}
-	if got := messages[2].Get("content").String(); got != "tool ok" {
+	if got := messages[1].Get("content").String(); got != "tool ok" {
 		t.Fatalf("Expected tool content %q, got %q", "tool ok", got)
 	}
 
 	// User message comes after tool message
-	if messages[3].Get("role").String() != "user" {
-		t.Fatalf("Expected messages[3] to be user, got %s", messages[3].Get("role").String())
+	if messages[2].Get("role").String() != "user" {
+		t.Fatalf("Expected messages[2] to be user, got %s", messages[2].Get("role").String())
 	}
 	// User message should contain both "before" and "after" text
-	if got := messages[3].Get("content.0.text").String(); got != "before" {
+	if got := messages[2].Get("content.0.text").String(); got != "before" {
 		t.Fatalf("Expected user text[0] %q, got %q", "before", got)
 	}
-	if got := messages[3].Get("content.1.text").String(); got != "after" {
+	if got := messages[2].Get("content.1.text").String(); got != "after" {
 		t.Fatalf("Expected user text[1] %q, got %q", "after", got)
 	}
 }
@@ -378,16 +472,16 @@ func TestConvertClaudeRequestToOpenAI_ToolResultObjectContent(t *testing.T) {
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
-	// system + assistant(tool_calls) + tool(result)
-	if len(messages) != 3 {
-		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	// assistant(tool_calls) + tool(result)
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
-	if messages[2].Get("role").String() != "tool" {
-		t.Fatalf("Expected messages[2] to be tool, got %s", messages[2].Get("role").String())
+	if messages[1].Get("role").String() != "tool" {
+		t.Fatalf("Expected messages[1] to be tool, got %s", messages[1].Get("role").String())
 	}
 
-	toolContent := messages[2].Get("content").String()
+	toolContent := messages[1].Get("content").String()
 	parsed := gjson.Parse(toolContent)
 	if parsed.Get("foo").String() != "bar" {
 		t.Fatalf("Expected tool content JSON foo=bar, got %q", toolContent)
@@ -414,18 +508,14 @@ func TestConvertClaudeRequestToOpenAI_AssistantTextToolUseTextOrder(t *testing.T
 	messages := resultJSON.Get("messages").Array()
 
 	// New behavior: content + tool_calls unified in single assistant message
-	// Expect: system + assistant(content[pre,post] + tool_calls)
-	if len(messages) != 2 {
-		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	// Expect: assistant(content[pre,post] + tool_calls)
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
-	if messages[0].Get("role").String() != "system" {
-		t.Fatalf("Expected messages[0] to be system, got %s", messages[0].Get("role").String())
-	}
-
-	assistantMsg := messages[1]
+	assistantMsg := messages[0]
 	if assistantMsg.Get("role").String() != "assistant" {
-		t.Fatalf("Expected messages[1] to be assistant, got %s", assistantMsg.Get("role").String())
+		t.Fatalf("Expected messages[0] to be assistant, got %s", assistantMsg.Get("role").String())
 	}
 
 	// Should have both content and tool_calls in same message
@@ -470,14 +560,14 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 	messages := resultJSON.Get("messages").Array()
 
 	// New behavior: all content, thinking, and tool_calls unified in single assistant message
-	// Expect: system + assistant(content[pre,post] + tool_calls + reasoning_content[t1+t2])
-	if len(messages) != 2 {
-		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	// Expect: assistant(content[pre,post] + tool_calls + reasoning_content[t1+t2])
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
-	assistantMsg := messages[1]
+	assistantMsg := messages[0]
 	if assistantMsg.Get("role").String() != "assistant" {
-		t.Fatalf("Expected messages[1] to be assistant, got %s", assistantMsg.Get("role").String())
+		t.Fatalf("Expected messages[0] to be assistant, got %s", assistantMsg.Get("role").String())
 	}
 
 	// Should have content with both pre and post

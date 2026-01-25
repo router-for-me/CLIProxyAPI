@@ -28,19 +28,19 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
+// OAuth configuration constants for Gemini
 const (
-	geminiOauthClientID       = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	geminiOauthClientSecret   = "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"
-	geminiDefaultCallbackPort = 8085
+	ClientID            = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+	ClientSecret        = "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"
+	DefaultCallbackPort = 8085
 )
 
-var (
-	geminiOauthScopes = []string{
-		"https://www.googleapis.com/auth/cloud-platform",
-		"https://www.googleapis.com/auth/userinfo.email",
-		"https://www.googleapis.com/auth/userinfo.profile",
-	}
-)
+// OAuth scopes for Gemini authentication
+var Scopes = []string{
+	"https://www.googleapis.com/auth/cloud-platform",
+	"https://www.googleapis.com/auth/userinfo.email",
+	"https://www.googleapis.com/auth/userinfo.profile",
+}
 
 // GeminiAuth provides methods for handling the Gemini OAuth2 authentication flow.
 // It encapsulates the logic for obtaining, storing, and refreshing authentication tokens
@@ -74,7 +74,7 @@ func NewGeminiAuth() *GeminiAuth {
 //   - *http.Client: An HTTP client configured with authentication
 //   - error: An error if the client configuration fails, nil otherwise
 func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiTokenStorage, cfg *config.Config, opts *WebLoginOptions) (*http.Client, error) {
-	callbackPort := geminiDefaultCallbackPort
+	callbackPort := DefaultCallbackPort
 	if opts != nil && opts.CallbackPort > 0 {
 		callbackPort = opts.CallbackPort
 	}
@@ -112,10 +112,10 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 
 	// Configure the OAuth2 client.
 	conf := &oauth2.Config{
-		ClientID:     geminiOauthClientID,
-		ClientSecret: geminiOauthClientSecret,
+		ClientID:     ClientID,
+		ClientSecret: ClientSecret,
 		RedirectURL:  callbackURL, // This will be used by the local server.
-		Scopes:       geminiOauthScopes,
+		Scopes:       Scopes,
 		Endpoint:     google.Endpoint,
 	}
 
@@ -198,9 +198,9 @@ func (g *GeminiAuth) createTokenStorage(ctx context.Context, config *oauth2.Conf
 	}
 
 	ifToken["token_uri"] = "https://oauth2.googleapis.com/token"
-	ifToken["client_id"] = geminiOauthClientID
-	ifToken["client_secret"] = geminiOauthClientSecret
-	ifToken["scopes"] = geminiOauthScopes
+	ifToken["client_id"] = ClientID
+	ifToken["client_secret"] = ClientSecret
+	ifToken["scopes"] = Scopes
 	ifToken["universe_domain"] = "googleapis.com"
 
 	ts := GeminiTokenStorage{
@@ -226,7 +226,7 @@ func (g *GeminiAuth) createTokenStorage(ctx context.Context, config *oauth2.Conf
 //   - *oauth2.Token: The OAuth2 token obtained from the authorization flow
 //   - error: An error if the token acquisition fails, nil otherwise
 func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config, opts *WebLoginOptions) (*oauth2.Token, error) {
-	callbackPort := geminiDefaultCallbackPort
+	callbackPort := DefaultCallbackPort
 	if opts != nil && opts.CallbackPort > 0 {
 		callbackPort = opts.CallbackPort
 	}

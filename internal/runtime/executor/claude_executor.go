@@ -733,6 +733,11 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
+			// Skip built-in tools (web_search, code_execution, etc.) which have
+			// a "type" field and require their name to remain unchanged.
+			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+				return true
+			}
 			name := tool.Get("name").String()
 			if name == "" || strings.HasPrefix(name, prefix) {
 				return true
