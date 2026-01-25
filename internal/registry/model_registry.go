@@ -925,39 +925,33 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	}
 
 	type providerCount struct {
-		name  string
-		count int
+		name      string
+		nameLower string
+		count     int
 	}
 	providers := make([]providerCount, 0, len(registration.Providers))
-	// suspendedByProvider := make(map[string]int)
-	// if registration.SuspendedClients != nil {
-	// 	for clientID := range registration.SuspendedClients {
-	// 		if provider, ok := r.clientProviders[clientID]; ok && provider != "" {
-	// 			suspendedByProvider[provider]++
-	// 		}
-	// 	}
-	// }
 	for name, count := range registration.Providers {
 		if count <= 0 {
 			continue
 		}
-		// adjusted := count - suspendedByProvider[name]
-		// if adjusted <= 0 {
-		// 	continue
-		// }
-		// providers = append(providers, providerCount{name: name, count: adjusted})
-		providers = append(providers, providerCount{name: name, count: count})
+		providers = append(providers, providerCount{
+			name:      name,
+			nameLower: strings.ToLower(name),
+			count:     count,
+		})
 	}
 	if len(providers) == 0 {
 		return nil
 	}
 
+	// Pre-calculate lowercase model ID for sorting (avoids O(N log N) repeated calls).
+	modelLower := strings.ToLower(modelID)
+
 	sort.Slice(providers, func(i, j int) bool {
 		// Native provider priority: provider name matching model prefix comes first.
 		// e.g., "claude-haiku-*" prefers "claude" provider over "antigravity".
-		modelLower := strings.ToLower(modelID)
-		iMatch := strings.HasPrefix(modelLower, strings.ToLower(providers[i].name))
-		jMatch := strings.HasPrefix(modelLower, strings.ToLower(providers[j].name))
+		iMatch := strings.HasPrefix(modelLower, providers[i].nameLower)
+		jMatch := strings.HasPrefix(modelLower, providers[j].nameLower)
 		if iMatch != jMatch {
 			return iMatch
 		}
