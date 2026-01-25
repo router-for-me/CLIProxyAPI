@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -70,7 +71,7 @@ type apiCallResponse struct {
 //	- Authorization: Bearer <key>
 //	- X-Management-Key: <key>
 //
-// Request JSON:
+// Request JSON (supports both application/json and application/cbor):
 //   - auth_index / authIndex / AuthIndex (optional):
 //     The credential "auth_index" from GET /v0/management/auth-files (or other endpoints returning it).
 //     If omitted or not found, credential-specific proxy/token substitution is skipped.
@@ -90,10 +91,12 @@ type apiCallResponse struct {
 //  2. Global config proxy-url
 //  3. Direct connect (environment proxies are not used)
 //
-// Response JSON (returned with HTTP 200 when the APICall itself succeeds):
-//   - status_code: Upstream HTTP status code.
-//   - header: Upstream response headers.
-//   - body: Upstream response body as string.
+// Response (returned with HTTP 200 when the APICall itself succeeds):
+//
+//	Format matches request Content-Type (application/json or application/cbor)
+//	- status_code: Upstream HTTP status code.
+//	- header: Upstream response headers.
+//	- body: Upstream response body as string.
 //
 // Example:
 //
@@ -107,10 +110,28 @@ type apiCallResponse struct {
 //	  -H "Content-Type: application/json" \
 //	  -d '{"auth_index":"<AUTH_INDEX>","method":"POST","url":"https://api.example.com/v1/fetchAvailableModels","header":{"Authorization":"Bearer $TOKEN$","Content-Type":"application/json","User-Agent":"cliproxyapi"},"data":"{}"}'
 func (h *Handler) APICall(c *gin.Context) {
+	// Detect content type
+	contentType := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))
+	isCBOR := strings.Contains(contentType, "application/cbor")
+
 	var body apiCallRequest
-	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
+
+	// Parse request body based on content type
+	if isCBOR {
+		rawBody, errRead := io.ReadAll(c.Request.Body)
+		if errRead != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+			return
+		}
+		if errUnmarshal := cbor.Unmarshal(rawBody, &body); errUnmarshal != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid cbor body"})
+			return
+		}
+	} else {
+		if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+			return
+		}
 	}
 
 	method := strings.ToUpper(strings.TrimSpace(body.Method))
@@ -209,11 +230,23 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, apiCallResponse{
+	response := apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
-	})
+	}
+
+	// Return response in the same format as the request
+	if isCBOR {
+		cborData, errMarshal := cbor.Marshal(response)
+		if errMarshal != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode cbor response"})
+			return
+		}
+		c.Data(http.StatusOK, "application/cbor", cborData)
+	} else {
+		c.JSON(http.StatusOK, response)
+	}
 }
 
 func firstNonEmptyString(values ...*string) string {
