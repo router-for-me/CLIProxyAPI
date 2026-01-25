@@ -5,10 +5,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
+	unifiedrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/unified-routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -36,7 +39,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"gopkg.in/yaml.v3"
 )
 
@@ -154,6 +161,9 @@ type Server struct {
 
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
+
+	// unifiedRoutingModule is the unified routing module for custom model routing
+	unifiedRoutingModule *unifiedrouting.Module
 
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
@@ -280,6 +290,18 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		log.Errorf("Failed to register Amp module: %v", err)
 	}
 
+	// Register Unified Routing module
+	// Note: We skip auto route registration here because unified-routing routes
+	// should use management auth middleware (not API key auth).
+	// Routes will be registered in registerManagementRoutes() with correct auth.
+	s.unifiedRoutingModule = unifiedrouting.New(
+		unifiedrouting.WithAuthManager(authManager),
+		unifiedrouting.WithSkipAutoRoutes(), // Routes registered later with management auth
+	)
+	if err := modules.RegisterModule(ctx, s.unifiedRoutingModule); err != nil {
+		log.Errorf("Failed to register Unified Routing module: %v", err)
+	}
+
 	// Apply additional router configurators from options
 	if optionState.routerConfigurator != nil {
 		optionState.routerConfigurator(engine, s.handlers, cfg)
@@ -320,11 +342,12 @@ func (s *Server) setupRoutes() {
 	v1.Use(AuthMiddleware(s.accessManager))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
-		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
-		v1.POST("/completions", openaiHandlers.Completions)
-		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
+		// Wrap handlers with unified routing support
+		v1.POST("/chat/completions", s.wrapWithUnifiedRouting(openaiHandlers.ChatCompletions))
+		v1.POST("/completions", s.wrapWithUnifiedRouting(openaiHandlers.Completions))
+		v1.POST("/messages", s.wrapWithUnifiedRouting(claudeCodeHandlers.ClaudeMessages))
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
-		v1.POST("/responses", openaiResponsesHandlers.Responses)
+		v1.POST("/responses", s.wrapWithUnifiedRouting(openaiResponsesHandlers.Responses))
 	}
 
 	// Gemini compatible API routes
@@ -628,6 +651,23 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
+
+	// Register unified-routing module routes with management auth
+	if s.unifiedRoutingModule != nil {
+		// Create a combined middleware that includes both availability check and management auth
+		managementAuth := func() gin.HandlerFunc {
+			availMiddleware := s.managementAvailabilityMiddleware()
+			authMiddleware := s.mgmt.Middleware()
+			return func(c *gin.Context) {
+				availMiddleware(c)
+				if c.IsAborted() {
+					return
+				}
+				authMiddleware(c)
+			}
+		}()
+		s.unifiedRoutingModule.RegisterRoutes(s.engine, managementAuth)
+	}
 }
 
 func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
@@ -749,8 +789,43 @@ func (s *Server) watchKeepAlive() {
 // that routes to different handlers based on the User-Agent header.
 // If User-Agent starts with "claude-cli", it routes to Claude handler,
 // otherwise it routes to OpenAI handler.
+// When unified routing is enabled with hide_original_models=true, only route aliases are returned.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Check if unified routing should hide original models
+		if s.unifiedRoutingModule != nil {
+			engine := s.unifiedRoutingModule.GetEngine()
+			if engine != nil {
+				isEnabled := engine.IsEnabled(c.Request.Context())
+				shouldHide := engine.ShouldHideOriginalModels(c.Request.Context())
+				log.Debugf("[UnifiedRouting] /v1/models check: enabled=%v, hideOriginal=%v", isEnabled, shouldHide)
+				
+				if shouldHide {
+					// Return only route aliases as models
+					routeNames := engine.GetRouteNames(c.Request.Context())
+					log.Debugf("[UnifiedRouting] Returning %d route aliases as models: %v", len(routeNames), routeNames)
+					models := make([]map[string]any, len(routeNames))
+					for i, name := range routeNames {
+						models[i] = map[string]any{
+							"id":       name,
+							"object":   "model",
+							"created":  1700000000,
+							"owned_by": "unified-routing",
+						}
+					}
+					c.JSON(200, gin.H{
+						"object": "list",
+						"data":   models,
+					})
+					return
+				}
+			} else {
+				log.Debugf("[UnifiedRouting] /v1/models: engine is nil")
+			}
+		} else {
+			log.Debugf("[UnifiedRouting] /v1/models: module is nil")
+		}
+
 		userAgent := c.GetHeader("User-Agent")
 
 		// Route to Claude handler if User-Agent starts with "claude-cli"
@@ -761,6 +836,245 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			// log.Debugf("Routing /v1/models to OpenAI handler for User-Agent: %s", userAgent)
 			openaiHandler.OpenAIModels(c)
 		}
+	}
+}
+
+// wrapWithUnifiedRouting wraps an API handler with unified routing support.
+// When a model name is a route alias, it executes the request using the target credential directly.
+// When hide_original_models is enabled and the model is not a route alias, it returns 404.
+// Otherwise, it delegates to the original handler.
+func (s *Server) wrapWithUnifiedRouting(originalHandler gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip if unified routing module is not configured
+		if s.unifiedRoutingModule == nil {
+			originalHandler(c)
+			return
+		}
+
+		engine := s.unifiedRoutingModule.GetEngine()
+		if engine == nil || !engine.IsEnabled(c.Request.Context()) {
+			originalHandler(c)
+			return
+		}
+
+		// Read the request body
+		rawBody, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			originalHandler(c)
+			return
+		}
+
+		// Extract model from request
+		modelName := gjson.GetBytes(rawBody, "model").String()
+		if modelName == "" {
+			c.Request.Body = io.NopCloser(bytes.NewReader(rawBody))
+			originalHandler(c)
+			return
+		}
+
+		// Check if this model is a route alias
+		_, _, routeErr := engine.GetRoutingTarget(c.Request.Context(), modelName)
+
+		if routeErr == nil {
+			// Model is a route alias - execute with full failover support
+			log.Debugf("[UnifiedRouting] Routing request for model: %s", modelName)
+
+			stream := gjson.GetBytes(rawBody, "stream").Bool()
+
+			// Use ExecuteWithFailover for full multi-layer failover support
+			s.executeWithUnifiedRoutingFailover(c, engine, modelName, rawBody, stream)
+			return
+		}
+
+		// Model is not a route alias
+		// Check if we should hide original models
+		if engine.ShouldHideOriginalModels(c.Request.Context()) {
+			// Return model not found error
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": gin.H{
+					"message": fmt.Sprintf("The model '%s' does not exist or you do not have access to it.", modelName),
+					"type":    "invalid_request_error",
+					"code":    "model_not_found",
+				},
+			})
+			return
+		}
+
+		// Allow the request to proceed with original handler
+		c.Request.Body = io.NopCloser(bytes.NewReader(rawBody))
+		originalHandler(c)
+	}
+}
+
+// executeWithUnifiedRoutingFailover executes a request with full multi-layer failover support.
+func (s *Server) executeWithUnifiedRoutingFailover(c *gin.Context, engine unifiedrouting.RoutingEngine, modelName string, rawBody []byte, stream bool) {
+	ctx := c.Request.Context()
+
+	// Get routing decision
+	routingEngine, ok := engine.(*unifiedrouting.DefaultRoutingEngine)
+	if !ok {
+		// Fallback to simple routing
+		s.executeWithUnifiedRoutingSimple(c, engine, modelName, rawBody, stream)
+		return
+	}
+
+	decision, err := routingEngine.GetRoutingDecision(ctx, modelName)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": gin.H{"message": err.Error(), "type": "invalid_request_error", "code": "model_not_found"},
+		})
+		return
+	}
+
+	// For non-streaming requests, use ExecuteWithFailover
+	if !stream {
+		var responsePayload []byte
+
+		// Create executor function that will be called for each target
+		executeFunc := func(execCtx context.Context, targetAuth *auth.Auth, targetModel string) error {
+			// Replace model in request body
+			newBody, err := sjson.SetBytes(rawBody, "model", targetModel)
+			if err != nil {
+				newBody = rawBody
+			}
+
+			req := cliproxyexecutor.Request{
+				Model:   targetModel,
+				Payload: newBody,
+			}
+			opts := cliproxyexecutor.Options{
+				Stream:          false,
+				OriginalRequest: rawBody,
+				SourceFormat:    sdktranslator.FormatOpenAI,
+			}
+
+			resp, err := s.handlers.AuthManager.ExecuteWithAuth(execCtx, targetAuth, req, opts)
+			if err != nil {
+				return err
+			}
+			responsePayload = resp.Payload
+			return nil
+		}
+
+		// Execute with failover
+		err := routingEngine.ExecuteWithFailover(ctx, decision, executeFunc)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+				if code := se.StatusCode(); code > 0 {
+					status = code
+				}
+			}
+			c.JSON(status, gin.H{
+				"error": gin.H{
+					"message": err.Error(),
+					"type":    "server_error",
+				},
+			})
+			return
+		}
+
+		c.Writer.Header().Set("Content-Type", "application/json")
+		c.Writer.WriteHeader(http.StatusOK)
+		_, _ = c.Writer.Write(responsePayload)
+		return
+	}
+
+	// For streaming requests, use simpler approach (get first target and execute)
+	// TODO: Implement streaming with full failover support
+	s.executeWithUnifiedRoutingSimple(c, engine, modelName, rawBody, stream)
+}
+
+// executeWithUnifiedRoutingSimple executes a request with simple single-target routing.
+func (s *Server) executeWithUnifiedRoutingSimple(c *gin.Context, engine unifiedrouting.RoutingEngine, modelName string, rawBody []byte, stream bool) {
+	ctx := c.Request.Context()
+
+	targetModel, credentialID, err := engine.GetRoutingTarget(ctx, modelName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": gin.H{"message": err.Error(), "type": "server_error"},
+		})
+		return
+	}
+
+	targetAuth, found := s.handlers.AuthManager.GetByID(credentialID)
+	if !found {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": gin.H{
+				"message": fmt.Sprintf("Credential '%s' not found", credentialID),
+				"type":    "server_error",
+			},
+		})
+		return
+	}
+
+	// Replace model in request body
+	newBody, err := sjson.SetBytes(rawBody, "model", targetModel)
+	if err != nil {
+		newBody = rawBody
+	}
+
+	req := cliproxyexecutor.Request{
+		Model:   targetModel,
+		Payload: newBody,
+	}
+	opts := cliproxyexecutor.Options{
+		Stream:          stream,
+		OriginalRequest: rawBody,
+		SourceFormat:    sdktranslator.FormatOpenAI,
+	}
+
+	if stream {
+		chunks, err := s.handlers.AuthManager.ExecuteStreamWithAuth(ctx, targetAuth, req, opts)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+				if code := se.StatusCode(); code > 0 {
+					status = code
+				}
+			}
+			c.JSON(status, gin.H{
+				"error": gin.H{"message": err.Error(), "type": "server_error"},
+			})
+			return
+		}
+
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.Header().Set("X-Accel-Buffering", "no")
+
+		flusher, _ := c.Writer.(http.Flusher)
+		for chunk := range chunks {
+			if chunk.Err != nil {
+				log.Warnf("[UnifiedRouting] Stream error: %v", chunk.Err)
+				break
+			}
+			if len(chunk.Payload) > 0 {
+				_, _ = c.Writer.Write(chunk.Payload)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		}
+	} else {
+		resp, err := s.handlers.AuthManager.ExecuteWithAuth(ctx, targetAuth, req, opts)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+				if code := se.StatusCode(); code > 0 {
+					status = code
+				}
+			}
+			c.JSON(status, gin.H{
+				"error": gin.H{"message": err.Error(), "type": "server_error"},
+			})
+			return
+		}
+
+		c.Writer.Header().Set("Content-Type", "application/json")
+		c.Writer.WriteHeader(http.StatusOK)
+		_, _ = c.Writer.Write(resp.Payload)
 	}
 }
 
@@ -1002,6 +1316,14 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	} else {
 		log.Warnf("amp module is nil, skipping config update")
+	}
+
+	// Notify Unified Routing module of config changes
+	if s.unifiedRoutingModule != nil {
+		log.Debugf("triggering unified routing module config update")
+		if err := s.unifiedRoutingModule.OnConfigUpdated(cfg); err != nil {
+			log.Errorf("failed to update Unified Routing module config: %v", err)
+		}
 	}
 
 	// Count client sources from configuration and auth store.
