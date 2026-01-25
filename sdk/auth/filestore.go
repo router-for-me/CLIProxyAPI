@@ -317,9 +317,12 @@ func jsonEqual(a, b []byte) bool {
 // ignoring fields that change on every refresh but don't affect functionality.
 // This prevents unnecessary file writes that would trigger watcher events and
 // create refresh loops.
-// The provider parameter controls whether access_token is ignored: providers like
-// Google OAuth (gemini, gemini-cli) can re-fetch tokens when needed, while others
-// like iFlow require the refreshed token to be persisted.
+//
+// NOTE: access_token is NOT ignored for Google OAuth providers (gemini, gemini-cli, antigravity).
+// Access tokens have a 1-hour lifespan and MUST be persisted after refresh, otherwise
+// the token will remain expired on disk while being refreshed in memory, causing
+// a refresh loop and authentication failures.
+// See: GitHub Issue #833
 func metadataEqualIgnoringTimestamps(a, b []byte, provider string) bool {
 	var objA, objB map[string]any
 	if err := json.Unmarshal(a, &objA); err != nil {
@@ -331,14 +334,8 @@ func metadataEqualIgnoringTimestamps(a, b []byte, provider string) bool {
 
 	// Fields to ignore: these change on every refresh but don't affect authentication logic.
 	// - timestamp, expired, expires_in, last_refresh: time-related fields that change on refresh
+	// NOTE: access_token is NOT ignored because it MUST be persisted to disk after refresh.
 	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh"}
-
-	// For providers that can re-fetch tokens when needed (e.g., Google OAuth),
-	// we ignore access_token to avoid unnecessary file writes.
-	switch provider {
-	case "gemini", "gemini-cli", "antigravity":
-		ignoredFields = append(ignoredFields, "access_token")
-	}
 
 	for _, field := range ignoredFields {
 		delete(objA, field)
