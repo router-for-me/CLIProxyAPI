@@ -306,3 +306,14 @@ oauth-model-alias:
 #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
 #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
+
+# Auto-delete OAuth credentials on specific HTTP status codes
+# auto-delete:
+#   providers:
+#     codex:
+#       enabled: true
+#       status-codes: [401, 403]  # optional, defaults to [401, 403]
+#     claude:
+#       enabled: true
+#     gemini-cli:
+#       enabled: false

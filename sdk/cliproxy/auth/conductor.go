@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1119,6 +1120,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	var autoDeleteReq *autoDeleteRequest
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1160,11 +1162,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.NextRetryAfter = next
 					suspendReason = "unauthorized"
 					shouldSuspendModel = true
+					autoDeleteReq = m.shouldAutoDeleteCredential(auth, statusCode, now)
 				case 402, 403:
 					next := now.Add(30 * time.Minute)
 					state.NextRetryAfter = next
 					suspendReason = "payment_required"
 					shouldSuspendModel = true
+					autoDeleteReq = m.shouldAutoDeleteCredential(auth, statusCode, now)
 				case 404:
 					next := now.Add(12 * time.Hour)
 					state.NextRetryAfter = next
@@ -1225,6 +1229,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+	}
+
+	if autoDeleteReq != nil {
+		_ = m.executeAutoDelete(ctx, autoDeleteReq)
 	}
 
 	m.hook.OnResult(ctx, result)
@@ -1405,6 +1413,87 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+var defaultAutoDeleteStatusCodes = []int{401, 403}
+
+type autoDeleteRequest struct {
+	authID       string
+	filename     string
+	decisionTime time.Time
+}
+
+func (m *Manager) shouldAutoDeleteCredential(auth *Auth, statusCode int, now time.Time) *autoDeleteRequest {
+	if auth == nil || auth.FileName == "" {
+		return nil
+	}
+
+	cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config)
+	if !ok || cfg == nil {
+		return nil
+	}
+
+	rule, ok := cfg.AutoDelete.Providers[strings.ToLower(auth.Provider)]
+	if !ok || !rule.Enabled {
+		return nil
+	}
+
+	statusCodes := rule.StatusCodes
+	if len(statusCodes) == 0 {
+		statusCodes = defaultAutoDeleteStatusCodes
+	}
+
+	if !slices.Contains(statusCodes, statusCode) {
+		return nil
+	}
+
+	return &autoDeleteRequest{
+		authID:       auth.ID,
+		filename:     auth.FileName,
+		decisionTime: now,
+	}
+}
+
+func (m *Manager) executeAutoDelete(ctx context.Context, req *autoDeleteRequest) error {
+	if req == nil {
+		return nil
+	}
+
+	m.mu.Lock()
+	existing, exists := m.auths[req.authID]
+	if !exists {
+		m.mu.Unlock()
+		return nil
+	}
+
+	if existing.FileName != req.filename {
+		m.mu.Unlock()
+		return nil
+	}
+
+	if existing.LastRefreshedAt.After(req.decisionTime) || existing.UpdatedAt.After(req.decisionTime) {
+		m.mu.Unlock()
+		return nil
+	}
+
+	delete(m.auths, req.authID)
+	m.mu.Unlock()
+
+	log.WithFields(log.Fields{
+		"auth_id":  req.authID,
+		"filename": req.filename,
+	}).Warn("auto-deleting invalid OAuth credential")
+
+	if err := m.store.Delete(ctx, req.authID); err != nil {
+		log.WithFields(log.Fields{
+			"auth_id": req.authID,
+			"error":   err,
+		}).Error("failed to auto-delete credential file")
+	}
+
+	registry.GetGlobalRegistry().UnregisterClient(req.authID)
+
+	return nil
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
