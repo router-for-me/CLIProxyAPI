@@ -7,7 +7,7 @@ on:
 
 env:
   APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: eceasy/cli-proxy-api
+  DOCKERHUB_REPO: eceasy/cli-proxy-api-plus
 
 jobs:
   docker:
@@ -44,3 +44,4 @@ jobs:
           tags: |
             ${{ env.DOCKERHUB_REPO }}:latest
             ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}
+
