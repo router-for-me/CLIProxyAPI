@@ -111,17 +111,27 @@ func (e *modelCooldownError) Headers() http.Header {
 }
 
 func authPriority(auth *Auth) int {
-	if auth == nil || auth.Attributes == nil {
+	if auth == nil {
 		return 0
 	}
-	raw := strings.TrimSpace(auth.Attributes["priority"])
-	if raw == "" {
-		return 0
+
+	parsed := 0
+	if auth.Attributes != nil {
+		raw := strings.TrimSpace(auth.Attributes["priority"])
+		if raw != "" {
+			if p, err := strconv.Atoi(raw); err == nil {
+				parsed = p
+			}
+		}
 	}
-	parsed, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0
+
+	// Give priority boost for antigravity "ultra" tier OAuth files.
+	// Ultra accounts form a separate priority group; standard accounts
+	// are only used when all ultra accounts are unavailable.
+	if auth.Provider == "antigravity" && strings.Contains(strings.ToLower(auth.ID), "ultra") {
+		parsed += 100
 	}
+
 	return parsed
 }
 

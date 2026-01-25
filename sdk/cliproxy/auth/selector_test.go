@@ -13,6 +13,165 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
+func TestAuthPriority_UltraBoost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		auth    *Auth
+		wantMin int
+		wantMax int
+	}{
+		{
+			name:    "nil_auth",
+			auth:    nil,
+			wantMin: 0,
+			wantMax: 0,
+		},
+		{
+			name: "antigravity_ultra_gets_boost",
+			auth: &Auth{
+				ID:       "antigravity-ultra-test_gmail_com.json",
+				Provider: "antigravity",
+			},
+			wantMin: 100,
+			wantMax: 100,
+		},
+		{
+			name: "antigravity_ultra_mixed_case",
+			auth: &Auth{
+				ID:       "antigravity-ULTRA-test_gmail_com.json",
+				Provider: "antigravity",
+			},
+			wantMin: 100,
+			wantMax: 100,
+		},
+		{
+			name: "antigravity_standard_no_boost",
+			auth: &Auth{
+				ID:       "antigravity-test_gmail_com.json",
+				Provider: "antigravity",
+			},
+			wantMin: 0,
+			wantMax: 0,
+		},
+		{
+			name: "antigravity_pro_no_boost",
+			auth: &Auth{
+				ID:       "antigravity-pro-test_gmail_com.json",
+				Provider: "antigravity",
+			},
+			wantMin: 0,
+			wantMax: 0,
+		},
+		{
+			name: "non_antigravity_with_ultra_no_boost",
+			auth: &Auth{
+				ID:       "ultra-test.json",
+				Provider: "gemini",
+			},
+			wantMin: 0,
+			wantMax: 0,
+		},
+		{
+			name: "antigravity_ultra_with_explicit_priority",
+			auth: &Auth{
+				ID:         "antigravity-ultra-test_gmail_com.json",
+				Provider:   "antigravity",
+				Attributes: map[string]string{"priority": "5"},
+			},
+			wantMin: 105,
+			wantMax: 105,
+		},
+		{
+			name: "antigravity_standard_with_explicit_priority",
+			auth: &Auth{
+				ID:         "antigravity-test_gmail_com.json",
+				Provider:   "antigravity",
+				Attributes: map[string]string{"priority": "50"},
+			},
+			wantMin: 50,
+			wantMax: 50,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := authPriority(tt.auth)
+			if got < tt.wantMin || got > tt.wantMax {
+				t.Errorf("authPriority() = %d, want between %d and %d", got, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestRoundRobinSelector_AntigravityUltraPriority(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "antigravity-standard1_gmail_com.json", Provider: "antigravity"},
+		{ID: "antigravity-ultra-user1_gmail_com.json", Provider: "antigravity"},
+		{ID: "antigravity-pro-user2_gmail_com.json", Provider: "antigravity"},
+		{ID: "antigravity-ultra-user2_gmail_com.json", Provider: "antigravity"},
+		{ID: "antigravity-standard2_gmail_com.json", Provider: "antigravity"},
+	}
+
+	pickedIDs := make(map[string]int)
+	for i := 0; i < 10; i++ {
+		got, err := selector.Pick(context.Background(), "antigravity", "claude-sonnet-4", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		pickedIDs[got.ID]++
+	}
+
+	for id := range pickedIDs {
+		if !strings.Contains(id, "ultra") {
+			t.Errorf("Pick() selected non-ultra auth %q, expected only ultra accounts", id)
+		}
+	}
+
+	if len(pickedIDs) != 2 {
+		t.Errorf("Pick() should cycle between 2 ultra accounts, got %d unique: %v", len(pickedIDs), pickedIDs)
+	}
+}
+
+func TestRoundRobinSelector_AntigravityUltraFallbackToStandard(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	now := time.Now()
+	model := "claude-sonnet-4"
+
+	ultraCooldown := &Auth{
+		ID:       "antigravity-ultra-cooldown_gmail_com.json",
+		Provider: "antigravity",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota:          QuotaState{Exceeded: true},
+			},
+		},
+	}
+	standard := &Auth{
+		ID:       "antigravity-standard_gmail_com.json",
+		Provider: "antigravity",
+	}
+
+	auths := []*Auth{ultraCooldown, standard}
+
+	got, err := selector.Pick(context.Background(), "antigravity", model, cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != standard.ID {
+		t.Errorf("Pick() = %q, want %q (should fallback to standard when ultra is on cooldown)", got.ID, standard.ID)
+	}
+}
+
 func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 	t.Parallel()
 
