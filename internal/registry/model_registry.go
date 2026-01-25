@@ -953,6 +953,15 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	}
 
 	sort.Slice(providers, func(i, j int) bool {
+		// Native provider priority: provider name matching model prefix comes first.
+		// e.g., "claude-haiku-*" prefers "claude" provider over "antigravity".
+		modelLower := strings.ToLower(modelID)
+		iMatch := strings.HasPrefix(modelLower, strings.ToLower(providers[i].name))
+		jMatch := strings.HasPrefix(modelLower, strings.ToLower(providers[j].name))
+		if iMatch != jMatch {
+			return iMatch
+		}
+		// Fallback to original logic: count desc, then name asc.
 		if providers[i].count == providers[j].count {
 			return providers[i].name < providers[j].name
 		}
