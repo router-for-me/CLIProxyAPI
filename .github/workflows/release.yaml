@@ -36,3 +36,35 @@ jobs:
           VERSION: ${{ env.VERSION }}
           COMMIT: ${{ env.COMMIT }}
           BUILD_DATE: ${{ env.BUILD_DATE }}
+
+  build-termux:
+    name: Build Termux (aarch64)
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: termux/termux-docker:aarch64
+    steps:
+      - name: Install dependencies
+        run: |
+          /entrypoint.sh pkg update -y
+          /entrypoint.sh pkg install -y golang build-essential tar
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build
+        run: |
+          # Set build metadata
+          VERSION=$(git describe --tags --always --dirty)
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          
+          # Build binary
+          /entrypoint.sh go build -ldflags "-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o cli-proxy-api ./cmd/server
+          
+          # Package
+          tar -czf "cli-proxy-api-termux-aarch64.tar.gz" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: cli-proxy-api-termux-aarch64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
