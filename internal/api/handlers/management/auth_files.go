@@ -2419,6 +2419,13 @@ func (h *Handler) CheckAuthFileModelsHealth(c *gin.Context) {
 		}
 	}
 
+	// Parse optional model filter parameters
+	// - model: single model to check
+	// - models: comma-separated list of models to check
+	// If neither is specified, all models are checked
+	modelFilter := strings.TrimSpace(c.Query("model"))
+	modelsFilter := strings.TrimSpace(c.Query("models"))
+
 	// Find auth by name or ID
 	var targetAuth *coreauth.Auth
 	if auth, ok := h.authManager.GetByID(name); ok {
@@ -2441,6 +2448,31 @@ func (h *Handler) CheckAuthFileModelsHealth(c *gin.Context) {
 	// Get models from registry
 	reg := registry.GetGlobalRegistry()
 	models := reg.GetModelsForClient(targetAuth.ID)
+
+	// Apply model filter if specified
+	if modelFilter != "" || modelsFilter != "" {
+		filterSet := make(map[string]struct{})
+		if modelFilter != "" {
+			filterSet[strings.ToLower(modelFilter)] = struct{}{}
+		}
+		if modelsFilter != "" {
+			for _, m := range strings.Split(modelsFilter, ",") {
+				trimmed := strings.TrimSpace(m)
+				if trimmed != "" {
+					filterSet[strings.ToLower(trimmed)] = struct{}{}
+				}
+			}
+		}
+		if len(filterSet) > 0 {
+			filtered := make([]*registry.ModelInfo, 0)
+			for _, model := range models {
+				if _, ok := filterSet[strings.ToLower(model.ID)]; ok {
+					filtered = append(filtered, model)
+				}
+			}
+			models = filtered
+		}
+	}
 
 	if len(models) == 0 {
 		c.JSON(http.StatusOK, gin.H{

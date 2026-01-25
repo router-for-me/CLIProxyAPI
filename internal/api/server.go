@@ -612,6 +612,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
+
+		mgmt.GET("/providers", s.mgmt.ListProviders)
+		mgmt.GET("/providers/health", s.mgmt.CheckProvidersHealth)
+
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
