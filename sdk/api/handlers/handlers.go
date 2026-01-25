@@ -385,6 +385,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		return nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: cloneBytes(rawJSON),
@@ -423,6 +424,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		return nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: cloneBytes(rawJSON),
@@ -464,6 +466,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, errChan
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: cloneBytes(rawJSON),

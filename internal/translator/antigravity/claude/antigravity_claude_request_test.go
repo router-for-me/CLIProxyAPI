@@ -74,13 +74,13 @@ func TestConvertClaudeRequestToAntigravity_RoleMapping(t *testing.T) {
 }
 
 func TestConvertClaudeRequestToAntigravity_ThinkingBlocks(t *testing.T) {
+	cache.ClearSignatureCache("")
+
 	// Valid signature must be at least 50 characters
 	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
 	thinkingText := "Let me think..."
 
-	// Pre-cache the signature (simulating a response from the same session)
-	// The session ID is derived from the first user message hash
-	// Since there's no user message in this test, we need to add one
+	// Pre-cache the signature (simulating a previous response for the same thinking text)
 	inputJSON := []byte(`{
 		"model": "claude-sonnet-4-5-thinking",
 		"messages": [
@@ -117,6 +117,8 @@ func TestConvertClaudeRequestToAntigravity_ThinkingBlocks(t *testing.T) {
 }
 
 func TestConvertClaudeRequestToAntigravity_ThinkingBlockWithoutSignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+
 	// Unsigned thinking blocks should be removed entirely (not converted to text)
 	inputJSON := []byte(`{
 		"model": "claude-sonnet-4-5-thinking",
@@ -238,6 +240,8 @@ func TestConvertClaudeRequestToAntigravity_ToolUse(t *testing.T) {
 }
 
 func TestConvertClaudeRequestToAntigravity_ToolUse_WithSignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+
 	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
 	thinkingText := "Let me think..."
 
@@ -279,6 +283,8 @@ func TestConvertClaudeRequestToAntigravity_ToolUse_WithSignature(t *testing.T) {
 }
 
 func TestConvertClaudeRequestToAntigravity_ReorderThinking(t *testing.T) {
+	cache.ClearSignatureCache("")
+
 	// Case: text block followed by thinking block -> should be reordered to thinking first
 	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
 	thinkingText := "Planning..."
@@ -487,6 +493,8 @@ func TestConvertClaudeRequestToAntigravity_TrailingUnsignedThinking_Removed(t *t
 }
 
 func TestConvertClaudeRequestToAntigravity_TrailingSignedThinking_Kept(t *testing.T) {
+	cache.ClearSignatureCache("")
+
 	// Last assistant message ends with signed thinking block - should be kept
 	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
 	thinkingText := "Valid thinking..."

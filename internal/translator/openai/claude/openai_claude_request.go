@@ -89,12 +89,14 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Handle system message first
 	systemMsgJSON := `{"role":"system","content":[]}`
+	hasSystemContent := false
 	if system := root.Get("system"); system.Exists() {
 		if system.Type == gjson.String {
 			if system.String() != "" {
 				oldSystem := `{"type":"text","text":""}`
 				oldSystem, _ = sjson.Set(oldSystem, "text", system.String())
 				systemMsgJSON, _ = sjson.SetRaw(systemMsgJSON, "content.-1", oldSystem)
+				hasSystemContent = true
 			}
 		} else if system.Type == gjson.JSON {
 			if system.IsArray() {
@@ -102,12 +104,16 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				for i := 0; i < len(systemResults); i++ {
 					if contentItem, ok := convertClaudeContentPart(systemResults[i]); ok {
 						systemMsgJSON, _ = sjson.SetRaw(systemMsgJSON, "content.-1", contentItem)
+						hasSystemContent = true
 					}
 				}
 			}
 		}
 	}
-	messagesJSON, _ = sjson.SetRaw(messagesJSON, "-1", systemMsgJSON)
+	// Only add system message if it has content
+	if hasSystemContent {
+		messagesJSON, _ = sjson.SetRaw(messagesJSON, "-1", systemMsgJSON)
+	}
 
 	// Process Anthropic messages
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {

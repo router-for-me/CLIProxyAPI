@@ -142,7 +142,8 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return resp, err
 	}
 
-	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -261,7 +262,8 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return resp, err
 	}
 
-	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -627,7 +629,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		return nil, err
 	}
 
-	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -994,7 +997,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		now := time.Now().Unix()
 		modelConfig := registry.GetAntigravityModelConfig()
 		models := make([]*registry.ModelInfo, 0, len(result.Map()))
-		for originalName := range result.Map() {
+		for originalName, modelData := range result.Map() {
 			modelID := strings.TrimSpace(originalName)
 			if modelID == "" {
 				continue
@@ -1004,12 +1007,18 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				continue
 			}
 			modelCfg := modelConfig[modelID]
-			modelName := modelID
+
+			// Extract displayName from upstream response, fallback to modelID
+			displayName := modelData.Get("displayName").String()
+			if displayName == "" {
+				displayName = modelID
+			}
+
 			modelInfo := &registry.ModelInfo{
 				ID:          modelID,
-				Name:        modelName,
-				Description: modelID,
-				DisplayName: modelID,
+				Name:        modelID,
+				Description: displayName,
+				DisplayName: displayName,
 				Version:     modelID,
 				Object:      "model",
 				Created:     now,
@@ -1218,7 +1227,17 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		// Use the centralized schema cleaner to handle unsupported keywords,
 		// const->enum conversion, and flattening of types/anyOf.
 		strJSON = util.CleanJSONSchemaForAntigravity(strJSON)
-
+		payload = []byte(strJSON)
+	} else {
+		strJSON := string(payload)
+		paths := make([]string, 0)
+		util.Walk(gjson.Parse(strJSON), "", "parametersJsonSchema", &paths)
+		for _, p := range paths {
+			strJSON, _ = util.RenameKey(strJSON, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
+		}
+		// Clean tool schemas for Gemini to remove unsupported JSON Schema keywords
+		// without adding empty-schema placeholders.
+		strJSON = util.CleanJSONSchemaForGemini(strJSON)
 		payload = []byte(strJSON)
 	}
 
@@ -1233,6 +1252,12 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 				payload, _ = sjson.SetRawBytes(payload, "request.systemInstruction.parts.-1", []byte(partResult.Raw))
 			}
 		}
+	}
+
+	if strings.Contains(modelName, "claude") {
+		payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+	} else {
+		payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.maxOutputTokens")
 	}
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
@@ -1444,6 +1469,7 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	template, _ = sjson.Set(template, "request.sessionId", generateStableSessionID(payload))
 
 	template, _ = sjson.Delete(template, "request.safetySettings")
+  
 	template, _ = sjson.Set(template, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 
 	// Clean tool parameters schema for all models (both Claude and Gemini)
@@ -1482,6 +1508,11 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 		template, _ = sjson.Delete(template, "request.generationConfig.maxOutputTokens")
 	}
 
+	if toolConfig := gjson.Get(template, "toolConfig"); toolConfig.Exists() && !gjson.Get(template, "request.toolConfig").Exists() {
+		template, _ = sjson.SetRaw(template, "request.toolConfig", toolConfig.Raw)
+		template, _ = sjson.Delete(template, "toolConfig")
+	}
+  
 	return []byte(template)
 }
 

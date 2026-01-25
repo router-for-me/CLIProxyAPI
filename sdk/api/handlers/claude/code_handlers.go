@@ -128,8 +128,23 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
+	models := h.Models()
+	firstID := ""
+	lastID := ""
+	if len(models) > 0 {
+		if id, ok := models[0]["id"].(string); ok {
+			firstID = id
+		}
+		if id, ok := models[len(models)-1]["id"].(string); ok {
+			lastID = id
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"data": h.Models(),
+		"data":     models,
+		"has_more": false,
+		"first_id": firstID,
+		"last_id":  lastID,
 	})
 }
 

@@ -1033,10 +1033,10 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			"owned_by": model.OwnedBy,
 		}
 		if model.Created > 0 {
-			result["created"] = model.Created
+			result["created_at"] = model.Created
 		}
 		if model.Type != "" {
-			result["type"] = model.Type
+			result["type"] = "model"
 		}
 		if model.DisplayName != "" {
 			result["display_name"] = model.DisplayName
