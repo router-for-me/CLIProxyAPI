@@ -88,6 +88,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 
 		a := &coreauth.Auth{
 			ID:       id,
+			FileName: id,
 			Provider: provider,
 			Label:    label,
 			Prefix:   prefix,
@@ -173,6 +174,7 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 		}
 		virtual := &coreauth.Auth{
 			ID:         buildGeminiVirtualID(primary.ID, projectID),
+			FileName:   primary.FileName,
 			Provider:   originalProvider,
 			Label:      fmt.Sprintf("%s [%s]", label, projectID),
 			Status:     coreauth.StatusActive,
