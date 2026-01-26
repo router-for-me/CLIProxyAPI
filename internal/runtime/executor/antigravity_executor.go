@@ -148,7 +148,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
-	attempts := antigravityRetryAttempts(e.cfg)
+	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -289,7 +289,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
-	attempts := antigravityRetryAttempts(e.cfg)
+	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -677,7 +677,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
-	attempts := antigravityRetryAttempts(e.cfg)
+	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -1447,11 +1447,16 @@ func resolveUserAgent(auth *cliproxyauth.Auth) string {
 	return defaultAntigravityAgent
 }
 
-func antigravityRetryAttempts(cfg *config.Config) int {
-	if cfg == nil {
-		return 1
+func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
+	retry := 0
+	if cfg != nil {
+		retry = cfg.RequestRetry
 	}
-	retry := cfg.RequestRetry
+	if auth != nil {
+		if override, ok := auth.RequestRetryOverride(); ok {
+			retry = override
+		}
+	}
 	if retry < 0 {
 		retry = 0
 	}

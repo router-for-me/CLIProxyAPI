@@ -124,6 +124,7 @@ func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
 }
 
 func (s *Service) consumeAuthUpdates(ctx context.Context) {
+	ctx = coreauth.WithSkipPersist(ctx)
 	for {
 		select {
 		case <-ctx.Done():
