@@ -78,6 +78,8 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			if metadataEqualIgnoringTimestamps(existing, raw, auth.Provider) {
 				return path, nil
 			}
+			// Record expected write to prevent fsnotify loop (Issue #833)
+			GetExpectedWriteTracker().ExpectWrite(path, raw)
 			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
 			if errOpen != nil {
 				return "", fmt.Errorf("auth filestore: open existing failed: %w", errOpen)
@@ -93,6 +95,8 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		} else if !os.IsNotExist(errRead) {
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
+		// Record expected write to prevent fsnotify loop (Issue #833)
+		GetExpectedWriteTracker().ExpectWrite(path, raw)
 		if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
 			return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
 		}
