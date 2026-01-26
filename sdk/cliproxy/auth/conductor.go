@@ -282,6 +282,8 @@ func (m *Manager) broadcastCredentialUpdate(ctx context.Context, auth *Auth) {
 		return
 	}
 
+	log.Infof("broadcasting credential update to %d peers: provider=%s, id=%s", len(peers), auth.Provider, auth.ID)
+
 	for _, peer := range peers {
 		go func(peerURL string) {
 			url := strings.TrimRight(peerURL, "/") + "/v0/internal/credential-update"
@@ -302,7 +304,7 @@ func (m *Manager) broadcastCredentialUpdate(ctx context.Context, auth *Auth) {
 			defer resp.Body.Close()
 
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				log.Debugf("successfully broadcast credential update to %s", peerURL)
+				log.Infof("successfully broadcast credential update to %s", peerURL)
 			} else {
 				body, _ := io.ReadAll(resp.Body)
 				log.Debugf("broadcast to %s returned status %d: %s", peerURL, resp.StatusCode, string(body))
