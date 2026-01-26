@@ -259,6 +259,14 @@ func (m *Manager) GetCredentialPeers() []string {
 	return result
 }
 
+// credentialUpdatePayload is the minimal data sent to peers for credential sync.
+// Only access_token is synced; refresh_token stays local to avoid overwriting.
+type credentialUpdatePayload struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`
+	AccessToken string `json:"access_token"`
+}
+
 // broadcastCredentialUpdate sends updated credentials to all configured peers.
 func (m *Manager) broadcastCredentialUpdate(ctx context.Context, auth *Auth) {
 	if m == nil || auth == nil {
@@ -276,9 +284,27 @@ func (m *Manager) broadcastCredentialUpdate(ctx context.Context, auth *Auth) {
 		return
 	}
 
-	payload, err := json.Marshal(auth)
+	// Extract access_token from metadata
+	var accessToken string
+	if auth.Metadata != nil {
+		if at, ok := auth.Metadata["access_token"].(string); ok {
+			accessToken = at
+		}
+	}
+	if accessToken == "" {
+		log.Debugf("no access_token to broadcast for %s", auth.ID)
+		return
+	}
+
+	// Only send minimal payload: id, provider, access_token
+	update := credentialUpdatePayload{
+		ID:          auth.ID,
+		Provider:    auth.Provider,
+		AccessToken: accessToken,
+	}
+	payload, err := json.Marshal(update)
 	if err != nil {
-		log.Errorf("failed to marshal auth for broadcast: %v", err)
+		log.Errorf("failed to marshal credential update: %v", err)
 		return
 	}
 
@@ -313,27 +339,42 @@ func (m *Manager) broadcastCredentialUpdate(ctx context.Context, auth *Auth) {
 	}
 }
 
-// UpdateFromPeer updates an auth entry from a peer broadcast without triggering another broadcast.
-func (m *Manager) UpdateFromPeer(ctx context.Context, auth *Auth) (*Auth, error) {
-	if auth == nil || auth.ID == "" {
-		return nil, nil
+// UpdateAccessTokenFromPeer updates only the access_token for an existing auth entry.
+// This preserves the local refresh_token and other metadata.
+func (m *Manager) UpdateAccessTokenFromPeer(ctx context.Context, id, provider, accessToken string) error {
+	if id == "" || accessToken == "" {
+		return nil
 	}
 	m.mu.Lock()
-	if existing, ok := m.auths[auth.ID]; ok && existing != nil && !auth.indexAssigned && auth.Index == "" {
-		auth.Index = existing.Index
-		auth.indexAssigned = existing.indexAssigned
+	existing, ok := m.auths[id]
+	if !ok || existing == nil {
+		m.mu.Unlock()
+		log.Debugf("peer credential update ignored: auth %s not found locally", id)
+		return nil
 	}
-	auth.EnsureIndex()
-	m.auths[auth.ID] = auth.Clone()
+	// Update only access_token in metadata
+	if existing.Metadata == nil {
+		existing.Metadata = make(map[string]any)
+	}
+	existing.Metadata["access_token"] = accessToken
+	existing.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+	existing.UpdatedAt = time.Now()
+	existing.LastRefreshedAt = time.Now()
+	existing.LastError = nil
+	existing.Status = StatusActive
+	existing.Unavailable = false
 	m.mu.Unlock()
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
-	// Persist but skip broadcasting (use special context flag)
+
+	// Persist without broadcasting
 	ctx = context.WithValue(ctx, "skipBroadcast", true)
-	_ = m.persist(ctx, auth)
-	// Clear any suspension states for this client since credentials were refreshed
-	registry.GetGlobalRegistry().ResumeClientAllModels(auth.ID)
-	m.hook.OnAuthUpdated(ctx, auth.Clone())
-	return auth.Clone(), nil
+	_ = m.persist(ctx, existing)
+
+	// Clear suspension states
+	registry.GetGlobalRegistry().ResumeClientAllModels(id)
+
+	log.Infof("updated access_token from peer: provider=%s, id=%s", provider, id)
+	m.hook.OnAuthUpdated(ctx, existing.Clone())
+	return nil
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {

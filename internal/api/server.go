@@ -1089,8 +1089,16 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	}
 }
 
+// credentialUpdateRequest is the minimal payload for peer credential sync.
+type credentialUpdateRequest struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`
+	AccessToken string `json:"access_token"`
+}
+
 // handleCredentialUpdate receives credential updates from peer instances.
 // This endpoint is used for peer-to-peer credential synchronization.
+// Only access_token is updated; refresh_token and other fields are preserved locally.
 func (s *Server) handleCredentialUpdate(c *gin.Context) {
 	if s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server not initialized"})
@@ -1112,24 +1120,28 @@ func (s *Server) handleCredentialUpdate(c *gin.Context) {
 		return
 	}
 
-	var authData auth.Auth
-	if err := c.ShouldBindJSON(&authData); err != nil {
+	var req credentialUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid request body: %v", err)})
 		return
 	}
 
-	if authData.ID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "auth ID is required"})
+	if req.ID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id is required"})
+		return
+	}
+	if req.AccessToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "access_token is required"})
 		return
 	}
 
-	// Use UpdateFromPeer to update the credential without triggering another broadcast
-	if _, err := s.handlers.AuthManager.UpdateFromPeer(c.Request.Context(), &authData); err != nil {
+	// Update only access_token, preserving local refresh_token
+	if err := s.handlers.AuthManager.UpdateAccessTokenFromPeer(c.Request.Context(), req.ID, req.Provider, req.AccessToken); err != nil {
 		log.Errorf("failed to update credential from peer: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update credential: %v", err)})
 		return
 	}
 
-	log.Debugf("credential updated from peer: provider=%s, id=%s", authData.Provider, authData.ID)
+	log.Debugf("credential updated from peer: provider=%s, id=%s", req.Provider, req.ID)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
