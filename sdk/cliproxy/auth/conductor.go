@@ -148,6 +148,9 @@ type Manager struct {
 	// credentialPeers stores peer URLs to broadcast credential updates to.
 	credentialPeers []string
 	peersMu         sync.RWMutex
+
+	// peerSecret stores the shared secret (bcrypt hash) for peer authentication.
+	peerSecret string
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -221,6 +224,26 @@ func (m *Manager) SetCredentialPeers(peers []string) {
 	m.peersMu.Unlock()
 }
 
+// SetPeerSecret sets the shared secret (bcrypt hash) for peer authentication.
+func (m *Manager) SetPeerSecret(secret string) {
+	if m == nil {
+		return
+	}
+	m.peersMu.Lock()
+	m.peerSecret = secret
+	m.peersMu.Unlock()
+}
+
+// GetPeerSecret returns the current peer secret.
+func (m *Manager) GetPeerSecret() string {
+	if m == nil {
+		return ""
+	}
+	m.peersMu.RLock()
+	defer m.peersMu.RUnlock()
+	return m.peerSecret
+}
+
 // GetCredentialPeers returns a copy of the current peer URLs.
 func (m *Manager) GetCredentialPeers() []string {
 	if m == nil {
@@ -246,6 +269,13 @@ func (m *Manager) broadcastCredentialUpdate(ctx context.Context, auth *Auth) {
 		return
 	}
 
+	// Check for peer secret - required for authentication
+	secret := m.GetPeerSecret()
+	if secret == "" {
+		log.Warn("credential-peers configured but remote-management.secret-key not set, peer sync disabled")
+		return
+	}
+
 	payload, err := json.Marshal(auth)
 	if err != nil {
 		log.Errorf("failed to marshal auth for broadcast: %v", err)
@@ -261,6 +291,7 @@ func (m *Manager) broadcastCredentialUpdate(ctx context.Context, auth *Auth) {
 				return
 			}
 			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Peer-Secret", secret)
 
 			client := &http.Client{Timeout: 10 * time.Second}
 			resp, err := client.Do(req)

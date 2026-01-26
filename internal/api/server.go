@@ -165,6 +165,9 @@ type Server struct {
 
 	localPassword string
 
+	// peerSecret stores the bcrypt hash for peer authentication (from remote-management.secret-key).
+	peerSecret string
+
 	keepAliveEnabled   bool
 	keepAliveTimeout   time.Duration
 	keepAliveOnTimeout func()
@@ -253,6 +256,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if authManager != nil {
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
 		authManager.SetCredentialPeers(cfg.CredentialPeers)
+		// Set peer secret for peer authentication (uses bcrypt hash from remote-management.secret-key)
+		if cfg.RemoteManagement.SecretKey != "" {
+			authManager.SetPeerSecret(cfg.RemoteManagement.SecretKey)
+			s.peerSecret = cfg.RemoteManagement.SecretKey
+		}
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
@@ -929,6 +937,11 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
 		s.handlers.AuthManager.SetCredentialPeers(cfg.CredentialPeers)
+		// Update peer secret for peer authentication
+		if cfg.RemoteManagement.SecretKey != "" {
+			s.handlers.AuthManager.SetPeerSecret(cfg.RemoteManagement.SecretKey)
+			s.peerSecret = cfg.RemoteManagement.SecretKey
+		}
 	}
 
 	// Update log level dynamically when debug flag changes
@@ -1081,6 +1094,21 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 func (s *Server) handleCredentialUpdate(c *gin.Context) {
 	if s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "server not initialized"})
+		return
+	}
+
+	// Verify peer secret
+	if s.peerSecret == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "peer authentication not configured"})
+		return
+	}
+	providedSecret := c.GetHeader("X-Peer-Secret")
+	if providedSecret == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing peer secret"})
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(providedSecret), []byte(s.peerSecret)) != 1 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid peer secret"})
 		return
 	}
 
