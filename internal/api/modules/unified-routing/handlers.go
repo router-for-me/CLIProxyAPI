@@ -677,6 +677,11 @@ func (h *Handlers) ListCredentials(c *gin.Context) {
 	credentials := make([]CredentialInfo, 0)
 
 	for _, auth := range auths {
+		// Skip disabled/removed auth entries
+		if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+			continue
+		}
+
 		// Determine type
 		credType := "oauth"
 		if auth.Attributes != nil {
