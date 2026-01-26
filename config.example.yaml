@@ -57,7 +57,7 @@ usage-statistics-enabled: false
 # Requires usage-statistics-enabled to be true for meaningful data.
 usage-persistence-enabled: false
 
-# File path for persisted usage statistics. If empty, defaults to "usage-stats.json" in the working directory.
+# File path for persisted usage statistics. If empty, defaults to "usage-stats.json" in the auth-dir (e.g., ~/.cli-proxy-api/usage-stats.json).
 usage-persistence-path: ""
 
 # Interval in seconds between periodic saves. If zero, defaults to 300 (5 minutes).

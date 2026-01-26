@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -679,9 +680,15 @@ func (s *Service) initUsagePersistence(ctx context.Context) {
 		interval = 5 * time.Minute
 	}
 
+	// Default to auth-dir (e.g., ~/.cli-proxy-api/usage-stats.json) if no path specified
+	filePath := s.cfg.UsagePersistencePath
+	if filePath == "" {
+		filePath = filepath.Join(s.cfg.AuthDir, "usage-stats.json")
+	}
+
 	cfg := internalusage.PersistenceConfig{
 		Enabled:  true,
-		FilePath: s.cfg.UsagePersistencePath,
+		FilePath: filePath,
 		Interval: interval,
 	}
 
