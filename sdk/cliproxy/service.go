@@ -15,7 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -86,6 +86,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// usagePersistence handles periodic saving of usage statistics to disk.
+	usagePersistence *internalusage.PersistencePlugin
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -418,6 +421,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 	usage.StartDefault(ctx)
 
+	// Initialize usage persistence if enabled
+	s.initUsagePersistence(ctx)
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	defer func() {
@@ -653,8 +659,39 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		usage.StopDefault()
+
+		// Stop usage persistence (triggers final save)
+		if s.usagePersistence != nil {
+			s.usagePersistence.Stop()
+		}
 	})
 	return shutdownErr
+}
+
+// initUsagePersistence initializes the usage persistence plugin if enabled in config.
+func (s *Service) initUsagePersistence(ctx context.Context) {
+	if s == nil || s.cfg == nil || !s.cfg.UsagePersistenceEnabled {
+		return
+	}
+
+	interval := time.Duration(s.cfg.UsagePersistenceIntervalSeconds) * time.Second
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+
+	cfg := internalusage.PersistenceConfig{
+		Enabled:  true,
+		FilePath: s.cfg.UsagePersistencePath,
+		Interval: interval,
+	}
+
+	s.usagePersistence = internalusage.NewPersistencePlugin(cfg, internalusage.GetRequestStatistics())
+	s.usagePersistence.Start(ctx)
+
+	// Register as a usage plugin (no-op handler, but keeps it in the plugin list)
+	usage.RegisterPlugin(s.usagePersistence)
+
+	log.Infof("usage persistence enabled: path=%s interval=%v", cfg.FilePath, interval)
 }
 
 func (s *Service) ensureAuthDir() error {

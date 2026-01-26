@@ -53,6 +53,16 @@ logs-max-total-size-mb: 0
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# When true, persist usage statistics to disk and restore them on startup.
+# Requires usage-statistics-enabled to be true for meaningful data.
+usage-persistence-enabled: false
+
+# File path for persisted usage statistics. If empty, defaults to "usage-stats.json" in the working directory.
+usage-persistence-path: ""
+
+# Interval in seconds between periodic saves. If zero, defaults to 300 (5 minutes).
+usage-persistence-interval-seconds: 300
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 
