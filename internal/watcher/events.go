@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -115,6 +116,17 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+		// NEW: Check if this is a self-triggered write (Issue #833)
+		// If we recently wrote this file ourselves, ignore the event
+		// Use the global tracker from sdk/auth to coordinate between filestore and watcher
+		if tracker := sdkAuth.GetExpectedWriteTracker(); tracker != nil {
+			data, errRead := os.ReadFile(event.Name)
+			if errRead == nil && tracker.ConsumeIfExpected(event.Name, data) {
+				log.Debugf("ignoring self-triggered write event: %s", filepath.Base(event.Name))
+				return
+			}
+		}
+
 		if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
 			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 			return
