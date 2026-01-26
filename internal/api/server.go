@@ -980,9 +980,68 @@ func (s *Server) executeWithUnifiedRoutingFailover(c *gin.Context, engine unifie
 		return
 	}
 
-	// For streaming requests, use simpler approach (get first target and execute)
-	// TODO: Implement streaming with full failover support
-	s.executeWithUnifiedRoutingSimple(c, engine, modelName, rawBody, stream)
+	// For streaming requests, use streaming failover
+	streamExecuteFunc := func(execCtx context.Context, targetAuth *auth.Auth, targetModel string) (<-chan cliproxyexecutor.StreamChunk, error) {
+		// Replace model in request body
+		newBody, err := sjson.SetBytes(rawBody, "model", targetModel)
+		if err != nil {
+			newBody = rawBody
+		}
+
+		req := cliproxyexecutor.Request{
+			Model:   targetModel,
+			Payload: newBody,
+		}
+		opts := cliproxyexecutor.Options{
+			Stream:          true,
+			OriginalRequest: rawBody,
+			SourceFormat:    sdktranslator.FormatOpenAI,
+		}
+
+		return s.handlers.AuthManager.ExecuteStreamWithAuth(execCtx, targetAuth, req, opts)
+	}
+
+	chunks, err := routingEngine.ExecuteStreamWithFailover(ctx, decision, streamExecuteFunc)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+			if code := se.StatusCode(); code > 0 {
+				status = code
+			}
+		}
+		c.JSON(status, gin.H{
+			"error": gin.H{
+				"message": err.Error(),
+				"type":    "server_error",
+			},
+		})
+		return
+	}
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, _ := c.Writer.(http.Flusher)
+	for chunk := range chunks {
+		if chunk.Err != nil {
+			log.Warnf("[UnifiedRouting] Stream error: %v", chunk.Err)
+			break
+		}
+		if len(chunk.Payload) > 0 {
+			// Write in SSE format: "data: <json>\n\n"
+			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk.Payload))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}
+	// Send SSE termination signal
+	_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
 }
 
 // executeWithUnifiedRoutingSimple executes a request with simple single-target routing.
@@ -1051,11 +1110,17 @@ func (s *Server) executeWithUnifiedRoutingSimple(c *gin.Context, engine unifiedr
 				break
 			}
 			if len(chunk.Payload) > 0 {
-				_, _ = c.Writer.Write(chunk.Payload)
+				// Write in SSE format: "data: <json>\n\n"
+				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk.Payload))
 				if flusher != nil {
 					flusher.Flush()
 				}
 			}
+		}
+		// Send SSE termination signal
+		_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+		if flusher != nil {
+			flusher.Flush()
 		}
 	} else {
 		resp, err := s.handlers.AuthManager.ExecuteWithAuth(ctx, targetAuth, req, opts)

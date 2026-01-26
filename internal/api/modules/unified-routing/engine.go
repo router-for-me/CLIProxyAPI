@@ -10,6 +10,7 @@ import (
 	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -421,6 +422,188 @@ func (e *DefaultRoutingEngine) ExecuteWithFailover(
 	e.metrics.RecordRequest(trace)
 
 	return &AllTargetsExhaustedError{RouteID: decision.RouteID}
+}
+
+// StreamExecuteFunc is the function type for streaming execution.
+// It returns a channel of StreamChunks and an error if connection fails.
+type StreamExecuteFunc func(ctx context.Context, auth *coreauth.Auth, model string) (<-chan cliproxyexecutor.StreamChunk, error)
+
+// ExecuteStreamWithFailover executes a streaming request with automatic failover.
+// Failover only occurs before the first successful chunk is received.
+// Once streaming begins, the target is committed and cannot be changed.
+func (e *DefaultRoutingEngine) ExecuteStreamWithFailover(
+	ctx context.Context,
+	decision *RoutingDecision,
+	executeFunc StreamExecuteFunc,
+) (<-chan cliproxyexecutor.StreamChunk, error) {
+	if decision == nil || decision.Pipeline == nil {
+		return nil, fmt.Errorf("invalid routing decision")
+	}
+
+	traceBuilder := NewTraceBuilder(decision.RouteID, decision.RouteName)
+	startTime := time.Now()
+
+	// Get health check config for cooldown
+	healthConfig, _ := e.configSvc.GetHealthCheckConfig(ctx)
+	if healthConfig == nil {
+		cfg := DefaultHealthCheckConfig()
+		healthConfig = &cfg
+	}
+
+	// Try each layer in order
+	for layerIdx, layer := range decision.Pipeline.Layers {
+		cooldownDuration := time.Duration(layer.CooldownSeconds) * time.Second
+		if cooldownDuration == 0 {
+			cooldownDuration = time.Duration(healthConfig.DefaultCooldownSeconds) * time.Second
+		}
+
+		// Keep trying targets in this layer until no available targets remain
+		for {
+			target, err := e.SelectTarget(ctx, decision.RouteID, &layer)
+			if err != nil {
+				// No available targets in this layer, move to next layer
+				break
+			}
+
+			// Find auth for this target
+			auth := e.findAuth(target.CredentialID)
+			if auth == nil {
+				traceBuilder.AddAttempt(layer.Level, target.ID, target.CredentialID, target.Model).
+					Failed("credential not found")
+				e.stateMgr.StartCooldown(ctx, target.ID, cooldownDuration)
+				continue
+			}
+
+			// Try to execute streaming request
+			attemptStart := time.Now()
+			chunks, err := executeFunc(ctx, auth, target.Model)
+			if err != nil {
+				// Connection failed, try next target
+				attemptLatency := time.Since(attemptStart).Milliseconds()
+				e.stateMgr.RecordFailure(ctx, target.ID, err.Error())
+				traceBuilder.AddAttempt(layer.Level, target.ID, target.CredentialID, target.Model).
+					Failed(err.Error())
+				e.stateMgr.StartCooldown(ctx, target.ID, cooldownDuration)
+				e.metrics.RecordEvent(&RoutingEvent{
+					Type:     EventCooldownStarted,
+					RouteID:  decision.RouteID,
+					TargetID: target.ID,
+					Details: map[string]any{
+						"duration_seconds": int(cooldownDuration.Seconds()),
+						"reason":           err.Error(),
+						"latency_ms":       attemptLatency,
+					},
+				})
+				continue
+			}
+
+			// Got a channel, now wait for the first chunk to validate the connection
+			firstChunk, ok := <-chunks
+			if !ok {
+				// Channel closed immediately without any data - treat as failure
+				attemptLatency := time.Since(attemptStart).Milliseconds()
+				e.stateMgr.RecordFailure(ctx, target.ID, "stream closed without data")
+				traceBuilder.AddAttempt(layer.Level, target.ID, target.CredentialID, target.Model).
+					Failed("stream closed without data")
+				e.stateMgr.StartCooldown(ctx, target.ID, cooldownDuration)
+				e.metrics.RecordEvent(&RoutingEvent{
+					Type:     EventCooldownStarted,
+					RouteID:  decision.RouteID,
+					TargetID: target.ID,
+					Details: map[string]any{
+						"duration_seconds": int(cooldownDuration.Seconds()),
+						"reason":           "stream closed without data",
+						"latency_ms":       attemptLatency,
+					},
+				})
+				continue
+			}
+
+			if firstChunk.Err != nil {
+				// First chunk has error - try next target
+				attemptLatency := time.Since(attemptStart).Milliseconds()
+				errMsg := firstChunk.Err.Error()
+				e.stateMgr.RecordFailure(ctx, target.ID, errMsg)
+				traceBuilder.AddAttempt(layer.Level, target.ID, target.CredentialID, target.Model).
+					Failed(errMsg)
+				e.stateMgr.StartCooldown(ctx, target.ID, cooldownDuration)
+				e.metrics.RecordEvent(&RoutingEvent{
+					Type:     EventCooldownStarted,
+					RouteID:  decision.RouteID,
+					TargetID: target.ID,
+					Details: map[string]any{
+						"duration_seconds": int(cooldownDuration.Seconds()),
+						"reason":           errMsg,
+						"latency_ms":       attemptLatency,
+					},
+				})
+				// Drain remaining chunks to prevent goroutine leak
+				go func() {
+					for range chunks {
+					}
+				}()
+				continue
+			}
+
+			// First chunk is successful! Create a new channel that forwards all chunks
+			// and record success after stream completes
+			outputChan := make(chan cliproxyexecutor.StreamChunk, 100)
+
+			// Write first chunk to buffer BEFORE starting goroutine to avoid race condition
+			outputChan <- firstChunk
+
+			// Capture loop variables for goroutine to avoid closure issues
+			capturedTarget := target
+			capturedAttemptStart := attemptStart
+
+			go func() {
+				defer close(outputChan)
+
+				// Forward remaining chunks
+				var streamErr error
+				for chunk := range chunks {
+					if chunk.Err != nil {
+						streamErr = chunk.Err
+					}
+					outputChan <- chunk
+				}
+
+				// Record result after stream completes
+				attemptLatency := time.Since(capturedAttemptStart).Milliseconds()
+				if streamErr != nil {
+					// Stream had an error mid-way, but we already committed to this target
+					// Just log it, don't start cooldown since connection was initially good
+					log.Warnf("[UnifiedRouting] Stream error after successful start: %v", streamErr)
+				}
+				e.stateMgr.RecordSuccess(ctx, capturedTarget.ID, time.Since(capturedAttemptStart))
+				traceBuilder.AddAttempt(layer.Level, capturedTarget.ID, capturedTarget.CredentialID, capturedTarget.Model).
+					Success(attemptLatency)
+
+				trace := traceBuilder.Build(time.Since(startTime).Milliseconds())
+				e.metrics.RecordRequest(trace)
+			}()
+
+			return outputChan, nil
+		}
+
+		// Record layer fallback event when moving to next layer
+		if layerIdx < len(decision.Pipeline.Layers)-1 {
+			e.metrics.RecordEvent(&RoutingEvent{
+				Type:    EventLayerFallback,
+				RouteID: decision.RouteID,
+				Details: map[string]any{
+					"from_layer": layer.Level,
+					"to_layer":   layer.Level + 1,
+				},
+			})
+		}
+	}
+
+	// All layers exhausted
+	trace := traceBuilder.Build(time.Since(startTime).Milliseconds())
+	e.metrics.RecordRequest(trace)
+
+	return nil, &AllTargetsExhaustedError{RouteID: decision.RouteID}
 }
 
 func (e *DefaultRoutingEngine) findAuth(credentialID string) *coreauth.Auth {
