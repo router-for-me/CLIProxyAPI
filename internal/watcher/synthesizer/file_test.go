@@ -69,10 +69,12 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 
 	// Create a valid auth file
 	authData := map[string]any{
-		"type":      "claude",
-		"email":     "test@example.com",
-		"proxy_url": "http://proxy.local",
-		"prefix":    "test-prefix",
+		"type":            "claude",
+		"email":           "test@example.com",
+		"proxy_url":       "http://proxy.local",
+		"prefix":          "test-prefix",
+		"disable_cooling": true,
+		"request_retry":   2,
 	}
 	data, _ := json.Marshal(authData)
 	err := os.WriteFile(filepath.Join(tempDir, "claude-auth.json"), data, 0644)
@@ -107,6 +109,12 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 	if auths[0].ProxyURL != "http://proxy.local" {
 		t.Errorf("expected proxy_url http://proxy.local, got %s", auths[0].ProxyURL)
+	}
+	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
+		t.Errorf("expected disable_cooling true, got %v", auths[0].Metadata["disable_cooling"])
+	}
+	if v, ok := auths[0].Metadata["request_retry"].(float64); !ok || int(v) != 2 {
+		t.Errorf("expected request_retry 2, got %v", auths[0].Metadata["request_retry"])
 	}
 	if auths[0].Status != coreauth.StatusActive {
 		t.Errorf("expected status active, got %s", auths[0].Status)
@@ -336,9 +344,11 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 		},
 	}
 	metadata := map[string]any{
-		"project_id": "project-a, project-b, project-c",
-		"email":      "test@example.com",
-		"type":       "gemini",
+		"project_id":      "project-a, project-b, project-c",
+		"email":           "test@example.com",
+		"type":            "gemini",
+		"request_retry":   2,
+		"disable_cooling": true,
 	}
 
 	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
@@ -375,6 +385,12 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 		}
 		if v.ProxyURL != "http://proxy.local" {
 			t.Errorf("expected proxy_url http://proxy.local, got %s", v.ProxyURL)
+		}
+		if vv, ok := v.Metadata["disable_cooling"].(bool); !ok || !vv {
+			t.Errorf("expected disable_cooling true, got %v", v.Metadata["disable_cooling"])
+		}
+		if vv, ok := v.Metadata["request_retry"].(int); !ok || vv != 2 {
+			t.Errorf("expected request_retry 2, got %v", v.Metadata["request_retry"])
 		}
 		if v.Attributes["runtime_only"] != "true" {
 			t.Error("expected runtime_only=true")

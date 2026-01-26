@@ -167,6 +167,16 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			"virtual_parent_id": primary.ID,
 			"type":              metadata["type"],
 		}
+		if v, ok := metadata["disable_cooling"]; ok {
+			metadataCopy["disable_cooling"] = v
+		} else if v, ok := metadata["disable-cooling"]; ok {
+			metadataCopy["disable_cooling"] = v
+		}
+		if v, ok := metadata["request_retry"]; ok {
+			metadataCopy["request_retry"] = v
+		} else if v, ok := metadata["request-retry"]; ok {
+			metadataCopy["request_retry"] = v
+		}
 		proxy := strings.TrimSpace(primary.ProxyURL)
 		if proxy != "" {
 			metadataCopy["proxy_url"] = proxy
