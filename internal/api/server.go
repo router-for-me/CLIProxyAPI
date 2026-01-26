@@ -252,6 +252,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.applyAccessConfig(nil, cfg)
 	if authManager != nil {
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
+		authManager.SetCredentialPeers(cfg.CredentialPeers)
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
@@ -421,6 +422,9 @@ func (s *Server) setupRoutes() {
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
+
+	// Internal peer-to-peer credential sync endpoint (no auth required, peers trust each other)
+	s.engine.POST("/v0/internal/credential-update", s.handleCredentialUpdate)
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
@@ -924,6 +928,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
+		s.handlers.AuthManager.SetCredentialPeers(cfg.CredentialPeers)
 	}
 
 	// Update log level dynamically when debug flag changes
@@ -1069,4 +1074,34 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Authentication service error"})
 		}
 	}
+}
+
+// handleCredentialUpdate receives credential updates from peer instances.
+// This endpoint is used for peer-to-peer credential synchronization.
+func (s *Server) handleCredentialUpdate(c *gin.Context) {
+	if s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server not initialized"})
+		return
+	}
+
+	var authData auth.Auth
+	if err := c.ShouldBindJSON(&authData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid request body: %v", err)})
+		return
+	}
+
+	if authData.ID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth ID is required"})
+		return
+	}
+
+	// Use UpdateFromPeer to update the credential without triggering another broadcast
+	if _, err := s.handlers.AuthManager.UpdateFromPeer(c.Request.Context(), &authData); err != nil {
+		log.Errorf("failed to update credential from peer: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update credential: %v", err)})
+		return
+	}
+
+	log.Debugf("credential updated from peer: provider=%s, id=%s", authData.Provider, authData.ID)
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

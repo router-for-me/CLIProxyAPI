@@ -144,6 +144,10 @@ type Manager struct {
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
+
+	// credentialPeers stores peer URLs to broadcast credential updates to.
+	credentialPeers []string
+	peersMu         sync.RWMutex
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -205,6 +209,96 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.runtimeConfig.Store(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+}
+
+// SetCredentialPeers updates the list of peer URLs to broadcast credential updates to.
+func (m *Manager) SetCredentialPeers(peers []string) {
+	if m == nil {
+		return
+	}
+	m.peersMu.Lock()
+	m.credentialPeers = peers
+	m.peersMu.Unlock()
+}
+
+// GetCredentialPeers returns a copy of the current peer URLs.
+func (m *Manager) GetCredentialPeers() []string {
+	if m == nil {
+		return nil
+	}
+	m.peersMu.RLock()
+	defer m.peersMu.RUnlock()
+	if len(m.credentialPeers) == 0 {
+		return nil
+	}
+	result := make([]string, len(m.credentialPeers))
+	copy(result, m.credentialPeers)
+	return result
+}
+
+// broadcastCredentialUpdate sends updated credentials to all configured peers.
+func (m *Manager) broadcastCredentialUpdate(ctx context.Context, auth *Auth) {
+	if m == nil || auth == nil {
+		return
+	}
+	peers := m.GetCredentialPeers()
+	if len(peers) == 0 {
+		return
+	}
+
+	payload, err := json.Marshal(auth)
+	if err != nil {
+		log.Errorf("failed to marshal auth for broadcast: %v", err)
+		return
+	}
+
+	for _, peer := range peers {
+		go func(peerURL string) {
+			url := strings.TrimRight(peerURL, "/") + "/v0/internal/credential-update"
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+			if err != nil {
+				log.Debugf("failed to create broadcast request to %s: %v", peerURL, err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			client := &http.Client{Timeout: 10 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Debugf("failed to broadcast credential to %s: %v", peerURL, err)
+				return
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				log.Debugf("successfully broadcast credential update to %s", peerURL)
+			} else {
+				body, _ := io.ReadAll(resp.Body)
+				log.Debugf("broadcast to %s returned status %d: %s", peerURL, resp.StatusCode, string(body))
+			}
+		}(peer)
+	}
+}
+
+// UpdateFromPeer updates an auth entry from a peer broadcast without triggering another broadcast.
+func (m *Manager) UpdateFromPeer(ctx context.Context, auth *Auth) (*Auth, error) {
+	if auth == nil || auth.ID == "" {
+		return nil, nil
+	}
+	m.mu.Lock()
+	if existing, ok := m.auths[auth.ID]; ok && existing != nil && !auth.indexAssigned && auth.Index == "" {
+		auth.Index = existing.Index
+		auth.indexAssigned = existing.indexAssigned
+	}
+	auth.EnsureIndex()
+	m.auths[auth.ID] = auth.Clone()
+	m.mu.Unlock()
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	// Persist but skip broadcasting (use special context flag)
+	ctx = context.WithValue(ctx, "skipBroadcast", true)
+	_ = m.persist(ctx, auth)
+	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	return auth.Clone(), nil
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -2005,6 +2099,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.LastError = nil
 	updated.UpdatedAt = now
 	_, _ = m.Update(ctx, updated)
+
+	// Broadcast the updated credentials to all configured peers
+	m.broadcastCredentialUpdate(ctx, updated)
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

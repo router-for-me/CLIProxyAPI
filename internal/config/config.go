@@ -57,6 +57,11 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// CredentialPeers lists peer URLs to broadcast credential updates to.
+	// When a token is refreshed, the new credentials are pushed to all peers.
+	// Example: ["http://192.168.1.100:8317", "http://192.168.1.101:8317"]
+	CredentialPeers []string `yaml:"credential-peers" json:"credential-peers"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
