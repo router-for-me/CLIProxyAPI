@@ -714,8 +714,8 @@ func (h *Handler) tryAPICallAutoDelete(ctx context.Context, auth *coreauth.Auth,
 		return
 	}
 
-	rule, ok := h.cfg.APICallAutoDelete.Providers[strings.ToLower(auth.Provider)]
-	if !ok || !rule.Enabled {
+	rule, ok := h.cfg.AutoDelete.Providers[strings.ToLower(auth.Provider)]
+	if !ok || !rule.Enabled || !rule.Management {
 		return
 	}
 

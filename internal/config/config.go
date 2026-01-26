@@ -113,9 +113,6 @@ type Config struct {
 	// when receiving specific HTTP error codes indicating permanent failure.
 	AutoDelete AutoDeleteConfig `yaml:"auto-delete" json:"auto-delete"`
 
-	// APICallAutoDelete configures auto-deletion for management/user-facing API.
-	APICallAutoDelete AutoDeleteConfig `yaml:"api-call-auto-delete" json:"api-call-auto-delete"`
-
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -272,6 +269,14 @@ type AutoDeleteRule struct {
 	// Common values: [401, 403]
 	// Default if empty and Enabled=true: [401, 403]
 	StatusCodes []int `yaml:"status-codes,omitempty" json:"status-codes,omitempty"`
+
+	// Proxy controls auto-delete during proxy requests (SDK layer).
+	// Default: true (enabled when Enabled=true, for backward compatibility)
+	Proxy *bool `yaml:"proxy,omitempty" json:"proxy,omitempty"`
+
+	// Management controls auto-delete during management API calls (/api-call).
+	// Default: false (must be explicitly enabled)
+	Management bool `yaml:"management,omitempty" json:"management,omitempty"`
 }
 
 func (c *AutoDeleteConfig) Validate() error {
@@ -617,9 +622,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate auto-delete configuration.
 	if err := cfg.AutoDelete.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid auto-delete config: %w", err)
-	}
-	if err := cfg.APICallAutoDelete.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid api-call-auto-delete config: %w", err)
 	}
 
 	if cfg.legacyMigrationPending {

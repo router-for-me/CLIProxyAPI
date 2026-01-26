@@ -1445,6 +1445,11 @@ func (m *Manager) shouldAutoDeleteCredential(auth *Auth, statusCode int, now tim
 		return nil
 	}
 
+	// Check if proxy auto-delete is enabled (default: true for backward compatibility)
+	if rule.Proxy != nil && !*rule.Proxy {
+		return nil
+	}
+
 	statusCodes := rule.StatusCodes
 	if len(statusCodes) == 0 {
 		statusCodes = DefaultAutoDeleteStatusCodes

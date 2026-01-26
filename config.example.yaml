@@ -313,17 +313,8 @@ oauth-model-alias:
 #     codex:
 #       enabled: true
 #       status-codes: [401, 403]  # optional, defaults to [401, 403]
-#     claude:
-#       enabled: true
-#     gemini-cli:
-#       enabled: false
-
-# Auto-delete OAuth credentials via management/user-facing API
-# api-call-auto-delete:
-#   providers:
-#     codex:
-#       enabled: true
-#       status-codes: [401, 403]  # optional, defaults to [401, 403]
+#       proxy: true               # auto-delete during proxy requests (default: true)
+#       management: true          # auto-delete during management API calls (default: false)
 #     claude:
 #       enabled: true
 #     gemini-cli:
