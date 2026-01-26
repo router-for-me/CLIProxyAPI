@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -134,8 +135,9 @@ func (m *Module) init(ctx modules.Context) error {
 		m.configStore = configStore
 		m.stateStore = NewMemoryStateStore()
 
-		// Use separate logs directory for traces (outside auth-dir to avoid confusion)
-		logsDir := filepath.Join(dataDir, "..", "logs", "unified-routing")
+		// Use the shared logging module to resolve the logs directory
+		baseLogsDir := logging.ResolveLogDirectory(ctx.Config)
+		logsDir := filepath.Join(baseLogsDir, "unified-routing")
 		metricsStore, err := NewFileMetricsStore(logsDir, 100) // 100MB max for traces
 		if err != nil {
 			initErr = err
