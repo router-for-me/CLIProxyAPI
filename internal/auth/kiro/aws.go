@@ -360,7 +360,7 @@ func SanitizeEmailForFilename(email string) string {
 	}
 
 	result := email
-	
+
 	// First, handle URL-encoded path traversal attempts (%2F, %2E, %5C, etc.)
 	// This prevents encoded characters from bypassing the sanitization.
 	// Note: We replace % last to catch any remaining encodings including double-encoding (%252F)
@@ -378,7 +378,7 @@ func SanitizeEmailForFilename(email string) string {
 	for _, char := range []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|", " ", "\x00"} {
 		result = strings.ReplaceAll(result, char, "_")
 	}
-	
+
 	// Prevent path traversal: replace leading dots in each path component
 	// This handles cases like "../../../etc/passwd" → "_.._.._.._etc_passwd"
 	parts := strings.Split(result, "_")
@@ -389,6 +389,65 @@ func SanitizeEmailForFilename(email string) string {
 		parts[i] = part
 	}
 	result = strings.Join(parts, "_")
-	
+
 	return result
+}
+
+// ExtractIDCIdentifier extracts a unique identifier from IDC startUrl.
+// Examples:
+//   - "https://d-1234567890.awsapps.com/start" -> "d-1234567890"
+//   - "https://my-company.awsapps.com/start" -> "my-company"
+//   - "https://acme-corp.awsapps.com/start" -> "acme-corp"
+func ExtractIDCIdentifier(startURL string) string {
+	if startURL == "" {
+		return ""
+	}
+
+	// Remove protocol prefix
+	url := strings.TrimPrefix(startURL, "https://")
+	url = strings.TrimPrefix(url, "http://")
+
+	// Extract subdomain (first part before the first dot)
+	// Format: {identifier}.awsapps.com/start
+	parts := strings.Split(url, ".")
+	if len(parts) > 0 && parts[0] != "" {
+		identifier := parts[0]
+		// Sanitize for filename safety
+		identifier = strings.ReplaceAll(identifier, "/", "_")
+		identifier = strings.ReplaceAll(identifier, "\\", "_")
+		identifier = strings.ReplaceAll(identifier, ":", "_")
+		return identifier
+	}
+
+	return ""
+}
+
+// GenerateTokenFileName generates a unique filename for token storage.
+// Priority: email > startUrl identifier (for IDC) > authMethod only
+// Format: kiro-{authMethod}-{identifier}.json
+func GenerateTokenFileName(tokenData *KiroTokenData) string {
+	authMethod := tokenData.AuthMethod
+	if authMethod == "" {
+		authMethod = "unknown"
+	}
+
+	// Priority 1: Use email if available
+	if tokenData.Email != "" {
+		// Sanitize email for filename (replace @ and . with -)
+		sanitizedEmail := tokenData.Email
+		sanitizedEmail = strings.ReplaceAll(sanitizedEmail, "@", "-")
+		sanitizedEmail = strings.ReplaceAll(sanitizedEmail, ".", "-")
+		return fmt.Sprintf("kiro-%s-%s.json", authMethod, sanitizedEmail)
+	}
+
+	// Priority 2: For IDC, use startUrl identifier
+	if authMethod == "idc" && tokenData.StartURL != "" {
+		identifier := ExtractIDCIdentifier(tokenData.StartURL)
+		if identifier != "" {
+			return fmt.Sprintf("kiro-%s-%s.json", authMethod, identifier)
+		}
+	}
+
+	// Priority 3: Fallback to authMethod only
+	return fmt.Sprintf("kiro-%s.json", authMethod)
 }
