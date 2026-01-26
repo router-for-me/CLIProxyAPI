@@ -29,6 +29,11 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// EmbeddingAPIKeys holds Gemini API keys specifically for embedding requests.
+	// This allows the SDK to provide embedding API key fallback without depending on full Config.
+	// Populated at runtime from Config.GeminiKey.
+	EmbeddingAPIKeys []string `yaml:"-" json:"-"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

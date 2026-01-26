@@ -233,6 +233,17 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	envAdminPassword = strings.TrimSpace(envAdminPassword)
 	envManagementSecret := envAdminPasswordSet && envAdminPassword != ""
 
+	// Copy Gemini API keys to SDKConfig.EmbeddingAPIKeys for embedding handler access
+	if len(cfg.GeminiKey) > 0 {
+		keys := make([]string, 0, len(cfg.GeminiKey))
+		for _, gk := range cfg.GeminiKey {
+			if gk.APIKey != "" {
+				keys = append(keys, gk.APIKey)
+			}
+		}
+		cfg.SDKConfig.EmbeddingAPIKeys = keys
+	}
+
 	// Create server instance
 	s := &Server{
 		engine:              engine,
@@ -979,6 +990,19 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	managementasset.SetCurrentConfig(cfg)
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
+
+	// Copy Gemini API keys to SDKConfig.EmbeddingAPIKeys for embedding handler access
+	if len(cfg.GeminiKey) > 0 {
+		keys := make([]string, 0, len(cfg.GeminiKey))
+		for _, gk := range cfg.GeminiKey {
+			if gk.APIKey != "" {
+				keys = append(keys, gk.APIKey)
+			}
+		}
+		cfg.SDKConfig.EmbeddingAPIKeys = keys
+	} else {
+		cfg.SDKConfig.EmbeddingAPIKeys = nil
+	}
 
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 

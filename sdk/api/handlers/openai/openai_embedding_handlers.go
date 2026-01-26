@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 // embeddingModelMapping maps OpenAI embedding models to Gemini embedding models.
@@ -23,6 +24,8 @@ var embeddingModelMapping = map[string]string{
 	"text-embedding-3-large": "text-embedding-004",
 	"text-embedding-004":     "text-embedding-004",
 	"embedding-001":          "embedding-001",
+	"gemini-embedding-001":   "gemini-embedding-001",
+	"gemini-embedding-1.0":   "gemini-embedding-001", // Map to actual API model name
 }
 
 // embeddingHTTPClient is a shared HTTP client for embedding requests.
@@ -36,6 +39,9 @@ var embeddingHTTPClient = &http.Client{
 	},
 }
 
+// embeddingKeyIndex is a global counter for round-robin API key selection.
+var embeddingKeyIndex uint64
+
 // Embeddings handles the /v1/embeddings endpoint.
 // It translates OpenAI embedding requests to Gemini embedContent API
 // and returns responses in OpenAI-compatible format.
@@ -43,6 +49,8 @@ var embeddingHTTPClient = &http.Client{
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 func (h *OpenAIAPIHandler) Embeddings(c *gin.Context) {
+	requestedAt := time.Now()
+
 	var req EmbeddingRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -85,16 +93,32 @@ func (h *OpenAIAPIHandler) Embeddings(c *gin.Context) {
 		return
 	}
 
-	// 2. Get API key from Authorization header
-	apiKey := extractEmbeddingAPIKey(c)
+	// 2. Get API key - prefer server-side config with round-robin, fall back to request header
+	// This allows clients to send dummy keys while server uses real credentials
+	var apiKey string
+	if h.Cfg != nil && len(h.Cfg.EmbeddingAPIKeys) > 0 {
+		// Round-robin key selection for load balancing across multiple accounts
+		idx := atomic.AddUint64(&embeddingKeyIndex, 1) % uint64(len(h.Cfg.EmbeddingAPIKeys))
+		apiKey = h.Cfg.EmbeddingAPIKeys[idx]
+	}
+	if apiKey == "" {
+		// Fall back to request header if no server config
+		apiKey = extractEmbeddingAPIKey(c)
+	}
 	if apiKey == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error": gin.H{
-				"message": "Missing API key. Include it in the Authorization header as 'Bearer YOUR_API_KEY'",
+				"message": "Missing API key. Configure gemini-api-key in server config or include it in the Authorization header",
 				"type":    "authentication_error",
 			},
 		})
 		return
+	}
+
+	// Derive usage source identifier from API key (masked for privacy)
+	usageSource := "embedding"
+	if len(apiKey) > 10 {
+		usageSource = "key_..." + apiKey[len(apiKey)-6:]
 	}
 
 	// 3. Map model name to Gemini model
@@ -155,6 +179,22 @@ func (h *OpenAIAPIHandler) Embeddings(c *gin.Context) {
 	}
 
 	wg.Wait()
+
+	// Publish usage record (whether success or failure)
+	finalTokens := atomic.LoadInt64(&totalTokens)
+	usageRecord := usage.Record{
+		Provider:    "gemini",
+		Model:       geminiModel,
+		APIKey:      apiKey, // Include actual API key for proper Dashboard grouping
+		Source:      usageSource,
+		RequestedAt: requestedAt,
+		Failed:      firstErr != nil,
+		Detail: usage.Detail{
+			InputTokens: finalTokens,
+			TotalTokens: finalTokens,
+		},
+	}
+	usage.PublishRecord(c.Request.Context(), usageRecord)
 
 	if firstErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
