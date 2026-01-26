@@ -345,8 +345,8 @@ func (s *Server) setupRoutes() {
 		// Wrap handlers with unified routing support
 		v1.POST("/chat/completions", s.wrapWithUnifiedRouting(openaiHandlers.ChatCompletions))
 		v1.POST("/completions", s.wrapWithUnifiedRouting(openaiHandlers.Completions))
-		v1.POST("/messages", s.wrapWithUnifiedRouting(claudeCodeHandlers.ClaudeMessages))
-		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
+		v1.POST("/messages", s.wrapWithUnifiedRoutingClaude(claudeCodeHandlers.ClaudeMessages))
+		v1.POST("/messages/count_tokens", s.wrapWithUnifiedRoutingClaude(claudeCodeHandlers.ClaudeCountTokens))
 		v1.POST("/responses", s.wrapWithUnifiedRouting(openaiResponsesHandlers.Responses))
 	}
 
@@ -354,9 +354,9 @@ func (s *Server) setupRoutes() {
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
 	{
-		v1beta.GET("/models", geminiHandlers.GeminiModels)
-		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
-		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
+		v1beta.GET("/models", s.unifiedGeminiModelsHandler(geminiHandlers))
+		v1beta.POST("/models/*action", s.wrapWithUnifiedRoutingGemini(geminiHandlers.GeminiHandler))
+		v1beta.GET("/models/*action", s.wrapWithUnifiedRoutingGemini(geminiHandlers.GeminiGetHandler))
 	}
 
 	// Root endpoint
@@ -370,7 +370,7 @@ func (s *Server) setupRoutes() {
 			},
 		})
 	})
-	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
+	s.engine.POST("/v1internal:method", s.wrapWithUnifiedRoutingGeminiCLI(geminiCLIHandlers.CLIHandler))
 
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
@@ -785,6 +785,37 @@ func (s *Server) watchKeepAlive() {
 	}
 }
 
+// unifiedGeminiModelsHandler creates a unified handler for the /v1beta/models endpoint.
+// When unified routing is enabled with hide_original_models=true, only route aliases are returned in Gemini format.
+func (s *Server) unifiedGeminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Check if unified routing should hide original models
+		if s.unifiedRoutingModule != nil {
+			engine := s.unifiedRoutingModule.GetEngine()
+			if engine != nil && engine.ShouldHideOriginalModels(c.Request.Context()) {
+				// Return only route aliases as models in Gemini format
+				routeNames := engine.GetRouteNames(c.Request.Context())
+				models := make([]map[string]any, len(routeNames))
+				for i, name := range routeNames {
+					models[i] = map[string]any{
+						"name":                       "models/" + name,
+						"displayName":                name,
+						"description":                name,
+						"supportedGenerationMethods": []string{"generateContent"},
+					}
+				}
+				c.JSON(200, gin.H{
+					"models": models,
+				})
+				return
+			}
+		}
+
+		// Delegate to original handler
+		geminiHandler.GeminiModels(c)
+	}
+}
+
 // unifiedModelsHandler creates a unified handler for the /v1/models endpoint
 // that routes to different handlers based on the User-Agent header.
 // If User-Agent starts with "claude-cli", it routes to Claude handler,
@@ -839,11 +870,21 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 	}
 }
 
-// wrapWithUnifiedRouting wraps an API handler with unified routing support.
+// wrapWithUnifiedRouting wraps an API handler with unified routing support for OpenAI format.
 // When a model name is a route alias, it executes the request using the target credential directly.
 // When hide_original_models is enabled and the model is not a route alias, it returns 404.
 // Otherwise, it delegates to the original handler.
 func (s *Server) wrapWithUnifiedRouting(originalHandler gin.HandlerFunc) gin.HandlerFunc {
+	return s.wrapWithUnifiedRoutingFormat(originalHandler, sdktranslator.FormatOpenAI, "model")
+}
+
+// wrapWithUnifiedRoutingClaude wraps an API handler with unified routing support for Claude format.
+func (s *Server) wrapWithUnifiedRoutingClaude(originalHandler gin.HandlerFunc) gin.HandlerFunc {
+	return s.wrapWithUnifiedRoutingFormat(originalHandler, sdktranslator.FormatClaude, "model")
+}
+
+// wrapWithUnifiedRoutingFormat wraps an API handler with unified routing support for a specific format.
+func (s *Server) wrapWithUnifiedRoutingFormat(originalHandler gin.HandlerFunc, sourceFormat sdktranslator.Format, modelField string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Skip if unified routing module is not configured
 		if s.unifiedRoutingModule == nil {
@@ -865,7 +906,7 @@ func (s *Server) wrapWithUnifiedRouting(originalHandler gin.HandlerFunc) gin.Han
 		}
 
 		// Extract model from request
-		modelName := gjson.GetBytes(rawBody, "model").String()
+		modelName := gjson.GetBytes(rawBody, modelField).String()
 		if modelName == "" {
 			c.Request.Body = io.NopCloser(bytes.NewReader(rawBody))
 			originalHandler(c)
@@ -877,12 +918,12 @@ func (s *Server) wrapWithUnifiedRouting(originalHandler gin.HandlerFunc) gin.Han
 
 		if routeErr == nil {
 			// Model is a route alias - execute with full failover support
-			log.Debugf("[UnifiedRouting] Routing request for model: %s", modelName)
+			log.Debugf("[UnifiedRouting] Routing request for model: %s (format: %s)", modelName, sourceFormat)
 
 			stream := gjson.GetBytes(rawBody, "stream").Bool()
 
 			// Use ExecuteWithFailover for full multi-layer failover support
-			s.executeWithUnifiedRoutingFailover(c, engine, modelName, rawBody, stream)
+			s.executeWithUnifiedRoutingFailoverFormat(c, engine, modelName, rawBody, stream, sourceFormat)
 			return
 		}
 
@@ -906,15 +947,161 @@ func (s *Server) wrapWithUnifiedRouting(originalHandler gin.HandlerFunc) gin.Han
 	}
 }
 
-// executeWithUnifiedRoutingFailover executes a request with full multi-layer failover support.
+// wrapWithUnifiedRoutingGemini wraps a Gemini API handler with unified routing support.
+// Gemini format has the model name in the URL path (e.g., /v1beta/models/gemini-pro:generateContent)
+func (s *Server) wrapWithUnifiedRoutingGemini(originalHandler gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip if unified routing module is not configured
+		if s.unifiedRoutingModule == nil {
+			originalHandler(c)
+			return
+		}
+
+		engine := s.unifiedRoutingModule.GetEngine()
+		if engine == nil || !engine.IsEnabled(c.Request.Context()) {
+			originalHandler(c)
+			return
+		}
+
+		// Extract model name from URL path
+		// Format: /v1beta/models/{model}:{method} or /v1beta/models/{model}
+		action := c.Param("action")
+		if action == "" {
+			originalHandler(c)
+			return
+		}
+
+		action = strings.TrimPrefix(action, "/")
+		parts := strings.Split(action, ":")
+		modelName := parts[0]
+
+		if modelName == "" {
+			originalHandler(c)
+			return
+		}
+
+		// Check if this model is a route alias
+		_, _, routeErr := engine.GetRoutingTarget(c.Request.Context(), modelName)
+
+		if routeErr == nil {
+			// Model is a route alias - execute with unified routing
+			log.Debugf("[UnifiedRouting] Routing Gemini request for model: %s", modelName)
+
+			// Read the request body
+			rawBody, err := io.ReadAll(c.Request.Body)
+			if err != nil {
+				rawBody = []byte("{}")
+			}
+
+			// For Gemini, check if it's streaming based on the method
+			method := ""
+			if len(parts) > 1 {
+				method = parts[1]
+			}
+			stream := method == "streamGenerateContent"
+
+			s.executeWithUnifiedRoutingFailoverFormat(c, engine, modelName, rawBody, stream, sdktranslator.FormatGemini)
+			return
+		}
+
+		// Model is not a route alias
+		// Check if we should hide original models
+		if engine.ShouldHideOriginalModels(c.Request.Context()) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": gin.H{
+					"message": fmt.Sprintf("The model '%s' does not exist or you do not have access to it.", modelName),
+					"type":    "invalid_request_error",
+					"code":    "model_not_found",
+				},
+			})
+			return
+		}
+
+		// Allow the request to proceed with original handler
+		originalHandler(c)
+	}
+}
+
+// wrapWithUnifiedRoutingGeminiCLI wraps a Gemini CLI API handler with unified routing support.
+// Gemini CLI format has the model name in the request body's "model" field.
+// The method is determined by the URL path (e.g., /v1internal:generateContent, /v1internal:streamGenerateContent)
+func (s *Server) wrapWithUnifiedRoutingGeminiCLI(originalHandler gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip if unified routing module is not configured
+		if s.unifiedRoutingModule == nil {
+			originalHandler(c)
+			return
+		}
+
+		engine := s.unifiedRoutingModule.GetEngine()
+		if engine == nil || !engine.IsEnabled(c.Request.Context()) {
+			originalHandler(c)
+			return
+		}
+
+		// Read the request body
+		rawBody, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			originalHandler(c)
+			return
+		}
+
+		// Extract model from request body
+		modelName := gjson.GetBytes(rawBody, "model").String()
+		if modelName == "" {
+			c.Request.Body = io.NopCloser(bytes.NewReader(rawBody))
+			originalHandler(c)
+			return
+		}
+
+		// Check if this model is a route alias
+		_, _, routeErr := engine.GetRoutingTarget(c.Request.Context(), modelName)
+
+		if routeErr == nil {
+			// Model is a route alias - execute with unified routing
+			log.Debugf("[UnifiedRouting] Routing Gemini CLI request for model: %s", modelName)
+
+			// Determine if streaming based on URL path
+			requestPath := c.Request.URL.Path
+			stream := strings.Contains(requestPath, "streamGenerateContent")
+
+			s.executeWithUnifiedRoutingFailoverFormat(c, engine, modelName, rawBody, stream, sdktranslator.FormatGeminiCLI)
+			return
+		}
+
+		// Model is not a route alias
+		// Check if we should hide original models
+		if engine.ShouldHideOriginalModels(c.Request.Context()) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": gin.H{
+					"message": fmt.Sprintf("The model '%s' does not exist or you do not have access to it.", modelName),
+					"type":    "invalid_request_error",
+					"code":    "model_not_found",
+				},
+			})
+			return
+		}
+
+		// Allow the request to proceed with original handler
+		c.Request.Body = io.NopCloser(bytes.NewReader(rawBody))
+		originalHandler(c)
+	}
+}
+
+// executeWithUnifiedRoutingFailover executes a request with full multi-layer failover support (OpenAI format).
 func (s *Server) executeWithUnifiedRoutingFailover(c *gin.Context, engine unifiedrouting.RoutingEngine, modelName string, rawBody []byte, stream bool) {
+	s.executeWithUnifiedRoutingFailoverFormat(c, engine, modelName, rawBody, stream, sdktranslator.FormatOpenAI)
+}
+
+// executeWithUnifiedRoutingFailoverFormat executes a request with full multi-layer failover support for any format.
+func (s *Server) executeWithUnifiedRoutingFailoverFormat(c *gin.Context, engine unifiedrouting.RoutingEngine, modelName string, rawBody []byte, stream bool, sourceFormat sdktranslator.Format) {
 	ctx := c.Request.Context()
 
 	// Get routing decision
 	routingEngine, ok := engine.(*unifiedrouting.DefaultRoutingEngine)
 	if !ok {
 		// Fallback to simple routing
-		s.executeWithUnifiedRoutingSimple(c, engine, modelName, rawBody, stream)
+		s.executeWithUnifiedRoutingSimpleFormat(c, engine, modelName, rawBody, stream, sourceFormat)
 		return
 	}
 
@@ -945,7 +1132,7 @@ func (s *Server) executeWithUnifiedRoutingFailover(c *gin.Context, engine unifie
 			opts := cliproxyexecutor.Options{
 				Stream:          false,
 				OriginalRequest: rawBody,
-				SourceFormat:    sdktranslator.FormatOpenAI,
+				SourceFormat:    sourceFormat,
 			}
 
 			resp, err := s.handlers.AuthManager.ExecuteWithAuth(execCtx, targetAuth, req, opts)
@@ -995,7 +1182,7 @@ func (s *Server) executeWithUnifiedRoutingFailover(c *gin.Context, engine unifie
 		opts := cliproxyexecutor.Options{
 			Stream:          true,
 			OriginalRequest: rawBody,
-			SourceFormat:    sdktranslator.FormatOpenAI,
+			SourceFormat:    sourceFormat,
 		}
 
 		return s.handlers.AuthManager.ExecuteStreamWithAuth(execCtx, targetAuth, req, opts)
@@ -1024,28 +1211,49 @@ func (s *Server) executeWithUnifiedRoutingFailover(c *gin.Context, engine unifie
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 
 	flusher, _ := c.Writer.(http.Flusher)
+	wroteData := false
 	for chunk := range chunks {
 		if chunk.Err != nil {
 			log.Warnf("[UnifiedRouting] Stream error: %v", chunk.Err)
 			break
 		}
 		if len(chunk.Payload) > 0 {
-			// Write in SSE format: "data: <json>\n\n"
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk.Payload))
+			wroteData = true
+			// Check if chunk already has SSE format (from Claude, Gemini, etc.)
+			if bytes.HasPrefix(chunk.Payload, []byte("data:")) ||
+				bytes.HasPrefix(chunk.Payload, []byte("event:")) {
+				// Already SSE formatted, write directly
+				_, _ = c.Writer.Write(chunk.Payload)
+				// Ensure newline termination if not present
+				if !bytes.HasSuffix(chunk.Payload, []byte("\n\n")) {
+					_, _ = c.Writer.Write([]byte("\n\n"))
+				}
+			} else {
+				// Raw JSON, wrap in SSE format
+				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk.Payload))
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 	}
-	// Send SSE termination signal
-	_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
-	if flusher != nil {
-		flusher.Flush()
+	// Send SSE termination signal only if we wrote data and it's OpenAI format
+	// Claude/Gemini handle their own termination
+	if wroteData {
+		_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
 	}
 }
 
-// executeWithUnifiedRoutingSimple executes a request with simple single-target routing.
+// executeWithUnifiedRoutingSimple executes a request with simple single-target routing (OpenAI format).
 func (s *Server) executeWithUnifiedRoutingSimple(c *gin.Context, engine unifiedrouting.RoutingEngine, modelName string, rawBody []byte, stream bool) {
+	s.executeWithUnifiedRoutingSimpleFormat(c, engine, modelName, rawBody, stream, sdktranslator.FormatOpenAI)
+}
+
+// executeWithUnifiedRoutingSimpleFormat executes a request with simple single-target routing for any format.
+func (s *Server) executeWithUnifiedRoutingSimpleFormat(c *gin.Context, engine unifiedrouting.RoutingEngine, modelName string, rawBody []byte, stream bool, sourceFormat sdktranslator.Format) {
 	ctx := c.Request.Context()
 
 	targetModel, credentialID, err := engine.GetRoutingTarget(ctx, modelName)
@@ -1080,7 +1288,7 @@ func (s *Server) executeWithUnifiedRoutingSimple(c *gin.Context, engine unifiedr
 	opts := cliproxyexecutor.Options{
 		Stream:          stream,
 		OriginalRequest: rawBody,
-		SourceFormat:    sdktranslator.FormatOpenAI,
+		SourceFormat:    sourceFormat,
 	}
 
 	if stream {
@@ -1104,23 +1312,38 @@ func (s *Server) executeWithUnifiedRoutingSimple(c *gin.Context, engine unifiedr
 		c.Writer.Header().Set("X-Accel-Buffering", "no")
 
 		flusher, _ := c.Writer.(http.Flusher)
+		wroteData := false
 		for chunk := range chunks {
 			if chunk.Err != nil {
 				log.Warnf("[UnifiedRouting] Stream error: %v", chunk.Err)
 				break
 			}
 			if len(chunk.Payload) > 0 {
-				// Write in SSE format: "data: <json>\n\n"
-				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk.Payload))
+				wroteData = true
+				// Check if chunk already has SSE format (from Claude, Gemini, etc.)
+				if bytes.HasPrefix(chunk.Payload, []byte("data:")) ||
+					bytes.HasPrefix(chunk.Payload, []byte("event:")) {
+					// Already SSE formatted, write directly
+					_, _ = c.Writer.Write(chunk.Payload)
+					// Ensure newline termination if not present
+					if !bytes.HasSuffix(chunk.Payload, []byte("\n\n")) {
+						_, _ = c.Writer.Write([]byte("\n\n"))
+					}
+				} else {
+					// Raw JSON, wrap in SSE format
+					_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk.Payload))
+				}
 				if flusher != nil {
 					flusher.Flush()
 				}
 			}
 		}
-		// Send SSE termination signal
-		_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
-		if flusher != nil {
-			flusher.Flush()
+		// Send SSE termination signal only if we wrote data and it's OpenAI format
+		if wroteData {
+			_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
 		}
 	} else {
 		resp, err := s.handlers.AuthManager.ExecuteWithAuth(ctx, targetAuth, req, opts)
