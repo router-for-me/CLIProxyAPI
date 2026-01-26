@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // SignatureEntry holds a cached thinking signature with timestamp
@@ -192,4 +195,38 @@ func GetModelGroup(modelName string) string {
 		return "gemini"
 	}
 	return modelName
+}
+
+// signatureCacheEnabled controls whether signature cache validation is enabled.
+// When true (default), cached signatures are used and validated.
+// When false, signature validation is bypassed and client signatures are used directly.
+var signatureCacheEnabled atomic.Bool
+
+func init() {
+	// Default: signature cache is enabled
+	signatureCacheEnabled.Store(true)
+}
+
+// SetSignatureCacheEnabled sets whether signature cache validation is enabled.
+// This can be called at runtime to toggle the behavior without restart.
+//
+// When enabled (true, default):
+//   - Cached signatures are preferred over client-provided ones
+//   - Signatures are validated for minimum length (50 chars)
+//   - Unsigned thinking blocks are dropped
+//
+// When disabled (false, bypass mode):
+//   - Client signatures are validated for Claude format (E.../R... → 0x12)
+//   - Valid signatures are normalized to 2-layer Base64
+//   - Invalid/missing signatures cause thinking blocks to be dropped
+func SetSignatureCacheEnabled(enabled bool) {
+	signatureCacheEnabled.Store(enabled)
+	if !enabled {
+		log.Warn("antigravity signature cache DISABLED - bypass mode active, signatures will not be cached")
+	}
+}
+
+// SignatureCacheEnabled returns whether signature cache validation is enabled.
+func SignatureCacheEnabled() bool {
+	return signatureCacheEnabled.Load()
 }

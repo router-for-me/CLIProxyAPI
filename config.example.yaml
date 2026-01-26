@@ -100,6 +100,11 @@ nonstream-keepalive-interval: 0
 # When false (default), CodexInstructionsForModel returns immediately without modification.
 codex-instructions-enabled: false
 
+# Signature cache validation for thinking blocks (Antigravity/Claude).
+# When true (default), cached signatures are preferred and validated.
+# When false, client signatures are used directly after normalization (bypass mode for testing).
+# antigravity-signature-cache-enabled: true
+
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"

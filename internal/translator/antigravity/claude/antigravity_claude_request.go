@@ -7,12 +7,17 @@ package claude
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"regexp"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -98,60 +103,68 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						// Use GetThinkingText to handle wrapped thinking objects
 						thinkingText := thinking.GetThinkingText(contentResult)
 
-						// Always try cached signature first (more reliable than client-provided)
-						// Client may send stale or invalid signatures from different sessions
 						signature := ""
-						if thinkingText != "" {
-							if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
-								signature = cachedSig
-								// log.Debugf("Using cached signature for thinking block")
+						if cache.SignatureCacheEnabled() {
+							// Cache mode: prefer cached signature, validate length
+							if thinkingText != "" {
+								if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
+									signature = cachedSig
+								}
 							}
-						}
 
-						// Fallback to client signature only if cache miss and client signature is valid
-						if signature == "" {
-							signatureResult := contentResult.Get("signature")
-							clientSignature := ""
-							if signatureResult.Exists() && signatureResult.String() != "" {
-								arrayClientSignatures := strings.SplitN(signatureResult.String(), "#", 2)
-								if len(arrayClientSignatures) == 2 {
-									if modelName == arrayClientSignatures[0] {
-										clientSignature = arrayClientSignatures[1]
+							// Fallback to client signature if cache miss
+							if signature == "" {
+								signatureResult := contentResult.Get("signature")
+								if signatureResult.Exists() && signatureResult.String() != "" {
+									clientSig := ""
+									arrayClientSignatures := strings.SplitN(signatureResult.String(), "#", 2)
+									if len(arrayClientSignatures) == 2 {
+										if modelName == arrayClientSignatures[0] || cache.GetModelGroup(modelName) == arrayClientSignatures[0] {
+											clientSig = arrayClientSignatures[1]
+										}
+									}
+									if cache.HasValidSignature(modelName, clientSig) {
+										signature = clientSig
 									}
 								}
 							}
-							if cache.HasValidSignature(modelName, clientSignature) {
-								signature = clientSignature
+
+							// Store for subsequent tool_use in the same message
+							if cache.HasValidSignature(modelName, signature) {
+								currentMessageThinkingSignature = signature
 							}
-							// log.Debugf("Using client-provided signature for thinking block")
+
+							// Skip unsigned thinking blocks when cache is enabled
+							if !cache.HasValidSignature(modelName, signature) {
+								log.Warnf("antigravity claude request: dropping thinking block with invalid signature (cache mode, textLen=%d)", len(thinkingText))
+								enableThoughtTranslate = false
+								continue
+							}
+						} else {
+							// Bypass mode: validate Claude signature format, drop invalid
+							signatureResult := contentResult.Get("signature")
+							if signatureResult.Exists() && signatureResult.String() != "" {
+								rawSig := signatureResult.String()
+								if isValidClaudeSignature(rawSig) {
+									signature = normalizeSignature(rawSig)
+									currentMessageThinkingSignature = signature
+								}
+							}
+							// Invalid/missing signature: drop thinking block (Antigravity validates signatures strictly)
+							if signature == "" {
+								log.Warnf("antigravity claude request: dropping thinking block with invalid signature (bypass mode, textLen=%d)", len(thinkingText))
+								enableThoughtTranslate = false
+								continue
+							}
 						}
 
-						// Store for subsequent tool_use in the same message
-						if cache.HasValidSignature(modelName, signature) {
-							currentMessageThinkingSignature = signature
-						}
-
-						// Skip trailing unsigned thinking blocks on last assistant message
-						isUnsigned := !cache.HasValidSignature(modelName, signature)
-
-						// If unsigned, skip entirely (don't convert to text)
-						// Claude requires assistant messages to start with thinking blocks when thinking is enabled
-						// Converting to text would break this requirement
-						if isUnsigned {
-							// log.Debugf("Dropping unsigned thinking block (no valid signature)")
-							enableThoughtTranslate = false
-							continue
-						}
-
-						// Valid signature, send as thought block
+						// Send as thought block
 						partJSON := `{}`
 						partJSON, _ = sjson.Set(partJSON, "thought", true)
 						if thinkingText != "" {
 							partJSON, _ = sjson.Set(partJSON, "text", thinkingText)
 						}
-						if signature != "" {
-							partJSON, _ = sjson.Set(partJSON, "thoughtSignature", signature)
-						}
+						partJSON, _ = sjson.Set(partJSON, "thoughtSignature", signature)
 						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
@@ -186,15 +199,21 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						if argsRaw != "" {
 							partJSON := `{}`
 
-							// Use skip_thought_signature_validator for tool calls without valid thinking signature
-							// This is the approach used in opencode-google-antigravity-auth for Gemini
-							// and also works for Claude through Antigravity API
-							const skipSentinel = "skip_thought_signature_validator"
-							if cache.HasValidSignature(modelName, currentMessageThinkingSignature) {
-								partJSON, _ = sjson.Set(partJSON, "thoughtSignature", currentMessageThinkingSignature)
+							// Attach signature for tool calls
+							if cache.SignatureCacheEnabled() {
+								if cache.HasValidSignature(modelName, currentMessageThinkingSignature) {
+									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", currentMessageThinkingSignature)
+								} else {
+									const skipSentinel = "skip_thought_signature_validator"
+									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", skipSentinel)
+								}
 							} else {
-								// No valid signature - use skip sentinel to bypass validation
-								partJSON, _ = sjson.Set(partJSON, "thoughtSignature", skipSentinel)
+								if currentMessageThinkingSignature != "" {
+									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", currentMessageThinkingSignature)
+								} else {
+									const skipSentinel = "skip_thought_signature_validator"
+									partJSON, _ = sjson.Set(partJSON, "thoughtSignature", skipSentinel)
+								}
 							}
 
 							if functionID != "" {
@@ -403,4 +422,99 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	outBytes = common.AttachDefaultSafetySettings(outBytes, "request.safetySettings")
 
 	return outBytes
+}
+
+// normalizeSignature converts signatures to the format required by Antigravity (2-layer Base64).
+// Used in bypass mode (signature-cache-enabled: false) to ensure correct signature format.
+//
+// Input formats:
+//   - "xxx#..." (CLIProxyAPI format) -> extract signature after "#"
+//   - "E..." (Anthropic, 1-layer Base64) -> Base64 encode to 2-layer
+//   - "R..." (Vertex, 2-layer Base64) -> return as-is
+//
+// Output: raw signature in 2-layer Base64 format (no prefix), ready for Antigravity.
+func normalizeSignature(rawSignature string) string {
+	// Extract signature if it has "xxx#" prefix
+	if idx := strings.Index(rawSignature, "#"); idx != -1 {
+		rawSignature = rawSignature[idx+1:]
+	}
+
+	// E... (Anthropic, 1-layer) -> Base64 encode to 2-layer
+	if strings.HasPrefix(rawSignature, "E") {
+		return base64.StdEncoding.EncodeToString([]byte(rawSignature))
+	}
+
+	// R... (Vertex, 2-layer) or other formats -> return as-is
+	return rawSignature
+}
+
+// isValidClaudeSignature validates Claude signature format in bypass mode.
+// Claude signatures have the following characteristics:
+//   - Start with "E" (1-layer Base64) or "R" (2-layer Base64)
+//   - After decoding all Base64 layers, the first byte must be 0x12 (Protobuf Field 2 tag)
+//
+// Signature block byte patterns (after full decode):
+//   - Max subscription: 08 0c 18 02 (Channel=12)
+//   - Anthropic API/Azure: 08 0b 18 02 (Channel=11)
+//   - AWS Bedrock: 08 0b 10 01 18 02 (Channel=11, Field2=1)
+//   - Google Vertex: 08 0b 10 02 18 02 (Channel=11, Field2=2)
+func isValidClaudeSignature(rawSignature string) bool {
+	if rawSignature == "" {
+		return false
+	}
+
+	// Extract signature if it has "xxx#" prefix
+	sig := rawSignature
+	if idx := strings.Index(sig, "#"); idx != -1 {
+		sig = sig[idx+1:]
+	}
+
+	if sig == "" {
+		return false
+	}
+
+	// Minimum length check (Claude signatures are substantial)
+	if len(sig) < 50 {
+		return false
+	}
+
+	// Decode to get the raw Protobuf bytes
+	var decoded []byte
+
+	if strings.HasPrefix(sig, "R") {
+		// R... (2-layer Base64): decode twice
+		firstLayer, err := base64.StdEncoding.DecodeString(sig)
+		if err != nil {
+			return false
+		}
+		// First layer should give us E... format
+		if len(firstLayer) == 0 || firstLayer[0] != 'E' {
+			return false
+		}
+		var decodeErr error
+		decoded, decodeErr = base64.StdEncoding.DecodeString(string(firstLayer))
+		if decodeErr != nil {
+			return false
+		}
+	} else if strings.HasPrefix(sig, "E") {
+		// E... (1-layer Base64): decode once
+		var err error
+		decoded, err = base64.StdEncoding.DecodeString(sig)
+		if err != nil {
+			return false
+		}
+	} else {
+		// Unknown format
+		return false
+	}
+
+	// Check Protobuf structure: first byte must be 0x12 (Field 2, wire type 2)
+	if len(decoded) < 4 {
+		return false
+	}
+	if decoded[0] != 0x12 {
+		return false
+	}
+
+	return true
 }

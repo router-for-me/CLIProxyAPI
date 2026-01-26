@@ -80,6 +80,11 @@ type Config struct {
 	// When true, the original instruction injection logic is used.
 	CodexInstructionsEnabled bool `yaml:"codex-instructions-enabled" json:"codex-instructions-enabled"`
 
+	// AntigravitySignatureCacheEnabled controls whether signature cache validation is enabled for thinking blocks.
+	// When true (default), cached signatures are preferred and validated.
+	// When false, client signatures are used directly after normalization (bypass mode).
+	AntigravitySignatureCacheEnabled *bool `yaml:"antigravity-signature-cache-enabled,omitempty" json:"antigravity-signature-cache-enabled,omitempty"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 

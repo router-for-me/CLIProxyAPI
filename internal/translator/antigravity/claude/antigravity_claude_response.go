@@ -9,6 +9,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -20,6 +21,23 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// decodeSignature decodes R... (2-layer Base64) to E... (1-layer Base64, Anthropic format).
+// Returns empty string if decoding fails (skip invalid signatures).
+func decodeSignature(signature string) string {
+	if signature == "" {
+		return signature
+	}
+	if strings.HasPrefix(signature, "R") {
+		decoded, err := base64.StdEncoding.DecodeString(signature)
+		if err != nil {
+			log.Warnf("antigravity claude response: failed to decode signature, skipping")
+			return ""
+		}
+		return string(decoded)
+	}
+	return signature
+}
 
 // Params holds parameters for response conversion and maintains state across streaming chunks.
 // This structure tracks the current state of the response translation process to ensure
@@ -144,7 +162,15 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 						}
 
 						output = output + "event: content_block_delta\n"
-						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), thoughtSignature.String()))
+						var sigValue string
+						if cache.SignatureCacheEnabled() {
+							sigValue = fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), thoughtSignature.String())
+						} else if cache.GetModelGroup(modelName) == "claude" {
+							sigValue = decodeSignature(thoughtSignature.String())
+						} else {
+							sigValue = thoughtSignature.String()
+						}
+						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", sigValue)
 						output = output + fmt.Sprintf("data: %s\n\n\n", data)
 						params.HasContent = true
 					} else if params.ResponseType == 2 { // Continue existing thinking block if already in thinking state
@@ -436,7 +462,15 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		block := `{"type":"thinking","thinking":""}`
 		block, _ = sjson.Set(block, "thinking", thinkingBuilder.String())
 		if thinkingSignature != "" {
-			block, _ = sjson.Set(block, "signature", fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), thinkingSignature))
+			var sigValue string
+			if cache.SignatureCacheEnabled() {
+				sigValue = fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), thinkingSignature)
+			} else if cache.GetModelGroup(modelName) == "claude" {
+				sigValue = decodeSignature(thinkingSignature)
+			} else {
+				sigValue = thinkingSignature
+			}
+			block, _ = sjson.Set(block, "signature", sigValue)
 		}
 		responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", block)
 		thinkingBuilder.Reset()

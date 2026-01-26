@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -119,7 +120,7 @@ func TestConvertClaudeRequestToAntigravity_ThinkingBlocks(t *testing.T) {
 func TestConvertClaudeRequestToAntigravity_ThinkingBlockWithoutSignature(t *testing.T) {
 	cache.ClearSignatureCache("")
 
-	// Unsigned thinking blocks should be removed entirely (not converted to text)
+	// With cache enabled (default), unsigned thinking blocks should be removed
 	inputJSON := []byte(`{
 		"model": "claude-sonnet-4-5-thinking",
 		"messages": [
@@ -695,5 +696,481 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 	}
 	if !found {
 		t.Errorf("Interleaved thinking hint should be in created systemInstruction, got: %v", sysInstruction.Raw)
+	}
+}
+
+// ============================================================================
+// normalizeSignature Tests
+// ============================================================================
+
+func TestNormalizeSignature_CLIProxyAPIFormat(t *testing.T) {
+	// "claude#..." format should extract the signature after "#"
+	sig := "claude#R1234567890abcdef1234567890abcdef1234567890abcdef12"
+	result := normalizeSignature(sig)
+
+	expected := "R1234567890abcdef1234567890abcdef1234567890abcdef12"
+	if result != expected {
+		t.Errorf("Expected '%s', got '%s'", expected, result)
+	}
+}
+
+func TestNormalizeSignature_GeminiFormat(t *testing.T) {
+	// "gemini#..." format should extract the signature after "#"
+	sig := "gemini#R1234567890abcdef1234567890abcdef1234567890abcdef12"
+	result := normalizeSignature(sig)
+
+	expected := "R1234567890abcdef1234567890abcdef1234567890abcdef12"
+	if result != expected {
+		t.Errorf("Expected '%s', got '%s'", expected, result)
+	}
+}
+
+func TestNormalizeSignature_AnthropicFormat(t *testing.T) {
+	// "E..." format (Anthropic direct, 1-layer Base64)
+	// Should be Base64 encoded to 2-layer format (no prefix)
+	sig := "EjIxMjM0NTY3ODkwYWJjZGVmMTIzNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTBhYmNkZWYxMg=="
+
+	result := normalizeSignature(sig)
+
+	// Result should start with "R" (Base64 of "E" starts with "R")
+	if !strings.HasPrefix(result, "R") {
+		t.Errorf("Expected result to start with 'R', got '%s'", result)
+	}
+	// Encoded part should be longer than original (Base64 encoding adds ~33% overhead)
+	if len(result) <= len(sig) {
+		t.Errorf("Base64 encoded should be longer: input=%d, output=%d", len(sig), len(result))
+	}
+}
+
+func TestNormalizeSignature_GoogleVertexFormat(t *testing.T) {
+	// "R..." format (Google Vertex, 2-layer Base64)
+	// Should return as-is (already correct format)
+	sig := "R1234567890abcdef1234567890abcdef1234567890abcdef12"
+	result := normalizeSignature(sig)
+
+	if result != sig {
+		t.Errorf("Expected '%s', got '%s'", sig, result)
+	}
+}
+
+func TestNormalizeSignature_UnknownFormat(t *testing.T) {
+	// Unknown format should be returned as-is (let original logic handle it)
+	testCases := []string{
+		"X1234567890",
+		"1234567890",
+		"abc",
+	}
+
+	for _, sig := range testCases {
+		result := normalizeSignature(sig)
+		if result != sig {
+			t.Errorf("Expected '%s' (same as input), got '%s'", sig, result)
+		}
+	}
+}
+
+func TestNormalizeSignature_EmptyString(t *testing.T) {
+	// Empty string should return empty
+	result := normalizeSignature("")
+	if result != "" {
+		t.Errorf("Expected empty for empty input, got '%s'", result)
+	}
+}
+
+func TestNormalizeSignature_CLIProxyAPIFormat_EmptyAfterPrefix(t *testing.T) {
+	// "claude#" with nothing after should extract empty string
+	sig := "claude#"
+	result := normalizeSignature(sig)
+
+	if result != "" {
+		t.Errorf("Expected empty string, got '%s'", result)
+	}
+}
+
+func TestNormalizeSignature_RoundTrip_AnthropicToGoogle(t *testing.T) {
+	// Simulate: Anthropic returns E... -> we encode -> result starts with R
+	anthropicSig := "EtgCCkgICxACGAIqQGF8Wm8HDPN/PnZe6Mv5SGcFreSRLSo8/i5qfxfx7dOxRoZGOQ"
+
+	result := normalizeSignature(anthropicSig)
+
+	// Result should start with R (base64 of 'E' = 0x45 = 69)
+	// base64("E") = "RQ==" so base64("Etg...") starts with "R"
+	if !strings.HasPrefix(result, "R") {
+		t.Errorf("Encoded signature should start with 'R', got prefix '%c'", result[0])
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_SignaturePassthrough(t *testing.T) {
+	cache.ClearSignatureCache("")
+
+	// Test that signature is correctly passed through to the output
+	validSig := "claude#R1234567890abcdef1234567890abcdef1234567890abcdef12"
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me think...", "signature": "` + validSig + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	// Check thinking block has thoughtSignature
+	thoughtSig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature").String()
+
+	// Should be the part after "claude#"
+	expectedSig := "R1234567890abcdef1234567890abcdef1234567890abcdef12"
+	if thoughtSig != expectedSig {
+		t.Errorf("Expected thoughtSignature '%s', got '%s'", expectedSig, thoughtSig)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_AnthropicSignatureFormat(t *testing.T) {
+	original := cache.SignatureCacheEnabled()
+	defer cache.SetSignatureCacheEnabled(original)
+
+	cache.SetSignatureCacheEnabled(false)
+
+	anthropicSig := "EoYDCkYIDBgCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Thinking...", "signature": "` + anthropicSig + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	thoughtSig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature").String()
+
+	if !strings.HasPrefix(thoughtSig, "R") {
+		t.Errorf("Expected thoughtSignature to start with 'R' (base64 of E...), got '%s'", thoughtSig)
+	}
+
+	if strings.Contains(thoughtSig, "#") {
+		t.Errorf("thoughtSignature should not contain '#', got '%s'", thoughtSig)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ToolUseInheritsSignature(t *testing.T) {
+	// Test that tool_use inherits signature from preceding thinking block
+	validSig := "claude#R1234567890abcdef1234567890abcdef1234567890abcdef12"
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me use a tool...", "signature": "` + validSig + `"},
+					{"type": "tool_use", "id": "tool_123", "name": "test_tool", "input": {"arg": "value"}}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	// Both thinking and tool_use should have the same signature
+	thinkingSig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature").String()
+	toolSig := gjson.Get(outputStr, "request.contents.0.parts.1.thoughtSignature").String()
+
+	expectedSig := "R1234567890abcdef1234567890abcdef1234567890abcdef12"
+
+	if thinkingSig != expectedSig {
+		t.Errorf("Thinking thoughtSignature expected '%s', got '%s'", expectedSig, thinkingSig)
+	}
+
+	if toolSig != expectedSig {
+		t.Errorf("Tool thoughtSignature expected '%s', got '%s'", expectedSig, toolSig)
+	}
+}
+
+// ============================================================================
+// SignatureCacheEnabled Toggle Tests
+// ============================================================================
+
+func TestSignatureCacheEnabled_DefaultTrue(t *testing.T) {
+	if !cache.SignatureCacheEnabled() {
+		t.Error("SignatureCacheEnabled should be true by default")
+	}
+}
+
+func TestSignatureCacheEnabled_Toggle(t *testing.T) {
+	original := cache.SignatureCacheEnabled()
+	defer cache.SetSignatureCacheEnabled(original)
+
+	cache.SetSignatureCacheEnabled(false)
+	if cache.SignatureCacheEnabled() {
+		t.Error("SignatureCacheEnabled should be false after SetSignatureCacheEnabled(false)")
+	}
+
+	cache.SetSignatureCacheEnabled(true)
+	if !cache.SignatureCacheEnabled() {
+		t.Error("SignatureCacheEnabled should be true after SetSignatureCacheEnabled(true)")
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_CacheEnabled_DropsUnsigned(t *testing.T) {
+	cache.ClearSignatureCache("")
+	original := cache.SignatureCacheEnabled()
+	defer cache.SetSignatureCacheEnabled(original)
+
+	cache.SetSignatureCacheEnabled(true)
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me think..."},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("With cache enabled, expected 1 part (thinking dropped), got %d", len(parts))
+	}
+
+	if parts[0].Get("thought").Bool() {
+		t.Error("Thinking block should be removed when unsigned and cache enabled")
+	}
+	if parts[0].Get("text").String() != "Answer" {
+		t.Errorf("Expected text 'Answer', got '%s'", parts[0].Get("text").String())
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_CacheDisabled_NormalizesAnthropicSignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+	original := cache.SignatureCacheEnabled()
+	defer cache.SetSignatureCacheEnabled(original)
+
+	cache.SetSignatureCacheEnabled(false)
+
+	// Valid Claude signature with 0x12 first byte
+	anthropicSig := "EoYDCkYIDBgCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Thinking...", "signature": "` + anthropicSig + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	thoughtSig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature").String()
+
+	if !strings.HasPrefix(thoughtSig, "R") {
+		t.Errorf("Expected thoughtSignature to start with 'R' (base64 of E...), got '%s'", thoughtSig)
+	}
+
+	if strings.Contains(thoughtSig, "#") {
+		t.Errorf("thoughtSignature should not contain '#', got '%s'", thoughtSig)
+	}
+}
+
+// ============================================================================
+// isValidClaudeSignature Tests
+// ============================================================================
+
+func TestIsValidClaudeSignature_ValidAnthropicMaxFormat(t *testing.T) {
+	// Valid Max subscription: 0x12 prefix, Channel=12
+	sig := "EoYDCkYIDBgCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	if !isValidClaudeSignature(sig) {
+		t.Error("Valid Anthropic Max signature should pass validation")
+	}
+}
+
+func TestIsValidClaudeSignature_ValidAnthropicAPIFormat(t *testing.T) {
+	// Valid API: 0x12 prefix, Channel=11
+	sig := "EoUICkYICxgCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	if !isValidClaudeSignature(sig) {
+		t.Error("Valid Anthropic API signature should pass validation")
+	}
+}
+
+func TestIsValidClaudeSignature_ValidAWSBedrockFormat(t *testing.T) {
+	// Valid AWS Bedrock: 0x12 prefix, Channel=11, Field2=1
+	sig := "Et0DCkgICxABGAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+	if !isValidClaudeSignature(sig) {
+		t.Error("Valid AWS Bedrock signature should pass validation")
+	}
+}
+
+func TestIsValidClaudeSignature_ValidGoogleVertexFormat(t *testing.T) {
+	// Valid Google Vertex: 0x12 prefix, Channel=11, Field2=2
+	sig := "EpUMCkgICxACGAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+	if !isValidClaudeSignature(sig) {
+		t.Error("Valid Google Vertex 1-layer signature should pass validation")
+	}
+}
+
+func TestIsValidClaudeSignature_ValidVertexTwoLayerFormat(t *testing.T) {
+	// Valid 2-layer: R... that decodes to E... which decodes to 0x12 prefix
+	innerSig := "EpUMCkgICxACGAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+	twoLayerSig := base64.StdEncoding.EncodeToString([]byte(innerSig))
+
+	if !strings.HasPrefix(twoLayerSig, "R") {
+		t.Fatalf("Test setup error: 2-layer signature should start with R, got %c", twoLayerSig[0])
+	}
+
+	if !isValidClaudeSignature(twoLayerSig) {
+		t.Error("Valid 2-layer Vertex signature should pass validation")
+	}
+}
+
+func TestIsValidClaudeSignature_WithCLIProxyAPIPrefix(t *testing.T) {
+	// Valid signature with "claude#" prefix
+	innerSig := "EoYDCkYIDBgCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	sig := "claude#" + innerSig
+
+	if !isValidClaudeSignature(sig) {
+		t.Error("Valid signature with 'claude#' prefix should pass validation")
+	}
+}
+
+func TestIsValidClaudeSignature_InvalidEmptyString(t *testing.T) {
+	if isValidClaudeSignature("") {
+		t.Error("Empty signature should fail validation")
+	}
+}
+
+func TestIsValidClaudeSignature_InvalidTooShort(t *testing.T) {
+	if isValidClaudeSignature("EoAB") {
+		t.Error("Short signature should fail validation")
+	}
+}
+
+func TestIsValidClaudeSignature_InvalidWrongPrefix(t *testing.T) {
+	// Does not start with E or R
+	sig := "XoYDCkYIDBgCKkCTiMT2RGJPOfSxH3FmzDTRRwVQ5C2l8QHba5Ukg"
+	if isValidClaudeSignature(sig) {
+		t.Error("Signature with wrong prefix should fail validation")
+	}
+}
+
+func TestIsValidClaudeSignature_InvalidProtobufStructure(t *testing.T) {
+	// Valid Base64 but wrong first byte (not 0x12)
+	// base64("ABC...") = first byte is 'A' = 0x41, not 0x12
+	sig := "QUJDREVGMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MA=="
+	if isValidClaudeSignature(sig) {
+		t.Error("Signature with wrong Protobuf structure should fail validation")
+	}
+}
+
+func TestIsValidClaudeSignature_InvalidBase64(t *testing.T) {
+	// E prefix but invalid Base64 content
+	sig := "E!!!invalidbase64!!!1234567890123456789012345678901234567890"
+	if isValidClaudeSignature(sig) {
+		t.Error("Invalid Base64 signature should fail validation")
+	}
+}
+
+func TestIsValidClaudeSignature_InvalidTwoLayerFirstLayerNotE(t *testing.T) {
+	// R... but first layer doesn't decode to E...
+	innerContent := "XYZnotEformat123456789012345678901234567890123456"
+	twoLayerSig := base64.StdEncoding.EncodeToString([]byte(innerContent))
+
+	if isValidClaudeSignature(twoLayerSig) {
+		t.Error("2-layer signature with invalid inner format should fail validation")
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_CacheDisabled_InvalidSignatureDropsThinking(t *testing.T) {
+	cache.ClearSignatureCache("")
+	original := cache.SignatureCacheEnabled()
+	defer cache.SetSignatureCacheEnabled(original)
+
+	cache.SetSignatureCacheEnabled(false)
+
+	invalidSig := "invalid_signature"
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Thinking...", "signature": "` + invalidSig + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("With invalid signature in bypass mode, expected 1 part (thinking dropped), got %d", len(parts))
+	}
+
+	if parts[0].Get("text").String() != "Answer" {
+		t.Errorf("Expected text 'Answer', got '%s'", parts[0].Get("text").String())
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_CacheDisabled_UnsignedDropsThinking(t *testing.T) {
+	cache.ClearSignatureCache("")
+	original := cache.SignatureCacheEnabled()
+	defer cache.SetSignatureCacheEnabled(original)
+
+	cache.SetSignatureCacheEnabled(false)
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me think..."},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("With no signature in bypass mode, expected 1 part (thinking dropped), got %d", len(parts))
+	}
+
+	if parts[0].Get("text").String() != "Answer" {
+		t.Errorf("Expected text 'Answer', got '%s'", parts[0].Get("text").String())
 	}
 }
