@@ -330,6 +330,8 @@ func (m *Manager) UpdateFromPeer(ctx context.Context, auth *Auth) (*Auth, error)
 	// Persist but skip broadcasting (use special context flag)
 	ctx = context.WithValue(ctx, "skipBroadcast", true)
 	_ = m.persist(ctx, auth)
+	// Clear any suspension states for this client since credentials were refreshed
+	registry.GetGlobalRegistry().ResumeClientAllModels(auth.ID)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -2132,6 +2134,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.LastError = nil
 	updated.UpdatedAt = now
 	_, _ = m.Update(ctx, updated)
+
+	// Clear any suspension states since credentials were refreshed successfully
+	registry.GetGlobalRegistry().ResumeClientAllModels(updated.ID)
 
 	// Broadcast the updated credentials to all configured peers
 	m.broadcastCredentialUpdate(ctx, updated)
