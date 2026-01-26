@@ -109,9 +109,9 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
-	// AutoDelete configures automatic deletion of OAuth credential files
+	// AutoDisable configures automatic disabling of OAuth credential files
 	// when receiving specific HTTP error codes indicating permanent failure.
-	AutoDelete AutoDeleteConfig `yaml:"auto-delete" json:"auto-delete"`
+	AutoDisable AutoDisableConfig `yaml:"auto-disable" json:"auto-disable"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
@@ -252,34 +252,34 @@ type PayloadModelRule struct {
 	Protocol string `yaml:"protocol" json:"protocol"`
 }
 
-// AutoDeleteConfig defines automatic deletion rules for OAuth credentials
+// AutoDisableConfig defines automatic disable rules for OAuth credentials
 // when specific HTTP status codes are received.
-type AutoDeleteConfig struct {
-	// Providers maps provider names to their auto-delete rules.
+type AutoDisableConfig struct {
+	// Providers maps provider names to their auto-disable rules.
 	// Supported providers: codex, claude, gemini-cli, antigravity, qwen, iflow
-	Providers map[string]AutoDeleteRule `yaml:"providers,omitempty" json:"providers,omitempty"`
+	Providers map[string]AutoDisableRule `yaml:"providers,omitempty" json:"providers,omitempty"`
 }
 
-// AutoDeleteRule defines when to auto-delete credentials for a specific provider.
-type AutoDeleteRule struct {
-	// Enabled controls whether auto-delete is active for this provider.
+// AutoDisableRule defines when to auto-disable credentials for a specific provider.
+type AutoDisableRule struct {
+	// Enabled controls whether auto-disable is active for this provider.
 	Enabled bool `yaml:"enabled" json:"enabled"`
 
-	// StatusCodes lists HTTP status codes that trigger deletion.
+	// StatusCodes lists HTTP status codes that trigger disabling.
 	// Common values: [401, 403]
 	// Default if empty and Enabled=true: [401, 403]
 	StatusCodes []int `yaml:"status-codes,omitempty" json:"status-codes,omitempty"`
 
-	// Proxy controls auto-delete during proxy requests (SDK layer).
+	// Proxy controls auto-disable during proxy requests (SDK layer).
 	// Default: true (enabled when Enabled=true, for backward compatibility)
 	Proxy *bool `yaml:"proxy,omitempty" json:"proxy,omitempty"`
 
-	// Management controls auto-delete during management API calls (/api-call).
+	// Management controls auto-disable during management API calls (/api-call).
 	// Default: false (must be explicitly enabled)
 	Management bool `yaml:"management,omitempty" json:"management,omitempty"`
 }
 
-func (c *AutoDeleteConfig) Validate() error {
+func (c *AutoDisableConfig) Validate() error {
 	for provider, rule := range c.Providers {
 		for _, code := range rule.StatusCodes {
 			if code < 100 || code > 599 {
@@ -619,9 +619,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
-	// Validate auto-delete configuration.
-	if err := cfg.AutoDelete.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid auto-delete config: %w", err)
+	if err := cfg.AutoDisable.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid auto-disable config: %w", err)
 	}
 
 	if cfg.legacyMigrationPending {

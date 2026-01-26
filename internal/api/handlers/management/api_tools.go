@@ -210,7 +210,7 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
-	h.tryAPICallAutoDelete(c.Request.Context(), auth, resp.StatusCode)
+	h.tryAPICallAutoDisable(c.Request.Context(), auth, resp.StatusCode)
 
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
@@ -706,7 +706,7 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 	return nil
 }
 
-func (h *Handler) tryAPICallAutoDelete(ctx context.Context, auth *coreauth.Auth, statusCode int) {
+func (h *Handler) tryAPICallAutoDisable(ctx context.Context, auth *coreauth.Auth, statusCode int) {
 	if h == nil || h.cfg == nil || h.authManager == nil {
 		return
 	}
@@ -714,19 +714,19 @@ func (h *Handler) tryAPICallAutoDelete(ctx context.Context, auth *coreauth.Auth,
 		return
 	}
 
-	rule, ok := h.cfg.AutoDelete.Providers[strings.ToLower(auth.Provider)]
+	rule, ok := h.cfg.AutoDisable.Providers[strings.ToLower(auth.Provider)]
 	if !ok || !rule.Enabled || !rule.Management {
 		return
 	}
 
 	statusCodes := rule.StatusCodes
 	if len(statusCodes) == 0 {
-		statusCodes = coreauth.DefaultAutoDeleteStatusCodes
+		statusCodes = coreauth.DefaultAutoDisableStatusCodes
 	}
 
 	if !slices.Contains(statusCodes, statusCode) {
 		return
 	}
 
-	h.authManager.RequestAutoDelete(ctx, auth.ID, auth.FileName, time.Now())
+	h.authManager.RequestAutoDisable(ctx, auth.ID, statusCode, time.Now())
 }
