@@ -151,11 +151,161 @@ func TestSanitizeEmailForFilename(t *testing.T) {
 // createTestJWT creates a test JWT token with the given claims
 func createTestJWT(claims map[string]any) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
-	
+
 	payloadBytes, _ := json.Marshal(claims)
 	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
-	
+
 	signature := base64.RawURLEncoding.EncodeToString([]byte("fake-signature"))
-	
+
 	return header + "." + payload + "." + signature
+}
+
+func TestExtractIDCIdentifier(t *testing.T) {
+	tests := []struct {
+		name     string
+		startURL string
+		expected string
+	}{
+		{
+			name:     "Empty URL",
+			startURL: "",
+			expected: "",
+		},
+		{
+			name:     "Standard IDC URL with d- prefix",
+			startURL: "https://d-1234567890.awsapps.com/start",
+			expected: "d-1234567890",
+		},
+		{
+			name:     "IDC URL with company name",
+			startURL: "https://my-company.awsapps.com/start",
+			expected: "my-company",
+		},
+		{
+			name:     "IDC URL with simple name",
+			startURL: "https://acme-corp.awsapps.com/start",
+			expected: "acme-corp",
+		},
+		{
+			name:     "IDC URL without https",
+			startURL: "http://d-9876543210.awsapps.com/start",
+			expected: "d-9876543210",
+		},
+		{
+			name:     "IDC URL with subdomain only",
+			startURL: "https://test.awsapps.com/start",
+			expected: "test",
+		},
+		{
+			name:     "Builder ID URL",
+			startURL: "https://view.awsapps.com/start",
+			expected: "view",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ExtractIDCIdentifier(tt.startURL)
+			if result != tt.expected {
+				t.Errorf("ExtractIDCIdentifier() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGenerateTokenFileName(t *testing.T) {
+	tests := []struct {
+		name      string
+		tokenData *KiroTokenData
+		expected  string
+	}{
+		{
+			name: "IDC with email",
+			tokenData: &KiroTokenData{
+				AuthMethod: "idc",
+				Email:      "user@example.com",
+				StartURL:   "https://d-1234567890.awsapps.com/start",
+			},
+			expected: "kiro-idc-user-example-com.json",
+		},
+		{
+			name: "IDC without email but with startUrl",
+			tokenData: &KiroTokenData{
+				AuthMethod: "idc",
+				Email:      "",
+				StartURL:   "https://d-1234567890.awsapps.com/start",
+			},
+			expected: "kiro-idc-d-1234567890.json",
+		},
+		{
+			name: "IDC with company name in startUrl",
+			tokenData: &KiroTokenData{
+				AuthMethod: "idc",
+				Email:      "",
+				StartURL:   "https://my-company.awsapps.com/start",
+			},
+			expected: "kiro-idc-my-company.json",
+		},
+		{
+			name: "IDC without email and without startUrl",
+			tokenData: &KiroTokenData{
+				AuthMethod: "idc",
+				Email:      "",
+				StartURL:   "",
+			},
+			expected: "kiro-idc.json",
+		},
+		{
+			name: "Builder ID with email",
+			tokenData: &KiroTokenData{
+				AuthMethod: "builder-id",
+				Email:      "user@gmail.com",
+				StartURL:   "https://view.awsapps.com/start",
+			},
+			expected: "kiro-builder-id-user-gmail-com.json",
+		},
+		{
+			name: "Builder ID without email",
+			tokenData: &KiroTokenData{
+				AuthMethod: "builder-id",
+				Email:      "",
+				StartURL:   "https://view.awsapps.com/start",
+			},
+			expected: "kiro-builder-id.json",
+		},
+		{
+			name: "Social auth with email",
+			tokenData: &KiroTokenData{
+				AuthMethod: "google",
+				Email:      "user@gmail.com",
+			},
+			expected: "kiro-google-user-gmail-com.json",
+		},
+		{
+			name: "Empty auth method",
+			tokenData: &KiroTokenData{
+				AuthMethod: "",
+				Email:      "",
+			},
+			expected: "kiro-unknown.json",
+		},
+		{
+			name: "Email with special characters",
+			tokenData: &KiroTokenData{
+				AuthMethod: "idc",
+				Email:      "user.name+tag@sub.example.com",
+				StartURL:   "https://d-1234567890.awsapps.com/start",
+			},
+			expected: "kiro-idc-user-name+tag-sub-example-com.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GenerateTokenFileName(tt.tokenData)
+			if result != tt.expected {
+				t.Errorf("GenerateTokenFileName() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
 }

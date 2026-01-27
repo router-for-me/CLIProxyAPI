@@ -421,7 +421,7 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *KiroTokenData) {
 			log.Errorf("OAuth Web: failed to resolve auth directory: %v", err)
 		}
 	}
-	
+
 	// Fall back to default location
 	if authDir == "" {
 		home, err := os.UserHomeDir()
@@ -431,24 +431,16 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *KiroTokenData) {
 		}
 		authDir = filepath.Join(home, ".cli-proxy-api")
 	}
-	
+
 	// Create directory if not exists
 	if err := os.MkdirAll(authDir, 0700); err != nil {
 		log.Errorf("OAuth Web: failed to create auth directory: %v", err)
 		return
 	}
-	
-	// Generate filename based on auth method
-	// Format: kiro-{authMethod}.json or kiro-{authMethod}-{email}.json
-	fileName := fmt.Sprintf("kiro-%s.json", tokenData.AuthMethod)
-	if tokenData.Email != "" {
-		// Sanitize email for filename (replace @ and . with -)
-		sanitizedEmail := tokenData.Email
-		sanitizedEmail = strings.ReplaceAll(sanitizedEmail, "@", "-")
-		sanitizedEmail = strings.ReplaceAll(sanitizedEmail, ".", "-")
-		fileName = fmt.Sprintf("kiro-%s-%s.json", tokenData.AuthMethod, sanitizedEmail)
-	}
-	
+
+	// Generate filename using the unified function
+	fileName := GenerateTokenFileName(tokenData)
+
 	authFilePath := filepath.Join(authDir, fileName)
 	
 	// Convert to storage format and save
@@ -811,13 +803,8 @@ func (h *OAuthWebHandler) handleImportToken(c *gin.Context) {
 	// Save token to file
 	h.saveTokenToFile(tokenData)
 
-	// Generate filename for response
-	fileName := fmt.Sprintf("kiro-%s.json", tokenData.AuthMethod)
-	if tokenData.Email != "" {
-		sanitizedEmail := strings.ReplaceAll(tokenData.Email, "@", "-")
-		sanitizedEmail = strings.ReplaceAll(sanitizedEmail, ".", "-")
-		fileName = fmt.Sprintf("kiro-%s-%s.json", tokenData.AuthMethod, sanitizedEmail)
-	}
+	// Generate filename for response using the unified function
+	fileName := GenerateTokenFileName(tokenData)
 
 	log.Infof("OAuth Web: token imported successfully")
 	c.JSON(http.StatusOK, gin.H{
