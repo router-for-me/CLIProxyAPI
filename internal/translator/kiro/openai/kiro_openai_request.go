@@ -381,6 +381,16 @@ func shortenToolNameIfNeeded(name string) string {
 	return name[:limit]
 }
 
+func ensureKiroInputSchema(parameters interface{}) interface{} {
+	if parameters != nil {
+		return parameters
+	}
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+
 // convertOpenAIToolsToKiro converts OpenAI tools to Kiro format
 func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
@@ -401,7 +411,12 @@ func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 
 		name := fn.Get("name").String()
 		description := fn.Get("description").String()
-		parameters := fn.Get("parameters").Value()
+		parametersResult := fn.Get("parameters")
+		var parameters interface{}
+		if parametersResult.Exists() && parametersResult.Type != gjson.Null {
+			parameters = parametersResult.Value()
+		}
+		parameters = ensureKiroInputSchema(parameters)
 
 		// Shorten tool name if it exceeds 64 characters (common with MCP tools)
 		originalName := name

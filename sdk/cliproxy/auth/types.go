@@ -194,6 +194,108 @@ func (a *Auth) ProxyInfo() string {
 	return "via proxy"
 }
 
+// DisableCoolingOverride returns the auth-file scoped disable_cooling override when present.
+// The value is read from metadata key "disable_cooling" (or legacy "disable-cooling").
+func (a *Auth) DisableCoolingOverride() (bool, bool) {
+	if a == nil || a.Metadata == nil {
+		return false, false
+	}
+	if val, ok := a.Metadata["disable_cooling"]; ok {
+		if parsed, okParse := parseBoolAny(val); okParse {
+			return parsed, true
+		}
+	}
+	if val, ok := a.Metadata["disable-cooling"]; ok {
+		if parsed, okParse := parseBoolAny(val); okParse {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+// RequestRetryOverride returns the auth-file scoped request_retry override when present.
+// The value is read from metadata key "request_retry" (or legacy "request-retry").
+func (a *Auth) RequestRetryOverride() (int, bool) {
+	if a == nil || a.Metadata == nil {
+		return 0, false
+	}
+	if val, ok := a.Metadata["request_retry"]; ok {
+		if parsed, okParse := parseIntAny(val); okParse {
+			if parsed < 0 {
+				parsed = 0
+			}
+			return parsed, true
+		}
+	}
+	if val, ok := a.Metadata["request-retry"]; ok {
+		if parsed, okParse := parseIntAny(val); okParse {
+			if parsed < 0 {
+				parsed = 0
+			}
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func parseBoolAny(val any) (bool, bool) {
+	switch typed := val.(type) {
+	case bool:
+		return typed, true
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return false, false
+		}
+		parsed, err := strconv.ParseBool(trimmed)
+		if err != nil {
+			return false, false
+		}
+		return parsed, true
+	case float64:
+		return typed != 0, true
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return false, false
+		}
+		return parsed != 0, true
+	default:
+		return false, false
+	}
+}
+
+func parseIntAny(val any) (int, bool) {
+	switch typed := val.(type) {
+	case int:
+		return typed, true
+	case int32:
+		return int(typed), true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(parsed), true
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return 0, false
+		}
+		parsed, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
+}
+
 func (a *Auth) AccountInfo() (string, string) {
 	if a == nil {
 		return "", ""
