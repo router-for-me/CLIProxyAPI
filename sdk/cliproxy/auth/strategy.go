@@ -1,6 +1,10 @@
 package auth
 
-import "strings"
+import (
+	"strings"
+
+	appconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+)
 
 const (
 	RoutingStrategyRoundRobin      = "round-robin"
@@ -44,27 +48,43 @@ func normalizeSelectorStrategy(strategy string) string {
 // NormalizeRoutingPreference normalizes a routing preference string.
 // Supported values: "provider-first", "credential-first".
 func NormalizeRoutingPreference(preference string) (string, bool) {
-	normalized := strings.ToLower(strings.TrimSpace(preference))
+	normalized, ok := appconfig.NormalizeRoutingPreference(preference)
+	if !ok {
+		return "", false
+	}
 	switch normalized {
-	case "provider-first", "providerfirst", "pf":
+	case "provider-first":
 		return RoutingStrategyProviderFirst, true
-	case "credential-first", "credentialfirst", "cf":
+	case "credential-first":
 		return RoutingStrategyCredentialFirst, true
 	default:
 		return "", false
 	}
 }
 
-func normalizeSameLevelStrategy(strategy string) string {
-	normalized := strings.ToLower(strings.TrimSpace(strategy))
+// NormalizeSameLevelRoutingStrategy normalizes the routing.strategy value used within the chosen group.
+// Supported values: "round-robin", "fill-first". It also accepts "random" as an alias for round-robin.
+func NormalizeSameLevelRoutingStrategy(strategy string) (string, bool) {
+	normalized, ok := appconfig.NormalizeRoutingSameLevelStrategy(strategy)
+	if !ok {
+		return "", false
+	}
 	switch normalized {
-	case "", "round-robin", "roundrobin", "rr", "random":
-		return RoutingStrategyRoundRobin
-	case "fill-first", "fillfirst", "ff":
-		return RoutingStrategyFillFirst
+	case "round-robin":
+		return RoutingStrategyRoundRobin, true
+	case "fill-first":
+		return RoutingStrategyFillFirst, true
 	default:
+		return "", false
+	}
+}
+
+func normalizeSameLevelStrategy(strategy string) string {
+	normalized, ok := NormalizeSameLevelRoutingStrategy(strategy)
+	if !ok {
 		return RoutingStrategyRoundRobin
 	}
+	return normalized
 }
 
 // NormalizeEffectiveSelectorKey returns a stable key representing the effective selector behavior.

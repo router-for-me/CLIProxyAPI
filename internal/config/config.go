@@ -609,15 +609,15 @@ func (cfg *Config) SanitizeRouting() {
 	cfg.Routing.Preference = strings.TrimSpace(cfg.Routing.Preference)
 	cfg.Routing.Strategy = strings.TrimSpace(cfg.Routing.Strategy)
 
-	if normalized, ok := normalizeRoutingPreference(cfg.Routing.Preference); ok {
+	if normalized, ok := NormalizeRoutingPreference(cfg.Routing.Preference); ok {
 		cfg.Routing.Preference = normalized
 	} else if cfg.Routing.Preference != "" {
 		cfg.Routing.Preference = ""
 	}
 
-	if normalized, ok := normalizeRoutingSameLevelStrategy(cfg.Routing.Strategy); ok {
+	if normalized, ok := NormalizeRoutingSameLevelStrategy(cfg.Routing.Strategy); ok {
 		cfg.Routing.Strategy = normalized
-	} else if pref, okPref := normalizeRoutingPreference(cfg.Routing.Strategy); okPref {
+	} else if pref, okPref := NormalizeRoutingPreference(cfg.Routing.Strategy); okPref {
 		// Migrate legacy combined config where preference was stored in strategy.
 		if cfg.Routing.Preference == "" {
 			cfg.Routing.Preference = pref
@@ -629,7 +629,9 @@ func (cfg *Config) SanitizeRouting() {
 	}
 }
 
-func normalizeRoutingPreference(value string) (string, bool) {
+// NormalizeRoutingPreference normalizes the routing.preference value.
+// Supported values: "provider-first", "credential-first".
+func NormalizeRoutingPreference(value string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	switch normalized {
 	case "provider-first", "providerfirst", "pf":
@@ -641,7 +643,9 @@ func normalizeRoutingPreference(value string) (string, bool) {
 	}
 }
 
-func normalizeRoutingSameLevelStrategy(value string) (string, bool) {
+// NormalizeRoutingSameLevelStrategy normalizes the routing.strategy value used within the chosen group.
+// Supported values: "round-robin", "fill-first". It also accepts "random" as an alias for round-robin.
+func NormalizeRoutingSameLevelStrategy(value string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	switch normalized {
 	case "", "round-robin", "roundrobin", "rr", "random":
