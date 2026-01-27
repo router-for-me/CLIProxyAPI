@@ -147,7 +147,11 @@ type QuotaExceeded struct {
 
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
-	// Strategy selects the credential selection strategy.
+	// Preference selects which group to try first in mixed routing scenarios.
+	// Supported values: "provider-first", "credential-first". When empty, no group preference is applied.
+	Preference string `yaml:"preference,omitempty" json:"preference,omitempty"`
+
+	// Strategy selects the selection strategy within the chosen candidate set.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 }
@@ -568,6 +572,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
+	// Normalize routing preference/strategy (and migrate legacy combined values).
+	cfg.SanitizeRouting()
+
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 
@@ -591,6 +598,59 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// SanitizeRouting normalizes routing preference/strategy and migrates legacy values.
+// Legacy: routing.strategy could contain "provider-first"/"credential-first"/"random".
+func (cfg *Config) SanitizeRouting() {
+	if cfg == nil {
+		return
+	}
+	cfg.Routing.Preference = strings.TrimSpace(cfg.Routing.Preference)
+	cfg.Routing.Strategy = strings.TrimSpace(cfg.Routing.Strategy)
+
+	if normalized, ok := normalizeRoutingPreference(cfg.Routing.Preference); ok {
+		cfg.Routing.Preference = normalized
+	} else if cfg.Routing.Preference != "" {
+		cfg.Routing.Preference = ""
+	}
+
+	if normalized, ok := normalizeRoutingSameLevelStrategy(cfg.Routing.Strategy); ok {
+		cfg.Routing.Strategy = normalized
+	} else if pref, okPref := normalizeRoutingPreference(cfg.Routing.Strategy); okPref {
+		// Migrate legacy combined config where preference was stored in strategy.
+		if cfg.Routing.Preference == "" {
+			cfg.Routing.Preference = pref
+		}
+		cfg.Routing.Strategy = "round-robin"
+		cfg.legacyMigrationPending = true
+	} else {
+		cfg.Routing.Strategy = "round-robin"
+	}
+}
+
+func normalizeRoutingPreference(value string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "provider-first", "providerfirst", "pf":
+		return "provider-first", true
+	case "credential-first", "credentialfirst", "cf":
+		return "credential-first", true
+	default:
+		return "", false
+	}
+}
+
+func normalizeRoutingSameLevelStrategy(value string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "", "round-robin", "roundrobin", "rr", "random":
+		return "round-robin", true
+	case "fill-first", "fillfirst", "ff":
+		return "fill-first", true
+	default:
+		return "", false
+	}
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.

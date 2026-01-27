@@ -507,10 +507,12 @@ func (s *Service) Run(ctx context.Context) error {
 
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
+		previousPreference := ""
 		previousStrategy := ""
 		s.cfgMu.RLock()
 		if s.cfg != nil {
-			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+			previousPreference = s.cfg.Routing.Preference
+			previousStrategy = s.cfg.Routing.Strategy
 		}
 		s.cfgMu.RUnlock()
 
@@ -523,27 +525,19 @@ func (s *Service) Run(ctx context.Context) error {
 			return
 		}
 
-		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-		normalizeStrategy := func(strategy string) string {
-			switch strategy {
-			case "fill-first", "fillfirst", "ff":
-				return "fill-first"
-			default:
-				return "round-robin"
+		previousKey := coreauth.NormalizeEffectiveSelectorKey(previousPreference, previousStrategy)
+		nextKey := coreauth.NormalizeEffectiveSelectorKey(newCfg.Routing.Preference, newCfg.Routing.Strategy)
+		if s.coreManager != nil && previousKey != nextKey {
+			s.coreManager.SetSelector(coreauth.NewSelectorWithRouting(newCfg.Routing.Preference, newCfg.Routing.Strategy))
+			if pref, ok := coreauth.NormalizeRoutingPreference(newCfg.Routing.Preference); ok {
+				log.Infof("routing updated: preference=%s, strategy=%s", pref, coreauth.NormalizeSelectorStrategy(newCfg.Routing.Strategy))
+			} else {
+				displayNext := coreauth.NormalizeSelectorStrategy(newCfg.Routing.Strategy)
+				if normalized, ok := coreauth.NormalizeRoutingStrategy(newCfg.Routing.Strategy); ok {
+					displayNext = normalized
+				}
+				log.Infof("routing strategy updated to %s", displayNext)
 			}
-		}
-		previousStrategy = normalizeStrategy(previousStrategy)
-		nextStrategy = normalizeStrategy(nextStrategy)
-		if s.coreManager != nil && previousStrategy != nextStrategy {
-			var selector coreauth.Selector
-			switch nextStrategy {
-			case "fill-first":
-				selector = &coreauth.FillFirstSelector{}
-			default:
-				selector = &coreauth.RoundRobinSelector{}
-			}
-			s.coreManager.SetSelector(selector)
-			log.Infof("routing strategy updated to %s", nextStrategy)
 		}
 
 		s.applyRetryConfig(newCfg)

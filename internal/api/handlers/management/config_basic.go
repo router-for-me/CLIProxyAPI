@@ -260,10 +260,10 @@ func (h *Handler) PutForceModelPrefix(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.ForceModelPrefix = v })
 }
 
-func normalizeRoutingStrategy(strategy string) (string, bool) {
+func normalizeRoutingSameLevelStrategy(strategy string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(strategy))
 	switch normalized {
-	case "", "round-robin", "roundrobin", "rr":
+	case "", "round-robin", "roundrobin", "rr", "random":
 		return "round-robin", true
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
@@ -272,9 +272,21 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 	}
 }
 
+func normalizeRoutingPreference(preference string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(preference))
+	switch normalized {
+	case "provider-first", "providerfirst", "pf":
+		return "provider-first", true
+	case "credential-first", "credentialfirst", "cf":
+		return "credential-first", true
+	default:
+		return "", false
+	}
+}
+
 // RoutingStrategy
 func (h *Handler) GetRoutingStrategy(c *gin.Context) {
-	strategy, ok := normalizeRoutingStrategy(h.cfg.Routing.Strategy)
+	strategy, ok := normalizeRoutingSameLevelStrategy(h.cfg.Routing.Strategy)
 	if !ok {
 		c.JSON(200, gin.H{"strategy": strings.TrimSpace(h.cfg.Routing.Strategy)})
 		return
@@ -289,12 +301,46 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	normalized, ok := normalizeRoutingStrategy(*body.Value)
+	if normalizedPref, okPref := normalizeRoutingPreference(*body.Value); okPref {
+		h.cfg.Routing.Preference = normalizedPref
+		if strings.TrimSpace(h.cfg.Routing.Strategy) == "" {
+			h.cfg.Routing.Strategy = "round-robin"
+		}
+		h.persist(c)
+		return
+	}
+	normalized, ok := normalizeRoutingSameLevelStrategy(*body.Value)
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid strategy"})
 		return
 	}
 	h.cfg.Routing.Strategy = normalized
+	h.persist(c)
+}
+
+// RoutingPreference
+func (h *Handler) GetRoutingPreference(c *gin.Context) {
+	preference, ok := normalizeRoutingPreference(h.cfg.Routing.Preference)
+	if !ok {
+		c.JSON(200, gin.H{"preference": strings.TrimSpace(h.cfg.Routing.Preference)})
+		return
+	}
+	c.JSON(200, gin.H{"preference": preference})
+}
+func (h *Handler) PutRoutingPreference(c *gin.Context) {
+	var body struct {
+		Value *string `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	normalized, ok := normalizeRoutingPreference(*body.Value)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid preference"})
+		return
+	}
+	h.cfg.Routing.Preference = normalized
 	h.persist(c)
 }
 
