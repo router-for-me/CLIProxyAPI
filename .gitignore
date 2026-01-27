@@ -48,3 +48,6 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+cliproxyapi-darwin-arm64
+cliproxyapi-linux
+cliproxyapi-patched

@@ -573,6 +573,14 @@ func (s *Service) Run(ctx context.Context) error {
 
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	s.watcherCancel = watcherCancel
+
+	// Sync auth files from master node if configured (before starting file watcher)
+	if s.coreManager != nil {
+		if err := s.coreManager.SyncAuthsFromMaster(ctx, s.cfg.AuthDir); err != nil {
+			log.Warnf("failed to sync auths from master: %v", err)
+		}
+	}
+
 	if err = watcherWrapper.Start(watcherCtx); err != nil {
 		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
 	}
