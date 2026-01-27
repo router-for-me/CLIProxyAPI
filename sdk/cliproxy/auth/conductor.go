@@ -1528,7 +1528,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
+		// Skip persist when fetching from master to avoid file watcher
+		// overwriting the new token that fetchCredentialFromMaster will set
+		if !shouldFetchFromMaster {
+			_ = m.persist(ctx, auth)
+		}
 	}
 	m.mu.Unlock()
 
