@@ -188,6 +188,12 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 		ctx = context.Background()
 	}
 
+	// Skip auto-update when MANAGEMENT_STATIC_PATH is explicitly set (user wants to use custom/local version)
+	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
+		log.Debug("management asset auto-update skipped: MANAGEMENT_STATIC_PATH is set, using local file")
+		return
+	}
+
 	if disableControlPanel.Load() {
 		log.Debug("management asset sync skipped: control panel disabled by configuration")
 		return

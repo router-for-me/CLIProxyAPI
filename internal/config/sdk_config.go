@@ -9,6 +9,10 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ProxyDNS is the DNS server (DoT format: tls://host:port) used to resolve SS proxy server hostnames.
+	// Only used when proxy-url uses the ss:// scheme. Leave empty to use system DNS.
+	ProxyDNS string `yaml:"proxy-dns,omitempty" json:"proxy-dns,omitempty"`
+
 	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
 	// credentials as well.

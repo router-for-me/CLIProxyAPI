@@ -287,6 +287,10 @@ type ClaudeKey struct {
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ProxyDNS is the DNS server (DoT format: tls://host:port) used to resolve SS proxy server hostnames.
+	// Only used when proxy-url uses the ss:// scheme. Leave empty to use system DNS.
+	ProxyDNS string `yaml:"proxy-dns,omitempty" json:"proxy-dns,omitempty"`
+
 	// Models defines upstream model names and aliases for request routing.
 	Models []ClaudeModel `yaml:"models" json:"models"`
 
@@ -335,6 +339,10 @@ type CodexKey struct {
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ProxyDNS is the DNS server (DoT format: tls://host:port) used to resolve SS proxy server hostnames.
+	// Only used when proxy-url uses the ss:// scheme. Leave empty to use system DNS.
+	ProxyDNS string `yaml:"proxy-dns,omitempty" json:"proxy-dns,omitempty"`
+
 	// Models defines upstream model names and aliases for request routing.
 	Models []CodexModel `yaml:"models" json:"models"`
 
@@ -378,6 +386,10 @@ type GeminiKey struct {
 
 	// ProxyURL optionally overrides the global proxy for this API key.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// ProxyDNS is the DNS server (DoT format: tls://host:port) used to resolve SS proxy server hostnames.
+	// Only used when proxy-url uses the ss:// scheme. Leave empty to use system DNS.
+	ProxyDNS string `yaml:"proxy-dns,omitempty" json:"proxy-dns,omitempty"`
 
 	// Models defines upstream model names and aliases for request routing.
 	Models []GeminiModel `yaml:"models,omitempty" json:"models,omitempty"`
@@ -437,6 +449,10 @@ type OpenAICompatibilityAPIKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// ProxyDNS is the DNS server (DoT format: tls://host:port) used to resolve SS proxy server hostnames.
+	// Only used when proxy-url uses the ss:// scheme. Leave empty to use system DNS.
+	ProxyDNS string `yaml:"proxy-dns,omitempty" json:"proxy-dns,omitempty"`
 }
 
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,
