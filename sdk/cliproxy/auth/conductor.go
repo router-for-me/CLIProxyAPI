@@ -375,6 +375,8 @@ func (m *Manager) fetchCredentialFromMaster(ctx context.Context, id, provider st
 	auth.LastError = nil
 	auth.Status = StatusActive
 	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	auth.ModelStates = nil // Clear per-model suspend states
 	m.mu.Unlock()
 
 	// Clear suspension states
@@ -426,15 +428,49 @@ func (m *Manager) SyncAuthsFromMaster(ctx context.Context, authDir string) error
 		return err
 	}
 
-	// Write each auth to local file
+	// Sync each auth to memory and file
 	for _, syncData := range result.Auths {
+		// 1. Directly update memory (immediate effect)
+		auth := m.syncDataToAuth(syncData, authDir)
+		m.mu.Lock()
+		m.auths[auth.ID] = auth
+		m.mu.Unlock()
+
+		// 2. Write file for persistence
 		if err := m.writeAuthToFile(authDir, syncData); err != nil {
 			log.Warnf("failed to write auth file %s: %v", syncData.ID, err)
 		}
+
+		// 3. Clear suspend states
+		registry.GetGlobalRegistry().ResumeClientAllModels(auth.ID)
+
+		// 4. Notify Service layer to register executors
+		m.hook.OnAuthUpdated(ctx, auth.Clone())
 	}
 
 	log.Infof("synced %d auths from master", len(result.Auths))
 	return nil
+}
+
+// syncDataToAuth converts AuthSyncData to Auth for memory storage.
+func (m *Manager) syncDataToAuth(data AuthSyncData, authDir string) *Auth {
+	now := time.Now()
+	filename := data.ID
+	if !strings.HasSuffix(filename, ".json") {
+		filename += ".json"
+	}
+	return &Auth{
+		ID:        data.ID,
+		Provider:  data.Provider,
+		FileName:  filename,
+		Metadata:  data.Metadata,
+		Status:    StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Attributes: map[string]string{
+			"path": filepath.Join(authDir, filename),
+		},
+	}
 }
 
 // writeAuthToFile writes an auth entry to local file for file watcher to pick up.
@@ -1418,17 +1454,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				statusCode := statusCodeFromResult(result.Error)
 				switch statusCode {
 				case 401, 403:
-					// If credential-master is configured, fetch from master instead of waiting
+					// If credential-master is configured, fetch from master instead of suspending
 					// 401 = Unauthorized, 403 = Forbidden (Claude uses 403 for invalid tokens)
 					if m.GetCredentialMaster() != "" {
-						state.NextRetryAfter = now.Add(3 * time.Second)
-						suspendReason = "fetching_from_master"
 						shouldFetchFromMaster = true
+						// Don't suspend - let fetchCredentialFromMaster handle it
 					} else {
 						state.NextRetryAfter = now.Add(30 * time.Minute)
 						suspendReason = "unauthorized"
+						shouldSuspendModel = true
 					}
-					shouldSuspendModel = true
 				case 402:
 					next := now.Add(30 * time.Minute)
 					state.NextRetryAfter = next
@@ -1480,8 +1515,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				// If 401/403 and credential-master is configured, fetch from master
 				sc := statusCodeFromResult(result.Error)
 				if (sc == 401 || sc == 403) && m.GetCredentialMaster() != "" {
-					auth.NextRetryAfter = now.Add(3 * time.Second)
 					shouldFetchFromMaster = true
+					// Clear the failure state since we'll fetch fresh credentials
+					auth.NextRetryAfter = time.Time{}
+					auth.Unavailable = false
+					auth.LastError = nil
 				}
 			}
 		}
