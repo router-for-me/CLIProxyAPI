@@ -1089,6 +1089,7 @@ func (w *FileStreamingLogWriter) WriteAPIResponse(apiResponse []byte) error {
 		return nil
 	}
 	w.apiResponse = bytes.Clone(apiResponse)
+	w.apiResponseTimestamp = time.Now()
 	return nil
 }
 

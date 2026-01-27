@@ -7,10 +7,7 @@ package claude
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
-	"regexp"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
