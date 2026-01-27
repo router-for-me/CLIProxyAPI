@@ -106,17 +106,9 @@ func (e *modelCooldownError) Headers() http.Header {
 
 func authPriority(auth *Auth) int {
 	if auth == nil || auth.Attributes == nil {
-		return 0
+		return PriorityDefault
 	}
-	raw := strings.TrimSpace(auth.Attributes["priority"])
-	if raw == "" {
-		return 0
-	}
-	parsed, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0
-	}
-	return parsed
+	return ParsePriority(auth.Attributes["priority"])
 }
 
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {

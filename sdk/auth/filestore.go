@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -230,7 +231,40 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	if priority, ok := metadata["priority"]; ok && auth.Attributes != nil {
+		if parsed, okParsed := parsePriorityValue(priority); okParsed {
+			auth.Attributes["priority"] = strconv.Itoa(cliproxyauth.NormalizePriority(parsed))
+		}
+	}
 	return auth, nil
+}
+
+func parsePriorityValue(v any) (int, bool) {
+	switch raw := v.(type) {
+	case float64:
+		return int(raw), true
+	case int:
+		return raw, true
+	case int64:
+		return int(raw), true
+	case json.Number:
+		if n, err := raw.Int64(); err == nil {
+			return int(n), true
+		}
+		return 0, false
+	case string:
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			return 0, false
+		}
+		n, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	default:
+		return 0, false
+	}
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {
