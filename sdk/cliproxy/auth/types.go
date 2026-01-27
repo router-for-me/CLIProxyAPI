@@ -38,6 +38,9 @@ type Auth struct {
 	Unavailable bool `json:"unavailable"`
 	// ProxyURL overrides the global proxy setting for this auth if provided.
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// ProxyDNS is the DNS server (DoT format: tls://host:port) used to resolve SS proxy server hostnames.
+	// Only used when ProxyURL uses the ss:// scheme. Leave empty to use system DNS.
+	ProxyDNS string `json:"proxy_dns,omitempty"`
 	// Attributes stores provider specific metadata needed by executors (immutable configuration).
 	Attributes map[string]string `json:"attributes,omitempty"`
 	// Metadata stores runtime mutable provider state (e.g. tokens, cookies).

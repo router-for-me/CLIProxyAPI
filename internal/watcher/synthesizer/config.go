@@ -55,6 +55,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		prefix := strings.TrimSpace(entry.Prefix)
 		base := strings.TrimSpace(entry.BaseURL)
 		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		proxyDNS := strings.TrimSpace(entry.ProxyDNS)
 		id, token := idGen.Next("gemini:apikey", key, base)
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:gemini[%s]", token),
@@ -77,6 +78,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
+			ProxyDNS:   proxyDNS,
 			Attributes: attrs,
 			CreatedAt:  now,
 			UpdatedAt:  now,
@@ -118,6 +120,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		proxyDNS := strings.TrimSpace(ck.ProxyDNS)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "claude",
@@ -125,6 +128,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
+			ProxyDNS:   proxyDNS,
 			Attributes: attrs,
 			CreatedAt:  now,
 			UpdatedAt:  now,
@@ -165,6 +169,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		proxyDNS := strings.TrimSpace(ck.ProxyDNS)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "codex",
@@ -172,6 +177,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
+			ProxyDNS:   proxyDNS,
 			Attributes: attrs,
 			CreatedAt:  now,
 			UpdatedAt:  now,
@@ -204,6 +210,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			entry := &compat.APIKeyEntries[j]
 			key := strings.TrimSpace(entry.APIKey)
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			proxyDNS := strings.TrimSpace(entry.ProxyDNS)
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 			id, token := idGen.Next(idKind, key, base, proxyURL)
 			attrs := map[string]string{
@@ -229,6 +236,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,
+				ProxyDNS:   proxyDNS,
 				Attributes: attrs,
 				CreatedAt:  now,
 				UpdatedAt:  now,
@@ -284,6 +292,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		key := strings.TrimSpace(compat.APIKey)
 		prefix := strings.TrimSpace(compat.Prefix)
 		proxyURL := strings.TrimSpace(compat.ProxyURL)
+		proxyDNS := strings.TrimSpace(compat.ProxyDNS)
 		idKind := "vertex:apikey"
 		id, token := idGen.Next(idKind, key, base, proxyURL)
 		attrs := map[string]string{
@@ -308,6 +317,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
+			ProxyDNS:   proxyDNS,
 			Attributes: attrs,
 			CreatedAt:  now,
 			UpdatedAt:  now,

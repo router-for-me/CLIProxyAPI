@@ -28,6 +28,10 @@ type VertexCompatKey struct {
 	// ProxyURL optionally overrides the global proxy for this API key.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 
+	// ProxyDNS is the DNS server (DoT format: tls://host:port) used to resolve SS proxy server hostnames.
+	// Only used when proxy-url uses the ss:// scheme. Leave empty to use system DNS.
+	ProxyDNS string `yaml:"proxy-dns,omitempty" json:"proxy-dns,omitempty"`
+
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	// Commonly used for cookies, user-agent, and other authentication headers.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
