@@ -3,6 +3,7 @@ package kiro
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,7 +59,7 @@ type BackgroundRefresher struct {
 	wg               sync.WaitGroup
 	oauth            *KiroOAuth
 	ssoClient        *SSOOIDCClient
-	callbackMu       sync.RWMutex                                    // 保护回调函数的并发访问
+	callbackMu       sync.RWMutex                                   // 保护回调函数的并发访问
 	onTokenRefreshed func(tokenID string, tokenData *KiroTokenData) // 刷新成功回调
 }
 
@@ -163,7 +164,10 @@ func (r *BackgroundRefresher) refreshSingle(ctx context.Context, token *Token) {
 	var newTokenData *KiroTokenData
 	var err error
 
-	switch token.AuthMethod {
+	// Normalize auth method to lowercase for case-insensitive matching
+	authMethod := strings.ToLower(token.AuthMethod)
+
+	switch authMethod {
 	case "idc":
 		newTokenData, err = r.ssoClient.RefreshTokenWithRegion(
 			ctx,
