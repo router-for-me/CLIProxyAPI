@@ -36,3 +36,38 @@ jobs:
           VERSION: ${{ env.VERSION }}
           COMMIT: ${{ env.COMMIT }}
           BUILD_DATE: ${{ env.BUILD_DATE }}
+
+  build-termux:
+    name: Build Termux (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build in Termux Container
+        run: |
+          # Prepare metadata on host
+          VERSION=$(git describe --tags --always --dirty | sed 's/^v//')
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          
+          # Ensure the workspace is writable by the container
+          chmod -R 777 .
+
+          # Run the build inside Termux container
+          docker run --rm -v $(pwd):/workspace -w /workspace \
+            -e VERSION=$VERSION -e COMMIT=$COMMIT -e BUILD_DATE=$BUILD_DATE \
+            termux/termux-docker:aarch64 bash -c "
+              pkg update -y && pkg upgrade -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'
+              pkg install -y golang build-essential tar
+              CGO_ENABLED=0 go build -ldflags \"-s -w -X 'main.Version=\$VERSION' -X 'main.Commit=\$COMMIT' -X 'main.BuildDate=\$BUILD_DATE'\" -o cli-proxy-api ./cmd/server
+              tar -czf cli-proxy-api-termux-aarch64.tar.gz cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+            "
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: cli-proxy-api-termux-aarch64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
