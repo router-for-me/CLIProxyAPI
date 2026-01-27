@@ -503,13 +503,13 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, time.Now()); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeAPISection(w, "=== API REQUEST ===\n", "=== API REQUEST", apiRequest); errWrite != nil {
+	if errWrite := writeAPISection(w, "=== API REQUEST ===\n", "=== API REQUEST", apiRequest, time.Time{}); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPIErrorResponses(w, apiResponseErrors); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeAPISection(w, "=== API RESPONSE ===\n", "=== API RESPONSE", apiResponse); errWrite != nil {
+	if errWrite := writeAPISection(w, "=== API RESPONSE ===\n", "=== API RESPONSE", apiResponse, time.Now()); errWrite != nil {
 		return errWrite
 	}
 	return writeResponseSection(w, statusCode, true, responseHeaders, bytes.NewReader(response), decompressErr, true)
@@ -583,7 +583,7 @@ func writeRequestInfoWithBody(
 	return nil
 }
 
-func writeAPISection(w io.Writer, sectionHeader string, sectionPrefix string, payload []byte) error {
+func writeAPISection(w io.Writer, sectionHeader string, sectionPrefix string, payload []byte, timestamp time.Time) error {
 	if len(payload) == 0 {
 		return nil
 	}
@@ -598,7 +598,11 @@ func writeAPISection(w io.Writer, sectionHeader string, sectionPrefix string, pa
 			}
 		}
 	} else {
-		if _, errWrite := io.WriteString(w, sectionHeader); errWrite != nil {
+		header := sectionHeader
+		if !timestamp.IsZero() {
+			header = fmt.Sprintf("%s (Timestamp: %s)\n", strings.TrimSuffix(sectionHeader, "\n"), timestamp.Format(time.RFC3339Nano))
+		}
+		if _, errWrite := io.WriteString(w, header); errWrite != nil {
 			return errWrite
 		}
 		if _, errWrite := w.Write(payload); errWrite != nil {
@@ -974,6 +978,9 @@ type FileStreamingLogWriter struct {
 
 	// apiResponse stores the upstream API response data.
 	apiResponse []byte
+
+	// apiResponseTimestamp captures when the API response was received.
+	apiResponseTimestamp time.Time
 }
 
 // WriteChunkAsync writes a response chunk asynchronously (non-blocking).
@@ -1050,6 +1057,7 @@ func (w *FileStreamingLogWriter) WriteAPIResponse(apiResponse []byte) error {
 		return nil
 	}
 	w.apiResponse = bytes.Clone(apiResponse)
+	w.apiResponseTimestamp = time.Now()
 	return nil
 }
 
@@ -1140,10 +1148,10 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeAPISection(logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest); errWrite != nil {
+	if errWrite := writeAPISection(logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeAPISection(logFile, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse); errWrite != nil {
+	if errWrite := writeAPISection(logFile, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTimestamp); errWrite != nil {
 		return errWrite
 	}
 
