@@ -187,8 +187,9 @@ func (r *FileTokenRepository) readTokenFile(path string) (*Token, error) {
 		return nil, nil
 	}
 
-	// 检查 auth_method
+	// 检查 auth_method (case-insensitive comparison to handle "IdC", "IDC", "idc", etc.)
 	authMethod, _ := metadata["auth_method"].(string)
+	authMethod = strings.ToLower(authMethod)
 	if authMethod != "idc" && authMethod != "builder-id" {
 		return nil, nil // 只处理 IDC 和 Builder ID token
 	}
