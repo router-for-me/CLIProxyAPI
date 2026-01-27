@@ -277,6 +277,13 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		return
 	}
 	auth = auth.Clone()
+	tokenPrefix := "nil"
+	if auth.Metadata != nil {
+		if t, ok := auth.Metadata["access_token"].(string); ok && len(t) >= 10 {
+			tokenPrefix = t[:10]
+		}
+	}
+	log.Infof("applyCoreAuthAddOrUpdate: id=%s token_prefix=%s", auth.ID, tokenPrefix)
 	s.ensureExecutorsForAuth(auth)
 	s.registerModelsForAuth(auth)
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok && existing != nil {

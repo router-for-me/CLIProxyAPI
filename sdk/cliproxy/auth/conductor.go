@@ -379,10 +379,13 @@ func (m *Manager) fetchCredentialFromMaster(ctx context.Context, id, provider st
 	auth.ModelStates = nil // Clear per-model suspend states
 	m.mu.Unlock()
 
+	// Persist to file so file watcher won't overwrite with old token
+	_ = m.persist(ctx, auth)
+
 	// Clear suspension states
 	registry.GetGlobalRegistry().ResumeClientAllModels(id)
 
-	log.Infof("fetched access_token from master: provider=%s, id=%s", provider, id)
+	log.Infof("fetched access_token from master: provider=%s, id=%s, token_prefix=%s", provider, id, authTokenPrefix(auth))
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return nil
 }
@@ -878,6 +881,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
 		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+		log.Infof("executing with auth=%s token_prefix=%s unavailable=%v modelstates=%d", auth.ID, authTokenPrefix(auth), auth.Unavailable, len(auth.ModelStates))
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -2532,4 +2536,15 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
 	return exec.HttpRequest(ctx, auth, req)
+}
+
+// authTokenPrefix returns the first 10 characters of the access_token for debugging.
+func authTokenPrefix(auth *Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return "nil"
+	}
+	if t, ok := auth.Metadata["access_token"].(string); ok && len(t) >= 10 {
+		return t[:10]
+	}
+	return "empty"
 }
