@@ -161,9 +161,12 @@ func (r *BackgroundRefresher) refreshBatch(ctx context.Context) {
 }
 
 func (r *BackgroundRefresher) refreshSingle(ctx context.Context, token *Token) {
+	// Normalize auth method to lowercase for case-insensitive matching
+	authMethod := strings.ToLower(token.AuthMethod)
+
 	// Create refresh function based on auth method
 	refreshFunc := func(ctx context.Context) (*KiroTokenData, error) {
-		switch token.AuthMethod {
+		switch authMethod {
 		case "idc":
 			return r.ssoClient.RefreshTokenWithRegion(
 				ctx,
