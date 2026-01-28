@@ -896,6 +896,25 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
+
+			// If 401/403 and credential-master is configured, sync fetch and retry
+			statusCode := 0
+			if result.Error != nil {
+				statusCode = result.Error.HTTPStatus
+			}
+			log.Debugf("executeMixedOnce: error statusCode=%d, master=%q", statusCode, m.GetCredentialMaster())
+			if (statusCode == 401 || statusCode == 403) && m.GetCredentialMaster() != "" {
+				log.Infof("got %d, fetching credential from master and retrying...", statusCode)
+				if err := m.fetchCredentialFromMaster(ctx, auth.ID, provider); err != nil {
+					log.Warnf("failed to fetch credential from master: %v", err)
+				} else {
+					// Fetch succeeded, remove from tried to allow retry with new token
+					delete(tried, auth.ID)
+					// Don't call MarkResult to avoid setting error states
+					continue
+				}
+			}
+
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
 			continue
@@ -998,6 +1017,23 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errors.As(errStream, &se) && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
+
+			// If 401/403 and credential-master is configured, sync fetch and retry
+			statusCode := 0
+			if rerr != nil {
+				statusCode = rerr.HTTPStatus
+			}
+			if (statusCode == 401 || statusCode == 403) && m.GetCredentialMaster() != "" {
+				log.Infof("stream got %d, fetching credential from master and retrying...", statusCode)
+				if err := m.fetchCredentialFromMaster(ctx, auth.ID, provider); err != nil {
+					log.Warnf("failed to fetch credential from master: %v", err)
+				} else {
+					// Fetch succeeded, remove from tried to allow retry with new token
+					delete(tried, auth.ID)
+					continue
+				}
+			}
+
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
@@ -1548,14 +1584,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
 
-	// Fetch credential from master on 401 error (follower mode)
-	if shouldFetchFromMaster {
-		go func() {
-			if err := m.fetchCredentialFromMaster(context.Background(), result.AuthID, result.Provider); err != nil {
-				log.Debugf("failed to fetch credential from master: %v", err)
-			}
-		}()
-	}
+	// Note: credential fetch from master is now handled synchronously in execute functions
+	// (executeMixedOnce, executeStreamMixedOnce) to enable immediate retry with new token
 
 	m.hook.OnResult(ctx, result)
 }
