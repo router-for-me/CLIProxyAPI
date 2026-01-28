@@ -17,7 +17,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-
 // Kiro API request structs - field order determines JSON key order
 
 // KiroPayload is the top-level request structure for Kiro API
@@ -33,7 +32,6 @@ type KiroInferenceConfig struct {
 	Temperature float64 `json:"temperature,omitempty"`
 	TopP        float64 `json:"topP,omitempty"`
 }
-
 
 // KiroConversationState holds the conversation context
 type KiroConversationState struct {
@@ -378,7 +376,6 @@ func hasThinkingTagInBody(body []byte) bool {
 	return strings.Contains(bodyStr, "<thinking_mode>") || strings.Contains(bodyStr, "<max_thinking_length>")
 }
 
-
 // IsThinkingEnabledFromHeader checks if thinking mode is enabled via Anthropic-Beta header.
 // Claude CLI uses "Anthropic-Beta: interleaved-thinking-2025-05-14" to enable thinking.
 func IsThinkingEnabledFromHeader(headers http.Header) bool {
@@ -518,6 +515,15 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 
 	for _, tool := range tools.Array() {
 		name := tool.Get("name").String()
+
+		// Filter out web_search/websearch tools (Kiro API doesn't support them)
+		// This matches the behavior in AIClient-2-API/claude-kiro.js
+		nameLower := strings.ToLower(name)
+		if nameLower == "web_search" || nameLower == "websearch" {
+			log.Debugf("kiro: skipping unsupported tool: %s", name)
+			continue
+		}
+
 		description := tool.Get("description").String()
 		inputSchemaResult := tool.Get("input_schema")
 		var inputSchema interface{}
