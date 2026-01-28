@@ -155,10 +155,13 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
-						partJSON := `{}`
-						if prompt != "" {
-							partJSON, _ = sjson.Set(partJSON, "text", prompt)
+						// Skip empty text parts to avoid Gemini API error:
+						// "required oneof field 'data' must have one initialized field"
+						if prompt == "" {
+							continue
 						}
+						partJSON := `{}`
+						partJSON, _ = sjson.Set(partJSON, "text", prompt)
 						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_use" {
 						// NOTE: Do NOT inject dummy thinking blocks here.
@@ -283,6 +286,13 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							}
 						}
 					}
+				}
+
+				// Skip messages with empty parts array to avoid Gemini API error:
+				// "required oneof field 'data' must have one initialized field"
+				partsCheck := gjson.Get(clientContentJSON, "parts")
+				if !partsCheck.IsArray() || len(partsCheck.Array()) == 0 {
+					continue
 				}
 
 				contentsJSON, _ = sjson.SetRaw(contentsJSON, "-1", clientContentJSON)
