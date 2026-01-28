@@ -62,9 +62,9 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 
 	selector := &RoundRobinSelector{}
 	auths := []*Auth{
-		{ID: "c", Attributes: map[string]string{"priority": "0"}},
-		{ID: "a", Attributes: map[string]string{"priority": "10"}},
-		{ID: "b", Attributes: map[string]string{"priority": "10"}},
+		{ID: "c", Attributes: map[string]string{"priority": "1"}},
+		{ID: "a", Attributes: map[string]string{"priority": "3"}},
+		{ID: "b", Attributes: map[string]string{"priority": "3"}},
 	}
 
 	want := []string{"a", "b", "a", "b"}
@@ -94,7 +94,7 @@ func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 
 	high := &Auth{
 		ID:         "high",
-		Attributes: map[string]string{"priority": "10"},
+		Attributes: map[string]string{"priority": "3"},
 		ModelStates: map[string]*ModelState{
 			model: {
 				Status:         StatusActive,
@@ -106,7 +106,7 @@ func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 			},
 		},
 	}
-	low := &Auth{ID: "low", Attributes: map[string]string{"priority": "0"}}
+	low := &Auth{ID: "low", Attributes: map[string]string{"priority": "1"}}
 
 	got, err := selector.Pick(context.Background(), "mixed", model, cliproxyexecutor.Options{}, []*Auth{high, low})
 	if err != nil {
@@ -173,5 +173,109 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 	case err := <-errCh:
 		t.Fatalf("concurrent Pick() error = %v", err)
 	default:
+	}
+}
+
+func TestProviderFirstSelectorPick_PrefersProviders(t *testing.T) {
+	t.Parallel()
+
+	selector := &ProviderFirstSelector{}
+	auths := []*Auth{
+		{ID: "c1", Provider: "claude", Attributes: map[string]string{"priority": "3"}},
+		{ID: "p2", Provider: "vertex"},
+		{ID: "p1", Provider: "openai-compatibility"},
+	}
+
+	want := []string{"p1", "p2", "p1", "p2"}
+	for i, id := range want {
+		got, err := selector.Pick(context.Background(), "mixed", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+		if got.ID == "c1" {
+			t.Fatalf("Pick() #%d unexpectedly selected credential auth", i)
+		}
+	}
+}
+
+func TestProviderFirstSelectorPick_FallsBackToCredentials(t *testing.T) {
+	t.Parallel()
+
+	selector := &ProviderFirstSelector{}
+	auths := []*Auth{
+		{ID: "p1", Provider: "openai-compatibility", Disabled: true},
+		{ID: "p2", Provider: "vertex", Disabled: true},
+		{ID: "c2", Provider: "claude", Attributes: map[string]string{"priority": "1"}},
+		{ID: "c1", Provider: "claude", Attributes: map[string]string{"priority": "3"}},
+	}
+
+	got, err := selector.Pick(context.Background(), "mixed", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "c1" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "c1")
+	}
+}
+
+func TestCredentialFirstSelectorPick_PrefersCredentials(t *testing.T) {
+	t.Parallel()
+
+	selector := &CredentialFirstSelector{}
+	auths := []*Auth{
+		{ID: "p1", Provider: "openai-compatibility", Attributes: map[string]string{"priority": "3"}},
+		{ID: "c2", Provider: "claude"},
+		{ID: "c1", Provider: "gemini"},
+	}
+
+	want := []string{"c1", "c2", "c1", "c2"}
+	for i, id := range want {
+		got, err := selector.Pick(context.Background(), "mixed", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+		if got.ID == "p1" {
+			t.Fatalf("Pick() #%d unexpectedly selected provider auth", i)
+		}
+	}
+}
+
+func TestCredentialFirstSelectorPick_FallsBackToProviders(t *testing.T) {
+	t.Parallel()
+
+	selector := &CredentialFirstSelector{}
+	auths := []*Auth{
+		{ID: "c1", Provider: "claude", Disabled: true},
+		{ID: "p2", Provider: "vertex"},
+		{ID: "p1", Provider: "openai-compatibility"},
+	}
+
+	want := []string{"p1", "p2", "p1"}
+	for i, id := range want {
+		got, err := selector.Pick(context.Background(), "mixed", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
 	}
 }

@@ -342,8 +342,16 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			if data, errRead := os.ReadFile(full); errRead == nil {
 				typeValue := gjson.GetBytes(data, "type").String()
 				emailValue := gjson.GetBytes(data, "email").String()
+				priorityValue := coreauth.PriorityDefault
+				priorityRaw := gjson.GetBytes(data, "priority")
+				if priorityRaw.Exists() {
+					if priorityRaw.Type == gjson.Number || priorityRaw.Type == gjson.String {
+						priorityValue = coreauth.ParsePriority(priorityRaw.String())
+					}
+				}
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
+				fileData["priority"] = priorityValue
 			}
 
 			files = append(files, fileData)
@@ -383,6 +391,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
 		"size":           int64(0),
+		"priority":       coreauth.ParsePriority(authAttribute(auth, "priority")),
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
@@ -425,6 +434,79 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		entry["id_token"] = claims
 	}
 	return entry
+}
+
+// PatchAuthFilePriority updates the priority field in an auth JSON file and reloads it.
+func (h *Handler) PatchAuthFilePriority(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name     string `json:"name"`
+		Priority *int   `json:"priority"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid name"})
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name must end with .json"})
+		return
+	}
+	if req.Priority == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "priority is required"})
+		return
+	}
+
+	normalized := coreauth.NormalizePriority(*req.Priority)
+	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	if !filepath.IsAbs(full) {
+		if abs, errAbs := filepath.Abs(full); errAbs == nil {
+			full = abs
+		}
+	}
+
+	data, err := os.ReadFile(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
+		return
+	}
+
+	meta := make(map[string]any)
+	if err := json.Unmarshal(data, &meta); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid auth file"})
+		return
+	}
+	meta["priority"] = normalized
+
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to encode auth file: %v", err)})
+		return
+	}
+	if err := os.WriteFile(full, raw, 0o600); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to write file: %v", err)})
+		return
+	}
+
+	if err := h.registerAuthFromFile(c.Request.Context(), full, raw); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "priority": normalized})
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -712,6 +794,11 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	attr := map[string]string{
 		"path":   path,
 		"source": path,
+	}
+	if rawPriority, ok := metadata["priority"]; ok {
+		if parsedPriority, okParsed := coreauth.ParsePriorityFromInterface(rawPriority); okParsed {
+			attr["priority"] = strconv.Itoa(coreauth.NormalizePriority(parsedPriority))
+		}
 	}
 	auth := &coreauth.Auth{
 		ID:         authID,

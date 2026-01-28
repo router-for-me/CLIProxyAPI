@@ -5,7 +5,6 @@ package cliproxy
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -199,16 +198,9 @@ func (b *Builder) Build() (*Service, error) {
 			dirSetter.SetBaseDir(b.cfg.AuthDir)
 		}
 
-		strategy := ""
+		selector := coreauth.NewSelector("")
 		if b.cfg != nil {
-			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
-		}
-		var selector coreauth.Selector
-		switch strategy {
-		case "fill-first", "fillfirst", "ff":
-			selector = &coreauth.FillFirstSelector{}
-		default:
-			selector = &coreauth.RoundRobinSelector{}
+			selector = coreauth.NewSelectorWithRouting(b.cfg.Routing.Preference, b.cfg.Routing.Strategy)
 		}
 
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)

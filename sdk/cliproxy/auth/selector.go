@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +19,8 @@ type RoundRobinSelector struct {
 	mu      sync.Mutex
 	cursors map[string]int
 }
+
+const maxRoundRobinIndex = 2_000_000_000
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
@@ -106,17 +107,9 @@ func (e *modelCooldownError) Headers() http.Header {
 
 func authPriority(auth *Auth) int {
 	if auth == nil || auth.Attributes == nil {
-		return 0
+		return PriorityDefault
 	}
-	raw := strings.TrimSpace(auth.Attributes["priority"])
-	if raw == "" {
-		return 0
-	}
-	parsed, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0
-	}
-	return parsed
+	return ParsePriority(auth.Attributes["priority"])
 }
 
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
@@ -192,7 +185,8 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	}
 	index := s.cursors[key]
 
-	if index >= 2_147_483_640 {
+	// Reset the cursor periodically to avoid int overflow on 32-bit platforms.
+	if index >= maxRoundRobinIndex {
 		index = 0
 	}
 

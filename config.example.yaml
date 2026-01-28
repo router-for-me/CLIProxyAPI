@@ -73,6 +73,9 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
+  # Routing preference for selecting candidate group order when both provider keys and auth-files are available.
+  # Supported values: provider-first (default), credential-first
+  preference: "provider-first"
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false

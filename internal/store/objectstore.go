@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -580,6 +581,9 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 	attr := map[string]string{"path": path}
 	if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {
 		attr["email"] = email
+	}
+	if priority := strings.TrimSpace(valueAsString(metadata["priority"])); priority != "" {
+		attr["priority"] = strconv.Itoa(cliproxyauth.ParsePriority(priority))
 	}
 	auth := &cliproxyauth.Auth{
 		ID:               rel,
