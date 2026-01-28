@@ -796,7 +796,7 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 		"source": path,
 	}
 	if rawPriority, ok := metadata["priority"]; ok {
-		if parsedPriority, okParsed := parsePriorityValue(rawPriority); okParsed {
+		if parsedPriority, okParsed := coreauth.ParsePriorityFromInterface(rawPriority); okParsed {
 			attr["priority"] = strconv.Itoa(coreauth.NormalizePriority(parsedPriority))
 		}
 	}
@@ -826,34 +826,6 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	}
 	_, err := h.authManager.Register(ctx, auth)
 	return err
-}
-
-func parsePriorityValue(v any) (int, bool) {
-	switch raw := v.(type) {
-	case float64:
-		return int(raw), true
-	case int:
-		return raw, true
-	case int64:
-		return int(raw), true
-	case json.Number:
-		if n, err := raw.Int64(); err == nil {
-			return int(n), true
-		}
-		return 0, false
-	case string:
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" {
-			return 0, false
-		}
-		n, err := strconv.Atoi(trimmed)
-		if err != nil {
-			return 0, false
-		}
-		return n, true
-	default:
-		return 0, false
-	}
 }
 
 // PatchAuthFileStatus toggles the disabled state of an auth file

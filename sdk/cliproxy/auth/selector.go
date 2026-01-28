@@ -20,6 +20,8 @@ type RoundRobinSelector struct {
 	cursors map[string]int
 }
 
+const maxRoundRobinIndex = 2_000_000_000
+
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
@@ -183,7 +185,8 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	}
 	index := s.cursors[key]
 
-	if index >= 2_147_483_640 {
+	// Reset the cursor periodically to avoid int overflow on 32-bit platforms.
+	if index >= maxRoundRobinIndex {
 		index = 0
 	}
 

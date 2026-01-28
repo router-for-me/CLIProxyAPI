@@ -30,7 +30,8 @@ func (s *PreferenceSelector) pickRoundRobin(keyPrefix, provider, model string, n
 		s.cursors = make(map[string]int)
 	}
 	index := s.cursors[key]
-	if index >= 2_147_483_640 {
+	// Reset the cursor periodically to avoid int overflow on 32-bit platforms.
+	if index >= maxRoundRobinIndex {
 		index = 0
 	}
 	s.cursors[key] = index + 1

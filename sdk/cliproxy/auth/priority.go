@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 )
@@ -37,4 +38,36 @@ func ParsePriority(raw string) int {
 		return PriorityDefault
 	}
 	return NormalizePriority(parsed)
+}
+
+// ParsePriorityFromInterface parses priority values from decoded JSON objects.
+// It returns the raw integer value and whether parsing succeeded.
+//
+// Callers should typically pass the result through NormalizePriority.
+func ParsePriorityFromInterface(v any) (int, bool) {
+	switch raw := v.(type) {
+	case float64:
+		return int(raw), true
+	case int:
+		return raw, true
+	case int64:
+		return int(raw), true
+	case json.Number:
+		if n, err := raw.Int64(); err == nil {
+			return int(n), true
+		}
+		return 0, false
+	case string:
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			return 0, false
+		}
+		n, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	default:
+		return 0, false
+	}
 }
