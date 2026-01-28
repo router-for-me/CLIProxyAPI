@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1142,6 +1144,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	shouldAutoDisable := false
+	var autoDisableAuthID string
+	var autoDisableStatusCode int
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1178,16 +1183,23 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 				statusCode := statusCodeFromResult(result.Error)
 				switch statusCode {
-				case 401:
+				case 401, 402, 403:
 					next := now.Add(30 * time.Minute)
 					state.NextRetryAfter = next
-					suspendReason = "unauthorized"
+					if statusCode == 401 {
+						suspendReason = "unauthorized"
+					} else {
+						suspendReason = "payment_required"
+					}
 					shouldSuspendModel = true
-				case 402, 403:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
-					suspendReason = "payment_required"
-					shouldSuspendModel = true
+					if m.checkAutoDisableCondition(auth, statusCode) {
+						shouldAutoDisable = true
+						autoDisableAuthID = auth.ID
+						autoDisableStatusCode = statusCode
+						auth.Disabled = true
+						auth.Status = StatusDisabled
+						auth.StatusMessage = fmt.Sprintf("auto-disabled: HTTP %d", statusCode)
+					}
 				case 404:
 					next := now.Add(12 * time.Hour)
 					state.NextRetryAfter = next
@@ -1227,6 +1239,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 
 				auth.Status = StatusError
+				if shouldAutoDisable {
+					auth.Status = StatusDisabled
+				}
 				auth.UpdatedAt = now
 				updateAggregatedAvailability(auth, now)
 			} else {
@@ -1234,7 +1249,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
+		if err := m.persist(ctx, auth); err != nil {
+			log.WithFields(log.Fields{
+				"auth_id": auth.ID,
+				"error":   err,
+			}).Error("failed to persist auth state")
+		}
 	}
 	m.mu.Unlock()
 
@@ -1248,6 +1268,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+	}
+
+	if shouldAutoDisable {
+		log.WithFields(log.Fields{
+			"auth_id":     autoDisableAuthID,
+			"status_code": autoDisableStatusCode,
+		}).Warn("auto-disabling OAuth credential due to HTTP error")
+		registry.GetGlobalRegistry().SuspendAllClientModels(autoDisableAuthID, "auto-disabled")
 	}
 
 	m.hook.OnResult(ctx, result)
@@ -1428,6 +1456,111 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+var DefaultAutoDisableStatusCodes = []int{401, 403}
+
+type autoDisableRequest struct {
+	authID       string
+	statusCode   int
+	decisionTime time.Time
+}
+
+func (m *Manager) checkAutoDisableConditionInternal(auth *Auth, statusCode int, forManagement bool) bool {
+	if auth == nil || auth.FileName == "" {
+		return false
+	}
+	if auth.Disabled && auth.Status == StatusDisabled {
+		return false
+	}
+
+	cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config)
+	if !ok || cfg == nil {
+		return false
+	}
+
+	rule, ok := cfg.AutoDisable.Providers[strings.ToLower(auth.Provider)]
+	if !ok || !rule.Enabled {
+		return false
+	}
+
+	if forManagement {
+		if !rule.Management {
+			return false
+		}
+	} else {
+		if rule.Proxy != nil && !*rule.Proxy {
+			return false
+		}
+	}
+
+	statusCodes := rule.StatusCodes
+	if len(statusCodes) == 0 {
+		statusCodes = DefaultAutoDisableStatusCodes
+	}
+
+	return slices.Contains(statusCodes, statusCode)
+}
+
+func (m *Manager) checkAutoDisableCondition(auth *Auth, statusCode int) bool {
+	return m.checkAutoDisableConditionInternal(auth, statusCode, false)
+}
+
+func (m *Manager) executeAutoDisable(ctx context.Context, req *autoDisableRequest) error {
+	if req == nil {
+		return nil
+	}
+
+	m.mu.Lock()
+	auth, exists := m.auths[req.authID]
+	if !exists {
+		m.mu.Unlock()
+		return nil
+	}
+
+	if auth.Disabled && auth.Status == StatusDisabled {
+		m.mu.Unlock()
+		return nil
+	}
+
+	if auth.LastRefreshedAt.After(req.decisionTime) {
+		m.mu.Unlock()
+		return nil
+	}
+
+	auth.Disabled = true
+	auth.Status = StatusDisabled
+	auth.StatusMessage = fmt.Sprintf("auto-disabled: HTTP %d", req.statusCode)
+	auth.UpdatedAt = time.Now()
+	m.mu.Unlock()
+
+	log.WithFields(log.Fields{
+		"auth_id":     req.authID,
+		"status_code": req.statusCode,
+	}).Warn("auto-disabling OAuth credential due to HTTP error")
+
+	if err := m.persist(ctx, auth); err != nil {
+		log.WithFields(log.Fields{
+			"auth_id": req.authID,
+			"error":   err,
+		}).Error("failed to persist auto-disabled credential state")
+	}
+
+	registry.GetGlobalRegistry().SuspendAllClientModels(req.authID, "auto-disabled")
+
+	return nil
+}
+
+func (m *Manager) RequestAutoDisable(ctx context.Context, authID string, statusCode int, decisionTime time.Time) error {
+	if m == nil {
+		return nil
+	}
+	req := &autoDisableRequest{
+		authID:       authID,
+		statusCode:   statusCode,
+		decisionTime: decisionTime,
+	}
+	return m.executeAutoDisable(ctx, req)
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {

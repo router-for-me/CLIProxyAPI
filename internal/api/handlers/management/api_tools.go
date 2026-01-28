@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -208,6 +209,8 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
+
+	h.tryAPICallAutoDisable(c.Request.Context(), auth, resp.StatusCode)
 
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
@@ -701,4 +704,29 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 
 	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
 	return nil
+}
+
+func (h *Handler) tryAPICallAutoDisable(ctx context.Context, auth *coreauth.Auth, statusCode int) {
+	if h == nil || h.cfg == nil || h.authManager == nil {
+		return
+	}
+	if auth == nil || auth.FileName == "" {
+		return
+	}
+
+	rule, ok := h.cfg.AutoDisable.Providers[strings.ToLower(auth.Provider)]
+	if !ok || !rule.Enabled || !rule.Management {
+		return
+	}
+
+	statusCodes := rule.StatusCodes
+	if len(statusCodes) == 0 {
+		statusCodes = coreauth.DefaultAutoDisableStatusCodes
+	}
+
+	if !slices.Contains(statusCodes, statusCode) {
+		return
+	}
+
+	h.authManager.RequestAutoDisable(ctx, auth.ID, statusCode, time.Now())
 }
