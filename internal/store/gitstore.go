@@ -19,6 +19,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 // GitTokenStore persists token records and auth metadata using git as the backing storage.
@@ -612,6 +613,14 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		}
 	} else if errRewrite := s.rewriteHeadAsSingleCommit(repo, headRef.Name(), commitHash, message, signature); errRewrite != nil {
 		return errRewrite
+	}
+	// Run GC to prune unreachable objects and repack after squashing history.
+	// This prevents loose objects from accumulating and filling up tmpfs.
+	if errPrune := repo.Prune(git.PruneOptions{OnlyObjectsOlderThan: time.Now()}); errPrune != nil {
+		log.WithError(errPrune).Warn("git token store: failed to prune objects")
+	}
+	if errRepack := repo.RepackObjects(&git.RepackConfig{}); errRepack != nil {
+		log.WithError(errRepack).Warn("git token store: failed to repack objects")
 	}
 	if err = repo.Push(&git.PushOptions{Auth: s.gitAuth(), Force: true}); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
