@@ -32,14 +32,17 @@ type KiroTokenData struct {
 	ProfileArn string `json:"profileArn"`
 	// ExpiresAt is the timestamp when the token expires
 	ExpiresAt string `json:"expiresAt"`
-	// AuthMethod indicates the authentication method used (e.g., "builder-id", "social")
+	// AuthMethod indicates the authentication method used (e.g., "builder-id", "social", "idc")
 	AuthMethod string `json:"authMethod"`
-	// Provider indicates the OAuth provider (e.g., "AWS", "Google")
+	// Provider indicates the OAuth provider (e.g., "AWS", "Google", "Enterprise")
 	Provider string `json:"provider"`
 	// ClientID is the OIDC client ID (needed for token refresh)
 	ClientID string `json:"clientId,omitempty"`
 	// ClientSecret is the OIDC client secret (needed for token refresh)
 	ClientSecret string `json:"clientSecret,omitempty"`
+	// ClientIDHash is the hash of client ID used to locate device registration file
+	// (Enterprise Kiro IDE stores clientId/clientSecret in ~/.aws/sso/cache/{clientIdHash}.json)
+	ClientIDHash string `json:"clientIdHash,omitempty"`
 	// Email is the user's email address (used for file naming)
 	Email string `json:"email,omitempty"`
 	// StartURL is the IDC/Identity Center start URL (only for IDC auth method)
@@ -169,6 +172,8 @@ func LoadKiroIDETokenWithRetry(maxAttempts int, baseDelay time.Duration) (*KiroT
 }
 
 // LoadKiroIDEToken loads token data from Kiro IDE's token file.
+// For Enterprise Kiro IDE (IDC auth), it also loads clientId and clientSecret
+// from the device registration file referenced by clientIdHash.
 func LoadKiroIDEToken() (*KiroTokenData, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -193,18 +198,69 @@ func LoadKiroIDEToken() (*KiroTokenData, error) {
 	// Normalize AuthMethod to lowercase (Kiro IDE uses "IdC" but we expect "idc")
 	token.AuthMethod = strings.ToLower(token.AuthMethod)
 
+	// For Enterprise Kiro IDE (IDC auth), load clientId and clientSecret from device registration
+	// The device registration file is located at ~/.aws/sso/cache/{clientIdHash}.json
+	if token.ClientIDHash != "" && token.ClientID == "" {
+		if err := loadDeviceRegistration(homeDir, token.ClientIDHash, &token); err != nil {
+			// Log warning but don't fail - token might still work for some operations
+			fmt.Printf("warning: failed to load device registration for clientIdHash %s: %v\n", token.ClientIDHash, err)
+		}
+	}
+
 	return &token, nil
+}
+
+// loadDeviceRegistration loads clientId and clientSecret from the device registration file.
+// Enterprise Kiro IDE stores these in ~/.aws/sso/cache/{clientIdHash}.json
+func loadDeviceRegistration(homeDir, clientIDHash string, token *KiroTokenData) error {
+	if clientIDHash == "" {
+		return fmt.Errorf("clientIdHash is empty")
+	}
+
+	// Sanitize clientIdHash to prevent path traversal
+	if strings.Contains(clientIDHash, "/") || strings.Contains(clientIDHash, "\\") || strings.Contains(clientIDHash, "..") {
+		return fmt.Errorf("invalid clientIdHash: contains path separator")
+	}
+
+	deviceRegPath := filepath.Join(homeDir, ".aws", "sso", "cache", clientIDHash+".json")
+	data, err := os.ReadFile(deviceRegPath)
+	if err != nil {
+		return fmt.Errorf("failed to read device registration file (%s): %w", deviceRegPath, err)
+	}
+
+	// Device registration file structure
+	var deviceReg struct {
+		ClientID     string `json:"clientId"`
+		ClientSecret string `json:"clientSecret"`
+		ExpiresAt    string `json:"expiresAt"`
+	}
+
+	if err := json.Unmarshal(data, &deviceReg); err != nil {
+		return fmt.Errorf("failed to parse device registration: %w", err)
+	}
+
+	if deviceReg.ClientID == "" || deviceReg.ClientSecret == "" {
+		return fmt.Errorf("device registration missing clientId or clientSecret")
+	}
+
+	token.ClientID = deviceReg.ClientID
+	token.ClientSecret = deviceReg.ClientSecret
+
+	return nil
 }
 
 // LoadKiroTokenFromPath loads token data from a custom path.
 // This supports multiple accounts by allowing different token files.
+// For Enterprise Kiro IDE (IDC auth), it also loads clientId and clientSecret
+// from the device registration file referenced by clientIdHash.
 func LoadKiroTokenFromPath(tokenPath string) (*KiroTokenData, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get home directory: %w", err)
+	}
+
 	// Expand ~ to home directory
 	if len(tokenPath) > 0 && tokenPath[0] == '~' {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get home directory: %w", err)
-		}
 		tokenPath = filepath.Join(homeDir, tokenPath[1:])
 	}
 
@@ -224,6 +280,14 @@ func LoadKiroTokenFromPath(tokenPath string) (*KiroTokenData, error) {
 
 	// Normalize AuthMethod to lowercase (Kiro IDE uses "IdC" but we expect "idc")
 	token.AuthMethod = strings.ToLower(token.AuthMethod)
+
+	// For Enterprise Kiro IDE (IDC auth), load clientId and clientSecret from device registration
+	if token.ClientIDHash != "" && token.ClientID == "" {
+		if err := loadDeviceRegistration(homeDir, token.ClientIDHash, &token); err != nil {
+			// Log warning but don't fail - token might still work for some operations
+			fmt.Printf("warning: failed to load device registration for clientIdHash %s: %v\n", token.ClientIDHash, err)
+		}
+	}
 
 	return &token, nil
 }

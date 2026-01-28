@@ -1537,11 +1537,27 @@ func determineAgenticMode(model string) (isAgentic, isChatOnly bool) {
 }
 
 // getEffectiveProfileArn determines if profileArn should be included based on auth method.
-// profileArn is only needed for social auth (Google OAuth), not for builder-id (AWS SSO).
+// profileArn is only needed for social auth (Google OAuth), not for AWS SSO OIDC (Builder ID/IDC).
+//
+// Detection logic (matching kiro-openai-gateway):
+// 1. Check auth_method field: "builder-id" or "idc"
+// 2. Check auth_type field: "aws_sso_oidc" (from kiro-cli tokens)
+// 3. Check for client_id + client_secret presence (AWS SSO OIDC signature)
 func getEffectiveProfileArn(auth *cliproxyauth.Auth, profileArn string) string {
 	if auth != nil && auth.Metadata != nil {
-		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && authMethod == "builder-id" {
-			return "" // Don't include profileArn for builder-id auth
+		// Check 1: auth_method field (from CLIProxyAPI tokens)
+		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && (authMethod == "builder-id" || authMethod == "idc") {
+			return "" // AWS SSO OIDC - don't include profileArn
+		}
+		// Check 2: auth_type field (from kiro-cli tokens)
+		if authType, ok := auth.Metadata["auth_type"].(string); ok && authType == "aws_sso_oidc" {
+			return "" // AWS SSO OIDC - don't include profileArn
+		}
+		// Check 3: client_id + client_secret presence (AWS SSO OIDC signature)
+		_, hasClientID := auth.Metadata["client_id"].(string)
+		_, hasClientSecret := auth.Metadata["client_secret"].(string)
+		if hasClientID && hasClientSecret {
+			return "" // AWS SSO OIDC - don't include profileArn
 		}
 	}
 	return profileArn
@@ -1550,14 +1566,32 @@ func getEffectiveProfileArn(auth *cliproxyauth.Auth, profileArn string) string {
 // getEffectiveProfileArnWithWarning determines if profileArn should be included based on auth method,
 // and logs a warning if profileArn is missing for non-builder-id auth.
 // This consolidates the auth_method check that was previously done separately.
+//
+// AWS SSO OIDC (Builder ID/IDC) users don't need profileArn - sending it causes 403 errors.
+// Only Kiro Desktop (social auth like Google/GitHub) users need profileArn.
+//
+// Detection logic (matching kiro-openai-gateway):
+// 1. Check auth_method field: "builder-id" or "idc"
+// 2. Check auth_type field: "aws_sso_oidc" (from kiro-cli tokens)
+// 3. Check for client_id + client_secret presence (AWS SSO OIDC signature)
 func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn string) string {
 	if auth != nil && auth.Metadata != nil {
+		// Check 1: auth_method field (from CLIProxyAPI tokens)
 		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && (authMethod == "builder-id" || authMethod == "idc") {
-			// builder-id and idc auth don't need profileArn
-			return ""
+			return "" // AWS SSO OIDC - don't include profileArn
+		}
+		// Check 2: auth_type field (from kiro-cli tokens)
+		if authType, ok := auth.Metadata["auth_type"].(string); ok && authType == "aws_sso_oidc" {
+			return "" // AWS SSO OIDC - don't include profileArn
+		}
+		// Check 3: client_id + client_secret presence (AWS SSO OIDC signature, like kiro-openai-gateway)
+		_, hasClientID := auth.Metadata["client_id"].(string)
+		_, hasClientSecret := auth.Metadata["client_secret"].(string)
+		if hasClientID && hasClientSecret {
+			return "" // AWS SSO OIDC - don't include profileArn
 		}
 	}
-	// For non-builder-id/idc auth (social auth), profileArn is required
+	// For social auth (Kiro Desktop), profileArn is required
 	if profileArn == "" {
 		log.Warnf("kiro: profile ARN not found in auth, API calls may fail")
 	}

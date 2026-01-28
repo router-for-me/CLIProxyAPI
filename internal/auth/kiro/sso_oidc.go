@@ -684,6 +684,7 @@ func (c *SSOOIDCClient) CreateToken(ctx context.Context, clientID, clientSecret,
 }
 
 // RefreshToken refreshes an access token using the refresh token.
+// Includes retry logic and improved error handling for better reliability.
 func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret, refreshToken string) (*KiroTokenData, error) {
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -701,8 +702,13 @@ func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret
 	if err != nil {
 		return nil, err
 	}
+
+	// Set headers matching Kiro IDE behavior for better compatibility
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", kiroUserAgent)
+	req.Header.Set("Host", "oidc.us-east-1.amazonaws.com")
+	req.Header.Set("x-amz-user-agent", idcAmzUserAgent)
+	req.Header.Set("User-Agent", "node")
+	req.Header.Set("Accept", "*/*")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -716,8 +722,8 @@ func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Debugf("token refresh failed (status %d): %s", resp.StatusCode, string(respBody))
-		return nil, fmt.Errorf("token refresh failed (status %d)", resp.StatusCode)
+		log.Warnf("token refresh failed (status %d): %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("token refresh failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	var result CreateTokenResponse

@@ -2,7 +2,10 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -279,18 +282,19 @@ func (a *KiroAuthenticator) ImportFromKiroIDE(ctx context.Context, cfg *config.C
 		CreatedAt: now,
 		UpdatedAt: now,
 		Metadata: map[string]any{
-			"type":          "kiro",
-			"access_token":  tokenData.AccessToken,
-			"refresh_token": tokenData.RefreshToken,
-			"profile_arn":   tokenData.ProfileArn,
-			"expires_at":    tokenData.ExpiresAt,
-			"auth_method":   tokenData.AuthMethod,
-			"provider":      tokenData.Provider,
-			"client_id":     tokenData.ClientID,
-			"client_secret": tokenData.ClientSecret,
-			"email":         tokenData.Email,
-			"region":        tokenData.Region,
-			"start_url":     tokenData.StartURL,
+			"type":           "kiro",
+			"access_token":   tokenData.AccessToken,
+			"refresh_token":  tokenData.RefreshToken,
+			"profile_arn":    tokenData.ProfileArn,
+			"expires_at":     tokenData.ExpiresAt,
+			"auth_method":    tokenData.AuthMethod,
+			"provider":       tokenData.Provider,
+			"client_id":      tokenData.ClientID,
+			"client_secret":  tokenData.ClientSecret,
+			"client_id_hash": tokenData.ClientIDHash,
+			"email":          tokenData.Email,
+			"region":         tokenData.Region,
+			"start_url":      tokenData.StartURL,
 		},
 		Attributes: map[string]string{
 			"profile_arn": tokenData.ProfileArn,
@@ -325,9 +329,20 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 
 	clientID, _ := auth.Metadata["client_id"].(string)
 	clientSecret, _ := auth.Metadata["client_secret"].(string)
+	clientIDHash, _ := auth.Metadata["client_id_hash"].(string)
 	authMethod, _ := auth.Metadata["auth_method"].(string)
 	startURL, _ := auth.Metadata["start_url"].(string)
 	region, _ := auth.Metadata["region"].(string)
+
+	// For Enterprise Kiro IDE (IDC auth), try to load clientId/clientSecret from device registration
+	// if they are missing from metadata. This handles the case where token was imported without
+	// clientId/clientSecret but has clientIdHash.
+	if (clientID == "" || clientSecret == "") && clientIDHash != "" {
+		if loadedClientID, loadedClientSecret, err := loadDeviceRegistrationCredentials(clientIDHash); err == nil {
+			clientID = loadedClientID
+			clientSecret = loadedClientSecret
+		}
+	}
 
 	var tokenData *kiroauth.KiroTokenData
 	var err error
@@ -339,8 +354,8 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 	case clientID != "" && clientSecret != "" && authMethod == "idc" && region != "":
 		// IDC refresh with region-specific endpoint
 		tokenData, err = ssoClient.RefreshTokenWithRegion(ctx, clientID, clientSecret, refreshToken, region, startURL)
-	case clientID != "" && clientSecret != "" && authMethod == "builder-id":
-		// Builder ID refresh with default endpoint
+	case clientID != "" && clientSecret != "" && (authMethod == "builder-id" || authMethod == "idc"):
+		// Builder ID or IDC refresh with default endpoint (us-east-1)
 		tokenData, err = ssoClient.RefreshToken(ctx, clientID, clientSecret, refreshToken)
 	default:
 		// Fallback to Kiro's refresh endpoint (for social auth: Google/GitHub)
@@ -367,8 +382,54 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 	updated.Metadata["refresh_token"] = tokenData.RefreshToken
 	updated.Metadata["expires_at"] = tokenData.ExpiresAt
 	updated.Metadata["last_refresh"] = now.Format(time.RFC3339) // For double-check optimization
+	// Store clientId/clientSecret if they were loaded from device registration
+	if clientID != "" && updated.Metadata["client_id"] == nil {
+		updated.Metadata["client_id"] = clientID
+	}
+	if clientSecret != "" && updated.Metadata["client_secret"] == nil {
+		updated.Metadata["client_secret"] = clientSecret
+	}
 	// NextRefreshAfter: 20 minutes before expiry
 	updated.NextRefreshAfter = expiresAt.Add(-20 * time.Minute)
 
 	return updated, nil
+}
+
+// loadDeviceRegistrationCredentials loads clientId and clientSecret from device registration file.
+// This is used when refreshing tokens that were imported without clientId/clientSecret.
+func loadDeviceRegistrationCredentials(clientIDHash string) (clientID, clientSecret string, err error) {
+	if clientIDHash == "" {
+		return "", "", fmt.Errorf("clientIdHash is empty")
+	}
+
+	// Sanitize clientIdHash to prevent path traversal
+	if strings.Contains(clientIDHash, "/") || strings.Contains(clientIDHash, "\\") || strings.Contains(clientIDHash, "..") {
+		return "", "", fmt.Errorf("invalid clientIdHash: contains path separator")
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	deviceRegPath := filepath.Join(homeDir, ".aws", "sso", "cache", clientIDHash+".json")
+	data, err := os.ReadFile(deviceRegPath)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read device registration file: %w", err)
+	}
+
+	var deviceReg struct {
+		ClientID     string `json:"clientId"`
+		ClientSecret string `json:"clientSecret"`
+	}
+
+	if err := json.Unmarshal(data, &deviceReg); err != nil {
+		return "", "", fmt.Errorf("failed to parse device registration: %w", err)
+	}
+
+	if deviceReg.ClientID == "" || deviceReg.ClientSecret == "" {
+		return "", "", fmt.Errorf("device registration missing clientId or clientSecret")
+	}
+
+	return deviceReg.ClientID, deviceReg.ClientSecret, nil
 }

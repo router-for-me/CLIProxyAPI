@@ -229,7 +229,7 @@ func (c *SocialAuthClient) CreateToken(ctx context.Context, req *CreateTokenRequ
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", "cli-proxy-api/1.0.0")
+	httpReq.Header.Set("User-Agent", "KiroIDE-0.7.45-cli-proxy-api")
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
