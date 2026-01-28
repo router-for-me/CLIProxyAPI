@@ -168,10 +168,11 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if statsKey == "" {
 		statsKey = resolveAPIIdentifier(ctx, record)
 	}
+	// Directly trust record.Failed, no longer relying on gin context status.
+	// Reason: usage records are processed asynchronously, and the gin context
+	// may be invalid or reclaimed by then.
+	// This requires all Handler/Executor to correctly set the Failed field.
 	failed := record.Failed
-	if !failed {
-		failed = !resolveSuccess(ctx)
-	}
 	success := !failed
 	modelName := record.Model
 	if modelName == "" {

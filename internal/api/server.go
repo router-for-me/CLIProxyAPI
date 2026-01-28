@@ -172,6 +172,23 @@ type Server struct {
 	keepAliveStop      chan struct{}
 }
 
+// populateEmbeddingAPIKeys copies Gemini API keys to SDKConfig.EmbeddingAPIKeys
+// for embedding handler access. This is called during server initialization
+// and configuration updates.
+func populateEmbeddingAPIKeys(cfg *config.Config) {
+	if len(cfg.GeminiKey) > 0 {
+		keys := make([]string, 0, len(cfg.GeminiKey))
+		for _, gk := range cfg.GeminiKey {
+			if gk.APIKey != "" {
+				keys = append(keys, gk.APIKey)
+			}
+		}
+		cfg.SDKConfig.EmbeddingAPIKeys = keys
+	} else {
+		cfg.SDKConfig.EmbeddingAPIKeys = nil
+	}
+}
+
 // NewServer creates and initializes a new API server instance.
 // It sets up the Gin engine, middleware, routes, and handlers.
 //
@@ -232,6 +249,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	envAdminPassword, envAdminPasswordSet := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envAdminPassword = strings.TrimSpace(envAdminPassword)
 	envManagementSecret := envAdminPasswordSet && envAdminPassword != ""
+
+	// Copy Gemini API keys to SDKConfig for embedding handler access
+	populateEmbeddingAPIKeys(cfg)
 
 	// Create server instance
 	s := &Server{
@@ -322,6 +342,7 @@ func (s *Server) setupRoutes() {
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
+		v1.POST("/embeddings", openaiHandlers.Embeddings)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
@@ -343,6 +364,7 @@ func (s *Server) setupRoutes() {
 			"endpoints": []string{
 				"POST /v1/chat/completions",
 				"POST /v1/completions",
+				"POST /v1/embeddings",
 				"GET /v1/models",
 			},
 		})
@@ -978,6 +1000,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	managementasset.SetCurrentConfig(cfg)
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
+
+	// Copy Gemini API keys to SDKConfig for embedding handler access
+	populateEmbeddingAPIKeys(cfg)
 
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 
