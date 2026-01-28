@@ -277,6 +277,13 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		return
 	}
 	auth = auth.Clone()
+	tokenPrefix := "nil"
+	if auth.Metadata != nil {
+		if t, ok := auth.Metadata["access_token"].(string); ok && len(t) >= 10 {
+			tokenPrefix = t[:10]
+		}
+	}
+	log.Infof("applyCoreAuthAddOrUpdate: id=%s token_prefix=%s", auth.ID, tokenPrefix)
 	s.ensureExecutorsForAuth(auth)
 	s.registerModelsForAuth(auth)
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok && existing != nil {
@@ -573,6 +580,14 @@ func (s *Service) Run(ctx context.Context) error {
 
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	s.watcherCancel = watcherCancel
+
+	// Sync auth files from master node if configured (before starting file watcher)
+	if s.coreManager != nil {
+		if err := s.coreManager.SyncAuthsFromMaster(ctx, s.cfg.AuthDir); err != nil {
+			log.Warnf("failed to sync auths from master: %v", err)
+		}
+	}
+
 	if err = watcherWrapper.Start(watcherCtx); err != nil {
 		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
 	}
