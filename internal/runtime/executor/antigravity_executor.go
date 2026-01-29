@@ -109,6 +109,7 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 
 // Execute performs a non-streaming request to the Antigravity API.
 func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	req.Model = e.resolveModelAlias(req.Model)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
 
@@ -641,6 +642,7 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 
 // ExecuteStream performs a streaming request to the Antigravity API.
 func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	req.Model = e.resolveModelAlias(req.Model)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	ctx = context.WithValue(ctx, "alt", "")
@@ -1593,4 +1595,38 @@ func generateProjectID() string {
 	randSourceMutex.Unlock()
 	randomPart := strings.ToLower(uuid.NewString())[:5]
 	return adj + "-" + noun + "-" + randomPart
+}
+// resolveModelAlias resolves the upstream model from OAuth model alias.
+func (e *AntigravityExecutor) resolveModelAlias(modelName string) string {
+	if e.cfg == nil || len(e.cfg.OAuthModelAlias) == 0 {
+		return modelName
+	}
+
+	aliases := e.cfg.OAuthModelAlias[antigravityAuthType]
+	if len(aliases) == 0 {
+		return modelName
+	}
+
+	requestResult := thinking.ParseSuffix(modelName)
+	baseRequested := requestResult.ModelName
+
+	for _, entry := range aliases {
+		if strings.EqualFold(strings.TrimSpace(entry.Alias), baseRequested) {
+			originalName := strings.TrimSpace(entry.Name)
+			if originalName == "" {
+				continue
+			}
+
+			// If config already has suffix, it takes priority.
+			if thinking.ParseSuffix(originalName).HasSuffix {
+				return originalName
+			}
+			// Preserve user's thinking suffix on the resolved model.
+			if requestResult.HasSuffix && requestResult.RawSuffix != "" {
+				return originalName + "(" + requestResult.RawSuffix + ")"
+			}
+			return originalName
+		}
+	}
+	return modelName
 }
