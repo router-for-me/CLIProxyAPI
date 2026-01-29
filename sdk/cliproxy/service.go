@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -86,6 +87,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// quotaMonitor watches Antigravity quota and disables models when threshold is reached.
+	quotaMonitor *quota.Monitor
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -585,6 +589,17 @@ func (s *Service) Run(ctx context.Context) error {
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
 
+	// Start quota monitor for Antigravity accounts.
+	// Default is enabled unless explicitly disabled in config.
+	quotaMonitorEnabled := true
+	if s.cfg != nil && s.cfg.QuotaMonitor.Enabled != nil {
+		quotaMonitorEnabled = *s.cfg.QuotaMonitor.Enabled
+	}
+	if s.coreManager != nil && quotaMonitorEnabled {
+		s.quotaMonitor = quota.NewMonitor(s.cfg, s.coreManager)
+		s.quotaMonitor.Start(context.Background())
+	}
+
 	select {
 	case <-ctx.Done():
 		log.Debug("service context cancelled, shutting down...")
@@ -620,6 +635,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+		}
+		if s.quotaMonitor != nil {
+			s.quotaMonitor.Stop()
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {

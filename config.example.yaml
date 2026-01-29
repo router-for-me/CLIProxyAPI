@@ -70,6 +70,13 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
 
+# Antigravity quota monitor settings
+# Automatically disables models when their quota usage reaches a threshold.
+quota-monitor:
+  enabled: true                    # Enable/disable quota monitoring (default: true)
+  check-interval-seconds: 60       # Interval between quota checks in seconds (default: 60)
+  disable-threshold-percent: 80    # Disable model when quota usage reaches this percentage (default: 80)
+
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first

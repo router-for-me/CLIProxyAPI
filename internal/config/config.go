@@ -109,6 +109,9 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// QuotaMonitor configures automatic quota monitoring for Antigravity accounts.
+	QuotaMonitor QuotaMonitorConfig `yaml:"quota-monitor" json:"quota-monitor"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -150,6 +153,17 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// QuotaMonitorConfig configures automatic quota monitoring for Antigravity accounts.
+type QuotaMonitorConfig struct {
+	// Enabled toggles the quota monitor. Default is true.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// CheckIntervalSeconds is the interval in seconds between quota checks. Default is 60 (1 minute).
+	CheckIntervalSeconds int `yaml:"check-interval-seconds,omitempty" json:"check-interval-seconds,omitempty"`
+	// DisableThresholdPercent is the percentage of quota used at which to disable the model.
+	// For example, 80 means disable when 80% quota is used (20% remaining). Default is 80.
+	DisableThresholdPercent int `yaml:"disable-threshold-percent,omitempty" json:"disable-threshold-percent,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
