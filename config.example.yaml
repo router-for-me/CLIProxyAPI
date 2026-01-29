@@ -150,6 +150,12 @@ codex-instructions-enabled: false
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"
+#
+#   # Kimi Code (Anthropic-compatible). For Droid CLI (Factory) with provider "anthropic".
+#   # User-Agent "claude-code/2.0" is sent automatically; override via headers if needed.
+#   # See https://www.kimi.com/code/docs/en/more/third-party-agents.html
+#   - api-key: "sk-kimi-..."
+#     base-url: "https://api.kimi.com/coding/"
 
 # OpenAI compatibility providers
 # openai-compatibility:
@@ -165,6 +171,13 @@ codex-instructions-enabled: false
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.
+#
+#
+# Droid CLI (Factory): Configure custom models in ~/.factory/settings.json or ~/.factory/config.json
+# with baseUrl = CLI Proxy URL (e.g. http://localhost:8317), apiKey, and provider "anthropic".
+# For Kimi Code, use claude-api-key (base-url https://api.kimi.com/coding/) above.
+# See https://gist.github.com/chandika/c4b64c5b8f5e29f6112021d46c159fdd
+# and https://help.router-for.me/agent-client/droid.
 
 # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
 # vertex-api-key:

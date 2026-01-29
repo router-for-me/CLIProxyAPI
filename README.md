@@ -76,6 +76,10 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 
 **→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
 
+## Droid CLI (Factory) and Kimi Code
+
+[Factory Droid CLI](https://docs.factory.ai/cli/getting-started/quickstart) can use CLI Proxy as a custom model endpoint (Anthropic-compatible). For [Kimi Code](https://www.kimi.com/code/docs/en/more/third-party-agents.html) (kimi-for-coding), configure `claude-api-key` with base-url `https://api.kimi.com/coding/`. The proxy sends `User-Agent: claude-code/2.0` to Kimi automatically. Set Droid’s `baseUrl` to the proxy URL (e.g. `http://localhost:8317`) and provider `anthropic` in `~/.factory/settings.json` or `~/.factory/config.json`. See [FACTORY_PROXY_CC](https://gist.github.com/chandika/c4b64c5b8f5e29f6112021d46c159fdd) and [Droid integration guide](https://help.router-for.me/agent-client/droid).
+
 ## SDK Docs
 
 - Usage: [docs/sdk-usage.md](docs/sdk-usage.md)

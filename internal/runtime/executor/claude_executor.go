@@ -672,7 +672,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Arch", "arm64")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Os", "MacOS")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", "60")
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", "claude-cli/1.0.83 (external, cli)")
+	userAgentDefault := "claude-cli/1.0.83 (external, cli)"
+	if _, baseURL := claudeCreds(auth); IsKimiProvider(baseURL, "claude") {
+		userAgentDefault = KimiUserAgent
+	}
+	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", userAgentDefault)
 	r.Header.Set("Connection", "keep-alive")
 	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {

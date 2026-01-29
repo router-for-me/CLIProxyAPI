@@ -17,6 +17,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -41,9 +42,12 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	if req == nil {
 		return nil
 	}
-	_, apiKey := e.resolveCredentials(auth)
+	baseURL, apiKey := e.resolveCredentials(auth)
 	if strings.TrimSpace(apiKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	if IsKimiProvider(baseURL, e.provider) {
+		req.Header.Set("User-Agent", KimiUserAgent)
 	}
 	var attrs map[string]string
 	if auth != nil {
@@ -107,7 +111,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	userAgent := "cli-proxy-openai-compat"
+	if IsKimiProvider(baseURL, e.provider) {
+		userAgent = KimiUserAgent
+	}
+	httpReq.Header.Set("User-Agent", userAgent)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -159,9 +167,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.publish(ctx, parseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
-	// Translate response back to source format when needed
+	// Normalize Kimi Chat Completions (reasoning_content -> content) before translating
+	// to Responses or other format, so /v1/responses etc. display correctly.
+	bodyToTranslate := body
+	if IsKimiProvider(baseURL, e.provider) {
+		bodyToTranslate = normalizeKimiOpenAIResponse(body)
+	}
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, body, &param)
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bodyToTranslate, &param)
 	resp = cliproxyexecutor.Response{Payload: []byte(out)}
 	return resp, nil
 }
@@ -203,7 +216,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	userAgent := "cli-proxy-openai-compat"
+	if IsKimiProvider(baseURL, e.provider) {
+		userAgent = KimiUserAgent
+	}
+	httpReq.Header.Set("User-Agent", userAgent)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -272,9 +289,22 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				continue
 			}
 
+			// Normalize Kimi Chat Completions (reasoning_content -> content) before translating
+			// to Responses or other format, so /v1/responses etc. display correctly.
+			// [DONE] is never normalized; we always pass it through so the translator can emit
+			// response.completed when the stream ends without a finish_reason chunk.
+			lineToTranslate := bytes.Clone(line)
+			if IsKimiProvider(baseURL, e.provider) {
+				payload := bytes.TrimSpace(line[5:])
+				if len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
+					normalized := normalizeKimiOpenAIResponse(payload)
+					lineToTranslate = append(append([]byte("data: "), normalized...), '\n')
+				}
+			}
+
 			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 			// Pass through translator; it yields one or more chunks for the target schema.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bytes.Clone(line), &param)
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, lineToTranslate, &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 			}
@@ -370,6 +400,52 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model)
 	return payload
+}
+
+// normalizeKimiOpenAIResponse ensures Droid and other clients that only read
+// choices[].message.content or choices[].delta.content can display Kimi output.
+// Kimi sometimes puts the visible text in reasoning_content; we copy it into
+// content when content is empty so the reply is shown.
+func normalizeKimiOpenAIResponse(raw []byte) []byte {
+	if len(raw) == 0 || !gjson.ValidBytes(raw) {
+		return raw
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return raw
+	}
+	root := gjson.ParseBytes(raw)
+	choices := root.Get("choices")
+	if !choices.Exists() || !choices.IsArray() || len(choices.Array()) == 0 {
+		return raw
+	}
+	choice := choices.Array()[0]
+	delta := choice.Get("delta")
+	msg := choice.Get("message")
+	var contentPath string
+	var content, rc gjson.Result
+	if delta.Exists() {
+		contentPath = "choices.0.delta.content"
+		content = delta.Get("content")
+		rc = delta.Get("reasoning_content")
+	} else if msg.Exists() {
+		contentPath = "choices.0.message.content"
+		content = msg.Get("content")
+		rc = msg.Get("reasoning_content")
+	} else {
+		return raw
+	}
+	if !rc.Exists() || rc.String() == "" {
+		return raw
+	}
+	if content.Exists() && content.String() != "" {
+		return raw
+	}
+	out, err := sjson.SetBytes(bytes.Clone(raw), contentPath, rc.String())
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 type statusErr struct {
