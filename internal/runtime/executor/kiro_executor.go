@@ -3173,7 +3173,11 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					bashInput := map[string]interface{}{
 						"command": errorMsg,
 					}
-					inputJSON, _ := json.Marshal(bashInput)
+					inputJSON, err := json.Marshal(bashInput)
+					if err != nil {
+						log.Errorf("kiro: failed to marshal bash input for truncated write error: %v", err)
+						continue
+					}
 					inputDelta := kiroclaude.BuildClaudeInputJsonDeltaEvent(string(inputJSON), contentBlockIndex)
 					sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, inputDelta, &translatorParam)
 					for _, chunk := range sseData {
