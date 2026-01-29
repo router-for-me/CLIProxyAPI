@@ -597,7 +597,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if s.coreManager != nil && quotaMonitorEnabled {
 		s.quotaMonitor = quota.NewMonitor(s.cfg, s.coreManager)
-		s.quotaMonitor.Start(context.Background())
+		s.quotaMonitor.Start(ctx)
 	}
 
 	select {

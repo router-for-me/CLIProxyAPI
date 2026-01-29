@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -29,18 +30,8 @@ const (
 	// When remainingFraction <= 0.2, the model is disabled.
 	DefaultDisableThreshold = 0.2
 
-	// antigravityAPIEndpoint is the Antigravity API base URL.
-	antigravityAPIEndpoint = "https://cloudcode-pa.googleapis.com"
-
 	// fetchModelsPath is the API path for fetching available models with quota info.
 	fetchModelsPath = "/v1internal:fetchAvailableModels"
-
-	// oauthTokenURL is the Google OAuth2 token endpoint.
-	oauthTokenURL = "https://oauth2.googleapis.com/token"
-
-	// antigravityClientID and antigravityClientSecret for OAuth2.
-	antigravityClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret = "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"
 )
 
 // AntigravityQuotaGroup defines a group of models that share quota.
@@ -188,15 +179,15 @@ func (m *Monitor) Stop() {
 func (m *Monitor) monitorLoop(ctx context.Context) {
 	defer m.wg.Done()
 
+	// Run immediately on start
+	m.checkAllAntigravityAccounts(ctx)
+
 	m.mu.Lock()
 	interval := m.checkInterval
 	m.mu.Unlock()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
-	// Run immediately on start
-	m.checkAllAntigravityAccounts(ctx)
 
 	for {
 		select {
@@ -206,6 +197,17 @@ func (m *Monitor) monitorLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.checkAllAntigravityAccounts(ctx)
+
+			// Check if interval changed and reset ticker if needed
+			m.mu.Lock()
+			newInterval := m.checkInterval
+			m.mu.Unlock()
+
+			if newInterval != interval {
+				ticker.Reset(newInterval)
+				interval = newInterval
+				log.Infof("quota monitor check interval updated to %s", interval)
+			}
 		}
 	}
 }
@@ -338,12 +340,12 @@ func (m *Monitor) ensureAccessToken(ctx context.Context, auth *coreauth.Auth) (s
 	}
 
 	form := url.Values{}
-	form.Set("client_id", antigravityClientID)
-	form.Set("client_secret", antigravityClientSecret)
+	form.Set("client_id", antigravity.ClientID)
+	form.Set("client_secret", antigravity.ClientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauthTokenURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, antigravity.TokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -391,14 +393,16 @@ func (m *Monitor) ensureAccessToken(ctx context.Context, auth *coreauth.Auth) (s
 	auth.LastRefreshedAt = now
 	auth.UpdatedAt = now
 	if m.authManager != nil {
-		_, _ = m.authManager.Update(ctx, auth)
+		if _, err := m.authManager.Update(ctx, auth); err != nil {
+			log.WithError(err).WithField("auth_id", auth.ID).Warn("failed to persist refreshed token")
+		}
 	}
 
 	return tokenResp.AccessToken, nil
 }
 
 func (m *Monitor) fetchAvailableModels(ctx context.Context, accessToken string, auth *coreauth.Auth) ([]ModelQuotaEntry, error) {
-	apiURL := antigravityAPIEndpoint + fetchModelsPath
+	apiURL := antigravity.APIEndpoint + fetchModelsPath
 
 	reqBody := `{}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(reqBody))
@@ -408,7 +412,7 @@ func (m *Monitor) fetchAvailableModels(ctx context.Context, accessToken string, 
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "antigravity/1.104.0")
+	req.Header.Set("User-Agent", antigravity.APIUserAgent)
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
