@@ -681,6 +681,10 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if a == nil || a.ID == "" {
 		return
 	}
+	if a.Disabled {
+		GlobalModelRegistry().UnregisterClient(a.ID)
+		return
+	}
 	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
 	if authKind == "" {
 		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {

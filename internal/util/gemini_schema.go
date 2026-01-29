@@ -175,7 +175,7 @@ func convertConstToEnum(jsonStr string) string {
 	return jsonStr
 }
 
-// convertEnumValuesToStrings ensures all enum values are strings.
+// convertEnumValuesToStrings ensures all enum values are strings and the schema type is set to string.
 // Gemini API requires enum values to be of type string, not numbers or booleans.
 func convertEnumValuesToStrings(jsonStr string) string {
 	for _, p := range findPaths(jsonStr, "enum") {
@@ -185,19 +185,15 @@ func convertEnumValuesToStrings(jsonStr string) string {
 		}
 
 		var stringVals []string
-		needsConversion := false
 		for _, item := range arr.Array() {
-			// Check if any value is not a string
-			if item.Type != gjson.String {
-				needsConversion = true
-			}
 			stringVals = append(stringVals, item.String())
 		}
 
-		// Only update if we found non-string values
-		if needsConversion {
-			jsonStr, _ = sjson.Set(jsonStr, p, stringVals)
-		}
+		// Always update enum values to strings and set type to "string"
+		// This ensures compatibility with Antigravity Gemini which only allows enum for STRING type
+		jsonStr, _ = sjson.Set(jsonStr, p, stringVals)
+		parentPath := trimSuffix(p, ".enum")
+		jsonStr, _ = sjson.Set(jsonStr, joinPath(parentPath, "type"), "string")
 	}
 	return jsonStr
 }
