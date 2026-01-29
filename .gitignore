@@ -48,3 +48,9 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+
+# Opencode
+.beads/
+.opencode/
+.cli-proxy-api/
+.venv/

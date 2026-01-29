@@ -30,6 +30,9 @@ type VertexCredentialStorage struct {
 
 	// Type is the provider identifier stored alongside credentials. Always "vertex".
 	Type string `json:"type"`
+
+	// Prefix optionally namespaces models for this credential (e.g., "teamA/gemini-2.0-flash").
+	Prefix string `json:"prefix,omitempty"`
 }
 
 // SaveTokenToFile writes the credential payload to the given file path in JSON format.
