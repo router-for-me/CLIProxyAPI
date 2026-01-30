@@ -93,7 +93,7 @@ docker compose pull && docker compose up -d
 
 该项目仅接受第三方供应商支持的 Pull Request。任何非第三方供应商支持的 Pull Request 都将被拒绝。
 
-如果需要提交任何非第三方供应商支持的 Pull Request，请提交到主线版本。
+如果需要提交任何非第三方供应商支持的 Pull Request，请提交到[主线](https://github.com/router-for-me/CLIProxyAPI)版本。
 
 ## 许可证
 

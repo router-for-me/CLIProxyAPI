@@ -93,7 +93,7 @@ docker compose pull && docker compose up -d
 
 This project only accepts pull requests that relate to third-party provider support. Any pull requests unrelated to third-party provider support will be rejected.
 
-If you need to submit any non-third-party provider changes, please open them against the mainline repository.
+If you need to submit any non-third-party provider changes, please open them against the [mainline](https://github.com/router-for-me/CLIProxyAPI) repository.
 
 ## License
 
