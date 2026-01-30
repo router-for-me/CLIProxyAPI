@@ -4,6 +4,7 @@ package util
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -431,7 +432,52 @@ func removeUnsupportedKeywords(jsonStr string) string {
 			jsonStr, _ = sjson.Delete(jsonStr, p)
 		}
 	}
+	// Remove x-* extension fields (e.g., x-google-enum-descriptions) that are not supported by Gemini API
+	jsonStr = removeExtensionFields(jsonStr)
 	return jsonStr
+}
+
+// removeExtensionFields removes all x-* extension fields from the JSON schema.
+// These are OpenAPI/JSON Schema extension fields that Google APIs don't recognize.
+func removeExtensionFields(jsonStr string) string {
+	var paths []string
+	walkForExtensions(gjson.Parse(jsonStr), "", &paths)
+	// walkForExtensions returns paths in a way that deeper paths are added before their ancestors
+	// when they are not deleted wholesale, but since we skip children of deleted x-* nodes,
+	// any collected path is safe to delete. We still use DeleteBytes for efficiency.
+
+	b := []byte(jsonStr)
+	for _, p := range paths {
+		b, _ = sjson.DeleteBytes(b, p)
+	}
+	return string(b)
+}
+
+func walkForExtensions(value gjson.Result, path string, paths *[]string) {
+	if value.IsArray() {
+		arr := value.Array()
+		for i := len(arr) - 1; i >= 0; i-- {
+			walkForExtensions(arr[i], joinPath(path, strconv.Itoa(i)), paths)
+		}
+		return
+	}
+
+	if value.IsObject() {
+		value.ForEach(func(key, val gjson.Result) bool {
+			keyStr := key.String()
+			safeKey := escapeGJSONPathKey(keyStr)
+			childPath := joinPath(path, safeKey)
+
+			// If it's an extension field, we delete it and don't need to look at its children.
+			if strings.HasPrefix(keyStr, "x-") && !isPropertyDefinition(path) {
+				*paths = append(*paths, childPath)
+				return true
+			}
+
+			walkForExtensions(val, childPath, paths)
+			return true
+		})
+	}
 }
 
 func cleanupRequiredFields(jsonStr string) string {
