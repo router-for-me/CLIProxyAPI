@@ -718,6 +718,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk) {
 			defer close(out)
 			var failed bool
+			forward := true
 			for chunk := range streamChunks {
 				if chunk.Err != nil && !failed {
 					failed = true
@@ -728,7 +729,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					}
 					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
 				}
-				out <- chunk
+				if !forward {
+					continue
+				}
+				if streamCtx == nil {
+					out <- chunk
+					continue
+				}
+				select {
+				case <-streamCtx.Done():
+					forward = false
+				case out <- chunk:
+				}
 			}
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})

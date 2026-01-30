@@ -124,32 +124,47 @@ func (m *Manager) Stream(ctx context.Context, provider string, req *HTTPRequest)
 	out := make(chan StreamEvent)
 	go func() {
 		defer close(out)
+		send := func(ev StreamEvent) bool {
+			if ctx == nil {
+				out <- ev
+				return true
+			}
+			select {
+			case <-ctx.Done():
+				return false
+			case out <- ev:
+				return true
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
-				out <- StreamEvent{Err: ctx.Err()}
 				return
 			case msg, ok := <-respCh:
 				if !ok {
-					out <- StreamEvent{Err: errors.New("wsrelay: stream closed")}
+					_ = send(StreamEvent{Err: errors.New("wsrelay: stream closed")})
 					return
 				}
 				switch msg.Type {
 				case MessageTypeStreamStart:
 					resp := decodeResponse(msg.Payload)
-					out <- StreamEvent{Type: MessageTypeStreamStart, Status: resp.Status, Headers: resp.Headers}
+					if okSend := send(StreamEvent{Type: MessageTypeStreamStart, Status: resp.Status, Headers: resp.Headers}); !okSend {
+						return
+					}
 				case MessageTypeStreamChunk:
 					chunk := decodeChunk(msg.Payload)
-					out <- StreamEvent{Type: MessageTypeStreamChunk, Payload: chunk}
+					if okSend := send(StreamEvent{Type: MessageTypeStreamChunk, Payload: chunk}); !okSend {
+						return
+					}
 				case MessageTypeStreamEnd:
-					out <- StreamEvent{Type: MessageTypeStreamEnd}
+					_ = send(StreamEvent{Type: MessageTypeStreamEnd})
 					return
 				case MessageTypeError:
-					out <- StreamEvent{Type: MessageTypeError, Err: decodeError(msg.Payload)}
+					_ = send(StreamEvent{Type: MessageTypeError, Err: decodeError(msg.Payload)})
 					return
 				case MessageTypeHTTPResp:
 					resp := decodeResponse(msg.Payload)
-					out <- StreamEvent{Type: MessageTypeHTTPResp, Status: resp.Status, Headers: resp.Headers, Payload: resp.Body}
+					_ = send(StreamEvent{Type: MessageTypeHTTPResp, Status: resp.Status, Headers: resp.Headers, Payload: resp.Body})
 					return
 				default:
 				}

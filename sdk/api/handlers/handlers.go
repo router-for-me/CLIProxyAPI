@@ -362,6 +362,11 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 		return
 	}
 
+	// Capture timestamp on first API response
+	if _, exists := c.Get("API_RESPONSE_TIMESTAMP"); !exists {
+		c.Set("API_RESPONSE_TIMESTAMP", time.Now())
+	}
+
 	if existing, exists := c.Get("API_RESPONSE"); exists {
 		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
 			combined := make([]byte, 0, len(existingBytes)+len(data)+1)
@@ -507,6 +512,32 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 
+		sendErr := func(msg *interfaces.ErrorMessage) bool {
+			if ctx == nil {
+				errChan <- msg
+				return true
+			}
+			select {
+			case <-ctx.Done():
+				return false
+			case errChan <- msg:
+				return true
+			}
+		}
+
+		sendData := func(chunk []byte) bool {
+			if ctx == nil {
+				dataChan <- chunk
+				return true
+			}
+			select {
+			case <-ctx.Done():
+				return false
+			case dataChan <- chunk:
+				return true
+			}
+		}
+
 		bootstrapEligible := func(err error) bool {
 			status := statusFromError(err)
 			if status == 0 {
@@ -566,12 +597,14 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							addon = hdr.Clone()
 						}
 					}
-					errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon}
+					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
 					return
 				}
 				if len(chunk.Payload) > 0 {
 					sentPayload = true
-					dataChan <- cloneBytes(chunk.Payload)
+					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+						return
+					}
 				}
 			}
 		}
