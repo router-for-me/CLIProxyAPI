@@ -1416,29 +1416,44 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 }
 
 // extractKiroTokenData extracts KiroTokenData from auth attributes and metadata.
+// It supports both config-based tokens (stored in Attributes) and file-based tokens (stored in Metadata).
 func (s *Service) extractKiroTokenData(a *coreauth.Auth) *kiroauth.KiroTokenData {
-	if a == nil || a.Attributes == nil {
+	if a == nil {
 		return nil
 	}
 
-	accessToken := strings.TrimSpace(a.Attributes["access_token"])
+	var accessToken, profileArn, refreshToken string
+
+	// Priority 1: Try to get from Attributes (config.yaml source)
+	if a.Attributes != nil {
+		accessToken = strings.TrimSpace(a.Attributes["access_token"])
+		profileArn = strings.TrimSpace(a.Attributes["profile_arn"])
+		refreshToken = strings.TrimSpace(a.Attributes["refresh_token"])
+	}
+
+	// Priority 2: If not found in Attributes, try Metadata (JSON file source)
+	if accessToken == "" && a.Metadata != nil {
+		if at, ok := a.Metadata["access_token"].(string); ok {
+			accessToken = strings.TrimSpace(at)
+		}
+		if pa, ok := a.Metadata["profile_arn"].(string); ok {
+			profileArn = strings.TrimSpace(pa)
+		}
+		if rt, ok := a.Metadata["refresh_token"].(string); ok {
+			refreshToken = strings.TrimSpace(rt)
+		}
+	}
+
+	// access_token is required
 	if accessToken == "" {
 		return nil
 	}
 
-	tokenData := &kiroauth.KiroTokenData{
-		AccessToken: accessToken,
-		ProfileArn:  strings.TrimSpace(a.Attributes["profile_arn"]),
+	return &kiroauth.KiroTokenData{
+		AccessToken:  accessToken,
+		ProfileArn:   profileArn,
+		RefreshToken: refreshToken,
 	}
-
-	// Also try to get refresh token from metadata
-	if a.Metadata != nil {
-		if rt, ok := a.Metadata["refresh_token"].(string); ok {
-			tokenData.RefreshToken = rt
-		}
-	}
-
-	return tokenData
 }
 
 // convertKiroAPIModels converts Kiro API models to ModelInfo slice.
