@@ -21,14 +21,16 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const (
+	kiroDefaultRegion            = "us-east-1"
+	kiroProviderKey              = "kiro"
+	kiroDefaultTokenExpirySeconds = 28800
+	kiroScannerBufferSize        = 52_428_800 // 50MB - matches other executors for large streaming responses
+)
+
 type KiroExecutor struct {
 	cfg *config.Config
 }
-
-const (
-	kiroDefaultRegion = "us-east-1"
-	kiroProviderKey   = "kiro"
-)
 
 func NewKiroExecutor(cfg *config.Config) *KiroExecutor { return &KiroExecutor{cfg: cfg} }
 
@@ -41,6 +43,33 @@ func kiroEndpoint(region string) string {
 	return fmt.Sprintf("https://kiro.%s.amazonaws.com", region)
 }
 
+func getStringFromMetadata(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func getJSONStringWithFallback(data []byte, primaryKey, fallbackKey string) string {
+	if v := gjson.GetBytes(data, primaryKey).String(); v != "" {
+		return v
+	}
+	return gjson.GetBytes(data, fallbackKey).String()
+}
+
+func getJSONIntWithFallback(data []byte, primaryKey, fallbackKey string, defaultVal int64) int64 {
+	if v := gjson.GetBytes(data, primaryKey).Int(); v != 0 {
+		return v
+	}
+	if v := gjson.GetBytes(data, fallbackKey).Int(); v != 0 {
+		return v
+	}
+	return defaultVal
+}
+
 func kiroCreds(a *cliproxyauth.Auth) (accessToken, region string) {
 	if a == nil {
 		return "", ""
@@ -50,11 +79,9 @@ func kiroCreds(a *cliproxyauth.Auth) (accessToken, region string) {
 		region = a.Attributes["region"]
 	}
 	if accessToken == "" && a.Metadata != nil {
-		if v, ok := a.Metadata["access_token"].(string); ok {
-			accessToken = v
-		}
-		if v, ok := a.Metadata["region"].(string); ok {
-			region = v
+		accessToken = getStringFromMetadata(a.Metadata, "access_token")
+		if region == "" {
+			region = getStringFromMetadata(a.Metadata, "region")
 		}
 	}
 	if region == "" {
@@ -67,21 +94,11 @@ func kiroRefreshCreds(a *cliproxyauth.Auth) (refreshToken, clientID, clientSecre
 	if a == nil || a.Metadata == nil {
 		return
 	}
-	if v, ok := a.Metadata["refresh_token"].(string); ok {
-		refreshToken = v
-	}
-	if v, ok := a.Metadata["client_id"].(string); ok {
-		clientID = v
-	}
-	if v, ok := a.Metadata["client_secret"].(string); ok {
-		clientSecret = v
-	}
-	if v, ok := a.Metadata["region"].(string); ok {
-		region = v
-	}
-	if v, ok := a.Metadata["auth_method"].(string); ok {
-		authMethod = v
-	}
+	refreshToken = getStringFromMetadata(a.Metadata, "refresh_token")
+	clientID = getStringFromMetadata(a.Metadata, "client_id")
+	clientSecret = getStringFromMetadata(a.Metadata, "client_secret")
+	region = getStringFromMetadata(a.Metadata, "region")
+	authMethod = getStringFromMetadata(a.Metadata, "auth_method")
 	if region == "" {
 		region = kiroDefaultRegion
 	}
@@ -139,19 +156,25 @@ func stripKiroModelPrefix(model string) string {
 	return model
 }
 
-func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+type kiroPreparedRequest struct {
+	body              []byte
+	upstreamModel     string
+	baseModel         string
+	baseURL           string
+	accessToken       string
+	from              sdktranslator.Format
+	to                sdktranslator.Format
+}
+
+func (e *KiroExecutor) prepareKiroRequest(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) (*kiroPreparedRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := stripKiroModelPrefix(baseModel)
 
 	accessToken, region := kiroCreds(auth)
 	baseURL := kiroEndpoint(region)
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
-
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
-	stream := from != to
 
 	originalPayload := bytes.Clone(req.Payload)
 	if len(opts.OriginalRequest) > 0 {
@@ -161,21 +184,42 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	body := sdktranslator.TranslateRequest(from, to, upstreamModel, bytes.Clone(req.Payload), stream)
 	body, _ = sjson.SetBytes(body, "model", upstreamModel)
 
+	var err error
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
-		return resp, err
+		return nil, err
 	}
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, upstreamModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = disableThinkingIfToolChoiceForced(body)
 
-	url := fmt.Sprintf("%s/v1/messages", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	return &kiroPreparedRequest{
+		body:          body,
+		upstreamModel: upstreamModel,
+		baseModel:     baseModel,
+		baseURL:       baseURL,
+		accessToken:   accessToken,
+		from:          from,
+		to:            to,
+	}, nil
+}
+
+func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	prepared, err := e.prepareKiroRequest(auth, req, opts, opts.SourceFormat != sdktranslator.FromString("claude"))
 	if err != nil {
 		return resp, err
 	}
-	applyKiroHeaders(httpReq, auth, accessToken, false)
+
+	reporter := newUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
+	defer reporter.trackFailure(ctx, &err)
+
+	url := fmt.Sprintf("%s/v1/messages", prepared.baseURL)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
+	if err != nil {
+		return resp, err
+	}
+	applyKiroHeaders(httpReq, auth, prepared.accessToken, false)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -187,7 +231,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      body,
+		Body:      prepared.body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -235,6 +279,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
 
+	stream := prepared.from != prepared.to
 	if stream {
 		lines := bytes.Split(data, []byte("\n"))
 		for _, line := range lines {
@@ -249,11 +294,11 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,
-		to,
-		from,
+		prepared.to,
+		prepared.from,
 		req.Model,
 		bytes.Clone(opts.OriginalRequest),
-		body,
+		prepared.body,
 		data,
 		&param,
 	)
@@ -262,41 +307,20 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 }
 
 func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	upstreamModel := stripKiroModelPrefix(baseModel)
+	prepared, err := e.prepareKiroRequest(auth, req, opts, true)
+	if err != nil {
+		return nil, err
+	}
 
-	accessToken, region := kiroCreds(auth)
-	baseURL := kiroEndpoint(region)
-
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("claude")
-
-	originalPayload := bytes.Clone(req.Payload)
-	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
-	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, upstreamModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, upstreamModel, bytes.Clone(req.Payload), true)
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
-
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	url := fmt.Sprintf("%s/v1/messages", prepared.baseURL)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
 	if err != nil {
 		return nil, err
 	}
-
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, upstreamModel, to.String(), "", body, originalTranslated, requestedModel)
-	body = disableThinkingIfToolChoiceForced(body)
-
-	url := fmt.Sprintf("%s/v1/messages", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	applyKiroHeaders(httpReq, auth, accessToken, true)
+	applyKiroHeaders(httpReq, auth, prepared.accessToken, true)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -308,7 +332,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      body,
+		Body:      prepared.body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -355,9 +379,9 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 		}()
 
-		if from == to {
+		if prepared.from == prepared.to {
 			scanner := bufio.NewScanner(decodedBody)
-			scanner.Buffer(nil, 52_428_800)
+			scanner.Buffer(nil, kiroScannerBufferSize)
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				appendAPIResponseChunk(ctx, e.cfg, line)
@@ -378,7 +402,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}
 
 		scanner := bufio.NewScanner(decodedBody)
-		scanner.Buffer(nil, 52_428_800)
+		scanner.Buffer(nil, kiroScannerBufferSize)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -388,11 +412,11 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 			chunks := sdktranslator.TranslateStream(
 				ctx,
-				to,
-				from,
+				prepared.to,
+				prepared.from,
 				req.Model,
 				bytes.Clone(opts.OriginalRequest),
-				body,
+				prepared.body,
 				bytes.Clone(line),
 				&param,
 			)
@@ -427,10 +451,11 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 
 	var tokenURL string
 	var reqBody []byte
+	var marshalErr error
 
 	if strings.EqualFold(authMethod, "social") {
 		tokenURL = fmt.Sprintf("https://prod.%s.auth.desktop.kiro.dev/refreshToken", region)
-		reqBody, _ = json.Marshal(map[string]string{
+		reqBody, marshalErr = json.Marshal(map[string]string{
 			"refreshToken": refreshToken,
 		})
 	} else {
@@ -439,12 +464,16 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 			return auth, nil
 		}
 		tokenURL = fmt.Sprintf("https://oidc.%s.amazonaws.com/token", region)
-		reqBody, _ = json.Marshal(map[string]string{
+		reqBody, marshalErr = json.Marshal(map[string]string{
 			"clientId":     clientID,
 			"clientSecret": clientSecret,
 			"grantType":    "refresh_token",
 			"refreshToken": refreshToken,
 		})
+	}
+
+	if marshalErr != nil {
+		return nil, fmt.Errorf("kiro executor: failed to marshal refresh request: %w", marshalErr)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, bytes.NewReader(reqBody))
@@ -469,26 +498,14 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		return nil, fmt.Errorf("kiro executor: refresh failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	accessToken := gjson.GetBytes(body, "accessToken").String()
-	if accessToken == "" {
-		accessToken = gjson.GetBytes(body, "access_token").String()
-	}
+	accessToken := getJSONStringWithFallback(body, "accessToken", "access_token")
 	if accessToken == "" {
 		return nil, fmt.Errorf("kiro executor: no access_token in refresh response")
 	}
 
-	expiresIn := gjson.GetBytes(body, "expiresIn").Int()
-	if expiresIn == 0 {
-		expiresIn = gjson.GetBytes(body, "expires_in").Int()
-	}
-	if expiresIn == 0 {
-		expiresIn = 28800
-	}
+	expiresIn := getJSONIntWithFallback(body, "expiresIn", "expires_in", kiroDefaultTokenExpirySeconds)
 
-	newRefreshToken := gjson.GetBytes(body, "refreshToken").String()
-	if newRefreshToken == "" {
-		newRefreshToken = gjson.GetBytes(body, "refresh_token").String()
-	}
+	newRefreshToken := getJSONStringWithFallback(body, "refreshToken", "refresh_token")
 	if newRefreshToken == "" {
 		newRefreshToken = refreshToken
 	}
