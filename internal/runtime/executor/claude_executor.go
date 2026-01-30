@@ -161,11 +161,17 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		// Decode response body (handle gzip if needed)
+		errorBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			log.Warnf("failed to decode error response body: %v", decErr)
+			errorBody = httpResp.Body
+		}
+		b, _ := io.ReadAll(errorBody)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		if errClose := httpResp.Body.Close(); errClose != nil {
+		if errClose := errorBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 		return resp, err
@@ -293,10 +299,16 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		// Decode response body (handle gzip if needed)
+		errorBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			log.Warnf("failed to decode error response body: %v", decErr)
+			errorBody = httpResp.Body
+		}
+		b, _ := io.ReadAll(errorBody)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
+		if errClose := errorBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
@@ -473,7 +485,6 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	log.Debugf("claude executor: refresh called")
 	if auth == nil {
 		return nil, fmt.Errorf("claude executor: auth is nil")
 	}
@@ -935,6 +946,7 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 	} else {
 		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
 	}
+
 	return payload
 }
 

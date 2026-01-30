@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -144,6 +145,11 @@ type Manager struct {
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
+
+	// Master-follower credential sync
+	credentialMaster string
+	peerSecret       string
+	masterMu         sync.RWMutex
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -205,6 +211,329 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.runtimeConfig.Store(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+}
+
+// SetCredentialMaster sets the master node URL for credential synchronization.
+func (m *Manager) SetCredentialMaster(master string) {
+	if m == nil {
+		return
+	}
+	m.masterMu.Lock()
+	m.credentialMaster = strings.TrimSpace(master)
+	m.masterMu.Unlock()
+}
+
+// GetCredentialMaster returns the configured master node URL.
+func (m *Manager) GetCredentialMaster() string {
+	if m == nil {
+		return ""
+	}
+	m.masterMu.RLock()
+	defer m.masterMu.RUnlock()
+	return m.credentialMaster
+}
+
+// SetPeerSecret sets the shared secret for peer authentication.
+func (m *Manager) SetPeerSecret(secret string) {
+	if m == nil {
+		return
+	}
+	m.masterMu.Lock()
+	m.peerSecret = secret
+	m.masterMu.Unlock()
+}
+
+// GetPeerSecret returns the current peer secret.
+func (m *Manager) GetPeerSecret() string {
+	if m == nil {
+		return ""
+	}
+	m.masterMu.RLock()
+	defer m.masterMu.RUnlock()
+	return m.peerSecret
+}
+
+// GetAccessToken returns the access_token for a given auth ID.
+// Used by master node to serve credential queries from followers.
+func (m *Manager) GetAccessToken(id string) string {
+	if m == nil || id == "" {
+		return ""
+	}
+	m.mu.RLock()
+	auth, ok := m.auths[id]
+	m.mu.RUnlock()
+	if !ok || auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	if at, ok := auth.Metadata["access_token"].(string); ok {
+		return at
+	}
+	return ""
+}
+
+// RefreshIfNeeded checks if the token for the given auth ID needs refresh,
+// and refreshes it if necessary. This is called by master node when serving
+// credential queries from followers, ensuring tokens are refreshed on-demand
+// even when master itself is not making API requests.
+func (m *Manager) RefreshIfNeeded(ctx context.Context, id string) {
+	if m == nil || id == "" {
+		return
+	}
+	m.mu.RLock()
+	auth := m.auths[id]
+	m.mu.RUnlock()
+	if auth == nil {
+		return
+	}
+	now := time.Now()
+	if m.shouldRefresh(auth, now) {
+		log.Debugf("RefreshIfNeeded: token needs refresh for %s, triggering refresh", id)
+		m.refreshAuth(ctx, id)
+	}
+}
+
+// GetExpirationTime returns the expiration time for a given auth ID.
+// Used by master node to include expiration info in credential responses.
+func (m *Manager) GetExpirationTime(id string) (time.Time, bool) {
+	if m == nil || id == "" {
+		return time.Time{}, false
+	}
+	m.mu.RLock()
+	auth := m.auths[id]
+	m.mu.RUnlock()
+	if auth == nil {
+		return time.Time{}, false
+	}
+	return auth.ExpirationTime()
+}
+
+// AuthSyncData represents auth data for sync (without refresh_token).
+type AuthSyncData struct {
+	ID       string         `json:"id"`
+	Provider string         `json:"provider"`
+	Metadata map[string]any `json:"metadata"`
+}
+
+// GetAllAuthsForSync returns all auth entries for sync (without refresh_token).
+func (m *Manager) GetAllAuthsForSync() []AuthSyncData {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]AuthSyncData, 0, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil || auth.Disabled {
+			continue
+		}
+		syncData := AuthSyncData{
+			ID:       auth.ID,
+			Provider: auth.Provider,
+			Metadata: sanitizeMetadataForSync(auth.Metadata),
+		}
+		result = append(result, syncData)
+	}
+	return result
+}
+
+// sanitizeMetadataForSync removes sensitive fields like refresh_token.
+func sanitizeMetadataForSync(meta map[string]any) map[string]any {
+	if meta == nil {
+		return nil
+	}
+	result := make(map[string]any, len(meta))
+	for k, v := range meta {
+		// Skip refresh_token and other sensitive fields
+		if k == "refresh_token" || k == "refreshToken" {
+			continue
+		}
+		result[k] = v
+	}
+	return result
+}
+
+// fetchCredentialFromMaster fetches the latest access_token from master node.
+func (m *Manager) fetchCredentialFromMaster(ctx context.Context, id, provider string) error {
+	master := m.GetCredentialMaster()
+	if master == "" {
+		return errors.New("credential-master not configured")
+	}
+	secret := m.GetPeerSecret()
+	if secret == "" {
+		return errors.New("peer secret not configured")
+	}
+
+	url := strings.TrimRight(master, "/") + "/v0/internal/credential?id=" + id
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Peer-Secret", secret)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return errors.New("master returned " + resp.Status + ": " + string(body))
+	}
+
+	var result struct {
+		ID          string `json:"id"`
+		AccessToken string `json:"access_token"`
+		Expired     string `json:"expired"` // RFC3339 format expiration time from master
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	if result.AccessToken == "" {
+		return errors.New("master returned empty access_token")
+	}
+
+	// Update local auth with new access_token
+	m.mu.Lock()
+	auth, ok := m.auths[id]
+	if !ok || auth == nil {
+		m.mu.Unlock()
+		return errors.New("auth not found locally")
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = result.AccessToken
+	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+	// Update expired time from master to prevent repeated fetch cycles
+	if result.Expired != "" {
+		auth.Metadata["expired"] = result.Expired
+	}
+	auth.UpdatedAt = time.Now()
+	auth.LastRefreshedAt = time.Now()
+	auth.LastError = nil
+	auth.Status = StatusActive
+	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	auth.ModelStates = nil // Clear per-model suspend states
+	m.mu.Unlock()
+
+	// Persist to file so file watcher won't overwrite with old token
+	_ = m.persist(ctx, auth)
+
+	// Clear suspension states
+	registry.GetGlobalRegistry().ResumeClientAllModels(id)
+
+	log.Infof("fetched access_token from master: provider=%s, id=%s", provider, id)
+	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	return nil
+}
+
+// SyncAuthsFromMaster syncs all auth entries from master node at startup.
+// It writes auth files to the local auth directory for file watcher to pick up.
+func (m *Manager) SyncAuthsFromMaster(ctx context.Context, authDir string) error {
+	master := m.GetCredentialMaster()
+	if master == "" {
+		return nil // Not a follower node
+	}
+	secret := m.GetPeerSecret()
+	if secret == "" {
+		log.Warnf("SyncAuthsFromMaster: peer secret not configured")
+		return errors.New("peer secret not configured")
+	}
+	log.Infof("SyncAuthsFromMaster: syncing from %s with authDir=%s", master, authDir)
+
+	url := strings.TrimRight(master, "/") + "/v0/internal/auth-list"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Peer-Secret", secret)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return errors.New("master returned " + resp.Status + ": " + string(body))
+	}
+
+	var result struct {
+		Auths []AuthSyncData `json:"auths"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+
+	// Sync each auth to memory and file
+	for _, syncData := range result.Auths {
+		// 1. Directly update memory (immediate effect)
+		auth := m.syncDataToAuth(syncData, authDir)
+		m.mu.Lock()
+		m.auths[auth.ID] = auth
+		m.mu.Unlock()
+
+		// 2. Write file for persistence
+		if err := m.writeAuthToFile(authDir, syncData); err != nil {
+			log.Warnf("failed to write auth file %s: %v", syncData.ID, err)
+		}
+
+		// 3. Clear suspend states
+		registry.GetGlobalRegistry().ResumeClientAllModels(auth.ID)
+
+		// 4. Notify Service layer to register executors
+		m.hook.OnAuthUpdated(ctx, auth.Clone())
+	}
+
+	log.Infof("synced %d auths from master", len(result.Auths))
+	return nil
+}
+
+// syncDataToAuth converts AuthSyncData to Auth for memory storage.
+func (m *Manager) syncDataToAuth(data AuthSyncData, authDir string) *Auth {
+	now := time.Now()
+	filename := data.ID
+	if !strings.HasSuffix(filename, ".json") {
+		filename += ".json"
+	}
+	return &Auth{
+		ID:        data.ID,
+		Provider:  data.Provider,
+		FileName:  filename,
+		Metadata:  data.Metadata,
+		Status:    StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Attributes: map[string]string{
+			"path": filepath.Join(authDir, filename),
+		},
+	}
+}
+
+// writeAuthToFile writes an auth entry to local file for file watcher to pick up.
+func (m *Manager) writeAuthToFile(authDir string, syncData AuthSyncData) error {
+	if authDir == "" || syncData.ID == "" {
+		return nil
+	}
+
+	filename := syncData.ID
+	if !strings.HasSuffix(filename, ".json") {
+		filename += ".json"
+	}
+	filePath := filepath.Join(authDir, filename)
+
+	data, err := json.MarshalIndent(syncData.Metadata, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filePath, data, 0600)
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -569,6 +898,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
+	fetchedFromMaster := make(map[string]struct{}) // Track auths that already fetched from master
 	var lastErr error
 	for {
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
@@ -592,6 +922,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
 		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -606,6 +937,30 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
+
+			// If 401 and credential-master is configured, sync fetch and retry (only once per auth)
+			// Note: 403 is NOT included because it may indicate TLS fingerprint mismatch (network config issue),
+			// not an invalid token. Fetching a new token won't help in that case.
+			statusCode := 0
+			if result.Error != nil {
+				statusCode = result.Error.HTTPStatus
+			}
+			if statusCode == 401 && m.GetCredentialMaster() != "" {
+				if _, alreadyFetched := fetchedFromMaster[auth.ID]; !alreadyFetched {
+					log.Infof("got %d, fetching credential from master and retrying...", statusCode)
+					fetchedFromMaster[auth.ID] = struct{}{} // Mark as fetched to prevent infinite loop
+					if err := m.fetchCredentialFromMaster(ctx, auth.ID, provider); err != nil {
+						log.Warnf("failed to fetch credential from master: %v", err)
+					} else {
+						// Fetch succeeded, remove from tried to allow retry with new token
+						delete(tried, auth.ID)
+						continue
+					}
+				} else {
+					log.Warnf("got %d again after fetching from master, not retrying to prevent infinite loop", statusCode)
+				}
+			}
+
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
 			continue
@@ -675,6 +1030,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
+	fetchedFromMaster := make(map[string]struct{}) // Track auths that already fetched from master
 	var lastErr error
 	for {
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
@@ -708,6 +1064,30 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errors.As(errStream, &se) && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
+
+			// If 401 and credential-master is configured, sync fetch and retry (only once per auth)
+			// Note: 403 is NOT included because it may indicate TLS fingerprint mismatch (network config issue),
+			// not an invalid token. Fetching a new token won't help in that case.
+			statusCode := 0
+			if rerr != nil {
+				statusCode = rerr.HTTPStatus
+			}
+			if statusCode == 401 && m.GetCredentialMaster() != "" {
+				if _, alreadyFetched := fetchedFromMaster[auth.ID]; !alreadyFetched {
+					log.Infof("stream got %d, fetching credential from master and retrying...", statusCode)
+					fetchedFromMaster[auth.ID] = struct{}{} // Mark as fetched to prevent infinite loop
+					if err := m.fetchCredentialFromMaster(ctx, auth.ID, provider); err != nil {
+						log.Warnf("failed to fetch credential from master: %v", err)
+					} else {
+						// Fetch succeeded, remove from tried to allow retry with new token
+						delete(tried, auth.ID)
+						continue
+					}
+				} else {
+					log.Warnf("stream got %d again after fetching from master, not retrying to prevent infinite loop", statusCode)
+				}
+			}
+
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
@@ -1166,12 +1546,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 				statusCode := statusCodeFromResult(result.Error)
 				switch statusCode {
-				case 401:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
+				case 401, 403:
+					// 401 = Unauthorized, 403 = Forbidden
+					// Note: For follower nodes, execute layer handles fetch-from-master and retries.
+					// If MarkResult is called, it means retry already failed or wasn't applicable.
+					state.NextRetryAfter = now.Add(30 * time.Minute)
 					suspendReason = "unauthorized"
 					shouldSuspendModel = true
-				case 402, 403:
+				case 402:
 					next := now.Add(30 * time.Minute)
 					state.NextRetryAfter = next
 					suspendReason = "payment_required"
@@ -1237,6 +1619,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
+
+	// Note: credential fetch from master is now handled synchronously in execute functions
+	// (executeMixedOnce, executeStreamMixedOnce) to enable immediate retry with new token
 
 	m.hook.OnResult(ctx, result)
 }
@@ -1971,7 +2356,19 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		exec = m.executors[auth.Provider]
 	}
 	m.mu.RUnlock()
-	if auth == nil || exec == nil {
+	if auth == nil {
+		return
+	}
+
+	// Follower nodes (with credential-master configured) fetch from master instead of local refresh
+	if m.GetCredentialMaster() != "" {
+		// Errors are logged inside fetchCredentialFromMaster, will retry on next refresh cycle or on 401/403
+		m.fetchCredentialFromMaster(ctx, id, auth.Provider)
+		return
+	}
+
+	// Master node: perform local refresh using executor
+	if exec == nil {
 		return
 	}
 	cloned := auth.Clone()

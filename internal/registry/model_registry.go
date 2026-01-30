@@ -670,6 +670,33 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
 }
 
+// ResumeClientAllModels clears all suspensions for a client across all models.
+// This is useful when credentials are refreshed or updated from master.
+func (r *ModelRegistry) ResumeClientAllModels(clientID string) {
+	if clientID == "" {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	now := time.Now()
+	resumed := 0
+	for modelID, registration := range r.models {
+		if registration == nil || registration.SuspendedClients == nil {
+			continue
+		}
+		if _, ok := registration.SuspendedClients[clientID]; ok {
+			delete(registration.SuspendedClients, clientID)
+			registration.LastUpdated = now
+			resumed++
+			log.Debugf("Resumed client %s for model %s (bulk)", clientID, modelID)
+		}
+	}
+	if resumed > 0 {
+		log.Debugf("Resumed client %s for %d models", clientID, resumed)
+	}
+}
+
 // ClientSupportsModel reports whether the client registered support for modelID.
 func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
