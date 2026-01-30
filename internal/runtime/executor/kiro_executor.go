@@ -334,12 +334,16 @@ type kiroEndpointConfig struct {
 	Name      string // Endpoint name for logging
 }
 
-// kiroEndpointConfigs defines the available Kiro API endpoints with their compatible configurations.
-// The order determines fallback priority: primary endpoint first, then fallbacks.
+// kiroDefaultRegion is the default AWS region for Kiro API endpoints.
+// Used when no region is specified in auth metadata.
+const kiroDefaultRegion = "us-east-1"
+
+// buildKiroEndpointConfigs creates endpoint configurations for the specified region.
+// This enables dynamic region support for Enterprise/IdC users in non-us-east-1 regions.
 //
 // CRITICAL: Each endpoint MUST use its compatible Origin and AmzTarget values:
-// - CodeWhisperer endpoint (codewhisperer.us-east-1.amazonaws.com): Uses AI_EDITOR origin and AmazonCodeWhispererStreamingService target
-// - Amazon Q endpoint (q.us-east-1.amazonaws.com): Uses CLI origin and AmazonQDeveloperStreamingService target
+// - CodeWhisperer endpoint (codewhisperer.{region}.amazonaws.com): Uses AI_EDITOR origin and AmazonCodeWhispererStreamingService target
+// - Amazon Q endpoint (q.{region}.amazonaws.com): Uses CLI origin and AmazonQDeveloperStreamingService target
 //
 // Mismatched combinations will result in 403 Forbidden errors.
 //
@@ -348,22 +352,32 @@ type kiroEndpointConfig struct {
 // 2. These tokens use AI_EDITOR origin which is only compatible with CodeWhisperer endpoint
 // 3. Amazon Q endpoint requires CLI origin which is for Amazon Q CLI tokens
 // This matches the AIClient-2-API-main project's configuration.
-var kiroEndpointConfigs = []kiroEndpointConfig{
-	{
-		URL:       "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:    "AI_EDITOR",
-		AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
-		Name:      "CodeWhisperer",
-	},
-	{
-		URL:       "https://q.us-east-1.amazonaws.com/",
-		Origin:    "CLI",
-		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
-		Name:      "AmazonQ",
-	},
+func buildKiroEndpointConfigs(region string) []kiroEndpointConfig {
+	if region == "" {
+		region = kiroDefaultRegion
+	}
+	return []kiroEndpointConfig{
+		{
+			URL:       fmt.Sprintf("https://codewhisperer.%s.amazonaws.com/generateAssistantResponse", region),
+			Origin:    "AI_EDITOR",
+			AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+			Name:      "CodeWhisperer",
+		},
+		{
+			URL:       fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", region),
+			Origin:    "CLI",
+			AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
+			Name:      "AmazonQ",
+		},
+	}
 }
 
+// kiroEndpointConfigs is kept for backward compatibility with default us-east-1 region.
+// Prefer using buildKiroEndpointConfigs(region) for dynamic region support.
+var kiroEndpointConfigs = buildKiroEndpointConfigs(kiroDefaultRegion)
+
 // getKiroEndpointConfigs returns the list of Kiro API endpoint configurations to try in order.
+// Supports dynamic region based on auth metadata "region" field.
 // Supports reordering based on "preferred_endpoint" in auth metadata/attributes.
 // For IDC auth method, automatically uses CodeWhisperer endpoint with CLI origin.
 func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
@@ -371,15 +385,27 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 		return kiroEndpointConfigs
 	}
 
+	// Extract region from auth metadata, fallback to default
+	region := kiroDefaultRegion
+	if auth.Metadata != nil {
+		if r, ok := auth.Metadata["region"].(string); ok && r != "" {
+			region = r
+			log.Debugf("kiro: using region from auth metadata: %s", region)
+		}
+	}
+
+	// Build endpoint configs for the specified region
+	endpointConfigs := buildKiroEndpointConfigs(region)
+
 	// For IDC auth, use CodeWhisperer endpoint with AI_EDITOR origin (same as Social auth)
 	// Based on kiro2api analysis: IDC tokens work with CodeWhisperer endpoint using Bearer auth
 	// The difference is only in how tokens are refreshed (OIDC with clientId/clientSecret for IDC)
 	// NOT in how API calls are made - both Social and IDC use the same endpoint/origin
 	if auth.Metadata != nil {
 		authMethod, _ := auth.Metadata["auth_method"].(string)
-		if authMethod == "idc" {
-			log.Debugf("kiro: IDC auth, using CodeWhisperer endpoint")
-			return kiroEndpointConfigs
+		if strings.ToLower(authMethod) == "idc" {
+			log.Debugf("kiro: IDC auth, using CodeWhisperer endpoint (region: %s)", region)
+			return endpointConfigs
 		}
 	}
 
@@ -396,7 +422,7 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	}
 
 	if preference == "" {
-		return kiroEndpointConfigs
+		return endpointConfigs
 	}
 
 	preference = strings.ToLower(strings.TrimSpace(preference))
@@ -405,7 +431,7 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	var sorted []kiroEndpointConfig
 	var remaining []kiroEndpointConfig
 
-	for _, cfg := range kiroEndpointConfigs {
+	for _, cfg := range endpointConfigs {
 		name := strings.ToLower(cfg.Name)
 		// Check for matches
 		// CodeWhisperer aliases: codewhisperer, ide
@@ -426,7 +452,7 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 
 	// If preference didn't match anything, return default
 	if len(sorted) == 0 {
-		return kiroEndpointConfigs
+		return endpointConfigs
 	}
 
 	// Combine: preferred first, then others
@@ -445,7 +471,7 @@ func isIDCAuth(auth *cliproxyauth.Auth) bool {
 		return false
 	}
 	authMethod, _ := auth.Metadata["auth_method"].(string)
-	return authMethod == "idc"
+	return strings.ToLower(authMethod) == "idc"
 }
 
 // buildKiroPayloadForFormat builds the Kiro API payload based on the source format.
