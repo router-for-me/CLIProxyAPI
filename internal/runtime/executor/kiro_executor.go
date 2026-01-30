@@ -396,8 +396,8 @@ var kiroEndpointConfigs = buildKiroEndpointConfigs(kiroDefaultRegion)
 // Region priority:
 // 1. auth.Metadata["api_region"] - explicit API region override
 // 2. ProfileARN region - extracted from arn:aws:service:REGION:account:resource
-// 3. auth.Metadata["region"] - OIDC/Identity region (may differ from API region)
-// 4. kiroDefaultRegion (us-east-1) - fallback
+// 3. kiroDefaultRegion (us-east-1) - fallback
+// Note: OIDC "region" is NOT used - it's for token refresh, not API calls
 func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	if auth == nil {
 		return kiroEndpointConfigs
@@ -420,13 +420,9 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 					regionSource = "profile_arn"
 				}
 			}
-			// Priority 3: OIDC region (only if not already set from profile_arn)
-			if regionSource == "default" {
-				if r, ok := auth.Metadata["region"].(string); ok && r != "" {
-					region = r
-					regionSource = "region"
-				}
-			}
+			// Note: OIDC "region" field is NOT used for API endpoint
+			// Kiro API only exists in us-east-1, while OIDC region can vary (e.g., ap-northeast-2)
+			// Using OIDC region for API calls causes DNS failures
 		}
 	}
 
