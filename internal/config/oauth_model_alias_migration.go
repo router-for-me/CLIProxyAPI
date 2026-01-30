@@ -12,7 +12,6 @@ import (
 var antigravityModelConversionTable = map[string]string{
 	"gemini-2.5-computer-use-preview-10-2025": "rev19-uic3-1p",
 	"gemini-3-pro-image-preview":              "gemini-3-pro-image",
-	"gemini-3-pro-preview":                    "gemini-3-pro-high",
 	"gemini-3-flash-preview":                  "gemini-3-flash",
 	"gemini-claude-sonnet-4-5":                "claude-sonnet-4-5",
 	"gemini-claude-sonnet-4-5-thinking":       "claude-sonnet-4-5-thinking",
@@ -25,7 +24,6 @@ func defaultAntigravityAliases() []OAuthModelAlias {
 	return []OAuthModelAlias{
 		{Name: "rev19-uic3-1p", Alias: "gemini-2.5-computer-use-preview-10-2025"},
 		{Name: "gemini-3-pro-image", Alias: "gemini-3-pro-image-preview"},
-		{Name: "gemini-3-pro-high", Alias: "gemini-3-pro-preview"},
 		{Name: "gemini-3-flash", Alias: "gemini-3-flash-preview"},
 		{Name: "claude-sonnet-4-5", Alias: "gemini-claude-sonnet-4-5"},
 		{Name: "claude-sonnet-4-5-thinking", Alias: "gemini-claude-sonnet-4-5-thinking"},
