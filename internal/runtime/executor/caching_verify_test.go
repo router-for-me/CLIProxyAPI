@@ -165,6 +165,54 @@ func TestEnsureCacheControl(t *testing.T) {
 			t.Errorf("system should have cache_control even with empty tools array")
 		}
 	})
+
+	// Test case 8: Messages caching for multi-turn (second-to-last user)
+	t.Run("Messages Caching Second-To-Last User", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-3-5-sonnet",
+			"messages": [
+				{"role": "user", "content": "First user"},
+				{"role": "assistant", "content": "Assistant reply"},
+				{"role": "user", "content": "Second user"},
+				{"role": "assistant", "content": "Assistant reply 2"},
+				{"role": "user", "content": "Third user"}
+			]
+		}`)
+		output := ensureCacheControl(input)
+
+		cacheType := gjson.GetBytes(output, "messages.2.content.0.cache_control.type")
+		if cacheType.String() != "ephemeral" {
+			t.Errorf("cache_control not found on second-to-last user turn. Output: %s", string(output))
+		}
+
+		lastUserCache := gjson.GetBytes(output, "messages.4.content.0.cache_control")
+		if lastUserCache.Exists() {
+			t.Errorf("last user turn should NOT have cache_control")
+		}
+	})
+
+	// Test case 9: Existing message cache_control should skip injection
+	t.Run("Messages Skip When Cache Control Exists", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-3-5-sonnet",
+			"messages": [
+				{"role": "user", "content": [{"type": "text", "text": "First user"}]},
+				{"role": "assistant", "content": [{"type": "text", "text": "Assistant reply", "cache_control": {"type": "ephemeral"}}]},
+				{"role": "user", "content": [{"type": "text", "text": "Second user"}]}
+			]
+		}`)
+		output := ensureCacheControl(input)
+
+		userCache := gjson.GetBytes(output, "messages.0.content.0.cache_control")
+		if userCache.Exists() {
+			t.Errorf("cache_control should NOT be injected when a message already has cache_control")
+		}
+
+		existingCache := gjson.GetBytes(output, "messages.1.content.0.cache_control.type")
+		if existingCache.String() != "ephemeral" {
+			t.Errorf("existing cache_control should be preserved. Output: %s", string(output))
+		}
+	})
 }
 
 // TestCacheControlOrder verifies the correct order: tools -> system -> messages

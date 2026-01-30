@@ -642,12 +642,16 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,prompt-caching-2024-07-31"
+	promptCachingBeta := "prompt-caching-2024-07-31"
+	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14," + promptCachingBeta
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 		baseBetas = val
 		if !strings.Contains(val, "oauth") {
 			baseBetas += ",oauth-2025-04-20"
 		}
+	}
+	if !strings.Contains(baseBetas, promptCachingBeta) {
+		baseBetas += "," + promptCachingBeta
 	}
 
 	// Merge extra betas from request body
