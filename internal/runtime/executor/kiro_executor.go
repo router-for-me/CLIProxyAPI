@@ -364,7 +364,7 @@ func buildKiroEndpointConfigs(region string) []kiroEndpointConfig {
 			Name:      "CodeWhisperer",
 		},
 		{
-			URL:       fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", region),
+			URL:       fmt.Sprintf("https://q.%s.amazonaws.com/", region),
 			Origin:    "CLI",
 			AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
 			Name:      "AmazonQ",
