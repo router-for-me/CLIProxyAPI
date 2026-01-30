@@ -35,7 +35,7 @@ import (
 
 const (
 	// Kiro API common constants
-	kiroContentType  = "application/x-amz-json-1.0"
+	kiroContentType  = "application/json"
 	kiroAcceptStream = "*/*"
 
 	// Event Stream frame size constants for boundary protection
@@ -47,17 +47,18 @@ const (
 	// Event Stream error type constants
 	ErrStreamFatal     = "fatal"     // Connection/authentication errors, not recoverable
 	ErrStreamMalformed = "malformed" // Format errors, data cannot be parsed
-	// kiroUserAgent matches amq2api format for User-Agent header (Amazon Q CLI style)
+
+	// kiroUserAgent matches Amazon Q CLI style for User-Agent header
 	kiroUserAgent = "aws-sdk-rust/1.3.9 os/macos lang/rust/1.87.0"
-	// kiroFullUserAgent is the complete x-amz-user-agent header matching amq2api (Amazon Q CLI style)
+	// kiroFullUserAgent is the complete x-amz-user-agent header (Amazon Q CLI style)
 	kiroFullUserAgent = "aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.88.0 os/macos lang/rust/1.87.0 m/E app/AmazonQ-For-CLI"
 
-	// Kiro IDE style headers (from kiro2api - for IDC auth)
-	kiroIDEUserAgent     = "aws-sdk-js/1.0.18 ua/2.1 os/darwin#25.0.0 lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1"
-	kiroIDEAmzUserAgent  = "aws-sdk-js/1.0.18 KiroIDE-0.2.13-66c23a8c5d15afabec89ef9954ef52a119f10d369df04d548fc6c1eac694b0d1"
-	kiroIDEAgentModeSpec = "spec"
+	// Kiro IDE style headers for IDC auth
+	kiroIDEUserAgent     = "aws-sdk-js/1.0.27 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E"
+	kiroIDEAmzUserAgent  = "aws-sdk-js/1.0.27"
+	kiroIDEAgentModeVibe = "vibe"
 
-	// Socket retry configuration constants (based on kiro2Api reference implementation)
+	// Socket retry configuration constants
 	// Maximum number of retry attempts for socket/network errors
 	kiroSocketMaxRetries = 3
 	// Base delay between retry attempts (uses exponential backoff: delay * 2^attempt)
@@ -355,33 +356,31 @@ func extractRegionFromProfileARN(profileArn string) string {
 // buildKiroEndpointConfigs creates endpoint configurations for the specified region.
 // This enables dynamic region support for Enterprise/IdC users in non-us-east-1 regions.
 //
-// CRITICAL: Each endpoint MUST use its compatible Origin and AmzTarget values:
-// - CodeWhisperer endpoint (codewhisperer.{region}.amazonaws.com): Uses AI_EDITOR origin and AmazonCodeWhispererStreamingService target
-// - Amazon Q endpoint (q.{region}.amazonaws.com): Uses CLI origin and AmazonQDeveloperStreamingService target
+// Uses Q endpoint (q.{region}.amazonaws.com) as primary for ALL auth types:
+// - Works universally across all AWS regions (CodeWhisperer endpoint only exists in us-east-1)
+// - Uses /generateAssistantResponse path with AI_EDITOR origin
+// - Does NOT require X-Amz-Target header
 //
-// Mismatched combinations will result in 403 Forbidden errors.
-//
-// NOTE: CodeWhisperer is set as the default endpoint because:
-// 1. Most tokens come from Kiro IDE / VSCode extensions (AWS Builder ID auth)
-// 2. These tokens use AI_EDITOR origin which is only compatible with CodeWhisperer endpoint
-// 3. Amazon Q endpoint requires CLI origin which is for Amazon Q CLI tokens
-// This matches the AIClient-2-API-main project's configuration.
+// The AmzTarget field is kept for backward compatibility but should be empty
+// to indicate that the header should NOT be set.
 func buildKiroEndpointConfigs(region string) []kiroEndpointConfig {
 	if region == "" {
 		region = kiroDefaultRegion
 	}
 	return []kiroEndpointConfig{
 		{
+			// Primary: Q endpoint - works for all regions and auth types
+			URL:       fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", region),
+			Origin:    "AI_EDITOR",
+			AmzTarget: "", // Empty = don't set X-Amz-Target header
+			Name:      "AmazonQ",
+		},
+		{
+			// Fallback: CodeWhisperer endpoint (legacy, only works in us-east-1)
 			URL:       fmt.Sprintf("https://codewhisperer.%s.amazonaws.com/generateAssistantResponse", region),
 			Origin:    "AI_EDITOR",
 			AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
 			Name:      "CodeWhisperer",
-		},
-		{
-			URL:       fmt.Sprintf("https://q.%s.amazonaws.com/", region),
-			Origin:    "CLI",
-			AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
-			Name:      "AmazonQ",
 		},
 	}
 }
@@ -393,7 +392,6 @@ var kiroEndpointConfigs = buildKiroEndpointConfigs(kiroDefaultRegion)
 // getKiroEndpointConfigs returns the list of Kiro API endpoint configurations to try in order.
 // Supports dynamic region based on auth metadata "api_region", "profile_arn", or "region" field.
 // Supports reordering based on "preferred_endpoint" in auth metadata/attributes.
-// For IDC auth method, automatically uses CodeWhisperer endpoint with CLI origin.
 //
 // Region priority:
 // 1. auth.Metadata["api_region"] - explicit API region override
@@ -437,14 +435,14 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	// Build endpoint configs for the specified region
 	endpointConfigs := buildKiroEndpointConfigs(region)
 
-	// For IDC auth, use CodeWhisperer endpoint with AI_EDITOR origin (same as Social auth)
-	// Based on kiro2api analysis: IDC tokens work with CodeWhisperer endpoint using Bearer auth
+	// For IDC auth, use Q endpoint with AI_EDITOR origin
+	// IDC tokens work with Q endpoint using Bearer auth
 	// The difference is only in how tokens are refreshed (OIDC with clientId/clientSecret for IDC)
 	// NOT in how API calls are made - both Social and IDC use the same endpoint/origin
 	if auth.Metadata != nil {
 		authMethod, _ := auth.Metadata["auth_method"].(string)
 		if strings.ToLower(authMethod) == "idc" {
-			log.Debugf("kiro: IDC auth, using CodeWhisperer endpoint (region: %s)", region)
+			log.Debugf("kiro: IDC auth, using Q endpoint (region: %s)", region)
 			return endpointConfigs
 		}
 	}
@@ -552,7 +550,7 @@ func applyDynamicFingerprint(req *http.Request, auth *cliproxyauth.Auth) {
 		// Use fingerprint-generated dynamic User-Agent
 		req.Header.Set("User-Agent", fp.BuildUserAgent())
 		req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
-		req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
+		req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeVibe)
 
 		log.Debugf("kiro: using dynamic fingerprint for token %s (SDK:%s, OS:%s/%s, Kiro:%s)",
 			tokenKey[:8]+"...", fp.SDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
@@ -731,8 +729,13 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 			httpReq.Header.Set("Content-Type", kiroContentType)
 			httpReq.Header.Set("Accept", kiroAcceptStream)
-			// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
-			httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
+			// Only set X-Amz-Target if specified (Q endpoint doesn't require it)
+			if endpointConfig.AmzTarget != "" {
+				httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
+			}
+			// Kiro-specific headers
+			httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeVibe)
+			httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
 
 			// Apply dynamic fingerprint-based headers
 			applyDynamicFingerprint(httpReq, auth)
@@ -1146,8 +1149,13 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 			httpReq.Header.Set("Content-Type", kiroContentType)
 			httpReq.Header.Set("Accept", kiroAcceptStream)
-			// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
-			httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
+			// Only set X-Amz-Target if specified (Q endpoint doesn't require it)
+			if endpointConfig.AmzTarget != "" {
+				httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
+			}
+			// Kiro-specific headers
+			httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeVibe)
+			httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
 
 			// Apply dynamic fingerprint-based headers
 			applyDynamicFingerprint(httpReq, auth)
