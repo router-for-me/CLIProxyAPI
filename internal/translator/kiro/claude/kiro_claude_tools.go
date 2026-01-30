@@ -395,6 +395,17 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 		isStop = stop
 	}
 
+	// Debug: log when stop event arrives
+	if isStop {
+		log.Debugf("kiro: toolUseEvent stop=true received for tool %s (ID: %s), currentToolUse buffer len: %d",
+			toolName, toolUseID, func() int {
+				if currentToolUse != nil {
+					return currentToolUse.InputBuffer.Len()
+				}
+				return -1
+			}())
+	}
+
 	// Get input - can be string (fragment) or object (complete)
 	var inputFragment string
 	var inputMap map[string]interface{}
@@ -466,12 +477,92 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 	if isStop && currentToolUse != nil {
 		fullInput := currentToolUse.InputBuffer.String()
 
+		// Check for Write tool with empty or missing input - this happens when Kiro API
+		// completely skips sending input for large file writes
+		if currentToolUse.Name == "Write" && len(strings.TrimSpace(fullInput)) == 0 {
+			log.Warnf("kiro: Write tool received no input from upstream API. The file content may be too large to transmit.")
+			// Return nil to skip this tool use - it will be handled as a truncation error
+			// The caller should emit a text block explaining the error instead
+			if processedIDs != nil {
+				processedIDs[currentToolUse.ToolUseID] = true
+			}
+			log.Infof("kiro: skipping Write tool use %s due to empty input (content too large)", currentToolUse.ToolUseID)
+			// Return a special marker tool use that indicates truncation
+			toolUse := KiroToolUse{
+				ToolUseID: currentToolUse.ToolUseID,
+				Name:      "__truncated_write__", // Special marker name
+				Input: map[string]interface{}{
+					"error": "Write tool input was not transmitted by upstream API. The file content is too large.",
+				},
+			}
+			toolUses = append(toolUses, toolUse)
+			return toolUses, nil
+		}
+
 		// Repair and parse the accumulated JSON
 		repairedJSON := RepairJSON(fullInput)
 		var finalInput map[string]interface{}
 		if err := json.Unmarshal([]byte(repairedJSON), &finalInput); err != nil {
 			log.Warnf("kiro: failed to parse accumulated tool input: %v, raw: %s", err, fullInput)
 			finalInput = make(map[string]interface{})
+
+			// Check if this is a Write tool with truncated input (missing content field)
+			// This happens when the Kiro API truncates large tool inputs
+			if currentToolUse.Name == "Write" && strings.Contains(fullInput, "file_path") && !strings.Contains(fullInput, "content") {
+				log.Warnf("kiro: Write tool input was truncated by upstream API (content field missing). The file content may be too large.")
+				// Extract file_path if possible for error context
+				filePath := ""
+				if idx := strings.Index(fullInput, "file_path"); idx >= 0 {
+					// Try to extract the file path value
+					rest := fullInput[idx:]
+					if colonIdx := strings.Index(rest, ":"); colonIdx >= 0 {
+						rest = strings.TrimSpace(rest[colonIdx+1:])
+						if len(rest) > 0 && rest[0] == '"' {
+							rest = rest[1:]
+							if endQuote := strings.Index(rest, "\""); endQuote >= 0 {
+								filePath = rest[:endQuote]
+							}
+						}
+					}
+				}
+				if processedIDs != nil {
+					processedIDs[currentToolUse.ToolUseID] = true
+				}
+				// Return a special marker tool use that indicates truncation
+				toolUse := KiroToolUse{
+					ToolUseID: currentToolUse.ToolUseID,
+					Name:      "__truncated_write__", // Special marker name
+					Input: map[string]interface{}{
+						"error":     "Write tool content was truncated by upstream API. The file content is too large.",
+						"file_path": filePath,
+					},
+				}
+				toolUses = append(toolUses, toolUse)
+				return toolUses, nil
+			}
+		}
+
+		// Additional check: Write tool parsed successfully but missing content field
+		if currentToolUse.Name == "Write" {
+			if _, hasContent := finalInput["content"]; !hasContent {
+				if filePath, hasPath := finalInput["file_path"]; hasPath {
+					log.Warnf("kiro: Write tool input missing 'content' field, likely truncated by upstream API")
+					if processedIDs != nil {
+						processedIDs[currentToolUse.ToolUseID] = true
+					}
+					// Return a special marker tool use that indicates truncation
+					toolUse := KiroToolUse{
+						ToolUseID: currentToolUse.ToolUseID,
+						Name:      "__truncated_write__", // Special marker name
+						Input: map[string]interface{}{
+							"error":     "Write tool content field was missing. The file content is too large.",
+							"file_path": filePath,
+						},
+					}
+					toolUses = append(toolUses, toolUse)
+					return toolUses, nil
+				}
+			}
 		}
 
 		toolUse := KiroToolUse{
