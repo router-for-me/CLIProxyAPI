@@ -161,40 +161,59 @@ func (r *BackgroundRefresher) refreshBatch(ctx context.Context) {
 }
 
 func (r *BackgroundRefresher) refreshSingle(ctx context.Context, token *Token) {
-	var newTokenData *KiroTokenData
-	var err error
-
 	// Normalize auth method to lowercase for case-insensitive matching
 	authMethod := strings.ToLower(token.AuthMethod)
 
-	switch authMethod {
-	case "idc":
-		newTokenData, err = r.ssoClient.RefreshTokenWithRegion(
-			ctx,
-			token.ClientID,
-			token.ClientSecret,
-			token.RefreshToken,
-			token.Region,
-			token.StartURL,
-		)
-	case "builder-id":
-		newTokenData, err = r.ssoClient.RefreshToken(
-			ctx,
-			token.ClientID,
-			token.ClientSecret,
-			token.RefreshToken,
-		)
-	default:
-		newTokenData, err = r.oauth.RefreshToken(ctx, token.RefreshToken)
+	// Create refresh function based on auth method
+	refreshFunc := func(ctx context.Context) (*KiroTokenData, error) {
+		switch authMethod {
+		case "idc":
+			return r.ssoClient.RefreshTokenWithRegion(
+				ctx,
+				token.ClientID,
+				token.ClientSecret,
+				token.RefreshToken,
+				token.Region,
+				token.StartURL,
+			)
+		case "builder-id":
+			return r.ssoClient.RefreshToken(
+				ctx,
+				token.ClientID,
+				token.ClientSecret,
+				token.RefreshToken,
+			)
+		default:
+			return r.oauth.RefreshTokenWithFingerprint(ctx, token.RefreshToken, token.ID)
+		}
 	}
 
-	if err != nil {
-		log.Printf("failed to refresh token %s: %v", token.ID, err)
+	// Use graceful degradation for better reliability
+	result := RefreshWithGracefulDegradation(
+		ctx,
+		refreshFunc,
+		token.AccessToken,
+		token.ExpiresAt,
+	)
+
+	if result.Error != nil {
+		log.Printf("failed to refresh token %s: %v", token.ID, result.Error)
+		return
+	}
+
+	newTokenData := result.TokenData
+	if result.UsedFallback {
+		log.Printf("token %s: using existing token as fallback (refresh failed but token still valid)", token.ID)
+		// Don't update the token file if we're using fallback
+		// Just update LastVerified to prevent immediate re-check
+		token.LastVerified = time.Now()
 		return
 	}
 
 	token.AccessToken = newTokenData.AccessToken
-	token.RefreshToken = newTokenData.RefreshToken
+	if newTokenData.RefreshToken != "" {
+		token.RefreshToken = newTokenData.RefreshToken
+	}
 	token.LastVerified = time.Now()
 
 	if newTokenData.ExpiresAt != "" {
