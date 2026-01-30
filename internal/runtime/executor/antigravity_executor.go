@@ -1318,6 +1318,12 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.maxOutputTokens")
 	}
 
+	// Sanitize request.contents to remove any invalid entries that contain
+	// request-level metadata fields (safetySettings, model, systemInstruction, etc.)
+	// This prevents "Invalid JSON payload" errors from the Gemini/Antigravity API
+	// when malformed history entries are accidentally included in contents.
+	payload = sanitizeRequestContents(payload)
+
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
 	if errReq != nil {
 		return nil, errReq
@@ -1593,4 +1599,70 @@ func generateProjectID() string {
 	randSourceMutex.Unlock()
 	randomPart := strings.ToLower(uuid.NewString())[:5]
 	return adj + "-" + noun + "-" + randomPart
+}
+
+// sanitizeRequestContents removes invalid entries from request.contents that contain
+// request-level metadata fields instead of proper message content.
+// Valid content entries should only have: role, parts
+// Invalid entries may contain: safetySettings, model, userAgent, requestType, requestId,
+// sessionId, systemInstruction, toolConfig, generationConfig, etc.
+func sanitizeRequestContents(payload []byte) []byte {
+	contentsPath := "request.contents"
+	contentsResult := gjson.GetBytes(payload, contentsPath)
+	if !contentsResult.Exists() || !contentsResult.IsArray() {
+		return payload
+	}
+
+	invalidFieldsSet := map[string]bool{
+		"safetySettings":    true,
+		"model":             true,
+		"userAgent":         true,
+		"requestType":       true,
+		"requestId":         true,
+		"sessionId":         true,
+		"systemInstruction": true,
+		"toolConfig":        true,
+		"generationConfig":  true,
+		"project":           true,
+		"request":           true,
+		"contents":          true,
+	}
+
+	validContents := make([]gjson.Result, 0)
+	contentsResult.ForEach(func(_, content gjson.Result) bool {
+		if !content.IsObject() {
+			return true
+		}
+
+		hasInvalidField := false
+		content.ForEach(func(key, _ gjson.Result) bool {
+			if invalidFieldsSet[key.String()] {
+				hasInvalidField = true
+				log.Warnf("sanitizeRequestContents: dropping invalid content entry with field %q", key.String())
+				return false
+			}
+			return true
+		})
+
+		if !hasInvalidField {
+			validContents = append(validContents, content)
+		}
+		return true
+	})
+
+	if len(validContents) == len(contentsResult.Array()) {
+		return payload
+	}
+
+	newContentsJSON := "["
+	for i, content := range validContents {
+		if i > 0 {
+			newContentsJSON += ","
+		}
+		newContentsJSON += content.Raw
+	}
+	newContentsJSON += "]"
+
+	result, _ := sjson.SetRawBytes(payload, contentsPath, []byte(newContentsJSON))
+	return result
 }
