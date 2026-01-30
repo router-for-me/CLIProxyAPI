@@ -7,7 +7,7 @@ on:
 
 env:
   APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: eceasy/cli-proxy-api
+  DOCKERHUB_REPO: eceasy/cli-proxy-api-plus
 
 jobs:
   docker_amd64:
