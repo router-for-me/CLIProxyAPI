@@ -338,6 +338,20 @@ type kiroEndpointConfig struct {
 // Used when no region is specified in auth metadata.
 const kiroDefaultRegion = "us-east-1"
 
+// extractRegionFromProfileARN extracts the AWS region from a ProfileARN.
+// ARN format: arn:aws:codewhisperer:REGION:ACCOUNT:profile/PROFILE_ID
+// Returns empty string if region cannot be extracted.
+func extractRegionFromProfileARN(profileArn string) string {
+	if profileArn == "" {
+		return ""
+	}
+	parts := strings.Split(profileArn, ":")
+	if len(parts) >= 4 && parts[3] != "" {
+		return parts[3]
+	}
+	return ""
+}
+
 // buildKiroEndpointConfigs creates endpoint configurations for the specified region.
 // This enables dynamic region support for Enterprise/IdC users in non-us-east-1 regions.
 //
@@ -377,22 +391,48 @@ func buildKiroEndpointConfigs(region string) []kiroEndpointConfig {
 var kiroEndpointConfigs = buildKiroEndpointConfigs(kiroDefaultRegion)
 
 // getKiroEndpointConfigs returns the list of Kiro API endpoint configurations to try in order.
-// Supports dynamic region based on auth metadata "region" field.
+// Supports dynamic region based on auth metadata "api_region", "profile_arn", or "region" field.
 // Supports reordering based on "preferred_endpoint" in auth metadata/attributes.
 // For IDC auth method, automatically uses CodeWhisperer endpoint with CLI origin.
+//
+// Region priority:
+// 1. auth.Metadata["api_region"] - explicit API region override
+// 2. ProfileARN region - extracted from arn:aws:service:REGION:account:resource
+// 3. auth.Metadata["region"] - OIDC/Identity region (may differ from API region)
+// 4. kiroDefaultRegion (us-east-1) - fallback
 func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	if auth == nil {
 		return kiroEndpointConfigs
 	}
 
-	// Extract region from auth metadata, fallback to default
+	// Determine API region with priority: api_region > profile_arn > region > default
 	region := kiroDefaultRegion
+	regionSource := "default"
+
 	if auth.Metadata != nil {
-		if r, ok := auth.Metadata["region"].(string); ok && r != "" {
+		// Priority 1: Explicit api_region override
+		if r, ok := auth.Metadata["api_region"].(string); ok && r != "" {
 			region = r
-			log.Debugf("kiro: using region from auth metadata: %s", region)
+			regionSource = "api_region"
+		} else {
+			// Priority 2: Extract from ProfileARN
+			if profileArn, ok := auth.Metadata["profile_arn"].(string); ok && profileArn != "" {
+				if arnRegion := extractRegionFromProfileARN(profileArn); arnRegion != "" {
+					region = arnRegion
+					regionSource = "profile_arn"
+				}
+			}
+			// Priority 3: OIDC region (only if not already set from profile_arn)
+			if regionSource == "default" {
+				if r, ok := auth.Metadata["region"].(string); ok && r != "" {
+					region = r
+					regionSource = "region"
+				}
+			}
 		}
 	}
+
+	log.Debugf("kiro: using region %s (source: %s)", region, regionSource)
 
 	// Build endpoint configs for the specified region
 	endpointConfigs := buildKiroEndpointConfigs(region)
