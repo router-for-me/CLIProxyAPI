@@ -329,8 +329,8 @@ func (a *Auth) AccountInfo() (string, string) {
 		}
 	}
 
-	// For GitHub provider, return username
-	if strings.ToLower(a.Provider) == "github" {
+	// For GitHub provider (including github-copilot), return username
+	if strings.HasPrefix(strings.ToLower(a.Provider), "github") {
 		if a.Metadata != nil {
 			if username, ok := a.Metadata["username"].(string); ok {
 				username = strings.TrimSpace(username)
