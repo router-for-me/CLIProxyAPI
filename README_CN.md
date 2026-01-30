@@ -52,7 +52,7 @@ mkdir -p ~/cli-proxy && cd ~/cli-proxy
 cat > docker-compose.yml << 'EOF'
 services:
   cli-proxy-api:
-    image: 17600006524/cli-proxy-api-plus:latest
+    image: eceasy/cli-proxy-api-plus:latest
     container_name: cli-proxy-api-plus
     ports:
       - "8317:8317"
@@ -64,7 +64,7 @@ services:
 EOF
 
 # 下载示例配置
-curl -o config.yaml https://raw.githubusercontent.com/linlang781/CLIProxyAPIPlus/main/config.example.yaml
+curl -o config.yaml https://raw.githubusercontent.com/router-for-me/CLIProxyAPIPlus/main/config.example.yaml
 
 # 拉取并启动
 docker compose pull && docker compose up -d
