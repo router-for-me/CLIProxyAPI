@@ -844,3 +844,55 @@ func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
 		"tab_flash_lite_preview":     {},
 	}
 }
+
+func GetKiroModels() []*ModelInfo {
+	return []*ModelInfo{
+		{
+			ID:                  "kiro-claude-haiku-4-5",
+			Object:              "model",
+			Created:             1759276800,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Haiku 4.5",
+			Description:         "Claude Haiku 4.5 via AWS Kiro",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "kiro-claude-sonnet-4",
+			Object:              "model",
+			Created:             1715644800,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Sonnet 4",
+			Description:         "Claude Sonnet 4 via AWS Kiro",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: false, DynamicAllowed: false},
+		},
+		{
+			ID:                  "kiro-claude-sonnet-4-5",
+			Object:              "model",
+			Created:             1759104000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Sonnet 4.5",
+			Description:         "Claude Sonnet 4.5 via AWS Kiro",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:                  "kiro-claude-opus-4-5",
+			Object:              "model",
+			Created:             1761955200,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Opus 4.5",
+			Description:         "Claude Opus 4.5 via AWS Kiro",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+		},
+	}
+}
