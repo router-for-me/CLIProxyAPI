@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -51,7 +50,8 @@ type ClaudeAuth struct {
 }
 
 // NewClaudeAuth creates a new Anthropic authentication service.
-// It initializes the HTTP client with proxy settings from the configuration.
+// It initializes the HTTP client with a custom TLS transport that uses Firefox
+// fingerprint to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
 //
 // Parameters:
 //   - cfg: The application configuration containing proxy settings
@@ -59,8 +59,10 @@ type ClaudeAuth struct {
 // Returns:
 //   - *ClaudeAuth: A new Claude authentication service instance
 func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
+	// Use custom HTTP client with Firefox TLS fingerprint to bypass
+	// Cloudflare's bot detection on Anthropic domains
 	return &ClaudeAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+		httpClient: NewAnthropicHttpClient(&cfg.SDKConfig),
 	}
 }
 
