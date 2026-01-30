@@ -103,3 +103,41 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 
 	return nil
 }
+
+// GetAllStaticModels returns all static model definitions from all providers.
+// This aggregates models from Claude, Gemini, Vertex, AI Studio, OpenAI/Codex,
+// Qwen, iFlow, and Antigravity into a single slice.
+func GetAllStaticModels() []*ModelInfo {
+	allModelSets := [][]*ModelInfo{
+		GetClaudeModels(),
+		GetGeminiModels(),
+		GetGeminiVertexModels(),
+		GetGeminiCLIModels(),
+		GetAIStudioModels(),
+		GetOpenAIModels(),
+		GetQwenModels(),
+		GetIFlowModels(),
+	}
+
+	var result []*ModelInfo
+	for _, models := range allModelSets {
+		result = append(result, models...)
+	}
+
+	// Include Antigravity models from static config
+	for modelID, cfg := range GetAntigravityModelConfig() {
+		if modelID == "" || cfg == nil {
+			continue
+		}
+		result = append(result, &ModelInfo{
+			ID:                  modelID,
+			Object:              "model",
+			OwnedBy:             "antigravity",
+			Type:                "antigravity",
+			Thinking:            cfg.Thinking,
+			MaxCompletionTokens: cfg.MaxCompletionTokens,
+		})
+	}
+
+	return result
+}
