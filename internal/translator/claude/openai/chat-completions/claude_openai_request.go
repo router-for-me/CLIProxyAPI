@@ -110,10 +110,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Temperature setting for controlling response randomness
 	if temp := root.Get("temperature"); temp.Exists() {
 		out, _ = sjson.Set(out, "temperature", temp.Float())
-	}
-
-	// Top P setting for nucleus sampling
-	if topP := root.Get("top_p"); topP.Exists() {
+	} else if topP := root.Get("top_p"); topP.Exists() {
+		// Top P setting for nucleus sampling (filtered out if temperature is set)
 		out, _ = sjson.Set(out, "top_p", topP.Float())
 	}
 

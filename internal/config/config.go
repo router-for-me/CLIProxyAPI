@@ -923,6 +923,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	removeLegacyGenerativeLanguageKeys(original.Content[0])
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
@@ -1413,6 +1414,16 @@ func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
 	}
 	srcIdx := findMapKeyIndex(srcRoot, key)
 	if srcIdx < 0 {
+		// Keep an explicit empty mapping for oauth-model-alias when it was previously present.
+		//
+		// Rationale: LoadConfig runs MigrateOAuthModelAlias before unmarshalling. If the
+		// oauth-model-alias key is missing, migration will add the default antigravity aliases.
+		// When users delete the last channel from oauth-model-alias via the management API,
+		// we want that deletion to persist across hot reloads and restarts.
+		if key == "oauth-model-alias" {
+			dstRoot.Content[dstIdx+1] = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			return
+		}
 		removeMapKey(dstRoot, key)
 		return
 	}

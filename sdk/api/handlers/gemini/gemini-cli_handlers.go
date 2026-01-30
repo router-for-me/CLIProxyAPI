@@ -124,6 +124,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 			log.Errorf("Failed to read response body: %v", err)
 			return
 		}
+		c.Set("API_RESPONSE_TIMESTAMP", time.Now())
 		_, _ = c.Writer.Write(output)
 		c.Set("API_RESPONSE", output)
 	}

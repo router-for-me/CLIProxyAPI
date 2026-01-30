@@ -68,14 +68,13 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			return "", err
 		}
 	case auth.Metadata != nil:
+		auth.Metadata["disabled"] = auth.Disabled
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
 		if existing, errRead := os.ReadFile(path); errRead == nil {
-			// Use metadataEqualIgnoringTimestamps to skip writes when only timestamp fields change.
-			// This prevents the token refresh loop caused by timestamp/expired/expires_in changes.
-			if metadataEqualIgnoringTimestamps(existing, raw, auth.Provider) {
+			if jsonEqual(existing, raw) {
 				return path, nil
 			}
 			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -216,12 +215,18 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
 	id := s.idFor(path, baseDir)
+	disabled, _ := metadata["disabled"].(bool)
+	status := cliproxyauth.StatusActive
+	if disabled {
+		status = cliproxyauth.StatusDisabled
+	}
 	auth := &cliproxyauth.Auth{
 		ID:               id,
 		Provider:         provider,
 		FileName:         id,
 		Label:            s.labelFor(metadata),
-		Status:           cliproxyauth.StatusActive,
+		Status:           status,
+		Disabled:         disabled,
 		Attributes:       map[string]string{"path": path},
 		Metadata:         metadata,
 		CreatedAt:        info.ModTime(),
@@ -299,8 +304,7 @@ func (s *FileTokenStore) baseDirSnapshot() string {
 	return s.baseDir
 }
 
-// DEPRECATED: Use metadataEqualIgnoringTimestamps for comparing auth metadata.
-// This function is kept for backward compatibility but can cause refresh loops.
+// jsonEqual compares two JSON blobs by parsing them into Go objects and deep comparing.
 func jsonEqual(a, b []byte) bool {
 	var objA any
 	var objB any
@@ -310,41 +314,6 @@ func jsonEqual(a, b []byte) bool {
 	if err := json.Unmarshal(b, &objB); err != nil {
 		return false
 	}
-	return deepEqualJSON(objA, objB)
-}
-
-// metadataEqualIgnoringTimestamps compares two metadata JSON blobs,
-// ignoring fields that change on every refresh but don't affect functionality.
-// This prevents unnecessary file writes that would trigger watcher events and
-// create refresh loops.
-// The provider parameter controls whether access_token is ignored: providers like
-// Google OAuth (gemini, gemini-cli) can re-fetch tokens when needed, while others
-// like iFlow require the refreshed token to be persisted.
-func metadataEqualIgnoringTimestamps(a, b []byte, provider string) bool {
-	var objA, objB map[string]any
-	if err := json.Unmarshal(a, &objA); err != nil {
-		return false
-	}
-	if err := json.Unmarshal(b, &objB); err != nil {
-		return false
-	}
-
-	// Fields to ignore: these change on every refresh but don't affect authentication logic.
-	// - timestamp, expired, expires_in, last_refresh: time-related fields that change on refresh
-	ignoredFields := []string{"timestamp", "expired", "expires_in", "last_refresh"}
-
-	// For providers that can re-fetch tokens when needed (e.g., Google OAuth),
-	// we ignore access_token to avoid unnecessary file writes.
-	switch provider {
-	case "gemini", "gemini-cli", "antigravity":
-		ignoredFields = append(ignoredFields, "access_token")
-	}
-
-	for _, field := range ignoredFields {
-		delete(objA, field)
-		delete(objB, field)
-	}
-
 	return deepEqualJSON(objA, objB)
 }
 

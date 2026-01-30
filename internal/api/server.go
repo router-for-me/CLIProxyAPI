@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,11 +34,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/live"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -172,11 +171,6 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
-
-	// wsRelay is the WebSocket relay manager for Live API tunneling through AI Studio Build
-	wsRelay              *wsrelay.Manager
-	liveProviderSelector func() string
-	liveHandler          *live.LiveHandler
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -316,9 +310,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
-	s.engine.GET("/pricing-config.html", s.servePricingConfig)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
-	openaiAudioHandlers := openai.NewOpenAIAudioHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -334,13 +326,7 @@ func (s *Server) setupRoutes() {
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
-		v1.POST("/audio/speech", openaiAudioHandlers.Speech)
 	}
-
-	// Live API WebSocket endpoint for real-time audio/video
-	// Note: The handler is configured later via SetLiveAPIRelay when wsrelay is available
-	s.liveHandler = live.NewLiveHandler(nil, nil)
-	s.engine.GET("/v1/realtime", s.liveHandler.HandleWebSocket)
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
@@ -475,19 +461,6 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	}
 
 	s.engine.GET(trimmed, conditionalAuth, finalHandler)
-}
-
-// SetLiveAPIRelay configures the Live API handler to use the wsrelay manager for tunneling
-// through AI Studio Build instead of direct Gemini API connections.
-func (s *Server) SetLiveAPIRelay(relay *wsrelay.Manager, providerSelector func() string) {
-	if s == nil || s.liveHandler == nil {
-		return
-	}
-	s.wsRelay = relay
-	s.liveProviderSelector = providerSelector
-	s.liveHandler.WSRelay = relay
-	s.liveHandler.ProviderSelector = providerSelector
-	log.Info("Live API relay configured for AI Studio Build tunneling")
 }
 
 func (s *Server) registerManagementRoutes() {
@@ -635,10 +608,11 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
-		mgmt.GET("/models/all", s.mgmt.GetAllModels)
+		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
+		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
@@ -687,22 +661,6 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		return
 	}
 
-	c.File(filePath)
-}
-
-func (s *Server) servePricingConfig(c *gin.Context) {
-	cfg := s.cfg
-	if cfg == nil || cfg.RemoteManagement.DisableControlPanel {
-		c.AbortWithStatus(http.StatusNotFound)
-		return
-	}
-	// Serve from static directory
-	staticDir := managementasset.StaticDir(s.configFilePath)
-	filePath := filepath.Join(staticDir, "pricing-config.html")
-	if _, err := os.Stat(filePath); err != nil {
-		c.AbortWithStatus(http.StatusNotFound)
-		return
-	}
 	c.File(filePath)
 }
 
@@ -1033,14 +991,17 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
 	}
 
-	// Notify Amp module of config changes (for model mapping hot-reload)
-	if s.ampModule != nil {
-		log.Debugf("triggering amp module config update")
-		if err := s.ampModule.OnConfigUpdated(cfg); err != nil {
-			log.Errorf("failed to update Amp module config: %v", err)
+	// Notify Amp module only when Amp config has changed.
+	ampConfigChanged := oldCfg == nil || !reflect.DeepEqual(oldCfg.AmpCode, cfg.AmpCode)
+	if ampConfigChanged {
+		if s.ampModule != nil {
+			log.Debugf("triggering amp module config update")
+			if err := s.ampModule.OnConfigUpdated(cfg); err != nil {
+				log.Errorf("failed to update Amp module config: %v", err)
+			}
+		} else {
+			log.Warnf("amp module is nil, skipping config update")
 		}
-	} else {
-		log.Warnf("amp module is nil, skipping config update")
 	}
 
 	// Count client sources from configuration and auth store.
