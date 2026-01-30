@@ -117,26 +117,17 @@ func GetAllStaticModels() []*ModelInfo {
 		GetOpenAIModels(),
 		GetQwenModels(),
 		GetIFlowModels(),
+		GetStaticModelDefinitionsByChannel("antigravity"),
 	}
 
-	var result []*ModelInfo
+	var totalSize int
+	for _, models := range allModelSets {
+		totalSize += len(models)
+	}
+
+	result := make([]*ModelInfo, 0, totalSize)
 	for _, models := range allModelSets {
 		result = append(result, models...)
-	}
-
-	// Include Antigravity models from static config
-	for modelID, cfg := range GetAntigravityModelConfig() {
-		if modelID == "" || cfg == nil {
-			continue
-		}
-		result = append(result, &ModelInfo{
-			ID:                  modelID,
-			Object:              "model",
-			OwnedBy:             "antigravity",
-			Type:                "antigravity",
-			Thinking:            cfg.Thinking,
-			MaxCompletionTokens: cfg.MaxCompletionTokens,
-		})
 	}
 
 	return result
