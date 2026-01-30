@@ -83,21 +83,13 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetOpenAIModels(),
 		GetQwenModels(),
 		GetIFlowModels(),
+		GetStaticModelDefinitionsByChannel("antigravity"),
 	}
 	for _, models := range allModels {
 		for _, m := range models {
 			if m != nil && m.ID == modelID {
 				return m
 			}
-		}
-	}
-
-	// Check Antigravity static config
-	if cfg := GetAntigravityModelConfig()[modelID]; cfg != nil {
-		return &ModelInfo{
-			ID:                  modelID,
-			Thinking:            cfg.Thinking,
-			MaxCompletionTokens: cfg.MaxCompletionTokens,
 		}
 	}
 
