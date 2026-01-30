@@ -49,6 +49,9 @@ const (
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
 	systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
+
+	// webSearchGeminiModel is the Gemini model used for web search functionality
+	webSearchGeminiModel = "gemini-2.5-flash"
 )
 
 var (
@@ -114,6 +117,20 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
+
+	// Check for web search tool - if present and model is Claude, use Gemini directly instead
+	// (Claude doesn't support web_search natively, so we route to Gemini)
+	if isClaude && doWebSearchTool(req.Payload) {
+		token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
+		if errToken != nil {
+			return resp, errToken
+		}
+		if updatedAuth != nil {
+			auth = updatedAuth
+		}
+		log.Debugf("antigravity executor: web_search tool detected, using Gemini for non-stream: %s", req.Model)
+		return e.executeWebSearchOnly(ctx, auth, token, req, opts)
+	}
 
 	if isClaude || strings.Contains(baseModel, "gemini-3-pro") {
 		return e.executeClaudeNonStream(ctx, auth, req, opts)
@@ -657,6 +674,13 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 	if updatedAuth != nil {
 		auth = updatedAuth
+	}
+
+	// Web search tool + Claude model: route to Gemini instead (Claude doesn't support web_search natively)
+	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
+	if isClaude && doWebSearchTool(req.Payload) {
+		log.Debugf("antigravity executor: web_search tool detected, using Gemini for stream: %s", req.Model)
+		return e.executeWebSearchOnlyStream(ctx, auth, token, req, opts)
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -1599,4 +1623,551 @@ func generateProjectID() string {
 	randSourceMutex.Unlock()
 	randomPart := strings.ToLower(uuid.NewString())[:5]
 	return adj + "-" + noun + "-" + randomPart
+}
+
+func doWebSearchTool(payload []byte) bool {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		toolType := tool.Get("type").String()
+		if strings.HasPrefix(toolType, "web_search") {
+			return true
+		}
+	}
+	return false
+}
+
+func extractUserQuery(payload []byte) string {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	arr := messages.Array()
+	for i := len(arr) - 1; i >= 0; i-- {
+		msg := arr[i]
+		if msg.Get("role").String() == "user" {
+			content := msg.Get("content")
+			if content.Type == gjson.String {
+				return content.String()
+			}
+			if content.IsArray() {
+				for _, item := range content.Array() {
+					if item.Get("type").String() == "text" {
+						return item.Get("text").String()
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (e *AntigravityExecutor) executeGeminiWebSearch(ctx context.Context, auth *cliproxyauth.Auth, token, query string) ([]byte, error) {
+	if query == "" {
+		return nil, fmt.Errorf("empty query")
+	}
+
+	geminiPayload := `{"model":"","request":{"contents":[],"tools":[{"googleSearch":{}}],"generationConfig":{"candidateCount":1}},"requestType":"web_search"}`
+	geminiPayload, _ = sjson.Set(geminiPayload, "model", webSearchGeminiModel)
+	geminiPayload, _ = sjson.Set(geminiPayload, "request.contents.0.role", "user")
+	geminiPayload, _ = sjson.Set(geminiPayload, "request.contents.0.parts.0.text", query)
+	geminiPayload, _ = sjson.Set(geminiPayload, "request.systemInstruction.role", "user")
+	geminiPayload, _ = sjson.Set(geminiPayload, "request.systemInstruction.parts.0.text", "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar.")
+
+	projectID := ""
+	if auth != nil && auth.Metadata != nil {
+		if pid, ok := auth.Metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+	}
+	geminiPayload = string(geminiToAntigravity(webSearchGeminiModel, []byte(geminiPayload), projectID))
+
+	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+
+	for _, baseURL := range baseURLs {
+		base := strings.TrimSuffix(baseURL, "/")
+		requestURL := base + antigravityGeneratePath
+
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader([]byte(geminiPayload)))
+		if errReq != nil {
+			continue
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("Accept", "application/json")
+		if host := resolveHost(base); host != "" {
+			httpReq.Host = host
+		}
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			log.Debugf("antigravity web search: request failed: %v", errDo)
+			continue
+		}
+
+		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		_ = httpResp.Body.Close()
+		if errRead != nil {
+			continue
+		}
+
+		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+			log.Debugf("antigravity web search: upstream error status: %d", httpResp.StatusCode)
+			continue
+		}
+
+		log.Debugf("antigravity web search: got response for query: %s", query)
+		return bodyBytes, nil
+	}
+
+	return nil, fmt.Errorf("web search failed")
+}
+
+func (e *AntigravityExecutor) executeWebSearchOnly(ctx context.Context, auth *cliproxyauth.Auth, token string, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+
+	query := extractUserQuery(req.Payload)
+	if query == "" {
+		reporter.publishFailure(ctx)
+		return cliproxyexecutor.Response{}, fmt.Errorf("no user query found for web search")
+	}
+
+	geminiResp, err := e.executeGeminiWebSearch(ctx, auth, token, query)
+	if err != nil {
+		reporter.publishFailure(ctx)
+		return cliproxyexecutor.Response{}, err
+	}
+
+	reporter.publish(ctx, parseAntigravityUsage(geminiResp))
+	claudeResp := convertGeminiToClaudeNonStream(req.Model, geminiResp)
+	reporter.ensurePublished(ctx)
+
+	return cliproxyexecutor.Response{Payload: []byte(claudeResp)}, nil
+}
+
+func (e *AntigravityExecutor) executeWebSearchOnlyStream(ctx context.Context, auth *cliproxyauth.Auth, token string, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+
+	query := extractUserQuery(req.Payload)
+	if query == "" {
+		reporter.publishFailure(ctx)
+		return nil, fmt.Errorf("no user query found for web search")
+	}
+
+	geminiResp, err := e.executeGeminiWebSearch(ctx, auth, token, query)
+	if err != nil {
+		reporter.publishFailure(ctx)
+		return nil, err
+	}
+
+	reporter.publish(ctx, parseAntigravityUsage(geminiResp))
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		defer reporter.ensurePublished(ctx)
+
+		sseEvents := convertGeminiToClaudeSSEStream(req.Model, geminiResp)
+		for _, event := range sseEvents {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- cliproxyexecutor.StreamChunk{Payload: []byte(event)}:
+			}
+		}
+	}()
+
+	return out, nil
+}
+
+// groundingSupport represents a citation segment from Gemini's groundingSupports
+type groundingSupport struct {
+	StartIndex int64
+	EndIndex   int64
+	Text       string
+	ChunkURLs  []string
+	ChunkTitle string
+}
+
+// parseGroundingSupports extracts fine-grained citation data from Gemini response
+func parseGroundingSupports(groundingMetadata gjson.Result) []groundingSupport {
+	var supports []groundingSupport
+
+	groundingChunks := groundingMetadata.Get("groundingChunks")
+	if !groundingChunks.IsArray() {
+		return supports
+	}
+
+	// Build chunk index -> (url, title) mapping
+	chunks := groundingChunks.Array()
+	chunkData := make([]struct {
+		URL   string
+		Title string
+	}, len(chunks))
+
+	for i, chunk := range chunks {
+		web := chunk.Get("web")
+		if web.Exists() {
+			chunkData[i].URL = web.Get("uri").String()
+			chunkData[i].Title = web.Get("title").String()
+		}
+	}
+
+	// Parse groundingSupports
+	groundingSupportsArr := groundingMetadata.Get("groundingSupports")
+	if !groundingSupportsArr.IsArray() {
+		return supports
+	}
+
+	for _, support := range groundingSupportsArr.Array() {
+		segment := support.Get("segment")
+		if !segment.Exists() {
+			continue
+		}
+
+		gs := groundingSupport{
+			StartIndex: segment.Get("startIndex").Int(),
+			EndIndex:   segment.Get("endIndex").Int(),
+			Text:       segment.Get("text").String(),
+		}
+
+		// Get referenced chunk URLs
+		chunkIndices := support.Get("groundingChunkIndices")
+		if chunkIndices.IsArray() {
+			for _, idx := range chunkIndices.Array() {
+				i := int(idx.Int())
+				if i >= 0 && i < len(chunkData) {
+					gs.ChunkURLs = append(gs.ChunkURLs, chunkData[i].URL)
+					if gs.ChunkTitle == "" {
+						gs.ChunkTitle = chunkData[i].Title
+					}
+				}
+			}
+		}
+
+		supports = append(supports, gs)
+	}
+
+	return supports
+}
+
+// buildCitedTextBlocks splits text into blocks based on groundingSupports
+// Returns: slice of (text, citations) pairs where citations may be nil for non-cited text
+// NOTE: Gemini's startIndex/endIndex are BYTE indices, not rune indices
+func buildCitedTextBlocks(textContent string, supports []groundingSupport) []struct {
+	Text      string
+	Citations []map[string]interface{}
+} {
+	var blocks []struct {
+		Text      string
+		Citations []map[string]interface{}
+	}
+
+	if len(supports) == 0 {
+		// No citations, return single text block
+		if textContent != "" {
+			blocks = append(blocks, struct {
+				Text      string
+				Citations []map[string]interface{}
+			}{Text: textContent, Citations: nil})
+		}
+		return blocks
+	}
+
+	textBytes := []byte(textContent)
+	lastEnd := int64(0)
+
+	for _, s := range supports {
+		// Add non-cited text before this citation
+		if s.StartIndex > lastEnd {
+			start := int(lastEnd)
+			end := int(s.StartIndex)
+			if end > len(textBytes) {
+				end = len(textBytes)
+			}
+			if start < end {
+				blocks = append(blocks, struct {
+					Text      string
+					Citations []map[string]interface{}
+				}{Text: string(textBytes[start:end]), Citations: nil})
+			}
+		}
+
+		// Add cited text block
+		if s.Text != "" && len(s.ChunkURLs) > 0 {
+			citation := map[string]interface{}{
+				"type":       "web_search_result_location",
+				"cited_text": s.Text,
+				"url":        s.ChunkURLs[0], // Use first URL
+				"title":      s.ChunkTitle,
+			}
+			blocks = append(blocks, struct {
+				Text      string
+				Citations []map[string]interface{}
+			}{Text: s.Text, Citations: []map[string]interface{}{citation}})
+		}
+
+		if s.EndIndex > lastEnd {
+			lastEnd = s.EndIndex
+		}
+	}
+
+	// Add remaining non-cited text
+	if int(lastEnd) < len(textBytes) {
+		blocks = append(blocks, struct {
+			Text      string
+			Citations []map[string]interface{}
+		}{Text: string(textBytes[lastEnd:]), Citations: nil})
+	}
+
+	return blocks
+}
+
+func convertGeminiToClaudeNonStream(model string, geminiResp []byte) string {
+	textContent := ""
+	if parts := gjson.GetBytes(geminiResp, "response.candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	} else if parts := gjson.GetBytes(geminiResp, "candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	}
+
+	groundingMetadata := gjson.GetBytes(geminiResp, "response.candidates.0.groundingMetadata")
+	if !groundingMetadata.Exists() {
+		groundingMetadata = gjson.GetBytes(geminiResp, "candidates.0.groundingMetadata")
+	}
+
+	inputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.promptTokenCount").Int()
+	if inputTokens == 0 {
+		inputTokens = gjson.GetBytes(geminiResp, "usageMetadata.promptTokenCount").Int()
+	}
+	outputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.candidatesTokenCount").Int()
+	if outputTokens == 0 {
+		outputTokens = gjson.GetBytes(geminiResp, "usageMetadata.candidatesTokenCount").Int()
+	}
+
+	msgID := fmt.Sprintf("msg_%s", uuid.New().String()[:24])
+	toolUseID := fmt.Sprintf("srvtoolu_%d", time.Now().UnixNano())
+
+	searchQuery := ""
+	if queries := groundingMetadata.Get("webSearchQueries"); queries.IsArray() && len(queries.Array()) > 0 {
+		searchQuery = queries.Array()[0].String()
+	}
+
+	content := []map[string]interface{}{}
+
+	serverToolUse := map[string]interface{}{
+		"type":  "server_tool_use",
+		"id":    toolUseID,
+		"name":  "web_search",
+		"input": map[string]interface{}{"query": searchQuery},
+	}
+	content = append(content, serverToolUse)
+
+	webSearchResults := []map[string]interface{}{}
+	groundingChunks := groundingMetadata.Get("groundingChunks")
+	if groundingChunks.IsArray() {
+		for _, chunk := range groundingChunks.Array() {
+			web := chunk.Get("web")
+			if web.Exists() {
+				result := map[string]interface{}{
+					"type":     "web_search_result",
+					"page_age": nil,
+				}
+				if title := web.Get("title"); title.Exists() {
+					result["title"] = title.String()
+				}
+				if uri := web.Get("uri"); uri.Exists() {
+					result["url"] = uri.String()
+				}
+				webSearchResults = append(webSearchResults, result)
+			}
+		}
+	}
+	webSearchToolResult := map[string]interface{}{
+		"type":        "web_search_tool_result",
+		"tool_use_id": toolUseID,
+		"content":     webSearchResults,
+	}
+	content = append(content, webSearchToolResult)
+
+	supports := parseGroundingSupports(groundingMetadata)
+	textBlocks := buildCitedTextBlocks(textContent, supports)
+
+	for _, block := range textBlocks {
+		textBlock := map[string]interface{}{
+			"type": "text",
+			"text": block.Text,
+		}
+		if block.Citations != nil {
+			textBlock["citations"] = block.Citations
+		}
+		content = append(content, textBlock)
+	}
+
+	response := map[string]interface{}{
+		"id":            msgID,
+		"type":          "message",
+		"role":          "assistant",
+		"content":       content,
+		"model":         model,
+		"stop_reason":   "end_turn",
+		"stop_sequence": nil,
+		"usage": map[string]interface{}{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+			"server_tool_use": map[string]interface{}{
+				"web_search_requests": 1,
+			},
+		},
+	}
+
+	respJSON, _ := json.Marshal(response)
+	return string(respJSON)
+}
+
+func convertGeminiToClaudeSSEStream(model string, geminiResp []byte) []string {
+	var events []string
+
+	textContent := ""
+	if parts := gjson.GetBytes(geminiResp, "response.candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	} else if parts := gjson.GetBytes(geminiResp, "candidates.0.content.parts"); parts.IsArray() {
+		for _, part := range parts.Array() {
+			if text := part.Get("text"); text.Exists() {
+				textContent += text.String()
+			}
+		}
+	}
+
+	groundingMetadata := gjson.GetBytes(geminiResp, "response.candidates.0.groundingMetadata")
+	if !groundingMetadata.Exists() {
+		groundingMetadata = gjson.GetBytes(geminiResp, "candidates.0.groundingMetadata")
+	}
+
+	inputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.promptTokenCount").Int()
+	if inputTokens == 0 {
+		inputTokens = gjson.GetBytes(geminiResp, "usageMetadata.promptTokenCount").Int()
+	}
+	outputTokens := gjson.GetBytes(geminiResp, "response.usageMetadata.candidatesTokenCount").Int()
+	if outputTokens == 0 {
+		outputTokens = gjson.GetBytes(geminiResp, "usageMetadata.candidatesTokenCount").Int()
+	}
+
+	msgID := fmt.Sprintf("msg_%s", uuid.New().String()[:24])
+	toolUseID := fmt.Sprintf("srvtoolu_%d", time.Now().UnixNano())
+
+	searchQuery := ""
+	if queries := groundingMetadata.Get("webSearchQueries"); queries.IsArray() && len(queries.Array()) > 0 {
+		searchQuery = queries.Array()[0].String()
+	}
+
+	messageStart := fmt.Sprintf(`{"type":"message_start","message":{"id":"%s","type":"message","role":"assistant","content":[],"model":"%s","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":%d,"output_tokens":0}}}`,
+		msgID, model, inputTokens)
+	events = append(events, "event: message_start\ndata: "+messageStart+"\n\n")
+
+	contentIndex := 0
+
+	serverToolUseStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"server_tool_use","id":"%s","name":"web_search","input":{}}}`,
+		contentIndex, toolUseID)
+	events = append(events, "event: content_block_start\ndata: "+serverToolUseStart+"\n\n")
+
+	if searchQuery != "" {
+		queryJSON, _ := sjson.Set(`{}`, "query", searchQuery)
+		inputDelta := fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, contentIndex)
+		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", queryJSON)
+		events = append(events, "event: content_block_delta\ndata: "+inputDelta+"\n\n")
+	}
+
+	events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
+	contentIndex++
+
+	webSearchResults := "[]"
+	groundingChunks := groundingMetadata.Get("groundingChunks")
+	if groundingChunks.IsArray() {
+		for _, chunk := range groundingChunks.Array() {
+			web := chunk.Get("web")
+			if web.Exists() {
+				result := `{"type":"web_search_result"}`
+				if title := web.Get("title"); title.Exists() {
+					result, _ = sjson.Set(result, "title", title.String())
+				}
+				if uri := web.Get("uri"); uri.Exists() {
+					result, _ = sjson.Set(result, "url", uri.String())
+				}
+				result, _ = sjson.Set(result, "page_age", nil)
+				webSearchResults, _ = sjson.SetRaw(webSearchResults, "-1", result)
+			}
+		}
+	}
+
+	webSearchToolResultStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"web_search_tool_result","tool_use_id":"%s","content":[]}}`,
+		contentIndex, toolUseID)
+	webSearchToolResultStart, _ = sjson.SetRaw(webSearchToolResultStart, "content_block.content", webSearchResults)
+	events = append(events, "event: content_block_start\ndata: "+webSearchToolResultStart+"\n\n")
+	events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
+	contentIndex++
+
+	supports := parseGroundingSupports(groundingMetadata)
+	textBlocks := buildCitedTextBlocks(textContent, supports)
+
+	for _, block := range textBlocks {
+		if block.Text == "" {
+			continue
+		}
+
+		if block.Citations != nil {
+			textBlockStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"citations":[],"type":"text","text":""}}`, contentIndex)
+			events = append(events, "event: content_block_start\ndata: "+textBlockStart+"\n\n")
+
+			for _, citation := range block.Citations {
+				citationJSON, _ := json.Marshal(citation)
+				citationDelta := fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"citations_delta","citation":%s}}`,
+					contentIndex, string(citationJSON))
+				events = append(events, "event: content_block_delta\ndata: "+citationDelta+"\n\n")
+			}
+		} else {
+			textBlockStart := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, contentIndex)
+			events = append(events, "event: content_block_start\ndata: "+textBlockStart+"\n\n")
+		}
+
+		runes := []rune(block.Text)
+		chunkSize := 50
+		for i := 0; i < len(runes); i += chunkSize {
+			end := i + chunkSize
+			if end > len(runes) {
+				end = len(runes)
+			}
+			chunk := string(runes[i:end])
+			textDelta := fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, contentIndex)
+			textDelta, _ = sjson.Set(textDelta, "delta.text", chunk)
+			events = append(events, "event: content_block_delta\ndata: "+textDelta+"\n\n")
+		}
+
+		events = append(events, fmt.Sprintf("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", contentIndex))
+		contentIndex++
+	}
+
+	messageDelta := fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d,"server_tool_use":{"web_search_requests":1}}}`,
+		inputTokens, outputTokens)
+	events = append(events, "event: message_delta\ndata: "+messageDelta+"\n\n")
+
+	events = append(events, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+
+	return events
 }
