@@ -109,6 +109,10 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// AutoDisable configures automatic disabling of OAuth credential files
+	// when receiving specific HTTP error codes indicating permanent failure.
+	AutoDisable AutoDisableConfig `yaml:"auto-disable" json:"auto-disable"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -246,6 +250,44 @@ type PayloadModelRule struct {
 	Name string `yaml:"name" json:"name"`
 	// Protocol restricts the rule to a specific translator format (e.g., "gemini", "responses").
 	Protocol string `yaml:"protocol" json:"protocol"`
+}
+
+// AutoDisableConfig defines automatic disable rules for OAuth credentials
+// when specific HTTP status codes are received.
+type AutoDisableConfig struct {
+	// Providers maps provider names to their auto-disable rules.
+	// Supported providers: codex, claude, gemini-cli, antigravity, qwen, iflow
+	Providers map[string]AutoDisableRule `yaml:"providers,omitempty" json:"providers,omitempty"`
+}
+
+// AutoDisableRule defines when to auto-disable credentials for a specific provider.
+type AutoDisableRule struct {
+	// Enabled controls whether auto-disable is active for this provider.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// StatusCodes lists HTTP status codes that trigger disabling.
+	// Common values: [401, 403]
+	// Default if empty and Enabled=true: [401, 403]
+	StatusCodes []int `yaml:"status-codes,omitempty" json:"status-codes,omitempty"`
+
+	// Proxy controls auto-disable during proxy requests (SDK layer).
+	// Default: true (enabled when Enabled=true, for backward compatibility)
+	Proxy *bool `yaml:"proxy,omitempty" json:"proxy,omitempty"`
+
+	// Management controls auto-disable during management API calls (/api-call).
+	// Default: false (must be explicitly enabled)
+	Management bool `yaml:"management,omitempty" json:"management,omitempty"`
+}
+
+func (c *AutoDisableConfig) Validate() error {
+	for provider, rule := range c.Providers {
+		for _, code := range rule.StatusCodes {
+			if code < 100 || code > 599 {
+				return fmt.Errorf("invalid status code %d for provider %s", code, provider)
+			}
+		}
+	}
+	return nil
 }
 
 // CloakConfig configures request cloaking for non-Claude-Code clients.
@@ -576,6 +618,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
+
+	if err := cfg.AutoDisable.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid auto-disable config: %w", err)
+	}
 
 	if cfg.legacyMigrationPending {
 		fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")

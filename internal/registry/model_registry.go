@@ -670,6 +670,33 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
 }
 
+func (r *ModelRegistry) SuspendAllClientModels(clientID, reason string) {
+	if clientID == "" {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	models, exists := r.clientModels[clientID]
+	if !exists || len(models) == 0 {
+		return
+	}
+
+	now := time.Now()
+	for _, modelID := range models {
+		registration, ok := r.models[modelID]
+		if !ok || registration == nil {
+			continue
+		}
+		if registration.SuspendedClients == nil {
+			registration.SuspendedClients = make(map[string]string)
+		}
+		registration.SuspendedClients[clientID] = reason
+		registration.LastUpdated = now
+	}
+	log.Debugf("Suspended client %s for all %d models: %s", clientID, len(models), reason)
+}
+
 // ClientSupportsModel reports whether the client registered support for modelID.
 func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
