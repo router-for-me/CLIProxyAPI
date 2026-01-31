@@ -137,6 +137,10 @@ Windows 桌面应用，基于 Tauri + React 构建，用于通过 CLIProxyAPI �
 
 面向 CLIProxyAPI 的 Web 管理面板，提供健康检查、资源监控、日志查看、自动更新、请求统计与定价展示，支持一键安装与 systemd 服务。
 
+### [CLIProxyAPI_Tray](https://github.com/kitephp/CLIProxyAPI_Tray)
+
+Windows 托盘应用，一个PowerShell脚本，不依赖任何第三方库，自动创建快捷方式，静默运行，密码管理，通道切换（Main / Plus），自动下载与更新。
+
 > [!NOTE]  
 > 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
 
