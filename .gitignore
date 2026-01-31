@@ -1,5 +1,6 @@
 # Binaries
 cli-proxy-api
+cliproxy
 *.exe
 
 # Configuration
@@ -44,7 +45,9 @@ GEMINI.md
 .bmad/*
 _bmad/*
 _bmad-output/*
+.mcp/cache/
 
 # macOS
 .DS_Store
 ._*
+*.bak
