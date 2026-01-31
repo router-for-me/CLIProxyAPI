@@ -57,6 +57,11 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// CredentialMaster specifies the master node URL for credential synchronization.
+	// When set, this node acts as a follower and fetches access_token from master on 401 errors.
+	// Example: "http://192.168.1.100:8317"
+	CredentialMaster string `yaml:"credential-master" json:"credential-master"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
