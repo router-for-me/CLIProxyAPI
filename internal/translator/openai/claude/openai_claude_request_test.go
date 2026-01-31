@@ -588,3 +588,124 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		t.Fatalf("Expected reasoning_content %q, got %q", "t1\n\nt2", got)
 	}
 }
+
+// TestConvertClaudeRequestToOpenAI_ThinkingEnabledToolCallsNoReasoning tests that
+// when thinking mode is enabled and assistant message has tool_calls but no thinking content,
+// an empty reasoning_content is added to satisfy Claude API requirements.
+func TestConvertClaudeRequestToOpenAI_ThinkingEnabledToolCallsNoReasoning(t *testing.T) {
+	tests := []struct {
+		name                    string
+		inputJSON               string
+		wantHasReasoningContent bool
+		wantReasoningContent    string
+	}{
+		{
+			name: "thinking enabled with tool_calls but no thinking content adds empty reasoning_content",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "enabled", "budget_tokens": 4000},
+				"messages": [{
+					"role": "assistant",
+					"content": [
+						{"type": "text", "text": "I will help you."},
+						{"type": "tool_use", "id": "tool_1", "name": "read_file", "input": {"path": "/test.txt"}}
+					]
+				}]
+			}`,
+			wantHasReasoningContent: true,
+			wantReasoningContent:    "",
+		},
+		{
+			name: "thinking enabled with tool_calls and thinking content uses actual reasoning",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "enabled", "budget_tokens": 4000},
+				"messages": [{
+					"role": "assistant",
+					"content": [
+						{"type": "thinking", "thinking": "Let me analyze this..."},
+						{"type": "text", "text": "I will help you."},
+						{"type": "tool_use", "id": "tool_1", "name": "read_file", "input": {"path": "/test.txt"}}
+					]
+				}]
+			}`,
+			wantHasReasoningContent: true,
+			wantReasoningContent:    "Let me analyze this...",
+		},
+		{
+			name: "thinking disabled with tool_calls does not add reasoning_content",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "disabled"},
+				"messages": [{
+					"role": "assistant",
+					"content": [
+						{"type": "text", "text": "I will help you."},
+						{"type": "tool_use", "id": "tool_1", "name": "read_file", "input": {"path": "/test.txt"}}
+					]
+				}]
+			}`,
+			wantHasReasoningContent: false,
+			wantReasoningContent:    "",
+		},
+		{
+			name: "no thinking config with tool_calls does not add reasoning_content",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"messages": [{
+					"role": "assistant",
+					"content": [
+						{"type": "text", "text": "I will help you."},
+						{"type": "tool_use", "id": "tool_1", "name": "read_file", "input": {"path": "/test.txt"}}
+					]
+				}]
+			}`,
+			wantHasReasoningContent: false,
+			wantReasoningContent:    "",
+		},
+		{
+			name: "thinking enabled without tool_calls and no thinking content does not add reasoning_content",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"thinking": {"type": "enabled", "budget_tokens": 4000},
+				"messages": [{
+					"role": "assistant",
+					"content": [
+						{"type": "text", "text": "Simple response without tools."}
+					]
+				}]
+			}`,
+			wantHasReasoningContent: false,
+			wantReasoningContent:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+			resultJSON := gjson.ParseBytes(result)
+
+			messages := resultJSON.Get("messages").Array()
+			if len(messages) == 0 {
+				t.Fatal("Expected at least one message")
+			}
+
+			assistantMsg := messages[0]
+			if assistantMsg.Get("role").String() != "assistant" {
+				t.Fatalf("Expected assistant message, got %s", assistantMsg.Get("role").String())
+			}
+
+			hasReasoningContent := assistantMsg.Get("reasoning_content").Exists()
+			if hasReasoningContent != tt.wantHasReasoningContent {
+				t.Errorf("reasoning_content existence = %v, want %v", hasReasoningContent, tt.wantHasReasoningContent)
+			}
+
+			if hasReasoningContent {
+				gotReasoningContent := assistantMsg.Get("reasoning_content").String()
+				if gotReasoningContent != tt.wantReasoningContent {
+					t.Errorf("reasoning_content = %q, want %q", gotReasoningContent, tt.wantReasoningContent)
+				}
+			}
+		})
+	}
+}

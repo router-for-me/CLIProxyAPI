@@ -255,16 +255,15 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
-	newCtx, cancel := context.WithCancel(parentCtx)
-	if requestCtx != nil && requestCtx != parentCtx {
-		go func() {
-			select {
-			case <-requestCtx.Done():
-				cancel()
-			case <-newCtx.Done():
-			}
-		}()
+
+	// Use requestCtx as base if available to preserve amp context values (fallback_models, etc.)
+	// Falls back to parentCtx if no request context
+	baseCtx := parentCtx
+	if requestCtx != nil {
+		baseCtx = requestCtx
 	}
+
+	newCtx, cancel := context.WithCancel(baseCtx)
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
