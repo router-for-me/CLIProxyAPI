@@ -36,7 +36,7 @@ var opencodeCodexInstructions string
 
 const (
 	codexUserAgentKey  = "__cpa_user_agent"
-	userAgentOpenAISDK = "ai-sdk/openai/"
+	userAgentOpenAISDK = "opencode/"
 )
 
 func InjectCodexUserAgent(raw []byte, userAgent string) []byte {
