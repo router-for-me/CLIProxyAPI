@@ -242,6 +242,16 @@ type PayloadConfig struct {
 	Override []PayloadRule `yaml:"override" json:"override"`
 	// OverrideRaw defines rules that always set raw JSON values, overwriting any existing values.
 	OverrideRaw []PayloadRule `yaml:"override-raw" json:"override-raw"`
+	// Filter defines rules that remove parameters from the payload by JSON path.
+	Filter []PayloadFilterRule `yaml:"filter" json:"filter"`
+}
+
+// PayloadFilterRule describes a rule to remove specific JSON paths from matching model payloads.
+type PayloadFilterRule struct {
+	// Models lists model entries with name pattern and protocol constraint.
+	Models []PayloadModelRule `yaml:"models" json:"models"`
+	// Params lists JSON paths (gjson/sjson syntax) to remove from the payload.
+	Params []string `yaml:"params" json:"params"`
 }
 
 // PayloadRule describes a single rule targeting a list of models with parameter updates.
