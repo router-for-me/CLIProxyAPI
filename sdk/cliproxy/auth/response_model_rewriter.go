@@ -58,6 +58,19 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 		return chunk
 	}
 
+	// Handle raw JSON chunks (Gemini/OpenAI format without SSE "data:" prefix)
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) > 0 && trimmed[0] == '{' && gjson.ValidBytes(trimmed) {
+		rewritten := trimmed
+		if r.options.StripThinking {
+			rewritten = stripThinkingBlocksFromResponse(rewritten)
+		}
+		if r.options.RewriteModel != "" {
+			rewritten = rewriteModelInResponse(rewritten, r.options.RewriteModel)
+		}
+		return rewritten
+	}
+
 	lastDoubleNewline := bytes.LastIndex(chunk, []byte("\n\n"))
 	lastNewline := -1
 	if len(chunk) > 0 && chunk[len(chunk)-1] == '\n' {

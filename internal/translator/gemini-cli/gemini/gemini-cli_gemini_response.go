@@ -35,30 +35,41 @@ func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, originalReq
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
-	if alt, ok := ctx.Value("alt").(string); ok {
-		var chunk []byte
-		if alt == "" {
-			responseResult := gjson.GetBytes(rawJSON, "response")
-			if responseResult.Exists() {
-				chunk = []byte(responseResult.Raw)
-			}
-		} else {
-			chunkTemplate := "[]"
-			responseResult := gjson.ParseBytes(chunk)
-			if responseResult.IsArray() {
-				responseResultItems := responseResult.Array()
-				for i := 0; i < len(responseResultItems); i++ {
-					responseResultItem := responseResultItems[i]
-					if responseResultItem.Get("response").Exists() {
-						chunkTemplate, _ = sjson.SetRaw(chunkTemplate, "-1", responseResultItem.Get("response").Raw)
-					}
+	// Default to SSE format (alt="") if alt is not set in context
+	alt, _ := ctx.Value("alt").(string)
+
+	var chunk []byte
+	if alt == "" {
+		responseResult := gjson.GetBytes(rawJSON, "response")
+		if responseResult.Exists() {
+			chunk = []byte(responseResult.Raw)
+		} else if gjson.GetBytes(rawJSON, "candidates").Exists() {
+			// Fallback: if no "response" wrapper but has "candidates", use rawJSON directly
+			chunk = rawJSON
+		}
+	} else {
+		chunkTemplate := "[]"
+		responseResult := gjson.ParseBytes(rawJSON)
+		if responseResult.IsArray() {
+			responseResultItems := responseResult.Array()
+			for i := 0; i < len(responseResultItems); i++ {
+				responseResultItem := responseResultItems[i]
+				if responseResultItem.Get("response").Exists() {
+					chunkTemplate, _ = sjson.SetRaw(chunkTemplate, "-1", responseResultItem.Get("response").Raw)
+				} else if responseResultItem.Get("candidates").Exists() {
+					// Fallback: if no "response" wrapper but has "candidates", use item directly
+					chunkTemplate, _ = sjson.SetRaw(chunkTemplate, "-1", responseResultItem.Raw)
 				}
 			}
-			chunk = []byte(chunkTemplate)
 		}
-		return []string{string(chunk)}
+		chunk = []byte(chunkTemplate)
 	}
-	return []string{}
+
+	// Return empty slice if no valid chunk was extracted
+	if len(chunk) == 0 {
+		return []string{}
+	}
+	return []string{string(chunk)}
 }
 
 // ConvertGeminiCliResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
