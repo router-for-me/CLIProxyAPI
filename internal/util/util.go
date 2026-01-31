@@ -4,15 +4,55 @@
 package util
 
 import (
+	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 )
+
+var functionNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.:-]`)
+
+// SanitizeFunctionName ensures a function name matches the requirements for Gemini/Vertex AI.
+// It replaces invalid characters with underscores, ensures it starts with a letter or underscore,
+// and truncates it to 64 characters if necessary.
+// Regex Rule: [^a-zA-Z0-9_.:-] replaced with _.
+func SanitizeFunctionName(name string) string {
+	if name == "" {
+		return ""
+	}
+
+	// Replace invalid characters with underscore
+	sanitized := functionNameSanitizer.ReplaceAllString(name, "_")
+
+	// Ensure it starts with a letter or underscore
+	// Re-reading requirements: Must start with a letter or an underscore.
+	if len(sanitized) > 0 {
+		first := sanitized[0]
+		if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+			// If it starts with an allowed character but not allowed at the beginning (digit, dot, colon, dash),
+			// we must prepend an underscore.
+
+			// To stay within the 64-character limit while prepending, we must truncate first.
+			if len(sanitized) >= 64 {
+				sanitized = sanitized[:63]
+			}
+			sanitized = "_" + sanitized
+		}
+	} else {
+		sanitized = "_"
+	}
+
+	// Truncate to 64 characters
+	if len(sanitized) > 64 {
+		sanitized = sanitized[:64]
+	}
+	return sanitized
+}
 
 // SetLogLevel configures the logrus log level based on the configuration.
 // It sets the log level to DebugLevel if debug mode is enabled, otherwise to InfoLevel.
@@ -53,36 +93,23 @@ func ResolveAuthDir(authDir string) (string, error) {
 	return filepath.Clean(authDir), nil
 }
 
-// CountAuthFiles returns the number of JSON auth files located under the provided directory.
-// The function resolves leading tildes to the user's home directory and performs a case-insensitive
-// match on the ".json" suffix so that files saved with uppercase extensions are also counted.
-func CountAuthFiles(authDir string) int {
-	dir, err := ResolveAuthDir(authDir)
+// CountAuthFiles returns the number of auth records available through the provided Store.
+// For filesystem-backed stores, this reflects the number of JSON auth files under the configured directory.
+func CountAuthFiles[T any](ctx context.Context, store interface {
+	List(context.Context) ([]T, error)
+}) int {
+	if store == nil {
+		return 0
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	entries, err := store.List(ctx)
 	if err != nil {
-		log.Debugf("countAuthFiles: failed to resolve auth directory: %v", err)
+		log.Debugf("countAuthFiles: failed to list auth records: %v", err)
 		return 0
 	}
-	if dir == "" {
-		return 0
-	}
-	count := 0
-	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			log.Debugf("countAuthFiles: error accessing %s: %v", path, err)
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
-			count++
-		}
-		return nil
-	})
-	if walkErr != nil {
-		log.Debugf("countAuthFiles: walk error: %v", walkErr)
-	}
-	return count
+	return len(entries)
 }
 
 // WritablePath returns the cleaned WRITABLE_PATH environment variable when it is set.

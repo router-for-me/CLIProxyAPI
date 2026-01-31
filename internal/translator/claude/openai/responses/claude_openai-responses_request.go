@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -53,10 +53,11 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	root := gjson.ParseBytes(rawJSON)
 
-	if v := root.Get("reasoning.effort"); v.Exists() && util.ModelSupportsThinking(modelName) && !util.ModelUsesThinkingLevels(modelName) {
+	// Convert OpenAI Responses reasoning.effort to Claude thinking config.
+	if v := root.Get("reasoning.effort"); v.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(v.String()))
 		if effort != "" {
-			budget, ok := util.ThinkingEffortToBudget(modelName, effort)
+			budget, ok := thinking.ConvertLevelToBudget(effort)
 			if ok {
 				switch budget {
 				case 0:
@@ -114,13 +115,16 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					var builder strings.Builder
 					if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 						parts.ForEach(func(_, part gjson.Result) bool {
-							text := part.Get("text").String()
+							textResult := part.Get("text")
+							text := textResult.String()
 							if builder.Len() > 0 && text != "" {
 								builder.WriteByte('\n')
 							}
 							builder.WriteString(text)
 							return true
 						})
+					} else if parts.Type == gjson.String {
+						builder.WriteString(parts.String())
 					}
 					instructionsText = builder.String()
 					if instructionsText != "" {
@@ -207,6 +211,8 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 						}
 						return true
 					})
+				} else if parts.Type == gjson.String {
+					textAggregate.WriteString(parts.String())
 				}
 
 				// Fallback to given role if content types not decisive

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -38,11 +39,12 @@ import (
 //   - []byte: The transformed request data in Codex API format
 func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
+	userAgent := misc.ExtractCodexUserAgent(rawJSON)
 	// Base template
 	out := `{"model":"","instructions":"","input":[]}`
 
 	// Inject standard Codex instructions
-	_, instructions := misc.CodexInstructionsForModel(modelName, "")
+	_, instructions := misc.CodexInstructionsForModel(modelName, "", userAgent)
 	out, _ = sjson.Set(out, "instructions", instructions)
 
 	root := gjson.ParseBytes(rawJSON)
@@ -92,7 +94,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	// System instruction -> as a user message with input_text parts
 	sysParts := root.Get("system_instruction.parts")
 	if sysParts.IsArray() {
-		msg := `{"type":"message","role":"user","content":[]}`
+		msg := `{"type":"message","role":"developer","content":[]}`
 		arr := sysParts.Array()
 		for i := 0; i < len(arr); i++ {
 			p := arr[i]
@@ -246,21 +248,28 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	// Fixed flags aligning with Codex expectations
 	out, _ = sjson.Set(out, "parallel_tool_calls", true)
 
-	// Convert thinkingBudget to reasoning.effort for level-based models
-	reasoningEffort := "medium" // default
+	// Convert Gemini thinkingConfig to Codex reasoning.effort.
+	effortSet := false
 	if genConfig := root.Get("generationConfig"); genConfig.Exists() {
 		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
-			if util.ModelUsesThinkingLevels(modelName) {
-				if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
-					budget := int(thinkingBudget.Int())
-					if effort, ok := util.ThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
-						reasoningEffort = effort
-					}
+			if thinkingLevel := thinkingConfig.Get("thinkingLevel"); thinkingLevel.Exists() {
+				effort := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
+				if effort != "" {
+					out, _ = sjson.Set(out, "reasoning.effort", effort)
+					effortSet = true
+				}
+			} else if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
+				if effort, ok := thinking.ConvertBudgetToLevel(int(thinkingBudget.Int())); ok {
+					out, _ = sjson.Set(out, "reasoning.effort", effort)
+					effortSet = true
 				}
 			}
 		}
 	}
-	out, _ = sjson.Set(out, "reasoning.effort", reasoningEffort)
+	if !effortSet {
+		// No thinking config, set default effort
+		out, _ = sjson.Set(out, "reasoning.effort", "medium")
+	}
 	out, _ = sjson.Set(out, "reasoning.summary", "auto")
 	out, _ = sjson.Set(out, "stream", true)
 	out, _ = sjson.Set(out, "store", false)

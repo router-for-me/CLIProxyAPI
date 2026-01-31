@@ -12,7 +12,7 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -77,12 +77,21 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			}
 		}
 
-		// Convert thinkingBudget to reasoning_effort
+		// Candidate count (OpenAI 'n' parameter)
+		if candidateCount := genConfig.Get("candidateCount"); candidateCount.Exists() {
+			out, _ = sjson.Set(out, "n", candidateCount.Int())
+		}
+
+		// Map Gemini thinkingConfig to OpenAI reasoning_effort.
 		// Always perform conversion to support allowCompat models that may not be in registry
 		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
-			if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
-				budget := int(thinkingBudget.Int())
-				if effort, ok := util.ThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
+			if thinkingLevel := thinkingConfig.Get("thinkingLevel"); thinkingLevel.Exists() {
+				effort := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
+				if effort != "" {
+					out, _ = sjson.Set(out, "reasoning_effort", effort)
+				}
+			} else if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
+				if effort, ok := thinking.ConvertBudgetToLevel(int(thinkingBudget.Int())); ok {
 					out, _ = sjson.Set(out, "reasoning_effort", effort)
 				}
 			}

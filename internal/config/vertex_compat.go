@@ -13,6 +13,10 @@ type VertexCompatKey struct {
 	// Maps to the x-goog-api-key header.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Priority controls selection preference when multiple credentials match.
+	// Higher values are preferred; defaults to 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
 	// Prefix optionally namespaces model aliases for this credential (e.g., "teamA/vertex-pro").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
@@ -32,6 +36,9 @@ type VertexCompatKey struct {
 	Models []VertexCompatModel `yaml:"models,omitempty" json:"models,omitempty"`
 }
 
+func (k VertexCompatKey) GetAPIKey() string  { return k.APIKey }
+func (k VertexCompatKey) GetBaseURL() string { return k.BaseURL }
+
 // VertexCompatModel represents a model configuration for Vertex compatibility,
 // including the actual model name and its alias for API routing.
 type VertexCompatModel struct {
@@ -41,6 +48,9 @@ type VertexCompatModel struct {
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
 }
+
+func (m VertexCompatModel) GetName() string  { return m.Name }
+func (m VertexCompatModel) GetAlias() string { return m.Alias }
 
 // SanitizeVertexCompatKeys deduplicates and normalizes Vertex-compatible API key credentials.
 func (cfg *Config) SanitizeVertexCompatKeys() {

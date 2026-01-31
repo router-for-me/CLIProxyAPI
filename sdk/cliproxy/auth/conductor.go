@@ -1,10 +1,13 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,8 +15,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -31,6 +36,9 @@ type ProviderExecutor interface {
 	Refresh(ctx context.Context, auth *Auth) (*Auth, error)
 	// CountTokens returns the token count for the given request.
 	CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+	// HttpRequest injects provider credentials into the supplied HTTP request and executes it.
+	// Callers must close the response body when non-nil.
+	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
 // RefreshEvaluator allows runtime state to override refresh decisions.
@@ -51,6 +59,15 @@ var quotaCooldownDisabled atomic.Bool
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
+}
+
+func quotaCooldownDisabledForAuth(auth *Auth) bool {
+	if auth != nil {
+		if override, ok := auth.DisableCoolingOverride(); ok {
+			return override
+		}
+	}
+	return quotaCooldownDisabled.Load()
 }
 
 // Result captures execution outcome used to adjust auth state.
@@ -111,6 +128,17 @@ type Manager struct {
 	requestRetry     atomic.Int32
 	maxRetryInterval atomic.Int64
 
+	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
+	oauthModelAlias atomic.Value
+
+	// apiKeyModelAlias caches resolved model alias mappings for API-key auths.
+	// Keyed by auth.ID, value is alias(lower) -> upstream model (including suffix).
+	apiKeyModelAlias atomic.Value
+
+	// runtimeConfig stores the latest application config for request-time decisions.
+	// It is initialized in NewManager; never Load() before first Store().
+	runtimeConfig atomic.Value
+
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
@@ -126,7 +154,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	if hook == nil {
 		hook = NoopHook{}
 	}
-	return &Manager{
+	manager := &Manager{
 		store:           store,
 		executors:       make(map[string]ProviderExecutor),
 		selector:        selector,
@@ -134,6 +162,10 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		auths:           make(map[string]*Auth),
 		providerOffsets: make(map[string]int),
 	}
+	// atomic.Value requires non-nil initial value.
+	manager.runtimeConfig.Store(&internalconfig.Config{})
+	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	return manager
 }
 
 func (m *Manager) SetSelector(selector Selector) {
@@ -160,6 +192,181 @@ func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 	m.mu.Lock()
 	m.rtProvider = p
 	m.mu.Unlock()
+}
+
+// SetConfig updates the runtime config snapshot used by request-time helpers.
+// Callers should provide the latest config on reload so per-credential alias mapping stays in sync.
+func (m *Manager) SetConfig(cfg *internalconfig.Config) {
+	if m == nil {
+		return
+	}
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+	m.runtimeConfig.Store(cfg)
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+}
+
+func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
+	if m == nil {
+		return ""
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return ""
+	}
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return ""
+	}
+	table, _ := m.apiKeyModelAlias.Load().(apiKeyModelAliasTable)
+	if table == nil {
+		return ""
+	}
+	byAlias := table[authID]
+	if len(byAlias) == 0 {
+		return ""
+	}
+	key := strings.ToLower(thinking.ParseSuffix(requestedModel).ModelName)
+	if key == "" {
+		key = strings.ToLower(requestedModel)
+	}
+	resolved := strings.TrimSpace(byAlias[key])
+	if resolved == "" {
+		return ""
+	}
+	// Preserve thinking suffix from the client's requested model unless config already has one.
+	requestResult := thinking.ParseSuffix(requestedModel)
+	if thinking.ParseSuffix(resolved).HasSuffix {
+		return resolved
+	}
+	if requestResult.HasSuffix && requestResult.RawSuffix != "" {
+		return resolved + "(" + requestResult.RawSuffix + ")"
+	}
+	return resolved
+
+}
+
+func (m *Manager) rebuildAPIKeyModelAliasFromRuntimeConfig() {
+	if m == nil {
+		return
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rebuildAPIKeyModelAliasLocked(cfg)
+}
+
+func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
+	if m == nil {
+		return
+	}
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+
+	out := make(apiKeyModelAliasTable)
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		kind, _ := auth.AccountInfo()
+		if !strings.EqualFold(strings.TrimSpace(kind), "api_key") {
+			continue
+		}
+
+		byAlias := make(map[string]string)
+		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		switch provider {
+		case "gemini":
+			if entry := resolveGeminiAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
+		case "claude":
+			if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
+		case "codex":
+			if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
+		case "vertex":
+			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
+		default:
+			// OpenAI-compat uses config selection from auth.Attributes.
+			providerKey := ""
+			compatName := ""
+			if auth.Attributes != nil {
+				providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
+				compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+			}
+			if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+				if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
+					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+				}
+			}
+		}
+
+		if len(byAlias) > 0 {
+			out[auth.ID] = byAlias
+		}
+	}
+
+	m.apiKeyModelAlias.Store(out)
+}
+
+func compileAPIKeyModelAliasForModels[T interface {
+	GetName() string
+	GetAlias() string
+}](out map[string]string, models []T) {
+	if out == nil {
+		return
+	}
+	for i := range models {
+		alias := strings.TrimSpace(models[i].GetAlias())
+		name := strings.TrimSpace(models[i].GetName())
+		if alias == "" || name == "" {
+			continue
+		}
+		aliasKey := strings.ToLower(thinking.ParseSuffix(alias).ModelName)
+		if aliasKey == "" {
+			aliasKey = strings.ToLower(alias)
+		}
+		// Config priority: first alias wins.
+		if _, exists := out[aliasKey]; exists {
+			continue
+		}
+		out[aliasKey] = name
+		// Also allow direct lookup by upstream name (case-insensitive), so lookups on already-upstream
+		// models remain a cheap no-op.
+		nameKey := strings.ToLower(thinking.ParseSuffix(name).ModelName)
+		if nameKey == "" {
+			nameKey = strings.ToLower(name)
+		}
+		if nameKey != "" {
+			if _, exists := out[nameKey]; !exists {
+				out[nameKey] = name
+			}
+		}
+		// Preserve config suffix priority by seeding a base-name lookup when name already has suffix.
+		nameResult := thinking.ParseSuffix(name)
+		if nameResult.HasSuffix {
+			baseKey := strings.ToLower(strings.TrimSpace(nameResult.ModelName))
+			if baseKey != "" {
+				if _, exists := out[baseKey]; !exists {
+					out[baseKey] = name
+				}
+			}
+		}
+	}
 }
 
 // SetRetryConfig updates retry attempts and cooldown wait interval.
@@ -210,6 +417,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.mu.Lock()
 	m.auths[auth.ID] = auth.Clone()
 	m.mu.Unlock()
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	return auth.Clone(), nil
@@ -228,6 +436,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.EnsureIndex()
 	m.auths[auth.ID] = auth.Clone()
 	m.mu.Unlock()
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
@@ -252,6 +461,11 @@ func (m *Manager) Load(ctx context.Context) error {
 		auth.EnsureIndex()
 		m.auths[auth.ID] = auth.Clone()
 	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+	m.rebuildAPIKeyModelAliasLocked(cfg)
 	return nil
 }
 
@@ -262,25 +476,17 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	rotated := m.rotateProviders(req.Model, normalized)
-	defer m.advanceProviderCursor(req.Model, normalized)
 
-	retryTimes, maxWait := m.retrySettings()
-	attempts := retryTimes + 1
-	if attempts < 1 {
-		attempts = 1
-	}
+	_, maxWait := m.retrySettings()
 
 	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
-		resp, errExec := m.executeProvidersOnce(ctx, rotated, func(execCtx context.Context, provider string) (cliproxyexecutor.Response, error) {
-			return m.executeWithProvider(execCtx, provider, req, opts)
-		})
+	for attempt := 0; ; attempt++ {
+		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts)
 		if errExec == nil {
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, attempts, rotated, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
@@ -301,25 +507,17 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	rotated := m.rotateProviders(req.Model, normalized)
-	defer m.advanceProviderCursor(req.Model, normalized)
 
-	retryTimes, maxWait := m.retrySettings()
-	attempts := retryTimes + 1
-	if attempts < 1 {
-		attempts = 1
-	}
+	_, maxWait := m.retrySettings()
 
 	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
-		resp, errExec := m.executeProvidersOnce(ctx, rotated, func(execCtx context.Context, provider string) (cliproxyexecutor.Response, error) {
-			return m.executeCountWithProvider(execCtx, provider, req, opts)
-		})
+	for attempt := 0; ; attempt++ {
+		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts)
 		if errExec == nil {
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, attempts, rotated, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
@@ -340,25 +538,17 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	rotated := m.rotateProviders(req.Model, normalized)
-	defer m.advanceProviderCursor(req.Model, normalized)
 
-	retryTimes, maxWait := m.retrySettings()
-	attempts := retryTimes + 1
-	if attempts < 1 {
-		attempts = 1
-	}
+	_, maxWait := m.retrySettings()
 
 	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
-		chunks, errStream := m.executeStreamProvidersOnce(ctx, rotated, func(execCtx context.Context, provider string) (<-chan cliproxyexecutor.StreamChunk, error) {
-			return m.executeStreamWithProvider(execCtx, provider, req, opts)
-		})
+	for attempt := 0; ; attempt++ {
+		chunks, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts)
 		if errStream == nil {
 			return chunks, nil
 		}
 		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, attempts, rotated, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
@@ -372,15 +562,16 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
-func (m *Manager) executeWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	if provider == "" {
-		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
+func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if len(providers) == 0 {
+		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	routeModel := req.Model
+	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
-		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -388,22 +579,8 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 			return cliproxyexecutor.Response{}, errPick
 		}
 
-		accountType, accountInfo := auth.AccountInfo()
-		proxyInfo := auth.ProxyInfo()
 		entry := logEntryWithRequestID(ctx)
-		if accountType == "api_key" {
-			if proxyInfo != "" {
-				entry.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
-			} else {
-				entry.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
-			}
-		} else if accountType == "oauth" {
-			if proxyInfo != "" {
-				entry.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
-			} else {
-				entry.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
-			}
-		}
+		debugLogAuthSelection(entry, auth, provider, req.Model)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -412,10 +589,15 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execReq := req
-		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
+			if errCtx := execCtx.Err(); errCtx != nil {
+				return cliproxyexecutor.Response{}, errCtx
+			}
 			result.Error = &Error{Message: errExec.Error()}
 			var se cliproxyexecutor.StatusError
 			if errors.As(errExec, &se) && se != nil {
@@ -433,15 +615,16 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 	}
 }
 
-func (m *Manager) executeCountWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	if provider == "" {
-		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
+func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if len(providers) == 0 {
+		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	routeModel := req.Model
+	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
-		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -449,22 +632,8 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 			return cliproxyexecutor.Response{}, errPick
 		}
 
-		accountType, accountInfo := auth.AccountInfo()
-		proxyInfo := auth.ProxyInfo()
 		entry := logEntryWithRequestID(ctx)
-		if accountType == "api_key" {
-			if proxyInfo != "" {
-				entry.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
-			} else {
-				entry.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
-			}
-		} else if accountType == "oauth" {
-			if proxyInfo != "" {
-				entry.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
-			} else {
-				entry.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
-			}
-		}
+		debugLogAuthSelection(entry, auth, provider, req.Model)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -473,10 +642,15 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execReq := req
-		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
+			if errCtx := execCtx.Err(); errCtx != nil {
+				return cliproxyexecutor.Response{}, errCtx
+			}
 			result.Error = &Error{Message: errExec.Error()}
 			var se cliproxyexecutor.StatusError
 			if errors.As(errExec, &se) && se != nil {
@@ -494,15 +668,16 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 	}
 }
 
-func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
-	if provider == "" {
-		return nil, &Error{Code: "provider_not_found", Message: "provider identifier is empty"}
+func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+	if len(providers) == 0 {
+		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	routeModel := req.Model
+	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
-		auth, executor, errPick := m.pickNext(ctx, provider, routeModel, opts, tried)
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
 				return nil, lastErr
@@ -510,22 +685,8 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			return nil, errPick
 		}
 
-		accountType, accountInfo := auth.AccountInfo()
-		proxyInfo := auth.ProxyInfo()
 		entry := logEntryWithRequestID(ctx)
-		if accountType == "api_key" {
-			if proxyInfo != "" {
-				entry.Debugf("Use API key %s for model %s %s", util.HideAPIKey(accountInfo), req.Model, proxyInfo)
-			} else {
-				entry.Debugf("Use API key %s for model %s", util.HideAPIKey(accountInfo), req.Model)
-			}
-		} else if accountType == "oauth" {
-			if proxyInfo != "" {
-				entry.Debugf("Use OAuth %s for model %s %s", accountInfo, req.Model, proxyInfo)
-			} else {
-				entry.Debugf("Use OAuth %s for model %s", accountInfo, req.Model)
-			}
-		}
+		debugLogAuthSelection(entry, auth, provider, req.Model)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -534,9 +695,14 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execReq := req
-		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
+		execReq.Model = rewriteModelForAuth(routeModel, auth)
+		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
+			if errCtx := execCtx.Err(); errCtx != nil {
+				return nil, errCtx
+			}
 			rerr := &Error{Message: errStream.Error()}
 			var se cliproxyexecutor.StatusError
 			if errors.As(errStream, &se) && se != nil {
@@ -552,6 +718,7 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk) {
 			defer close(out)
 			var failed bool
+			forward := true
 			for chunk := range streamChunks {
 				if chunk.Err != nil && !failed {
 					failed = true
@@ -562,7 +729,18 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 					}
 					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
 				}
-				out <- chunk
+				if !forward {
+					continue
+				}
+				if streamCtx == nil {
+					out <- chunk
+					continue
+				}
+				select {
+				case <-streamCtx.Done():
+					forward = false
+				case out <- chunk:
+				}
 			}
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
@@ -572,50 +750,268 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 	}
 }
 
-func rewriteModelForAuth(model string, metadata map[string]any, auth *Auth) (string, map[string]any) {
+func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return opts
+	}
+	if hasRequestedModelMetadata(opts.Metadata) {
+		return opts
+	}
+	if len(opts.Metadata) == 0 {
+		opts.Metadata = map[string]any{cliproxyexecutor.RequestedModelMetadataKey: requestedModel}
+		return opts
+	}
+	meta := make(map[string]any, len(opts.Metadata)+1)
+	for k, v := range opts.Metadata {
+		meta[k] = v
+	}
+	meta[cliproxyexecutor.RequestedModelMetadataKey] = requestedModel
+	opts.Metadata = meta
+	return opts
+}
+
+func hasRequestedModelMetadata(meta map[string]any) bool {
+	if len(meta) == 0 {
+		return false
+	}
+	raw, ok := meta[cliproxyexecutor.RequestedModelMetadataKey]
+	if !ok || raw == nil {
+		return false
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v) != ""
+	case []byte:
+		return strings.TrimSpace(string(v)) != ""
+	default:
+		return false
+	}
+}
+
+func rewriteModelForAuth(model string, auth *Auth) string {
 	if auth == nil || model == "" {
-		return model, metadata
+		return model
 	}
 	prefix := strings.TrimSpace(auth.Prefix)
 	if prefix == "" {
-		return model, metadata
+		return model
 	}
 	needle := prefix + "/"
 	if !strings.HasPrefix(model, needle) {
-		return model, metadata
+		return model
 	}
-	rewritten := strings.TrimPrefix(model, needle)
-	return rewritten, stripPrefixFromMetadata(metadata, needle)
+	return strings.TrimPrefix(model, needle)
 }
 
-func stripPrefixFromMetadata(metadata map[string]any, needle string) map[string]any {
-	if len(metadata) == 0 || needle == "" {
-		return metadata
+func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) string {
+	if m == nil || auth == nil {
+		return requestedModel
 	}
-	keys := []string{
-		util.ThinkingOriginalModelMetadataKey,
-		util.GeminiOriginalModelMetadataKey,
+
+	kind, _ := auth.AccountInfo()
+	if !strings.EqualFold(strings.TrimSpace(kind), "api_key") {
+		return requestedModel
 	}
-	var out map[string]any
-	for _, key := range keys {
-		raw, ok := metadata[key]
-		if !ok {
+
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return requestedModel
+	}
+
+	// Fast path: lookup per-auth mapping table (keyed by auth.ID).
+	if resolved := m.lookupAPIKeyUpstreamModel(auth.ID, requestedModel); resolved != "" {
+		return resolved
+	}
+
+	// Slow path: scan config for the matching credential entry and resolve alias.
+	// This acts as a safety net if mappings are stale or auth.ID is missing.
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	upstreamModel := ""
+	switch provider {
+	case "gemini":
+		upstreamModel = resolveUpstreamModelForGeminiAPIKey(cfg, auth, requestedModel)
+	case "claude":
+		upstreamModel = resolveUpstreamModelForClaudeAPIKey(cfg, auth, requestedModel)
+	case "codex":
+		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
+	case "vertex":
+		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
+	default:
+		upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
+	}
+
+	// Return upstream model if found, otherwise return requested model.
+	if upstreamModel != "" {
+		return upstreamModel
+	}
+	return requestedModel
+}
+
+// APIKeyConfigEntry is a generic interface for API key configurations.
+type APIKeyConfigEntry interface {
+	GetAPIKey() string
+	GetBaseURL() string
+}
+
+func resolveAPIKeyConfig[T APIKeyConfigEntry](entries []T, auth *Auth) *T {
+	if auth == nil || len(entries) == 0 {
+		return nil
+	}
+	attrKey, attrBase := "", ""
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range entries {
+		entry := &entries[i]
+		cfgKey := strings.TrimSpace((*entry).GetAPIKey())
+		cfgBase := strings.TrimSpace((*entry).GetBaseURL())
+		if attrKey != "" && attrBase != "" {
+			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
 			continue
 		}
-		value, okStr := raw.(string)
-		if !okStr || !strings.HasPrefix(value, needle) {
-			continue
-		}
-		if out == nil {
-			out = make(map[string]any, len(metadata))
-			for k, v := range metadata {
-				out[k] = v
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
 			}
 		}
-		out[key] = strings.TrimPrefix(value, needle)
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
 	}
-	if out == nil {
-		return metadata
+	if attrKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			if strings.EqualFold(strings.TrimSpace((*entry).GetAPIKey()), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
+func resolveGeminiAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.GeminiKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.GeminiKey, auth)
+}
+
+func resolveClaudeAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.ClaudeKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.ClaudeKey, auth)
+}
+
+func resolveCodexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.CodexKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.CodexKey, auth)
+}
+
+func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.VertexCompatKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.VertexCompatAPIKey, auth)
+}
+
+func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveGeminiAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForClaudeAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveClaudeAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveCodexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForVertexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveVertexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	providerKey := ""
+	compatName := ""
+	if auth != nil && len(auth.Attributes) > 0 {
+		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
+		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+	}
+	if compatName == "" && !strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+		return ""
+	}
+	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+type apiKeyModelAliasTable map[string]map[string]string
+
+func resolveOpenAICompatConfig(cfg *internalconfig.Config, providerKey, compatName, authProvider string) *internalconfig.OpenAICompatibility {
+	if cfg == nil {
+		return nil
+	}
+	candidates := make([]string, 0, 3)
+	if v := strings.TrimSpace(compatName); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := strings.TrimSpace(providerKey); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := strings.TrimSpace(authProvider); v != "" {
+		candidates = append(candidates, v)
+	}
+	for i := range cfg.OpenAICompatibility {
+		compat := &cfg.OpenAICompatibility[i]
+		for _, candidate := range candidates {
+			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
+				return compat
+			}
+		}
+	}
+	return nil
+}
+
+func asModelAliasEntries[T interface {
+	GetName() string
+	GetAlias() string
+}](models []T) []modelAliasEntry {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]modelAliasEntry, 0, len(models))
+	for i := range models {
+		out = append(out, models[i])
 	}
 	return out
 }
@@ -640,41 +1036,6 @@ func (m *Manager) normalizeProviders(providers []string) []string {
 	return result
 }
 
-func (m *Manager) rotateProviders(model string, providers []string) []string {
-	if len(providers) == 0 {
-		return nil
-	}
-	m.mu.RLock()
-	offset := m.providerOffsets[model]
-	m.mu.RUnlock()
-	if len(providers) > 0 {
-		offset %= len(providers)
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	if offset == 0 {
-		return providers
-	}
-	rotated := make([]string, 0, len(providers))
-	rotated = append(rotated, providers[offset:]...)
-	rotated = append(rotated, providers[:offset]...)
-	return rotated
-}
-
-func (m *Manager) advanceProviderCursor(model string, providers []string) {
-	if len(providers) == 0 {
-		m.mu.Lock()
-		delete(m.providerOffsets, model)
-		m.mu.Unlock()
-		return
-	}
-	m.mu.Lock()
-	current := m.providerOffsets[model]
-	m.providerOffsets[model] = (current + 1) % len(providers)
-	m.mu.Unlock()
-}
-
 func (m *Manager) retrySettings() (int, time.Duration) {
 	if m == nil {
 		return 0, 0
@@ -682,11 +1043,15 @@ func (m *Manager) retrySettings() (int, time.Duration) {
 	return int(m.requestRetry.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
-func (m *Manager) closestCooldownWait(providers []string, model string) (time.Duration, bool) {
+func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
 	if m == nil || len(providers) == 0 {
 		return 0, false
 	}
 	now := time.Now()
+	defaultRetry := int(m.requestRetry.Load())
+	if defaultRetry < 0 {
+		defaultRetry = 0
+	}
 	providerSet := make(map[string]struct{}, len(providers))
 	for i := range providers {
 		key := strings.TrimSpace(strings.ToLower(providers[i]))
@@ -709,6 +1074,16 @@ func (m *Manager) closestCooldownWait(providers []string, model string) (time.Du
 		if _, ok := providerSet[providerKey]; !ok {
 			continue
 		}
+		effectiveRetry := defaultRetry
+		if override, ok := auth.RequestRetryOverride(); ok {
+			effectiveRetry = override
+		}
+		if effectiveRetry < 0 {
+			effectiveRetry = 0
+		}
+		if attempt >= effectiveRetry {
+			continue
+		}
 		blocked, reason, next := isAuthBlockedForModel(auth, model, now)
 		if !blocked || next.IsZero() || reason == blockReasonDisabled {
 			continue
@@ -725,8 +1100,8 @@ func (m *Manager) closestCooldownWait(providers []string, model string) (time.Du
 	return minWait, found
 }
 
-func (m *Manager) shouldRetryAfterError(err error, attempt, maxAttempts int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
-	if err == nil || attempt >= maxAttempts-1 {
+func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
+	if err == nil {
 		return 0, false
 	}
 	if maxWait <= 0 {
@@ -735,7 +1110,7 @@ func (m *Manager) shouldRetryAfterError(err error, attempt, maxAttempts int, pro
 	if status := statusCodeFromError(err); status == http.StatusOK {
 		return 0, false
 	}
-	wait, found := m.closestCooldownWait(providers, model)
+	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if !found || wait > maxWait {
 		return 0, false
 	}
@@ -754,42 +1129,6 @@ func waitForCooldown(ctx context.Context, wait time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-func (m *Manager) executeProvidersOnce(ctx context.Context, providers []string, fn func(context.Context, string) (cliproxyexecutor.Response, error)) (cliproxyexecutor.Response, error) {
-	if len(providers) == 0 {
-		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
-	}
-	var lastErr error
-	for _, provider := range providers {
-		resp, errExec := fn(ctx, provider)
-		if errExec == nil {
-			return resp, nil
-		}
-		lastErr = errExec
-	}
-	if lastErr != nil {
-		return cliproxyexecutor.Response{}, lastErr
-	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
-}
-
-func (m *Manager) executeStreamProvidersOnce(ctx context.Context, providers []string, fn func(context.Context, string) (<-chan cliproxyexecutor.StreamChunk, error)) (<-chan cliproxyexecutor.StreamChunk, error) {
-	if len(providers) == 0 {
-		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
-	}
-	var lastErr error
-	for _, provider := range providers {
-		chunks, errExec := fn(ctx, provider)
-		if errExec == nil {
-			return chunks, nil
-		}
-		lastErr = errExec
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
 // MarkResult records an execution result and notifies hooks.
@@ -860,7 +1199,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					if result.RetryAfter != nil {
 						next = now.Add(*result.RetryAfter)
 					} else {
-						cooldown, nextLevel := nextQuotaCooldown(backoffLevel)
+						cooldown, nextLevel := nextQuotaCooldown(backoffLevel, quotaCooldownDisabledForAuth(auth))
 						if cooldown > 0 {
 							next = now.Add(cooldown)
 						}
@@ -877,8 +1216,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					shouldSuspendModel = true
 					setModelQuota = true
 				case 408, 500, 502, 503, 504:
-					next := now.Add(1 * time.Minute)
-					state.NextRetryAfter = next
+					if quotaCooldownDisabledForAuth(auth) {
+						state.NextRetryAfter = time.Time{}
+					} else {
+						next := now.Add(1 * time.Minute)
+						state.NextRetryAfter = next
+					}
 				default:
 					state.NextRetryAfter = time.Time{}
 				}
@@ -1119,7 +1462,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if retryAfter != nil {
 			next = now.Add(*retryAfter)
 		} else {
-			cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel)
+			cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel, quotaCooldownDisabledForAuth(auth))
 			if cooldown > 0 {
 				next = now.Add(cooldown)
 			}
@@ -1129,7 +1472,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
-		auth.NextRetryAfter = now.Add(1 * time.Minute)
+		if quotaCooldownDisabledForAuth(auth) {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(1 * time.Minute)
+		}
 	default:
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
@@ -1138,11 +1485,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
-func nextQuotaCooldown(prevLevel int) (time.Duration, int) {
+func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) {
 	if prevLevel < 0 {
 		prevLevel = 0
 	}
-	if quotaCooldownDisabled.Load() {
+	if disableCooling {
 		return 0, prevLevel
 	}
 	cooldown := quotaBackoffBase * time.Duration(1<<prevLevel)
@@ -1190,6 +1537,13 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
+	// Always use base model name (without thinking suffix) for auth matching.
+	if modelKey != "" {
+		parsed := thinking.ParseSuffix(modelKey)
+		if parsed.ModelName != "" {
+			modelKey = strings.TrimSpace(parsed.ModelName)
+		}
+	}
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
 		if candidate.Provider != provider || candidate.Disabled {
@@ -1229,8 +1583,89 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	return authCopy, executor, nil
 }
 
+func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		p := strings.TrimSpace(strings.ToLower(provider))
+		if p == "" {
+			continue
+		}
+		providerSet[p] = struct{}{}
+	}
+	if len(providerSet) == 0 {
+		return nil, nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+
+	m.mu.RLock()
+	candidates := make([]*Auth, 0, len(m.auths))
+	modelKey := strings.TrimSpace(model)
+	// Always use base model name (without thinking suffix) for auth matching.
+	if modelKey != "" {
+		parsed := thinking.ParseSuffix(modelKey)
+		if parsed.ModelName != "" {
+			modelKey = strings.TrimSpace(parsed.ModelName)
+		}
+	}
+	registryRef := registry.GetGlobalRegistry()
+	for _, candidate := range m.auths {
+		if candidate == nil || candidate.Disabled {
+			continue
+		}
+		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
+		if providerKey == "" {
+			continue
+		}
+		if _, ok := providerSet[providerKey]; !ok {
+			continue
+		}
+		if _, used := tried[candidate.ID]; used {
+			continue
+		}
+		if _, ok := m.executors[providerKey]; !ok {
+			continue
+		}
+		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 {
+		m.mu.RUnlock()
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	selected, errPick := m.selector.Pick(ctx, "mixed", model, opts, candidates)
+	if errPick != nil {
+		m.mu.RUnlock()
+		return nil, nil, "", errPick
+	}
+	if selected == nil {
+		m.mu.RUnlock()
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
+	executor, okExecutor := m.executors[providerKey]
+	if !okExecutor {
+		m.mu.RUnlock()
+		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	authCopy := selected.Clone()
+	m.mu.RUnlock()
+	if !selected.indexAssigned {
+		m.mu.Lock()
+		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+			current.EnsureIndex()
+			authCopy = current.Clone()
+		}
+		m.mu.Unlock()
+	}
+	return authCopy, executor, providerKey, nil
+}
+
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if m.store == nil || auth == nil {
+		return nil
+	}
+	if shouldSkipPersist(ctx) {
 		return nil
 	}
 	if auth.Attributes != nil {
@@ -1538,6 +1973,9 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.RLock()
 	auth := m.auths[id]
 	var exec ProviderExecutor
@@ -1550,6 +1988,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	}
 	cloned := auth.Clone()
 	updated, err := exec.Refresh(ctx, cloned)
+	if err != nil && errors.Is(err, context.Canceled) {
+		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
+		return
+	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
@@ -1608,6 +2050,23 @@ type RequestPreparer interface {
 	PrepareRequest(req *http.Request, auth *Auth) error
 }
 
+func executorKeyFromAuth(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		providerKey := strings.TrimSpace(auth.Attributes["provider_key"])
+		compatName := strings.TrimSpace(auth.Attributes["compat_name"])
+		if compatName != "" {
+			if providerKey == "" {
+				providerKey = compatName
+			}
+			return strings.ToLower(providerKey)
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(auth.Provider))
+}
+
 // logEntryWithRequestID returns a logrus entry with request_id field if available in context.
 func logEntryWithRequestID(ctx context.Context) *log.Entry {
 	if ctx == nil {
@@ -1617,6 +2076,59 @@ func logEntryWithRequestID(ctx context.Context) *log.Entry {
 		return log.WithField("request_id", reqID)
 	}
 	return log.NewEntry(log.StandardLogger())
+}
+
+func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model string) {
+	if !log.IsLevelEnabled(log.DebugLevel) {
+		return
+	}
+	if entry == nil || auth == nil {
+		return
+	}
+	accountType, accountInfo := auth.AccountInfo()
+	proxyInfo := auth.ProxyInfo()
+	suffix := ""
+	if proxyInfo != "" {
+		suffix = " " + proxyInfo
+	}
+	switch accountType {
+	case "api_key":
+		entry.Debugf("Use API key %s for model %s%s", util.HideAPIKey(accountInfo), model, suffix)
+	case "oauth":
+		ident := formatOauthIdentity(auth, provider, accountInfo)
+		entry.Debugf("Use OAuth %s for model %s%s", ident, model, suffix)
+	}
+}
+
+func formatOauthIdentity(auth *Auth, provider string, accountInfo string) string {
+	if auth == nil {
+		return ""
+	}
+	// Prefer the auth's provider when available.
+	providerName := strings.TrimSpace(auth.Provider)
+	if providerName == "" {
+		providerName = strings.TrimSpace(provider)
+	}
+	// Only log the basename to avoid leaking host paths.
+	// FileName may be unset for some auth backends; fall back to ID.
+	authFile := strings.TrimSpace(auth.FileName)
+	if authFile == "" {
+		authFile = strings.TrimSpace(auth.ID)
+	}
+	if authFile != "" {
+		authFile = filepath.Base(authFile)
+	}
+	parts := make([]string, 0, 3)
+	if providerName != "" {
+		parts = append(parts, "provider="+providerName)
+	}
+	if authFile != "" {
+		parts = append(parts, "auth_file="+authFile)
+	}
+	if len(parts) == 0 {
+		return accountInfo
+	}
+	return strings.Join(parts, " ")
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.
@@ -1630,7 +2142,7 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	a := m.auths[authID]
 	var exec ProviderExecutor
 	if a != nil {
-		exec = m.executors[a.Provider]
+		exec = m.executors[executorKeyFromAuth(a)]
 	}
 	m.mu.RUnlock()
 	if a == nil || exec == nil {
@@ -1640,4 +2152,81 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 		return p.PrepareRequest(req, a)
 	}
 	return nil
+}
+
+// PrepareHttpRequest injects provider credentials into the supplied HTTP request.
+func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.Request) error {
+	if m == nil {
+		return &Error{Code: "provider_not_found", Message: "manager is nil"}
+	}
+	if auth == nil {
+		return &Error{Code: "auth_not_found", Message: "auth is nil"}
+	}
+	if req == nil {
+		return &Error{Code: "invalid_request", Message: "http request is nil"}
+	}
+	if ctx != nil {
+		*req = *req.WithContext(ctx)
+	}
+	providerKey := executorKeyFromAuth(auth)
+	if providerKey == "" {
+		return &Error{Code: "provider_not_found", Message: "auth provider is empty"}
+	}
+	exec := m.executorFor(providerKey)
+	if exec == nil {
+		return &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
+	}
+	preparer, ok := exec.(RequestPreparer)
+	if !ok || preparer == nil {
+		return &Error{Code: "not_supported", Message: "executor does not support http request preparation"}
+	}
+	return preparer.PrepareRequest(req, auth)
+}
+
+// NewHttpRequest constructs a new HTTP request and injects provider credentials into it.
+func (m *Manager) NewHttpRequest(ctx context.Context, auth *Auth, method, targetURL string, body []byte, headers http.Header) (*http.Request, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	method = strings.TrimSpace(method)
+	if method == "" {
+		method = http.MethodGet
+	}
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, method, targetURL, reader)
+	if err != nil {
+		return nil, err
+	}
+	if headers != nil {
+		httpReq.Header = headers.Clone()
+	}
+	if errPrepare := m.PrepareHttpRequest(ctx, auth, httpReq); errPrepare != nil {
+		return nil, errPrepare
+	}
+	return httpReq, nil
+}
+
+// HttpRequest injects provider credentials into the supplied HTTP request and executes it.
+func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	if m == nil {
+		return nil, &Error{Code: "provider_not_found", Message: "manager is nil"}
+	}
+	if auth == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "auth is nil"}
+	}
+	if req == nil {
+		return nil, &Error{Code: "invalid_request", Message: "http request is nil"}
+	}
+	providerKey := executorKeyFromAuth(auth)
+	if providerKey == "" {
+		return nil, &Error{Code: "provider_not_found", Message: "auth provider is empty"}
+	}
+	exec := m.executorFor(providerKey)
+	if exec == nil {
+		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
+	}
+	return exec.HttpRequest(ctx, auth, req)
 }

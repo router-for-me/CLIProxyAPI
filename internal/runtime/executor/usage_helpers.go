@@ -199,15 +199,31 @@ func parseOpenAIUsage(data []byte) usage.Detail {
 	if !usageNode.Exists() {
 		return usage.Detail{}
 	}
+	inputNode := usageNode.Get("prompt_tokens")
+	if !inputNode.Exists() {
+		inputNode = usageNode.Get("input_tokens")
+	}
+	outputNode := usageNode.Get("completion_tokens")
+	if !outputNode.Exists() {
+		outputNode = usageNode.Get("output_tokens")
+	}
 	detail := usage.Detail{
-		InputTokens:  usageNode.Get("prompt_tokens").Int(),
-		OutputTokens: usageNode.Get("completion_tokens").Int(),
+		InputTokens:  inputNode.Int(),
+		OutputTokens: outputNode.Int(),
 		TotalTokens:  usageNode.Get("total_tokens").Int(),
 	}
-	if cached := usageNode.Get("prompt_tokens_details.cached_tokens"); cached.Exists() {
+	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
+	if !cached.Exists() {
+		cached = usageNode.Get("input_tokens_details.cached_tokens")
+	}
+	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
 	}
-	if reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
+	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
+	if !reasoning.Exists() {
+		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
+	}
+	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
 	}
 	return detail
@@ -482,12 +498,16 @@ func StripUsageMetadataFromJSON(rawJSON []byte) ([]byte, bool) {
 	cleaned := jsonBytes
 	var changed bool
 
-	if gjson.GetBytes(cleaned, "usageMetadata").Exists() {
+	if usageMetadata = gjson.GetBytes(cleaned, "usageMetadata"); usageMetadata.Exists() {
+		// Rename usageMetadata to cpaUsageMetadata in the message_start event of Claude
+		cleaned, _ = sjson.SetRawBytes(cleaned, "cpaUsageMetadata", []byte(usageMetadata.Raw))
 		cleaned, _ = sjson.DeleteBytes(cleaned, "usageMetadata")
 		changed = true
 	}
 
-	if gjson.GetBytes(cleaned, "response.usageMetadata").Exists() {
+	if usageMetadata = gjson.GetBytes(cleaned, "response.usageMetadata"); usageMetadata.Exists() {
+		// Rename usageMetadata to cpaUsageMetadata in the message_start event of Claude
+		cleaned, _ = sjson.SetRawBytes(cleaned, "response.cpaUsageMetadata", []byte(usageMetadata.Raw))
 		cleaned, _ = sjson.DeleteBytes(cleaned, "response.usageMetadata")
 		changed = true
 	}

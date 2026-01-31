@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -47,6 +49,11 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		opts = &LoginOptions{}
 	}
 
+	callbackPort := a.CallbackPort
+	if opts.CallbackPort > 0 {
+		callbackPort = opts.CallbackPort
+	}
+
 	pkceCodes, err := codex.GeneratePKCECodes()
 	if err != nil {
 		return nil, fmt.Errorf("codex pkce generation failed: %w", err)
@@ -57,7 +64,7 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		return nil, fmt.Errorf("codex state generation failed: %w", err)
 	}
 
-	oauthServer := codex.NewOAuthServer(a.CallbackPort)
+	oauthServer := codex.NewOAuthServer(callbackPort)
 	if err = oauthServer.Start(); err != nil {
 		if strings.Contains(err.Error(), "already in use") {
 			return nil, codex.NewAuthenticationError(codex.ErrPortInUse, err)
@@ -83,15 +90,15 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		fmt.Println("Opening browser for Codex authentication")
 		if !browser.IsAvailable() {
 			log.Warn("No browser available; please open the URL manually")
-			util.PrintSSHTunnelInstructions(a.CallbackPort)
+			util.PrintSSHTunnelInstructions(callbackPort)
 			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
 		} else if err = browser.OpenURL(authURL); err != nil {
 			log.Warnf("Failed to open browser automatically: %v", err)
-			util.PrintSSHTunnelInstructions(a.CallbackPort)
+			util.PrintSSHTunnelInstructions(callbackPort)
 			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
 		}
 	} else {
-		util.PrintSSHTunnelInstructions(a.CallbackPort)
+		util.PrintSSHTunnelInstructions(callbackPort)
 		fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
 	}
 
@@ -186,7 +193,19 @@ waitForCallback:
 		return nil, fmt.Errorf("codex token storage missing account information")
 	}
 
-	fileName := fmt.Sprintf("codex-%s.json", tokenStorage.Email)
+	planType := ""
+	hashAccountID := ""
+	if tokenStorage.IDToken != "" {
+		if claims, errParse := codex.ParseJWTToken(tokenStorage.IDToken); errParse == nil && claims != nil {
+			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+			accountID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID)
+			if accountID != "" {
+				digest := sha256.Sum256([]byte(accountID))
+				hashAccountID = hex.EncodeToString(digest[:])[:8]
+			}
+		}
+	}
+	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}

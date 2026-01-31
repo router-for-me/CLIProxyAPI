@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -63,28 +64,76 @@ func NewGeminiCLIExecutor(cfg *config.Config) *GeminiCLIExecutor {
 // Identifier returns the executor identifier.
 func (e *GeminiCLIExecutor) Identifier() string { return "gemini-cli" }
 
-// PrepareRequest prepares the HTTP request for execution (no-op for Gemini CLI).
-func (e *GeminiCLIExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
+// PrepareRequest injects Gemini CLI credentials into the outgoing HTTP request.
+func (e *GeminiCLIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	if req == nil {
+		return nil
+	}
+	tokenSource, _, errSource := prepareGeminiCLITokenSource(req.Context(), e.cfg, auth)
+	if errSource != nil {
+		return errSource
+	}
+	tok, errTok := tokenSource.Token()
+	if errTok != nil {
+		return errTok
+	}
+	if strings.TrimSpace(tok.AccessToken) == "" {
+		return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+	}
+	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	applyGeminiCLIHeaders(req)
+	return nil
+}
+
+// HttpRequest injects Gemini CLI credentials into the request and executes it.
+func (e *GeminiCLIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("gemini-cli executor: request is nil")
+	}
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	httpReq := req.WithContext(ctx)
+	if err := e.PrepareRequest(httpReq, auth); err != nil {
+		return nil, err
+	}
+	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
+	return httpClient.Do(httpReq)
+}
 
 // Execute performs a non-streaming request to the Gemini CLI API.
 func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.Alt == "responses/compact" {
+		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
 	if err != nil {
 		return resp, err
 	}
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+
+	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
-	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
-	basePayload = applyThinkingMetadataCLI(basePayload, req.Metadata, req.Model)
-	basePayload = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, basePayload)
-	basePayload = util.ApplyDefaultThinkingIfNeededCLI(req.Model, basePayload)
-	basePayload = util.NormalizeGeminiCLIThinkingBudget(req.Model, basePayload)
-	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
-	basePayload = fixGeminiCLIImageAspectRatio(req.Model, basePayload)
-	basePayload = applyPayloadConfigWithRoot(e.cfg, req.Model, "gemini", "request", basePayload)
+
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
+	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+
+	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return resp, err
+	}
+
+	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	basePayload = applyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -94,9 +143,9 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	projectID := resolveGeminiProjectID(auth)
-	models := cliPreviewFallbackOrder(req.Model)
-	if len(models) == 0 || models[0] != req.Model {
-		models = append([]string{req.Model}, models...)
+	models := cliPreviewFallbackOrder(baseModel)
+	if len(models) == 0 || models[0] != baseModel {
+		models = append([]string{baseModel}, models...)
 	}
 
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
@@ -181,7 +230,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 		lastStatus = httpResp.StatusCode
 		lastBody = append([]byte(nil), data...)
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		if httpResp.StatusCode == 429 {
 			if idx+1 < len(models) {
 				log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
@@ -207,29 +256,43 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 // ExecuteStream performs a streaming request to the Gemini CLI API.
 func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	if opts.Alt == "responses/compact" {
+		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
 	if err != nil {
 		return nil, err
 	}
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+
+	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
-	basePayload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
-	basePayload = applyThinkingMetadataCLI(basePayload, req.Metadata, req.Model)
-	basePayload = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, basePayload)
-	basePayload = util.ApplyDefaultThinkingIfNeededCLI(req.Model, basePayload)
-	basePayload = util.NormalizeGeminiCLIThinkingBudget(req.Model, basePayload)
-	basePayload = util.StripThinkingConfigIfUnsupported(req.Model, basePayload)
-	basePayload = fixGeminiCLIImageAspectRatio(req.Model, basePayload)
-	basePayload = applyPayloadConfigWithRoot(e.cfg, req.Model, "gemini", "request", basePayload)
+
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
+
+	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return nil, err
+	}
+
+	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	basePayload = applyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel)
 
 	projectID := resolveGeminiProjectID(auth)
 
-	models := cliPreviewFallbackOrder(req.Model)
-	if len(models) == 0 || models[0] != req.Model {
-		models = append([]string{req.Model}, models...)
+	models := cliPreviewFallbackOrder(baseModel)
+	if len(models) == 0 || models[0] != baseModel {
+		models = append([]string{baseModel}, models...)
 	}
 
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
@@ -303,7 +366,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			appendAPIResponseChunk(ctx, e.cfg, data)
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), data...)
-			log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+			logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 			if httpResp.StatusCode == 429 {
 				if idx+1 < len(models) {
 					log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
@@ -318,7 +381,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 		out := make(chan cliproxyexecutor.StreamChunk)
 		stream = out
-		go func(resp *http.Response, reqBody []byte, attempt string) {
+		go func(resp *http.Response, reqBody []byte, attemptModel string) {
 			defer close(out)
 			defer func() {
 				if errClose := resp.Body.Close(); errClose != nil {
@@ -336,14 +399,14 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 						reporter.publish(ctx, detail)
 					}
 					if bytes.HasPrefix(line, dataTag) {
-						segments := sdktranslator.TranslateStream(respCtx, to, from, attempt, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone(line), &param)
+						segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone(line), &param)
 						for i := range segments {
 							out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
 						}
 					}
 				}
 
-				segments := sdktranslator.TranslateStream(respCtx, to, from, attempt, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone([]byte("[DONE]")), &param)
+				segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone([]byte("[DONE]")), &param)
 				for i := range segments {
 					out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
 				}
@@ -365,12 +428,12 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			appendAPIResponseChunk(ctx, e.cfg, data)
 			reporter.publish(ctx, parseGeminiCLIUsage(data))
 			var param any
-			segments := sdktranslator.TranslateStream(respCtx, to, from, attempt, bytes.Clone(opts.OriginalRequest), reqBody, data, &param)
+			segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, bytes.Clone(opts.OriginalRequest), reqBody, data, &param)
 			for i := range segments {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
 			}
 
-			segments = sdktranslator.TranslateStream(respCtx, to, from, attempt, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone([]byte("[DONE]")), &param)
+			segments = sdktranslator.TranslateStream(respCtx, to, from, attemptModel, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone([]byte("[DONE]")), &param)
 			for i := range segments {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
 			}
@@ -391,6 +454,8 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 // CountTokens counts tokens for the given request using the Gemini CLI API.
 func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -399,9 +464,9 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 
-	models := cliPreviewFallbackOrder(req.Model)
-	if len(models) == 0 || models[0] != req.Model {
-		models = append([]string{req.Model}, models...)
+	models := cliPreviewFallbackOrder(baseModel)
+	if len(models) == 0 || models[0] != baseModel {
+		models = append([]string{baseModel}, models...)
 	}
 
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
@@ -417,15 +482,20 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	var lastStatus int
 	var lastBody []byte
 
-	for _, attemptModel := range models {
-		payload := sdktranslator.TranslateRequest(from, to, attemptModel, bytes.Clone(req.Payload), false)
-		payload = applyThinkingMetadataCLI(payload, req.Metadata, req.Model)
-		payload = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, payload)
+	// The loop variable attemptModel is only used as the concrete model id sent to the upstream
+	// Gemini CLI endpoint when iterating fallback variants.
+	for range models {
+		payload := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+
+		payload, err = thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+
 		payload = deleteJSONField(payload, "project")
 		payload = deleteJSONField(payload, "model")
 		payload = deleteJSONField(payload, "request.safetySettings")
-		payload = util.StripThinkingConfigIfUnsupported(req.Model, payload)
-		payload = fixGeminiCLIImageAspectRatio(attemptModel, payload)
+		payload = fixGeminiCLIImageAspectRatio(baseModel, payload)
 
 		tok, errTok := tokenSource.Token()
 		if errTok != nil {

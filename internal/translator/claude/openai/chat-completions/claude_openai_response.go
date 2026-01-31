@@ -205,9 +205,12 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 		if usage := root.Get("usage"); usage.Exists() {
 			inputTokens := usage.Get("input_tokens").Int()
 			outputTokens := usage.Get("output_tokens").Int()
-			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokens)
+			cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
+			cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
+			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokens+cacheCreationInputTokens)
 			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokens)
 			template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens)
+			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cacheReadInputTokens)
 		}
 		return []string{template}
 
@@ -281,8 +284,6 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	var messageID string
 	var model string
 	var createdAt int64
-	var inputTokens, outputTokens int64
-	var reasoningTokens int64
 	var stopReason string
 	var contentParts []string
 	var reasoningParts []string
@@ -299,9 +300,6 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 				messageID = message.Get("id").String()
 				model = message.Get("model").String()
 				createdAt = time.Now().Unix()
-				if usage := message.Get("usage"); usage.Exists() {
-					inputTokens = usage.Get("input_tokens").Int()
-				}
 			}
 
 		case "content_block_start":
@@ -364,11 +362,14 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 				}
 			}
 			if usage := root.Get("usage"); usage.Exists() {
-				outputTokens = usage.Get("output_tokens").Int()
-				// Estimate reasoning tokens from accumulated thinking content
-				if len(reasoningParts) > 0 {
-					reasoningTokens = int64(len(strings.Join(reasoningParts, "")) / 4) // Rough estimation
-				}
+				inputTokens := usage.Get("input_tokens").Int()
+				outputTokens := usage.Get("output_tokens").Int()
+				cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
+				cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
+				out, _ = sjson.Set(out, "usage.prompt_tokens", inputTokens+cacheCreationInputTokens)
+				out, _ = sjson.Set(out, "usage.completion_tokens", outputTokens)
+				out, _ = sjson.Set(out, "usage.total_tokens", inputTokens+outputTokens)
+				out, _ = sjson.Set(out, "usage.prompt_tokens_details.cached_tokens", cacheReadInputTokens)
 			}
 		}
 	}
@@ -425,17 +426,6 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 		}
 	} else {
 		out, _ = sjson.Set(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
-	}
-
-	// Set usage information including prompt tokens, completion tokens, and total tokens
-	totalTokens := inputTokens + outputTokens
-	out, _ = sjson.Set(out, "usage.prompt_tokens", inputTokens)
-	out, _ = sjson.Set(out, "usage.completion_tokens", outputTokens)
-	out, _ = sjson.Set(out, "usage.total_tokens", totalTokens)
-
-	// Add reasoning tokens to usage details if any reasoning content was processed
-	if reasoningTokens > 0 {
-		out, _ = sjson.Set(out, "usage.completion_tokens_details.reasoning_tokens", reasoningTokens)
 	}
 
 	return out

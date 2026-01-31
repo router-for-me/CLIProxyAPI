@@ -62,40 +62,6 @@ func TestConvertGeminiRequestToAntigravity_AddSkipSentinelToFunctionCall(t *test
 	}
 }
 
-func TestConvertGeminiRequestToAntigravity_RemoveThinkingBlocks(t *testing.T) {
-	// Thinking blocks should be removed entirely for Gemini
-	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
-	inputJSON := []byte(fmt.Sprintf(`{
-		"model": "gemini-3-pro-preview",
-		"contents": [
-			{
-				"role": "model",
-				"parts": [
-					{"thought": true, "text": "Thinking...", "thoughtSignature": "%s"},
-					{"text": "Here is my response"}
-				]
-			}
-		]
-	}`, validSignature))
-
-	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
-	outputStr := string(output)
-
-	// Check that thinking block is removed
-	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
-	if len(parts) != 1 {
-		t.Fatalf("Expected 1 part (thinking removed), got %d", len(parts))
-	}
-
-	// Only text part should remain
-	if parts[0].Get("thought").Bool() {
-		t.Error("Thinking block should be removed for Gemini")
-	}
-	if parts[0].Get("text").String() != "Here is my response" {
-		t.Errorf("Expected text 'Here is my response', got '%s'", parts[0].Get("text").String())
-	}
-}
-
 func TestConvertGeminiRequestToAntigravity_ParallelFunctionCalls(t *testing.T) {
 	// Multiple functionCalls should all get skip_thought_signature_validator
 	inputJSON := []byte(`{

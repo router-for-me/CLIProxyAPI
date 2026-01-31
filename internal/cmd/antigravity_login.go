@@ -22,9 +22,10 @@ func DoAntigravityLogin(cfg *config.Config, options *LoginOptions) {
 
 	manager := newAuthManager()
 	authOpts := &sdkAuth.LoginOptions{
-		NoBrowser: options.NoBrowser,
-		Metadata:  map[string]string{},
-		Prompt:    promptFn,
+		NoBrowser:    options.NoBrowser,
+		CallbackPort: options.CallbackPort,
+		Metadata:     map[string]string{},
+		Prompt:       promptFn,
 	}
 
 	record, savedPath, err := manager.Login(context.Background(), "antigravity", cfg, authOpts)

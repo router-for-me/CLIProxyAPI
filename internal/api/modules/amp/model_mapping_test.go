@@ -217,10 +217,10 @@ func TestModelMapper_Regex_MatchBaseWithoutParens(t *testing.T) {
 
 	mapper := NewModelMapper(mappings)
 
-	// Incoming model has reasoning suffix but should match base via regex
+	// Incoming model has reasoning suffix, regex matches base, suffix is preserved
 	result := mapper.MapModel("gpt-5(high)")
-	if result != "gemini-2.5-pro" {
-		t.Errorf("Expected gemini-2.5-pro, got %s", result)
+	if result != "gemini-2.5-pro(high)" {
+		t.Errorf("Expected gemini-2.5-pro(high), got %s", result)
 	}
 }
 
@@ -279,5 +279,97 @@ func TestModelMapper_Regex_CaseInsensitive(t *testing.T) {
 	result := mapper.MapModel("claude-opus-4.5")
 	if result != "claude-sonnet-4" {
 		t.Errorf("Expected claude-sonnet-4, got %s", result)
+	}
+}
+
+func TestModelMapper_SuffixPreservation(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+
+	// Register test models
+	reg.RegisterClient("test-client-suffix", "gemini", []*registry.ModelInfo{
+		{ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
+	})
+	reg.RegisterClient("test-client-suffix-2", "claude", []*registry.ModelInfo{
+		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+	})
+	defer reg.UnregisterClient("test-client-suffix")
+	defer reg.UnregisterClient("test-client-suffix-2")
+
+	tests := []struct {
+		name     string
+		mappings []config.AmpModelMapping
+		input    string
+		want     string
+	}{
+		{
+			name:     "numeric suffix preserved",
+			mappings: []config.AmpModelMapping{{From: "g25p", To: "gemini-2.5-pro"}},
+			input:    "g25p(8192)",
+			want:     "gemini-2.5-pro(8192)",
+		},
+		{
+			name:     "level suffix preserved",
+			mappings: []config.AmpModelMapping{{From: "g25p", To: "gemini-2.5-pro"}},
+			input:    "g25p(high)",
+			want:     "gemini-2.5-pro(high)",
+		},
+		{
+			name:     "no suffix unchanged",
+			mappings: []config.AmpModelMapping{{From: "g25p", To: "gemini-2.5-pro"}},
+			input:    "g25p",
+			want:     "gemini-2.5-pro",
+		},
+		{
+			name:     "config suffix takes priority",
+			mappings: []config.AmpModelMapping{{From: "alias", To: "gemini-2.5-pro(medium)"}},
+			input:    "alias(high)",
+			want:     "gemini-2.5-pro(medium)",
+		},
+		{
+			name:     "regex with suffix preserved",
+			mappings: []config.AmpModelMapping{{From: "^g25.*", To: "gemini-2.5-pro", Regex: true}},
+			input:    "g25p(8192)",
+			want:     "gemini-2.5-pro(8192)",
+		},
+		{
+			name:     "auto suffix preserved",
+			mappings: []config.AmpModelMapping{{From: "g25p", To: "gemini-2.5-pro"}},
+			input:    "g25p(auto)",
+			want:     "gemini-2.5-pro(auto)",
+		},
+		{
+			name:     "none suffix preserved",
+			mappings: []config.AmpModelMapping{{From: "g25p", To: "gemini-2.5-pro"}},
+			input:    "g25p(none)",
+			want:     "gemini-2.5-pro(none)",
+		},
+		{
+			name:     "case insensitive base lookup with suffix",
+			mappings: []config.AmpModelMapping{{From: "G25P", To: "gemini-2.5-pro"}},
+			input:    "g25p(high)",
+			want:     "gemini-2.5-pro(high)",
+		},
+		{
+			name:     "empty suffix filtered out",
+			mappings: []config.AmpModelMapping{{From: "g25p", To: "gemini-2.5-pro"}},
+			input:    "g25p()",
+			want:     "gemini-2.5-pro",
+		},
+		{
+			name:     "incomplete suffix treated as no suffix",
+			mappings: []config.AmpModelMapping{{From: "g25p(high", To: "gemini-2.5-pro"}},
+			input:    "g25p(high",
+			want:     "gemini-2.5-pro",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mapper := NewModelMapper(tt.mappings)
+			got := mapper.MapModel(tt.input)
+			if got != tt.want {
+				t.Errorf("MapModel(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }

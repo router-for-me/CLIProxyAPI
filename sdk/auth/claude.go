@@ -47,6 +47,11 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		opts = &LoginOptions{}
 	}
 
+	callbackPort := a.CallbackPort
+	if opts.CallbackPort > 0 {
+		callbackPort = opts.CallbackPort
+	}
+
 	pkceCodes, err := claude.GeneratePKCECodes()
 	if err != nil {
 		return nil, fmt.Errorf("claude pkce generation failed: %w", err)
@@ -57,7 +62,7 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		return nil, fmt.Errorf("claude state generation failed: %w", err)
 	}
 
-	oauthServer := claude.NewOAuthServer(a.CallbackPort)
+	oauthServer := claude.NewOAuthServer(callbackPort)
 	if err = oauthServer.Start(); err != nil {
 		if strings.Contains(err.Error(), "already in use") {
 			return nil, claude.NewAuthenticationError(claude.ErrPortInUse, err)
@@ -84,15 +89,15 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		fmt.Println("Opening browser for Claude authentication")
 		if !browser.IsAvailable() {
 			log.Warn("No browser available; please open the URL manually")
-			util.PrintSSHTunnelInstructions(a.CallbackPort)
+			util.PrintSSHTunnelInstructions(callbackPort)
 			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
 		} else if err = browser.OpenURL(authURL); err != nil {
 			log.Warnf("Failed to open browser automatically: %v", err)
-			util.PrintSSHTunnelInstructions(a.CallbackPort)
+			util.PrintSSHTunnelInstructions(callbackPort)
 			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
 		}
 	} else {
-		util.PrintSSHTunnelInstructions(a.CallbackPort)
+		util.PrintSSHTunnelInstructions(callbackPort)
 		fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
 	}
 
@@ -171,13 +176,16 @@ waitForCallback:
 	}
 
 	if result.State != state {
+		log.Errorf("State mismatch: expected %s, got %s", state, result.State)
 		return nil, claude.NewAuthenticationError(claude.ErrInvalidState, fmt.Errorf("state mismatch"))
 	}
 
 	log.Debug("Claude authorization code received; exchanging for tokens")
+	log.Debugf("Code: %s, State: %s", result.Code[:min(20, len(result.Code))], state)
 
 	authBundle, err := authSvc.ExchangeCodeForTokens(ctx, result.Code, state, pkceCodes)
 	if err != nil {
+		log.Errorf("Token exchange failed: %v", err)
 		return nil, claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, err)
 	}
 

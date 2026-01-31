@@ -19,11 +19,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// OAuth configuration constants for OpenAI Codex
 const (
-	openaiAuthURL  = "https://auth.openai.com/oauth/authorize"
-	openaiTokenURL = "https://auth.openai.com/oauth/token"
-	openaiClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
-	redirectURI    = "http://localhost:1455/auth/callback"
+	AuthURL     = "https://auth.openai.com/oauth/authorize"
+	TokenURL    = "https://auth.openai.com/oauth/token"
+	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
+	RedirectURI = "http://localhost:1455/auth/callback"
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -50,9 +51,9 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 	}
 
 	params := url.Values{
-		"client_id":                  {openaiClientID},
+		"client_id":                  {ClientID},
 		"response_type":              {"code"},
-		"redirect_uri":               {redirectURI},
+		"redirect_uri":               {RedirectURI},
 		"scope":                      {"openid email profile offline_access"},
 		"state":                      {state},
 		"code_challenge":             {pkceCodes.CodeChallenge},
@@ -62,7 +63,7 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 		"codex_cli_simplified_flow":  {"true"},
 	}
 
-	authURL := fmt.Sprintf("%s?%s", openaiAuthURL, params.Encode())
+	authURL := fmt.Sprintf("%s?%s", AuthURL, params.Encode())
 	return authURL, nil
 }
 
@@ -77,13 +78,13 @@ func (o *CodexAuth) ExchangeCodeForTokens(ctx context.Context, code string, pkce
 	// Prepare token exchange request
 	data := url.Values{
 		"grant_type":    {"authorization_code"},
-		"client_id":     {openaiClientID},
+		"client_id":     {ClientID},
 		"code":          {code},
-		"redirect_uri":  {redirectURI},
+		"redirect_uri":  {RedirectURI},
 		"code_verifier": {pkceCodes.CodeVerifier},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", openaiTokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
@@ -163,13 +164,13 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	}
 
 	data := url.Values{
-		"client_id":     {openaiClientID},
+		"client_id":     {ClientID},
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refreshToken},
 		"scope":         {"openid profile email"},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", openaiTokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create refresh request: %w", err)
 	}

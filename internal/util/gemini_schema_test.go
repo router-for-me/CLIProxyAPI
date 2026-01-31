@@ -127,8 +127,10 @@ func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_SmartSelection(t *testing
 				"type": "object",
 				"description": "Accepts: null | object",
 				"properties": {
+					"_": { "type": "boolean" },
 					"kind": { "type": "string" }
-				}
+				},
+				"required": ["_"]
 			}
 		}
 	}`
@@ -614,71 +616,6 @@ func TestCleanJSONSchemaForAntigravity_MultipleNonNullTypes(t *testing.T) {
 	}
 }
 
-func TestCleanJSONSchemaForGemini_PropertyNamesRemoval(t *testing.T) {
-	// propertyNames is used to validate object property names (e.g., must match a pattern)
-	// Gemini doesn't support this keyword and will reject requests containing it
-	input := `{
-		"type": "object",
-		"properties": {
-			"metadata": {
-				"type": "object",
-				"propertyNames": {
-					"pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
-				},
-				"additionalProperties": {
-					"type": "string"
-				}
-			}
-		}
-	}`
-
-	expected := `{
-		"type": "object",
-		"properties": {
-			"metadata": {
-				"type": "object"
-			}
-		}
-	}`
-
-	result := CleanJSONSchemaForGemini(input)
-	compareJSON(t, expected, result)
-
-	// Verify propertyNames is completely removed
-	if strings.Contains(result, "propertyNames") {
-		t.Errorf("propertyNames keyword should be removed, got: %s", result)
-	}
-}
-
-func TestCleanJSONSchemaForGemini_PropertyNamesRemoval_Nested(t *testing.T) {
-	// Test deeply nested propertyNames (as seen in real Claude tool schemas)
-	input := `{
-		"type": "object",
-		"properties": {
-			"items": {
-				"type": "array",
-				"items": {
-					"type": "object",
-					"properties": {
-						"config": {
-							"type": "object",
-							"propertyNames": {
-								"type": "string"
-							}
-						}
-					}
-				}
-			}
-		}
-	}`
-
-	result := CleanJSONSchemaForGemini(input)
-
-	if strings.Contains(result, "propertyNames") {
-		t.Errorf("Nested propertyNames should be removed, got: %s", result)
-	}
-}
-
 func compareJSON(t *testing.T, expectedJSON, actualJSON string) {
 	var expMap, actMap map[string]interface{}
 	errExp := json.Unmarshal([]byte(expectedJSON), &expMap)
@@ -879,5 +816,182 @@ func TestCleanJSONSchemaForAntigravity_MultipleFormats(t *testing.T) {
 	}
 	if !strings.Contains(result, "format: date-time") {
 		t.Errorf("date-time format hint should be added, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_NumericEnumToString(t *testing.T) {
+	// Gemini API requires enum values to be strings, not numbers
+	input := `{
+		"type": "object",
+		"properties": {
+			"priority": {"type": "integer", "enum": [0, 1, 2]},
+			"level": {"type": "number", "enum": [1.5, 2.5, 3.5]},
+			"status": {"type": "string", "enum": ["active", "inactive"]}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// Numeric enum values should be converted to strings
+	if strings.Contains(result, `"enum":[0,1,2]`) {
+		t.Errorf("Integer enum values should be converted to strings, got: %s", result)
+	}
+	if strings.Contains(result, `"enum":[1.5,2.5,3.5]`) {
+		t.Errorf("Float enum values should be converted to strings, got: %s", result)
+	}
+	// Should contain string versions
+	if !strings.Contains(result, `"0"`) || !strings.Contains(result, `"1"`) || !strings.Contains(result, `"2"`) {
+		t.Errorf("Integer enum values should be converted to string format, got: %s", result)
+	}
+	// String enum values should remain unchanged
+	if !strings.Contains(result, `"active"`) || !strings.Contains(result, `"inactive"`) {
+		t.Errorf("String enum values should remain unchanged, got: %s", result)
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_BooleanEnumToString(t *testing.T) {
+	// Boolean enum values should also be converted to strings
+	input := `{
+		"type": "object",
+		"properties": {
+			"enabled": {"type": "boolean", "enum": [true, false]}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// Boolean enum values should be converted to strings
+	if strings.Contains(result, `"enum":[true,false]`) {
+		t.Errorf("Boolean enum values should be converted to strings, got: %s", result)
+	}
+	// Should contain string versions "true" and "false"
+	if !strings.Contains(result, `"true"`) || !strings.Contains(result, `"false"`) {
+		t.Errorf("Boolean enum values should be converted to string format, got: %s", result)
+	}
+}
+
+func TestRemoveExtensionFields(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name: "removes x- fields at root",
+			input: `{
+				"type": "object",
+				"x-custom-meta": "value",
+				"properties": {
+					"foo": { "type": "string" }
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"foo": { "type": "string" }
+				}
+			}`,
+		},
+		{
+			name: "removes x- fields in nested properties",
+			input: `{
+				"type": "object",
+				"properties": {
+					"foo": {
+						"type": "string",
+						"x-internal-id": 123
+					}
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"foo": {
+						"type": "string"
+					}
+				}
+			}`,
+		},
+		{
+			name: "does NOT remove properties named x-",
+			input: `{
+				"type": "object",
+				"properties": {
+					"x-data": { "type": "string" },
+					"normal": { "type": "number", "x-meta": "remove" }
+				},
+				"required": ["x-data"]
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"x-data": { "type": "string" },
+					"normal": { "type": "number" }
+				},
+				"required": ["x-data"]
+			}`,
+		},
+		{
+			name: "does NOT remove $schema and other meta fields (as requested)",
+			input: `{
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"$id": "test",
+				"type": "object",
+				"properties": {
+					"foo": { "type": "string" }
+				}
+			}`,
+			expected: `{
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"$id": "test",
+				"type": "object",
+				"properties": {
+					"foo": { "type": "string" }
+				}
+			}`,
+		},
+		{
+			name: "handles properties named $schema",
+			input: `{
+				"type": "object",
+				"properties": {
+					"$schema": { "type": "string" }
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"$schema": { "type": "string" }
+				}
+			}`,
+		},
+		{
+			name: "handles escaping in paths",
+			input: `{
+				"type": "object",
+				"properties": {
+					"foo.bar": {
+						"type": "string",
+						"x-meta": "remove"
+					}
+				},
+				"x-root.meta": "remove"
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"foo.bar": {
+						"type": "string"
+					}
+				}
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := removeExtensionFields(tt.input)
+			compareJSON(t, tt.expected, actual)
+		})
 	}
 }

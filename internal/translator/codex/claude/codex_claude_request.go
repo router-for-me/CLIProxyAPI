@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -37,10 +37,11 @@ import (
 //   - []byte: The transformed request data in internal client format
 func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
+	userAgent := misc.ExtractCodexUserAgent(rawJSON)
 
 	template := `{"model":"","instructions":"","input":[]}`
 
-	_, instructions := misc.CodexInstructionsForModel(modelName, "")
+	_, instructions := misc.CodexInstructionsForModel(modelName, "", userAgent)
 	template, _ = sjson.Set(template, "instructions", instructions)
 
 	rootResult := gjson.ParseBytes(rawJSON)
@@ -50,7 +51,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	systemsResult := rootResult.Get("system")
 	if systemsResult.IsArray() {
 		systemResults := systemsResult.Array()
-		message := `{"type":"message","role":"user","content":[]}`
+		message := `{"type":"message","role":"developer","content":[]}`
 		for i := 0; i < len(systemResults); i++ {
 			systemResult := systemResults[i]
 			systemTypeResult := systemResult.Get("type")
@@ -216,21 +217,19 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	// Add additional configuration parameters for the Codex API.
 	template, _ = sjson.Set(template, "parallel_tool_calls", true)
 
-	// Convert thinking.budget_tokens to reasoning.effort for level-based models
-	reasoningEffort := "medium" // default
-	if thinking := rootResult.Get("thinking"); thinking.Exists() && thinking.IsObject() {
-		switch thinking.Get("type").String() {
+	// Convert thinking.budget_tokens to reasoning.effort.
+	reasoningEffort := "medium"
+	if thinkingConfig := rootResult.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
+		switch thinkingConfig.Get("type").String() {
 		case "enabled":
-			if util.ModelUsesThinkingLevels(modelName) {
-				if budgetTokens := thinking.Get("budget_tokens"); budgetTokens.Exists() {
-					budget := int(budgetTokens.Int())
-					if effort, ok := util.ThinkingBudgetToEffort(modelName, budget); ok && effort != "" {
-						reasoningEffort = effort
-					}
+			if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
+				budget := int(budgetTokens.Int())
+				if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
+					reasoningEffort = effort
 				}
 			}
 		case "disabled":
-			if effort, ok := util.ThinkingBudgetToEffort(modelName, 0); ok && effort != "" {
+			if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
 				reasoningEffort = effort
 			}
 		}
@@ -242,21 +241,23 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.Set(template, "include", []string{"reasoning.encrypted_content"})
 
 	// Add a first message to ignore system instructions and ensure proper execution.
-	inputResult := gjson.Get(template, "input")
-	if inputResult.Exists() && inputResult.IsArray() {
-		inputResults := inputResult.Array()
-		newInput := "[]"
-		for i := 0; i < len(inputResults); i++ {
-			if i == 0 {
-				firstText := inputResults[i].Get("content.0.text")
-				firstInstructions := "EXECUTE ACCORDING TO THE FOLLOWING INSTRUCTIONS!!!"
-				if firstText.Exists() && firstText.String() != firstInstructions {
-					newInput, _ = sjson.SetRaw(newInput, "-1", `{"type":"message","role":"user","content":[{"type":"input_text","text":"EXECUTE ACCORDING TO THE FOLLOWING INSTRUCTIONS!!!"}]}`)
+	if misc.GetCodexInstructionsEnabled() {
+		inputResult := gjson.Get(template, "input")
+		if inputResult.Exists() && inputResult.IsArray() {
+			inputResults := inputResult.Array()
+			newInput := "[]"
+			for i := 0; i < len(inputResults); i++ {
+				if i == 0 {
+					firstText := inputResults[i].Get("content.0.text")
+					firstInstructions := "EXECUTE ACCORDING TO THE FOLLOWING INSTRUCTIONS!!!"
+					if firstText.Exists() && firstText.String() != firstInstructions {
+						newInput, _ = sjson.SetRaw(newInput, "-1", `{"type":"message","role":"user","content":[{"type":"input_text","text":"EXECUTE ACCORDING TO THE FOLLOWING INSTRUCTIONS!!!"}]}`)
+					}
 				}
+				newInput, _ = sjson.SetRaw(newInput, "-1", inputResults[i].Raw)
 			}
-			newInput, _ = sjson.SetRaw(newInput, "-1", inputResults[i].Raw)
+			template, _ = sjson.SetRaw(template, "input", newInput)
 		}
-		template, _ = sjson.SetRaw(template, "input", newInput)
 	}
 
 	return []byte(template)

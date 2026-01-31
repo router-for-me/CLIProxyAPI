@@ -1,6 +1,7 @@
 package amp
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -15,6 +16,37 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	log "github.com/sirupsen/logrus"
 )
+
+// clientAPIKeyContextKey is the context key used to pass the client API key
+// from gin.Context to the request context for SecretSource lookup.
+type clientAPIKeyContextKey struct{}
+
+// clientAPIKeyMiddleware injects the authenticated client API key from gin.Context["apiKey"]
+// into the request context so that SecretSource can look it up for per-client upstream routing.
+func clientAPIKeyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Extract the client API key from gin context (set by AuthMiddleware)
+		if apiKey, exists := c.Get("apiKey"); exists {
+			if keyStr, ok := apiKey.(string); ok && keyStr != "" {
+				// Inject into request context for SecretSource.Get(ctx) to read
+				ctx := context.WithValue(c.Request.Context(), clientAPIKeyContextKey{}, keyStr)
+				c.Request = c.Request.WithContext(ctx)
+			}
+		}
+		c.Next()
+	}
+}
+
+// getClientAPIKeyFromContext retrieves the client API key from request context.
+// Returns empty string if not present.
+func getClientAPIKeyFromContext(ctx context.Context) string {
+	if val := ctx.Value(clientAPIKeyContextKey{}); val != nil {
+		if keyStr, ok := val.(string); ok {
+			return keyStr
+		}
+	}
+	return ""
+}
 
 // localhostOnlyMiddleware returns a middleware that dynamically checks the module's
 // localhost restriction setting. This allows hot-reload of the restriction without restarting.
@@ -129,6 +161,9 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 		authWithBypass = wrapManagementAuth(auth, "/threads", "/auth", "/docs", "/settings")
 	}
 
+	// Inject client API key into request context for per-client upstream routing
+	ampAPI.Use(clientAPIKeyMiddleware())
+
 	// Dynamic proxy handler that uses m.getProxy() for hot-reload support
 	proxyHandler := func(c *gin.Context) {
 		// Swallow ErrAbortHandler panics from ReverseProxy copyResponse to avoid noisy stack traces
@@ -175,6 +210,8 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	if authWithBypass != nil {
 		rootMiddleware = append(rootMiddleware, authWithBypass)
 	}
+	// Add clientAPIKeyMiddleware after auth for per-client upstream routing
+	rootMiddleware = append(rootMiddleware, clientAPIKeyMiddleware())
 	engine.GET("/threads", append(rootMiddleware, proxyHandler)...)
 	engine.GET("/threads/*path", append(rootMiddleware, proxyHandler)...)
 	engine.GET("/docs", append(rootMiddleware, proxyHandler)...)
@@ -244,6 +281,8 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	if auth != nil {
 		ampProviders.Use(auth)
 	}
+	// Inject client API key into request context for per-client upstream routing
+	ampProviders.Use(clientAPIKeyMiddleware())
 
 	provider := ampProviders.Group("/:provider")
 

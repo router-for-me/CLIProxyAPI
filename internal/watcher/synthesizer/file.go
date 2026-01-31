@@ -86,12 +86,19 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			}
 		}
 
+		disabled, _ := metadata["disabled"].(bool)
+		status := coreauth.StatusActive
+		if disabled {
+			status = coreauth.StatusDisabled
+		}
+
 		a := &coreauth.Auth{
 			ID:       id,
 			Provider: provider,
 			Label:    label,
 			Prefix:   prefix,
-			Status:   coreauth.StatusActive,
+			Status:   status,
+			Disabled: disabled,
 			Attributes: map[string]string{
 				"source": full,
 				"path":   full,
@@ -166,6 +173,16 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			"virtual":           true,
 			"virtual_parent_id": primary.ID,
 			"type":              metadata["type"],
+		}
+		if v, ok := metadata["disable_cooling"]; ok {
+			metadataCopy["disable_cooling"] = v
+		} else if v, ok := metadata["disable-cooling"]; ok {
+			metadataCopy["disable_cooling"] = v
+		}
+		if v, ok := metadata["request_retry"]; ok {
+			metadataCopy["request_retry"] = v
+		} else if v, ok := metadata["request-retry"]; ok {
+			metadataCopy["request_retry"] = v
 		}
 		proxy := strings.TrimSpace(primary.ProxyURL)
 		if proxy != "" {

@@ -124,6 +124,7 @@ func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
 }
 
 func (s *Service) consumeAuthUpdates(ctx context.Context) {
+	ctx = coreauth.WithSkipPersist(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -552,6 +553,10 @@ func (s *Service) Run(ctx context.Context) error {
 		s.cfgMu.Lock()
 		s.cfg = newCfg
 		s.cfgMu.Unlock()
+		if s.coreManager != nil {
+			s.coreManager.SetConfig(newCfg)
+			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+		}
 		s.rebindExecutors()
 	}
 
@@ -676,7 +681,16 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if a == nil || a.ID == "" {
 		return
 	}
+	if a.Disabled {
+		GlobalModelRegistry().UnregisterClient(a.ID)
+		return
+	}
 	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
+	if authKind == "" {
+		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
+			authKind = "apikey"
+		}
+	}
 	if a.Attributes != nil {
 		if v := strings.TrimSpace(a.Attributes["gemini_virtual_primary"]); strings.EqualFold(v, "true") {
 			GlobalModelRegistry().UnregisterClient(a.ID)
@@ -702,6 +716,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "gemini":
 		models = registry.GetGeminiModels()
 		if entry := s.resolveConfigGeminiKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildGeminiConfigModels(entry)
+			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
@@ -741,6 +758,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "codex":
 		models = registry.GetOpenAIModels()
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildCodexConfigModels(entry)
+			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
@@ -811,6 +831,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							OwnedBy:     compat.Name,
 							Type:        "openai-compatibility",
 							DisplayName: modelID,
+							UserDefined: true,
 						})
 					}
 					// Register and return
@@ -833,6 +854,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 	}
+	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {
@@ -1104,17 +1126,22 @@ func matchWildcard(pattern, value string) bool {
 	return true
 }
 
-func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
-	if entry == nil || len(entry.Models) == 0 {
+type modelEntry interface {
+	GetName() string
+	GetAlias() string
+}
+
+func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {
+	if len(models) == 0 {
 		return nil
 	}
 	now := time.Now().Unix()
-	out := make([]*ModelInfo, 0, len(entry.Models))
-	seen := make(map[string]struct{}, len(entry.Models))
-	for i := range entry.Models {
-		model := entry.Models[i]
-		name := strings.TrimSpace(model.Name)
-		alias := strings.TrimSpace(model.Alias)
+	out := make([]*ModelInfo, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for i := range models {
+		model := models[i]
+		name := strings.TrimSpace(model.GetName())
+		alias := strings.TrimSpace(model.GetAlias())
 		if alias == "" {
 			alias = name
 		}
@@ -1130,52 +1157,179 @@ func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
 		if display == "" {
 			display = alias
 		}
-		out = append(out, &ModelInfo{
+		info := &ModelInfo{
 			ID:          alias,
 			Object:      "model",
 			Created:     now,
-			OwnedBy:     "vertex",
-			Type:        "vertex",
+			OwnedBy:     ownedBy,
+			Type:        modelType,
 			DisplayName: display,
-		})
+			UserDefined: true,
+		}
+		if name != "" {
+			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
+				info.Thinking = upstream.Thinking
+			}
+		}
+		out = append(out, info)
 	}
 	return out
 }
 
-func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
-	if entry == nil || len(entry.Models) == 0 {
+func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
+	if entry == nil {
 		return nil
 	}
-	now := time.Now().Unix()
-	out := make([]*ModelInfo, 0, len(entry.Models))
-	seen := make(map[string]struct{}, len(entry.Models))
-	for i := range entry.Models {
-		model := entry.Models[i]
-		name := strings.TrimSpace(model.Name)
-		alias := strings.TrimSpace(model.Alias)
-		if alias == "" {
-			alias = name
-		}
-		if alias == "" {
+	return buildConfigModels(entry.Models, "google", "vertex")
+}
+
+func buildGeminiConfigModels(entry *config.GeminiKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "google", "gemini")
+}
+
+func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "anthropic", "claude")
+}
+
+func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "openai", "openai")
+}
+
+func rewriteModelInfoName(name, oldID, newID string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return name
+	}
+	oldID = strings.TrimSpace(oldID)
+	newID = strings.TrimSpace(newID)
+	if oldID == "" || newID == "" {
+		return name
+	}
+	if strings.EqualFold(oldID, newID) {
+		return name
+	}
+	if strings.EqualFold(trimmed, oldID) {
+		return newID
+	}
+	if strings.HasSuffix(trimmed, "/"+oldID) {
+		prefix := strings.TrimSuffix(trimmed, oldID)
+		return prefix + newID
+	}
+	if trimmed == "models/"+oldID {
+		return "models/" + newID
+	}
+	return name
+}
+
+func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
+	if cfg == nil || len(models) == 0 {
+		return models
+	}
+	channel := coreauth.OAuthModelAliasChannel(provider, authKind)
+	if channel == "" || len(cfg.OAuthModelAlias) == 0 {
+		return models
+	}
+	aliases := cfg.OAuthModelAlias[channel]
+	if len(aliases) == 0 {
+		return models
+	}
+
+	type aliasEntry struct {
+		alias string
+		fork  bool
+	}
+
+	forward := make(map[string][]aliasEntry, len(aliases))
+	for i := range aliases {
+		name := strings.TrimSpace(aliases[i].Name)
+		alias := strings.TrimSpace(aliases[i].Alias)
+		if name == "" || alias == "" {
 			continue
 		}
-		key := strings.ToLower(alias)
-		if _, exists := seen[key]; exists {
+		if strings.EqualFold(name, alias) {
 			continue
 		}
-		seen[key] = struct{}{}
-		display := name
-		if display == "" {
-			display = alias
+		key := strings.ToLower(name)
+		forward[key] = append(forward[key], aliasEntry{alias: alias, fork: aliases[i].Fork})
+	}
+	if len(forward) == 0 {
+		return models
+	}
+
+	out := make([]*ModelInfo, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
 		}
-		out = append(out, &ModelInfo{
-			ID:          alias,
-			Object:      "model",
-			Created:     now,
-			OwnedBy:     "claude",
-			Type:        "claude",
-			DisplayName: display,
-		})
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		entries := forward[key]
+		if len(entries) == 0 {
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, model)
+			continue
+		}
+
+		keepOriginal := false
+		for _, entry := range entries {
+			if entry.fork {
+				keepOriginal = true
+				break
+			}
+		}
+		if keepOriginal {
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				out = append(out, model)
+			}
+		}
+
+		addedAlias := false
+		for _, entry := range entries {
+			mappedID := strings.TrimSpace(entry.alias)
+			if mappedID == "" {
+				continue
+			}
+			if strings.EqualFold(mappedID, id) {
+				continue
+			}
+			aliasKey := strings.ToLower(mappedID)
+			if _, exists := seen[aliasKey]; exists {
+				continue
+			}
+			seen[aliasKey] = struct{}{}
+			clone := *model
+			clone.ID = mappedID
+			if clone.Name != "" {
+				clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
+			}
+			out = append(out, &clone)
+			addedAlias = true
+		}
+
+		if !keepOriginal && !addedAlias {
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, model)
+		}
 	}
 	return out
 }

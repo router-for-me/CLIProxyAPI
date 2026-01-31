@@ -35,6 +35,7 @@ auth-dir: "~/.cli-proxy-api"
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"
+  - "your-api-key-3"
 
 # Enable debug logging
 debug: false
@@ -76,10 +77,17 @@ routing:
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
+# When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
+nonstream-keepalive-interval: 0
+
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
 #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+
+# When true, enable official Codex instructions injection for Codex API requests.
+# When false (default), CodexInstructionsForModel returns immediately without modification.
+codex-instructions-enabled: false
 
 # Gemini API keys
 # gemini-api-key:
@@ -89,6 +97,9 @@ ws-auth: false
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080"
+#     models:
+#       - name: "gemini-2.5-flash" # upstream model name
+#         alias: "gemini-flash"    # client alias mapped to the upstream model
 #     excluded-models:
 #       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
 #       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
@@ -104,6 +115,9 @@ ws-auth: false
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     models:
+#       - name: "gpt-5-codex"   # upstream model name
+#         alias: "codex-latest" # client alias mapped to the upstream model
 #     excluded-models:
 #       - "gpt-5.1"         # exclude specific models (exact match)
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
@@ -121,12 +135,21 @@ ws-auth: false
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #     models:
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
-#         alias: "claude-sonnet-latest" # client alias mapped to the upstream model
+#         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
 #     excluded-models:
 #       - "claude-opus-4-5-20251101" # exclude specific models (exact match)
 #       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
 #       - "*-thinking"               # wildcard matching suffix (e.g. claude-opus-4-5-thinking)
 #       - "*haiku*"                  # wildcard matching substring (e.g. claude-3-5-haiku-20241022)
+#     cloak:                         # optional: request cloaking for non-Claude-Code clients
+#       mode: "auto"                 # "auto" (default): cloak only when client is not Claude Code
+#                                    # "always": always apply cloaking
+#                                    # "never": never apply cloaking
+#       strict-mode: false           # false (default): prepend Claude Code prompt to user system messages
+#                                    # true: strip all user system messages, keep only Claude Code prompt
+#       sensitive-words:             # optional: words to obfuscate with zero-width characters
+#         - "API"
+#         - "proxy"
 
 # OpenAI compatibility providers
 # openai-compatibility:
@@ -152,9 +175,9 @@ ws-auth: false
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     models:                                     # optional: map aliases to upstream model names
-#       - name: "gemini-2.0-flash"                # upstream model name
+#       - name: "gemini-2.5-flash"                # upstream model name
 #         alias: "vertex-flash"                   # client-visible alias
-#       - name: "gemini-1.5-pro"
+#       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
 
 # Amp Integration
@@ -163,6 +186,18 @@ ws-auth: false
 #   upstream-url: "https://ampcode.com"
 #   # Optional: Override API key for Amp upstream (otherwise uses env or file)
 #   upstream-api-key: ""
+#   # Per-client upstream API key mapping
+#   # Maps client API keys (from top-level api-keys) to different Amp upstream API keys.
+#   # Useful when different clients need to use different Amp accounts/quotas.
+#   # If a client key isn't mapped, falls back to upstream-api-key (default behavior).
+#   upstream-api-keys:
+#     - upstream-api-key: "amp_key_for_team_a"    # Upstream key to use for these clients
+#       api-keys:                                 # Client keys that use this upstream key
+#         - "your-api-key-1"
+#         - "your-api-key-2"
+#     - upstream-api-key: "amp_key_for_team_b"
+#       api-keys:
+#         - "your-api-key-3"
 #   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (default: false)
 #   restrict-management-to-localhost: false
 #   # Force model mappings to run before checking local API keys (default: false)
@@ -172,12 +207,56 @@ ws-auth: false
 #   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
 #   # but you have a similar model available (e.g., Claude Sonnet 4).
 #   model-mappings:
-#     - from: "claude-opus-4.5"       # Model requested by Amp CLI
-#       to: "claude-sonnet-4"         # Route to this available model instead
-#     - from: "gpt-5"
-#       to: "gemini-2.5-pro"
-#     - from: "claude-3-opus-20240229"
-#       to: "claude-3-5-sonnet-20241022"
+#     - from: "claude-opus-4-5-20251101"          # Model requested by Amp CLI
+#       to: "gemini-claude-opus-4-5-thinking"     # Route to this available model instead
+#     - from: "claude-sonnet-4-5-20250929"
+#       to: "gemini-claude-sonnet-4-5-thinking"
+#     - from: "claude-haiku-4-5-20251001"
+#       to: "gemini-2.5-flash"
+
+# Global OAuth model name aliases (per channel)
+# These aliases rename model IDs for both model listing and request routing.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow.
+# NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# You can repeat the same name with different aliases to expose multiple client model names.
+oauth-model-alias:
+  antigravity:
+    - name: "rev19-uic3-1p"
+      alias: "gemini-2.5-computer-use-preview-10-2025"
+    - name: "gemini-3-pro-image"
+      alias: "gemini-3-pro-image-preview"
+    - name: "gemini-3-pro-high"
+      alias: "gemini-3-pro-preview"
+    - name: "gemini-3-flash"
+      alias: "gemini-3-flash-preview"
+    - name: "claude-sonnet-4-5"
+      alias: "gemini-claude-sonnet-4-5"
+    - name: "claude-sonnet-4-5-thinking"
+      alias: "gemini-claude-sonnet-4-5-thinking"
+    - name: "claude-opus-4-5-thinking"
+      alias: "gemini-claude-opus-4-5-thinking"
+#   gemini-cli:
+#     - name: "gemini-2.5-pro"          # original model name under this channel
+#       alias: "g2.5p"                  # client-visible alias
+#       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
+#   vertex:
+#     - name: "gemini-2.5-pro"
+#       alias: "g2.5p"
+#   aistudio:
+#     - name: "gemini-2.5-pro"
+#       alias: "g2.5p"
+#   claude:
+#     - name: "claude-sonnet-4-5-20250929"
+#       alias: "cs4.5"
+#   codex:
+#     - name: "gpt-5"
+#       alias: "g5"
+#   qwen:
+#     - name: "qwen3-coder-plus"
+#       alias: "qwen-plus"
+#   iflow:
+#     - name: "glm-4.7"
+#       alias: "glm-god"
 
 # OAuth provider excluded models
 # oauth-excluded-models:
@@ -209,9 +288,21 @@ ws-auth: false
 #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "generationConfig.thinkingConfig.thinkingBudget": 32768
+#   default-raw: # Default raw rules set parameters using raw JSON when missing (must be valid JSON).
+#     - models:
+#         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
+#           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
+#       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
+#         "generationConfig.responseJsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}"
 #   override: # Override rules always set parameters, overwriting any existing values.
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
 #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "reasoning.effort": "high"
+#   override-raw: # Override raw rules always set parameters using raw JSON (must be valid JSON).
+#     - models:
+#         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
+#           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex
+#       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
+#         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"

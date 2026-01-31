@@ -2,15 +2,13 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
@@ -18,20 +16,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
-
-const (
-	antigravityClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret = "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"
-	antigravityCallbackPort = 51121
-)
-
-var antigravityScopes = []string{
-	"https://www.googleapis.com/auth/cloud-platform",
-	"https://www.googleapis.com/auth/userinfo.email",
-	"https://www.googleapis.com/auth/userinfo.profile",
-	"https://www.googleapis.com/auth/cclog",
-	"https://www.googleapis.com/auth/experimentsandconfigs",
-}
 
 // AntigravityAuthenticator implements OAuth login for the antigravity provider.
 type AntigravityAuthenticator struct{}
@@ -60,14 +44,19 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		opts = &LoginOptions{}
 	}
 
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	callbackPort := antigravity.CallbackPort
+	if opts.CallbackPort > 0 {
+		callbackPort = opts.CallbackPort
+	}
+
+	authSvc := antigravity.NewAntigravityAuth(cfg, nil)
 
 	state, err := misc.GenerateRandomState()
 	if err != nil {
 		return nil, fmt.Errorf("antigravity: failed to generate state: %w", err)
 	}
 
-	srv, port, cbChan, errServer := startAntigravityCallbackServer()
+	srv, port, cbChan, errServer := startAntigravityCallbackServer(callbackPort)
 	if errServer != nil {
 		return nil, fmt.Errorf("antigravity: failed to start callback server: %w", errServer)
 	}
@@ -78,7 +67,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	}()
 
 	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", port)
-	authURL := buildAntigravityAuthURL(redirectURI, state)
+	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	if !opts.NoBrowser {
 		fmt.Println("Opening browser for antigravity authentication")
@@ -159,22 +148,29 @@ waitForCallback:
 		return nil, fmt.Errorf("antigravity: missing authorization code")
 	}
 
-	tokenResp, errToken := exchangeAntigravityCode(ctx, cbRes.Code, redirectURI, httpClient)
+	tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, cbRes.Code, redirectURI)
 	if errToken != nil {
 		return nil, fmt.Errorf("antigravity: token exchange failed: %w", errToken)
 	}
 
-	email := ""
-	if tokenResp.AccessToken != "" {
-		if info, errInfo := fetchAntigravityUserInfo(ctx, tokenResp.AccessToken, httpClient); errInfo == nil && strings.TrimSpace(info.Email) != "" {
-			email = strings.TrimSpace(info.Email)
-		}
+	accessToken := strings.TrimSpace(tokenResp.AccessToken)
+	if accessToken == "" {
+		return nil, fmt.Errorf("antigravity: token exchange returned empty access token")
+	}
+
+	email, errInfo := authSvc.FetchUserInfo(ctx, accessToken)
+	if errInfo != nil {
+		return nil, fmt.Errorf("antigravity: fetch user info failed: %w", errInfo)
+	}
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return nil, fmt.Errorf("antigravity: empty email returned from user info")
 	}
 
 	// Fetch project ID via loadCodeAssist (same approach as Gemini CLI)
 	projectID := ""
-	if tokenResp.AccessToken != "" {
-		fetchedProjectID, errProject := fetchAntigravityProjectID(ctx, tokenResp.AccessToken, httpClient)
+	if accessToken != "" {
+		fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
 		if errProject != nil {
 			log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
 		} else {
@@ -199,7 +195,7 @@ waitForCallback:
 		metadata["project_id"] = projectID
 	}
 
-	fileName := sanitizeAntigravityFileName(email)
+	fileName := antigravity.CredentialFileName(email)
 	label := email
 	if label == "" {
 		label = "antigravity"
@@ -224,13 +220,16 @@ type callbackResult struct {
 	State string
 }
 
-func startAntigravityCallbackServer() (*http.Server, int, <-chan callbackResult, error) {
-	addr := fmt.Sprintf(":%d", antigravityCallbackPort)
+func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbackResult, error) {
+	if port <= 0 {
+		port = antigravity.CallbackPort
+	}
+	addr := fmt.Sprintf(":%d", port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
+	port = listener.Addr().(*net.TCPAddr).Port
 	resultCh := make(chan callbackResult, 1)
 
 	mux := http.NewServeMux()
@@ -259,183 +258,9 @@ func startAntigravityCallbackServer() (*http.Server, int, <-chan callbackResult,
 	return srv, port, resultCh, nil
 }
 
-type antigravityTokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int64  `json:"expires_in"`
-	TokenType    string `json:"token_type"`
-}
-
-func exchangeAntigravityCode(ctx context.Context, code, redirectURI string, httpClient *http.Client) (*antigravityTokenResponse, error) {
-	data := url.Values{}
-	data.Set("code", code)
-	data.Set("client_id", antigravityClientID)
-	data.Set("client_secret", antigravityClientSecret)
-	data.Set("redirect_uri", redirectURI)
-	data.Set("grant_type", "authorization_code")
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, errDo := httpClient.Do(req)
-	if errDo != nil {
-		return nil, errDo
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity token exchange: close body error: %v", errClose)
-		}
-	}()
-
-	var token antigravityTokenResponse
-	if errDecode := json.NewDecoder(resp.Body).Decode(&token); errDecode != nil {
-		return nil, errDecode
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("oauth token exchange failed: status %d", resp.StatusCode)
-	}
-	return &token, nil
-}
-
-type antigravityUserInfo struct {
-	Email string `json:"email"`
-}
-
-func fetchAntigravityUserInfo(ctx context.Context, accessToken string, httpClient *http.Client) (*antigravityUserInfo, error) {
-	if strings.TrimSpace(accessToken) == "" {
-		return &antigravityUserInfo{}, nil
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.googleapis.com/oauth2/v1/userinfo?alt=json", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	resp, errDo := httpClient.Do(req)
-	if errDo != nil {
-		return nil, errDo
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity userinfo: close body error: %v", errClose)
-		}
-	}()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return &antigravityUserInfo{}, nil
-	}
-	var info antigravityUserInfo
-	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
-		return nil, errDecode
-	}
-	return &info, nil
-}
-
-func buildAntigravityAuthURL(redirectURI, state string) string {
-	params := url.Values{}
-	params.Set("access_type", "offline")
-	params.Set("client_id", antigravityClientID)
-	params.Set("prompt", "consent")
-	params.Set("redirect_uri", redirectURI)
-	params.Set("response_type", "code")
-	params.Set("scope", strings.Join(antigravityScopes, " "))
-	params.Set("state", state)
-	return "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
-}
-
-func sanitizeAntigravityFileName(email string) string {
-	if strings.TrimSpace(email) == "" {
-		return "antigravity.json"
-	}
-	replacer := strings.NewReplacer("@", "_", ".", "_")
-	return fmt.Sprintf("antigravity-%s.json", replacer.Replace(email))
-}
-
-// Antigravity API constants for project discovery
-const (
-	antigravityAPIEndpoint    = "https://cloudcode-pa.googleapis.com"
-	antigravityAPIVersion     = "v1internal"
-	antigravityAPIUserAgent   = "google-api-nodejs-client/9.15.1"
-	antigravityAPIClient      = "google-cloud-sdk vscode_cloudshelleditor/0.1"
-	antigravityClientMetadata = `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
-)
-
 // FetchAntigravityProjectID exposes project discovery for external callers.
 func FetchAntigravityProjectID(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
-	return fetchAntigravityProjectID(ctx, accessToken, httpClient)
-}
-
-// fetchAntigravityProjectID retrieves the project ID for the authenticated user via loadCodeAssist.
-// This uses the same approach as Gemini CLI to get the cloudaicompanionProject.
-func fetchAntigravityProjectID(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
-	// Call loadCodeAssist to get the project
-	loadReqBody := map[string]any{
-		"metadata": map[string]string{
-			"ideType":    "IDE_UNSPECIFIED",
-			"platform":   "PLATFORM_UNSPECIFIED",
-			"pluginType": "GEMINI",
-		},
-	}
-
-	rawBody, errMarshal := json.Marshal(loadReqBody)
-	if errMarshal != nil {
-		return "", fmt.Errorf("marshal request body: %w", errMarshal)
-	}
-
-	endpointURL := fmt.Sprintf("%s/%s:loadCodeAssist", antigravityAPIEndpoint, antigravityAPIVersion)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", antigravityAPIUserAgent)
-	req.Header.Set("X-Goog-Api-Client", antigravityAPIClient)
-	req.Header.Set("Client-Metadata", antigravityClientMetadata)
-
-	resp, errDo := httpClient.Do(req)
-	if errDo != nil {
-		return "", fmt.Errorf("execute request: %w", errDo)
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity loadCodeAssist: close body error: %v", errClose)
-		}
-	}()
-
-	bodyBytes, errRead := io.ReadAll(resp.Body)
-	if errRead != nil {
-		return "", fmt.Errorf("read response: %w", errRead)
-	}
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
-	}
-
-	var loadResp map[string]any
-	if errDecode := json.Unmarshal(bodyBytes, &loadResp); errDecode != nil {
-		return "", fmt.Errorf("decode response: %w", errDecode)
-	}
-
-	// Extract projectID from response
-	projectID := ""
-	if id, ok := loadResp["cloudaicompanionProject"].(string); ok {
-		projectID = strings.TrimSpace(id)
-	}
-	if projectID == "" {
-		if projectMap, ok := loadResp["cloudaicompanionProject"].(map[string]any); ok {
-			if id, okID := projectMap["id"].(string); okID {
-				projectID = strings.TrimSpace(id)
-			}
-		}
-	}
-
-	if projectID == "" {
-		return "", fmt.Errorf("no cloudaicompanionProject in response")
-	}
-
-	return projectID, nil
+	cfg := &config.Config{}
+	authSvc := antigravity.NewAntigravityAuth(cfg, httpClient)
+	return authSvc.FetchProjectID(ctx, accessToken)
 }

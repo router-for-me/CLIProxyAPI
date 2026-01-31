@@ -12,10 +12,10 @@ import (
 // Signature Caching Tests
 // ============================================================================
 
-func TestConvertAntigravityResponseToClaude_SessionIDDerived(t *testing.T) {
+func TestConvertAntigravityResponseToClaude_ParamsInitialized(t *testing.T) {
 	cache.ClearSignatureCache("")
 
-	// Request with user message - should derive session ID
+	// Request with user message - should initialize params
 	requestJSON := []byte(`{
 		"messages": [
 			{"role": "user", "content": [{"type": "text", "text": "Hello world"}]}
@@ -37,10 +37,12 @@ func TestConvertAntigravityResponseToClaude_SessionIDDerived(t *testing.T) {
 	ctx := context.Background()
 	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, &param)
 
-	// Verify session ID was set
 	params := param.(*Params)
-	if params.SessionID == "" {
-		t.Error("SessionID should be derived from request")
+	if !params.HasFirstResponse {
+		t.Error("HasFirstResponse should be set after first chunk")
+	}
+	if params.CurrentThinkingText.Len() == 0 {
+		t.Error("Thinking text should be accumulated")
 	}
 }
 
@@ -97,6 +99,7 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 	cache.ClearSignatureCache("")
 
 	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
 		"messages": [{"role": "user", "content": [{"type": "text", "text": "Cache test"}]}]
 	}`)
 
@@ -129,12 +132,8 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 	// Process thinking chunk
 	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, thinkingChunk, &param)
 	params := param.(*Params)
-	sessionID := params.SessionID
 	thinkingText := params.CurrentThinkingText.String()
 
-	if sessionID == "" {
-		t.Fatal("SessionID should be set")
-	}
 	if thinkingText == "" {
 		t.Fatal("Thinking text should be accumulated")
 	}
@@ -143,7 +142,7 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, signatureChunk, &param)
 
 	// Verify signature was cached
-	cachedSig := cache.GetCachedSignature(sessionID, thinkingText)
+	cachedSig := cache.GetCachedSignature("claude-sonnet-4-5-thinking", thinkingText)
 	if cachedSig != validSignature {
 		t.Errorf("Expected cached signature '%s', got '%s'", validSignature, cachedSig)
 	}
@@ -158,6 +157,7 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	cache.ClearSignatureCache("")
 
 	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
 		"messages": [{"role": "user", "content": [{"type": "text", "text": "Multi block test"}]}]
 	}`)
 
@@ -221,13 +221,12 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	// Process first thinking block
 	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Thinking, &param)
 	params := param.(*Params)
-	sessionID := params.SessionID
 	firstThinkingText := params.CurrentThinkingText.String()
 
 	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Sig, &param)
 
 	// Verify first signature cached
-	if cache.GetCachedSignature(sessionID, firstThinkingText) != validSig1 {
+	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", firstThinkingText) != validSig1 {
 		t.Error("First thinking block signature should be cached")
 	}
 
@@ -241,76 +240,7 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Sig, &param)
 
 	// Verify second signature cached
-	if cache.GetCachedSignature(sessionID, secondThinkingText) != validSig2 {
+	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", secondThinkingText) != validSig2 {
 		t.Error("Second thinking block signature should be cached")
-	}
-}
-
-func TestDeriveSessionIDFromRequest(t *testing.T) {
-	tests := []struct {
-		name      string
-		input     []byte
-		wantEmpty bool
-	}{
-		{
-			name:      "valid user message",
-			input:     []byte(`{"messages": [{"role": "user", "content": "Hello"}]}`),
-			wantEmpty: false,
-		},
-		{
-			name:      "user message with content array",
-			input:     []byte(`{"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}]}`),
-			wantEmpty: false,
-		},
-		{
-			name:      "no user message",
-			input:     []byte(`{"messages": [{"role": "assistant", "content": "Hi"}]}`),
-			wantEmpty: true,
-		},
-		{
-			name:      "empty messages",
-			input:     []byte(`{"messages": []}`),
-			wantEmpty: true,
-		},
-		{
-			name:      "no messages field",
-			input:     []byte(`{}`),
-			wantEmpty: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := deriveSessionID(tt.input)
-			if tt.wantEmpty && result != "" {
-				t.Errorf("Expected empty session ID, got '%s'", result)
-			}
-			if !tt.wantEmpty && result == "" {
-				t.Error("Expected non-empty session ID")
-			}
-		})
-	}
-}
-
-func TestDeriveSessionIDFromRequest_Deterministic(t *testing.T) {
-	input := []byte(`{"messages": [{"role": "user", "content": "Same message"}]}`)
-
-	id1 := deriveSessionID(input)
-	id2 := deriveSessionID(input)
-
-	if id1 != id2 {
-		t.Errorf("Session ID should be deterministic: '%s' != '%s'", id1, id2)
-	}
-}
-
-func TestDeriveSessionIDFromRequest_DifferentMessages(t *testing.T) {
-	input1 := []byte(`{"messages": [{"role": "user", "content": "Message A"}]}`)
-	input2 := []byte(`{"messages": [{"role": "user", "content": "Message B"}]}`)
-
-	id1 := deriveSessionID(input1)
-	id2 := deriveSessionID(input2)
-
-	if id1 == id2 {
-		t.Error("Different messages should produce different session IDs")
 	}
 }

@@ -40,6 +40,16 @@ type claudeToResponsesState struct {
 
 var dataTag = []byte("data:")
 
+func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
+	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
+		return originalRequestRawJSON
+	}
+	if len(requestRawJSON) > 0 && gjson.ValidBytes(requestRawJSON) {
+		return requestRawJSON
+	}
+	return nil
+}
+
 func emitEvent(event string, payload string) string {
 	return fmt.Sprintf("event: %s\ndata: %s", event, payload)
 }
@@ -241,6 +251,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("fc_%s", st.CurrentFCID))
 			itemDone, _ = sjson.Set(itemDone, "item.arguments", args)
 			itemDone, _ = sjson.Set(itemDone, "item.call_id", st.CurrentFCID)
+			itemDone, _ = sjson.Set(itemDone, "item.name", st.FuncNames[idx])
 			out = append(out, emitEvent("response.output_item.done", itemDone))
 			st.InFuncBlock = false
 		} else if st.ReasoningActive {
@@ -279,8 +290,9 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		completed, _ = sjson.Set(completed, "response.created_at", st.CreatedAt)
 		// Inject original request fields into response as per docs/response.completed.json
 
-		if requestRawJSON != nil {
-			req := gjson.ParseBytes(requestRawJSON)
+		reqBytes := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
+		if len(reqBytes) > 0 {
+			req := gjson.ParseBytes(reqBytes)
 			if v := req.Get("instructions"); v.Exists() {
 				completed, _ = sjson.Set(completed, "response.instructions", v.String())
 			}
@@ -549,8 +561,9 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	out, _ = sjson.Set(out, "created_at", createdAt)
 
 	// Inject request echo fields as top-level (similar to streaming variant)
-	if requestRawJSON != nil {
-		req := gjson.ParseBytes(requestRawJSON)
+	reqBytes := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
+	if len(reqBytes) > 0 {
+		req := gjson.ParseBytes(reqBytes)
 		if v := req.Get("instructions"); v.Exists() {
 			out, _ = sjson.Set(out, "instructions", v.String())
 		}
