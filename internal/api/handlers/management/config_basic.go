@@ -222,6 +222,26 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 	h.persist(c)
 }
 
+// ErrorLogsMaxFiles
+func (h *Handler) GetErrorLogsMaxFiles(c *gin.Context) {
+	c.JSON(200, gin.H{"error-logs-max-files": h.cfg.ErrorLogsMaxFiles})
+}
+func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
+	var body struct {
+		Value *int `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	value := *body.Value
+	if value < 0 {
+		value = 10
+	}
+	h.cfg.ErrorLogsMaxFiles = value
+	h.persist(c)
+}
+
 // Request log
 func (h *Handler) GetRequestLog(c *gin.Context) { c.JSON(200, gin.H{"request-log": h.cfg.RequestLog}) }
 func (h *Handler) PutRequestLog(c *gin.Context) {
