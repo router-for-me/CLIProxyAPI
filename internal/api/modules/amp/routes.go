@@ -5,11 +5,12 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
@@ -234,19 +235,20 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	// If no local OAuth is available, falls back to ampcode.com proxy.
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
 	geminiBridge := createGeminiBridgeHandler(geminiHandlers.GeminiHandler)
-	geminiV1Beta1Fallback := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
-		return m.getProxy()
-	}, m.modelMapper, m.forceModelMappings)
-	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
 
-	// Route POST model calls through Gemini bridge with FallbackHandler.
-	// FallbackHandler checks provider -> mapping -> proxy fallback automatically.
+	// T-025: Migrated Gemini v1beta1 bridge to use ModelRoutingWrapper
+	// Create a dedicated routing wrapper for the Gemini bridge
+	geminiBridgeWrapper := m.createModelRoutingWrapper()
+	geminiV1Beta1Handler := geminiBridgeWrapper.Wrap(geminiBridge)
+
+	// Route POST model calls through Gemini bridge with ModelRoutingWrapper.
+	// ModelRoutingWrapper checks provider -> mapping -> proxy fallback automatically.
 	// All other methods (e.g., GET model listing) always proxy to upstream to preserve Amp CLI behavior.
 	ampAPI.Any("/provider/google/v1beta1/*path", func(c *gin.Context) {
 		if c.Request.Method == "POST" {
 			if path := c.Param("path"); strings.Contains(path, "/models/") {
-				// POST with /models/ path -> use Gemini bridge with fallback handler
-				// FallbackHandler will check provider/mapping and proxy if needed
+				// POST with /models/ path -> use Gemini bridge with unified routing wrapper
+				// ModelRoutingWrapper will check provider/mapping and proxy if needed
 				geminiV1Beta1Handler(c)
 				return
 			}
@@ -254,6 +256,41 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 		// Non-POST or no local provider available -> proxy upstream
 		proxyHandler(c)
 	})
+}
+
+// createModelRoutingWrapper creates a new ModelRoutingWrapper for unified routing.
+// This is used for testing the new routing implementation (T-021 onwards).
+func (m *AmpModule) createModelRoutingWrapper() *routing.ModelRoutingWrapper {
+	// Create a registry - in production this would be populated with actual providers
+	registry := routing.NewRegistry()
+
+	// Create a minimal config with just AmpCode settings
+	// The Router only needs AmpCode.ModelMappings and OAuthModelAlias
+	cfg := &config.Config{
+		AmpCode: func() config.AmpCode {
+			if m.modelMapper != nil {
+				return config.AmpCode{
+					ModelMappings: m.modelMapper.GetMappingsAsConfig(),
+				}
+			}
+			return config.AmpCode{}
+		}(),
+	}
+
+	// Create router with registry and config
+	router := routing.NewRouter(registry, cfg)
+
+	// Create wrapper with proxy function
+	proxyFunc := func(c *gin.Context) {
+		proxy := m.getProxy()
+		if proxy != nil {
+			proxy.ServeHTTP(c.Writer, c.Request)
+		} else {
+			c.JSON(503, gin.H{"error": "amp upstream proxy not available"})
+		}
+	}
+
+	return routing.NewModelRoutingWrapper(router, nil, nil, proxyFunc)
 }
 
 // registerProviderAliases registers /api/provider/{provider}/... routes
@@ -269,12 +306,9 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(baseHandler)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(baseHandler)
 
-	// Create fallback handler wrapper that forwards to ampcode.com when provider not found
-	// Uses m.getProxy() for hot-reload support (proxy can be updated at runtime)
-	// Also includes model mapping support for routing unavailable models to alternatives
-	fallbackHandler := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
-		return m.getProxy()
-	}, m.modelMapper, m.forceModelMappings)
+	// Create unified routing wrapper (T-021 onwards)
+	// Replaces FallbackHandler with Router-based unified routing
+	routingWrapper := m.createModelRoutingWrapper()
 
 	// Provider-specific routes under /api/provider/:provider
 	ampProviders := engine.Group("/api/provider")
@@ -302,33 +336,36 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	}
 
 	// Root-level routes (for providers that omit /v1, like groq/cerebras)
-	// Wrap handlers with fallback logic to forward to ampcode.com when provider not found
+	// T-022: Migrated all OpenAI routes to use ModelRoutingWrapper for unified routing
 	provider.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback (no body to check)
-	provider.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
-	provider.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
-	provider.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
+	provider.POST("/chat/completions", routingWrapper.Wrap(openaiHandlers.ChatCompletions))
+	provider.POST("/completions", routingWrapper.Wrap(openaiHandlers.Completions))
+	provider.POST("/responses", routingWrapper.Wrap(openaiResponsesHandlers.Responses))
 
 	// /v1 routes (OpenAI/Claude-compatible endpoints)
 	v1Amp := provider.Group("/v1")
 	{
 		v1Amp.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback
 
-		// OpenAI-compatible endpoints with fallback
-		v1Amp.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
-		v1Amp.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
-		v1Amp.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
+		// OpenAI-compatible endpoints with ModelRoutingWrapper
+		// T-021, T-022: Migrated to unified routing wrapper
+		v1Amp.POST("/chat/completions", routingWrapper.Wrap(openaiHandlers.ChatCompletions))
+		v1Amp.POST("/completions", routingWrapper.Wrap(openaiHandlers.Completions))
+		v1Amp.POST("/responses", routingWrapper.Wrap(openaiResponsesHandlers.Responses))
 
-		// Claude/Anthropic-compatible endpoints with fallback
-		v1Amp.POST("/messages", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeMessages))
-		v1Amp.POST("/messages/count_tokens", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeCountTokens))
+		// Claude/Anthropic-compatible endpoints with ModelRoutingWrapper
+		// T-023: Migrated Claude routes to unified routing wrapper
+		v1Amp.POST("/messages", routingWrapper.Wrap(claudeCodeHandlers.ClaudeMessages))
+		v1Amp.POST("/messages/count_tokens", routingWrapper.Wrap(claudeCodeHandlers.ClaudeCountTokens))
 	}
 
 	// /v1beta routes (Gemini native API)
 	// Note: Gemini handler extracts model from URL path, so fallback logic needs special handling
+	// T-024: Migrated Gemini v1beta routes to unified routing wrapper
 	v1betaAmp := provider.Group("/v1beta")
 	{
 		v1betaAmp.GET("/models", geminiHandlers.GeminiModels)
-		v1betaAmp.POST("/models/*action", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
+		v1betaAmp.POST("/models/*action", routingWrapper.Wrap(geminiHandlers.GeminiHandler))
 		v1betaAmp.GET("/models/*action", geminiHandlers.GeminiGetHandler)
 	}
 }

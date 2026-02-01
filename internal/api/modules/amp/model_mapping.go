@@ -276,6 +276,22 @@ func (m *DefaultModelMapper) GetMappings() map[string]string {
 	return result
 }
 
+// GetMappingsAsConfig returns the current model mappings as config.AmpModelMapping slice.
+// Safe for concurrent use.
+func (m *DefaultModelMapper) GetMappingsAsConfig() []config.AmpModelMapping {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]config.AmpModelMapping, 0, len(m.mappings))
+	for from, to := range m.mappings {
+		result = append(result, config.AmpModelMapping{
+			From: from,
+			To:   to,
+		})
+	}
+	return result
+}
+
 type regexMapping struct {
 	re *regexp.Regexp
 	to string

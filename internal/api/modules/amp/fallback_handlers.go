@@ -86,6 +86,10 @@ func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provid
 
 // FallbackHandler wraps a standard handler with fallback logic to ampcode.com
 // when the model's provider is not available in CLIProxyAPI
+//
+// Deprecated: FallbackHandler is deprecated in favor of routing.ModelRoutingWrapper.
+// Use routing.NewModelRoutingWrapper() instead for unified routing logic.
+// This type is kept for backward compatibility and test purposes.
 type FallbackHandler struct {
 	getProxy           func() *httputil.ReverseProxy
 	modelMapper        ModelMapper
@@ -94,6 +98,8 @@ type FallbackHandler struct {
 
 // NewFallbackHandler creates a new fallback handler wrapper
 // The getProxy function allows lazy evaluation of the proxy (useful when proxy is created after routes)
+//
+// Deprecated: Use routing.NewModelRoutingWrapper() instead.
 func NewFallbackHandler(getProxy func() *httputil.ReverseProxy) *FallbackHandler {
 	return &FallbackHandler{
 		getProxy:           getProxy,
@@ -102,6 +108,8 @@ func NewFallbackHandler(getProxy func() *httputil.ReverseProxy) *FallbackHandler
 }
 
 // NewFallbackHandlerWithMapper creates a new fallback handler with model mapping support
+//
+// Deprecated: Use routing.NewModelRoutingWrapper() instead.
 func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper, forceModelMappings func() bool) *FallbackHandler {
 	if forceModelMappings == nil {
 		forceModelMappings = func() bool { return false }
