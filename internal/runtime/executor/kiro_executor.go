@@ -2443,6 +2443,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	reader := bufio.NewReaderSize(body, 20*1024*1024) // 20MB buffer to match other providers
 	var totalUsage usage.Detail
 	var hasToolUses bool          // Track if any tool uses were emitted
+	var hasTruncatedTools bool    // Track if any tool uses were truncated
 	var upstreamStopReason string // Track stop_reason from upstream events
 
 	// Tool use state tracking for input buffering and deduplication
@@ -3227,6 +3228,62 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 			// Emit completed tool uses
 			for _, tu := range completedToolUses {
+				// Check if this tool was truncated - emit with SOFT_LIMIT_REACHED marker
+				if tu.IsTruncated {
+					hasTruncatedTools = true
+					log.Infof("kiro: streamToChannel emitting truncated tool with SOFT_LIMIT_REACHED: %s (ID: %s)", tu.Name, tu.ToolUseID)
+
+					// Close text block if open
+					if isTextBlockOpen && contentBlockIndex >= 0 {
+						blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
+						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+						for _, chunk := range sseData {
+							if chunk != "" {
+								out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+							}
+						}
+						isTextBlockOpen = false
+					}
+
+					contentBlockIndex++
+
+					// Emit tool_use with SOFT_LIMIT_REACHED marker input
+					blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, tu.Name)
+					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+					for _, chunk := range sseData {
+						if chunk != "" {
+							out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+						}
+					}
+
+					// Build SOFT_LIMIT_REACHED marker input
+					markerInput := map[string]interface{}{
+						"_status":  "SOFT_LIMIT_REACHED",
+						"_message": "Tool output was truncated. Split content into smaller chunks (max 300 lines). Due to potential model hallucination, you MUST re-fetch the current working directory and generate the correct file_path.",
+					}
+
+					markerJSON, _ := json.Marshal(markerInput)
+					inputDelta := kiroclaude.BuildClaudeInputJsonDeltaEvent(string(markerJSON), contentBlockIndex)
+					sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, inputDelta, &translatorParam)
+					for _, chunk := range sseData {
+						if chunk != "" {
+							out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+						}
+					}
+
+					// Close tool_use block
+					blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
+					sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+					for _, chunk := range sseData {
+						if chunk != "" {
+							out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk + "\n\n")}
+						}
+					}
+
+					hasToolUses = true // Keep this so stop_reason = tool_use
+					continue
+				}
+
 				hasToolUses = true
 
 				// Close text block if open
@@ -3525,7 +3582,12 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	}
 
 	// Determine stop reason: prefer upstream, then detect tool_use, default to end_turn
+	// SOFT_LIMIT_REACHED: Keep stop_reason = "tool_use" so Claude continues the loop
 	stopReason := upstreamStopReason
+	if hasTruncatedTools {
+		// Log that we're using SOFT_LIMIT_REACHED approach
+		log.Infof("kiro: streamToChannel using SOFT_LIMIT_REACHED - keeping stop_reason=tool_use for truncated tools")
+	}
 	if stopReason == "" {
 		if hasToolUses {
 			stopReason = "tool_use"

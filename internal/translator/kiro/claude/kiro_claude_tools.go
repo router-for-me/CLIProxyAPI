@@ -14,10 +14,11 @@ import (
 
 // ToolUseState tracks the state of an in-progress tool use during streaming.
 type ToolUseState struct {
-	ToolUseID   string
-	Name        string
-	InputBuffer strings.Builder
-	IsComplete  bool
+	ToolUseID      string
+	Name           string
+	InputBuffer    strings.Builder
+	IsComplete     bool
+	TruncationInfo *TruncationInfo // Truncation detection result (set when complete)
 }
 
 // Pre-compiled regex patterns for performance
@@ -474,10 +475,31 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 			finalInput = make(map[string]interface{})
 		}
 
+		// Detect truncation for all tools
+		truncInfo := DetectTruncation(currentToolUse.Name, currentToolUse.ToolUseID, fullInput, finalInput)
+		if truncInfo.IsTruncated {
+			log.Warnf("kiro: TRUNCATION DETECTED for tool %s (ID: %s): type=%s, raw_size=%d bytes",
+				currentToolUse.Name, currentToolUse.ToolUseID, truncInfo.TruncationType, len(fullInput))
+			log.Warnf("kiro: truncation details: %s", truncInfo.ErrorMessage)
+			if len(truncInfo.ParsedFields) > 0 {
+				log.Infof("kiro: partial fields received: %v", truncInfo.ParsedFields)
+			}
+			// Store truncation info in the state for upstream handling
+			currentToolUse.TruncationInfo = &truncInfo
+		} else {
+			log.Infof("kiro: tool use %s input length: %d bytes (no truncation)", currentToolUse.Name, len(fullInput))
+		}
+
+		// Create the tool use with truncation info if applicable
 		toolUse := KiroToolUse{
-			ToolUseID: currentToolUse.ToolUseID,
-			Name:      currentToolUse.Name,
-			Input:     finalInput,
+			ToolUseID:      currentToolUse.ToolUseID,
+			Name:           currentToolUse.Name,
+			Input:          finalInput,
+			IsTruncated:    truncInfo.IsTruncated,
+			TruncationInfo: nil, // Will be set below if truncated
+		}
+		if truncInfo.IsTruncated {
+			toolUse.TruncationInfo = &truncInfo
 		}
 		toolUses = append(toolUses, toolUse)
 
@@ -485,7 +507,7 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 			processedIDs[currentToolUse.ToolUseID] = true
 		}
 
-		log.Infof("kiro: completed tool use: %s (ID: %s)", currentToolUse.Name, currentToolUse.ToolUseID)
+		log.Infof("kiro: completed tool use: %s (ID: %s, truncated: %v)", currentToolUse.Name, currentToolUse.ToolUseID, truncInfo.IsTruncated)
 		return toolUses, nil
 	}
 
@@ -519,4 +541,3 @@ func DeduplicateToolUses(toolUses []KiroToolUse) []KiroToolUse {
 
 	return unique
 }
-

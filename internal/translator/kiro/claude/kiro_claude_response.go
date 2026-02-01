@@ -55,14 +55,39 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 		}
 	}
 
-	// Add tool_use blocks
+	// Add tool_use blocks - emit truncated tools with SOFT_LIMIT_REACHED marker
+	hasTruncatedTools := false
 	for _, toolUse := range toolUses {
-		contentBlocks = append(contentBlocks, map[string]interface{}{
-			"type":  "tool_use",
-			"id":    toolUse.ToolUseID,
-			"name":  toolUse.Name,
-			"input": toolUse.Input,
-		})
+		if toolUse.IsTruncated && toolUse.TruncationInfo != nil {
+			// Emit tool_use with SOFT_LIMIT_REACHED marker input
+			hasTruncatedTools = true
+			log.Infof("kiro: buildClaudeResponse emitting truncated tool with SOFT_LIMIT_REACHED: %s (ID: %s)", toolUse.Name, toolUse.ToolUseID)
+
+			markerInput := map[string]interface{}{
+				"_status":  "SOFT_LIMIT_REACHED",
+				"_message": "Tool output was truncated. Split content into smaller chunks (max 300 lines). Due to potential model hallucination, you MUST re-fetch the current working directory and generate the correct file_path.",
+			}
+
+			contentBlocks = append(contentBlocks, map[string]interface{}{
+				"type":  "tool_use",
+				"id":    toolUse.ToolUseID,
+				"name":  toolUse.Name,
+				"input": markerInput,
+			})
+		} else {
+			// Normal tool use
+			contentBlocks = append(contentBlocks, map[string]interface{}{
+				"type":  "tool_use",
+				"id":    toolUse.ToolUseID,
+				"name":  toolUse.Name,
+				"input": toolUse.Input,
+			})
+		}
+	}
+
+	// Log if we used SOFT_LIMIT_REACHED
+	if hasTruncatedTools {
+		log.Infof("kiro: buildClaudeResponse using SOFT_LIMIT_REACHED - keeping stop_reason=tool_use")
 	}
 
 	// Ensure at least one content block (Claude API requires non-empty content)
@@ -74,6 +99,7 @@ func BuildClaudeResponse(content string, toolUses []KiroToolUse, model string, u
 	}
 
 	// Use upstream stopReason; apply fallback logic if not provided
+	// SOFT_LIMIT_REACHED: Keep stop_reason = "tool_use" so Claude continues the loop
 	if stopReason == "" {
 		stopReason = "end_turn"
 		if len(toolUses) > 0 {
