@@ -30,6 +30,7 @@ docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+.sisyphus
 
 # Tooling metadata
 .vscode/*
