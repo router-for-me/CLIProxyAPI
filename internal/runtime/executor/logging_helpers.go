@@ -22,6 +22,11 @@ const (
 	apiAttemptsKey = "API_UPSTREAM_ATTEMPTS"
 	apiRequestKey  = "API_REQUEST"
 	apiResponseKey = "API_RESPONSE"
+
+	// maxErrorLogResponseBodySize limits cached response body when request-log is disabled.
+	// This prevents unbounded memory growth for large/streaming responses while still capturing
+	// sufficient context for error debugging.
+	maxErrorLogResponseBodySize = 32 * 1024 // 32KB
 )
 
 // upstreamRequestLog captures the outbound upstream request details for logging.
@@ -47,17 +52,18 @@ type upstreamAttempt struct {
 	bodyStarted          bool
 	bodyHasContent       bool
 	errorWritten         bool
+	bodyBytesWritten     int
+	bodyTruncated        bool
 }
 
 // recordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
+
+	requestLogEnabled := cfg != nil && cfg.RequestLog
 
 	attempts := getAttempts(ginCtx)
 	index := len(attempts) + 1
@@ -78,11 +84,16 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	}
 	builder.WriteString("\nHeaders:\n")
 	writeHeaders(builder, info.Headers)
-	builder.WriteString("\nBody:\n")
-	if len(info.Body) > 0 {
-		builder.WriteString(string(bytes.Clone(info.Body)))
+
+	if requestLogEnabled {
+		builder.WriteString("\nBody:\n")
+		if len(info.Body) > 0 {
+			builder.WriteString(string(bytes.Clone(info.Body)))
+		} else {
+			builder.WriteString("<empty>")
+		}
 	} else {
-		builder.WriteString("<empty>")
+		builder.WriteString("\nBody: <omitted for error log>\n")
 	}
 	builder.WriteString("\n\n")
 
@@ -98,9 +109,6 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 
 // recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
@@ -124,7 +132,7 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 
 // recordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if cfg == nil || !cfg.RequestLog || err == nil {
+	if err == nil {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -149,9 +157,6 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // appendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	data := bytes.TrimSpace(bytes.Clone(chunk))
 	if len(data) == 0 {
 		return
@@ -163,6 +168,12 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
 
+	requestLogEnabled := cfg != nil && cfg.RequestLog
+
+	if !requestLogEnabled && attempt.bodyTruncated {
+		return
+	}
+
 	if !attempt.headersWritten {
 		attempt.response.WriteString("Headers:\n")
 		writeHeaders(attempt.response, nil)
@@ -173,11 +184,31 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		attempt.response.WriteString("Body:\n")
 		attempt.bodyStarted = true
 	}
+
+	if !requestLogEnabled {
+		remaining := maxErrorLogResponseBodySize - attempt.bodyBytesWritten
+		if remaining <= 0 {
+			attempt.bodyTruncated = true
+			attempt.response.WriteString("\n<truncated: response body exceeded 32KB limit for error log>")
+			updateAggregatedResponse(ginCtx, attempts)
+			return
+		}
+		if len(data) > remaining {
+			data = data[:remaining]
+			attempt.bodyTruncated = true
+		}
+	}
+
 	if attempt.bodyHasContent {
 		attempt.response.WriteString("\n\n")
 	}
 	attempt.response.WriteString(string(data))
+	attempt.bodyBytesWritten += len(data)
 	attempt.bodyHasContent = true
+
+	if attempt.bodyTruncated {
+		attempt.response.WriteString("\n<truncated: response body exceeded 32KB limit for error log>")
+	}
 
 	updateAggregatedResponse(ginCtx, attempts)
 }
