@@ -57,6 +57,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.NonStreamKeepAliveInterval != newCfg.NonStreamKeepAliveInterval {
 		changes = append(changes, fmt.Sprintf("nonstream-keepalive-interval: %d -> %d", oldCfg.NonStreamKeepAliveInterval, newCfg.NonStreamKeepAliveInterval))
 	}
+	if oldCfg.CodexInstructionsEnabled != newCfg.CodexInstructionsEnabled {
+		changes = append(changes, fmt.Sprintf("codex-instructions-enabled: %t -> %t", oldCfg.CodexInstructionsEnabled, newCfg.CodexInstructionsEnabled))
+	}
 
 	// Quota-exceeded behavior
 	if oldCfg.QuotaExceeded.SwitchProject != newCfg.QuotaExceeded.SwitchProject {

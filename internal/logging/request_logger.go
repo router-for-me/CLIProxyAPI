@@ -132,6 +132,9 @@ type FileRequestLogger struct {
 
 	// logsDir is the directory where log files are stored.
 	logsDir string
+
+	// errorLogsMaxFiles limits the number of error log files retained.
+	errorLogsMaxFiles int
 }
 
 // NewFileRequestLogger creates a new file-based request logger.
@@ -141,10 +144,11 @@ type FileRequestLogger struct {
 //   - logsDir: The directory where log files should be stored (can be relative)
 //   - configDir: The directory of the configuration file; when logsDir is
 //     relative, it will be resolved relative to this directory
+//   - errorLogsMaxFiles: Maximum number of error log files to retain (0 = no cleanup)
 //
 // Returns:
 //   - *FileRequestLogger: A new file-based request logger instance
-func NewFileRequestLogger(enabled bool, logsDir string, configDir string) *FileRequestLogger {
+func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int) *FileRequestLogger {
 	// Resolve logsDir relative to the configuration file directory when it's not absolute.
 	if !filepath.IsAbs(logsDir) {
 		// If configDir is provided, resolve logsDir relative to it.
@@ -153,8 +157,9 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string) *FileR
 		}
 	}
 	return &FileRequestLogger{
-		enabled: enabled,
-		logsDir: logsDir,
+		enabled:           enabled,
+		logsDir:           logsDir,
+		errorLogsMaxFiles: errorLogsMaxFiles,
 	}
 }
 
@@ -173,6 +178,11 @@ func (l *FileRequestLogger) IsEnabled() bool {
 //   - enabled: Whether request logging should be enabled
 func (l *FileRequestLogger) SetEnabled(enabled bool) {
 	l.enabled = enabled
+}
+
+// SetErrorLogsMaxFiles updates the maximum number of error log files to retain.
+func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
+	l.errorLogsMaxFiles = maxFiles
 }
 
 // LogRequest logs a complete non-streaming request/response cycle to a file.
@@ -433,8 +443,12 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 	return sanitized
 }
 
-// cleanupOldErrorLogs keeps only the newest 10 forced error log files.
+// cleanupOldErrorLogs keeps only the newest errorLogsMaxFiles forced error log files.
 func (l *FileRequestLogger) cleanupOldErrorLogs() error {
+	if l.errorLogsMaxFiles <= 0 {
+		return nil
+	}
+
 	entries, errRead := os.ReadDir(l.logsDir)
 	if errRead != nil {
 		return errRead
@@ -462,7 +476,7 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 		files = append(files, logFile{name: name, modTime: info.ModTime()})
 	}
 
-	if len(files) <= 10 {
+	if len(files) <= l.errorLogsMaxFiles {
 		return nil
 	}
 
@@ -470,7 +484,7 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 		return files[i].modTime.After(files[j].modTime)
 	})
 
-	for _, file := range files[10:] {
+	for _, file := range files[l.errorLogsMaxFiles:] {
 		if errRemove := os.Remove(filepath.Join(l.logsDir, file.name)); errRemove != nil {
 			log.WithError(errRemove).Warnf("failed to remove old error log: %s", file.name)
 		}

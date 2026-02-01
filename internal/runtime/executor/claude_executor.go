@@ -124,7 +124,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = disableThinkingIfToolChoiceForced(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	body = ensureCacheControl(body)
+	if countCacheControls(body) == 0 {
+		body = ensureCacheControl(body)
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -262,7 +264,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	body = ensureCacheControl(body)
+	if countCacheControls(body) == 0 {
+		body = ensureCacheControl(body)
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -1031,6 +1035,51 @@ func ensureCacheControl(payload []byte) []byte {
 	payload = injectMessagesCacheControl(payload)
 
 	return payload
+}
+
+func countCacheControls(payload []byte) int {
+	count := 0
+
+	// Check system
+	system := gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		system.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				count++
+			}
+			return true
+		})
+	}
+
+	// Check tools
+	tools := gjson.GetBytes(payload, "tools")
+	if tools.IsArray() {
+		tools.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				count++
+			}
+			return true
+		})
+	}
+
+	// Check messages
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if content.IsArray() {
+				content.ForEach(func(_, item gjson.Result) bool {
+					if item.Get("cache_control").Exists() {
+						count++
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+
+	return count
 }
 
 // injectMessagesCacheControl adds cache_control to the second-to-last user turn for multi-turn caching.
