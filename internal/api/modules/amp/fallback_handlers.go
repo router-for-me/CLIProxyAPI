@@ -122,7 +122,11 @@ func (fh *FallbackHandler) SetModelMapper(mapper ModelMapper) {
 // If the model's provider is not configured in CLIProxyAPI, it forwards to ampcode.com
 func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Swallow ErrAbortHandler panics from ReverseProxy copyResponse to avoid noisy stack traces
+		// Swallow ErrAbortHandler panics from ReverseProxy to avoid noisy stack traces.
+		// ReverseProxy raises this panic when the client connection is closed prematurely
+		// (e.g., user cancels request, network disconnect) or when ServeHTTP is called
+		// with a ResponseWriter that doesn't implement http.CloseNotifier.
+		// This is an expected error condition, not a bug, so we handle it gracefully.
 		defer func() {
 			if rec := recover(); rec != nil {
 				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
@@ -219,6 +223,19 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		usedMapping := false
 		var providers []string
 
+		// Helper to apply model mapping and update state
+		applyMapping := func(mappedModels []string, mappedProviders []string) {
+			bodyBytes = rewriteModelInRequest(bodyBytes, mappedModels[0])
+			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			c.Set(string(ctxkeys.MappedModel), mappedModels[0])
+			if len(mappedModels) > 1 {
+				c.Set(string(ctxkeys.FallbackModels), mappedModels[1:])
+			}
+			resolvedModel = mappedModels[0]
+			usedMapping = true
+			providers = mappedProviders
+		}
+
 		// Check if model mappings should be forced ahead of local API keys
 		forceMappings := fh.forceModelMappings != nil && fh.forceModelMappings()
 
@@ -226,17 +243,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			// FORCE MODE: Check model mappings FIRST (takes precedence over local API keys)
 			// This allows users to route Amp requests to their preferred OAuth providers
 			if mappedModels, mappedProviders := resolveMappedModels(); len(mappedModels) > 0 {
-				// Mapping found and provider available - rewrite the model in request body
-				bodyBytes = rewriteModelInRequest(bodyBytes, mappedModels[0])
-				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				// Store mapped model and fallbacks in context for handlers
-							c.Set(string(ctxkeys.MappedModel), mappedModels[0])
-							if len(mappedModels) > 1 {
-								c.Set(string(ctxkeys.FallbackModels), mappedModels[1:])
-							}
-				resolvedModel = mappedModels[0]
-				usedMapping = true
-				providers = mappedProviders
+				applyMapping(mappedModels, mappedProviders)
 			}
 
 			// If no mapping applied, check for local providers
@@ -250,17 +257,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			if len(providers) == 0 {
 				// No providers configured - check if we have a model mapping
 				if mappedModels, mappedProviders := resolveMappedModels(); len(mappedModels) > 0 {
-					// Mapping found and provider available - rewrite the model in request body
-					bodyBytes = rewriteModelInRequest(bodyBytes, mappedModels[0])
-					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-					// Store mapped model and fallbacks in context for handlers
-					c.Set(string(ctxkeys.MappedModel), mappedModels[0])
-					if len(mappedModels) > 1 {
-						c.Set(string(ctxkeys.FallbackModels), mappedModels[1:])
-					}
-					resolvedModel = mappedModels[0]
-					usedMapping = true
-					providers = mappedProviders
+					applyMapping(mappedModels, mappedProviders)
 				}
 			}
 		}

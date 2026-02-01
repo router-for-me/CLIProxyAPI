@@ -89,20 +89,6 @@ func (m *DefaultModelMapper) UpdateOAuthModelAlias(aliases map[string][]config.O
 	log.Debugf("amp model mapping: loaded oauth-model-alias for %d channel(s)", len(forward))
 }
 
-// findProviderViaOAuthAlias checks if targetModel is an oauth-model-alias name
-// and returns all aliases that have available providers.
-// Returns the first alias and its providers for backward compatibility,
-// and also populates allAliases with all available alias models.
-func (m *DefaultModelMapper) findProviderViaOAuthAlias(targetModel string) (aliasModel string, providers []string) {
-	aliases := m.findAllAliasesWithProviders(targetModel)
-	if len(aliases) == 0 {
-		return "", nil
-	}
-	// Return first one for backward compatibility
-	first := aliases[0]
-	return first, util.GetProviderName(first)
-}
-
 // findAllAliasesWithProviders returns all oauth-model-alias aliases for targetModel
 // that have available providers. Useful for fallback when one alias is quota-exceeded.
 func (m *DefaultModelMapper) findAllAliasesWithProviders(targetModel string) []string {
@@ -222,7 +208,7 @@ func (m *DefaultModelMapper) MapModelWithFallbacks(requestedModel string) []stri
 	if len(allAliases) == 1 {
 		log.Debugf("amp model mapping: resolved %s -> %s via oauth-model-alias", targetModel, allAliases[0])
 	} else {
-		log.Debugf("amp model mapping: resolved %s -> %v via oauth-model-alias (%d fallbacks)", targetModel, allAliases, len(allAliases))
+		log.Debugf("amp model mapping: resolved %s -> %v via oauth-model-alias (%d fallbacks)", targetModel, allAliases, len(allAliases)-1)
 	}
 
 	// Apply suffix to all aliases
