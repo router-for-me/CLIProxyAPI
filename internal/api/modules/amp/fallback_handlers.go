@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/routing/ctxkeys"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -32,11 +33,13 @@ const (
 )
 
 // MappedModelContextKey is the Gin context key for passing mapped model names.
-const MappedModelContextKey = "mapped_model"
+// Deprecated: Use ctxkeys.MappedModel instead.
+const MappedModelContextKey = string(ctxkeys.MappedModel)
 
 // FallbackModelsContextKey is the Gin context key for passing fallback model names.
 // When the primary mapped model fails (e.g., quota exceeded), these models can be tried.
-const FallbackModelsContextKey = "fallback_models"
+// Deprecated: Use ctxkeys.FallbackModels instead.
+const FallbackModelsContextKey = string(ctxkeys.FallbackModels)
 
 // logAmpRouting logs the routing decision for an Amp request with structured fields
 func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provider, path string) {
@@ -227,10 +230,10 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 				bodyBytes = rewriteModelInRequest(bodyBytes, mappedModels[0])
 				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				// Store mapped model and fallbacks in context for handlers
-				c.Set(MappedModelContextKey, mappedModels[0])
-				if len(mappedModels) > 1 {
-					c.Set(FallbackModelsContextKey, mappedModels[1:])
-				}
+							c.Set(string(ctxkeys.MappedModel), mappedModels[0])
+							if len(mappedModels) > 1 {
+								c.Set(string(ctxkeys.FallbackModels), mappedModels[1:])
+							}
 				resolvedModel = mappedModels[0]
 				usedMapping = true
 				providers = mappedProviders
@@ -251,9 +254,9 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 					bodyBytes = rewriteModelInRequest(bodyBytes, mappedModels[0])
 					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 					// Store mapped model and fallbacks in context for handlers
-					c.Set(MappedModelContextKey, mappedModels[0])
+					c.Set(string(ctxkeys.MappedModel), mappedModels[0])
 					if len(mappedModels) > 1 {
-						c.Set(FallbackModelsContextKey, mappedModels[1:])
+						c.Set(string(ctxkeys.FallbackModels), mappedModels[1:])
 					}
 					resolvedModel = mappedModels[0]
 					usedMapping = true

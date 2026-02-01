@@ -18,6 +18,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/routing/ctxkeys"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -577,7 +578,7 @@ func (m *Manager) executeWithFallback(
 
 	// Track fallback models from context (provided by Amp module fallback_models key)
 	var fallbacks []string
-	if v := ctx.Value("fallback_models"); v != nil {
+	if v := ctx.Value(ctxkeys.FallbackModels); v != nil {
 		if fs, ok := v.([]string); ok {
 			fallbacks = fs
 		}
