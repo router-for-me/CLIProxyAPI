@@ -695,10 +695,13 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 	// This can happen with compaction requests or error recovery scenarios
 	finalContent := contentBuilder.String()
 	if strings.TrimSpace(finalContent) == "" {
+		const defaultAssistantContentWithTools = "I'll help you with that."
+		const defaultAssistantContent = "I understand."
+
 		if len(toolUses) > 0 {
-			finalContent = "I'll help you with that."
+			finalContent = defaultAssistantContentWithTools
 		} else {
-			finalContent = "I understand."
+			finalContent = defaultAssistantContent
 		}
 		log.Debugf("kiro-openai: assistant content was empty, using default: %s", finalContent)
 	}
