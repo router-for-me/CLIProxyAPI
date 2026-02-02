@@ -83,6 +83,10 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 
 	// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint)
 	result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
+
+	// When thinking is enabled, Claude API requires assistant messages with tool_use
+	// to have a thinking block. Inject empty thinking block if missing.
+	result = injectThinkingBlockForToolUse(result)
 	return result, nil
 }
 
@@ -149,18 +153,85 @@ func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte,
 		body = []byte(`{}`)
 	}
 
+	var result []byte
 	switch config.Mode {
 	case thinking.ModeNone:
-		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
+		result, _ = sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		return result, nil
 	case thinking.ModeAuto:
-		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
+		result, _ = sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		return result, nil
 	default:
-		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
+		result, _ = sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
-		return result, nil
 	}
+
+	// When thinking is enabled, Claude API requires assistant messages with tool_use
+	// to have a thinking block. Inject empty thinking block if missing.
+	result = injectThinkingBlockForToolUse(result)
+	return result, nil
+}
+
+// injectThinkingBlockForToolUse adds empty thinking block to assistant messages
+// that have tool_use but no thinking block. This is required by Claude API when
+// thinking is enabled.
+func injectThinkingBlockForToolUse(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body
+	}
+
+	messageArray := messages.Array()
+	modified := false
+	newMessages := "[]"
+
+	for _, msg := range messageArray {
+		role := msg.Get("role").String()
+		if role != "assistant" {
+			newMessages, _ = sjson.SetRaw(newMessages, "-1", msg.Raw)
+			continue
+		}
+
+		content := msg.Get("content")
+		if !content.IsArray() {
+			newMessages, _ = sjson.SetRaw(newMessages, "-1", msg.Raw)
+			continue
+		}
+
+		contentArray := content.Array()
+		hasToolUse := false
+		hasThinking := false
+
+		for _, part := range contentArray {
+			partType := part.Get("type").String()
+			if partType == "tool_use" {
+				hasToolUse = true
+			}
+			if partType == "thinking" {
+				hasThinking = true
+			}
+		}
+
+		if hasToolUse && !hasThinking {
+			// Inject empty thinking block at the beginning of content
+			newContent := "[]"
+			newContent, _ = sjson.SetRaw(newContent, "-1", `{"type":"thinking","thinking":""}`)
+			for _, part := range contentArray {
+				newContent, _ = sjson.SetRaw(newContent, "-1", part.Raw)
+			}
+			msgJSON := msg.Raw
+			msgJSON, _ = sjson.SetRaw(msgJSON, "content", newContent)
+			newMessages, _ = sjson.SetRaw(newMessages, "-1", msgJSON)
+			modified = true
+			continue
+		}
+
+		newMessages, _ = sjson.SetRaw(newMessages, "-1", msg.Raw)
+	}
+
+	if modified {
+		body, _ = sjson.SetRawBytes(body, "messages", []byte(newMessages))
+	}
+	return body
 }
