@@ -208,3 +208,84 @@ func TestCacheSignature_ExpirationLogic(t *testing.T) {
 	// but the logic is verified by the implementation
 	_ = time.Now() // Acknowledge we're not testing time passage
 }
+
+// === GetModelGroup Tests ===
+// These tests verify that GetModelGroup correctly identifies model groups
+// both by name pattern (fast path) and by registry provider lookup (slow path).
+
+func TestGetModelGroup_ByNamePattern(t *testing.T) {
+	tests := []struct {
+		modelName     string
+		expectedGroup string
+	}{
+		{"gpt-4o", "gpt"},
+		{"gpt-4-turbo", "gpt"},
+		{"claude-sonnet-4-20250514", "claude"},
+		{"claude-opus-4-5-thinking", "claude"},
+		{"gemini-2.5-pro", "gemini"},
+		{"gemini-3-pro-preview", "gemini"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.modelName, func(t *testing.T) {
+			result := GetModelGroup(tt.modelName)
+			if result != tt.expectedGroup {
+				t.Errorf("GetModelGroup(%q) = %q, expected %q", tt.modelName, result, tt.expectedGroup)
+			}
+		})
+	}
+}
+
+func TestGetModelGroup_UnknownModel(t *testing.T) {
+	// For unknown models with no registry entry, should return the model name itself
+	result := GetModelGroup("unknown-model-xyz")
+	if result != "unknown-model-xyz" {
+		t.Errorf("GetModelGroup for unknown model should return model name, got %q", result)
+	}
+}
+
+// TestGetModelGroup_RegistryFallback tests that models registered via
+// provider-specific API keys (e.g., kimi-k2.5 via claude-api-key) are
+// correctly grouped by their provider.
+// This test requires a populated global registry.
+func TestGetModelGroup_RegistryFallback(t *testing.T) {
+	// This test only makes sense when the global registry is populated
+	// In unit test context, skip if registry is empty
+	
+	// Example: kimi-k2.5 registered via claude-api-key should group as "claude"
+	// The model name doesn't contain "claude", so name pattern matching fails.
+	// The registry should be checked to find the provider.
+	
+	// Skip for now - this requires integration test setup
+	t.Skip("Requires populated global registry - run as integration test")
+}
+
+// === Cross-Model Signature Validation Tests ===
+// These tests verify that signatures cached under one model name can be
+// validated under mapped model names (same provider group).
+
+func TestCacheSignature_CrossModelValidation(t *testing.T) {
+	ClearSignatureCache("")
+
+	// Original request uses "claude-opus-4-5-20251101"
+	originalModel := "claude-opus-4-5-20251101"
+	// Mapped model is "claude-opus-4-5-thinking"
+	mappedModel := "claude-opus-4-5-thinking"
+	
+	text := "Some thinking block content"
+	sig := "validSignature123456789012345678901234567890123456789012"
+
+	// Cache signature under the original model
+	CacheSignature(originalModel, text, sig)
+
+	// Both should return the same signature because they're in the same group
+	retrieved1 := GetCachedSignature(originalModel, text)
+	retrieved2 := GetCachedSignature(mappedModel, text)
+
+	if retrieved1 != sig {
+		t.Errorf("Original model signature mismatch: got %q", retrieved1)
+	}
+	if retrieved2 != sig {
+		t.Errorf("Mapped model signature mismatch: got %q", retrieved2)
+	}
+}

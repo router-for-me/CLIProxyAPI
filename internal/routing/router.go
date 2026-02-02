@@ -1,11 +1,14 @@
 package routing
 
 import (
+	"context"
 	"sort"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 // Router resolves models to provider candidates.
@@ -115,25 +118,47 @@ func (r *Router) ResolveV2(req RoutingRequest) *RoutingDecision {
 }
 
 // findLocalCandidates finds local provider candidates for a model.
+// If the internal registry is empty, it falls back to the global model registry.
 func (r *Router) findLocalCandidates(model string, suffixResult thinking.SuffixResult) []ProviderCandidate {
 	var candidates []ProviderCandidate
 
-	for _, p := range r.registry.All() {
-		if !p.SupportsModel(model) {
-			continue
-		}
+	// Check internal registry first
+	registryProviders := r.registry.All()
+	if len(registryProviders) > 0 {
+		for _, p := range registryProviders {
+			if !p.SupportsModel(model) {
+				continue
+			}
 
-		// Apply thinking suffix if needed
-		actualModel := model
-		if suffixResult.HasSuffix && !thinking.ParseSuffix(model).HasSuffix {
-			actualModel = model + "(" + suffixResult.RawSuffix + ")"
-		}
+			// Apply thinking suffix if needed
+			actualModel := model
+			if suffixResult.HasSuffix && !thinking.ParseSuffix(model).HasSuffix {
+				actualModel = model + "(" + suffixResult.RawSuffix + ")"
+			}
 
-		if p.Available(actualModel) {
-			candidates = append(candidates, ProviderCandidate{
-				Provider: p,
-				Model:    actualModel,
-			})
+			if p.Available(actualModel) {
+				candidates = append(candidates, ProviderCandidate{
+					Provider: p,
+					Model:    actualModel,
+				})
+			}
+		}
+	} else {
+		// Fallback to global model registry (same logic as FallbackHandler)
+		// This ensures compatibility when the wrapper is initialized with an empty registry
+		providers := registry.GetGlobalRegistry().GetModelProviders(model)
+		if len(providers) > 0 {
+			actualModel := model
+			if suffixResult.HasSuffix && !thinking.ParseSuffix(model).HasSuffix {
+				actualModel = model + "(" + suffixResult.RawSuffix + ")"
+			}
+			// Create a synthetic provider candidate for each provider
+			for _, providerName := range providers {
+				candidates = append(candidates, ProviderCandidate{
+					Provider: &globalRegistryProvider{name: providerName, model: actualModel},
+					Model:    actualModel,
+				})
+			}
 		}
 	}
 
@@ -143,6 +168,31 @@ func (r *Router) findLocalCandidates(model string, suffixResult thinking.SuffixR
 	})
 
 	return candidates
+}
+
+// globalRegistryProvider is a synthetic Provider implementation that wraps
+// a provider name from the global model registry. It is used only for routing
+// decisions when the internal registry is empty - actual execution goes through
+// the normal handler path, not through this provider's Execute methods.
+type globalRegistryProvider struct {
+	name  string
+	model string
+}
+
+func (p *globalRegistryProvider) Name() string                   { return p.name }
+func (p *globalRegistryProvider) Type() ProviderType             { return ProviderTypeOAuth }
+func (p *globalRegistryProvider) Priority() int                  { return 0 }
+func (p *globalRegistryProvider) SupportsModel(string) bool      { return true }
+func (p *globalRegistryProvider) Available(string) bool          { return true }
+
+// Execute is not used for globalRegistryProvider - routing wrapper calls the handler directly.
+func (p *globalRegistryProvider) Execute(ctx context.Context, model string, req executor.Request) (executor.Response, error) {
+	return executor.Response{}, nil
+}
+
+// ExecuteStream is not used for globalRegistryProvider - routing wrapper calls the handler directly.
+func (p *globalRegistryProvider) ExecuteStream(ctx context.Context, model string, req executor.Request) (<-chan executor.StreamChunk, error) {
+	return nil, nil
 }
 
 // buildLocalProviderDecision creates a decision for local provider routing.

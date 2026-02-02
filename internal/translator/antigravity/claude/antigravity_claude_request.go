@@ -115,7 +115,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							if signatureResult.Exists() && signatureResult.String() != "" {
 								arrayClientSignatures := strings.SplitN(signatureResult.String(), "#", 2)
 								if len(arrayClientSignatures) == 2 {
-									if modelName == arrayClientSignatures[0] {
+									// Compare using model group to handle model mapping
+									// e.g., claude-opus-4-5-thinking -> "claude" group should match "claude#signature"
+									if cache.GetModelGroup(modelName) == arrayClientSignatures[0] {
 										clientSignature = arrayClientSignatures[1]
 									}
 								}

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 )
 
 // SignatureEntry holds a cached thinking signature with timestamp
@@ -184,6 +186,7 @@ func HasValidSignature(modelName, signature string) bool {
 }
 
 func GetModelGroup(modelName string) string {
+	// Fast path: check model name patterns first
 	if strings.Contains(modelName, "gpt") {
 		return "gpt"
 	} else if strings.Contains(modelName, "claude") {
@@ -191,5 +194,21 @@ func GetModelGroup(modelName string) string {
 	} else if strings.Contains(modelName, "gemini") {
 		return "gemini"
 	}
+
+	// Slow path: check registry for provider-based grouping
+	// This handles models registered via claude-api-key, gemini-api-key, etc.
+	// that don't have provider name in their model name (e.g., kimi-k2.5 via claude-api-key)
+	if providers := registry.GetGlobalRegistry().GetModelProviders(modelName); len(providers) > 0 {
+		provider := strings.ToLower(providers[0])
+		switch provider {
+		case "claude":
+			return "claude"
+		case "gemini", "gemini-cli", "aistudio", "vertex", "antigravity":
+			return "gemini"
+		case "codex":
+			return "gpt"
+		}
+	}
+
 	return modelName
 }
