@@ -17,7 +17,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-
 // Kiro API request structs - field order determines JSON key order
 
 // KiroPayload is the top-level request structure for Kiro API
@@ -33,7 +32,6 @@ type KiroInferenceConfig struct {
 	Temperature float64 `json:"temperature,omitempty"`
 	TopP        float64 `json:"topP,omitempty"`
 }
-
 
 // KiroConversationState holds the conversation context
 type KiroConversationState struct {
@@ -219,7 +217,26 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	}
 
 	// Convert Claude tools to Kiro format
-	kiroTools := convertClaudeToolsToKiro(tools)
+	kiroTools, hasWebSearch := convertClaudeToolsToKiro(tools)
+
+	// If web_search was requested but filtered, inject alternative hint
+	if hasWebSearch {
+		webSearchHint := `[CRITICAL WEB ACCESS INSTRUCTION]
+You have the Fetch/read_url_content tool available. When the user asks about current events, weather, news, or any information that requires web access:
+- DO NOT say you cannot search the web
+- DO NOT refuse to help with web-related queries
+- IMMEDIATELY use the Fetch tool to access relevant URLs
+- Use well-known official websites, documentation sites, or API endpoints
+- Construct appropriate URLs based on the query context
+
+IMPORTANT: Always attempt to fetch information FIRST before declining. You CAN access the web via Fetch.`
+		if systemPrompt != "" {
+			systemPrompt += "\n" + webSearchHint
+		} else {
+			systemPrompt = webSearchHint
+		}
+		log.Infof("kiro: injected web_search alternative hint (tool was filtered)")
+	}
 
 	// Thinking mode implementation:
 	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
@@ -378,7 +395,6 @@ func hasThinkingTagInBody(body []byte) bool {
 	return strings.Contains(bodyStr, "<thinking_mode>") || strings.Contains(bodyStr, "<max_thinking_length>")
 }
 
-
 // IsThinkingEnabledFromHeader checks if thinking mode is enabled via Anthropic-Beta header.
 // Claude CLI uses "Anthropic-Beta: interleaved-thinking-2025-05-14" to enable thinking.
 func IsThinkingEnabledFromHeader(headers http.Header) bool {
@@ -509,15 +525,27 @@ func ensureKiroInputSchema(parameters interface{}) interface{} {
 	}
 }
 
-// convertClaudeToolsToKiro converts Claude tools to Kiro format
-func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
+// convertClaudeToolsToKiro converts Claude tools to Kiro format.
+// Returns the converted tools and a boolean indicating if web_search was filtered.
+func convertClaudeToolsToKiro(tools gjson.Result) ([]KiroToolWrapper, bool) {
 	var kiroTools []KiroToolWrapper
+	hasWebSearch := false
 	if !tools.IsArray() {
-		return kiroTools
+		return kiroTools, hasWebSearch
 	}
 
 	for _, tool := range tools.Array() {
 		name := tool.Get("name").String()
+
+		// Filter out web_search/websearch tools (Kiro API doesn't support them)
+		// This matches the behavior in AIClient-2-API/claude-kiro.js
+		nameLower := strings.ToLower(name)
+		if nameLower == "web_search" || nameLower == "websearch" {
+			log.Debugf("kiro: skipping unsupported tool: %s", name)
+			hasWebSearch = true
+			continue
+		}
+
 		description := tool.Get("description").String()
 		inputSchemaResult := tool.Get("input_schema")
 		var inputSchema interface{}
@@ -561,7 +589,7 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	// This prevents 500 errors when Claude Code sends too many tools
 	kiroTools = compressToolsIfNeeded(kiroTools)
 
-	return kiroTools
+	return kiroTools, hasWebSearch
 }
 
 // processMessages processes Claude messages and builds Kiro history
