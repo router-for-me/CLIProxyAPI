@@ -13,6 +13,8 @@ logs/*
 conv/*
 temp/*
 refs/*
+tmp/*
+build-errors.log
 
 # Storage backends
 pgstore/*
