@@ -48,3 +48,7 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+
+# Windows
+nul
+start.bat
