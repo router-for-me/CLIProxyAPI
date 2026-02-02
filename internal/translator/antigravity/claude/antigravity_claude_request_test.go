@@ -697,3 +697,41 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 		t.Errorf("Interleaved thinking hint should be in created systemInstruction, got: %v", sysInstruction.Raw)
 	}
 }
+
+func TestConvertClaudeRequestToAntigravity_ClientProvidedSignatureWithModelGroupPrefix(t *testing.T) {
+	// Test that client-provided signatures with model group prefix (e.g., "claude#...")
+	// are correctly parsed when the full model name differs from the prefix.
+	// This validates the fix for comparing GetModelGroup(modelName) instead of modelName.
+	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
+	clientSignatureWithPrefix := "claude#" + validSignature
+	modelName := "claude-sonnet-4-5-thinking"
+
+	inputJSON := []byte(`{
+		"model": "` + modelName + `",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me think...", "signature": "` + clientSignatureWithPrefix + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	// Clear cache to ensure we're testing client signature parsing, not cache lookup
+	cache.ClearSignatureCache(modelName)
+
+	output := ConvertClaudeRequestToAntigravity(modelName, inputJSON, false)
+	outputStr := string(output)
+
+	// Check that the thinking block is converted and has the correct signature
+	firstPart := gjson.Get(outputStr, "request.contents.0.parts.0")
+
+	if !firstPart.Get("thought").Bool() {
+		t.Error("thinking block should have thought: true")
+	}
+	if firstPart.Get("thoughtSignature").String() != validSignature {
+		t.Errorf("Expected thoughtSignature '%s', got '%s'", validSignature, firstPart.Get("thoughtSignature").String())
+	}
+}
