@@ -1554,7 +1554,8 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	template, _ = sjson.Set(template, "requestId", generateRequestID())
 	template, _ = sjson.Set(template, "request.sessionId", generateStableSessionID(payload))
 
-	template, _ = sjson.Delete(template, "request.safetySettings")
+	// [Removed] Keep safetySettings in request for logging and explicit safety config
+	// template, _ = sjson.Delete(template, "request.safetySettings")
 	if toolConfig := gjson.Get(template, "toolConfig"); toolConfig.Exists() && !gjson.Get(template, "request.toolConfig").Exists() {
 		template, _ = sjson.SetRaw(template, "request.toolConfig", toolConfig.Raw)
 		template, _ = sjson.Delete(template, "toolConfig")
