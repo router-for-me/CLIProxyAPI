@@ -411,12 +411,37 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 	// Remove leading/trailing hyphens
 	sanitized = strings.Trim(sanitized, "-")
 
+	// Map path to protocol name for cleaner filenames
+	sanitized = l.mapPathToProtocol(sanitized)
+
 	// Handle empty result
 	if sanitized == "" {
 		sanitized = "root"
 	}
 
 	return sanitized
+}
+
+// mapPathToProtocol maps API paths to protocol names for cleaner filenames.
+func (l *FileRequestLogger) mapPathToProtocol(path string) string {
+	// OpenAI protocol endpoints
+	if strings.Contains(path, "chat-completions") || strings.Contains(path, "responses") {
+		return "openai"
+	}
+
+	// Anthropic/Claude protocol endpoints
+	if strings.Contains(path, "messages") && !strings.Contains(path, "beta") {
+		return "anthropic"
+	}
+
+	// Gemini protocol endpoints
+	if strings.Contains(path, "v1beta") || strings.Contains(path, "generateContent") ||
+		strings.Contains(path, "streamGenerateContent") {
+		return "gemini"
+	}
+
+	// Keep original for unrecognized paths
+	return path
 }
 
 // cleanupOldErrorLogs keeps only the newest errorLogsMaxFiles forced error log files.
