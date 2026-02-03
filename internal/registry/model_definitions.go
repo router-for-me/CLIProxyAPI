@@ -92,6 +92,9 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetOpenAIModels(),
 		GetQwenModels(),
 		GetIFlowModels(),
+		GetGitHubCopilotModels(),
+		GetKiroModels(),
+		GetAmazonQModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {
