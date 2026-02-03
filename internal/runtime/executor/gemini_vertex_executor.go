@@ -1003,6 +1003,8 @@ func vertexBaseURL(location string) string {
 	loc := strings.TrimSpace(location)
 	if loc == "" {
 		loc = "us-central1"
+	} else if loc == "global" {
+		return "https://aiplatform.googleapis.com"
 	}
 	return fmt.Sprintf("https://%s-aiplatform.googleapis.com", loc)
 }
