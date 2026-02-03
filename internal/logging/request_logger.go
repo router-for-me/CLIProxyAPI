@@ -223,61 +223,30 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		return fmt.Errorf("failed to create logs directory: %w", errEnsure)
 	}
 
-	// Generate filename with request ID
+	// Generate JSON filename with request ID
 	filename := l.generateFilename(url, requestID)
 	if force && !l.enabled {
 		filename = l.generateErrorFilename(url, requestID)
 	}
 	filePath := filepath.Join(l.logsDir, filename)
 
-	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
-	if errTemp != nil {
-		log.WithError(errTemp).Warn("failed to create request body temp file, falling back to direct write")
-	}
-	if requestBodyPath != "" {
-		defer func() {
-			if errRemove := os.Remove(requestBodyPath); errRemove != nil {
-				log.WithError(errRemove).Warn("failed to remove request body temp file")
-			}
-		}()
-	}
-
-	responseToWrite, decompressErr := l.decompressResponse(responseHeaders, response)
-	if decompressErr != nil {
-		// If decompression fails, continue with original response and annotate the log output.
-		responseToWrite = response
-	}
-
-	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if errOpen != nil {
-		return fmt.Errorf("failed to create log file: %w", errOpen)
-	}
-
-	writeErr := l.writeNonStreamingLog(
-		logFile,
+	// Use JSON log writer for structured output
+	if writeErr := WriteJSONLog(
+		filePath,
 		url,
 		method,
 		requestHeaders,
 		body,
-		requestBodyPath,
+		statusCode,
+		responseHeaders,
+		response,
 		apiRequest,
 		apiResponse,
 		apiResponseErrors,
-		statusCode,
-		responseHeaders,
-		responseToWrite,
-		decompressErr,
 		requestTimestamp,
 		apiResponseTimestamp,
-	)
-	if errClose := logFile.Close(); errClose != nil {
-		log.WithError(errClose).Warn("failed to close request log file")
-		if writeErr == nil {
-			return errClose
-		}
-	}
-	if writeErr != nil {
-		return fmt.Errorf("failed to write log file: %w", writeErr)
+	); writeErr != nil {
+		return fmt.Errorf("failed to write JSON log file: %w", writeErr)
 	}
 
 	if force && !l.enabled {
@@ -407,7 +376,7 @@ func (l *FileRequestLogger) generateFilename(url string, requestID ...string) st
 		idPart = fmt.Sprintf("%d", id)
 	}
 
-	return fmt.Sprintf("%s-%s-%s.log", sanitized, timestamp, idPart)
+	return fmt.Sprintf("%s-%s-%s.json", sanitized, timestamp, idPart)
 }
 
 // sanitizeForFilename replaces characters that are not safe for filenames.
