@@ -13,6 +13,7 @@ logs/*
 conv/*
 temp/*
 refs/*
+tmp/*
 
 # Storage backends
 pgstore/*
