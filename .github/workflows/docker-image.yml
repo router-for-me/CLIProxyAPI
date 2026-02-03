@@ -1,13 +1,14 @@
 name: docker-image
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - v*
 
 env:
   APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: eceasy/cli-proxy-api-plus
+  DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/cli-proxy-api-plus
 
 jobs:
   docker_amd64:
