@@ -526,6 +526,7 @@ func extractThinkingBudget(data map[string]interface{}) int {
 }
 
 func extractUpstreamThinkingBudget(data map[string]interface{}) int {
+	// Vertex/Gemini format: request.generationConfig.thinkingConfig.thinkingBudget
 	if request, ok := data["request"].(map[string]interface{}); ok {
 		if genConfig, ok := request["generationConfig"].(map[string]interface{}); ok {
 			if thinkConfig, ok := genConfig["thinkingConfig"].(map[string]interface{}); ok {
@@ -535,11 +536,27 @@ func extractUpstreamThinkingBudget(data map[string]interface{}) int {
 			}
 		}
 	}
+
+	// Codex format: reasoning.effort (high/medium/low)
+	// For Codex, we map effort levels to approximate budget values for display
+	if reasoning, ok := data["reasoning"].(map[string]interface{}); ok {
+		if effort, ok := reasoning["effort"].(string); ok {
+			switch effort {
+			case "high":
+				return -1 // -1 indicates "high" effort (will be displayed specially)
+			case "medium":
+				return -2 // -2 indicates "medium" effort
+			case "low":
+				return -3 // -3 indicates "low" effort
+			}
+		}
+	}
+
 	return 0
 }
 
 func formatTransform(from, to int) string {
-	return formatInt(from) + " → " + formatInt(to)
+	return formatThinkingBudget(from) + " → " + formatThinkingBudget(to)
 }
 
 func formatFloatTransform(from, to float64) string {
@@ -548,4 +565,18 @@ func formatFloatTransform(from, to float64) string {
 
 func formatInt(v int) string {
 	return fmt.Sprintf("%d", v)
+}
+
+// formatThinkingBudget formats thinking budget values, including Codex effort levels
+func formatThinkingBudget(v int) string {
+	switch v {
+	case -1:
+		return "high"
+	case -2:
+		return "medium"
+	case -3:
+		return "low"
+	default:
+		return fmt.Sprintf("%d", v)
+	}
 }
