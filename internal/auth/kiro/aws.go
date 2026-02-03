@@ -92,7 +92,7 @@ const KiroIDETokenFile = ".aws/sso/cache/kiro-auth-token.json"
 
 // Default retry configuration for file reading
 const (
-	defaultTokenReadMaxAttempts = 10               // Maximum retry attempts
+	defaultTokenReadMaxAttempts = 10                    // Maximum retry attempts
 	defaultTokenReadBaseDelay   = 50 * time.Millisecond // Base delay between retries
 )
 
@@ -301,7 +301,7 @@ func ListKiroTokenFiles() ([]string, error) {
 	}
 
 	cacheDir := filepath.Join(homeDir, ".aws", "sso", "cache")
-	
+
 	// Check if directory exists
 	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
 		return nil, nil // No token files
@@ -488,14 +488,16 @@ func ExtractIDCIdentifier(startURL string) string {
 
 // GenerateTokenFileName generates a unique filename for token storage.
 // Priority: email > startUrl identifier (for IDC) > authMethod only
-// Format: kiro-{authMethod}-{identifier}.json
+// Email is unique, so no sequence suffix needed. Sequence is only added
+// when email is unavailable to prevent filename collisions.
+// Format: kiro-{authMethod}-{identifier}[-{seq}].json
 func GenerateTokenFileName(tokenData *KiroTokenData) string {
 	authMethod := tokenData.AuthMethod
 	if authMethod == "" {
 		authMethod = "unknown"
 	}
 
-	// Priority 1: Use email if available
+	// Priority 1: Use email if available (no sequence needed, email is unique)
 	if tokenData.Email != "" {
 		// Sanitize email for filename (replace @ and . with -)
 		sanitizedEmail := tokenData.Email
@@ -504,14 +506,17 @@ func GenerateTokenFileName(tokenData *KiroTokenData) string {
 		return fmt.Sprintf("kiro-%s-%s.json", authMethod, sanitizedEmail)
 	}
 
-	// Priority 2: For IDC, use startUrl identifier
+	// Generate sequence only when email is unavailable
+	seq := time.Now().UnixNano() % 100000
+
+	// Priority 2: For IDC, use startUrl identifier with sequence
 	if authMethod == "idc" && tokenData.StartURL != "" {
 		identifier := ExtractIDCIdentifier(tokenData.StartURL)
 		if identifier != "" {
-			return fmt.Sprintf("kiro-%s-%s.json", authMethod, identifier)
+			return fmt.Sprintf("kiro-%s-%s-%05d.json", authMethod, identifier, seq)
 		}
 	}
 
-	// Priority 3: Fallback to authMethod only
-	return fmt.Sprintf("kiro-%s.json", authMethod)
+	// Priority 3: Fallback to authMethod only with sequence
+	return fmt.Sprintf("kiro-%s-%05d.json", authMethod, seq)
 }
