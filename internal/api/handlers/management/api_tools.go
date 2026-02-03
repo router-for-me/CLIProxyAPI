@@ -985,8 +985,6 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 		return response
 	}
 
-	log.Debugf("enrichCopilotTokenResponse: %s", string(quotaBody))
-
 	// Parse the quota response
 	var quotaData CopilotUsageResponse
 	if err := json.Unmarshal(quotaBody, &quotaData); err != nil {
@@ -1003,7 +1001,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 			tokenResp["quota_snapshots"] = quotaData.QuotaSnapshots
 			tokenResp["access_type_sku"] = quotaData.AccessTypeSKU
 			tokenResp["copilot_plan"] = quotaData.CopilotPlan
-			
+
 			// Add quota reset date for enterprise (quota_reset_date_utc)
 			if quotaResetDateUTC, ok := quotaRaw["quota_reset_date_utc"]; ok {
 				tokenResp["quota_reset_date"] = quotaResetDateUTC
@@ -1013,11 +1011,11 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 		} else {
 			// Non-enterprise account - build quota from limited_user_quotas and monthly_quotas
 			var quotaSnapshots QuotaSnapshots
-			
+
 			// Get monthly quotas (total entitlement) and limited_user_quotas (remaining)
 			monthlyQuotas, hasMonthly := quotaRaw["monthly_quotas"].(map[string]interface{})
 			limitedQuotas, hasLimited := quotaRaw["limited_user_quotas"].(map[string]interface{})
-			
+
 			// Process chat quota
 			if hasMonthly && hasLimited {
 				if chatTotal, ok := monthlyQuotas["chat"].(float64); ok {
@@ -1038,7 +1036,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 						Unlimited:        false,
 					}
 				}
-				
+
 				// Process completions quota
 				if completionsTotal, ok := monthlyQuotas["completions"].(float64); ok {
 					completionsRemaining := completionsTotal // default to full if no limited quota
@@ -1059,18 +1057,18 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 					}
 				}
 			}
-			
+
 			// Premium interactions don't exist for non-enterprise, leave as zero values
 			quotaSnapshots.PremiumInteractions = QuotaDetail{
 				QuotaID:   "premium_interactions",
 				Unlimited: false,
 			}
-			
+
 			// Add quota_snapshots to the token response
 			tokenResp["quota_snapshots"] = quotaSnapshots
 			tokenResp["access_type_sku"] = quotaData.AccessTypeSKU
 			tokenResp["copilot_plan"] = quotaData.CopilotPlan
-			
+
 			// Add quota reset date for non-enterprise (limited_user_reset_date)
 			if limitedResetDate, ok := quotaRaw["limited_user_reset_date"]; ok {
 				tokenResp["quota_reset_date"] = limitedResetDate
