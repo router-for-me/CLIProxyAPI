@@ -383,7 +383,7 @@ func (l *FileRequestLogger) generateFilename(url string, requestID ...string) st
 		idPart = fmt.Sprintf("%d", id)
 	}
 
-	return fmt.Sprintf("%s-%s-%s.json", sanitized, timestamp, idPart)
+	return fmt.Sprintf("%s-%s-%s.json", timestamp, sanitized, idPart)
 }
 
 // sanitizeForFilename replaces characters that are not safe for filenames.

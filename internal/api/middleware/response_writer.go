@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	log "github.com/sirupsen/logrus"
 )
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
@@ -264,6 +265,15 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		} else {
 			finalStatusCode = 200
 		}
+	}
+
+	// Debug: Log API_RESPONSE status at Finalize time
+	if apiResp, exists := c.Get("API_RESPONSE"); exists {
+		if data, ok := apiResp.([]byte); ok {
+			log.Debugf("Finalize: isStreaming=%v, streamWriter=%v, API_RESPONSE len=%d", w.isStreaming, w.streamWriter != nil, len(data))
+		}
+	} else {
+		log.Debugf("Finalize: isStreaming=%v, streamWriter=%v, API_RESPONSE NOT FOUND", w.isStreaming, w.streamWriter != nil)
 	}
 
 	var slicesAPIResponseError []*interfaces.ErrorMessage

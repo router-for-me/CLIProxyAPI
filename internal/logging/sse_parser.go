@@ -31,6 +31,11 @@ func (p *SSEParser) ParseChunk(chunk []byte) {
 		return
 	}
 
+	// Skip SSE event type lines (e.g., "event: response.output_text.delta")
+	if bytes.HasPrefix(chunk, []byte("event:")) {
+		return
+	}
+
 	// Extract data payload if prefixed with "data: "
 	if bytes.HasPrefix(chunk, []byte("data: ")) {
 		chunk = chunk[6:]
@@ -56,6 +61,9 @@ func (p *SSEParser) ParseChunk(chunk []byte) {
 		return
 	}
 	if p.parseClaudeFormat(data) {
+		return
+	}
+	if p.parseCodexFormat(data) {
 		return
 	}
 	p.parseOpenAIFormat(data)
@@ -149,6 +157,7 @@ func (p *SSEParser) parseClaudeFormat(data map[string]interface{}) bool {
 				p.aggregator.AddResponseChunk(text)
 			}
 		}
+		return true
 
 	case "message_start":
 		msg, ok := data["message"].(map[string]interface{})
@@ -161,15 +170,18 @@ func (p *SSEParser) parseClaudeFormat(data map[string]interface{}) bool {
 		if usage, ok := msg["usage"].(map[string]interface{}); ok {
 			p.extractTokenUsage(usage)
 		}
+		return true
 
 	case "message_delta":
 		if usage, ok := data["usage"].(map[string]interface{}); ok {
 			p.extractTokenUsage(usage)
 		}
+		return true
+
 	default:
-		// Unknown Claude message type, but still matched the format
+		// Unknown message type - let other parsers try
+		return false
 	}
-	return true
 }
 
 // parseOpenAIFormat handles OpenAI-compatible SSE response format.
@@ -206,6 +218,64 @@ func (p *SSEParser) parseOpenAIFormat(data map[string]interface{}) {
 	// Extract usage
 	if usage, ok := data["usage"].(map[string]interface{}); ok {
 		p.extractTokenUsage(usage)
+	}
+}
+
+// parseCodexFormat handles Codex Responses API SSE format.
+// This format uses event types like "response.output_text.delta" and "response.reasoning_summary_text.delta".
+// Returns true if the format was matched and processed.
+func (p *SSEParser) parseCodexFormat(data map[string]interface{}) bool {
+	// Check for Codex response types via "type" field
+	msgType, ok := data["type"].(string)
+	if !ok {
+		return false
+	}
+
+	switch msgType {
+	case "response.output_text.delta":
+		// Extract text content from delta field
+		if delta, ok := data["delta"].(string); ok && delta != "" {
+			p.aggregator.AddResponseChunk(delta)
+		}
+		return true
+
+	case "response.reasoning_summary_text.delta":
+		// Extract reasoning/thinking summary from delta field
+		if delta, ok := data["delta"].(string); ok && delta != "" {
+			p.aggregator.AddThinkingChunk(delta)
+		}
+		return true
+
+	case "response.created", "response.in_progress":
+		// Extract model and usage from response object
+		if response, ok := data["response"].(map[string]interface{}); ok {
+			if model, ok := response["model"].(string); ok {
+				p.modelVersion = model
+			}
+		}
+		return true
+
+	case "response.completed":
+		// Extract final usage stats from response object
+		if response, ok := data["response"].(map[string]interface{}); ok {
+			if model, ok := response["model"].(string); ok {
+				p.modelVersion = model
+			}
+			if usage, ok := response["usage"].(map[string]interface{}); ok {
+				p.extractTokenUsage(usage)
+			}
+		}
+		return true
+
+	case "response.output_text.done", "response.content_part.added",
+		"response.content_part.done", "response.output_item.added",
+		"response.output_item.done", "response.reasoning_summary_text.done":
+		// These are control events, acknowledge but don't extract content
+		return true
+
+	default:
+		// Unknown Codex event type, let other parsers try
+		return false
 	}
 }
 
