@@ -2,12 +2,15 @@ package amp
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"net/http"
 	"net/http/httputil"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/routing/ctxkeys"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -30,7 +33,13 @@ const (
 )
 
 // MappedModelContextKey is the Gin context key for passing mapped model names.
-const MappedModelContextKey = "mapped_model"
+// Deprecated: Use ctxkeys.MappedModel instead.
+const MappedModelContextKey = string(ctxkeys.MappedModel)
+
+// FallbackModelsContextKey is the Gin context key for passing fallback model names.
+// When the primary mapped model fails (e.g., quota exceeded), these models can be tried.
+// Deprecated: Use ctxkeys.FallbackModels instead.
+const FallbackModelsContextKey = string(ctxkeys.FallbackModels)
 
 // logAmpRouting logs the routing decision for an Amp request with structured fields
 func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provider, path string) {
@@ -77,6 +86,10 @@ func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provid
 
 // FallbackHandler wraps a standard handler with fallback logic to ampcode.com
 // when the model's provider is not available in CLIProxyAPI
+//
+// Deprecated: FallbackHandler is deprecated in favor of routing.ModelRoutingWrapper.
+// Use routing.NewModelRoutingWrapper() instead for unified routing logic.
+// This type is kept for backward compatibility and test purposes.
 type FallbackHandler struct {
 	getProxy           func() *httputil.ReverseProxy
 	modelMapper        ModelMapper
@@ -85,6 +98,8 @@ type FallbackHandler struct {
 
 // NewFallbackHandler creates a new fallback handler wrapper
 // The getProxy function allows lazy evaluation of the proxy (useful when proxy is created after routes)
+//
+// Deprecated: Use routing.NewModelRoutingWrapper() instead.
 func NewFallbackHandler(getProxy func() *httputil.ReverseProxy) *FallbackHandler {
 	return &FallbackHandler{
 		getProxy:           getProxy,
@@ -93,6 +108,8 @@ func NewFallbackHandler(getProxy func() *httputil.ReverseProxy) *FallbackHandler
 }
 
 // NewFallbackHandlerWithMapper creates a new fallback handler with model mapping support
+//
+// Deprecated: Use routing.NewModelRoutingWrapper() instead.
 func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper, forceModelMappings func() bool) *FallbackHandler {
 	if forceModelMappings == nil {
 		forceModelMappings = func() bool { return false }
@@ -113,6 +130,20 @@ func (fh *FallbackHandler) SetModelMapper(mapper ModelMapper) {
 // If the model's provider is not configured in CLIProxyAPI, it forwards to ampcode.com
 func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Swallow ErrAbortHandler panics from ReverseProxy to avoid noisy stack traces.
+		// ReverseProxy raises this panic when the client connection is closed prematurely
+		// (e.g., user cancels request, network disconnect) or when ServeHTTP is called
+		// with a ResponseWriter that doesn't implement http.CloseNotifier.
+		// This is an expected error condition, not a bug, so we handle it gracefully.
+		defer func() {
+			if rec := recover(); rec != nil {
+				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					return
+				}
+				panic(rec)
+			}
+		}()
+
 		requestPath := c.Request.URL.Path
 
 		// Read the request body to extract the model name
@@ -142,36 +173,57 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			thinkingSuffix = "(" + suffixResult.RawSuffix + ")"
 		}
 
-		resolveMappedModel := func() (string, []string) {
+		// resolveMappedModels returns all mapped models (primary + fallbacks) and providers for the first one.
+		resolveMappedModels := func() ([]string, []string) {
 			if fh.modelMapper == nil {
-				return "", nil
+				return nil, nil
 			}
 
-			mappedModel := fh.modelMapper.MapModel(modelName)
-			if mappedModel == "" {
-				mappedModel = fh.modelMapper.MapModel(normalizedModel)
-			}
-			mappedModel = strings.TrimSpace(mappedModel)
-			if mappedModel == "" {
-				return "", nil
+			mapper, ok := fh.modelMapper.(*DefaultModelMapper)
+			if !ok {
+				// Fallback to single model for non-DefaultModelMapper
+				mappedModel := fh.modelMapper.MapModel(modelName)
+				if mappedModel == "" {
+					mappedModel = fh.modelMapper.MapModel(normalizedModel)
+				}
+				if mappedModel == "" {
+					return nil, nil
+				}
+				mappedBaseModel := thinking.ParseSuffix(mappedModel).ModelName
+				mappedProviders := util.GetProviderName(mappedBaseModel)
+				if len(mappedProviders) == 0 {
+					return nil, nil
+				}
+				return []string{mappedModel}, mappedProviders
 			}
 
-			// Preserve dynamic thinking suffix (e.g. "(xhigh)") when mapping applies, unless the target
-			// already specifies its own thinking suffix.
-			if thinkingSuffix != "" {
-				mappedSuffixResult := thinking.ParseSuffix(mappedModel)
-				if !mappedSuffixResult.HasSuffix {
-					mappedModel += thinkingSuffix
+			// Use MapModelWithFallbacks for DefaultModelMapper
+			mappedModels := mapper.MapModelWithFallbacks(modelName)
+			if len(mappedModels) == 0 {
+				mappedModels = mapper.MapModelWithFallbacks(normalizedModel)
+			}
+			if len(mappedModels) == 0 {
+				return nil, nil
+			}
+
+			// Apply thinking suffix if needed
+			for i, model := range mappedModels {
+				if thinkingSuffix != "" {
+					suffixResult := thinking.ParseSuffix(model)
+					if !suffixResult.HasSuffix {
+						mappedModels[i] = model + thinkingSuffix
+					}
 				}
 			}
 
-			mappedBaseModel := thinking.ParseSuffix(mappedModel).ModelName
-			mappedProviders := util.GetProviderName(mappedBaseModel)
-			if len(mappedProviders) == 0 {
-				return "", nil
+			// Get providers for the first model
+			firstBaseModel := thinking.ParseSuffix(mappedModels[0]).ModelName
+			providers := util.GetProviderName(firstBaseModel)
+			if len(providers) == 0 {
+				return nil, nil
 			}
 
-			return mappedModel, mappedProviders
+			return mappedModels, providers
 		}
 
 		// Track resolved model for logging (may change if mapping is applied)
@@ -179,21 +231,27 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		usedMapping := false
 		var providers []string
 
+		// Helper to apply model mapping and update state
+		applyMapping := func(mappedModels []string, mappedProviders []string) {
+			bodyBytes = rewriteModelInRequest(bodyBytes, mappedModels[0])
+			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			c.Set(string(ctxkeys.MappedModel), mappedModels[0])
+			if len(mappedModels) > 1 {
+				c.Set(string(ctxkeys.FallbackModels), mappedModels[1:])
+			}
+			resolvedModel = mappedModels[0]
+			usedMapping = true
+			providers = mappedProviders
+		}
+
 		// Check if model mappings should be forced ahead of local API keys
 		forceMappings := fh.forceModelMappings != nil && fh.forceModelMappings()
 
 		if forceMappings {
 			// FORCE MODE: Check model mappings FIRST (takes precedence over local API keys)
 			// This allows users to route Amp requests to their preferred OAuth providers
-			if mappedModel, mappedProviders := resolveMappedModel(); mappedModel != "" {
-				// Mapping found and provider available - rewrite the model in request body
-				bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
-				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				// Store mapped model in context for handlers that check it (like gemini bridge)
-				c.Set(MappedModelContextKey, mappedModel)
-				resolvedModel = mappedModel
-				usedMapping = true
-				providers = mappedProviders
+			if mappedModels, mappedProviders := resolveMappedModels(); len(mappedModels) > 0 {
+				applyMapping(mappedModels, mappedProviders)
 			}
 
 			// If no mapping applied, check for local providers
@@ -206,15 +264,8 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 
 			if len(providers) == 0 {
 				// No providers configured - check if we have a model mapping
-				if mappedModel, mappedProviders := resolveMappedModel(); mappedModel != "" {
-					// Mapping found and provider available - rewrite the model in request body
-					bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
-					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-					// Store mapped model in context for handlers that check it (like gemini bridge)
-					c.Set(MappedModelContextKey, mappedModel)
-					resolvedModel = mappedModel
-					usedMapping = true
-					providers = mappedProviders
+				if mappedModels, mappedProviders := resolveMappedModels(); len(mappedModels) > 0 {
+					applyMapping(mappedModels, mappedProviders)
 				}
 			}
 		}

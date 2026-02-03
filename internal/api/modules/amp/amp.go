@@ -125,6 +125,8 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 	m.registerOnce.Do(func() {
 		// Initialize model mapper from config (for routing unavailable models to alternatives)
 		m.modelMapper = NewModelMapper(settings.ModelMappings)
+		// Load oauth-model-alias for provider lookup via aliases
+		m.modelMapper.UpdateOAuthModelAlias(ctx.Config.OAuthModelAlias)
 
 		// Store initial config for partial reload comparison
 		settingsCopy := settings
@@ -210,6 +212,11 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 		} else if m.enabled {
 			log.Warnf("amp model mapper not initialized, skipping model mapping update")
 		}
+	}
+
+	// Always update oauth-model-alias for model mapper (used for provider lookup)
+	if m.modelMapper != nil {
+		m.modelMapper.UpdateOAuthModelAlias(cfg.OAuthModelAlias)
 	}
 
 	if m.enabled {
