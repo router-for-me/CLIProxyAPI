@@ -1,0 +1,389 @@
+from docx import Document
+from docx.shared import Pt, Inches, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.style import WD_STYLE_TYPE
+
+doc = Document()
+
+# 设置标题
+title = doc.add_heading('MMEX 用户协议', 0)
+title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+# 版本信息
+version_info = doc.add_paragraph()
+version_info.alignment = WD_ALIGN_PARAGRAPH.CENTER
+version_info.add_run('版本号：V1.0').bold = True
+version_info.add_run('\n')
+version_info.add_run('生效日期：2024年12月').bold = True
+
+doc.add_paragraph()
+
+# 前言
+doc.add_heading('前言', level=1)
+doc.add_paragraph(
+    '欢迎使用MMEX平台（以下简称"本平台"或"MMEX"）。本用户协议（以下简称"本协议"）是您（以下简称"用户"或"您"）'
+    '与MMEX之间就使用本平台提供的各项服务所订立的具有法律约束力的协议。'
+)
+
+warning = doc.add_paragraph()
+warning_run = warning.add_run(
+    '请您在注册账户或使用本平台服务之前，务必仔细阅读并充分理解本协议的全部内容。'
+    '如果您不同意本协议的任何条款，请立即停止注册或使用本平台服务。'
+)
+warning_run.bold = True
+
+doc.add_paragraph(
+    '您注册、登录、使用本平台服务的行为，即表示您已阅读、理解并同意接受本协议的全部条款。'
+)
+
+# 第一条 定义与解释
+doc.add_heading('第一条 定义与解释', level=1)
+definitions = [
+    ('MMEX平台', '指MMEX运营的网站、移动应用程序、API接口及其他相关服务载体的统称。'),
+    ('数字资产', '指基于区块链技术或其他分布式账本技术的加密货币、代币及其他虚拟资产。'),
+    ('服务', '指MMEX向用户提供的数字资产交易、期货合约交易及其他衍生品交易、资产托管、信息查询等各项服务。'),
+    ('账户', '指用户在本平台注册并通过身份验证后获得的唯一标识账户。'),
+    ('法定货币', '指由主权国家或地区发行的法定流通货币。'),
+    ('订单', '指用户通过本平台提交的买入或卖出数字资产或衍生品合约的指令。'),
+]
+for i, (term, definition) in enumerate(definitions, 1):
+    p = doc.add_paragraph()
+    p.add_run(f'1.{i} ').bold = True
+    p.add_run(f'{term}').bold = True
+    p.add_run(f'：{definition}')
+
+# 第二条 账户注册与管理
+doc.add_heading('第二条 账户注册与管理', level=1)
+
+doc.add_heading('2.1 注册条件', level=2)
+doc.add_paragraph('用户在注册MMEX账户时，需确认并保证：')
+conditions = [
+    '您已年满18周岁或达到您所在司法管辖区的法定成年年龄，具有完全民事行为能力；',
+    '您不是被本平台拒绝服务的个人或实体；',
+    '您不在相关制裁名单上，也不是来自受国际制裁国家或地区的居民；',
+    '您使用本平台的行为不违反您所在司法管辖区的任何适用法律法规。',
+]
+for item in conditions:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('2.2 身份验证（KYC）', level=2)
+kyc_items = [
+    '为遵守反洗钱（AML）、了解您的客户（KYC）及反恐怖融资等法规要求，您同意按照本平台要求提供真实、准确、完整的身份信息；',
+    '您授权MMEX或其授权的第三方服务商验证您提供的信息；',
+    '如您的身份信息发生变更，您有义务及时更新；',
+    '本平台有权根据您完成的验证级别设定相应的服务权限和交易限额。',
+]
+for item in kyc_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('2.3 账户安全', level=2)
+security_items = [
+    '您有责任妥善保管您的账户登录凭证，包括但不限于密码、二次验证设备和安全密钥；',
+    '您不得将账户转让、出借或以任何方式提供给第三方使用；',
+    '通过您账户进行的所有操作均被视为您本人的行为，您应对此承担全部责任；',
+    '如发现任何未经授权使用您账户的情况，您应立即通知MMEX。',
+]
+for item in security_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('2.4 账户冻结与终止', level=2)
+doc.add_paragraph('MMEX有权在以下情况下冻结、限制或终止您的账户：')
+freeze_items = [
+    '您违反本协议或其他适用条款；',
+    '您的账户涉嫌欺诈、洗钱或其他非法活动；',
+    '应法律法规、监管机构或执法机关的要求；',
+    '您的账户超过一定期限未进行任何活动；',
+    'MMEX认为有必要保护平台或其他用户的利益。',
+]
+for item in freeze_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+# 第三条 服务内容
+doc.add_heading('第三条 服务内容', level=1)
+
+doc.add_heading('3.1 现货交易服务', level=2)
+doc.add_paragraph('本平台为用户提供数字资产之间的现货交易服务，包括限价订单、市价订单及其他支持的订单类型。')
+
+doc.add_heading('3.2 衍生品交易服务', level=2)
+doc.add_paragraph('本平台提供数字资产衍生品交易服务，包括但不限于：')
+derivative_items = ['永续合约', '交割合约', '期权合约', '其他杠杆交易产品']
+for item in derivative_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+warning_p = doc.add_paragraph()
+warning_run = warning_p.add_run(
+    '警告：衍生品交易具有极高风险，杠杆交易可能导致您损失全部保证金甚至更多。'
+    '请确保您充分理解相关风险后再参与交易。'
+)
+warning_run.bold = True
+warning_run.font.color.rgb = RGBColor(192, 0, 0)
+
+doc.add_heading('3.3 资产托管服务', level=2)
+custody_items = [
+    '您存入本平台的数字资产将由MMEX代为托管；',
+    '除产品条款另有规定外，MMEX不会将您的资产用于借贷、质押或其他用途；',
+    '您的账户不是银行账户，存放的资产不受任何政府存款保险的保护。',
+]
+for item in custody_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('3.4 信息服务', level=2)
+doc.add_paragraph('本平台提供市场行情、交易数据、资讯内容等信息服务。这些信息仅供参考，不构成任何投资建议。')
+
+# 第四条 费用与结算
+doc.add_heading('第四条 费用与结算', level=1)
+
+doc.add_heading('4.1 交易费用', level=2)
+fee_items = [
+    '您同意支付因使用本平台服务而产生的所有费用，包括但不限于交易手续费、提现费用、资金费率等；',
+    '具体费率请参见本平台公布的《费率说明》页面；',
+    'MMEX有权调整费率标准，并会在调整前进行公告。',
+]
+for item in fee_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('4.2 费用扣除', level=2)
+doc.add_paragraph('您授权MMEX从您的账户资产中直接扣除应付的各项费用。')
+
+doc.add_heading('4.3 税务责任', level=2)
+tax_items = [
+    '您有责任自行确定并履行因使用本平台服务而产生的税务义务；',
+    'MMEX不提供任何税务建议，您应咨询专业税务顾问。',
+]
+for item in tax_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+# 第五条 充值与提现
+doc.add_heading('第五条 充值与提现', level=1)
+
+doc.add_heading('5.1 充值', level=2)
+deposit_items = [
+    '您只能向本平台指定的钱包地址充值相应的数字资产；',
+    '因充值地址或网络选择错误导致的资产损失，由您自行承担；',
+    '充值到账时间取决于区块链网络确认进度。',
+]
+for item in deposit_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('5.2 提现', level=2)
+withdraw_items = [
+    '您可以申请将账户中的数字资产提现至您的外部钱包地址；',
+    '请务必核实提现地址的准确性，因地址错误导致的资产损失无法恢复；',
+    'MMEX有权对提现申请进行安全审核，审核期间可能延迟处理；',
+    '基于风控需要，MMEX有权设定最低提现金额和每日提现限额。',
+]
+for item in withdraw_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+# 第六条 交易规则
+doc.add_heading('第六条 交易规则', level=1)
+
+doc.add_heading('6.1 订单规则', level=2)
+order_items = [
+    '您提交的订单一经成交即不可撤销；',
+    '如订单尚未成交，您可以根据平台规则取消订单；',
+    'MMEX有权拒绝或取消违反平台规则的订单。',
+]
+for item in order_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('6.2 强制平仓', level=2)
+doc.add_paragraph('对于衍生品交易，当您的账户风险率达到平仓线时，本平台有权对您的持仓进行强制平仓，无需事先通知。')
+
+doc.add_heading('6.3 异常交易处理', level=2)
+doc.add_paragraph('MMEX有权对异常交易行为进行调查，包括但不限于市场操纵、洗钱、欺诈等。如发现异常，MMEX有权采取以下措施：')
+abnormal_items = [
+    '冻结相关账户',
+    '撤销相关交易',
+    '向相关监管机构报告',
+    '追究法律责任',
+]
+for item in abnormal_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+# 第七条 用户行为规范
+doc.add_heading('第七条 用户行为规范', level=1)
+
+doc.add_heading('7.1 禁止行为', level=2)
+doc.add_paragraph('您在使用本平台服务时，不得从事以下行为：')
+prohibited_items = [
+    '从事任何非法活动，包括但不限于洗钱、恐怖融资、诈骗等；',
+    '操纵市场价格或进行虚假交易；',
+    '干扰、破坏本平台的正常运行；',
+    '未经授权获取其他用户的账户信息；',
+    '利用本平台传播违法、有害信息；',
+    '规避本平台的安全措施或交易限制；',
+    '使用自动化工具进行交易（除非获得MMEX书面授权）。',
+]
+for item in prohibited_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('7.2 合规义务', level=2)
+doc.add_paragraph('您承诺遵守您所在司法管辖区的所有适用法律法规，并对自己的交易行为承担全部法律责任。')
+
+# 第八条 风险披露
+doc.add_heading('第八条 风险披露', level=1)
+
+doc.add_heading('8.1 风险确认', level=2)
+doc.add_paragraph('您确认已阅读并理解《MMEX用户风险提示》的全部内容，并充分了解数字资产交易及衍生品交易的高风险性质。')
+
+doc.add_heading('8.2 主要风险', level=2)
+doc.add_paragraph('使用本平台服务可能涉及的风险包括但不限于：')
+risk_items = [
+    '市场风险：数字资产价格可能剧烈波动，您可能损失全部投资本金；',
+    '流动性风险：在特定市场条件下，您可能无法及时以期望价格完成交易；',
+    '技术风险：系统故障、网络攻击等可能影响您的交易或资产安全；',
+    '监管风险：法律法规的变化可能影响数字资产的价值和交易；',
+    '杠杆风险：衍生品交易的杠杆效应可能放大您的损失。',
+]
+for item in risk_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('8.3 风险自担', level=2)
+doc.add_paragraph('您理解并同意，您对通过本平台进行的所有交易和投资决策承担全部责任和风险。')
+
+# 第九条 免责声明
+doc.add_heading('第九条 免责声明', level=1)
+
+doc.add_heading('9.1 服务免责', level=2)
+service_disclaimer = [
+    'MMEX不保证服务不会中断或没有错误，也不对服务中断或错误造成的损失承担责任；',
+    'MMEX不对因不可抗力（包括但不限于自然灾害、战争、政府行为、网络攻击等）导致的服务中断或损失承担责任。',
+]
+for item in service_disclaimer:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('9.2 信息免责', level=2)
+info_disclaimer = [
+    '本平台提供的任何信息、数据、分析仅供参考，不构成任何投资建议；',
+    'MMEX不对第三方提供的信息的准确性、完整性或时效性承担责任。',
+]
+for item in info_disclaimer:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('9.3 非投资顾问', level=2)
+doc.add_paragraph('MMEX不是您的经纪人、中介、代理人或投资顾问，与您之间不存在信托关系或受托义务。')
+
+doc.add_heading('9.4 损失免责', level=2)
+doc.add_paragraph(
+    '在法律允许的最大范围内，MMEX不对您因使用本平台服务而产生的任何间接、附带、特殊、惩罚性或后果性损失承担责任，'
+    '包括但不限于利润损失、商业机会损失等。'
+)
+
+# 第十条 隐私保护
+doc.add_heading('第十条 隐私保护', level=1)
+
+doc.add_heading('10.1 信息收集', level=2)
+doc.add_paragraph('MMEX将根据《隐私政策》收集、使用、存储和保护您的个人信息。')
+
+doc.add_heading('10.2 信息使用', level=2)
+doc.add_paragraph('您的个人信息将用于：')
+info_use = [
+    '提供、维护和改进本平台服务；',
+    '进行身份验证和风险管理；',
+    '遵守法律法规和监管要求；',
+    '向您发送服务相关通知。',
+]
+for item in info_use:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('10.3 信息披露', level=2)
+doc.add_paragraph('除法律要求或您明确授权外，MMEX不会向第三方披露您的个人信息。')
+
+# 第十一条 知识产权
+doc.add_heading('第十一条 知识产权', level=1)
+
+doc.add_heading('11.1 平台权利', level=2)
+doc.add_paragraph('本平台的所有内容，包括但不限于文字、图片、软件、商标、标识等，均受知识产权法律保护，归MMEX或其许可方所有。')
+
+doc.add_heading('11.2 使用限制', level=2)
+doc.add_paragraph('未经MMEX书面许可，您不得复制、修改、传播、出售或以其他方式使用本平台的任何内容。')
+
+# 第十二条 协议变更
+doc.add_heading('第十二条 协议变更', level=1)
+
+doc.add_heading('12.1 变更权利', level=2)
+doc.add_paragraph('MMEX有权随时修改本协议。修改后的协议将在本平台公布后生效。')
+
+doc.add_heading('12.2 通知方式', level=2)
+doc.add_paragraph('协议变更将通过以下方式之一通知您：')
+notice_items = [
+    '在本平台发布公告',
+    '发送电子邮件或站内信',
+    '其他MMEX认为适当的方式',
+]
+for item in notice_items:
+    doc.add_paragraph(item, style='List Bullet')
+
+doc.add_heading('12.3 继续使用', level=2)
+doc.add_paragraph('如您在协议变更后继续使用本平台服务，即表示您接受变更后的协议。如您不同意变更，应立即停止使用并注销账户。')
+
+# 第十三条 争议解决
+doc.add_heading('第十三条 争议解决', level=1)
+
+doc.add_heading('13.1 协商解决', level=2)
+doc.add_paragraph('因本协议引起的或与本协议相关的任何争议，双方应首先通过友好协商解决。')
+
+doc.add_heading('13.2 仲裁', level=2)
+doc.add_paragraph('如协商不成，任何一方均可将争议提交至MMEX注册地有管辖权的仲裁机构进行仲裁。仲裁裁决为终局裁决，对双方均有约束力。')
+
+doc.add_heading('13.3 集体诉讼放弃', level=2)
+doc.add_paragraph('在法律允许的范围内，您同意以个人身份参与争议解决程序，放弃参与任何形式的集体诉讼或集体仲裁的权利。')
+
+# 第十四条 适用法律
+doc.add_heading('第十四条 适用法律', level=1)
+doc.add_paragraph('本协议的订立、生效、解释、执行及争议解决均适用MMEX注册地的法律。')
+
+# 第十五条 其他条款
+doc.add_heading('第十五条 其他条款', level=1)
+
+doc.add_heading('15.1 完整协议', level=2)
+doc.add_paragraph('本协议（包括其引用的所有文件）构成您与MMEX之间关于本平台服务的完整协议，取代此前的任何口头或书面协议。')
+
+doc.add_heading('15.2 可分割性', level=2)
+doc.add_paragraph('如本协议的任何条款被认定为无效或不可执行，该条款应在最小必要范围内被修改或删除，其余条款仍然有效。')
+
+doc.add_heading('15.3 权利保留', level=2)
+doc.add_paragraph('MMEX未行使或延迟行使本协议项下的任何权利，不构成对该权利的放弃。')
+
+doc.add_heading('15.4 语言', level=2)
+doc.add_paragraph('本协议可能提供多种语言版本，如有歧义，以中文版本为准。')
+
+doc.add_heading('15.5 联系方式', level=2)
+doc.add_paragraph('如您对本协议有任何疑问，可通过以下方式联系我们：')
+contact = doc.add_paragraph()
+contact.add_run('客服邮箱：').bold = True
+contact.add_run('support@mmex.com\n')
+contact.add_run('官方网站：').bold = True
+contact.add_run('www.mmex.com')
+
+# 附录
+doc.add_heading('附录', level=1)
+doc.add_paragraph('本协议包含以下附属文件，构成本协议不可分割的组成部分：')
+appendix_items = [
+    '《MMEX用户风险提示》',
+    '《MMEX隐私政策》',
+    '《MMEX费率说明》',
+    '《MMEX合约交易规则》',
+]
+for i, item in enumerate(appendix_items, 1):
+    doc.add_paragraph(f'{i}. {item}')
+
+doc.add_paragraph()
+
+# 确认声明
+confirm = doc.add_paragraph()
+confirm_run = confirm.add_run('通过注册账户或使用MMEX平台服务，您确认已阅读、理解并同意接受本协议的全部条款。')
+confirm_run.bold = True
+
+doc.add_paragraph()
+
+# 版权
+copyright_p = doc.add_paragraph()
+copyright_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+copyright_run = copyright_p.add_run('© 2024 MMEX. 保留所有权利。')
+copyright_run.italic = True
+
+# 保存文档
+doc.save('MMEX_用户协议.docx')
+print('Word文档已生成：MMEX_用户协议.docx')

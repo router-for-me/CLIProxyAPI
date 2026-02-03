@@ -60,6 +60,38 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Cloud Platform Deployment
+
+### Railway Deployment
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/new)
+
+See [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md) for detailed configuration guide.
+
+**Quick Setup:**
+1. Add environment variables in Railway dashboard:
+   - `API_KEY`: Your API key (required)
+   - `MANAGEMENT_PASSWORD`: Management panel password (required)
+   - `USAGE_STATS=true`: Enable usage statistics (view quota and records)
+2. Railway will automatically build and deploy
+3. Access `https://your-app.railway.app/v0/management/panel` for management panel
+
+### Zeabur Deployment
+
+[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates)
+
+See [ZEABUR_DEPLOYMENT.md](ZEABUR_DEPLOYMENT.md) for detailed configuration guide.
+
+**Quick Setup:**
+1. Add environment variables in Zeabur dashboard (same as Railway):
+   - `API_KEY`: Your API key (required)
+   - `MANAGEMENT_PASSWORD`: Management panel password (required)
+   - `USAGE_STATS=true`: Enable usage statistics (**Important: Required to view quota and records**)
+2. Zeabur will automatically build and deploy
+3. Access management panel to view usage statistics
+
+**Important:** If you cannot see usage quota and records in the management panel, make sure `USAGE_STATS=true` is set.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

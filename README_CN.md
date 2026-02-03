@@ -60,6 +60,38 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+## 云平台部署
+
+### Railway 部署
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/new)
+
+详细配置指南请参见 [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md)
+
+**快速配置：**
+1. 在 Railway 控制台添加环境变量：
+   - `API_KEY`: 你的 API 密钥（必需）
+   - `MANAGEMENT_PASSWORD`: 管理后台密码（必需）
+   - `USAGE_STATS=true`: 启用使用统计（查看额度和记录）
+2. Railway 会自动构建和部署
+3. 访问 `https://your-app.railway.app/v0/management/panel` 进入管理面板
+
+### Zeabur 部署
+
+[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates)
+
+详细配置指南请参见 [ZEABUR_DEPLOYMENT.md](ZEABUR_DEPLOYMENT.md)
+
+**快速配置：**
+1. 在 Zeabur 控制台添加环境变量（与 Railway 相同）：
+   - `API_KEY`: 你的 API 密钥（必需）
+   - `MANAGEMENT_PASSWORD`: 管理后台密码（必需）
+   - `USAGE_STATS=true`: 启用使用统计（**重要：必须启用才能查看额度和记录**）
+2. Zeabur 会自动构建和部署
+3. 访问管理面板查看使用统计
+
+**重要提示：** 如果管理面板看不到使用额度和记录，请确保设置了 `USAGE_STATS=true` 环境变量。
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

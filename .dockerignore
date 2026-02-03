@@ -7,13 +7,19 @@ docker-compose.yml
 .dockerignore
 .gitignore
 .goreleaser.yml
-Dockerfile
+
+# Deprecated platform-specific Dockerfiles and scripts
+# (Use main Dockerfile and start-cloud.sh instead)
+Dockerfile.railway
+start-railway.sh
+start-zeabur.sh
 
 # Documentation and license
 docs/*
 README.md
 README_CN.md
 LICENSE
+RAILWAY_DEPLOYMENT.md
 
 # Runtime data folders (should be mounted as volumes)
 auths/*
@@ -34,3 +40,12 @@ bin/*
 .bmad/*
 _bmad/*
 _bmad-output/*
+
+# User-generated files
+*.docx
+*.md (except README files already excluded above)
+*.py
+convert_to_word.py
+extract_docx.py
+用户协议*
+MMEX_*
