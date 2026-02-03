@@ -70,14 +70,25 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, 
 	}
 
 	// Determine label and identifier based on auth method
+	// Generate sequence number for uniqueness
+	seq := time.Now().UnixNano() % 100000
+
 	var label, idPart string
 	if tokenData.AuthMethod == "idc" {
 		label = "kiro-idc"
-		// For IDC auth, always use clientID as identifier
-		if tokenData.ClientID != "" {
-			idPart = kiroauth.SanitizeEmailForFilename(tokenData.ClientID)
+		// Priority: email > startUrl identifier > sequence only
+		// Email is unique, so no sequence needed when email is available
+		if tokenData.Email != "" {
+			idPart = kiroauth.SanitizeEmailForFilename(tokenData.Email)
+		} else if tokenData.StartURL != "" {
+			identifier := kiroauth.ExtractIDCIdentifier(tokenData.StartURL)
+			if identifier != "" {
+				idPart = fmt.Sprintf("%s-%05d", identifier, seq)
+			} else {
+				idPart = fmt.Sprintf("%05d", seq)
+			}
 		} else {
-			idPart = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+			idPart = fmt.Sprintf("%05d", seq)
 		}
 	} else {
 		label = fmt.Sprintf("kiro-%s", source)
@@ -126,14 +137,14 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, 
 	}
 
 	record := &coreauth.Auth{
-		ID:        fileName,
-		Provider:  "kiro",
-		FileName:  fileName,
-		Label:     label,
-		Status:    coreauth.StatusActive,
-		CreatedAt: now,
-		UpdatedAt: now,
-		Metadata:  metadata,
+		ID:         fileName,
+		Provider:   "kiro",
+		FileName:   fileName,
+		Label:      label,
+		Status:     coreauth.StatusActive,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		Metadata:   metadata,
 		Attributes: attributes,
 		// NextRefreshAfter: 20 minutes before expiry
 		NextRefreshAfter: expiresAt.Add(-20 * time.Minute),
