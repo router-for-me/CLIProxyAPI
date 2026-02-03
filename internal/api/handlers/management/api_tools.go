@@ -929,15 +929,6 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 		return response
 	}
 
-	// Check if this is an enterprise account (limited_user_quotas is null)
-	// limitedQuotas, hasLimitedQuotas := tokenResp["limited_user_quotas"]
-	// isEnterprise := !hasLimitedQuotas || limitedQuotas == nil
-
-	// // Only fetch additional quota info for enterprise accounts
-	// if !isEnterprise {
-	// 	return response
-	// }
-
 	// Get the GitHub token to call the copilot_internal/user endpoint
 	token, tokenErr := h.resolveTokenForAuth(ctx, auth)
 	if tokenErr != nil {
@@ -1010,9 +1001,15 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 		if _, hasQuotaSnapshots := quotaRaw["quota_snapshots"]; hasQuotaSnapshots {
 			// Enterprise account - has quota_snapshots
 			tokenResp["quota_snapshots"] = quotaData.QuotaSnapshots
-			tokenResp["quota_reset_date"] = quotaData.QuotaResetDate
 			tokenResp["access_type_sku"] = quotaData.AccessTypeSKU
 			tokenResp["copilot_plan"] = quotaData.CopilotPlan
+			
+			// Add quota reset date for enterprise (quota_reset_date_utc)
+			if quotaResetDateUTC, ok := quotaRaw["quota_reset_date_utc"]; ok {
+				tokenResp["quota_reset_date"] = quotaResetDateUTC
+			} else if quotaData.QuotaResetDate != "" {
+				tokenResp["quota_reset_date"] = quotaData.QuotaResetDate
+			}
 		} else {
 			// Non-enterprise account - build quota from limited_user_quotas and monthly_quotas
 			var quotaSnapshots QuotaSnapshots
@@ -1073,6 +1070,11 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 			tokenResp["quota_snapshots"] = quotaSnapshots
 			tokenResp["access_type_sku"] = quotaData.AccessTypeSKU
 			tokenResp["copilot_plan"] = quotaData.CopilotPlan
+			
+			// Add quota reset date for non-enterprise (limited_user_reset_date)
+			if limitedResetDate, ok := quotaRaw["limited_user_reset_date"]; ok {
+				tokenResp["quota_reset_date"] = limitedResetDate
+			}
 		}
 	}
 
