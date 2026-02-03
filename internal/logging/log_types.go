@@ -10,26 +10,26 @@ import (
 // RequestLog represents the complete structured log for a single request/response cycle.
 // This is the root structure that gets serialized to JSON.
 type RequestLog struct {
-	Version   string              `json:"version"`
-	Timestamp string              `json:"timestamp"`
-	Summary   *RequestSummary     `json:"summary"`
+	Version   string               `json:"version"`
+	Timestamp string               `json:"timestamp"`
+	Summary   *RequestSummary      `json:"summary"`
 	Protocol  *ProtocolTranslation `json:"protocol_translation,omitempty"`
-	Request   *RequestInfo        `json:"request"`
-	Upstream  *UpstreamInfo       `json:"upstream"`
-	Response  *ResponseInfo       `json:"response"`
+	Request   *RequestInfo         `json:"request"`
+	Upstream  *UpstreamInfo        `json:"upstream"`
+	Response  *ResponseInfo        `json:"response"`
 }
 
 // RequestSummary provides a quick overview of the request for easy scanning.
 type RequestSummary struct {
-	RequestURL    string       `json:"request_url"`
-	Method        string       `json:"method"`
-	ClientModel   string       `json:"client_model"`
-	UpstreamModel string       `json:"upstream_model,omitempty"`
-	Status        int          `json:"status"`
-	StatusText    string       `json:"status_text,omitempty"`
-	DurationMs    int64        `json:"duration_ms"`
-	TTFBMs        int64        `json:"ttfb_ms,omitempty"`
-	RetryCount    int          `json:"retry_count"`
+	RequestURL    string        `json:"request_url"`
+	Method        string        `json:"method"`
+	ClientModel   string        `json:"client_model"`
+	UpstreamModel string        `json:"upstream_model,omitempty"`
+	Status        int           `json:"status"`
+	StatusText    string        `json:"status_text,omitempty"`
+	DurationMs    int64         `json:"duration_ms"`
+	TTFBMs        int64         `json:"ttfb_ms,omitempty"`
+	RetryCount    int           `json:"retry_count"`
 	Tokens        *TokenSummary `json:"tokens,omitempty"`
 }
 
@@ -84,12 +84,12 @@ type AuthInfo struct {
 
 // UpstreamResponse captures the upstream API response.
 type UpstreamResponse struct {
-	Timestamp  string                `json:"timestamp,omitempty"`
-	Status     int                   `json:"status"`
-	Headers    map[string]string     `json:"headers,omitempty"`
-	Content    *StreamingContent     `json:"content,omitempty"`
-	RawBody    json.RawMessage       `json:"raw_body,omitempty"`
-	TokenUsage *TokenSummary         `json:"token_usage,omitempty"`
+	Timestamp  string            `json:"timestamp,omitempty"`
+	Status     int               `json:"status"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	Content    *StreamingContent `json:"content,omitempty"`
+	RawBody    json.RawMessage   `json:"raw_body,omitempty"`
+	TokenUsage *TokenSummary     `json:"token_usage,omitempty"`
 }
 
 // StreamingContent holds merged streaming response content.
@@ -111,10 +111,10 @@ type ResponseInfo struct {
 
 // StreamingContentAggregator collects and merges streaming chunks.
 type StreamingContentAggregator struct {
-	thinkingBuilder  strings.Builder
-	responseBuilder  strings.Builder
-	thinkingChunks   int
-	responseChunks   int
+	thinkingBuilder strings.Builder
+	responseBuilder strings.Builder
+	thinkingChunks  int
+	responseChunks  int
 }
 
 // NewStreamingContentAggregator creates a new aggregator instance.
@@ -138,11 +138,11 @@ func (a *StreamingContentAggregator) AddResponseChunk(text string) {
 func (a *StreamingContentAggregator) ToStreamingContent() *StreamingContent {
 	thinkingText := a.thinkingBuilder.String()
 	responseText := a.responseBuilder.String()
-	
+
 	if thinkingText == "" && responseText == "" {
 		return nil
 	}
-	
+
 	return &StreamingContent{
 		ThinkingText:   thinkingText,
 		ThinkingChunks: a.thinkingChunks,
@@ -244,31 +244,4 @@ func (b *RequestLogBuilder) Finalize() *RequestLog {
 // ToJSON serializes the log to pretty-printed JSON.
 func (b *RequestLogBuilder) ToJSON() ([]byte, error) {
 	return json.MarshalIndent(b.log, "", "  ")
-}
-
-func statusText(code int) string {
-	switch code {
-	case 200:
-		return "OK"
-	case 201:
-		return "Created"
-	case 400:
-		return "Bad Request"
-	case 401:
-		return "Unauthorized"
-	case 403:
-		return "Forbidden"
-	case 404:
-		return "Not Found"
-	case 429:
-		return "Too Many Requests"
-	case 500:
-		return "Internal Server Error"
-	case 502:
-		return "Bad Gateway"
-	case 503:
-		return "Service Unavailable"
-	default:
-		return ""
-	}
 }

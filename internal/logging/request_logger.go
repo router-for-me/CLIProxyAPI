@@ -230,6 +230,13 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 	}
 	filePath := filepath.Join(l.logsDir, filename)
 
+	// Decompress response body before JSON logging (restored for SSE parsing)
+	responseForJSONLog, decompressErr := l.decompressResponse(responseHeaders, response)
+	if decompressErr != nil {
+		log.WithError(decompressErr).Warn("failed to decompress response for logging, SSE parsing may fail")
+		responseForJSONLog = response // fallback to raw response
+	}
+
 	// Use JSON log writer for structured output
 	if writeErr := WriteJSONLog(
 		filePath,
@@ -239,7 +246,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		body,
 		statusCode,
 		responseHeaders,
-		response,
+		responseForJSONLog,
 		apiRequest,
 		apiResponse,
 		apiResponseErrors,

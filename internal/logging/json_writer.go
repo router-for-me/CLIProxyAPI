@@ -4,14 +4,23 @@ package logging
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+)
+
+// Package-level compiled regexes for performance
+var (
+	requestIndexRegex         = regexp.MustCompile(`REQUEST\s+(\d+)`)
+	fileNameInvalidCharsRegex = regexp.MustCompile(`[<>:"|?*\s]`)
+	fileNameMultipleHyphens   = regexp.MustCompile(`-+`)
 )
 
 // WriteJSONLog writes a complete request/response cycle as a JSON file.
@@ -148,32 +157,36 @@ func parseAPIRequestLogData(data []byte) *UpstreamAttempt {
 	var authParts []string
 
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
+		trimmedLine := strings.TrimSpace(line)
 
-		if strings.HasPrefix(line, "=== API REQUEST") {
-			if idx := extractRequestIndex(line); idx > 0 {
+		if strings.HasPrefix(trimmedLine, "=== API REQUEST") {
+			if idx := extractRequestIndex(trimmedLine); idx > 0 {
 				attempt.Index = idx
 			}
 			continue
 		}
 
 		switch {
-		case strings.HasPrefix(line, "Timestamp:"):
-			attempt.Timestamp = strings.TrimSpace(strings.TrimPrefix(line, "Timestamp:"))
-		case strings.HasPrefix(line, "Upstream URL:"):
-			attempt.URL = strings.TrimSpace(strings.TrimPrefix(line, "Upstream URL:"))
-		case strings.HasPrefix(line, "HTTP Method:"):
-			attempt.Method = strings.TrimSpace(strings.TrimPrefix(line, "HTTP Method:"))
-		case strings.HasPrefix(line, "Auth:"):
-			authParts = append(authParts, strings.TrimSpace(strings.TrimPrefix(line, "Auth:")))
-		case line == "Headers:":
+		case strings.HasPrefix(trimmedLine, "Timestamp:"):
+			attempt.Timestamp = strings.TrimSpace(strings.TrimPrefix(trimmedLine, "Timestamp:"))
+		case strings.HasPrefix(trimmedLine, "Upstream URL:"):
+			attempt.URL = strings.TrimSpace(strings.TrimPrefix(trimmedLine, "Upstream URL:"))
+		case strings.HasPrefix(trimmedLine, "HTTP Method:"):
+			attempt.Method = strings.TrimSpace(strings.TrimPrefix(trimmedLine, "HTTP Method:"))
+		case strings.HasPrefix(trimmedLine, "Auth:"):
+			authParts = append(authParts, strings.TrimSpace(strings.TrimPrefix(trimmedLine, "Auth:")))
+		case trimmedLine == "Headers:":
 			inBody = false
-		case line == "Body:":
+		case trimmedLine == "Body:":
 			inBody = true
-		case inBody && line != "" && line != "<empty>":
-			bodyBuilder.WriteString(line)
-		case strings.Contains(line, ":") && !inBody:
-			parts := strings.SplitN(line, ":", 2)
+		case inBody && trimmedLine != "" && trimmedLine != "<empty>":
+			// Preserve newlines for multi-line body
+			if bodyBuilder.Len() > 0 {
+				bodyBuilder.WriteString("\n")
+			}
+			bodyBuilder.WriteString(line) // Use original line to preserve indentation
+		case strings.Contains(trimmedLine, ":") && !inBody:
+			parts := strings.SplitN(trimmedLine, ":", 2)
 			if len(parts) == 2 {
 				headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 			}
@@ -184,7 +197,7 @@ func parseAPIRequestLogData(data []byte) *UpstreamAttempt {
 		attempt.Headers = headers
 	}
 
-	if bodyStr := bodyBuilder.String(); bodyStr != "" {
+	if bodyStr := strings.TrimSpace(bodyBuilder.String()); bodyStr != "" {
 		if json.Valid([]byte(bodyStr)) {
 			attempt.Body = json.RawMessage(bodyStr)
 		}
@@ -198,14 +211,18 @@ func parseAPIRequestLogData(data []byte) *UpstreamAttempt {
 }
 
 func extractRequestIndex(line string) int {
-	re := regexp.MustCompile(`REQUEST\s+(\d+)`)
-	matches := re.FindStringSubmatch(line)
+	matches := requestIndexRegex.FindStringSubmatch(line)
 	if len(matches) >= 2 {
-		var idx int
-		fmt.Sscanf(matches[1], "%d", &idx)
-		return idx
+		if idx, err := strconv.Atoi(matches[1]); err == nil {
+			return idx
+		}
 	}
 	return 0
+}
+
+// statusText returns HTTP status text using standard library.
+func statusText(code int) string {
+	return http.StatusText(code)
 }
 
 func parseAuthInfoData(authStr string) *AuthInfo {

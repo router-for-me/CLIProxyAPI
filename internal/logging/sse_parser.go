@@ -51,18 +51,23 @@ func (p *SSEParser) ParseChunk(chunk []byte) {
 		return
 	}
 
-	// Parse based on format
-	p.parseVertexFormat(data)
-	p.parseClaudeFormat(data)
+	// Parse based on format - stop after first successful parse
+	if p.parseVertexFormat(data) {
+		return
+	}
+	if p.parseClaudeFormat(data) {
+		return
+	}
 	p.parseOpenAIFormat(data)
 }
 
 // parseVertexFormat handles Vertex/Gemini API response format.
-func (p *SSEParser) parseVertexFormat(data map[string]interface{}) {
+// Returns true if the format was matched and processed.
+func (p *SSEParser) parseVertexFormat(data map[string]interface{}) bool {
 	// Check for response.candidates[0].content.parts
 	response, ok := data["response"].(map[string]interface{})
 	if !ok {
-		return
+		return false
 	}
 
 	// Extract model version
@@ -77,22 +82,22 @@ func (p *SSEParser) parseVertexFormat(data map[string]interface{}) {
 
 	candidates, ok := response["candidates"].([]interface{})
 	if !ok || len(candidates) == 0 {
-		return
+		return true // Matched Vertex format even without candidates
 	}
 
 	candidate, ok := candidates[0].(map[string]interface{})
 	if !ok {
-		return
+		return true
 	}
 
 	content, ok := candidate["content"].(map[string]interface{})
 	if !ok {
-		return
+		return true
 	}
 
 	parts, ok := content["parts"].([]interface{})
 	if !ok || len(parts) == 0 {
-		return
+		return true
 	}
 
 	for _, part := range parts {
@@ -114,21 +119,23 @@ func (p *SSEParser) parseVertexFormat(data map[string]interface{}) {
 			p.aggregator.AddResponseChunk(text)
 		}
 	}
+	return true
 }
 
 // parseClaudeFormat handles Claude API SSE response format.
-func (p *SSEParser) parseClaudeFormat(data map[string]interface{}) {
+// Returns true if the format was matched and processed.
+func (p *SSEParser) parseClaudeFormat(data map[string]interface{}) bool {
 	// Check for content_block_delta type
 	msgType, ok := data["type"].(string)
 	if !ok {
-		return
+		return false
 	}
 
 	switch msgType {
 	case "content_block_delta":
 		delta, ok := data["delta"].(map[string]interface{})
 		if !ok {
-			return
+			return true
 		}
 
 		deltaType, _ := delta["type"].(string)
@@ -146,7 +153,7 @@ func (p *SSEParser) parseClaudeFormat(data map[string]interface{}) {
 	case "message_start":
 		msg, ok := data["message"].(map[string]interface{})
 		if !ok {
-			return
+			return true
 		}
 		if model, ok := msg["model"].(string); ok {
 			p.modelVersion = model
@@ -159,7 +166,10 @@ func (p *SSEParser) parseClaudeFormat(data map[string]interface{}) {
 		if usage, ok := data["usage"].(map[string]interface{}); ok {
 			p.extractTokenUsage(usage)
 		}
+	default:
+		// Unknown Claude message type, but still matched the format
 	}
+	return true
 }
 
 // parseOpenAIFormat handles OpenAI-compatible SSE response format.
@@ -205,33 +215,28 @@ func (p *SSEParser) extractTokenUsage(usage map[string]interface{}) {
 		p.tokenUsage = &TokenSummary{}
 	}
 
-	// Vertex/Gemini format
+	// Extract input tokens (prioritize Vertex format)
 	if v, ok := usage["promptTokenCount"].(float64); ok {
 		p.tokenUsage.Input = int(v)
+	} else if v, ok := usage["input_tokens"].(float64); ok { // Claude format
+		p.tokenUsage.Input = int(v)
+	} else if v, ok := usage["prompt_tokens"].(float64); ok { // OpenAI format
+		p.tokenUsage.Input = int(v)
 	}
+
+	// Extract output tokens (prioritize Vertex format)
 	if v, ok := usage["candidatesTokenCount"].(float64); ok {
 		p.tokenUsage.Output = int(v)
+	} else if v, ok := usage["output_tokens"].(float64); ok { // Claude format
+		p.tokenUsage.Output = int(v)
+	} else if v, ok := usage["completion_tokens"].(float64); ok { // OpenAI format
+		p.tokenUsage.Output = int(v)
 	}
+
+	// Extract total tokens
 	if v, ok := usage["totalTokenCount"].(float64); ok {
 		p.tokenUsage.Total = int(v)
-	}
-
-	// Claude/OpenAI format
-	if v, ok := usage["input_tokens"].(float64); ok {
-		p.tokenUsage.Input = int(v)
-	}
-	if v, ok := usage["output_tokens"].(float64); ok {
-		p.tokenUsage.Output = int(v)
-	}
-
-	// OpenAI format
-	if v, ok := usage["prompt_tokens"].(float64); ok {
-		p.tokenUsage.Input = int(v)
-	}
-	if v, ok := usage["completion_tokens"].(float64); ok {
-		p.tokenUsage.Output = int(v)
-	}
-	if v, ok := usage["total_tokens"].(float64); ok {
+	} else if v, ok := usage["total_tokens"].(float64); ok { // OpenAI format
 		p.tokenUsage.Total = int(v)
 	}
 
