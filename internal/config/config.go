@@ -75,6 +75,9 @@ type Config struct {
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
+	// ModelFallback configures automatic fallback to alternative models when primary fails.
+	ModelFallback ModelFallbackConfig `yaml:"model-fallback" json:"model-fallback"`
+
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
@@ -163,6 +166,38 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// ModelFallbackConfig configures automatic model fallback when primary model fails.
+type ModelFallbackConfig struct {
+	// Enabled toggles the model fallback feature globally.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// MaxFallbackAttempts limits how many fallback models to try (default: 1).
+	MaxFallbackAttempts int `yaml:"max-fallback-attempts,omitempty" json:"max-fallback-attempts,omitempty"`
+
+	// Mappings defines model fallback chains.
+	Mappings []ModelFallbackMapping `yaml:"mappings" json:"mappings"`
+}
+
+// ModelFallbackMapping defines a single model fallback rule.
+type ModelFallbackMapping struct {
+	// From is the primary model name (supports wildcards: "claude-*", "*-preview").
+	From string `yaml:"from" json:"from"`
+
+	// To is the fallback model name to use when the primary fails.
+	To string `yaml:"to" json:"to"`
+
+	// OnStatusCodes specifies which HTTP status codes trigger fallback.
+	// Common values: 429 (rate limit), 503 (unavailable), 502 (bad gateway).
+	// If empty, defaults to [429, 502, 503, 529].
+	OnStatusCodes []int `yaml:"on-status-codes,omitempty" json:"on-status-codes,omitempty"`
+
+	// OnTimeout triggers fallback when request times out.
+	OnTimeout bool `yaml:"on-timeout,omitempty" json:"on-timeout,omitempty"`
+
+	// Regex indicates whether 'From' should be treated as a regular expression.
+	Regex bool `yaml:"regex,omitempty" json:"regex,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

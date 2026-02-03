@@ -79,6 +79,25 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
 
+# Model fallback configuration
+# When a model fails with specific error codes (429, 503, etc.), automatically retry with a fallback model.
+# model-fallback:
+#   enabled: true
+#   max-fallback-attempts: 1  # How many fallback models to try (default: 1)
+#   mappings:
+#     - from: "claude-opus-4-5"           # Primary model (supports wildcards: "claude-*", "*-preview")
+#       to: "gpt-5.2"                     # Fallback model to use
+#       on-status-codes: [429, 502, 503]  # HTTP codes that trigger fallback (default: [429, 502, 503, 529])
+#       on-timeout: true                  # Trigger fallback on request timeout
+#     - from: "claude-sonnet-*"
+#       to: "gpt-5.2-codex"
+#     - from: "claude-haiku-*"
+#       to: "gpt-5.2"
+#       on-status-codes: [429]            # Only fallback on rate limit
+#     - from: "gemini-.*-preview"         # Regex pattern example
+#       to: "gpt-5.2"
+#       regex: true                       # Treat 'from' as regular expression
+
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first

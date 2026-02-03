@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -139,6 +140,9 @@ type Manager struct {
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
 
+	// modelFallbackConfig stores model fallback configuration.
+	modelFallbackConfig atomic.Value
+
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
@@ -165,6 +169,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.modelFallbackConfig.Store(&internalconfig.ModelFallbackConfig{})
 	return manager
 }
 
@@ -205,6 +210,123 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.runtimeConfig.Store(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	// Also update model fallback config from runtime config.
+	m.SetModelFallback(&cfg.ModelFallback)
+}
+
+// SetModelFallback updates the model fallback configuration.
+func (m *Manager) SetModelFallback(cfg *internalconfig.ModelFallbackConfig) {
+	if m == nil {
+		return
+	}
+	if cfg == nil {
+		cfg = &internalconfig.ModelFallbackConfig{}
+	}
+	m.modelFallbackConfig.Store(cfg)
+}
+
+// getModelFallbackConfig returns the current model fallback configuration.
+func (m *Manager) getModelFallbackConfig() *internalconfig.ModelFallbackConfig {
+	if m == nil {
+		return nil
+	}
+	cfg, _ := m.modelFallbackConfig.Load().(*internalconfig.ModelFallbackConfig)
+	return cfg
+}
+
+// resolveFallbackModel finds a fallback model for the given primary model and error.
+// Returns empty string if no fallback is configured or applicable.
+func (m *Manager) resolveFallbackModel(primaryModel string, err error, triedFallbacks map[string]struct{}) string {
+	cfg := m.getModelFallbackConfig()
+	if cfg == nil || !cfg.Enabled || len(cfg.Mappings) == 0 {
+		return ""
+	}
+
+	statusCode := statusCodeFromError(err)
+	isTimeout := isTimeoutError(err)
+
+	for _, mapping := range cfg.Mappings {
+		// Check if this mapping applies to the primary model.
+		if !modelMatchesPattern(primaryModel, mapping.From, mapping.Regex) {
+			continue
+		}
+
+		// Check if fallback was already tried.
+		if _, tried := triedFallbacks[mapping.To]; tried {
+			continue
+		}
+
+		// Check if error triggers this fallback.
+		if shouldTriggerFallback(statusCode, isTimeout, mapping) {
+			return mapping.To
+		}
+	}
+	return ""
+}
+
+// modelMatchesPattern checks if model matches the pattern (supports wildcards and regex).
+func modelMatchesPattern(model, pattern string, isRegex bool) bool {
+	if isRegex {
+		matched, err := regexp.MatchString(pattern, model)
+		return err == nil && matched
+	}
+
+	// Wildcard matching: "*" matches any sequence.
+	if strings.Contains(pattern, "*") {
+		// Convert wildcard pattern to regex.
+		regexPattern := "^" + regexp.QuoteMeta(pattern) + "$"
+		regexPattern = strings.ReplaceAll(regexPattern, `\*`, ".*")
+		matched, err := regexp.MatchString(regexPattern, model)
+		return err == nil && matched
+	}
+
+	// Exact match (case-insensitive).
+	return strings.EqualFold(model, pattern)
+}
+
+// shouldTriggerFallback checks if the error should trigger a fallback based on mapping config.
+func shouldTriggerFallback(statusCode int, isTimeout bool, mapping internalconfig.ModelFallbackMapping) bool {
+	// Check timeout.
+	if isTimeout && mapping.OnTimeout {
+		return true
+	}
+
+	// Determine status codes to trigger on.
+	triggerCodes := mapping.OnStatusCodes
+	if len(triggerCodes) == 0 {
+		// Default trigger codes.
+		triggerCodes = []int{429, 502, 503, 529}
+	}
+
+	for _, code := range triggerCodes {
+		if statusCode == code {
+			return true
+		}
+	}
+	return false
+}
+
+// isTimeoutError checks if the error is a timeout.
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "deadline exceeded") ||
+		errors.Is(err, context.DeadlineExceeded)
+}
+
+// logModelFallback logs when a model fallback occurs.
+func (m *Manager) logModelFallback(ctx context.Context, fromModel, toModel string, err error) {
+	entry := logEntryWithRequestID(ctx)
+	statusCode := statusCodeFromError(err)
+	entry.WithFields(log.Fields{
+		"from_model":  fromModel,
+		"to_model":    toModel,
+		"status_code": statusCode,
+		"error":       err.Error(),
+	}).Info("model fallback triggered")
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -471,6 +593,7 @@ func (m *Manager) Load(ctx context.Context) error {
 
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
+// When model fallback is enabled, it will try alternative models if the primary fails with configured error codes.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -478,6 +601,14 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 
 	_, maxWait := m.retrySettings()
+	originalModel := req.Model
+	triedFallbacks := make(map[string]struct{})
+	fallbackCfg := m.getModelFallbackConfig()
+	maxFallbackAttempts := 1
+	if fallbackCfg != nil && fallbackCfg.MaxFallbackAttempts > 0 {
+		maxFallbackAttempts = fallbackCfg.MaxFallbackAttempts
+	}
+	fallbackAttempt := 0
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -488,12 +619,26 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
+			// Try model fallback before giving up.
+			if fallbackAttempt < maxFallbackAttempts {
+				fallbackModel := m.resolveFallbackModel(req.Model, errExec, triedFallbacks)
+				if fallbackModel != "" {
+					triedFallbacks[fallbackModel] = struct{}{}
+					fallbackAttempt++
+					m.logModelFallback(ctx, req.Model, fallbackModel, errExec)
+					req.Model = fallbackModel
+					attempt = -1 // Reset retry counter for fallback model.
+					continue
+				}
+			}
 			break
 		}
 		if errWait := waitForCooldown(ctx, wait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
 	}
+	// Restore original model in request for error context.
+	req.Model = originalModel
 	if lastErr != nil {
 		return cliproxyexecutor.Response{}, lastErr
 	}
@@ -502,6 +647,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // ExecuteCount performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
+// When model fallback is enabled, it will try alternative models if the primary fails with configured error codes.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -509,6 +655,14 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	}
 
 	_, maxWait := m.retrySettings()
+	originalModel := req.Model
+	triedFallbacks := make(map[string]struct{})
+	fallbackCfg := m.getModelFallbackConfig()
+	maxFallbackAttempts := 1
+	if fallbackCfg != nil && fallbackCfg.MaxFallbackAttempts > 0 {
+		maxFallbackAttempts = fallbackCfg.MaxFallbackAttempts
+	}
+	fallbackAttempt := 0
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -519,12 +673,26 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
+			// Try model fallback before giving up.
+			if fallbackAttempt < maxFallbackAttempts {
+				fallbackModel := m.resolveFallbackModel(req.Model, errExec, triedFallbacks)
+				if fallbackModel != "" {
+					triedFallbacks[fallbackModel] = struct{}{}
+					fallbackAttempt++
+					m.logModelFallback(ctx, req.Model, fallbackModel, errExec)
+					req.Model = fallbackModel
+					attempt = -1 // Reset retry counter for fallback model.
+					continue
+				}
+			}
 			break
 		}
 		if errWait := waitForCooldown(ctx, wait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
 	}
+	// Restore original model in request for error context.
+	req.Model = originalModel
 	if lastErr != nil {
 		return cliproxyexecutor.Response{}, lastErr
 	}
@@ -533,6 +701,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
+// When model fallback is enabled, it will try alternative models if the primary fails with configured error codes.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -540,6 +709,14 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	}
 
 	_, maxWait := m.retrySettings()
+	originalModel := req.Model
+	triedFallbacks := make(map[string]struct{})
+	fallbackCfg := m.getModelFallbackConfig()
+	maxFallbackAttempts := 1
+	if fallbackCfg != nil && fallbackCfg.MaxFallbackAttempts > 0 {
+		maxFallbackAttempts = fallbackCfg.MaxFallbackAttempts
+	}
+	fallbackAttempt := 0
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -550,12 +727,26 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		lastErr = errStream
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
+			// Try model fallback before giving up.
+			if fallbackAttempt < maxFallbackAttempts {
+				fallbackModel := m.resolveFallbackModel(req.Model, errStream, triedFallbacks)
+				if fallbackModel != "" {
+					triedFallbacks[fallbackModel] = struct{}{}
+					fallbackAttempt++
+					m.logModelFallback(ctx, req.Model, fallbackModel, errStream)
+					req.Model = fallbackModel
+					attempt = -1 // Reset retry counter for fallback model.
+					continue
+				}
+			}
 			break
 		}
 		if errWait := waitForCooldown(ctx, wait); errWait != nil {
 			return nil, errWait
 		}
 	}
+	// Restore original model in request for error context.
+	req.Model = originalModel
 	if lastErr != nil {
 		return nil, lastErr
 	}
