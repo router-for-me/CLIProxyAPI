@@ -19,6 +19,7 @@ import (
 //   - codex
 //   - qwen
 //   - iflow
+//   - kiro
 //   - github-copilot
 //   - antigravity (returns static overrides only)
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
@@ -40,6 +41,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetQwenModels()
 	case "iflow":
 		return GetIFlowModels()
+	case "kiro":
+		return GetKiroModels()
 	case "github-copilot":
 		return GetGitHubCopilotModels()
 	case "antigravity":
