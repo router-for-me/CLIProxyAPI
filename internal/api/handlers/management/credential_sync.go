@@ -1,41 +1,11 @@
 package management
 
 import (
-	"crypto/subtle"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
-
-// PeerAuthMiddleware returns a middleware that verifies the X-Peer-Secret header
-// using constant-time comparison. This is for server-to-server peer authentication
-// where both sides share the same config value (which may be a bcrypt hash string).
-// Unlike the management Middleware (which does bcrypt verification against a plaintext
-// password), this performs direct equality comparison — suitable for peer communication.
-func (h *Handler) PeerAuthMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if h == nil || h.authManager == nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "peer authentication not configured"})
-			return
-		}
-		peerSecret := h.authManager.GetPeerSecret()
-		if peerSecret == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "peer authentication not configured"})
-			return
-		}
-		provided := c.GetHeader("X-Peer-Secret")
-		if provided == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing peer secret"})
-			return
-		}
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(peerSecret)) != 1 {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid peer secret"})
-			return
-		}
-		c.Next()
-	}
-}
 
 // HandleCredentialQuery returns the current access_token for a given auth ID.
 // This endpoint is used by follower nodes to fetch credentials from master.

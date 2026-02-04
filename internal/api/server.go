@@ -427,10 +427,8 @@ func (s *Server) setupRoutes() {
 	})
 
 	// Internal credential query endpoint for master-follower mode.
-	// Uses peer auth (constant-time secret comparison) — not management Middleware,
-	// because peer auth shares the raw config value (possibly a bcrypt hash string)
-	// while management Middleware expects plaintext-vs-bcrypt verification.
-	internal := s.engine.Group("/v0/internal", s.mgmt.PeerAuthMiddleware())
+	// Reuses the management Middleware (bcrypt + rate limiting + IP ban).
+	internal := s.engine.Group("/v0/internal", s.mgmt.Middleware())
 	internal.GET("/credential", s.mgmt.HandleCredentialQuery)
 	internal.GET("/auth-list", s.mgmt.HandleAuthList)
 

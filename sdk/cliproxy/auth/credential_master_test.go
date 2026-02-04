@@ -111,8 +111,8 @@ func TestFetchCredentialFromMaster(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		peerSecret := r.Header.Get("X-Peer-Secret")
-		if peerSecret != "test-secret" {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer test-secret" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -204,8 +204,8 @@ func TestSyncAuthsFromMaster(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		peerSecret := r.Header.Get("X-Peer-Secret")
-		if peerSecret != "sync-secret" {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer sync-secret" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

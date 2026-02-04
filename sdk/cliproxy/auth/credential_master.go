@@ -170,7 +170,7 @@ func (m *Manager) fetchCredentialFromMaster(ctx context.Context, id, provider st
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Peer-Secret", secret)
+	req.Header.Set("Authorization", "Bearer "+secret)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -246,7 +246,7 @@ func (m *Manager) SyncAuthsFromMaster(ctx context.Context, authDir string) error
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Peer-Secret", secret)
+	req.Header.Set("Authorization", "Bearer "+secret)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
