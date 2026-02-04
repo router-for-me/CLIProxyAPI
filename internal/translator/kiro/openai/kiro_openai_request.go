@@ -670,18 +670,12 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 				toolName := part.Get("name").String()
 				inputData := part.Get("input")
 
-				var inputMap map[string]interface{}
-				if inputData.Exists() {
-					if inputData.IsObject() {
-						inputMap = make(map[string]interface{})
-						inputData.ForEach(func(key, value gjson.Result) bool {
-							inputMap[key.String()] = value.Value()
-							return true
-						})
-					}
-				}
-				if inputMap == nil {
-					inputMap = make(map[string]interface{})
+				inputMap := make(map[string]interface{})
+				if inputData.Exists() && inputData.IsObject() {
+					inputData.ForEach(func(key, value gjson.Result) bool {
+						inputMap[key.String()] = value.Value()
+						return true
+					})
 				}
 
 				toolUses = append(toolUses, KiroToolUse{
