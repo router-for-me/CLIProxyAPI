@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 func TestSanitizeMetadataForSync(t *testing.T) {
@@ -126,8 +128,10 @@ func TestFetchCredentialFromMaster(t *testing.T) {
 	defer master.Close()
 
 	mgr := NewManager(nil, nil, nil)
-	mgr.credentialMaster = master.URL
-	mgr.peerSecret = "test-secret"
+	mgr.SetConfig(&config.Config{
+		CredentialMaster: master.URL,
+		RemoteManagement: config.RemoteManagement{SecretKey: "test-secret"},
+	})
 
 	// Register a local auth entry
 	mgr.mu.Lock()
@@ -166,7 +170,10 @@ func TestFetchCredentialFromMaster_NoMaster(t *testing.T) {
 
 func TestFetchCredentialFromMaster_NoSecret(t *testing.T) {
 	mgr := NewManager(nil, nil, nil)
-	mgr.credentialMaster = "http://localhost:9999"
+	mgr.SetConfig(&config.Config{
+		CredentialMaster: "http://localhost:9999",
+		// No SecretKey configured
+	})
 	err := mgr.fetchCredentialFromMaster(context.Background(), "x", "claude")
 	if err == nil || err.Error() != "peer secret not configured" {
 		t.Errorf("expected 'peer secret not configured', got %v", err)
@@ -220,8 +227,10 @@ func TestSyncAuthsFromMaster(t *testing.T) {
 
 	dir := t.TempDir()
 	mgr := NewManager(nil, nil, nil)
-	mgr.credentialMaster = master.URL
-	mgr.peerSecret = "sync-secret"
+	mgr.SetConfig(&config.Config{
+		CredentialMaster: master.URL,
+		RemoteManagement: config.RemoteManagement{SecretKey: "sync-secret"},
+	})
 
 	err := mgr.SyncAuthsFromMaster(context.Background(), dir)
 	if err != nil {

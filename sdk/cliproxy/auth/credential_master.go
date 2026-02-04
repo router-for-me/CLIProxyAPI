@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
@@ -42,44 +43,28 @@ func (m *Manager) tryFetchFromMasterOnUnauthorized(ctx context.Context, statusCo
 	return true
 }
 
-// SetCredentialMaster sets the master node URL for credential synchronization.
-func (m *Manager) SetCredentialMaster(master string) {
-	if m == nil {
-		return
-	}
-	m.masterMu.Lock()
-	m.credentialMaster = strings.TrimSpace(master)
-	m.masterMu.Unlock()
-}
-
-// GetCredentialMaster returns the configured master node URL.
+// GetCredentialMaster returns the configured master node URL from runtime config.
 func (m *Manager) GetCredentialMaster() string {
 	if m == nil {
 		return ""
 	}
-	m.masterMu.RLock()
-	defer m.masterMu.RUnlock()
-	return m.credentialMaster
-}
-
-// SetPeerSecret sets the shared secret for peer authentication.
-func (m *Manager) SetPeerSecret(secret string) {
-	if m == nil {
-		return
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return ""
 	}
-	m.masterMu.Lock()
-	m.peerSecret = secret
-	m.masterMu.Unlock()
+	return strings.TrimSpace(cfg.CredentialMaster)
 }
 
-// GetPeerSecret returns the current peer secret.
-func (m *Manager) GetPeerSecret() string {
+// getPeerSecret returns the peer secret from runtime config.
+func (m *Manager) getPeerSecret() string {
 	if m == nil {
 		return ""
 	}
-	m.masterMu.RLock()
-	defer m.masterMu.RUnlock()
-	return m.peerSecret
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return ""
+	}
+	return cfg.RemoteManagement.SecretKey
 }
 
 // GetAccessToken returns the access_token for a given auth ID.
@@ -180,7 +165,7 @@ func (m *Manager) fetchCredentialFromMaster(ctx context.Context, id, provider st
 	if master == "" {
 		return errors.New("credential-master not configured")
 	}
-	secret := m.GetPeerSecret()
+	secret := m.getPeerSecret()
 	if secret == "" {
 		return errors.New("peer secret not configured")
 	}
@@ -254,7 +239,7 @@ func (m *Manager) SyncAuthsFromMaster(ctx context.Context, authDir string) error
 	if master == "" {
 		return nil
 	}
-	secret := m.GetPeerSecret()
+	secret := m.getPeerSecret()
 	if secret == "" {
 		log.Warnf("SyncAuthsFromMaster: peer secret not configured")
 		return errors.New("peer secret not configured")

@@ -252,10 +252,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.applyAccessConfig(nil, cfg)
 	if authManager != nil {
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
-		authManager.SetCredentialMaster(cfg.CredentialMaster)
-		if cfg.RemoteManagement.SecretKey != "" {
-			authManager.SetPeerSecret(cfg.RemoteManagement.SecretKey)
-		}
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
@@ -910,10 +906,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
-		s.handlers.AuthManager.SetCredentialMaster(cfg.CredentialMaster)
-		if cfg.RemoteManagement.SecretKey != "" {
-			s.handlers.AuthManager.SetPeerSecret(cfg.RemoteManagement.SecretKey)
-		}
 	}
 
 	// Update log level dynamically when debug flag changes

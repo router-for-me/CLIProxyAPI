@@ -144,11 +144,6 @@ type Manager struct {
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
-
-	// Master-follower credential sync
-	credentialMaster string
-	peerSecret       string
-	masterMu         sync.RWMutex
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
