@@ -1236,10 +1236,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 				statusCode := statusCodeFromResult(result.Error)
 				switch statusCode {
-				case 401, 403:
-					// 401 = Unauthorized, 403 = Forbidden
-					// Note: For follower nodes, execute layer handles fetch-from-master and retries.
-					// If MarkResult is called, it means retry already failed or wasn't applicable.
+				case 401:
 					state.NextRetryAfter = now.Add(30 * time.Minute)
 					suspendReason = "unauthorized"
 					shouldSuspendModel = true
@@ -1309,9 +1306,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
-
-	// Note: credential fetch from master is now handled synchronously in execute functions
-	// (executeMixedOnce, executeStreamMixedOnce) to enable immediate retry with new token
 
 	m.hook.OnResult(ctx, result)
 }
