@@ -22,6 +22,26 @@ type AuthSyncData struct {
 	Metadata map[string]any `json:"metadata"`
 }
 
+// tryFetchFromMasterOnUnauthorized attempts to fetch credentials from master on 401 errors.
+// Returns true if retry should happen (fetch succeeded and auth not yet retried).
+// The fetched map tracks which auth IDs have already been fetched to prevent infinite loops.
+func (m *Manager) tryFetchFromMasterOnUnauthorized(ctx context.Context, statusCode int, authID, provider string, fetched map[string]struct{}) bool {
+	if statusCode != 401 || m.GetCredentialMaster() == "" {
+		return false
+	}
+	if _, alreadyFetched := fetched[authID]; alreadyFetched {
+		log.Warnf("got %d again after fetching from master, not retrying", statusCode)
+		return false
+	}
+	log.Infof("got %d, fetching credential from master and retrying...", statusCode)
+	fetched[authID] = struct{}{}
+	if err := m.fetchCredentialFromMaster(ctx, authID, provider); err != nil {
+		log.Warnf("failed to fetch credential from master: %v", err)
+		return false
+	}
+	return true
+}
+
 // SetCredentialMaster sets the master node URL for credential synchronization.
 func (m *Manager) SetCredentialMaster(master string) {
 	if m == nil {

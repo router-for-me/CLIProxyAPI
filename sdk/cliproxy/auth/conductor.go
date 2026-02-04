@@ -616,27 +616,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				result.RetryAfter = ra
 			}
 
-			// If 401 and credential-master is configured, sync fetch and retry (only once per auth)
-			// Note: 403 is NOT included because it may indicate TLS fingerprint mismatch (network config issue),
-			// not an invalid token. Fetching a new token won't help in that case.
 			statusCode := 0
 			if result.Error != nil {
 				statusCode = result.Error.HTTPStatus
 			}
-			if statusCode == 401 && m.GetCredentialMaster() != "" {
-				if _, alreadyFetched := fetchedFromMaster[auth.ID]; !alreadyFetched {
-					log.Infof("got %d, fetching credential from master and retrying...", statusCode)
-					fetchedFromMaster[auth.ID] = struct{}{} // Mark as fetched to prevent infinite loop
-					if err := m.fetchCredentialFromMaster(ctx, auth.ID, provider); err != nil {
-						log.Warnf("failed to fetch credential from master: %v", err)
-					} else {
-						// Fetch succeeded, remove from tried to allow retry with new token
-						delete(tried, auth.ID)
-						continue
-					}
-				} else {
-					log.Warnf("got %d again after fetching from master, not retrying to prevent infinite loop", statusCode)
-				}
+			if m.tryFetchFromMasterOnUnauthorized(ctx, statusCode, auth.ID, provider, fetchedFromMaster) {
+				delete(tried, auth.ID)
+				continue
 			}
 
 			m.MarkResult(execCtx, result)
@@ -743,27 +729,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				rerr.HTTPStatus = se.StatusCode()
 			}
 
-			// If 401 and credential-master is configured, sync fetch and retry (only once per auth)
-			// Note: 403 is NOT included because it may indicate TLS fingerprint mismatch (network config issue),
-			// not an invalid token. Fetching a new token won't help in that case.
-			statusCode := 0
-			if rerr != nil {
-				statusCode = rerr.HTTPStatus
-			}
-			if statusCode == 401 && m.GetCredentialMaster() != "" {
-				if _, alreadyFetched := fetchedFromMaster[auth.ID]; !alreadyFetched {
-					log.Infof("stream got %d, fetching credential from master and retrying...", statusCode)
-					fetchedFromMaster[auth.ID] = struct{}{} // Mark as fetched to prevent infinite loop
-					if err := m.fetchCredentialFromMaster(ctx, auth.ID, provider); err != nil {
-						log.Warnf("failed to fetch credential from master: %v", err)
-					} else {
-						// Fetch succeeded, remove from tried to allow retry with new token
-						delete(tried, auth.ID)
-						continue
-					}
-				} else {
-					log.Warnf("stream got %d again after fetching from master, not retrying to prevent infinite loop", statusCode)
-				}
+			if m.tryFetchFromMasterOnUnauthorized(ctx, rerr.HTTPStatus, auth.ID, provider, fetchedFromMaster) {
+				delete(tried, auth.ID)
+				continue
 			}
 
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
