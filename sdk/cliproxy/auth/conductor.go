@@ -2009,7 +2009,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 
 	// Follower nodes (with credential-master configured) fetch from master instead of local refresh
 	if m.GetCredentialMaster() != "" {
-		// Errors are logged inside fetchCredentialFromMaster, will retry on next refresh cycle or on 401/403
+		// Errors are logged inside fetchCredentialFromMaster, will retry on next refresh cycle or on 401
 		m.fetchCredentialFromMaster(ctx, id, auth.Provider)
 		return
 	}
