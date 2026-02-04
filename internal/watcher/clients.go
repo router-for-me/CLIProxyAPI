@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -72,6 +74,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Lock()
 
 		w.lastAuthHashes = make(map[string]string)
+		w.lastAuthContents = make(map[string]*coreauth.Auth)
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
@@ -84,6 +87,11 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 						sum := sha256.Sum256(data)
 						normalizedPath := w.normalizeAuthPath(path)
 						w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
+						// Parse and cache auth content for future diff comparisons
+						var auth coreauth.Auth
+						if errParse := json.Unmarshal(data, &auth); errParse == nil {
+							w.lastAuthContents[normalizedPath] = &auth
+						}
 					}
 				}
 				return nil
@@ -127,6 +135,13 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	curHash := hex.EncodeToString(sum[:])
 	normalized := w.normalizeAuthPath(path)
 
+	// Parse new auth content for diff comparison
+	var newAuth coreauth.Auth
+	if errParse := json.Unmarshal(data, &newAuth); errParse != nil {
+		log.Errorf("failed to parse auth file %s: %v", filepath.Base(path), errParse)
+		return
+	}
+
 	w.clientsMutex.Lock()
 
 	cfg := w.config
@@ -141,7 +156,26 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		return
 	}
 
+	// Get old auth for diff comparison
+	var oldAuth *coreauth.Auth
+	if w.lastAuthContents != nil {
+		oldAuth = w.lastAuthContents[normalized]
+	}
+
+	// Compute and log field changes
+	if changes := diff.BuildAuthChangeDetails(oldAuth, &newAuth); len(changes) > 0 {
+		log.Debugf("auth field changes for %s:", filepath.Base(path))
+		for _, c := range changes {
+			log.Debugf("  %s", c)
+		}
+	}
+
+	// Update caches
 	w.lastAuthHashes[normalized] = curHash
+	if w.lastAuthContents == nil {
+		w.lastAuthContents = make(map[string]*coreauth.Auth)
+	}
+	w.lastAuthContents[normalized] = &newAuth
 
 	w.clientsMutex.Unlock() // Unlock before the callback
 
@@ -160,6 +194,7 @@ func (w *Watcher) removeClient(path string) {
 
 	cfg := w.config
 	delete(w.lastAuthHashes, normalized)
+	delete(w.lastAuthContents, normalized)
 
 	w.clientsMutex.Unlock() // Release the lock before the callback
 

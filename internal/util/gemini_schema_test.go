@@ -869,3 +869,129 @@ func TestCleanJSONSchemaForAntigravity_BooleanEnumToString(t *testing.T) {
 		t.Errorf("Boolean enum values should be converted to string format, got: %s", result)
 	}
 }
+
+func TestRemoveExtensionFields(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name: "removes x- fields at root",
+			input: `{
+				"type": "object",
+				"x-custom-meta": "value",
+				"properties": {
+					"foo": { "type": "string" }
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"foo": { "type": "string" }
+				}
+			}`,
+		},
+		{
+			name: "removes x- fields in nested properties",
+			input: `{
+				"type": "object",
+				"properties": {
+					"foo": {
+						"type": "string",
+						"x-internal-id": 123
+					}
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"foo": {
+						"type": "string"
+					}
+				}
+			}`,
+		},
+		{
+			name: "does NOT remove properties named x-",
+			input: `{
+				"type": "object",
+				"properties": {
+					"x-data": { "type": "string" },
+					"normal": { "type": "number", "x-meta": "remove" }
+				},
+				"required": ["x-data"]
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"x-data": { "type": "string" },
+					"normal": { "type": "number" }
+				},
+				"required": ["x-data"]
+			}`,
+		},
+		{
+			name: "does NOT remove $schema and other meta fields (as requested)",
+			input: `{
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"$id": "test",
+				"type": "object",
+				"properties": {
+					"foo": { "type": "string" }
+				}
+			}`,
+			expected: `{
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"$id": "test",
+				"type": "object",
+				"properties": {
+					"foo": { "type": "string" }
+				}
+			}`,
+		},
+		{
+			name: "handles properties named $schema",
+			input: `{
+				"type": "object",
+				"properties": {
+					"$schema": { "type": "string" }
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"$schema": { "type": "string" }
+				}
+			}`,
+		},
+		{
+			name: "handles escaping in paths",
+			input: `{
+				"type": "object",
+				"properties": {
+					"foo.bar": {
+						"type": "string",
+						"x-meta": "remove"
+					}
+				},
+				"x-root.meta": "remove"
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"foo.bar": {
+						"type": "string"
+					}
+				}
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := removeExtensionFields(tt.input)
+			compareJSON(t, tt.expected, actual)
+		})
+	}
+}

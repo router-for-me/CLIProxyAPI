@@ -1,7 +1,7 @@
-// Package iflow implements thinking configuration for iFlow models (GLM, MiniMax).
+// Package iflow implements thinking configuration for iFlow models.
 //
 // iFlow models use boolean toggle semantics:
-//   - GLM models: chat_template_kwargs.enable_thinking (boolean)
+//   - Models using chat_template_kwargs.enable_thinking (boolean toggle)
 //   - MiniMax models: reasoning_split (boolean)
 //
 // Level values are converted to boolean: none=false, all others=true
@@ -20,6 +20,7 @@ import (
 // Applier implements thinking.ProviderApplier for iFlow models.
 //
 // iFlow-specific behavior:
+//   - enable_thinking toggle models: enable_thinking boolean
 //   - GLM models: enable_thinking boolean + clear_thinking=false
 //   - MiniMax models: reasoning_split boolean
 //   - Level to boolean: none=false, others=true
@@ -61,8 +62,8 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return body, nil
 	}
 
-	if isGLMModel(modelInfo.ID) {
-		return applyGLM(body, config), nil
+	if isEnableThinkingModel(modelInfo.ID) {
+		return applyEnableThinking(body, config, isGLMModel(modelInfo.ID)), nil
 	}
 
 	if isMiniMaxModel(modelInfo.ID) {
@@ -97,7 +98,8 @@ func configToBoolean(config thinking.ThinkingConfig) bool {
 	}
 }
 
-// applyGLM applies thinking configuration for GLM models.
+// applyEnableThinking applies thinking configuration for models that use
+// chat_template_kwargs.enable_thinking format.
 //
 // Output format when enabled:
 //
@@ -107,9 +109,8 @@ func configToBoolean(config thinking.ThinkingConfig) bool {
 //
 //	{"chat_template_kwargs": {"enable_thinking": false}}
 //
-// Note: clear_thinking is only set when thinking is enabled, to preserve
-// thinking output in the response.
-func applyGLM(body []byte, config thinking.ThinkingConfig) []byte {
+// Note: clear_thinking is only set for GLM models when thinking is enabled.
+func applyEnableThinking(body []byte, config thinking.ThinkingConfig, setClearThinking bool) []byte {
 	enableThinking := configToBoolean(config)
 
 	if len(body) == 0 || !gjson.ValidBytes(body) {
@@ -118,8 +119,11 @@ func applyGLM(body []byte, config thinking.ThinkingConfig) []byte {
 
 	result, _ := sjson.SetBytes(body, "chat_template_kwargs.enable_thinking", enableThinking)
 
+	// clear_thinking is a GLM-only knob, strip it for other models.
+	result, _ = sjson.DeleteBytes(result, "chat_template_kwargs.clear_thinking")
+
 	// clear_thinking only needed when thinking is enabled
-	if enableThinking {
+	if enableThinking && setClearThinking {
 		result, _ = sjson.SetBytes(result, "chat_template_kwargs.clear_thinking", false)
 	}
 
@@ -143,8 +147,21 @@ func applyMiniMax(body []byte, config thinking.ThinkingConfig) []byte {
 	return result
 }
 
+// isEnableThinkingModel determines if the model uses chat_template_kwargs.enable_thinking format.
+func isEnableThinkingModel(modelID string) bool {
+	if isGLMModel(modelID) {
+		return true
+	}
+	id := strings.ToLower(modelID)
+	switch id {
+	case "qwen3-max-preview", "deepseek-v3.2", "deepseek-v3.1":
+		return true
+	default:
+		return false
+	}
+}
+
 // isGLMModel determines if the model is a GLM series model.
-// GLM models use chat_template_kwargs.enable_thinking format.
 func isGLMModel(modelID string) bool {
 	return strings.HasPrefix(strings.ToLower(modelID), "glm")
 }

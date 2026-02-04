@@ -205,7 +205,7 @@ func main() {
 			// Optional: add a simple middleware + custom request logger
 			api.WithMiddleware(func(c *gin.Context) { c.Header("X-Example", "custom-provider"); c.Next() }),
 			api.WithRequestLoggerFactory(func(cfg *config.Config, cfgPath string) logging.RequestLogger {
-				return logging.NewFileRequestLogger(true, "logs", filepath.Dir(cfgPath))
+				return logging.NewFileRequestLoggerWithOptions(true, "logs", filepath.Dir(cfgPath), cfg.ErrorLogsMaxFiles)
 			}),
 		).
 		WithHooks(hooks).

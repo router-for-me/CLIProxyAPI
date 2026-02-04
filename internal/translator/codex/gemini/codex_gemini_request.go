@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
@@ -39,13 +38,8 @@ import (
 //   - []byte: The transformed request data in Codex API format
 func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
-	userAgent := misc.ExtractCodexUserAgent(rawJSON)
 	// Base template
 	out := `{"model":"","instructions":"","input":[]}`
-
-	// Inject standard Codex instructions
-	_, instructions := misc.CodexInstructionsForModel(modelName, "", userAgent)
-	out, _ = sjson.Set(out, "instructions", instructions)
 
 	root := gjson.ParseBytes(rawJSON)
 

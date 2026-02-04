@@ -244,6 +244,8 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 				// Set tool_use stop reason if tools were used in this response
 				if usedTool {
 					template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
+				} else if finish := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
+					template = `{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
 				}
 
 				// Include thinking tokens in output token count if present

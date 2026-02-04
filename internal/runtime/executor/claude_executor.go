@@ -84,6 +84,9 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.Alt == "responses/compact" {
+		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
@@ -119,6 +122,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+
+	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
+	if countCacheControls(body) == 0 {
+		body = ensureCacheControl(body)
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -224,6 +232,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 }
 
 func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	if opts.Alt == "responses/compact" {
+		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
@@ -257,6 +268,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+
+	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
+	if countCacheControls(body) == 0 {
+		body = ensureCacheControl(body)
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -647,12 +663,16 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
+	promptCachingBeta := "prompt-caching-2024-07-31"
+	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14," + promptCachingBeta
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 		baseBetas = val
 		if !strings.Contains(val, "oauth") {
 			baseBetas += ",oauth-2025-04-20"
 		}
+	}
+	if !strings.Contains(baseBetas, promptCachingBeta) {
+		baseBetas += "," + promptCachingBeta
 	}
 
 	// Merge extra betas from request body
@@ -998,6 +1018,262 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	if len(sensitiveWords) > 0 {
 		matcher := buildSensitiveWordMatcher(sensitiveWords)
 		payload = obfuscateSensitiveWords(payload, matcher)
+	}
+
+	return payload
+}
+
+// ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.
+// According to Anthropic's documentation, cache prefixes are created in order: tools -> system -> messages.
+// This function adds cache_control to:
+// 1. The LAST tool in the tools array (caches all tool definitions)
+// 2. The LAST element in the system array (caches system prompt)
+// 3. The SECOND-TO-LAST user turn (caches conversation history for multi-turn)
+//
+// Up to 4 cache breakpoints are allowed per request. Tools, System, and Messages are INDEPENDENT breakpoints.
+// This enables up to 90% cost reduction on cached tokens (cache read = 0.1x base price).
+// See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+func ensureCacheControl(payload []byte) []byte {
+	// 1. Inject cache_control into the LAST tool (caches all tool definitions)
+	// Tools are cached first in the hierarchy, so this is the most important breakpoint.
+	payload = injectToolsCacheControl(payload)
+
+	// 2. Inject cache_control into the LAST system prompt element
+	// System is the second level in the cache hierarchy.
+	payload = injectSystemCacheControl(payload)
+
+	// 3. Inject cache_control into messages for multi-turn conversation caching
+	// This caches the conversation history up to the second-to-last user turn.
+	payload = injectMessagesCacheControl(payload)
+
+	return payload
+}
+
+func countCacheControls(payload []byte) int {
+	count := 0
+
+	// Check system
+	system := gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		system.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				count++
+			}
+			return true
+		})
+	}
+
+	// Check tools
+	tools := gjson.GetBytes(payload, "tools")
+	if tools.IsArray() {
+		tools.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				count++
+			}
+			return true
+		})
+	}
+
+	// Check messages
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if content.IsArray() {
+				content.ForEach(func(_, item gjson.Result) bool {
+					if item.Get("cache_control").Exists() {
+						count++
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+
+	return count
+}
+
+// injectMessagesCacheControl adds cache_control to the second-to-last user turn for multi-turn caching.
+// Per Anthropic docs: "Place cache_control on the second-to-last User message to let the model reuse the earlier cache."
+// This enables caching of conversation history, which is especially beneficial for long multi-turn conversations.
+// Only adds cache_control if:
+// - There are at least 2 user turns in the conversation
+// - No message content already has cache_control
+func injectMessagesCacheControl(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	// Check if ANY message content already has cache_control
+	hasCacheControlInMessages := false
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		content := msg.Get("content")
+		if content.IsArray() {
+			content.ForEach(func(_, item gjson.Result) bool {
+				if item.Get("cache_control").Exists() {
+					hasCacheControlInMessages = true
+					return false
+				}
+				return true
+			})
+		}
+		return !hasCacheControlInMessages
+	})
+	if hasCacheControlInMessages {
+		return payload
+	}
+
+	// Find all user message indices
+	var userMsgIndices []int
+	messages.ForEach(func(index gjson.Result, msg gjson.Result) bool {
+		if msg.Get("role").String() == "user" {
+			userMsgIndices = append(userMsgIndices, int(index.Int()))
+		}
+		return true
+	})
+
+	// Need at least 2 user turns to cache the second-to-last
+	if len(userMsgIndices) < 2 {
+		return payload
+	}
+
+	// Get the second-to-last user message index
+	secondToLastUserIdx := userMsgIndices[len(userMsgIndices)-2]
+
+	// Get the content of this message
+	contentPath := fmt.Sprintf("messages.%d.content", secondToLastUserIdx)
+	content := gjson.GetBytes(payload, contentPath)
+
+	if content.IsArray() {
+		// Add cache_control to the last content block of this message
+		contentCount := int(content.Get("#").Int())
+		if contentCount > 0 {
+			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastUserIdx, contentCount-1)
+			result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral"})
+			if err != nil {
+				log.Warnf("failed to inject cache_control into messages: %v", err)
+				return payload
+			}
+			payload = result
+		}
+	} else if content.Type == gjson.String {
+		// Convert string content to array with cache_control
+		text := content.String()
+		newContent := []map[string]interface{}{
+			{
+				"type": "text",
+				"text": text,
+				"cache_control": map[string]string{
+					"type": "ephemeral",
+				},
+			},
+		}
+		result, err := sjson.SetBytes(payload, contentPath, newContent)
+		if err != nil {
+			log.Warnf("failed to inject cache_control into message string content: %v", err)
+			return payload
+		}
+		payload = result
+	}
+
+	return payload
+}
+
+// injectToolsCacheControl adds cache_control to the last tool in the tools array.
+// Per Anthropic docs: "The cache_control parameter on the last tool definition caches all tool definitions."
+// This only adds cache_control if NO tool in the array already has it.
+func injectToolsCacheControl(payload []byte) []byte {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return payload
+	}
+
+	toolCount := int(tools.Get("#").Int())
+	if toolCount == 0 {
+		return payload
+	}
+
+	// Check if ANY tool already has cache_control - if so, don't modify tools
+	hasCacheControlInTools := false
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if tool.Get("cache_control").Exists() {
+			hasCacheControlInTools = true
+			return false
+		}
+		return true
+	})
+	if hasCacheControlInTools {
+		return payload
+	}
+
+	// Add cache_control to the last tool
+	lastToolPath := fmt.Sprintf("tools.%d.cache_control", toolCount-1)
+	result, err := sjson.SetBytes(payload, lastToolPath, map[string]string{"type": "ephemeral"})
+	if err != nil {
+		log.Warnf("failed to inject cache_control into tools array: %v", err)
+		return payload
+	}
+
+	return result
+}
+
+// injectSystemCacheControl adds cache_control to the last element in the system prompt.
+// Converts string system prompts to array format if needed.
+// This only adds cache_control if NO system element already has it.
+func injectSystemCacheControl(payload []byte) []byte {
+	system := gjson.GetBytes(payload, "system")
+	if !system.Exists() {
+		return payload
+	}
+
+	if system.IsArray() {
+		count := int(system.Get("#").Int())
+		if count == 0 {
+			return payload
+		}
+
+		// Check if ANY system element already has cache_control
+		hasCacheControlInSystem := false
+		system.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				hasCacheControlInSystem = true
+				return false
+			}
+			return true
+		})
+		if hasCacheControlInSystem {
+			return payload
+		}
+
+		// Add cache_control to the last system element
+		lastSystemPath := fmt.Sprintf("system.%d.cache_control", count-1)
+		result, err := sjson.SetBytes(payload, lastSystemPath, map[string]string{"type": "ephemeral"})
+		if err != nil {
+			log.Warnf("failed to inject cache_control into system array: %v", err)
+			return payload
+		}
+		payload = result
+	} else if system.Type == gjson.String {
+		// Convert string system prompt to array with cache_control
+		// "system": "text" -> "system": [{"type": "text", "text": "text", "cache_control": {"type": "ephemeral"}}]
+		text := system.String()
+		newSystem := []map[string]interface{}{
+			{
+				"type": "text",
+				"text": text,
+				"cache_control": map[string]string{
+					"type": "ephemeral",
+				},
+			},
+		}
+		result, err := sjson.SetBytes(payload, "system", newSystem)
+		if err != nil {
+			log.Warnf("failed to inject cache_control into system string: %v", err)
+			return payload
+		}
+		payload = result
 	}
 
 	return payload

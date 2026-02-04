@@ -112,7 +112,10 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.completed" {
 		template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
 		p := (*param).(*ConvertCodexResponseToClaudeParams).HasToolCall
-		if p {
+		stopReason := rootResult.Get("response.stop_reason").String()
+		if stopReason != "" {
+			template, _ = sjson.Set(template, "delta.stop_reason", stopReason)
+		} else if p {
 			template, _ = sjson.Set(template, "delta.stop_reason", "tool_use")
 		} else {
 			template, _ = sjson.Set(template, "delta.stop_reason", "end_turn")

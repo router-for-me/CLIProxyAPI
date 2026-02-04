@@ -21,7 +21,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		return payload
 	}
 	rules := cfg.Payload
-	if len(rules.Default) == 0 && len(rules.DefaultRaw) == 0 && len(rules.Override) == 0 && len(rules.OverrideRaw) == 0 {
+	if len(rules.Default) == 0 && len(rules.DefaultRaw) == 0 && len(rules.Override) == 0 && len(rules.OverrideRaw) == 0 && len(rules.Filter) == 0 {
 		return payload
 	}
 	model = strings.TrimSpace(model)
@@ -39,7 +39,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply default rules: first write wins per field across all matching rules.
 	for i := range rules.Default {
 		rule := &rules.Default[i]
-		if !payloadRuleMatchesModels(rule, protocol, candidates) {
+		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 			continue
 		}
 		for path, value := range rule.Params {
@@ -64,7 +64,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply default raw rules: first write wins per field across all matching rules.
 	for i := range rules.DefaultRaw {
 		rule := &rules.DefaultRaw[i]
-		if !payloadRuleMatchesModels(rule, protocol, candidates) {
+		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 			continue
 		}
 		for path, value := range rule.Params {
@@ -93,7 +93,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply override rules: last write wins per field across all matching rules.
 	for i := range rules.Override {
 		rule := &rules.Override[i]
-		if !payloadRuleMatchesModels(rule, protocol, candidates) {
+		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 			continue
 		}
 		for path, value := range rule.Params {
@@ -111,7 +111,7 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply override raw rules: last write wins per field across all matching rules.
 	for i := range rules.OverrideRaw {
 		rule := &rules.OverrideRaw[i]
-		if !payloadRuleMatchesModels(rule, protocol, candidates) {
+		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 			continue
 		}
 		for path, value := range rule.Params {
@@ -130,38 +130,43 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			out = updated
 		}
 	}
+	// Apply filter rules: remove matching paths from payload.
+	for i := range rules.Filter {
+		rule := &rules.Filter[i]
+		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+			continue
+		}
+		for _, path := range rule.Params {
+			fullPath := buildPayloadPath(root, path)
+			if fullPath == "" {
+				continue
+			}
+			updated, errDel := sjson.DeleteBytes(out, fullPath)
+			if errDel != nil {
+				continue
+			}
+			out = updated
+		}
+	}
 	return out
 }
 
-func payloadRuleMatchesModels(rule *config.PayloadRule, protocol string, models []string) bool {
-	if rule == nil || len(models) == 0 {
+func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, models []string) bool {
+	if len(rules) == 0 || len(models) == 0 {
 		return false
 	}
 	for _, model := range models {
-		if payloadRuleMatchesModel(rule, model, protocol) {
-			return true
-		}
-	}
-	return false
-}
-
-func payloadRuleMatchesModel(rule *config.PayloadRule, model, protocol string) bool {
-	if rule == nil {
-		return false
-	}
-	if len(rule.Models) == 0 {
-		return false
-	}
-	for _, entry := range rule.Models {
-		name := strings.TrimSpace(entry.Name)
-		if name == "" {
-			continue
-		}
-		if ep := strings.TrimSpace(entry.Protocol); ep != "" && protocol != "" && !strings.EqualFold(ep, protocol) {
-			continue
-		}
-		if matchModelPattern(name, model) {
-			return true
+		for _, entry := range rules {
+			name := strings.TrimSpace(entry.Name)
+			if name == "" {
+				continue
+			}
+			if ep := strings.TrimSpace(entry.Protocol); ep != "" && protocol != "" && !strings.EqualFold(ep, protocol) {
+				continue
+			}
+			if matchModelPattern(name, model) {
+				return true
+			}
 		}
 	}
 	return false

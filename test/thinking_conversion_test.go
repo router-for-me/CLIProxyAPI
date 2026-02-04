@@ -2,6 +2,7 @@ package test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -2778,12 +2779,18 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 
 			// Verify clear_thinking for iFlow GLM models when enable_thinking=true
 			if tc.to == "iflow" && tc.expectField == "chat_template_kwargs.enable_thinking" && tc.expectValue == "true" {
+				baseModel := thinking.ParseSuffix(tc.model).ModelName
+				isGLM := strings.HasPrefix(strings.ToLower(baseModel), "glm")
 				ctVal := gjson.GetBytes(body, "chat_template_kwargs.clear_thinking")
-				if !ctVal.Exists() {
-					t.Fatalf("expected clear_thinking field not found for GLM model, body=%s", string(body))
-				}
-				if ctVal.Bool() != false {
-					t.Fatalf("clear_thinking: expected false, got %v, body=%s", ctVal.Bool(), string(body))
+				if isGLM {
+					if !ctVal.Exists() {
+						t.Fatalf("expected clear_thinking field not found for GLM model, body=%s", string(body))
+					}
+					if ctVal.Bool() != false {
+						t.Fatalf("clear_thinking: expected false, got %v, body=%s", ctVal.Bool(), string(body))
+					}
+				} else if ctVal.Exists() {
+					t.Fatalf("expected no clear_thinking field for non-GLM enable_thinking model, body=%s", string(body))
 				}
 			}
 		})

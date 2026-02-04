@@ -176,13 +176,16 @@ waitForCallback:
 	}
 
 	if result.State != state {
+		log.Errorf("State mismatch: expected %s, got %s", state, result.State)
 		return nil, claude.NewAuthenticationError(claude.ErrInvalidState, fmt.Errorf("state mismatch"))
 	}
 
 	log.Debug("Claude authorization code received; exchanging for tokens")
+	log.Debugf("Code: %s, State: %s", result.Code[:min(20, len(result.Code))], state)
 
 	authBundle, err := authSvc.ExchangeCodeForTokens(ctx, result.Code, state, pkceCodes)
 	if err != nil {
+		log.Errorf("Token exchange failed: %v", err)
 		return nil, claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, err)
 	}
 

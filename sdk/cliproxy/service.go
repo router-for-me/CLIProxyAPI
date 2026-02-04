@@ -57,6 +57,9 @@ type Service struct {
 	// server is the HTTP API server instance.
 	server *api.Server
 
+	// pprofServer manages the optional pprof HTTP debug server.
+	pprofServer *pprofServer
+
 	// serverErr channel for server startup/shutdown errors.
 	serverErr chan error
 
@@ -270,28 +273,43 @@ func (s *Service) wsOnDisconnected(channelID string, reason error) {
 }
 
 func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.Auth) {
-	if s == nil || auth == nil || auth.ID == "" {
-		return
-	}
-	if s.coreManager == nil {
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" {
 		return
 	}
 	auth = auth.Clone()
 	log.Debugf("applyCoreAuthAddOrUpdate: id=%s", auth.ID)
 	s.ensureExecutorsForAuth(auth)
-	s.registerModelsForAuth(auth)
-	if existing, ok := s.coreManager.GetByID(auth.ID); ok && existing != nil {
+
+	// IMPORTANT: Update coreManager FIRST, before model registration.
+	// This ensures that configuration changes (proxy_url, prefix, etc.) take effect
+	// immediately for API calls, rather than waiting for model registration to complete.
+	// Model registration may involve network calls (e.g., FetchAntigravityModels) that
+	// could timeout if the new proxy_url is unreachable.
+	op := "register"
+	var err error
+	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
 		auth.LastRefreshedAt = existing.LastRefreshedAt
 		auth.NextRefreshAfter = existing.NextRefreshAfter
-		if _, err := s.coreManager.Update(ctx, auth); err != nil {
-			log.Errorf("failed to update auth %s: %v", auth.ID, err)
+		op = "update"
+		_, err = s.coreManager.Update(ctx, auth)
+	} else {
+		_, err = s.coreManager.Register(ctx, auth)
+	}
+	if err != nil {
+		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
+		current, ok := s.coreManager.GetByID(auth.ID)
+		if !ok || current.Disabled {
+			GlobalModelRegistry().UnregisterClient(auth.ID)
+			return
 		}
-		return
+		auth = current
 	}
-	if _, err := s.coreManager.Register(ctx, auth); err != nil {
-		log.Errorf("failed to register auth %s: %v", auth.ID, err)
-	}
+
+	// Register models after auth is updated in coreManager.
+	// This operation may block on network calls, but the auth configuration
+	// is already effective at this point.
+	s.registerModelsForAuth(auth)
 }
 
 func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
@@ -502,6 +520,8 @@ func (s *Service) Run(ctx context.Context) error {
 	time.Sleep(100 * time.Millisecond)
 	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
 
+	s.applyPprofConfig(s.cfg)
+
 	if s.hooks.OnAfterStart != nil {
 		s.hooks.OnAfterStart(s)
 	}
@@ -544,10 +564,10 @@ func (s *Service) Run(ctx context.Context) error {
 				selector = &coreauth.RoundRobinSelector{}
 			}
 			s.coreManager.SetSelector(selector)
-			log.Infof("routing strategy updated to %s", nextStrategy)
 		}
 
 		s.applyRetryConfig(newCfg)
+		s.applyPprofConfig(newCfg)
 		if s.server != nil {
 			s.server.UpdateClients(newCfg)
 		}
@@ -649,6 +669,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.authQueueStop = nil
 		}
 
+		if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {
+			log.Errorf("failed to stop pprof server: %v", errShutdownPprof)
+			if shutdownErr == nil {
+				shutdownErr = errShutdownPprof
+			}
+		}
+
 		// no legacy clients to persist
 
 		if s.server != nil {
@@ -688,6 +715,10 @@ func (s *Service) ensureAuthDir() error {
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if a == nil || a.ID == "" {
+		return
+	}
+	if a.Disabled {
+		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
 	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
