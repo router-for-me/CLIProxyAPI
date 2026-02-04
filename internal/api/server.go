@@ -165,9 +165,6 @@ type Server struct {
 
 	localPassword string
 
-	// peerSecret stores the secret for peer/internal API authentication (from remote-management.secret-key).
-	peerSecret string
-
 	keepAliveEnabled   bool
 	keepAliveTimeout   time.Duration
 	keepAliveOnTimeout func()
@@ -258,7 +255,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		authManager.SetCredentialMaster(cfg.CredentialMaster)
 		if cfg.RemoteManagement.SecretKey != "" {
 			authManager.SetPeerSecret(cfg.RemoteManagement.SecretKey)
-			s.peerSecret = cfg.RemoteManagement.SecretKey
 		}
 	}
 	managementasset.SetCurrentConfig(cfg)
@@ -430,10 +426,11 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
-	// Internal credential query endpoint for master-follower mode
-	internal := s.engine.Group("/v0/internal", s.peerAuthMiddleware())
-	internal.GET("/credential", s.handleCredentialQuery)
-	internal.GET("/auth-list", s.handleAuthList)
+	// Internal credential query endpoint for master-follower mode.
+	// Reuses the management Middleware (bcrypt + rate limiting + IP ban).
+	internal := s.engine.Group("/v0/internal", s.mgmt.Middleware())
+	internal.GET("/credential", s.mgmt.HandleCredentialQuery)
+	internal.GET("/auth-list", s.mgmt.HandleAuthList)
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
@@ -916,7 +913,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		s.handlers.AuthManager.SetCredentialMaster(cfg.CredentialMaster)
 		if cfg.RemoteManagement.SecretKey != "" {
 			s.handlers.AuthManager.SetPeerSecret(cfg.RemoteManagement.SecretKey)
-			s.peerSecret = cfg.RemoteManagement.SecretKey
 		}
 	}
 
@@ -1063,68 +1059,4 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	}
 }
 
-// peerAuthMiddleware returns a middleware that verifies the X-Peer-Secret header.
-func (s *Server) peerAuthMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if s.peerSecret == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "peer authentication not configured"})
-			return
-		}
-		providedSecret := c.GetHeader("X-Peer-Secret")
-		if providedSecret == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing peer secret"})
-			return
-		}
-		if providedSecret != s.peerSecret {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid peer secret"})
-			return
-		}
-		c.Next()
-	}
-}
 
-// handleCredentialQuery returns the current access_token for a given auth ID.
-// This endpoint is used by follower nodes to fetch credentials from master.
-func (s *Server) handleCredentialQuery(c *gin.Context) {
-	if s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server not initialized"})
-		return
-	}
-
-	id := c.Query("id")
-	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "id parameter is required"})
-		return
-	}
-
-	// Check if token needs refresh before returning (on-demand refresh for master node)
-	s.handlers.AuthManager.RefreshIfNeeded(c.Request.Context(), id)
-
-	accessToken := s.handlers.AuthManager.GetAccessToken(id)
-	if accessToken == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "credential not found or no access_token"})
-		return
-	}
-
-	// Include expiration time so follower can update local expired field
-	response := gin.H{
-		"id":           id,
-		"access_token": accessToken,
-	}
-	if expiredAt, ok := s.handlers.AuthManager.GetExpirationTime(id); ok && !expiredAt.IsZero() {
-		response["expired"] = expiredAt.Format(time.RFC3339)
-	}
-	c.JSON(http.StatusOK, response)
-}
-
-// handleAuthList returns all auth entries (without refresh_token).
-// This endpoint is used by follower nodes for startup sync.
-func (s *Server) handleAuthList(c *gin.Context) {
-	if s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server not initialized"})
-		return
-	}
-
-	auths := s.handlers.AuthManager.GetAllAuthsForSync()
-	c.JSON(http.StatusOK, gin.H{"auths": auths})
-}
