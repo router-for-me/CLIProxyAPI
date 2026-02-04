@@ -270,6 +270,138 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	h.cfg.SanitizeClaudeKeys()
 	h.persist(c)
 }
+
+// rovo-api-key: []RovoKey
+func (h *Handler) GetRovoKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"rovo-api-key": h.cfg.RovoKey})
+}
+func (h *Handler) PutRovoKeys(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.RovoKey
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.RovoKey `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	for i := range arr {
+		arr[i].APIKey = strings.TrimSpace(arr[i].APIKey)
+		arr[i].Email = strings.TrimSpace(arr[i].Email)
+		arr[i].CloudID = strings.TrimSpace(arr[i].CloudID)
+		arr[i].Prefix = strings.TrimSpace(arr[i].Prefix)
+		arr[i].BaseURL = strings.TrimSpace(arr[i].BaseURL)
+		arr[i].ProxyURL = strings.TrimSpace(arr[i].ProxyURL)
+		arr[i].Headers = config.NormalizeHeaders(arr[i].Headers)
+		arr[i].ExcludedModels = config.NormalizeExcludedModels(arr[i].ExcludedModels)
+		if len(arr[i].Models) > 0 {
+			for m := range arr[i].Models {
+				arr[i].Models[m].Name = strings.TrimSpace(arr[i].Models[m].Name)
+				arr[i].Models[m].Alias = strings.TrimSpace(arr[i].Models[m].Alias)
+			}
+		}
+	}
+	h.cfg.RovoKey = append([]config.RovoKey(nil), arr...)
+	h.cfg.SanitizeRovoKeys()
+	h.persist(c)
+}
+func (h *Handler) PatchRovoKey(c *gin.Context) {
+	type rovoKeyPatch struct {
+		APIKey         *string             `json:"api-key"`
+		Email          *string             `json:"email"`
+		CloudID        *string             `json:"cloud-id"`
+		Prefix         *string             `json:"prefix"`
+		BaseURL        *string             `json:"base-url"`
+		ProxyURL       *string             `json:"proxy-url"`
+		Models         *[]config.RovoModel `json:"models"`
+		Headers        *map[string]string  `json:"headers"`
+		ExcludedModels *[]string           `json:"excluded-models"`
+	}
+	var body struct {
+		Index *int          `json:"index"`
+		Match *string       `json:"match"`
+		Value *rovoKeyPatch `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.RovoKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		for i := range h.cfg.RovoKey {
+			if h.cfg.RovoKey[i].APIKey == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+
+	entry := h.cfg.RovoKey[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Email != nil {
+		entry.Email = strings.TrimSpace(*body.Value.Email)
+	}
+	if body.Value.CloudID != nil {
+		entry.CloudID = strings.TrimSpace(*body.Value.CloudID)
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.BaseURL != nil {
+		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.RovoModel(nil), (*body.Value.Models)...)
+		for m := range entry.Models {
+			entry.Models[m].Name = strings.TrimSpace(entry.Models[m].Name)
+			entry.Models[m].Alias = strings.TrimSpace(entry.Models[m].Alias)
+		}
+	}
+	if body.Value.Headers != nil {
+		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	h.cfg.RovoKey[targetIndex] = entry
+	h.cfg.SanitizeRovoKeys()
+	h.persist(c)
+}
+func (h *Handler) DeleteRovoKey(c *gin.Context) {
+	if val := c.Query("api-key"); val != "" {
+		out := make([]config.RovoKey, 0, len(h.cfg.RovoKey))
+		for _, v := range h.cfg.RovoKey {
+			if v.APIKey != val {
+				out = append(out, v)
+			}
+		}
+		h.cfg.RovoKey = out
+		h.cfg.SanitizeRovoKeys()
+		h.persist(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing api-key"})
+}
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
 		APIKey         *string               `json:"api-key"`

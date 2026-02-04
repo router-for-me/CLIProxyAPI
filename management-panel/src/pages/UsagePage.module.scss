@@ -1,0 +1,797 @@
+@use '../styles/variables' as *;
+@use '../styles/mixins' as *;
+
+.container {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  position: relative;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pageTitle {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.errorBox {
+  padding: 10px;
+  background-color: rgba(239, 68, 68, 0.1);
+  border: 1px solid var(--error-color);
+  border-radius: $radius-sm;
+  color: var(--error-color);
+  font-size: 12px;
+}
+
+.hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+  padding: 16px;
+}
+
+.loadingOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(243, 244, 246, 0.75);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+:global([data-theme='dark']) .loadingOverlay {
+  background: rgba(25, 25, 25, 0.72);
+}
+
+.loadingOverlayContent {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: $radius-lg;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  box-shadow: var(--shadow-lg);
+}
+
+.loadingOverlaySpinner {
+  border-color: rgba(59, 130, 246, 0.25);
+  border-top-color: var(--primary-color);
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.25);
+}
+
+.loadingOverlayText {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+// Stats Grid
+.statsGrid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.statCard {
+  --accent: #3b82f6;
+  --accent-soft: rgba(59, 130, 246, 0.18);
+  --accent-border: rgba(59, 130, 246, 0.35);
+
+  grid-column: span 4;
+  position: relative;
+  padding: 18px;
+  background:
+    radial-gradient(120% 140% at 12% 0%, var(--accent-soft) 0%, rgba(0, 0, 0, 0) 62%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0)),
+    var(--bg-primary);
+  border-radius: $radius-lg;
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 176px;
+  box-shadow: var(--shadow-lg);
+  transition: transform $transition-fast, box-shadow $transition-fast, border-color $transition-fast;
+  overflow: hidden;
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 3px;
+    width: 100%;
+    background: linear-gradient(90deg, var(--accent), rgba(0, 0, 0, 0));
+    opacity: 0.95;
+  }
+
+  &:hover {
+    transform: translateY(-2px);
+    border-color: var(--accent-border);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+  }
+
+  @include tablet {
+    grid-column: span 6;
+  }
+
+  @include mobile {
+    grid-column: auto;
+    min-height: 168px;
+  }
+}
+
+.statCard:nth-child(-n + 2) {
+  grid-column: span 6;
+
+  .statValue {
+    font-size: 32px;
+  }
+}
+
+@include mobile {
+  .statCard:nth-child(-n + 2) {
+    grid-column: auto;
+
+    .statValue {
+      font-size: 28px;
+    }
+  }
+}
+
+.statCardHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.statLabelGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.statIconBadge {
+  width: 34px;
+  height: 34px;
+  border-radius: $radius-md;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 13px;
+  background: var(--accent);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.25);
+  flex-shrink: 0;
+
+  svg {
+    display: block;
+  }
+}
+
+.statHeader {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+}
+
+.statIcon {
+  font-size: 18px;
+}
+
+.statLabel {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.statValue {
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.statValueRow {
+  display: flex;
+  gap: $spacing-lg;
+}
+
+.statValueSmall {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.statValueLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.statValueNum {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.statMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.statSuccess {
+  color: var(--success-color, #22c55e);
+}
+
+.statFailure {
+  color: var(--danger-color, #ef4444);
+}
+
+.statNeutral {
+  color: var(--text-secondary);
+}
+
+.statMetaRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.statMetaItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.statMetaDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--text-secondary);
+}
+
+.statSubtle {
+  color: var(--text-tertiary);
+}
+
+.statTrend {
+  margin-top: auto;
+  background: var(--bg-tertiary);
+  border-radius: $radius-md;
+  padding: 8px;
+  height: 58px;
+  border: 1px solid var(--border-color);
+}
+
+.statTrendPlaceholder {
+  width: 100%;
+  height: 100%;
+  background: var(--bg-secondary);
+  border-radius: $radius-md;
+}
+
+.sparkline {
+  width: 100%;
+  height: 100% !important;
+}
+
+.statHint {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+// API List (80%比例)
+.apiList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.apiItem {
+  background-color: var(--bg-secondary);
+  border-radius: $radius-sm;
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.apiHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+
+  &:hover {
+    background-color: var(--bg-tertiary);
+  }
+}
+
+.apiInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.apiEndpoint {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.apiStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.apiBadge {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  padding: 2px 8px;
+  border-radius: $radius-full;
+}
+
+.expandIcon {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.apiModels {
+  padding: 10px;
+  padding-top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-top: 1px solid var(--border-color);
+  margin-top: 0;
+  padding-top: 10px;
+}
+
+.modelRow {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+  padding: 8px 10px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  font-size: 12px;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+}
+
+.modelName {
+  color: var(--text-primary);
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.modelStat {
+  color: var(--text-secondary);
+  text-align: right;
+
+  @include mobile {
+    text-align: left;
+  }
+}
+
+// Table (80%比例)
+.tableWrapper {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+
+  th, td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  th {
+    font-weight: 600;
+    color: var(--text-tertiary);
+    background-color: var(--bg-secondary);
+    white-space: nowrap;
+  }
+
+  td {
+    color: var(--text-primary);
+  }
+
+  tbody tr:hover {
+    background-color: var(--bg-tertiary);
+  }
+}
+
+.modelCell {
+  font-weight: 500;
+  max-width: 240px;
+  word-break: break-all;
+}
+
+.requestCountCell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.requestBreakdown {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+// Pricing Section (80%比例)
+.pricingSection {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.priceForm {
+  padding: 10px;
+  background-color: var(--bg-secondary);
+  border-radius: $radius-sm;
+  border: 1px solid var(--border-color);
+}
+
+.formRow {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.formField {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 120px;
+
+  label {
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  // 确保 Input 组件的 form-group 包装器不影响布局
+  :global(.form-group) {
+    margin: 0;
+
+    > label {
+      display: none; // 隐藏 Input 自带的 label，使用外层的
+    }
+  }
+
+  :global(.input) {
+    height: 40px;
+    box-sizing: border-box;
+  }
+}
+
+.select {
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 14px;
+  cursor: pointer;
+  height: 40px;
+  box-sizing: border-box;
+
+  &:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  }
+}
+
+.pricesList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pricesTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.pricesGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.priceItem {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px;
+  background-color: var(--bg-secondary);
+  border-radius: $radius-sm;
+  border: 1px solid var(--border-color);
+  gap: 10px;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+.priceInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.priceModel {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.priceMeta {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--text-secondary);
+
+  @include mobile {
+    flex-direction: column;
+    gap: 3px;
+  }
+}
+
+.priceActions {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+// Chart Section (80%比例)
+.chartSection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chartControls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.chartWrapper {
+  padding: 14px;
+  background-color: var(--bg-secondary);
+  border-radius: $radius-lg;
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chartLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  min-width: 0;
+
+  @include mobile {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 240px;
+  padding: 4px 10px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  font-size: 12px;
+  color: var(--text-secondary);
+
+  @include mobile {
+    max-width: 180px;
+  }
+}
+
+.legendDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.legendLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chartArea {
+  height: 280px;
+
+  @include mobile {
+    height: 320px;
+  }
+}
+
+.chartScroller {
+  width: 100%;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+
+  // Chart.js 默认会设置 canvas 的 touch-action: none，导致移动端无法横向滚动
+  :global(canvas) {
+    touch-action: pan-x pan-y !important;
+  }
+}
+
+.chartCanvas {
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
+
+.periodButtons {
+  display: flex;
+  gap: 6px;
+}
+
+.chartsGrid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: minmax(0, 1fr);
+
+  > * {
+    min-width: 0;
+  }
+
+  @include desktop {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.detailsGrid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: minmax(0, 1fr);
+
+  > * {
+    min-width: 0;
+  }
+
+  @include desktop {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.chartLineHeader {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.chartLineList {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chartLineItem {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 8px;
+  }
+}
+
+.chartLineLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  min-width: 64px;
+}
+
+.chartLineCount {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.chartLineHint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin: 10px 0 0 0;
+}

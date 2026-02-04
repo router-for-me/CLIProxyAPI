@@ -84,6 +84,9 @@ type Config struct {
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
+	// RovoKey defines Atlassian Rovo API key configurations.
+	RovoKey []RovoKey `yaml:"rovo-api-key" json:"rovo-api-key"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
@@ -323,6 +326,56 @@ type ClaudeModel struct {
 
 func (m ClaudeModel) GetName() string  { return m.Name }
 func (m ClaudeModel) GetAlias() string { return m.Alias }
+
+// RovoKey represents the configuration for an Atlassian Rovo API key.
+type RovoKey struct {
+	// APIKey is the authentication key for accessing Rovo services.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Email identifies the Atlassian account for encoded token generation.
+	Email string `yaml:"email" json:"email"`
+
+	// CloudID identifies the Atlassian site (cloud) used for billing and routing.
+	CloudID string `yaml:"cloud-id" json:"cloud-id"`
+
+	// Priority controls selection preference when multiple credentials match.
+	// Higher values are preferred; defaults to 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Prefix optionally namespaces models for this credential.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL is the base URL for the Rovo proxy endpoint.
+	// If empty, the default Atlassian Rovo URL will be used.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines upstream model names and aliases for request routing.
+	Models []RovoModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent with this key.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+}
+
+func (k RovoKey) GetAPIKey() string  { return k.APIKey }
+func (k RovoKey) GetBaseURL() string { return k.BaseURL }
+
+// RovoModel describes a mapping between an alias and the actual upstream model name.
+type RovoModel struct {
+	// Name is the upstream model identifier used when issuing requests.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the client-facing model name that maps to Name.
+	Alias string `yaml:"alias" json:"alias"`
+}
+
+func (m RovoModel) GetName() string  { return m.Name }
+func (m RovoModel) GetAlias() string { return m.Alias }
 
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.
@@ -579,6 +632,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
 
+	// Sanitize Rovo keys
+	cfg.SanitizeRovoKeys()
+
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
@@ -752,6 +808,24 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+	}
+}
+
+// SanitizeRovoKeys normalizes headers and defaults for Rovo credentials.
+func (cfg *Config) SanitizeRovoKeys() {
+	if cfg == nil || len(cfg.RovoKey) == 0 {
+		return
+	}
+	for i := range cfg.RovoKey {
+		entry := &cfg.RovoKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.Email = strings.TrimSpace(entry.Email)
+		entry.CloudID = strings.TrimSpace(entry.CloudID)
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}

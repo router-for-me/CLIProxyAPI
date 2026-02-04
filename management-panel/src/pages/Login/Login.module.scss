@@ -1,0 +1,124 @@
+.container {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(135deg, var(--primary-color) 0%, #1d4ed8 100%);
+  padding: $spacing-md;
+}
+
+.header {
+  display: flex;
+  justify-content: flex-end;
+  padding: $spacing-md 0;
+}
+
+.controls {
+  display: flex;
+  gap: $spacing-sm;
+}
+
+.iconButton {
+  @include button-reset;
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+  padding: $spacing-sm $spacing-md;
+  background-color: rgba(255, 255, 255, 0.2);
+  color: white;
+  border-radius: $radius-md;
+  transition: background-color $transition-fast;
+
+  &:hover {
+    background-color: rgba(255, 255, 255, 0.3);
+  }
+
+  i {
+    font-size: 18px;
+  }
+
+  span {
+    font-size: 14px;
+    font-weight: 500;
+  }
+}
+
+.loginBox {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  max-width: 450px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.logo {
+  width: 80px;
+  height: 80px;
+  background-color: white;
+  border-radius: $radius-full;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 40px;
+  color: var(--primary-color);
+  margin-bottom: $spacing-lg;
+  box-shadow: var(--shadow-lg);
+}
+
+.title {
+  font-size: 28px;
+  font-weight: 700;
+  color: white;
+  margin: 0 0 $spacing-sm 0;
+  text-align: center;
+}
+
+.subtitle {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.9);
+  margin: 0 0 $spacing-2xl 0;
+  text-align: center;
+}
+
+.form {
+  width: 100%;
+  background-color: var(--bg-primary);
+  padding: $spacing-2xl;
+  border-radius: $radius-lg;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+}
+
+.detectedInfo {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  padding: $spacing-md;
+  background-color: rgba(59, 130, 246, 0.1);
+  border-radius: $radius-md;
+  font-size: 13px;
+  color: var(--text-secondary);
+
+  i {
+    color: var(--primary-color);
+  }
+
+  strong {
+    color: var(--text-primary);
+  }
+}
+
+.footer {
+  margin-top: $spacing-xl;
+  text-align: center;
+}
+
+.version {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0;
+}

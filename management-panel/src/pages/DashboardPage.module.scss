@@ -1,0 +1,320 @@
+@use 'sass:color';
+@use '../styles/variables.scss' as *;
+
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.header {
+  margin-bottom: $spacing-sm;
+}
+
+.title {
+  font-size: 26px;
+  font-weight: 800;
+  color: var(--text-primary);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.subtitle {
+  font-size: 15px;
+  color: var(--text-secondary);
+  margin: $spacing-xs 0 0 0;
+}
+
+.connectionCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-md;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  padding: $spacing-md $spacing-lg;
+  flex-wrap: wrap;
+}
+
+.connectionStatus {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+}
+
+.statusDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: $gray-400;
+
+  &.connected {
+    background: $success-color;
+    box-shadow: 0 0 8px rgba($success-color, 0.5);
+  }
+
+  &.connecting {
+    background: $warning-color;
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  &.disconnected {
+    background: $error-color;
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.statusText {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.connectionInfo {
+  display: flex;
+  align-items: center;
+  gap: $spacing-md;
+  flex-wrap: wrap;
+}
+
+.serverUrl {
+  font-family: $font-mono;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  padding: 4px 10px;
+  border-radius: $radius-md;
+  border: 1px solid var(--border-color);
+}
+
+.serverVersion {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary-color);
+  background: rgba($primary-color, 0.1);
+  padding: 4px 10px;
+  border-radius: $radius-full;
+}
+
+.buildDate {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: $spacing-md;
+
+  @media (max-width: 900px) {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  @media (max-width: 500px) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.statCard {
+  display: flex;
+  align-items: center;
+  gap: $spacing-md;
+  padding: $spacing-lg;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  text-decoration: none;
+  transition: all $transition-fast;
+
+  &:hover {
+    border-color: var(--primary-color);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    transform: translateY(-2px);
+  }
+}
+
+.statIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+  color: var(--primary-color);
+}
+
+.statContent {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.statValue {
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.statLabel {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.statSublabel {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.8;
+  margin-top: 2px;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+}
+
+.sectionTitle {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.actionsGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-sm;
+
+  a {
+    text-decoration: none;
+  }
+}
+
+.actionButton {
+  display: inline-flex;
+  align-items: center;
+  gap: $spacing-sm;
+
+  // Button 内部的 span 需要 flex 对齐图标和文字
+  > span {
+    display: inline-flex;
+    align-items: center;
+    gap: $spacing-sm;
+  }
+
+  svg {
+    flex-shrink: 0;
+  }
+}
+
+.configGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: $spacing-sm;
+}
+
+.configItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  padding: $spacing-sm $spacing-md;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+}
+
+.configLabel {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.configValue {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+
+  &.enabled {
+    color: $success-color;
+  }
+
+  &.disabled {
+    color: var(--text-secondary);
+  }
+}
+
+.configValueMono {
+  font-size: 12px;
+  font-family: $font-mono;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.configItemFull {
+  grid-column: 1 / -1;
+}
+
+// Usage stats section
+.usageGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: $spacing-sm;
+}
+
+.usageCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: $spacing-md;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  text-align: center;
+}
+
+.usageValue {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--primary-color);
+}
+
+.usageLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.usageLoading,
+.usageEmpty {
+  padding: $spacing-lg;
+  text-align: center;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+}
+
+.viewMoreLink {
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  color: var(--primary-color);
+  text-decoration: none;
+  margin-top: $spacing-xs;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}

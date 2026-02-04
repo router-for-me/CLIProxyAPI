@@ -1,0 +1,535 @@
+@use '../styles/variables' as *;
+@use '../styles/mixins' as *;
+
+.container {
+  width: 100%;
+}
+
+.cardTitle {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+}
+
+.cardTitleIcon {
+  width: 24px;
+  height: 24px;
+}
+
+.pageTitle {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 $spacing-xl 0;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xl;
+
+  @include mobile {
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+}
+
+.sectionHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: $spacing-md;
+
+  h3 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+}
+
+.providerList {
+  display: grid;
+  gap: $spacing-md;
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+// 成功失败次数统计样式
+.cardStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 4px;
+}
+
+.statPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.1;
+  border: 1px solid transparent;
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.statSuccess {
+  background-color: var(--success-badge-bg, #d1fae5);
+  color: var(--success-badge-text, #065f46);
+  border-color: var(--success-badge-border, #6ee7b7);
+}
+
+.statFailure {
+  background-color: var(--failure-badge-bg, #fee2e2);
+  color: var(--failure-badge-text, #991b1b);
+  border-color: var(--failure-badge-border, #fca5a5);
+}
+
+// 字段行样式：标签 + 值
+.fieldRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.fieldLabel {
+  color: var(--text-tertiary);
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.fieldValue {
+  color: var(--text-primary);
+  font-weight: 600;
+  word-break: break-all;
+  font-family: 'Monaco', 'Menlo', 'Consolas', 'Ubuntu Mono', monospace;
+}
+
+// 自定义请求头徽章
+.headerBadgeList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.headerBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--accent-tertiary, #f3f4f6);
+  border: 1px solid var(--border-primary);
+  border-radius: 12px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+
+  strong {
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+}
+
+// 模型标签容器
+.modelTagList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  align-items: center;
+}
+
+.modelCountLabel {
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+// 单个模型标签
+.modelTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-quinary, #f8f9fa);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 14px;
+  padding: 4px 10px;
+  font-size: 12px;
+  transition: all 0.15s ease;
+
+  &:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--primary-color);
+  }
+}
+
+.modelName {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.modelAlias {
+  color: var(--text-tertiary);
+  font-style: italic;
+
+  &::before {
+    content: '→ ';
+  }
+}
+
+// 排除模型标签（警告色）
+.excludedModelTag {
+  background: var(--warning-bg, #fef3c7);
+  border-color: var(--warning-border, #fbbf24);
+  color: var(--warning-text, #92400e);
+
+  .modelName {
+    color: var(--warning-text, #92400e);
+  }
+}
+
+// 排除模型区块
+.excludedModelsSection {
+  margin-top: 8px;
+}
+
+.excludedModelsLabel {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--warning-text, #92400e);
+  margin-bottom: 4px;
+}
+
+// API密钥条目列表（二级卡片）
+.apiKeyEntriesSection {
+  margin-top: 10px;
+}
+
+.apiKeyEntriesLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.apiKeyEntryList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.apiKeyEntryCard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-secondary, #f9fafb);
+  border: 1px solid var(--border-secondary);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.apiKeyEntryIndex {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--primary-color);
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.apiKeyEntryKey {
+  font-family: 'Monaco', 'Menlo', 'Consolas', 'Ubuntu Mono', monospace;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.apiKeyEntryProxy {
+  color: var(--text-tertiary);
+  font-size: 11px;
+
+  &::before {
+    content: '| Proxy: ';
+    color: var(--text-quaternary);
+  }
+}
+
+.apiKeyEntryStats {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.apiKeyEntryStat {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+
+  svg {
+    display: block;
+  }
+}
+
+.apiKeyEntryStatSuccess {
+  background: var(--success-badge-bg, #d1fae5);
+  color: var(--success-badge-text, #065f46);
+}
+
+.apiKeyEntryStatFailure {
+  background: var(--failure-badge-bg, #fee2e2);
+  color: var(--failure-badge-text, #991b1b);
+}
+
+// OpenAI 模型发现（二级界面）
+.modelDiscoveryList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 360px;
+  overflow-y: auto;
+  margin-top: 8px;
+  padding-right: 4px;
+}
+
+.modelDiscoveryRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+
+  input[type='checkbox'] {
+    margin-top: 2px;
+    cursor: pointer;
+  }
+
+  &:hover {
+    border-color: var(--primary-color);
+    background: var(--bg-secondary);
+  }
+}
+
+.modelDiscoveryRowSelected {
+  border-color: var(--primary-color);
+  background: var(--bg-tertiary);
+}
+
+.modelDiscoveryMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.modelDiscoveryName {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.modelDiscoveryAlias {
+  margin-left: 6px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.modelDiscoveryDesc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.openaiTestButtonSuccess {
+  background-color: var(--success-badge-bg, #d1fae5);
+  border-color: var(--success-badge-border, #6ee7b7);
+  color: var(--success-badge-text, #065f46);
+
+  &:hover {
+    background-color: var(--success-badge-bg, #d1fae5);
+    border-color: var(--success-badge-border, #6ee7b7);
+  }
+}
+
+// 连通性测试按钮高度对齐
+.openaiTestSelect {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.openaiTestButton {
+  flex: 1 1 0;
+  padding: 8px 12px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+// 状态监测栏
+.statusBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 0;
+  max-width: 280px;
+}
+
+.statusBlocks {
+  display: flex;
+  gap: 2px;
+  flex: 1;
+  min-width: 180px;
+}
+
+.statusBlock {
+  flex: 1;
+  height: 8px;
+  border-radius: 2px;
+  min-width: 6px;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+
+  &:hover {
+    transform: scaleY(1.5);
+    opacity: 0.85;
+  }
+}
+
+.statusBlockSuccess {
+  background-color: var(--success-color, #22c55e);
+}
+
+.statusBlockFailure {
+  background-color: var(--danger-color, #ef4444);
+}
+
+.statusBlockMixed {
+  background-color: var(--warning-color, #f59e0b);
+}
+
+.statusBlockIdle {
+  background-color: var(--border-secondary, #e5e7eb);
+}
+
+.statusRate {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+}
+
+.statusRateHigh {
+  color: var(--success-badge-text, #065f46);
+  background: var(--success-badge-bg, #d1fae5);
+}
+
+.statusRateMedium {
+  color: var(--warning-text, #92400e);
+  background: var(--warning-bg, #fef3c7);
+}
+
+.statusRateLow {
+  color: var(--failure-badge-text, #991b1b);
+  background: var(--failure-badge-bg, #fee2e2);
+}
+
+// 暗色主题适配
+:global([data-theme='dark']) {
+  .headerBadge {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: rgba(59, 130, 246, 0.3);
+    color: var(--text-secondary);
+
+    strong {
+      color: var(--text-secondary);
+    }
+  }
+
+  .modelTag {
+    background: rgba(59, 130, 246, 0.1);
+    border-color: var(--border-secondary);
+  }
+
+  .excludedModelTag {
+    background: rgba(251, 191, 36, 0.22);
+    border-color: rgba(251, 191, 36, 0.55);
+    color: #fde68a;
+
+    .modelName {
+      color: #fde68a;
+    }
+  }
+
+  .excludedModelsLabel {
+    color: #fde68a;
+  }
+
+  .apiKeyEntryCard {
+    background: var(--bg-tertiary);
+    border-color: var(--border-primary);
+  }
+
+  .apiKeyEntryIndex {
+    background: var(--primary-color);
+  }
+
+  .statusBlockIdle {
+    background-color: var(--border-primary, #374151);
+  }
+
+  .statusRateHigh {
+    background: rgba(34, 197, 94, 0.2);
+    color: #86efac;
+  }
+
+  .statusRateMedium {
+    background: rgba(251, 191, 36, 0.2);
+    color: #fde68a;
+  }
+
+  .statusRateLow {
+    background: rgba(239, 68, 68, 0.2);
+    color: #fca5a5;
+  }
+}

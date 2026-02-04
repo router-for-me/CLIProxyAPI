@@ -1,0 +1,165 @@
+@use '../../../styles/variables' as *;
+
+.navContainer {
+  position: fixed;
+  right: 24px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 50;
+  pointer-events: auto;
+}
+
+.navList {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 8px;
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 16px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.1);
+}
+
+.indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  opacity: 0;
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.15);
+  box-shadow: inset 0 0 0 2px var(--primary-color);
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 120ms ease;
+  will-change: transform, width, height;
+}
+
+.indicatorVisible {
+  opacity: 1;
+}
+
+.indicatorNoTransition {
+  transition: none;
+}
+
+.navItem {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.15s ease;
+
+  &:hover {
+    background: rgba(0, 0, 0, 0.06);
+    transform: scale(1.08);
+  }
+
+  &:active {
+    transform: scale(0.95);
+  }
+}
+
+.navItem.active {
+  &:hover {
+    background: transparent;
+    transform: none;
+  }
+}
+
+.icon {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
+
+.active {
+  // Active highlight is rendered by the sliding indicator.
+  background: transparent;
+  box-shadow: none;
+}
+
+// 暗色主题适配
+:global([data-theme='dark']) {
+  .navList {
+    background: rgba(30, 30, 30, 0.7);
+    border-color: rgba(255, 255, 255, 0.1);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  }
+
+  .navItem {
+    &:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+  }
+
+  .indicator {
+    background: rgba(59, 130, 246, 0.25);
+  }
+}
+
+// 小屏幕改为底部横向浮层
+@media (max-width: 1200px) {
+  .navContainer {
+    top: auto;
+    right: auto;
+    left: 50%;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    width: fit-content;
+    max-width: calc(100vw - 24px);
+  }
+
+  .navList {
+    display: inline-flex;
+    flex-direction: row;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 999px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    max-width: inherit;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+  }
+
+  .indicator {
+    border-radius: 999px;
+  }
+
+  .navItem {
+    width: 36px;
+    height: 36px;
+    border-radius: 999px;
+    flex: 0 0 auto;
+  }
+
+  .icon {
+    width: 22px;
+    height: 22px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .indicator {
+    transition: none;
+  }
+
+  .navItem {
+    transition: background-color 0.2s ease;
+  }
+}

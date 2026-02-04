@@ -1,0 +1,420 @@
+@use './variables.scss' as *;
+
+:root {
+  --header-height: 64px;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+
+  @media (max-width: $breakpoint-mobile) {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+    overflow-y: auto;
+  }
+}
+
+.main-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-md;
+  padding: $spacing-md $spacing-lg;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  width: 100%;
+
+  @media (max-width: $breakpoint-mobile) {
+    position: fixed;
+    left: 0;
+    right: 0;
+    padding: $spacing-sm $spacing-md;
+    gap: $spacing-sm;
+  }
+
+  .left {
+    display: flex;
+    align-items: center;
+    gap: $spacing-sm;
+    min-width: 0;
+    flex: 0 1 auto;
+
+    .brand-logo {
+      height: 32px;
+      width: 32px;
+      object-fit: contain;
+      flex-shrink: 0;
+      border-radius: $radius-sm;
+    }
+  }
+
+  .right {
+    display: flex;
+    align-items: center;
+    gap: $spacing-md;
+    min-width: 0;
+    flex: 1 1 auto;
+    justify-content: flex-end;
+
+    @media (max-width: $breakpoint-mobile) {
+      flex: 0 1 auto;
+      gap: $spacing-sm;
+    }
+  }
+
+  .sidebar-toggle-header {
+    padding: 0;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: $radius-md;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: bold;
+    transition: background $transition-fast, color $transition-fast;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    line-height: 1;
+
+    &:hover {
+      background: var(--bg-tertiary, var(--border-color));
+      color: var(--text-primary);
+    }
+
+    @media (max-width: $breakpoint-mobile) {
+      display: none;
+    }
+  }
+
+  .brand-header {
+    display: flex;
+    align-items: center;
+    gap: $spacing-xs;
+    font-weight: 800;
+    font-size: 18px;
+    color: var(--text-primary);
+    margin-right: $spacing-md;
+    cursor: pointer;
+    overflow: hidden;
+    white-space: nowrap;
+    flex-shrink: 0;
+
+    .brand-full {
+      display: inline-block;
+      max-width: 320px;
+      opacity: 1;
+      transform: translateX(0);
+      transition: max-width 0.4s ease, opacity 0.4s ease, transform 0.4s ease;
+    }
+
+    .brand-abbr {
+      display: inline-block;
+      transform: translateX(12px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.4s ease, transform 0.4s ease;
+    }
+
+    &.collapsed {
+      .brand-full {
+        max-width: 0;
+        opacity: 0;
+        transform: translateX(-12px);
+      }
+
+      .brand-abbr {
+        transform: translateX(0);
+        opacity: 1;
+        pointer-events: auto;
+      }
+    }
+
+    &:hover {
+      color: var(--primary-color);
+    }
+
+    // 移动端：禁用动画，只显示缩写
+    @media (max-width: $breakpoint-mobile) {
+      cursor: default;
+      flex-shrink: 1;
+      min-width: 0;
+      margin-right: 0;
+
+      .brand-full,
+      .brand-abbr {
+        transition: none;
+      }
+
+      .brand-full {
+        display: none;
+      }
+
+      .brand-abbr {
+        transform: translateX(0);
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      &:hover {
+        color: var(--text-primary);
+      }
+    }
+  }
+
+  .mobile-menu-btn {
+    display: none;
+    flex-shrink: 0;
+
+    @media (max-width: $breakpoint-mobile) {
+      display: inline-flex;
+    }
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: $spacing-xs;
+    flex-shrink: 0;
+
+    svg {
+      display: block;
+    }
+
+    @media (max-width: $breakpoint-mobile) {
+      gap: 2px;
+    }
+  }
+
+  .connection {
+    display: flex;
+    align-items: center;
+    gap: $spacing-sm;
+    color: var(--text-secondary);
+    min-width: 0;
+    flex-shrink: 1;
+    overflow: hidden;
+
+    .status-badge {
+      flex-shrink: 0;
+      white-space: nowrap;
+      margin-bottom: 0;
+    }
+
+    .base {
+      font-weight: 600;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 80px;
+    }
+
+    @media (max-width: $breakpoint-mobile) {
+      display: none;
+    }
+  }
+}
+
+.main-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  height: calc(100vh - var(--header-height));
+  overflow: hidden;
+  position: relative;
+
+  @supports (height: 100dvh) {
+    height: calc(100dvh - var(--header-height));
+  }
+
+  @media (max-width: $breakpoint-mobile) {
+    height: auto;
+    min-height: calc(100vh - var(--header-height));
+    overflow: visible;
+    padding-top: var(--header-height);
+
+    @supports (min-height: 100dvh) {
+      min-height: calc(100dvh - var(--header-height));
+    }
+  }
+}
+
+.sidebar {
+  width: 240px;
+  background: var(--bg-primary);
+  border-right: 1px solid var(--border-color);
+  padding: $spacing-md;
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+  transition: width $transition-normal, transform $transition-normal;
+  overflow-y: auto;
+  flex-shrink: 0;
+  height: 100%;
+
+  &.collapsed {
+    width: 60px;
+    padding: $spacing-md $spacing-sm;
+
+    .nav-item {
+      justify-content: center;
+      padding: 10px;
+    }
+  }
+
+  .nav-section {
+    display: flex;
+    flex-direction: column;
+    gap: $spacing-sm;
+    flex: 1;
+  }
+
+  .nav-item {
+    padding: 10px 12px;
+    border-radius: $radius-md;
+    color: var(--text-primary);
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: $spacing-sm;
+    cursor: pointer;
+    transition: background $transition-fast, color $transition-fast;
+
+    .nav-icon {
+      width: 20px;
+      height: 20px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      opacity: 0.9;
+
+      svg {
+        width: 18px;
+        height: 18px;
+        display: block;
+      }
+    }
+
+    .nav-label {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    &:hover {
+      background: var(--bg-secondary);
+    }
+
+    &.active {
+      background: rgba(59, 130, 246, 0.12);
+      color: var(--primary-color);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+  }
+
+  @media (max-width: $breakpoint-mobile) {
+    position: fixed;
+    z-index: $z-dropdown;
+    left: 0;
+    top: var(--header-height);
+    bottom: 0;
+    transform: translateX(-100%);
+    box-shadow: $shadow-lg;
+
+    &.open {
+      transform: translateX(0);
+    }
+  }
+}
+
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  height: 100%;
+
+  &.content-logs {
+    overflow: hidden;
+
+    @media (max-width: $breakpoint-mobile) {
+      overflow: visible;
+      overflow-y: auto;
+      height: auto;
+    }
+  }
+}
+
+.main-content {
+  flex: 1 0 auto;
+  padding: $spacing-lg;
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+  overflow-x: hidden;
+
+  &.main-content-logs {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+
+    @media (max-width: $breakpoint-mobile) {
+      flex: 0 0 auto;
+      min-height: auto;
+      overflow: visible;
+    }
+  }
+
+  @media (max-width: $breakpoint-mobile) {
+    padding: $spacing-md;
+  }
+}
+
+.footer {
+  padding: $spacing-md $spacing-lg;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+  flex-wrap: wrap;
+  gap: $spacing-sm;
+
+  .footer-version {
+    user-select: none;
+    -webkit-user-select: none;
+    -ms-user-select: none;
+    -webkit-touch-callout: none;
+  }
+}
+
+
+.grid {
+  display: grid;
+  gap: $spacing-lg;
+}
+
+@media (min-width: $breakpoint-tablet) {
+  .grid.cols-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

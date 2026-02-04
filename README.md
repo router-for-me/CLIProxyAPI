@@ -38,8 +38,10 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - OpenAI/Gemini/Claude compatible API endpoints for CLI models
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
+- Atlassian Rovo support via CLI (`acli`)
 - Qwen Code support via OAuth login
 - iFlow support via OAuth login
+- **Consolidated Management UI**: Built-in React-based management panel (formerly a separate repo)
 - Amp CLI and IDE extensions support with provider routing
 - Streaming and non-streaming responses
 - Function calling/tools support
@@ -57,6 +59,16 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started
+
+## Quick Start
+
+1.  **Install Prerequisites**:
+    - [Go 1.22+](https://go.dev/dl/)
+    - **For Atlassian Rovo**: Install the Rovo CLI (`npm install -g @atlassian/rovo-cli` or via binary) and ensure `acli` is in your PATH.
+2.  **Run the Server**:
+    - Use `start.bat` (Windows) to automatically start both the main server and the Rovo CLI proxy (if available).
+    - Or run `go run cmd/server/main.go`.
+3.  **Manage**: Open `http://localhost:8318/management.html` (port 8318 is default).
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 

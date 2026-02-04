@@ -1,0 +1,77 @@
+/**
+ * 主题样式
+ */
+
+// 浅色主题（默认）
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f3f4f6;
+  --bg-tertiary: #e5e7eb;
+
+  --text-primary: #1f2937;
+  --text-secondary: #6b7280;
+  --text-tertiary: #9ca3af;
+
+  --border-color: #e5e7eb;
+  --border-hover: #d1d5db;
+
+  --primary-color: #3b82f6;
+  --primary-hover: #2563eb;
+  --primary-active: #1d4ed8;
+
+  --success-color: #10b981;
+  --warning-color: #f59e0b;
+  --error-color: #ef4444;
+  --info-color: #3b82f6;
+
+  --success-badge-bg: #d1fae5;
+  --success-badge-text: #065f46;
+  --success-badge-border: #6ee7b7;
+
+  --failure-badge-bg: #fee2e2;
+  --failure-badge-text: #991b1b;
+  --failure-badge-border: #fca5a5;
+
+  --count-badge-bg: rgba(59, 130, 246, 0.14);
+  --count-badge-text: var(--primary-active);
+
+  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+}
+
+// 深色主题（#191919）
+[data-theme='dark'] {
+  --bg-primary: #202020;
+  --bg-secondary: #191919;
+  --bg-tertiary: #262626;
+
+  --text-primary: #fafafa;
+  --text-secondary: #a3a3a3;
+  --text-tertiary: #737373;
+
+  --border-color: #262626;
+  --border-hover: #404040;
+
+  --primary-color: #3b82f6;
+  --primary-hover: #60a5fa;
+  --primary-active: #93c5fd;
+
+  --success-color: #10b981;
+  --warning-color: #f59e0b;
+  --error-color: #ef4444;
+  --info-color: #3b82f6;
+
+  --success-badge-bg: rgba(6, 78, 59, 0.3);
+  --success-badge-text: #6ee7b7;
+  --success-badge-border: #059669;
+
+  --failure-badge-bg: rgba(153, 27, 27, 0.3);
+  --failure-badge-text: #fca5a5;
+  --failure-badge-border: #dc2626;
+
+  --count-badge-bg: rgba(59, 130, 246, 0.25);
+  --count-badge-text: var(--primary-active);
+
+  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.3);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3);
+}

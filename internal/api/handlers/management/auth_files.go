@@ -26,6 +26,7 @@ import (
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/rovo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -1813,6 +1814,94 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 		"email":      email,
 		"expired":    tokenStorage.Expire,
 		"type":       tokenStorage.Type,
+	})
+}
+
+func (h *Handler) RequestRovoToken(c *gin.Context) {
+	var payload struct {
+		Email    string `json:"email"`
+		APIKey   string `json:"api_key"`
+		CloudID  string `json:"cloud_id"`
+		BaseURL  string `json:"base_url"`
+		ProxyURL string `json:"proxy_url"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid payload"})
+		return
+	}
+
+	email := strings.TrimSpace(payload.Email)
+	apiKey := strings.TrimSpace(payload.APIKey)
+	if email == "" || apiKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "email and api_key are required"})
+		return
+	}
+
+	cloudID := strings.TrimSpace(payload.CloudID)
+	baseURL := strings.TrimSpace(payload.BaseURL)
+	if baseURL == "" {
+		baseURL = "https://api.atlassian.com"
+	}
+
+	// Auto-fetch cloud ID if missing
+	if cloudID == "" {
+		fetched, err := rovo.FetchCloudID(c.Request.Context(), email, apiKey, baseURL, &http.Client{Timeout: 30 * time.Second})
+		if err != nil {
+			log.Warnf("rovo: failed to auto-fetch cloud id: %v", err)
+		} else {
+			cloudID = fetched
+		}
+	}
+
+	storage := &rovo.TokenStorage{
+		Email:   email,
+		APIKey:  apiKey,
+		CloudID: cloudID,
+		Type:    "rovo",
+	}
+
+	fileName := rovo.SanitizeRovoFileName(email)
+	if fileName == "" {
+		fileName = fmt.Sprintf("rovo-%d", time.Now().UnixMilli())
+	} else {
+		fileName = fmt.Sprintf("rovo-%s", fileName)
+	}
+	timestamp := time.Now().Unix()
+
+	record := &coreauth.Auth{
+		ID:       fmt.Sprintf("%s-%d.json", fileName, timestamp),
+		Provider: "rovo",
+		FileName: fmt.Sprintf("%s-%d.json", fileName, timestamp),
+		Storage:  storage,
+		Metadata: map[string]any{
+			"email":     email,
+			"api_key":   apiKey,
+			"cloud_id":  cloudID,
+			"base_url":  baseURL,
+			"proxy_url": strings.TrimSpace(payload.ProxyURL),
+			"type":      "rovo",
+		},
+		Attributes: map[string]string{
+			"api_key":   apiKey,
+			"auth_kind": "apikey",
+			"base_url":  baseURL,
+			"email":     email,
+			"cloud_id":  cloudID,
+		},
+	}
+
+	savedPath, errSave := h.saveTokenRecord(c.Request.Context(), record)
+	if errSave != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to save rovo token"})
+		return
+	}
+
+	fmt.Printf("Rovo authentication successful. Token saved to %s\n", savedPath)
+	c.JSON(http.StatusOK, gin.H{
+		"status":     "ok",
+		"saved_path": savedPath,
+		"email":      email,
+		"cloud_id":   cloudID,
 	})
 }
 

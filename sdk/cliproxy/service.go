@@ -380,6 +380,8 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "iflow":
 		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
+	case "rovo":
+		s.coreManager.RegisterExecutor(executor.NewRovoExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -771,6 +773,17 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "iflow":
 		models = registry.GetIFlowModels()
 		models = applyExcludedModels(models, excluded)
+	case "rovo":
+		models = registry.GetRovoModels()
+		if entry := s.resolveConfigRovoKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildRovoConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -898,6 +911,75 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 		for i := range s.cfg.ClaudeKey {
 			entry := &s.cfg.ClaudeKey[i]
 			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) resolveConfigRovoKey(auth *coreauth.Auth) *config.RovoKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase, attrEmail string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		attrEmail = strings.TrimSpace(auth.Attributes["email"])
+	}
+	if auth.Metadata != nil {
+		if attrKey == "" {
+			if v, ok := auth.Metadata["api_key"].(string); ok {
+				attrKey = strings.TrimSpace(v)
+			}
+		}
+		if attrBase == "" {
+			if v, ok := auth.Metadata["base_url"].(string); ok {
+				attrBase = strings.TrimSpace(v)
+			}
+		}
+		if attrEmail == "" {
+			if v, ok := auth.Metadata["email"].(string); ok {
+				attrEmail = strings.TrimSpace(v)
+			}
+		}
+	}
+	for i := range s.cfg.RovoKey {
+		entry := &s.cfg.RovoKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		cfgEmail := strings.TrimSpace(entry.Email)
+		if attrKey != "" && attrBase != "" {
+			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+		if attrEmail != "" && strings.EqualFold(cfgEmail, attrEmail) {
+			return entry
+		}
+	}
+	if attrKey != "" {
+		for i := range s.cfg.RovoKey {
+			entry := &s.cfg.RovoKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	if attrEmail != "" {
+		for i := range s.cfg.RovoKey {
+			entry := &s.cfg.RovoKey[i]
+			if strings.EqualFold(strings.TrimSpace(entry.Email), attrEmail) {
 				return entry
 			}
 		}
@@ -1194,6 +1276,13 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "anthropic", "claude")
+}
+
+func buildRovoConfigModels(entry *config.RovoKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "atlassian", "rovo")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {

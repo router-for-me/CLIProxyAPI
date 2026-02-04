@@ -820,6 +820,38 @@ func GetIFlowModels() []*ModelInfo {
 	return models
 }
 
+// GetRovoModels returns supported models for Atlassian Rovo accounts.
+func GetRovoModels() []*ModelInfo {
+	entries := []struct {
+		ID          string
+		DisplayName string
+		Description string
+		Created     int64
+	}{
+		{ID: "rovo-claude-sonnet-4.5", DisplayName: "Rovo Claude Sonnet 4.5", Description: "Atlassian Rovo (Bedrock) Claude Sonnet 4.5", Created: 1759104000},
+		{ID: "rovo-claude-haiku-4.5", DisplayName: "Rovo Claude Haiku 4.5", Description: "Atlassian Rovo (Bedrock) Claude Haiku 4.5", Created: 1759276800},
+		{ID: "rovo-claude-sonnet-4", DisplayName: "Rovo Claude Sonnet 4", Description: "Atlassian Rovo (Bedrock) Claude Sonnet 4", Created: 1715644800},
+		{ID: "rovo-claude-opus-4.5", DisplayName: "Rovo Claude Opus 4.5", Description: "Atlassian Rovo (Bedrock) Claude Opus 4.5", Created: 1761955200},
+		{ID: "rovo-gpt-5.2-codex", DisplayName: "Rovo GPT-5.2 Codex", Description: "Atlassian Rovo GPT-5.2 Optimized for Code", Created: 1765000000},
+		{ID: "rovo-gpt-5.2", DisplayName: "Rovo GPT-5.2", Description: "Atlassian Rovo GPT-5.2 Standard", Created: 1765000000},
+		{ID: "rovo-gpt-5.1", DisplayName: "Rovo GPT-5.1", Description: "Atlassian Rovo GPT-5.1 Standard", Created: 1764000000},
+		{ID: "rovo-gpt-5", DisplayName: "Rovo GPT-5", Description: "Atlassian Rovo GPT-5 standard", Created: 1763000000},
+	}
+	models := make([]*ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, &ModelInfo{
+			ID:          entry.ID,
+			Object:      "model",
+			Created:     entry.Created,
+			OwnedBy:     "atlassian",
+			Type:        "rovo",
+			DisplayName: entry.DisplayName,
+			Description: entry.Description,
+		})
+	}
+	return models
+}
+
 // AntigravityModelConfig captures static antigravity model overrides, including
 // Thinking budget limits and provider max completion tokens.
 type AntigravityModelConfig struct {

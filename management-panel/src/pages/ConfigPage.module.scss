@@ -1,0 +1,262 @@
+@use '../styles/mixins' as *;
+
+.container {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.pageTitle {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 $spacing-md 0;
+}
+
+.description {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin: 0 0 $spacing-xl 0;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+  flex: 1;
+  min-height: 0;
+}
+
+.searchInputWrapper {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+
+  // The shared Input component adds a wrapper (.form-group) with margin-bottom.
+  // In the floating toolbar we want the input to be compact.
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+}
+
+.searchInput {
+  flex: 1;
+  border-radius: $radius-full !important;
+  padding-right: 132px !important;
+}
+
+.searchCount {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  padding: 2px 8px;
+  border-radius: $radius-full;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.searchRight {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.searchButton {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: $radius-full;
+  background: var(--primary-color);
+  border: 1px solid var(--primary-color);
+  color: #fff;
+  transition: background-color $transition-fast, border-color $transition-fast, opacity $transition-fast;
+
+  &:hover:not(:disabled) {
+    background: var(--primary-hover);
+    border-color: var(--primary-hover);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.searchActions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+
+  button {
+    min-width: 32px;
+    width: 32px;
+    height: 32px;
+    padding: 0 !important;
+    border-radius: $radius-full;
+  }
+}
+
+.controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: $spacing-md;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.status {
+  font-size: 14px;
+  color: var(--text-secondary);
+
+  &.modified {
+    color: #f59e0b;
+  }
+
+  &.saved {
+    color: #16a34a;
+  }
+
+  &.error {
+    color: #dc2626;
+  }
+}
+
+.editorWrapper {
+  width: 100%;
+  flex: 0 0 auto;
+  height: clamp(360px, 60vh, 920px);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  overflow: hidden;
+  position: relative;
+  --floating-controls-height: 0px;
+
+  @supports (height: 100dvh) {
+    height: clamp(360px, 60dvh, 920px);
+  }
+
+  // Floating search toolbar on top of the editor (but not covering content).
+  .floatingControls {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    right: 12px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: $spacing-sm;
+    flex-wrap: wrap;
+    pointer-events: auto;
+  }
+
+  // CodeMirror theme overrides
+  :global {
+    .cm-editor {
+      height: 100%;
+      font-size: 14px;
+      font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
+    }
+
+    .cm-scroller {
+      overflow: auto;
+      padding-top: calc(var(--floating-controls-height, 0px) + #{$spacing-md});
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-x pan-y;
+      overscroll-behavior: contain;
+    }
+
+    .cm-gutters {
+      border-right: 1px solid var(--border-color);
+      background: var(--bg-secondary);
+    }
+
+    .cm-lineNumbers .cm-gutterElement {
+      padding: 0 8px 0 12px;
+      min-width: 40px;
+      color: var(--text-muted);
+    }
+
+    .cm-activeLine {
+      background: var(--bg-hover);
+    }
+
+    .cm-activeLineGutter {
+      background: var(--bg-hover);
+    }
+
+    .cm-selectionMatch {
+      background: rgba(255, 193, 7, 0.3);
+    }
+
+    .cm-searchMatch {
+      background: rgba(255, 193, 7, 0.4);
+      outline: 1px solid rgba(255, 193, 7, 0.6);
+    }
+
+    .cm-searchMatch-selected {
+      background: rgba(255, 152, 0, 0.5);
+    }
+
+    // Dark theme adjustments
+    [data-theme='dark'] & {
+      .cm-gutters {
+        background: var(--bg-tertiary);
+      }
+
+      .cm-selectionMatch {
+        background: rgba(255, 193, 7, 0.2);
+      }
+    }
+  }
+}
+
+.configCard {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: visible;
+}
+
+.actions {
+  display: flex;
+  gap: $spacing-sm;
+  justify-content: flex-end;
+
+  @include mobile {
+    justify-content: stretch;
+
+    button {
+      flex: 1;
+    }
+  }
+}
+
+@media (max-height: 820px) {
+  .pageTitle {
+    font-size: 24px;
+    margin-bottom: $spacing-sm;
+  }
+
+  .description {
+    margin-bottom: $spacing-lg;
+  }
+
+  .content {
+    gap: $spacing-md;
+  }
+
+  .configCard {
+    padding: $spacing-md;
+  }
+}

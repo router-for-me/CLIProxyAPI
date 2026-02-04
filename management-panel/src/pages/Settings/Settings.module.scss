@@ -1,0 +1,164 @@
+@use '../../styles/mixins' as *;
+
+.container {
+  width: 100%;
+}
+
+.pageTitle {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 $spacing-xl 0;
+}
+
+.grid {
+  display: grid;
+  gap: $spacing-lg;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settingRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-md;
+}
+
+.settingInfo {
+  flex: 1;
+
+  h4 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 $spacing-xs 0;
+  }
+
+  p {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin: 0;
+  }
+}
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 52px;
+  height: 28px;
+  flex-shrink: 0;
+
+  input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+
+    &:checked + .slider {
+      background-color: var(--primary-color);
+
+      &:before {
+        transform: translateX(24px);
+      }
+    }
+
+    &:focus + .slider {
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+    }
+  }
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: var(--border-color);
+  transition: $transition-fast;
+  border-radius: $radius-full;
+
+  &:before {
+    position: absolute;
+    content: '';
+    height: 20px;
+    width: 20px;
+    left: 4px;
+    bottom: 4px;
+    background-color: white;
+    transition: $transition-fast;
+    border-radius: $radius-full;
+  }
+}
+
+.formGroup {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+}
+
+.buttonGroup {
+  display: flex;
+  gap: $spacing-sm;
+}
+
+.retryRow {
+  display: flex;
+  align-items: flex-end;
+  gap: $spacing-md;
+  flex-wrap: wrap;
+
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.retryRowAligned {
+  align-items: flex-start;
+
+  .retryButton {
+    margin-top: calc(1.5em + #{$spacing-xs});
+  }
+
+  @include mobile {
+    align-items: stretch;
+
+    .retryButton {
+      margin-top: 0;
+    }
+  }
+}
+
+.retryRowInputGrow {
+  :global(.form-group) {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .retryInput {
+    width: 100%;
+  }
+}
+
+.retryInput {
+  width: 140px;
+
+  @include mobile {
+    width: 100%;
+  }
+}
+
+.retryButton {
+  @include mobile {
+    width: 100%;
+  }
+}

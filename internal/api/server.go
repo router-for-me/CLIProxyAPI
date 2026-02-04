@@ -308,6 +308,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/rovo-auth.html", s.serveRovoAuthPage)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -584,6 +585,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/claude-api-key", s.mgmt.PatchClaudeKey)
 		mgmt.DELETE("/claude-api-key", s.mgmt.DeleteClaudeKey)
 
+		mgmt.GET("/rovo-api-key", s.mgmt.GetRovoKeys)
+		mgmt.PUT("/rovo-api-key", s.mgmt.PutRovoKeys)
+		mgmt.PATCH("/rovo-api-key", s.mgmt.PatchRovoKey)
+		mgmt.DELETE("/rovo-api-key", s.mgmt.DeleteRovoKey)
+
 		mgmt.GET("/codex-api-key", s.mgmt.GetCodexKeys)
 		mgmt.PUT("/codex-api-key", s.mgmt.PutCodexKeys)
 		mgmt.PATCH("/codex-api-key", s.mgmt.PatchCodexKey)
@@ -625,6 +631,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/qwen-auth-url", s.mgmt.RequestQwenToken)
 		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
+		mgmt.POST("/rovo-auth-url", s.mgmt.RequestRovoToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
@@ -664,6 +671,23 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		return
 	}
 
+	c.File(filePath)
+}
+
+func (s *Server) serveRovoAuthPage(c *gin.Context) {
+	// Serve the static rovo-auth.html file from the static directory
+	staticDir := filepath.Dir(s.configFilePath)
+	filePath := filepath.Join(staticDir, "static", "rovo-auth.html")
+	if _, err := os.Stat(filePath); err != nil {
+		// Try relative to executable
+		if execPath, err := os.Executable(); err == nil {
+			filePath = filepath.Join(filepath.Dir(execPath), "static", "rovo-auth.html")
+		}
+	}
+	if _, err := os.Stat(filePath); err != nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
 	c.File(filePath)
 }
 
