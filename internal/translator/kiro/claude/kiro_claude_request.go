@@ -889,9 +889,9 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 	finalContent := contentBuilder.String()
 	if strings.TrimSpace(finalContent) == "" {
 		if len(toolUses) > 0 {
-			finalContent = "I'll help you with that."
+			finalContent = kirocommon.DefaultAssistantContentWithTools
 		} else {
-			finalContent = "I understand."
+			finalContent = kirocommon.DefaultAssistantContent
 		}
 		log.Debugf("kiro: assistant content was empty, using default: %s", finalContent)
 	}
