@@ -31,7 +31,12 @@ jobs:
 
       - name: Generate Build Metadata
         run: |
-          echo VERSION=$(date +%Y%m%d)-$(git rev-parse --short HEAD) >> $GITHUB_ENV
+          # 获取上游仓库的最新版本号
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git || true
+          git fetch upstream --tags
+          # 使用上游最新 tag 作为版本号，如果没有则使用 git describe
+          UPSTREAM_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "dev")
+          echo VERSION=${UPSTREAM_VERSION} >> $GITHUB_ENV
           echo COMMIT=$(git rev-parse --short HEAD) >> $GITHUB_ENV
           echo BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) >> $GITHUB_ENV
 
