@@ -1,0 +1,22 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+oauth:
+  callback_port: 1455
+
+auth_dir: "./data/auth"
+
+selector:
+  type: "round_robin"
+
+proxy:
+  timeout: 120s
+  retry: 3
+
+management:
+  # true 时仅允许 127.0.0.1 / ::1 访问 /api 管理接口
+  local_only: true
+  # 管理接口 API Key，建议在生产环境配置复杂随机值并通过 X-API-Key 头传递
+  # 留空则不启用 API Key 鉴权（仍可依赖 local_only）
+  api_key: ""

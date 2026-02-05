@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  codex-lite:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml
+    restart: unless-stopped

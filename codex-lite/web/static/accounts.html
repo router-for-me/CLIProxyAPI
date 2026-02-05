@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Codex Lite - 账号管理</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="bg-animation"></div>
+
+  <!-- 导航栏 -->
+  <nav class="navbar">
+    <div class="navbar-content">
+      <div class="logo">
+        <div class="logo-icon">⚡</div>
+        <span>Codex Lite</span>
+      </div>
+      <div class="nav-links">
+        <a href="/" class="nav-link">Dashboard</a>
+        <a href="/accounts.html" class="nav-link active">账号管理</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- 主内容 -->
+  <main class="container">
+    <div class="page-header">
+      <h1 class="page-title">账号管理</h1>
+      <button class="btn btn-primary" onclick="startLogin()">
+        ➕ 添加账号
+      </button>
+    </div>
+
+    <!-- 账号卡片列表 -->
+    <div id="accounts-list" class="stats-grid">
+      <div class="loading">
+        <div class="spinner"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 登录模态框 -->
+  <div id="login-modal" class="modal">
+    <div class="glass-card modal-content">
+      <h2 style="margin-bottom: 16px;">添加账号</h2>
+      <p style="color: var(--text-secondary); margin-bottom: 20px;">
+        点击下方按钮将跳转到 OpenAI 登录页面进行授权
+      </p>
+      <div id="login-url" style="display: none; margin-bottom: 16px;">
+        <a id="auth-link" href="#" target="_blank" class="btn btn-primary" style="width: 100%;">
+          🔗 前往登录
+        </a>
+      </div>
+      <div style="display: flex; gap: 12px;">
+        <button class="btn btn-outline" style="flex: 1;" onclick="closeModal()">取消</button>
+        <button id="get-url-btn" class="btn btn-primary" style="flex: 1;" onclick="getAuthUrl()">获取授权链接</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
