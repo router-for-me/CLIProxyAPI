@@ -1,7 +1,7 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-cli-proxy-api:local}
-    pull_policy: if_not_present
+    image: ${CLI_PROXY_IMAGE:-yuuuuu0/cliproxyapi:latest}
+    pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile
