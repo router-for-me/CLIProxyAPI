@@ -1277,7 +1277,20 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 			projectID = strings.TrimSpace(pid)
 		}
 	}
-	payload = geminiToAntigravity(modelName, payload, projectID)
+
+	// Get web search config for Claude API requests
+	var webSearchCfg *config.WebSearchConfig
+	if e.cfg != nil {
+		webSearchCfg = &e.cfg.AntigravityClaudeWebSearch
+	}
+
+	payload = geminiToAntigravity(modelName, payload, projectID, webSearchCfg)
+
+	// Update modelName if it was changed by web search config
+	resolvedModel := gjson.GetBytes(payload, "model").String()
+	if resolvedModel != "" && resolvedModel != modelName {
+		modelName = resolvedModel
+	}
 	payload, _ = sjson.SetBytes(payload, "model", modelName)
 
 	if strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-high") {
@@ -1540,10 +1553,74 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
-	template, _ := sjson.Set(string(payload), "model", modelName)
+func geminiToAntigravity(modelName string, payload []byte, projectID string, webSearchCfg *config.WebSearchConfig) []byte {
+	requestType := "agent"
+	resolvedModel := modelName
+	hasWebSearch := false
+
+	// Check if web search is enabled and detect web_search marker from translator
+	if webSearchCfg != nil && webSearchCfg.Enable {
+		// Check for _hasWebSearch marker set by Claude translator
+		if gjson.GetBytes(payload, "_hasWebSearch").Bool() {
+			hasWebSearch = true
+		}
+		// Also check for googleSearch tool (may be set by other translators)
+		tools := gjson.GetBytes(payload, "request.tools")
+		if tools.IsArray() {
+			for _, tool := range tools.Array() {
+				if tool.Get("googleSearch").Exists() {
+					hasWebSearch = true
+					break
+				}
+			}
+		}
+
+		if hasWebSearch {
+			requestType = "web_search"
+			// Use configured model or default to gemini-2.5-flash (currently the only model supporting grounding)
+			if webSearchCfg.Model != "" {
+				resolvedModel = webSearchCfg.Model
+			} else {
+				resolvedModel = "gemini-2.5-flash"
+			}
+			// Inject googleSearch tool
+			payload, _ = sjson.SetRawBytes(payload, "request.tools.-1.googleSearch", []byte(`{}`))
+			// Set candidateCount to 1 for grounding
+			payload, _ = sjson.SetBytes(payload, "request.generationConfig.candidateCount", 1)
+		}
+	}
+
+	// Remove the marker field before sending to upstream
+	payload, _ = sjson.DeleteBytes(payload, "_hasWebSearch")
+
+	template, _ := sjson.Set(string(payload), "model", resolvedModel)
 	template, _ = sjson.Set(template, "userAgent", "antigravity")
-	template, _ = sjson.Set(template, "requestType", "agent")
+	template, _ = sjson.Set(template, "requestType", requestType)
+
+	// Adjust thinking_budget for web_search requests to stay within model limits
+	// This is done automatically based on model's ThinkingSupport from registry
+	if requestType == "web_search" {
+		budgetResult := gjson.Get(template, "request.generationConfig.thinkingConfig.thinkingBudget")
+		if budgetResult.Exists() {
+			budget := int(budgetResult.Int())
+			// Try to get model-specific limits from registry
+			if modelInfo := registry.LookupModelInfo(resolvedModel, "antigravity"); modelInfo != nil && modelInfo.Thinking != nil {
+				support := modelInfo.Thinking
+				if budget > 0 && support.Max > 0 && budget > support.Max {
+					template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", support.Max)
+				} else if budget == 0 && !support.ZeroAllowed && support.Min > 0 {
+					template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", support.Min)
+				} else if budget > 0 && support.Min > 0 && budget < support.Min {
+					template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", support.Min)
+				}
+			} else {
+				// Fallback: cap at 24576 (Gemini's max for grounding models)
+				if budget > 24576 {
+					template, _ = sjson.Set(template, "request.generationConfig.thinkingConfig.thinkingBudget", 24576)
+				}
+			}
+		}
+	}
 
 	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
 	if projectID != "" {

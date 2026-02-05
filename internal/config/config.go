@@ -114,7 +114,24 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// AntigravityClaudeWebSearch configures web_search tool translation for Claude API requests via Antigravity backend.
+	AntigravityClaudeWebSearch WebSearchConfig `yaml:"antigravity-claude-web-search" json:"antigravity-claude-web-search"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// WebSearchConfig configures web_search tool translation for Claude API requests via Antigravity backend.
+// This enables translation of Claude API web_search tool requests to Gemini googleSearch format.
+type WebSearchConfig struct {
+	// Enable enables web_search tool translation (Claude API -> Gemini googleSearch).
+	// When false, web_search tool declarations are passed through without translation.
+	Enable bool `yaml:"enable" json:"enable"`
+
+	// Model specifies the model to use for web search requests (optional).
+	// Must be a model that supports googleSearch/grounding.
+	// If empty, defaults to "gemini-2.5-flash" (currently the only model supporting grounding).
+	// The thinking_budget will be automatically adjusted to fit the model's supported range.
+	Model string `yaml:"model,omitempty" json:"model,omitempty"`
 }
 
 // TLSConfig holds HTTPS server settings.

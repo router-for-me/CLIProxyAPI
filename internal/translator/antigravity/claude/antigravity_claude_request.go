@@ -313,6 +313,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// tools
 	toolsJSON := ""
 	toolDeclCount := 0
+	hasWebSearchTool := false
 	allowedToolKeys := []string{"name", "description", "behavior", "parameters", "parametersJsonSchema", "response", "responseJsonSchema"}
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.IsArray() {
@@ -320,6 +321,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
+			// Check for web_search tool declaration
+			if toolResult.Get("type").String() == "web_search" || toolResult.Get("name").String() == "web_search" {
+				hasWebSearchTool = true
+				continue // Skip adding web_search to functionDeclarations
+			}
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				// Sanitize the input schema for Antigravity API compatibility
@@ -397,6 +403,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 	if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() && v.Type == gjson.Number {
 		out, _ = sjson.Set(out, "request.generationConfig.maxOutputTokens", v.Num)
+	}
+
+	// Store web_search detection result as a marker field for executor to read
+	if hasWebSearchTool {
+		out, _ = sjson.Set(out, "_hasWebSearch", true)
 	}
 
 	outBytes := []byte(out)
