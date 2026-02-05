@@ -116,6 +116,19 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 						part, _ = sjson.Set(part, "functionResponse.name", funcName)
 						part, _ = sjson.Set(part, "functionResponse.response.result", responseData)
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+
+					case "image":
+						source := contentResult.Get("source")
+						if source.Get("type").String() == "base64" {
+							mimeType := source.Get("media_type").String()
+							data := source.Get("data").String()
+							if mimeType != "" && data != "" {
+								part := `{"inlineData":{"mime_type":"","data":""}}`
+								part, _ = sjson.Set(part, "inlineData.mime_type", mimeType)
+								part, _ = sjson.Set(part, "inlineData.data", data)
+								contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+							}
+						}
 					}
 					return true
 				})

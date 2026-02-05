@@ -116,7 +116,11 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		// Include thoughts configuration for reasoning process visibility
 		// Translator only does format conversion, ApplyThinking handles model capability validation.
 		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
-			if thinkingLevel := thinkingConfig.Get("thinkingLevel"); thinkingLevel.Exists() {
+			thinkingLevel := thinkingConfig.Get("thinkingLevel")
+			if !thinkingLevel.Exists() {
+				thinkingLevel = thinkingConfig.Get("thinking_level")
+			}
+			if thinkingLevel.Exists() {
 				level := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
 				switch level {
 				case "":
@@ -132,23 +136,29 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
 					}
 				}
-			} else if thinkingBudget := thinkingConfig.Get("thinkingBudget"); thinkingBudget.Exists() {
-				budget := int(thinkingBudget.Int())
-				switch budget {
-				case 0:
-					out, _ = sjson.Set(out, "thinking.type", "disabled")
-					out, _ = sjson.Delete(out, "thinking.budget_tokens")
-				case -1:
-					out, _ = sjson.Set(out, "thinking.type", "enabled")
-					out, _ = sjson.Delete(out, "thinking.budget_tokens")
-				default:
-					out, _ = sjson.Set(out, "thinking.type", "enabled")
-					out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+			} else {
+				thinkingBudget := thinkingConfig.Get("thinkingBudget")
+				if !thinkingBudget.Exists() {
+					thinkingBudget = thinkingConfig.Get("thinking_budget")
 				}
-			} else if includeThoughts := thinkingConfig.Get("includeThoughts"); includeThoughts.Exists() && includeThoughts.Type == gjson.True {
-				out, _ = sjson.Set(out, "thinking.type", "enabled")
-			} else if includeThoughts := thinkingConfig.Get("include_thoughts"); includeThoughts.Exists() && includeThoughts.Type == gjson.True {
-				out, _ = sjson.Set(out, "thinking.type", "enabled")
+				if thinkingBudget.Exists() {
+					budget := int(thinkingBudget.Int())
+					switch budget {
+					case 0:
+						out, _ = sjson.Set(out, "thinking.type", "disabled")
+						out, _ = sjson.Delete(out, "thinking.budget_tokens")
+					case -1:
+						out, _ = sjson.Set(out, "thinking.type", "enabled")
+						out, _ = sjson.Delete(out, "thinking.budget_tokens")
+					default:
+						out, _ = sjson.Set(out, "thinking.type", "enabled")
+						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+					}
+				} else if includeThoughts := thinkingConfig.Get("includeThoughts"); includeThoughts.Exists() && includeThoughts.Type == gjson.True {
+					out, _ = sjson.Set(out, "thinking.type", "enabled")
+				} else if includeThoughts := thinkingConfig.Get("include_thoughts"); includeThoughts.Exists() && includeThoughts.Type == gjson.True {
+					out, _ = sjson.Set(out, "thinking.type", "enabled")
+				}
 			}
 		}
 	}
