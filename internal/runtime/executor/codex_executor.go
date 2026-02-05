@@ -27,6 +27,11 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	codexClientVersion = "0.98.0"
+	codexUserAgent     = "codex_cli_rs/0.98.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+)
+
 var dataTag = []byte("data:")
 
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
@@ -637,10 +642,10 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	misc.EnsureHeader(r.Header, ginHeaders, "Version", "0.21.0")
+	misc.EnsureHeader(r.Header, ginHeaders, "Version", codexClientVersion)
 	misc.EnsureHeader(r.Header, ginHeaders, "Openai-Beta", "responses=experimental")
 	misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464")
+	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", codexUserAgent)
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
