@@ -1,11 +1,18 @@
 // API 基础配置
 const API_BASE = '/api';
 
+// 管理 API Key（可通过 localStorage.managementApiKey 注入）
+function getManagementHeaders() {
+  const apiKey = localStorage.getItem('managementApiKey') || '';
+  if (!apiKey) return {};
+  return { 'X-API-Key': apiKey };
+}
+
 // API 调用封装
 async function fetchAPI(endpoint, options = {}) {
   try {
     const response = await fetch(`${API_BASE}${endpoint}`, {
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getManagementHeaders() },
       ...options
     });
     return await response.json();
