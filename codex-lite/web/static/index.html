@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Codex Lite - Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="bg-animation"></div>
+
+  <!-- 导航栏 -->
+  <nav class="navbar">
+    <div class="navbar-content">
+      <div class="logo">
+        <div class="logo-icon">⚡</div>
+        <span>Codex Lite</span>
+      </div>
+      <div class="nav-links">
+        <a href="/" class="nav-link active">Dashboard</a>
+        <a href="/accounts.html" class="nav-link">账号管理</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- 主内容 -->
+  <main class="container">
+    <!-- 页面标题 -->
+    <div class="page-header">
+      <h1 class="page-title">Dashboard</h1>
+      <button class="btn btn-outline" onclick="refreshData()">
+        🔄 刷新数据
+      </button>
+    </div>
+
+    <!-- 状态卡片 -->
+    <div class="stats-grid">
+      <div class="glass-card stat-card">
+        <div class="stat-icon primary">📊</div>
+        <div class="stat-info">
+          <h3 id="status-text">--</h3>
+          <p>服务状态</p>
+        </div>
+      </div>
+      <div class="glass-card stat-card">
+        <div class="stat-icon success">👥</div>
+        <div class="stat-info">
+          <h3 id="accounts-count">0</h3>
+          <p>账号数量</p>
+        </div>
+      </div>
+      <div class="glass-card stat-card">
+        <div class="stat-icon warning">🔑</div>
+        <div class="stat-info">
+          <h3 id="active-count">0</h3>
+          <p>活跃账号</p>
+        </div>
+      </div>
+      <div class="glass-card stat-card">
+        <div class="stat-icon danger">⏰</div>
+        <div class="stat-info">
+          <h3 id="expired-count">0</h3>
+          <p>已过期</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 账号列表 -->
+    <div class="glass-card">
+      <h2 style="margin-bottom: 20px;">账号列表</h2>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>邮箱</th>
+              <th>账号ID</th>
+              <th>状态</th>
+              <th>过期时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="accounts-table">
+            <tr>
+              <td colspan="5" class="loading">
+                <div class="spinner"></div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+oauth:
+  callback_port: 1455
+
+auth_dir: "./data/auth"
+
+selector:
+  type: "round_robin"
+
+proxy:
+  timeout: 120s
+  retry: 3
