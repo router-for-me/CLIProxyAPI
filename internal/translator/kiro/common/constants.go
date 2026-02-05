@@ -29,6 +29,14 @@ const (
 	// InlineCodeMarker is the markdown inline code marker (backtick).
 	InlineCodeMarker = "`"
 
+	// DefaultAssistantContentWithTools is the fallback content for assistant messages
+	// that have tool_use but no text content. Kiro API requires non-empty content.
+	DefaultAssistantContentWithTools = "I'll help you with that."
+
+	// DefaultAssistantContent is the fallback content for assistant messages
+	// that have no content at all. Kiro API requires non-empty content.
+	DefaultAssistantContent = "I understand."
+
 	// KiroAgenticSystemPrompt is injected only for -agentic models to prevent timeouts on large writes.
 	// AWS Kiro API has a 2-3 minute timeout for large file write operations.
 	KiroAgenticSystemPrompt = `
