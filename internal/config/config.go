@@ -18,7 +18,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+const (
+	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPprofAddr             = "127.0.0.1:8316"
+)
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
@@ -40,6 +43,9 @@ type Config struct {
 
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
+
+	// Pprof config controls the optional pprof HTTP debug server.
+	Pprof PprofConfig `yaml:"pprof" json:"pprof"`
 
 	// CommercialMode disables high-overhead HTTP middleware features to minimize per-request memory usage.
 	CommercialMode bool `yaml:"commercial-mode" json:"commercial-mode"`
@@ -132,6 +138,14 @@ type TLSConfig struct {
 	Cert string `yaml:"cert" json:"cert"`
 	// Key is the path to the TLS private key file.
 	Key string `yaml:"key" json:"key"`
+}
+
+// PprofConfig holds pprof HTTP server settings.
+type PprofConfig struct {
+	// Enable toggles the pprof HTTP debug server.
+	Enable bool `yaml:"enable" json:"enable"`
+	// Addr is the host:port address for the pprof HTTP server.
+	Addr string `yaml:"addr" json:"addr"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -556,6 +570,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
+	cfg.Pprof.Enable = false
+	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.IncognitoBrowser = false // Default to normal browser (AWS uses incognito by force)
@@ -597,6 +613,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
 	if cfg.RemoteManagement.PanelGitHubRepository == "" {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	}
+
+	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
+	if cfg.Pprof.Addr == "" {
+		cfg.Pprof.Addr = DefaultPprofAddr
 	}
 
 	if cfg.LogsMaxTotalSizeMB < 0 {
