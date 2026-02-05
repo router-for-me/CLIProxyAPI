@@ -1,0 +1,48 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git || true
+          git fetch upstream
+
+      - name: Merge upstream changes
+        id: merge
+        run: |
+          git checkout main
+          if git merge upstream/main --no-edit; then
+            echo "merged=true" >> $GITHUB_OUTPUT
+          else
+            echo "Merge conflict detected, attempting to resolve..."
+            git merge --abort
+            echo "merged=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push changes
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            git push origin main
+            echo "Changes pushed successfully"
+          else
+            echo "No new changes to push"
+          fi

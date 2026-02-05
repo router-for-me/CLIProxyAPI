@@ -1,7 +1,7 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
-    pull_policy: always
+    image: ${CLI_PROXY_IMAGE:-cli-proxy-api:local}
+    pull_policy: if_not_present
     build:
       context: .
       dockerfile: Dockerfile
@@ -14,6 +14,7 @@ services:
     #   - .env
     environment:
       DEPLOY: ${DEPLOY:-}
+      USAGE_SQLITE_PATH: /CLIProxyAPI/data/usage.db
     ports:
       - "8317:8317"
       - "8085:8085"
@@ -25,4 +26,5 @@ services:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      - ${CLI_PROXY_DATA_PATH:-./data}:/CLIProxyAPI/data
     restart: unless-stopped
