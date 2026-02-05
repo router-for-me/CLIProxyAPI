@@ -883,8 +883,21 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 		contentBuilder.WriteString(content.String())
 	}
 
+	// CRITICAL FIX: Kiro API requires non-empty content for assistant messages
+	// This can happen with compaction requests where assistant messages have only tool_use
+	// (no text content). Without this fix, Kiro API returns "Improperly formed request" error.
+	finalContent := contentBuilder.String()
+	if strings.TrimSpace(finalContent) == "" {
+		if len(toolUses) > 0 {
+			finalContent = "I'll help you with that."
+		} else {
+			finalContent = "I understand."
+		}
+		log.Debugf("kiro: assistant content was empty, using default: %s", finalContent)
+	}
+
 	return KiroAssistantResponseMessage{
-		Content:  contentBuilder.String(),
+		Content:  finalContent,
 		ToolUses: toolUses,
 	}
 }
