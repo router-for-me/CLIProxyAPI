@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 完整克隆以获取所有 tags
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
