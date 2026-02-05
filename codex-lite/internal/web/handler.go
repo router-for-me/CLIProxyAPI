@@ -14,27 +14,77 @@ import (
 )
 
 type Handler struct {
-	manager     *manager.Manager
-	authDir     string
-	oauthPort   int
-	sessions    map[string]*loginSession
-	sessionsMu  sync.RWMutex
+	manager      *manager.Manager
+	authDir      string
+	oauthPort    int
+	sessions     map[string]*loginSession
+	sessionsMu   sync.RWMutex
+	sessionTTL   time.Duration
+	exchangeCode func(context.Context, string, *auth.PKCECodes) (*auth.TokenResponse, error)
 }
 
 type loginSession struct {
-	State        string
-	PKCE         *auth.PKCECodes
-	AuthURL      string
-	CreatedAt    time.Time
+	State     string
+	PKCE      *auth.PKCECodes
+	AuthURL   string
+	CreatedAt time.Time
 }
 
+const (
+	defaultSessionTTL      = 10 * time.Minute
+	defaultCleanupInterval = 1 * time.Minute
+)
+
 func NewHandler(mgr *manager.Manager, authDir string, oauthPort int) *Handler {
-	return &Handler{
-		manager:   mgr,
-		authDir:   authDir,
-		oauthPort: oauthPort,
-		sessions:  make(map[string]*loginSession),
+	h := &Handler{
+		manager:    mgr,
+		authDir:    authDir,
+		oauthPort:  oauthPort,
+		sessions:   make(map[string]*loginSession),
+		sessionTTL: defaultSessionTTL,
+		exchangeCode: func(ctx context.Context, code string, pkce *auth.PKCECodes) (*auth.TokenResponse, error) {
+			return auth.NewCodexAuth().ExchangeCode(ctx, code, pkce)
+		},
 	}
+	h.startSessionCleanup(defaultCleanupInterval)
+	return h
+}
+
+func (h *Handler) startSessionCleanup(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			h.cleanupExpiredSessions(time.Now())
+		}
+	}()
+}
+
+func (h *Handler) cleanupExpiredSessions(now time.Time) int {
+	h.sessionsMu.Lock()
+	defer h.sessionsMu.Unlock()
+
+	removed := 0
+	for state, session := range h.sessions {
+		if h.isSessionExpired(session, now) {
+			delete(h.sessions, state)
+			removed++
+		}
+	}
+
+	return removed
+}
+
+func (h *Handler) isSessionExpired(session *loginSession, now time.Time) bool {
+	if session == nil {
+		return true
+	}
+	return now.Sub(session.CreatedAt) > h.sessionTTL
 }
 
 // ListAccounts 返回所有账号列表
@@ -122,12 +172,19 @@ func (h *Handler) HandleCallback(c *gin.Context) {
 		return
 	}
 
+	if h.isSessionExpired(session, time.Now()) {
+		h.sessionsMu.Lock()
+		delete(h.sessions, state)
+		h.sessionsMu.Unlock()
+		c.JSON(http.StatusBadRequest, gin.H{"error": "state expired"})
+		return
+	}
+
 	// 交换 code 获取 token
-	codexAuth := auth.NewCodexAuth()
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	tokenResp, err := codexAuth.ExchangeCode(ctx, code, session.PKCE)
+	tokenResp, err := h.exchangeCode(ctx, code, session.PKCE)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
