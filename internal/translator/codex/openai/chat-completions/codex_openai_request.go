@@ -7,8 +7,6 @@
 package chat_completions
 
 import (
-	"bytes"
-
 	"strconv"
 	"strings"
 
@@ -29,7 +27,7 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI Responses API format
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 	// Start with empty JSON object
 	out := `{"instructions":""}`
 
