@@ -3,7 +3,6 @@
 package chat_completions
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 
@@ -28,7 +27,7 @@ const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
 // Returns:
 //   - []byte: The transformed request data in Gemini CLI API format
 func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 	// Base envelope (no default thinkingConfig)
 	out := []byte(`{"project":"","request":{"contents":[]},"model":"gemini-2.5-pro"}`)
 
