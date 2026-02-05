@@ -67,7 +67,7 @@ type SQLitePlugin struct {
 //   - *SQLitePlugin: A new SQLite plugin instance
 //   - error: An error if the database could not be opened or initialized
 func NewSQLitePlugin(dbPath string) (*SQLitePlugin, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, err
 	}
