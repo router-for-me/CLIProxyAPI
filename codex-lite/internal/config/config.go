@@ -8,11 +8,12 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	OAuth    OAuthConfig    `yaml:"oauth"`
-	AuthDir  string         `yaml:"auth_dir"`
-	Selector SelectorConfig `yaml:"selector"`
-	Proxy    ProxyConfig    `yaml:"proxy"`
+	Server     ServerConfig     `yaml:"server"`
+	OAuth      OAuthConfig      `yaml:"oauth"`
+	AuthDir    string           `yaml:"auth_dir"`
+	Selector   SelectorConfig   `yaml:"selector"`
+	Proxy      ProxyConfig      `yaml:"proxy"`
+	Management ManagementConfig `yaml:"management"`
 }
 
 type ServerConfig struct {
@@ -33,6 +34,11 @@ type ProxyConfig struct {
 	Retry   int           `yaml:"retry"`
 }
 
+type ManagementConfig struct {
+	LocalOnly bool   `yaml:"local_only"`
+	APIKey    string `yaml:"api_key"`
+}
+
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
@@ -49,6 +55,10 @@ func DefaultConfig() *Config {
 		Proxy: ProxyConfig{
 			Timeout: 120 * time.Second,
 			Retry:   3,
+		},
+		Management: ManagementConfig{
+			LocalOnly: true,
+			APIKey:    "",
 		},
 	}
 }
