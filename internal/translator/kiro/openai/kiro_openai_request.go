@@ -659,13 +659,36 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 		contentBuilder.WriteString(content.String())
 	} else if content.IsArray() {
 		for _, part := range content.Array() {
-			if part.Get("type").String() == "text" {
+			partType := part.Get("type").String()
+			switch partType {
+			case "text":
 				contentBuilder.WriteString(part.Get("text").String())
+			case "tool_use":
+				// Handle tool_use in content array (Anthropic/OpenCode format)
+				// This is different from OpenAI's tool_calls format
+				toolUseID := part.Get("id").String()
+				toolName := part.Get("name").String()
+				inputData := part.Get("input")
+
+				inputMap := make(map[string]interface{})
+				if inputData.Exists() && inputData.IsObject() {
+					inputData.ForEach(func(key, value gjson.Result) bool {
+						inputMap[key.String()] = value.Value()
+						return true
+					})
+				}
+
+				toolUses = append(toolUses, KiroToolUse{
+					ToolUseID: toolUseID,
+					Name:      toolName,
+					Input:     inputMap,
+				})
+				log.Debugf("kiro-openai: extracted tool_use from content array: %s", toolName)
 			}
 		}
 	}
 
-	// Handle tool_calls
+	// Handle tool_calls (OpenAI format)
 	toolCalls := msg.Get("tool_calls")
 	if toolCalls.IsArray() {
 		for _, tc := range toolCalls.Array() {
