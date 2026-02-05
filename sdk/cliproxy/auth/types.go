@@ -329,6 +329,18 @@ func (a *Auth) AccountInfo() (string, string) {
 		}
 	}
 
+	// For GitHub provider (including github-copilot), return username
+	if strings.HasPrefix(strings.ToLower(a.Provider), "github") {
+		if a.Metadata != nil {
+			if username, ok := a.Metadata["username"].(string); ok {
+				username = strings.TrimSpace(username)
+				if username != "" {
+					return "oauth", username
+				}
+			}
+		}
+	}
+
 	// Check metadata for email first (OAuth-style auth)
 	if a.Metadata != nil {
 		if v, ok := a.Metadata["email"].(string); ok {

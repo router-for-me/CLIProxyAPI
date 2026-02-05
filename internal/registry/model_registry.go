@@ -47,6 +47,8 @@ type ModelInfo struct {
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// SupportedParameters lists supported parameters
 	SupportedParameters []string `json:"supported_parameters,omitempty"`
+	// SupportedEndpoints lists supported API endpoints (e.g., "/chat/completions", "/responses").
+	SupportedEndpoints []string `json:"supported_endpoints,omitempty"`
 
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
@@ -498,6 +500,9 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	}
 	if len(model.SupportedParameters) > 0 {
 		copyModel.SupportedParameters = append([]string(nil), model.SupportedParameters...)
+	}
+	if len(model.SupportedEndpoints) > 0 {
+		copyModel.SupportedEndpoints = append([]string(nil), model.SupportedEndpoints...)
 	}
 	return &copyModel
 }
@@ -1024,9 +1029,13 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = model.SupportedParameters
 		}
+		if len(model.SupportedEndpoints) > 0 {
+			result["supported_endpoints"] = model.SupportedEndpoints
+		}
 		return result
 
-	case "claude":
+	case "claude", "kiro", "antigravity":
+		// Claude, Kiro, and Antigravity all use Claude-compatible format for Claude Code client
 		result := map[string]any{
 			"id":       model.ID,
 			"object":   "model",
@@ -1040,6 +1049,19 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if model.DisplayName != "" {
 			result["display_name"] = model.DisplayName
+		}
+		// Add thinking support for Claude Code client
+		// Claude Code checks for "thinking" field (simple boolean) to enable tab toggle
+		// Also add "extended_thinking" for detailed budget info
+		if model.Thinking != nil {
+			result["thinking"] = true
+			result["extended_thinking"] = map[string]any{
+				"supported":       true,
+				"min":             model.Thinking.Min,
+				"max":             model.Thinking.Max,
+				"zero_allowed":    model.Thinking.ZeroAllowed,
+				"dynamic_allowed": model.Thinking.DynamicAllowed,
+			}
 		}
 		return result
 
