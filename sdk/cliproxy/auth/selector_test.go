@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -173,5 +174,48 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 	case err := <-errCh:
 		t.Fatalf("concurrent Pick() error = %v", err)
 	default:
+	}
+}
+
+func TestGetAvailableAuths_AuthUnavailableReturns429(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	model := "test-model"
+
+	// One auth disabled, one in cooldown — cooldownCount (1) != len(auths) (2),
+	// so we hit the auth_unavailable path instead of model_cooldown.
+	disabled := &Auth{
+		ID:       "disabled",
+		Disabled: true,
+	}
+	cooldown := &Auth{
+		ID: "cooldown",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota: QuotaState{
+					Exceeded: true,
+				},
+			},
+		},
+	}
+
+	_, err := getAvailableAuths([]*Auth{disabled, cooldown}, "gemini", model, now)
+	if err == nil {
+		t.Fatal("getAvailableAuths() expected error, got nil")
+	}
+
+	authErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("getAvailableAuths() error type = %T, want *Error", err)
+	}
+	if authErr.Code != "auth_unavailable" {
+		t.Fatalf("error.Code = %q, want %q", authErr.Code, "auth_unavailable")
+	}
+	if authErr.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("error.StatusCode() = %d, want %d (http.StatusTooManyRequests)", authErr.StatusCode(), http.StatusTooManyRequests)
 	}
 }
