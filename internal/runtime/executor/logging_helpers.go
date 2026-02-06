@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -388,4 +389,44 @@ func logWithRequestID(ctx context.Context) *log.Entry {
 		return log.NewEntry(log.StandardLogger())
 	}
 	return log.WithField("request_id", requestID)
+}
+
+// logQuotaUsage logs quota usage information for debugging quota tracking behavior.
+// This function is called after each API response to track per-account quota consumption.
+//
+// Logged fields include:
+//   - auth_id: Authentication record ID
+//   - auth_index: Stable runtime identifier for the auth
+//   - remaining: Number of requests/tokens remaining in quota window
+//   - limit: Maximum quota allowed in the window
+//   - percentage: Remaining quota as a percentage (for quick visual assessment)
+//   - source: Where quota data came from ("header" or "body")
+//   - exceeded: Whether quota limit has been hit (from 429 status)
+//
+// The function uses Debug level to avoid noise in production logs while providing
+// detailed quota tracking for troubleshooting and monitoring quota-aware load balancing.
+//
+// Returns early if auth or info is nil (defensive programming).
+func logQuotaUsage(ctx context.Context, auth *cliproxyauth.Auth, info *cliproxyauth.QuotaInfo) {
+	// Defensive nil checks
+	if auth == nil || info == nil {
+		return
+	}
+
+	// Calculate percentage of remaining quota
+	pct := 0.0
+	if info.Limit > 0 {
+		pct = (float64(info.Remaining) / float64(info.Limit)) * 100
+	}
+
+	// Log quota usage with structured fields
+	log.WithFields(log.Fields{
+		"auth_id":    auth.ID,
+		"auth_index": auth.EnsureIndex(),
+		"remaining":  info.Remaining,
+		"limit":      info.Limit,
+		"percentage": fmt.Sprintf("%.1f%%", pct),
+		"source":     info.Source,
+		"exceeded":   info.Exceeded,
+	}).Debugf("Quota update for account %s", auth.ID)
 }
