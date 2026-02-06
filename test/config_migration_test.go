@@ -50,14 +50,14 @@ amp-model-mappings:
 			t.Fatalf("amp mappings migration mismatch: %+v", cfg.AmpCode.ModelMappings)
 		}
 		updated := readFile(t, path)
-		if strings.Contains(updated, "generative-language-api-key") {
-			t.Fatalf("legacy gemini key still present:\n%s", updated)
+		if !strings.Contains(updated, "generative-language-api-key") {
+			t.Fatalf("expected legacy gemini key to remain in config file:\n%s", updated)
 		}
-		if strings.Contains(updated, "amp-upstream-url") || strings.Contains(updated, "amp-restrict-management-to-localhost") {
-			t.Fatalf("legacy amp keys still present:\n%s", updated)
+		if !strings.Contains(updated, "amp-upstream-url") || !strings.Contains(updated, "amp-restrict-management-to-localhost") {
+			t.Fatalf("expected legacy amp keys to remain in config file:\n%s", updated)
 		}
-		if strings.Contains(updated, "\n    api-keys:") {
-			t.Fatalf("legacy openai compat keys still present:\n%s", updated)
+		if !strings.Contains(updated, "\n    api-keys:") {
+			t.Fatalf("expected legacy openai compat keys to remain in config file:\n%s", updated)
 		}
 	})
 

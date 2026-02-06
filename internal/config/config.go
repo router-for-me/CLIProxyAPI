@@ -118,8 +118,6 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
-
-	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -546,21 +544,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// NOTE: Startup legacy key migration is intentionally disabled.
-	// Reason: avoid mutating config.yaml during server startup.
-	// Re-enable the block below if automatic startup migration is needed again.
-	// var legacy legacyConfigData
-	// if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
-	// 	if cfg.migrateLegacyGeminiKeys(legacy.LegacyGeminiKeys) {
-	// 		cfg.legacyMigrationPending = true
-	// 	}
-	// 	if cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat) {
-	// 		cfg.legacyMigrationPending = true
-	// 	}
-	// 	if cfg.migrateLegacyAmpConfig(&legacy) {
-	// 		cfg.legacyMigrationPending = true
-	// 	}
-	// }
+	// Keep startup read-only, but preserve compatibility with legacy fields in memory.
+	var legacy legacyConfigData
+	if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
+		cfg.migrateLegacyGeminiKeys(legacy.LegacyGeminiKeys)
+		cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat)
+		cfg.migrateLegacyAmpConfig(&legacy)
+	}
 
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
@@ -621,10 +611,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
-	// NOTE: Legacy migration persistence is intentionally disabled together with
-	// startup legacy migration to keep startup read-only for config.yaml.
+	// NOTE: Legacy migration persistence is intentionally disabled to keep
+	// startup read-only for config.yaml.
 	// Re-enable the block below if automatic startup migration is needed again.
-	// if cfg.legacyMigrationPending {
+	// if false {
 	// 	fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
 	// 	if !optional && configFile != "" {
 	// 		if err := SaveConfigPreserveComments(configFile, &cfg); err != nil {
