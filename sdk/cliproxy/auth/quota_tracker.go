@@ -1,8 +1,12 @@
 package auth
 
 import (
+	"context"
+	"math"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // QuotaTracker provides thread-safe quota state updates for Auth records.
@@ -12,7 +16,8 @@ import (
 // The tracker follows the singleton pattern (similar to usageReporter) and
 // should be accessed via GetTracker().
 type QuotaTracker struct {
-	mu sync.RWMutex
+	mu              sync.RWMutex
+	persistCallback func(ctx context.Context, auth *Auth) error // callback to trigger persistence
 }
 
 var (
@@ -28,6 +33,38 @@ func GetTracker() *QuotaTracker {
 		quotaTrackerInstance = &QuotaTracker{}
 	})
 	return quotaTrackerInstance
+}
+
+// SetPersistCallback injects a callback function to trigger persistence when quota state changes significantly.
+// The callback is invoked asynchronously in a goroutine to avoid blocking the request path.
+// This method should be called during application initialization (e.g., by the watcher).
+func (qt *QuotaTracker) SetPersistCallback(callback func(ctx context.Context, auth *Auth) error) {
+	qt.mu.Lock()
+	defer qt.mu.Unlock()
+	qt.persistCallback = callback
+}
+
+// shouldPersist determines whether quota state changes are significant enough to warrant persistence.
+// Returns true if:
+// - Exceeded status changed (critical state transition)
+// - Quota percentage dropped by more than 10% (significant usage change)
+// Returns false for minor changes to avoid excessive persistence operations.
+func (qt *QuotaTracker) shouldPersist(oldQuota, newQuota QuotaState) bool {
+	// Always persist exceeded status changes
+	if oldQuota.Exceeded != newQuota.Exceeded {
+		return true
+	}
+
+	// Persist significant quota changes (>10% drop in percentage)
+	if oldQuota.Limit > 0 {
+		oldPct := float64(oldQuota.Remaining) / float64(oldQuota.Limit)
+		newPct := float64(newQuota.Remaining) / float64(newQuota.Limit)
+		if math.Abs(oldPct-newPct) > 0.10 {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Update applies quota information from a provider API response to an Auth record.
@@ -54,6 +91,9 @@ func (qt *QuotaTracker) Update(auth *Auth, info *QuotaInfo) {
 	// Acquire write lock for atomic multi-field update
 	qt.mu.Lock()
 	defer qt.mu.Unlock()
+
+	// Capture old quota state before modifications for persistence check
+	oldQuota := auth.Quota
 
 	// Update quota fields if values are present (> 0)
 	// Providers may omit certain fields, so we only update when data is available
@@ -89,4 +129,16 @@ func (qt *QuotaTracker) Update(auth *Auth, info *QuotaInfo) {
 
 	// Update auth record timestamp to track last quota update
 	auth.UpdatedAt = time.Now()
+
+	// Trigger async persistence if quota change is significant
+	if qt.shouldPersist(oldQuota, auth.Quota) && qt.persistCallback != nil {
+		// Clone auth to avoid concurrent modification during async persistence
+		authCopy := auth.Clone()
+		go func(authCopy *Auth) {
+			ctx := context.Background()
+			if err := qt.persistCallback(ctx, authCopy); err != nil {
+				log.Warnf("Failed to persist quota state: %v", err)
+			}
+		}(authCopy)
+	}
 }
