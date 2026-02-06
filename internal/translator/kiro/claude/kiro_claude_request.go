@@ -219,26 +219,7 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	}
 
 	// Convert Claude tools to Kiro format
-	kiroTools, hasWebSearch := convertClaudeToolsToKiro(tools)
-
-	// If web_search was requested but filtered, inject alternative hint
-	if hasWebSearch {
-		webSearchHint := `[CRITICAL WEB ACCESS INSTRUCTION]
-You have the Fetch/read_url_content tool available. When the user asks about current events, weather, news, or any information that requires web access:
-- DO NOT say you cannot search the web
-- DO NOT refuse to help with web-related queries
-- IMMEDIATELY use the Fetch tool to access relevant URLs
-- Use well-known official websites, documentation sites, or API endpoints
-- Construct appropriate URLs based on the query context
-
-IMPORTANT: Always attempt to fetch information FIRST before declining. You CAN access the web via Fetch.`
-		if systemPrompt != "" {
-			systemPrompt += "\n" + webSearchHint
-		} else {
-			systemPrompt = webSearchHint
-		}
-		log.Infof("kiro: injected web_search alternative hint (tool was filtered)")
-	}
+	kiroTools := convertClaudeToolsToKiro(tools)
 
 	// Thinking mode implementation:
 	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
@@ -527,13 +508,11 @@ func ensureKiroInputSchema(parameters interface{}) interface{} {
 	}
 }
 
-// convertClaudeToolsToKiro converts Claude tools to Kiro format.
-// Returns the converted tools and a boolean indicating if web_search was filtered.
-func convertClaudeToolsToKiro(tools gjson.Result) ([]KiroToolWrapper, bool) {
+// convertClaudeToolsToKiro converts Claude tools to Kiro format
+func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
-	hasWebSearch := false
 	if !tools.IsArray() {
-		return kiroTools, hasWebSearch
+		return kiroTools
 	}
 
 	for _, tool := range tools.Array() {
@@ -544,7 +523,6 @@ func convertClaudeToolsToKiro(tools gjson.Result) ([]KiroToolWrapper, bool) {
 		nameLower := strings.ToLower(name)
 		if nameLower == "web_search" || nameLower == "websearch" {
 			log.Debugf("kiro: skipping unsupported tool: %s", name)
-			hasWebSearch = true
 			continue
 		}
 
@@ -591,7 +569,7 @@ func convertClaudeToolsToKiro(tools gjson.Result) ([]KiroToolWrapper, bool) {
 	// This prevents 500 errors when Claude Code sends too many tools
 	kiroTools = compressToolsIfNeeded(kiroTools)
 
-	return kiroTools, hasWebSearch
+	return kiroTools
 }
 
 // processMessages processes Claude messages and builds Kiro history
