@@ -37,6 +37,14 @@ const (
 	// that have no content at all. Kiro API requires non-empty content.
 	DefaultAssistantContent = "I understand."
 
+	// DefaultUserContentWithToolResults is the fallback content for user messages
+	// that have only tool_result (no text). Kiro API requires non-empty content.
+	DefaultUserContentWithToolResults = "Tool results provided."
+
+	// DefaultUserContent is the fallback content for user messages
+	// that have no content at all. Kiro API requires non-empty content.
+	DefaultUserContent = "Continue"
+
 	// KiroAgenticSystemPrompt is injected only for -agentic models to prevent timeouts on large writes.
 	// AWS Kiro API has a 2-3 minute timeout for large file write operations.
 	KiroAgenticSystemPrompt = `
