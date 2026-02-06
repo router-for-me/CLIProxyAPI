@@ -872,3 +872,44 @@ func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
 		"tab_flash_lite_preview":     {},
 	}
 }
+
+// GetKimiModels returns the standard Kimi (Moonshot AI) model definitions
+func GetKimiModels() []*ModelInfo {
+	return []*ModelInfo{
+		{
+			ID:                  "kimi-k2",
+			Object:              "model",
+			Created:             1752192000, // 2025-07-11
+			OwnedBy:             "moonshot",
+			Type:                "kimi",
+			DisplayName:         "Kimi K2",
+			Description:         "Kimi K2 - Moonshot AI's flagship coding model",
+			ContextLength:       131072,
+			MaxCompletionTokens: 32768,
+		},
+		{
+			ID:                  "kimi-k2-thinking",
+			Object:              "model",
+			Created:             1762387200, // 2025-11-06
+			OwnedBy:             "moonshot",
+			Type:                "kimi",
+			DisplayName:         "Kimi K2 Thinking",
+			Description:         "Kimi K2 Thinking - Extended reasoning model",
+			ContextLength:       131072,
+			MaxCompletionTokens: 32768,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:                  "kimi-k2.5",
+			Object:              "model",
+			Created:             1769472000, // 2026-01-26
+			OwnedBy:             "moonshot",
+			Type:                "kimi",
+			DisplayName:         "Kimi K2.5",
+			Description:         "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
+			ContextLength:       131072,
+			MaxCompletionTokens: 32768,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+	}
+}

@@ -18,6 +18,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"codex":       nil,
 	"iflow":       nil,
 	"antigravity": nil,
+	"kimi":        nil,
 }
 
 // GetProviderApplier returns the ProviderApplier for the given provider name.
@@ -325,6 +326,9 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		if hasThinkingConfig(config) {
 			return config
 		}
+		return extractOpenAIConfig(body)
+	case "kimi":
+		// Kimi uses OpenAI-compatible reasoning_effort format
 		return extractOpenAIConfig(body)
 	default:
 		return ThinkingConfig{}
