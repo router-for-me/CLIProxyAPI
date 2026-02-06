@@ -6,6 +6,8 @@
 package kimi
 
 import (
+	"fmt"
+
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
@@ -78,7 +80,10 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return body, nil
 	}
 
-	result, _ := sjson.SetBytes(body, "reasoning_effort", effort)
+	result, err := sjson.SetBytes(body, "reasoning_effort", effort)
+	if err != nil {
+		return body, fmt.Errorf("kimi thinking: failed to set reasoning_effort: %w", err)
+	}
 	return result, nil
 }
 
@@ -113,6 +118,9 @@ func applyCompatibleKimi(body []byte, config thinking.ThinkingConfig) ([]byte, e
 		return body, nil
 	}
 
-	result, _ := sjson.SetBytes(body, "reasoning_effort", effort)
+	result, err := sjson.SetBytes(body, "reasoning_effort", effort)
+	if err != nil {
+		return body, fmt.Errorf("kimi thinking: failed to set reasoning_effort: %w", err)
+	}
 	return result, nil
 }

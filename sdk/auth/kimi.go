@@ -99,7 +99,7 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 	}
 
 	if authBundle.TokenData.ExpiresAt > 0 {
-		exp := time.Unix(int64(authBundle.TokenData.ExpiresAt), 0).UTC().Format(time.RFC3339)
+		exp := time.Unix(authBundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
 		metadata["expired"] = exp
 	}
 
@@ -115,32 +115,5 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		Label:    "Kimi User",
 		Storage:  tokenStorage,
 		Metadata: metadata,
-	}, nil
-}
-
-// RefreshKimiToken refreshes an existing Kimi token using the refresh token.
-func RefreshKimiToken(ctx context.Context, cfg *config.Config, storage *kimi.KimiTokenStorage) (*kimi.KimiTokenStorage, error) {
-	if storage == nil || storage.RefreshToken == "" {
-		return nil, fmt.Errorf("no refresh token available")
-	}
-
-	client := kimi.NewDeviceFlowClient(cfg)
-	newTokenData, err := client.RefreshToken(ctx, storage.RefreshToken)
-	if err != nil {
-		return nil, fmt.Errorf("token refresh failed: %w", err)
-	}
-
-	expiresAt := ""
-	if newTokenData.ExpiresAt > 0 {
-		expiresAt = time.Unix(int64(newTokenData.ExpiresAt), 0).UTC().Format(time.RFC3339)
-	}
-
-	return &kimi.KimiTokenStorage{
-		AccessToken:  newTokenData.AccessToken,
-		RefreshToken: newTokenData.RefreshToken,
-		TokenType:    newTokenData.TokenType,
-		Scope:        newTokenData.Scope,
-		Expired:      expiresAt,
-		Type:         "kimi",
 	}, nil
 }

@@ -38,7 +38,7 @@ type KimiTokenData struct {
 	// TokenType is the type of token, typically "Bearer".
 	TokenType string `json:"token_type"`
 	// ExpiresAt is the Unix timestamp when the token expires.
-	ExpiresAt float64 `json:"expires_at"`
+	ExpiresAt int64 `json:"expires_at"`
 	// Scope is the OAuth2 scope granted to the token.
 	Scope string `json:"scope"`
 }

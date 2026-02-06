@@ -30,8 +30,8 @@ const (
 	kimiDeviceCodeURL = kimiOAuthHost + "/api/oauth/device_authorization"
 	// kimiTokenURL is the endpoint for exchanging device codes for tokens.
 	kimiTokenURL = kimiOAuthHost + "/api/oauth/token"
-	// kimiAPIBaseURL is the base URL for Kimi API requests.
-	kimiAPIBaseURL = "https://api.kimi.com/coding/v1"
+	// KimiAPIBaseURL is the base URL for Kimi API requests.
+	KimiAPIBaseURL = "https://api.kimi.com/coding/v1"
 	// defaultPollInterval is the default interval for polling token endpoint.
 	defaultPollInterval = 5 * time.Second
 	// maxPollDuration is the maximum time to wait for user authorization.
@@ -42,7 +42,6 @@ const (
 
 // KimiAuth handles Kimi authentication flow.
 type KimiAuth struct {
-	httpClient   *http.Client
 	deviceClient *DeviceFlowClient
 	cfg          *config.Config
 }
@@ -50,7 +49,6 @@ type KimiAuth struct {
 // NewKimiAuth creates a new KimiAuth service instance.
 func NewKimiAuth(cfg *config.Config) *KimiAuth {
 	return &KimiAuth{
-		httpClient:   util.SetProxy(&cfg.SDKConfig, &http.Client{Timeout: 30 * time.Second}),
 		deviceClient: NewDeviceFlowClient(cfg),
 		cfg:          cfg,
 	}
@@ -77,7 +75,7 @@ func (k *KimiAuth) WaitForAuthorization(ctx context.Context, deviceCode *DeviceC
 func (k *KimiAuth) CreateTokenStorage(bundle *KimiAuthBundle) *KimiTokenStorage {
 	expired := ""
 	if bundle.TokenData.ExpiresAt > 0 {
-		expired = time.Unix(int64(bundle.TokenData.ExpiresAt), 0).UTC().Format(time.RFC3339)
+		expired = time.Unix(bundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
 	}
 	return &KimiTokenStorage{
 		AccessToken:  bundle.TokenData.AccessToken,
@@ -325,9 +323,9 @@ func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode st
 		return nil, fmt.Errorf("kimi: empty access token in response"), false
 	}
 
-	expiresAt := float64(0)
+	var expiresAt int64
 	if oauthResp.ExpiresIn > 0 {
-		expiresAt = float64(time.Now().Unix()) + oauthResp.ExpiresIn
+		expiresAt = time.Now().Unix() + int64(oauthResp.ExpiresIn)
 	}
 
 	return &KimiTokenData{
@@ -395,9 +393,9 @@ func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string
 		return nil, fmt.Errorf("kimi: empty access token in refresh response")
 	}
 
-	expiresAt := float64(0)
+	var expiresAt int64
 	if tokenResp.ExpiresIn > 0 {
-		expiresAt = float64(time.Now().Unix()) + tokenResp.ExpiresIn
+		expiresAt = time.Now().Unix() + int64(tokenResp.ExpiresIn)
 	}
 
 	return &KimiTokenData{

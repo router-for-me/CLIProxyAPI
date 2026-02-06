@@ -23,10 +23,6 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const (
-	// kimiAPIBaseURL is the Kimi API endpoint for chat completions.
-	kimiAPIBaseURL = "https://api.kimi.com/coding/v1"
-)
 
 // KimiExecutor is a stateless executor for Kimi API using OpenAI-compatible chat completions.
 type KimiExecutor struct {
@@ -87,7 +83,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 	// Strip kimi- prefix for upstream API
 	upstreamModel := stripKimiPrefix(baseModel)
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body, err = sjson.SetBytes(body, "model", upstreamModel)
+	if err != nil {
+		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
+	}
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -97,7 +96,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 
-	url := kimiAPIBaseURL + "/chat/completions"
+	url := kimiauth.KimiAPIBaseURL + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
@@ -175,18 +174,24 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Strip kimi- prefix for upstream API
 	upstreamModel := stripKimiPrefix(baseModel)
-	body, _ = sjson.SetBytes(body, "model", upstreamModel)
+	body, err = sjson.SetBytes(body, "model", upstreamModel)
+	if err != nil {
+		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
+	}
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
 
-	body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
+	body, err = sjson.SetBytes(body, "stream_options.include_usage", true)
+	if err != nil {
+		return nil, fmt.Errorf("kimi executor: failed to set stream_options in payload: %w", err)
+	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 
-	url := kimiAPIBaseURL + "/chat/completions"
+	url := kimiauth.KimiAPIBaseURL + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -318,7 +323,7 @@ func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		auth.Metadata["refresh_token"] = td.RefreshToken
 	}
 	if td.ExpiresAt > 0 {
-		exp := time.Unix(int64(td.ExpiresAt), 0).UTC().Format(time.RFC3339)
+		exp := time.Unix(td.ExpiresAt, 0).UTC().Format(time.RFC3339)
 		auth.Metadata["expired"] = exp
 	}
 	auth.Metadata["type"] = "kimi"
@@ -366,8 +371,20 @@ func getKimiDeviceID() string {
 	if err != nil {
 		return "cli-proxy-api-device"
 	}
-	// Check kimi-cli's device_id location first
-	kimiShareDir := filepath.Join(homeDir, ".local", "share", "kimi")
+	// Check kimi-cli's device_id location first (platform-specific)
+	var kimiShareDir string
+	switch runtime.GOOS {
+	case "darwin":
+		kimiShareDir = filepath.Join(homeDir, "Library", "Application Support", "kimi")
+	case "windows":
+		appData := os.Getenv("APPDATA")
+		if appData == "" {
+			appData = filepath.Join(homeDir, "AppData", "Roaming")
+		}
+		kimiShareDir = filepath.Join(appData, "kimi")
+	default: // linux and other unix-like
+		kimiShareDir = filepath.Join(homeDir, ".local", "share", "kimi")
+	}
 	deviceIDPath := filepath.Join(kimiShareDir, "device_id")
 	if data, err := os.ReadFile(deviceIDPath); err == nil {
 		return strings.TrimSpace(string(data))
