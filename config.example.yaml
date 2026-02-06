@@ -48,6 +48,11 @@ pprof:
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 
+# Open OAuth URLs in incognito/private browser mode.
+# Useful when you want to login with a different account without logging out from your current session.
+# Default: false (but Kiro auth defaults to true for multi-account support)
+incognito-browser: true
+
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 
@@ -156,6 +161,16 @@ nonstream-keepalive-interval: 0
 #         - "API"
 #         - "proxy"
 
+# Kiro (AWS CodeWhisperer) configuration
+# Note: Kiro API currently only operates in us-east-1 region
+#kiro:
+#  - token-file: "~/.aws/sso/cache/kiro-auth-token.json" # path to Kiro token file
+#    agent-task-type: "" # optional: "vibe" or empty (API default)
+#  - access-token: "aoaAAAAA..." # or provide tokens directly
+#    refresh-token: "aorAAAAA..."
+#    profile-arn: "arn:aws:codewhisperer:us-east-1:..."
+#    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy override
+
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
@@ -221,25 +236,25 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # You can repeat the same name with different aliases to expose multiple client model names.
-oauth-model-alias:
-  antigravity:
-    - name: "rev19-uic3-1p"
-      alias: "gemini-2.5-computer-use-preview-10-2025"
-    - name: "gemini-3-pro-image"
-      alias: "gemini-3-pro-image-preview"
-    - name: "gemini-3-pro-high"
-      alias: "gemini-3-pro-preview"
-    - name: "gemini-3-flash"
-      alias: "gemini-3-flash-preview"
-    - name: "claude-sonnet-4-5"
-      alias: "gemini-claude-sonnet-4-5"
-    - name: "claude-sonnet-4-5-thinking"
-      alias: "gemini-claude-sonnet-4-5-thinking"
-    - name: "claude-opus-4-5-thinking"
-      alias: "gemini-claude-opus-4-5-thinking"
+#oauth-model-alias:
+#  antigravity:
+#    - name: "rev19-uic3-1p"
+#      alias: "gemini-2.5-computer-use-preview-10-2025"
+#    - name: "gemini-3-pro-image"
+#      alias: "gemini-3-pro-image-preview"
+#    - name: "gemini-3-pro-high"
+#      alias: "gemini-3-pro-preview"
+#    - name: "gemini-3-flash"
+#      alias: "gemini-3-flash-preview"
+#    - name: "claude-sonnet-4-5"
+#      alias: "gemini-claude-sonnet-4-5"
+#    - name: "claude-sonnet-4-5-thinking"
+#      alias: "gemini-claude-sonnet-4-5-thinking"
+#    - name: "claude-opus-4-5-thinking"
+#      alias: "gemini-claude-opus-4-5-thinking"
 #   gemini-cli:
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
@@ -250,6 +265,9 @@ oauth-model-alias:
 #   aistudio:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
+#   antigravity:
+#     - name: "gemini-3-pro-preview"
+#       alias: "g3p"
 #   claude:
 #     - name: "claude-sonnet-4-5-20250929"
 #       alias: "cs4.5"
@@ -262,8 +280,15 @@ oauth-model-alias:
 #   iflow:
 #     - name: "glm-4.7"
 #       alias: "glm-god"
+#   kiro:
+#     - name: "kiro-claude-opus-4-5"
+#       alias: "op45"
+#   github-copilot:
+#     - name: "gpt-5"
+#       alias: "copilot-gpt5"
 
 # OAuth provider excluded models
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 # oauth-excluded-models:
 #   gemini-cli:
 #     - "gemini-2.5-pro"     # exclude specific models (exact match)
@@ -284,6 +309,10 @@ oauth-model-alias:
 #     - "vision-model"
 #   iflow:
 #     - "tstars2.0"
+#   kiro:
+#     - "kiro-claude-haiku-4-5"
+#   github-copilot:
+#     - "raptor-mini"
 
 # Optional payload configuration
 # payload:
