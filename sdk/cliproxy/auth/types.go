@@ -75,6 +75,22 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// Used tracks the number of requests or tokens consumed in the current quota window.
+	Used int64 `json:"used,omitempty"`
+	// Limit represents the maximum quota allowed in the current window.
+	Limit int64 `json:"limit,omitempty"`
+	// Remaining indicates how much quota is still available in the current window.
+	Remaining int64 `json:"remaining,omitempty"`
+}
+
+// Percentage calculates the remaining quota as a percentage of the limit.
+// Returns 0 if Limit is 0 to avoid division by zero.
+// Returns a value between 0 and 100 representing the percentage of remaining quota.
+func (q QuotaState) Percentage() float64 {
+	if q.Limit == 0 {
+		return 0
+	}
+	return (float64(q.Remaining) / float64(q.Limit)) * 100
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.
