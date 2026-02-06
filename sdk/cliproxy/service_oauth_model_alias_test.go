@@ -90,3 +90,27 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 		t.Fatalf("expected forked model name %q, got %q", "models/g5-2", out[2].Name)
 	}
 }
+
+func TestApplyOAuthModelAlias_KimiRename(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"kimi": {
+				{Name: "kimi-k2.5", Alias: "k2.5"},
+			},
+		},
+	}
+	models := []*ModelInfo{
+		{ID: "kimi-k2.5", Name: "models/kimi-k2.5"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "kimi", "oauth", models)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(out))
+	}
+	if out[0].ID != "k2.5" {
+		t.Fatalf("expected model id %q, got %q", "k2.5", out[0].ID)
+	}
+	if out[0].Name != "models/k2.5" {
+		t.Fatalf("expected model name %q, got %q", "models/k2.5", out[0].Name)
+	}
+}
