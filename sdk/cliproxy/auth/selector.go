@@ -26,6 +26,12 @@ type RoundRobinSelector struct {
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// MaxQuotaSelector selects the account with the highest remaining quota percentage.
+// This maximizes utilization of high-quota accounts while respecting existing
+// cooldown and priority constraints. When multiple accounts have equal quota
+// percentages, selection is deterministic (sorted by ID).
+type MaxQuotaSelector struct{}
+
 type blockReason int
 
 const (
@@ -211,6 +217,31 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	if err != nil {
 		return nil, err
 	}
+	return available[0], nil
+}
+
+// Pick selects the auth with the highest remaining quota percentage.
+// It reuses getAvailableAuths for cooldown/priority filtering, then sorts
+// by quota percentage (highest first) with deterministic tie-breaking by ID.
+func (s *MaxQuotaSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = ctx
+	_ = opts
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sort by quota percentage (highest first), tie-break by ID (alphabetically)
+	sort.Slice(available, func(i, j int) bool {
+		pctI := available[i].Quota.Percentage()
+		pctJ := available[j].Quota.Percentage()
+		if pctI != pctJ {
+			return pctI > pctJ // Higher percentage first
+		}
+		return available[i].ID < available[j].ID // Deterministic tie-breaking
+	})
+
 	return available[0], nil
 }
 
