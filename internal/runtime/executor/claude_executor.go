@@ -169,6 +169,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	
+	// Extract and update quota information from response headers
+	if quotaInfo := cliproxyauth.ExtractClaudeQuota(httpResp.Header, httpResp.StatusCode); quotaInfo != nil {
+		cliproxyauth.GetTracker().Update(auth, quotaInfo)
+		logQuotaUsage(ctx, auth, quotaInfo)
+	}
+	
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -310,6 +317,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	
+	// Extract and update quota information from response headers
+	if quotaInfo := cliproxyauth.ExtractClaudeQuota(httpResp.Header, httpResp.StatusCode); quotaInfo != nil {
+		cliproxyauth.GetTracker().Update(auth, quotaInfo)
+		logQuotaUsage(ctx, auth, quotaInfo)
+	}
+	
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)

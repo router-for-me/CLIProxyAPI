@@ -202,6 +202,13 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
+	
+	// Extract and update quota information from response body
+	if quotaInfo := cliproxyauth.ExtractGeminiQuota(data, httpResp.StatusCode); quotaInfo != nil {
+		cliproxyauth.GetTracker().Update(auth, quotaInfo)
+		logQuotaUsage(ctx, auth, quotaInfo)
+	}
+	
 	reporter.publish(ctx, parseGeminiUsage(data))
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
@@ -317,6 +324,13 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if len(payload) == 0 {
 				continue
 			}
+			
+			// Extract and update quota information from stream chunk
+			if quotaInfo := cliproxyauth.ExtractGeminiQuota(payload, httpResp.StatusCode); quotaInfo != nil {
+				cliproxyauth.GetTracker().Update(auth, quotaInfo)
+				logQuotaUsage(ctx, auth, quotaInfo)
+			}
+			
 			if detail, ok := parseGeminiStreamUsage(payload); ok {
 				reporter.publish(ctx, detail)
 			}
