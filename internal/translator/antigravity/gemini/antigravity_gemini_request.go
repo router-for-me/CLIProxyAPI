@@ -6,7 +6,6 @@
 package gemini
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 
@@ -34,7 +33,7 @@ import (
 // Returns:
 //   - []byte: The transformed request data in Gemini API format
 func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 	hasWebSearchTool := false
 	tools := gjson.GetBytes(rawJSON, "tools")
 	if tools.Exists() && tools.IsArray() {

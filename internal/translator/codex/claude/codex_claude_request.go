@@ -6,7 +6,6 @@
 package claude
 
 import (
-	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
@@ -35,7 +34,7 @@ import (
 // Returns:
 //   - []byte: The transformed request data in internal client format
 func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 
 	template := `{"model":"","instructions":"","input":[]}`
 

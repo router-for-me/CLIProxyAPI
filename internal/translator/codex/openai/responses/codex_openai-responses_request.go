@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"bytes"
 	"fmt"
 
 	"github.com/tidwall/gjson"
@@ -9,7 +8,7 @@ import (
 )
 
 func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	if inputResult.Type == gjson.String {

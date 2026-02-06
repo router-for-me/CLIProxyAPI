@@ -6,7 +6,6 @@
 package gemini
 
 import (
-	"bytes"
 	"crypto/rand"
 	"fmt"
 	"math/big"
@@ -37,7 +36,7 @@ import (
 // Returns:
 //   - []byte: The transformed request data in Codex API format
 func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 	// Base template
 	out := `{"model":"","instructions":"","input":[]}`
 

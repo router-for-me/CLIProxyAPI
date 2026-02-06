@@ -133,12 +133,13 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
+	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -230,7 +231,7 @@ attemptLoop:
 
 			reporter.publish(ctx, parseAntigravityUsage(bodyBytes))
 			var param any
-			converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bodyBytes, &param)
+			converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bodyBytes, &param)
 			resp = cliproxyexecutor.Response{Payload: []byte(converted)}
 			reporter.ensurePublished(ctx)
 			return resp, nil
@@ -274,12 +275,13 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
+	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -433,7 +435,7 @@ attemptLoop:
 
 			reporter.publish(ctx, parseAntigravityUsage(resp.Payload))
 			var param any
-			converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, resp.Payload, &param)
+			converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, resp.Payload, &param)
 			resp = cliproxyexecutor.Response{Payload: []byte(converted)}
 			reporter.ensurePublished(ctx)
 
@@ -665,12 +667,13 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
+	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -800,12 +803,12 @@ attemptLoop:
 						reporter.publish(ctx, detail)
 					}
 
-					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, bytes.Clone(payload), &param)
+					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param)
 					for i := range chunks {
 						out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 					}
 				}
-				tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), translated, []byte("[DONE]"), &param)
+				tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
 				for i := range tail {
 					out <- cliproxyexecutor.StreamChunk{Payload: []byte(tail[i])}
 				}
@@ -872,7 +875,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 
 	// Prepare payload once (doesn't depend on baseURL)
-	payload := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+	payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {

@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -32,7 +31,7 @@ var (
 // - max_output_tokens -> max_tokens
 // - stream passthrough via parameter
 func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 
 	if account == "" {
 		u, _ := uuid.NewRandom()

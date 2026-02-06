@@ -100,12 +100,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
+	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), stream)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -216,7 +217,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		to,
 		from,
 		req.Model,
-		bytes.Clone(opts.OriginalRequest),
+		opts.OriginalRequest,
 		bodyForTranslation,
 		data,
 		&param,
@@ -240,12 +241,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	defer reporter.trackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
+	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -381,7 +383,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				to,
 				from,
 				req.Model,
-				bytes.Clone(opts.OriginalRequest),
+				opts.OriginalRequest,
 				bodyForTranslation,
 				bytes.Clone(line),
 				&param,
@@ -411,7 +413,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), stream)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
