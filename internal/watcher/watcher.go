@@ -96,6 +96,15 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 		if persister, ok := store.(storePersister); ok {
 			w.storePersister = persister
 			log.Debug("persistence-capable token store detected; watcher will propagate persisted changes")
+
+			// Inject quota persistence callback into QuotaTracker
+			// This enables automatic persistence of quota state when significant changes occur
+			coreauth.GetTracker().SetPersistCallback(func(ctx context.Context, auth *coreauth.Auth) error {
+				// Reuse existing PersistAuthFiles mechanism which works with all storage backends
+				// (Postgres, Git, S3, file-based)
+				return w.storePersister.PersistAuthFiles(ctx, "quota state update", auth.FileName)
+			})
+			log.Debug("quota tracker persistence callback configured")
 		}
 		if provider, ok := store.(authDirProvider); ok {
 			if fixed := strings.TrimSpace(provider.AuthDir()); fixed != "" {
