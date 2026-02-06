@@ -111,6 +111,10 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// AntigravitySystemInstruction overrides the default system instruction for Antigravity API requests.
+	// When empty, uses the default Antigravity system instruction.
+	AntigravitySystemInstruction string `yaml:"antigravity-system-instruction,omitempty" json:"antigravity-system-instruction,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 

@@ -285,6 +285,11 @@ oauth-model-alias:
 #   iflow:
 #     - "tstars2.0"
 
+# Custom Antigravity system instruction
+# Override the default system instruction for Antigravity API requests (Claude/Gemini-3-Pro models).
+# When empty or not set, uses the default Antigravity system instruction.
+# antigravity-system-instruction: "You are a helpful AI coding assistant..."
+
 # Optional payload configuration
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.
