@@ -59,6 +59,18 @@ usage-persistence-enabled: true
 - 交叉编译 Dockerfile，加速多平台构建
 - 自动清理临时 Docker 标签
 
+### 管理面板
+
+为本 fork 版本专门开发的 Web 管理面板，提供增强的监控和管理功能：
+
+- **仪表盘**：实时查看代理状态、请求统计和系统健康状况
+- **账户管理**：可视化界面管理所有提供商的 OAuth 凭证
+- **使用量分析**：详细的图表和统计，展示 API 使用量、配额和费用
+- **请求日志**：可搜索的请求历史记录，支持筛选和导出
+- **提供商状态**：监控各个已配置提供商的可用性和性能
+
+**→ [Cli-Proxy-API-Management-Center](https://github.com/caidaoli/Cli-Proxy-API-Management-Center)**
+
 ---
 
 ## 赞助商

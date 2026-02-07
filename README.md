@@ -59,6 +59,18 @@ Automatically cleans up old usage statistics data:
 - Cross-compilation Dockerfile for faster multi-platform builds
 - Automatic cleanup of temporary Docker tags
 
+### Management Center
+
+A dedicated web-based management panel for this fork with enhanced monitoring and administration capabilities:
+
+- **Dashboard**: Real-time overview of proxy status, request statistics, and system health
+- **Account Management**: Visual interface for managing OAuth credentials across all providers
+- **Usage Analytics**: Detailed charts and statistics for API usage, quotas, and costs
+- **Request Logs**: Searchable request history with filtering and export capabilities
+- **Provider Status**: Monitor availability and performance of each configured provider
+
+**→ [Cli-Proxy-API-Management-Center](https://github.com/caidaoli/Cli-Proxy-API-Management-Center)**
+
 ---
 
 ## Sponsor
