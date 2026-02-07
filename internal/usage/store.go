@@ -10,6 +10,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	_ "modernc.org/sqlite"
 )
 
@@ -58,12 +59,12 @@ type AggregatedStats struct {
 
 // DetailRecord represents a single request record from database.
 type DetailRecord struct {
-	APIKey      string
-	Model       string
-	Source      string
-	AuthIndex   string
-	Failed      bool
-	RequestedAt time.Time
+	APIKey          string
+	Model           string
+	Source          string
+	AuthIndex       string
+	Failed          bool
+	RequestedAt     time.Time
 	InputTokens     int64
 	OutputTokens    int64
 	ReasoningTokens int64
@@ -82,13 +83,203 @@ type UsageStore interface {
 	Close() error
 }
 
+const (
+	defaultMirrorSyncBatchSize = 10000
+	defaultLocalUsageFileName  = "usage.db"
+)
+
 // NewUsageStore creates a UsageStore based on environment configuration.
-// If pgDSN is provided, uses PostgreSQL; otherwise uses SQLite in authDir.
+// If pgDSN is provided, it uses PostgreSQL for writes and a local SQLite mirror for reads;
+// otherwise it uses SQLite in authDir directly.
 func NewUsageStore(ctx context.Context, pgDSN, pgSchema, authDir string) (UsageStore, error) {
 	if strings.TrimSpace(pgDSN) != "" {
-		return newPgUsageStore(ctx, pgDSN, pgSchema)
+		return newMirrorUsageStore(ctx, pgDSN, pgSchema, authDir)
 	}
 	return newSQLiteUsageStore(authDir)
+}
+
+type mirrorUsageStore struct {
+	primary *pgUsageStore
+	local   *sqliteUsageStore
+}
+
+func newMirrorUsageStore(ctx context.Context, pgDSN, pgSchema, authDir string) (*mirrorUsageStore, error) {
+	primary, err := newPgUsageStore(ctx, pgDSN, pgSchema)
+	if err != nil {
+		return nil, err
+	}
+
+	localPath := resolveLocalUsageDBPath(authDir)
+	local, err := newSQLiteUsageStoreAtPath(localPath)
+	if err != nil {
+		_ = primary.Close()
+		return nil, err
+	}
+
+	store := &mirrorUsageStore{primary: primary, local: local}
+	if err = store.bootstrapLocalFromPrimary(ctx); err != nil {
+		_ = local.Close()
+		_ = primary.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func resolveLocalUsageDBPath(authDir string) string {
+	if localPath := util.GetEnvTrimmed("PGSTORE_LOCAL_PATH", "pgstore_local_path"); localPath != "" {
+		cleaned := filepath.Clean(localPath)
+		if strings.EqualFold(filepath.Ext(cleaned), ".db") {
+			return cleaned
+		}
+		return filepath.Join(cleaned, defaultLocalUsageFileName)
+	}
+	if authDir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			authDir = cwd
+		}
+	}
+	if authDir == "" {
+		return defaultLocalUsageFileName
+	}
+	return filepath.Join(authDir, defaultLocalUsageFileName)
+}
+
+func (s *mirrorUsageStore) bootstrapLocalFromPrimary(ctx context.Context) error {
+	if s == nil || s.primary == nil || s.local == nil {
+		return fmt.Errorf("usage store: mirror store not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.local.Reset(ctx); err != nil {
+		return fmt.Errorf("usage store: reset local sqlite mirror: %w", err)
+	}
+
+	lastID := int64(0)
+	for {
+		records, newLastID, err := s.primary.ListRecordsAfterID(ctx, lastID, defaultMirrorSyncBatchSize)
+		if err != nil {
+			return fmt.Errorf("usage store: sync records from postgres: %w", err)
+		}
+		if len(records) == 0 {
+			break
+		}
+		added, skipped, err := s.local.InsertBatch(ctx, records)
+		if err != nil {
+			return fmt.Errorf("usage store: write mirror sqlite batch: %w", err)
+		}
+		if skipped > 0 || added != int64(len(records)) {
+			return fmt.Errorf("usage store: sqlite mirror batch mismatch (added=%d skipped=%d expected=%d)", added, skipped, len(records))
+		}
+		lastID = newLastID
+	}
+	return nil
+}
+
+func (s *mirrorUsageStore) Insert(ctx context.Context, record UsageRecord) error {
+	if s == nil || s.primary == nil || s.local == nil {
+		return fmt.Errorf("usage store: mirror store not initialized")
+	}
+	if err := s.primary.Insert(ctx, record); err != nil {
+		return err
+	}
+	if err := s.local.Insert(ctx, record); err != nil {
+		return fmt.Errorf("usage store: insert sqlite mirror: %w", err)
+	}
+	return nil
+}
+
+func (s *mirrorUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (added, skipped int64, err error) {
+	if len(records) == 0 {
+		return 0, 0, nil
+	}
+	if s == nil || s.primary == nil || s.local == nil {
+		return 0, 0, fmt.Errorf("usage store: mirror store not initialized")
+	}
+
+	var firstErr error
+	for _, record := range records {
+		if err = s.primary.Insert(ctx, record); err != nil {
+			skipped++
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err = s.local.Insert(ctx, record); err != nil {
+			skipped++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("usage store: insert sqlite mirror: %w", err)
+			}
+			continue
+		}
+		added++
+	}
+
+	if firstErr != nil {
+		return added, skipped, firstErr
+	}
+	return added, skipped, nil
+}
+
+func (s *mirrorUsageStore) GetAggregatedStats(ctx context.Context) (AggregatedStats, error) {
+	if s == nil || s.local == nil {
+		return AggregatedStats{}, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	return s.local.GetAggregatedStats(ctx)
+}
+
+func (s *mirrorUsageStore) GetDetails(ctx context.Context, offset, limit int) ([]DetailRecord, error) {
+	if s == nil || s.local == nil {
+		return nil, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	return s.local.GetDetails(ctx, offset, limit)
+}
+
+func (s *mirrorUsageStore) DeleteOldRecords(ctx context.Context, retentionDays int) (deleted int64, err error) {
+	if s == nil || s.primary == nil || s.local == nil {
+		return 0, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	deletedPG, err := s.primary.DeleteOldRecords(ctx, retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	deletedLocal, err := s.local.DeleteOldRecords(ctx, retentionDays)
+	if err != nil {
+		return 0, fmt.Errorf("usage store: delete old records in sqlite mirror: %w", err)
+	}
+	if deletedPG > deletedLocal {
+		return deletedPG, nil
+	}
+	return deletedLocal, nil
+}
+
+func (s *mirrorUsageStore) EnsureSchema(ctx context.Context) error {
+	if s == nil || s.primary == nil || s.local == nil {
+		return fmt.Errorf("usage store: mirror store not initialized")
+	}
+	if err := s.primary.EnsureSchema(ctx); err != nil {
+		return err
+	}
+	return s.local.EnsureSchema(ctx)
+}
+
+func (s *mirrorUsageStore) Close() error {
+	if s == nil {
+		return nil
+	}
+	var firstErr error
+	if s.local != nil {
+		if err := s.local.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.primary != nil {
+		if err := s.primary.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // pgUsageStore implements UsageStore using PostgreSQL.
@@ -247,6 +438,68 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 		return 0, 0, fmt.Errorf("usage store: commit tx: %w", err)
 	}
 	return added, skipped, nil
+}
+
+func (s *pgUsageStore) ListRecordsAfterID(ctx context.Context, afterID int64, limit int) ([]UsageRecord, int64, error) {
+	if limit <= 0 {
+		limit = defaultMirrorSyncBatchSize
+	}
+	if limit > 50000 {
+		limit = 50000
+	}
+	if afterID < 0 {
+		afterID = 0
+	}
+
+	table := s.fullTableName("usage_records")
+	query := fmt.Sprintf(`
+		SELECT id, api_key, model, source, auth_index, failed, requested_at,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens
+		FROM %s
+		WHERE id > $1
+		ORDER BY id ASC
+		LIMIT $2
+	`, table)
+
+	rows, err := s.db.QueryContext(ctx, query, afterID, limit)
+	if err != nil {
+		return nil, afterID, fmt.Errorf("usage store: list records after id: %w", err)
+	}
+	defer rows.Close()
+
+	records := make([]UsageRecord, 0, limit)
+	lastID := afterID
+	for rows.Next() {
+		var (
+			id     int64
+			failed int
+			record UsageRecord
+		)
+		if err = rows.Scan(
+			&id,
+			&record.APIKey,
+			&record.Model,
+			&record.Source,
+			&record.AuthIndex,
+			&failed,
+			&record.RequestedAt,
+			&record.InputTokens,
+			&record.OutputTokens,
+			&record.ReasoningTokens,
+			&record.CachedTokens,
+			&record.TotalTokens,
+		); err != nil {
+			return nil, afterID, fmt.Errorf("usage store: scan list records after id: %w", err)
+		}
+		record.Failed = failed != 0
+		records = append(records, record)
+		lastID = id
+	}
+	if err = rows.Err(); err != nil {
+		return nil, afterID, fmt.Errorf("usage store: iterate list records after id: %w", err)
+	}
+
+	return records, lastID, nil
 }
 
 func (s *pgUsageStore) GetAggregatedStats(ctx context.Context) (AggregatedStats, error) {
@@ -463,11 +716,18 @@ func newSQLiteUsageStore(authDir string) (*sqliteUsageStore, error) {
 		cwd, _ := os.Getwd()
 		authDir = cwd
 	}
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
-		return nil, fmt.Errorf("usage store: create auth dir: %w", err)
+	return newSQLiteUsageStoreAtPath(filepath.Join(authDir, defaultLocalUsageFileName))
+}
+
+func newSQLiteUsageStoreAtPath(dbPath string) (*sqliteUsageStore, error) {
+	cleanPath := filepath.Clean(strings.TrimSpace(dbPath))
+	if cleanPath == "" || cleanPath == "." {
+		return nil, fmt.Errorf("usage store: sqlite path is empty")
 	}
-	dbPath := filepath.Join(authDir, "usage.db")
-	db, err := sql.Open("sqlite", dbPath)
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o700); err != nil {
+		return nil, fmt.Errorf("usage store: create sqlite dir: %w", err)
+	}
+	db, err := sql.Open("sqlite", cleanPath)
 	if err != nil {
 		return nil, fmt.Errorf("usage store: open sqlite: %w", err)
 	}
@@ -476,7 +736,7 @@ func newSQLiteUsageStore(authDir string) (*sqliteUsageStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("usage store: enable WAL: %w", err)
 	}
-	store := &sqliteUsageStore{db: db, path: dbPath}
+	store := &sqliteUsageStore{db: db, path: cleanPath}
 	if err = store.EnsureSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -511,11 +771,34 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_usage_api_key ON usage_records(api_key)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_api_model ON usage_records(api_key, model)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_failed ON usage_records(failed)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_source_requested ON usage_records(source, requested_at DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_source_model_requested ON usage_records(source, model, requested_at DESC)",
 	}
 	for _, idx := range indexes {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
 			return fmt.Errorf("usage store: create index: %w", err)
 		}
+	}
+	return nil
+}
+
+func (s *sqliteUsageStore) Reset(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("usage store: sqlite store not initialized")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("usage store: begin reset tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err = tx.ExecContext(ctx, "DELETE FROM usage_records"); err != nil {
+		return fmt.Errorf("usage store: reset records: %w", err)
+	}
+	_, _ = tx.ExecContext(ctx, "DELETE FROM sqlite_sequence WHERE name = 'usage_records'")
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("usage store: commit reset tx: %w", err)
 	}
 	return nil
 }

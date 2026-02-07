@@ -477,6 +477,9 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/custom/monitor/request-logs", s.mgmt.GetMonitorRequestLogs)
+		mgmt.GET("/custom/monitor/channel-stats", s.mgmt.GetMonitorChannelStats)
+		mgmt.GET("/custom/monitor/failure-analysis", s.mgmt.GetMonitorFailureAnalysis)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)

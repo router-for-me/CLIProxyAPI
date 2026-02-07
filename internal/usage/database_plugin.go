@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,8 +41,9 @@ func init() {
 
 // DatabasePlugin persists usage records to database and provides combined statistics.
 type DatabasePlugin struct {
-	store         UsageStore
-	retentionDays int
+	store             UsageStore
+	retentionDays     int
+	storeOnlySnapshot bool
 
 	// Write buffer
 	buffer    []UsageRecord
@@ -86,11 +88,12 @@ func InitDatabasePlugin(ctx context.Context, pgDSN, pgSchema, authDir string) er
 	}
 
 	plugin := &DatabasePlugin{
-		store:         store,
-		retentionDays: retentionDays,
-		buffer:        make([]UsageRecord, 0, defaultBufferSize),
-		flushCh:       make(chan struct{}, 1),
-		closeCh:       make(chan struct{}),
+		store:             store,
+		retentionDays:     retentionDays,
+		storeOnlySnapshot: strings.TrimSpace(pgDSN) != "",
+		buffer:            make([]UsageRecord, 0, defaultBufferSize),
+		flushCh:           make(chan struct{}, 1),
+		closeCh:           make(chan struct{}),
 	}
 	plugin.wg.Add(1)
 	go plugin.flushLoop()
@@ -259,6 +262,9 @@ func (p *DatabasePlugin) GetCombinedSnapshot() StatisticsSnapshot {
 		return memStats
 	}
 
+	if p.storeOnlySnapshot {
+		return mergeStats(dbStats, StatisticsSnapshot{})
+	}
 	return mergeStats(dbStats, memStats)
 }
 

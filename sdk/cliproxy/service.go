@@ -453,7 +453,10 @@ func (s *Service) Run(ctx context.Context) error {
 
 	if s.cfg != nil {
 		if err := internalusage.UpdatePersistence(ctx, s.cfg.UsagePersistenceEnabled, s.cfg.AuthDir); err != nil {
-			log.Warnf("usage database init failed, using memory only: %v", err)
+			if s.cfg.UsagePersistenceEnabled {
+				return fmt.Errorf("cliproxy: initialize usage persistence: %w", err)
+			}
+			log.Warnf("usage database init failed while persistence disabled: %v", err)
 		}
 	}
 
