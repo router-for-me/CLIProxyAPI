@@ -75,6 +75,12 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 
 	params := (*param).(*Params)
 
+	// Check if thinking was requested in the original Claude request.
+	// When thinking is not requested but the upstream model (e.g. claude-opus-4-6-thinking)
+	// still returns thinking blocks, we must skip them to prevent leaking internal
+	// reasoning into the client-visible output.
+	thinkingRequested := gjson.GetBytes(originalRequestRawJSON, "thinking.type").String() == "enabled"
+
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		output := ""
 		// Only send final events if we have actually output content
@@ -134,6 +140,10 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			if partTextResult.Exists() {
 				// Process thinking content (internal reasoning)
 				if partResult.Get("thought").Bool() {
+					// Skip thinking blocks entirely if thinking was not requested by the client
+					if !thinkingRequested {
+						continue
+					}
 					if thoughtSignature := partResult.Get("thoughtSignature"); thoughtSignature.Exists() && thoughtSignature.String() != "" {
 						// log.Debug("Branch: signature_delta")
 
@@ -370,8 +380,13 @@ func resolveStopReason(params *Params) string {
 // Returns:
 //   - string: A Claude-compatible JSON response.
 func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
+
+	// Check if thinking was requested in the original Claude request.
+	// When thinking is not requested but the upstream model (e.g. claude-opus-4-6-thinking)
+	// still returns thinking blocks, we must skip them to prevent leaking internal
+	// reasoning into the client-visible output.
+	thinkingRequested := gjson.GetBytes(originalRequestRawJSON, "thinking.type").String() == "enabled"
 
 	root := gjson.ParseBytes(rawJSON)
 	promptTokens := root.Get("response.usageMetadata.promptTokenCount").Int()
@@ -446,6 +461,12 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
 			isThought := part.Get("thought").Bool()
+
+			// Skip thinking blocks entirely if thinking was not requested by the client
+			if isThought && !thinkingRequested {
+				continue
+			}
+
 			if isThought {
 				sig := part.Get("thoughtSignature")
 				if !sig.Exists() {

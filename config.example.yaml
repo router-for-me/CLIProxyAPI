@@ -142,9 +142,9 @@ nonstream-keepalive-interval: 0
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
 #     excluded-models:
-#       - "claude-opus-4-5-20251101" # exclude specific models (exact match)
+#       - "claude-opus-4-6" # exclude specific models (exact match)
 #       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
-#       - "*-thinking"               # wildcard matching suffix (e.g. claude-opus-4-5-thinking)
+#       - "*-thinking"               # wildcard matching suffix (e.g. claude-opus-4-6-thinking)
 #       - "*haiku*"                  # wildcard matching substring (e.g. claude-3-5-haiku-20241022)
 #     cloak:                         # optional: request cloaking for non-Claude-Code clients
 #       mode: "auto"                 # "auto" (default): cloak only when client is not Claude Code
@@ -209,11 +209,11 @@ nonstream-keepalive-interval: 0
 #   force-model-mappings: false
 #   # Amp Model Mappings
 #   # Route unavailable Amp models to alternative models available in your local proxy.
-#   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
+#   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.6)
 #   # but you have a similar model available (e.g., Claude Sonnet 4).
 #   model-mappings:
-#     - from: "claude-opus-4-5-20251101"          # Model requested by Amp CLI
-#       to: "gemini-claude-opus-4-5-thinking"     # Route to this available model instead
+#     - from: "claude-opus-4-6"                   # Model requested by Amp CLI
+#       to: "gemini-claude-opus-4-6-thinking"     # Route to this available model instead
 #     - from: "claude-sonnet-4-5-20250929"
 #       to: "gemini-claude-sonnet-4-5-thinking"
 #     - from: "claude-haiku-4-5-20251001"
@@ -238,8 +238,8 @@ oauth-model-alias:
       alias: "gemini-claude-sonnet-4-5"
     - name: "claude-sonnet-4-5-thinking"
       alias: "gemini-claude-sonnet-4-5-thinking"
-    - name: "claude-opus-4-5-thinking"
-      alias: "gemini-claude-opus-4-5-thinking"
+    - name: "claude-opus-4-6-thinking"
+      alias: "gemini-claude-opus-4-6-thinking"
 #   gemini-cli:
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias

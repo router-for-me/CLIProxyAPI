@@ -9,7 +9,7 @@ import (
 
 func TestNewModelMapper(t *testing.T) {
 	mappings := []config.AmpModelMapping{
-		{From: "claude-opus-4.5", To: "claude-sonnet-4"},
+		{From: "claude-opus-4.6", To: "claude-sonnet-4"},
 		{From: "gpt-5", To: "gemini-2.5-pro"},
 	}
 
@@ -38,13 +38,13 @@ func TestNewModelMapper_Empty(t *testing.T) {
 
 func TestModelMapper_MapModel_NoProvider(t *testing.T) {
 	mappings := []config.AmpModelMapping{
-		{From: "claude-opus-4.5", To: "claude-sonnet-4"},
+		{From: "claude-opus-4.6", To: "claude-sonnet-4"},
 	}
 
 	mapper := NewModelMapper(mappings)
 
 	// Without a registered provider for the target, mapping should return empty
-	result := mapper.MapModel("claude-opus-4.5")
+	result := mapper.MapModel("claude-opus-4.6")
 	if result != "" {
 		t.Errorf("Expected empty result when target has no provider, got %s", result)
 	}
@@ -59,13 +59,13 @@ func TestModelMapper_MapModel_WithProvider(t *testing.T) {
 	defer reg.UnregisterClient("test-client")
 
 	mappings := []config.AmpModelMapping{
-		{From: "claude-opus-4.5", To: "claude-sonnet-4"},
+		{From: "claude-opus-4.6", To: "claude-sonnet-4"},
 	}
 
 	mapper := NewModelMapper(mappings)
 
 	// With a registered provider, mapping should work
-	result := mapper.MapModel("claude-opus-4.5")
+	result := mapper.MapModel("claude-opus-4.6")
 	if result != "claude-sonnet-4" {
 		t.Errorf("Expected claude-sonnet-4, got %s", result)
 	}
@@ -98,13 +98,13 @@ func TestModelMapper_MapModel_CaseInsensitive(t *testing.T) {
 	defer reg.UnregisterClient("test-client2")
 
 	mappings := []config.AmpModelMapping{
-		{From: "Claude-Opus-4.5", To: "claude-sonnet-4"},
+		{From: "Claude-Opus-4.6", To: "claude-sonnet-4"},
 	}
 
 	mapper := NewModelMapper(mappings)
 
 	// Should match case-insensitively
-	result := mapper.MapModel("claude-opus-4.5")
+	result := mapper.MapModel("claude-opus-4.6")
 	if result != "claude-sonnet-4" {
 		t.Errorf("Expected claude-sonnet-4, got %s", result)
 	}
@@ -112,7 +112,7 @@ func TestModelMapper_MapModel_CaseInsensitive(t *testing.T) {
 
 func TestModelMapper_MapModel_NotFound(t *testing.T) {
 	mappings := []config.AmpModelMapping{
-		{From: "claude-opus-4.5", To: "claude-sonnet-4"},
+		{From: "claude-opus-4.6", To: "claude-sonnet-4"},
 	}
 
 	mapper := NewModelMapper(mappings)
@@ -126,7 +126,7 @@ func TestModelMapper_MapModel_NotFound(t *testing.T) {
 
 func TestModelMapper_MapModel_EmptyInput(t *testing.T) {
 	mappings := []config.AmpModelMapping{
-		{From: "claude-opus-4.5", To: "claude-sonnet-4"},
+		{From: "claude-opus-4.6", To: "claude-sonnet-4"},
 	}
 
 	mapper := NewModelMapper(mappings)
@@ -276,7 +276,7 @@ func TestModelMapper_Regex_CaseInsensitive(t *testing.T) {
 
 	mapper := NewModelMapper(mappings)
 
-	result := mapper.MapModel("claude-opus-4.5")
+	result := mapper.MapModel("claude-opus-4.6")
 	if result != "claude-sonnet-4" {
 		t.Errorf("Expected claude-sonnet-4, got %s", result)
 	}

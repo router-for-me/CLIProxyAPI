@@ -16,8 +16,7 @@ var antigravityModelConversionTable = map[string]string{
 	"gemini-3-flash-preview":                  "gemini-3-flash",
 	"gemini-claude-sonnet-4-5":                "claude-sonnet-4-5",
 	"gemini-claude-sonnet-4-5-thinking":       "claude-sonnet-4-5-thinking",
-	"gemini-claude-opus-4-5-thinking":         "claude-opus-4-5-thinking",
-	"gemini-claude-opus-4-6-thinking":         "claude-opus-4-6-thinking",
+	"gemini-claude-opus-4-5-thinking":         "claude-opus-4-6-thinking",
 }
 
 // defaultAntigravityAliases returns the default oauth-model-alias configuration
@@ -30,7 +29,6 @@ func defaultAntigravityAliases() []OAuthModelAlias {
 		{Name: "gemini-3-flash", Alias: "gemini-3-flash-preview"},
 		{Name: "claude-sonnet-4-5", Alias: "gemini-claude-sonnet-4-5"},
 		{Name: "claude-sonnet-4-5-thinking", Alias: "gemini-claude-sonnet-4-5-thinking"},
-		{Name: "claude-opus-4-5-thinking", Alias: "gemini-claude-opus-4-5-thinking"},
 		{Name: "claude-opus-4-6-thinking", Alias: "gemini-claude-opus-4-6-thinking"},
 	}
 }
