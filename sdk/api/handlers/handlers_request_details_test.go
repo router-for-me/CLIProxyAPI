@@ -116,3 +116,48 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 		})
 	}
 }
+
+func TestFilterProvidersByToolCompatibility(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		providers []string
+		payload   []byte
+		want      []string
+	}{
+		{
+			name:      "mixed tools exclude antigravity",
+			providers: []string{"antigravity", "gemini"},
+			payload:   []byte(`{"tools":[{"type":"function","function":{"name":"f"}},{"google_search":{}}]}`),
+			want:      []string{"gemini"},
+		},
+		{
+			name:      "search only keeps antigravity",
+			providers: []string{"antigravity", "gemini"},
+			payload:   []byte(`{"tools":[{"google_search":{}}]}`),
+			want:      []string{"antigravity", "gemini"},
+		},
+		{
+			name:      "function only keeps antigravity",
+			providers: []string{"antigravity", "gemini"},
+			payload:   []byte(`{"tools":[{"type":"function","function":{"name":"f"}}]}`),
+			want:      []string{"antigravity", "gemini"},
+		},
+		{
+			name:      "mixed tools only antigravity becomes empty",
+			providers: []string{"antigravity"},
+			payload:   []byte(`{"tools":[{"type":"function","function":{"name":"f"}},{"google_search":{}}]}`),
+			want:      []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := filterProvidersByToolCompatibility(tt.providers, tt.payload)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("filterProvidersByToolCompatibility() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -374,6 +374,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				googleSearchNodes = append(googleSearchNodes, googleToolNode)
 			}
 			if gs := t.Get("google_search"); gs.Exists() {
+				hasWebSearchTool = true
 				googleToolNode := []byte(`{}`)
 				var errSet error
 				googleToolNode, errSet = sjson.SetRawBytes(googleToolNode, "googleSearch", []byte(gs.Raw))

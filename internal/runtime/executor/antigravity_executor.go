@@ -1544,7 +1544,7 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
 	requestType := gjson.GetBytes(payload, "requestType").String()
 	if strings.TrimSpace(requestType) == "" {
-		if gjson.GetBytes(payload, "request.tools.0.googleSearch").Exists() {
+		if hasGoogleSearchTool(payload) {
 			requestType = "web_search"
 		} else {
 			requestType = "agent"
@@ -1595,6 +1595,19 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 		template, _ = sjson.Delete(template, "toolConfig")
 	}
 	return []byte(template)
+}
+
+func hasGoogleSearchTool(payload []byte) bool {
+	tools := gjson.GetBytes(payload, "request.tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		if tool.Get("googleSearch").Exists() {
+			return true
+		}
+	}
+	return false
 }
 
 func generateRequestID() string {

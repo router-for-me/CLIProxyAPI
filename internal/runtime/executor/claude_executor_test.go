@@ -61,3 +61,21 @@ func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
 		t.Fatalf("content_block.name = %q, want %q", got, "alpha")
 	}
 }
+
+func TestGeminiToAntigravity_RequestTypeDetectsGoogleSearchAnywhere(t *testing.T) {
+	t.Run("googleSearch at index 1 sets web_search", func(t *testing.T) {
+		input := []byte(`{"model":"gemini-3-flash","request":{"tools":[{"functionDeclarations":[{"name":"f"}]},{"googleSearch":{}}]}}`)
+		out := geminiToAntigravity("gemini-3-flash", input, "")
+		if got := gjson.GetBytes(out, "requestType").String(); got != "web_search" {
+			t.Fatalf("requestType = %q, want %q", got, "web_search")
+		}
+	})
+
+	t.Run("no googleSearch keeps agent", func(t *testing.T) {
+		input := []byte(`{"model":"gemini-3-flash","request":{"tools":[{"functionDeclarations":[{"name":"f"}]}]}}`)
+		out := geminiToAntigravity("gemini-3-flash", input, "")
+		if got := gjson.GetBytes(out, "requestType").String(); got != "agent" {
+			t.Fatalf("requestType = %q, want %q", got, "agent")
+		}
+	})
+}
