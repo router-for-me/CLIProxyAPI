@@ -422,6 +422,13 @@ func (s *Server) setupRoutes() {
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
 
+	// Internal credential query endpoint for master-follower mode.
+	// Uses PeerAuthMiddleware (constant-time hash comparison) instead of Middleware (bcrypt),
+	// because both master and follower share the same secret-key hash value.
+	internal := s.engine.Group("/v0/internal", s.mgmt.PeerAuthMiddleware())
+	internal.GET("/credential", s.mgmt.HandleCredentialQuery)
+	internal.GET("/auth-list", s.mgmt.HandleAuthList)
+
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
 
@@ -1045,3 +1052,5 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 	}
 }
+
+

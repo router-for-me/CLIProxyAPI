@@ -207,6 +207,8 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 
+
+
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
 	if m == nil {
 		return ""
@@ -569,6 +571,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
+	fetchedFromMaster := make(map[string]struct{}) // Track auths that already fetched from master
 	var lastErr error
 	for {
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
@@ -592,6 +595,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
 		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -606,6 +610,16 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
+
+			statusCode := 0
+			if result.Error != nil {
+				statusCode = result.Error.HTTPStatus
+			}
+			if m.tryFetchFromMasterOnUnauthorized(ctx, statusCode, auth.ID, provider, fetchedFromMaster) {
+				delete(tried, auth.ID)
+				continue
+			}
+
 			m.MarkResult(execCtx, result)
 			if isRequestInvalidError(errExec) {
 				return cliproxyexecutor.Response{}, errExec
@@ -681,6 +695,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
+	fetchedFromMaster := make(map[string]struct{}) // Track auths that already fetched from master
 	var lastErr error
 	for {
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
@@ -714,6 +729,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errors.As(errStream, &se) && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
+
+			if m.tryFetchFromMasterOnUnauthorized(ctx, rerr.HTTPStatus, auth.ID, provider, fetchedFromMaster) {
+				delete(tried, auth.ID)
+				continue
+			}
+
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
@@ -1191,11 +1212,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				statusCode := statusCodeFromResult(result.Error)
 				switch statusCode {
 				case 401:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
+					state.NextRetryAfter = now.Add(30 * time.Minute)
 					suspendReason = "unauthorized"
 					shouldSuspendModel = true
-				case 402, 403:
+				case 402:
 					next := now.Add(30 * time.Minute)
 					state.NextRetryAfter = next
 					suspendReason = "payment_required"
@@ -2010,7 +2030,19 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		exec = m.executors[auth.Provider]
 	}
 	m.mu.RUnlock()
-	if auth == nil || exec == nil {
+	if auth == nil {
+		return
+	}
+
+	// Follower nodes (with credential-master configured) fetch from master instead of local refresh
+	if m.GetCredentialMaster() != "" {
+		// Errors are logged inside fetchCredentialFromMaster, will retry on next refresh cycle or on 401
+		m.fetchCredentialFromMaster(ctx, id, auth.Provider)
+		return
+	}
+
+	// Master node: perform local refresh using executor
+	if exec == nil {
 		return
 	}
 	cloned := auth.Clone()
