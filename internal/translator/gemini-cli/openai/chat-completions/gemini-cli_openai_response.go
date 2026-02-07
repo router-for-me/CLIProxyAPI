@@ -109,7 +109,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 			var err error
 			template, err = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
 			if err != nil {
-				log.Warnf("antigravity openai response: failed to set cached_tokens: %v", err)
+				log.Warnf("gemini-cli openai response: failed to set cached_tokens: %v", err)
 			}
 		}
 	}

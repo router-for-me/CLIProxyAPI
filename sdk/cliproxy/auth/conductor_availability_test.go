@@ -59,4 +59,3 @@ func TestUpdateAggregatedAvailability_FutureNextRetryBlocksAuth(t *testing.T) {
 		t.Fatalf("auth.NextRetryAfter = %v, want %v", auth.NextRetryAfter, next)
 	}
 }
-
