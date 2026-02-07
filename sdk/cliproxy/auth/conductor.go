@@ -607,6 +607,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				result.RetryAfter = ra
 			}
 			m.MarkResult(execCtx, result)
+			if isRequestInvalidError(errExec) {
+				return cliproxyexecutor.Response{}, errExec
+			}
 			lastErr = errExec
 			continue
 		}
@@ -660,6 +663,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				result.RetryAfter = ra
 			}
 			m.MarkResult(execCtx, result)
+			if isRequestInvalidError(errExec) {
+				return cliproxyexecutor.Response{}, errExec
+			}
 			lastErr = errExec
 			continue
 		}
@@ -711,6 +717,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
+			if isRequestInvalidError(errStream) {
+				return nil, errStream
+			}
 			lastErr = errStream
 			continue
 		}
@@ -1110,6 +1119,9 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if status := statusCodeFromError(err); status == http.StatusOK {
 		return 0, false
 	}
+	if isRequestInvalidError(err) {
+		return 0, false
+	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if !found || wait > maxWait {
 		return 0, false
@@ -1299,7 +1311,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 			stateUnavailable = true
 		} else if state.Unavailable {
 			if state.NextRetryAfter.IsZero() {
-				stateUnavailable = true
+				stateUnavailable = false
 			} else if state.NextRetryAfter.After(now) {
 				stateUnavailable = true
 				if earliestRetry.IsZero() || state.NextRetryAfter.Before(earliestRetry) {
@@ -1428,6 +1440,21 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+// isRequestInvalidError returns true if the error represents a client request
+// error that should not be retried. Specifically, it checks for 400 Bad Request
+// with "invalid_request_error" in the message, indicating the request itself is
+// malformed and switching to a different auth will not help.
+func isRequestInvalidError(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(err.Error(), "invalid_request_error")
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {

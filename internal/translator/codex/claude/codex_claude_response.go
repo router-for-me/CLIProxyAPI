@@ -113,10 +113,10 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
 		p := (*param).(*ConvertCodexResponseToClaudeParams).HasToolCall
 		stopReason := rootResult.Get("response.stop_reason").String()
-		if stopReason != "" {
-			template, _ = sjson.Set(template, "delta.stop_reason", stopReason)
-		} else if p {
+		if p {
 			template, _ = sjson.Set(template, "delta.stop_reason", "tool_use")
+		} else if stopReason == "max_tokens" || stopReason == "stop" {
+			template, _ = sjson.Set(template, "delta.stop_reason", stopReason)
 		} else {
 			template, _ = sjson.Set(template, "delta.stop_reason", "end_turn")
 		}

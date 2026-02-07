@@ -30,7 +30,7 @@ const (
 	// kimiTokenURL is the endpoint for exchanging device codes for tokens.
 	kimiTokenURL = kimiOAuthHost + "/api/oauth/token"
 	// KimiAPIBaseURL is the base URL for Kimi API requests.
-	KimiAPIBaseURL = "https://api.kimi.com/coding/v1"
+	KimiAPIBaseURL = "https://api.kimi.com/coding"
 	// defaultPollInterval is the default interval for polling token endpoint.
 	defaultPollInterval = 5 * time.Second
 	// maxPollDuration is the maximum time to wait for user authorization.
