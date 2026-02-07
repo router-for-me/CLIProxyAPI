@@ -238,7 +238,7 @@ func (k *KiroAuth) ListAvailableModels(ctx context.Context, tokenData *KiroToken
 			Description    string  `json:"description"`
 			RateMultiplier float64 `json:"rateMultiplier"`
 			RateUnit       string  `json:"rateUnit"`
-			TokenLimits    struct {
+			TokenLimits    *struct {
 				MaxInputTokens int `json:"maxInputTokens"`
 			} `json:"tokenLimits"`
 		} `json:"models"`
@@ -250,13 +250,17 @@ func (k *KiroAuth) ListAvailableModels(ctx context.Context, tokenData *KiroToken
 
 	models := make([]*KiroModel, 0, len(result.Models))
 	for _, m := range result.Models {
+		maxInputTokens := 0
+		if m.TokenLimits != nil {
+			maxInputTokens = m.TokenLimits.MaxInputTokens
+		}
 		models = append(models, &KiroModel{
 			ModelID:        m.ModelID,
 			ModelName:      m.ModelName,
 			Description:    m.Description,
 			RateMultiplier: m.RateMultiplier,
 			RateUnit:       m.RateUnit,
-			MaxInputTokens: m.TokenLimits.MaxInputTokens,
+			MaxInputTokens: maxInputTokens,
 		})
 	}
 

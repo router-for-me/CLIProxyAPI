@@ -2102,6 +2102,22 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				}
 			}
 
+		case "contextUsageEvent":
+			// Handle context usage events from Kiro API
+			// Format: {"contextUsageEvent": {"contextUsagePercentage": 0.53}}
+			if ctxUsage, ok := event["contextUsageEvent"].(map[string]interface{}); ok {
+				if ctxPct, ok := ctxUsage["contextUsagePercentage"].(float64); ok {
+					upstreamContextPercentage = ctxPct
+					log.Debugf("kiro: parseEventStream received contextUsageEvent: %.2f%%", ctxPct*100)
+				}
+			} else {
+				// Try direct field (fallback)
+				if ctxPct, ok := event["contextUsagePercentage"].(float64); ok {
+					upstreamContextPercentage = ctxPct
+					log.Debugf("kiro: parseEventStream received contextUsagePercentage (direct): %.2f%%", ctxPct*100)
+				}
+			}
+
 		case "error", "exception", "internalServerException", "invalidStateEvent":
 			// Handle error events from Kiro API stream
 			errMsg := ""
@@ -2702,6 +2718,22 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 						hasUpstreamUsage = true
 						log.Infof("kiro: streamToChannel received meteringEvent (direct): usage=%.4f %s", usage, unit)
 					}
+				}
+			}
+
+		case "contextUsageEvent":
+			// Handle context usage events from Kiro API
+			// Format: {"contextUsageEvent": {"contextUsagePercentage": 0.53}}
+			if ctxUsage, ok := event["contextUsageEvent"].(map[string]interface{}); ok {
+				if ctxPct, ok := ctxUsage["contextUsagePercentage"].(float64); ok {
+					upstreamContextPercentage = ctxPct
+					log.Debugf("kiro: streamToChannel received contextUsageEvent: %.2f%%", ctxPct*100)
+				}
+			} else {
+				// Try direct field (fallback)
+				if ctxPct, ok := event["contextUsagePercentage"].(float64); ok {
+					upstreamContextPercentage = ctxPct
+					log.Debugf("kiro: streamToChannel received contextUsagePercentage (direct): %.2f%%", ctxPct*100)
 				}
 			}
 
