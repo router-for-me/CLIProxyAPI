@@ -128,9 +128,6 @@ func TestMigrateOAuthModelAlias_ConvertsAntigravityModels(t *testing.T) {
 	if !strings.Contains(content, "claude-sonnet-4-5-thinking") {
 		t.Fatal("expected missing default alias claude-sonnet-4-5-thinking to be added")
 	}
-	if !strings.Contains(content, "claude-opus-4-5-thinking") {
-		t.Fatal("expected missing default alias claude-opus-4-5-thinking to be added")
-	}
 	if !strings.Contains(content, "claude-opus-4-6-thinking") {
 		t.Fatal("expected missing default alias claude-opus-4-6-thinking to be added")
 	}

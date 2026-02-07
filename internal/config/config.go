@@ -179,7 +179,7 @@ type OAuthModelAlias struct {
 // When Amp requests a model that isn't available locally, this mapping
 // allows routing to an alternative model that IS available.
 type AmpModelMapping struct {
-	// From is the model name that Amp CLI requests (e.g., "claude-opus-4.5").
+	// From is the model name that Amp CLI requests (e.g., "claude-opus-4.6").
 	From string `yaml:"from" json:"from"`
 
 	// To is the target model name to route to (e.g., "claude-sonnet-4").

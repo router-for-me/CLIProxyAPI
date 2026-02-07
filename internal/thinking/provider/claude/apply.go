@@ -1,7 +1,7 @@
 // Package claude implements thinking configuration scaffolding for Claude models.
 //
 // Claude models use the thinking.budget_tokens format with values in the range
-// 1024-128000. Some Claude models support ZeroAllowed (sonnet-4-5, opus-4-5),
+// 1024-128000. Some Claude models support ZeroAllowed (sonnet-4-5, opus-4-6),
 // while older models do not.
 // See: _bmad-output/planning-artifacts/architecture.md#Epic-6
 package claude
