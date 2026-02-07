@@ -17,6 +17,7 @@ func TestConvertAntigravityResponseToClaude_ParamsInitialized(t *testing.T) {
 
 	// Request with user message - should initialize params
 	requestJSON := []byte(`{
+		"thinking": {"type": "enabled", "budget_tokens": 8192},
 		"messages": [
 			{"role": "user", "content": [{"type": "text", "text": "Hello world"}]}
 		]
@@ -50,6 +51,7 @@ func TestConvertAntigravityResponseToClaude_ThinkingTextAccumulated(t *testing.T
 	cache.ClearSignatureCache("")
 
 	requestJSON := []byte(`{
+		"thinking": {"type": "enabled", "budget_tokens": 8192},
 		"messages": [{"role": "user", "content": [{"type": "text", "text": "Test"}]}]
 	}`)
 
@@ -100,6 +102,7 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 
 	requestJSON := []byte(`{
 		"model": "claude-sonnet-4-5-thinking",
+		"thinking": {"type": "enabled", "budget_tokens": 8192},
 		"messages": [{"role": "user", "content": [{"type": "text", "text": "Cache test"}]}]
 	}`)
 
@@ -158,6 +161,7 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 
 	requestJSON := []byte(`{
 		"model": "claude-sonnet-4-5-thinking",
+		"thinking": {"type": "enabled", "budget_tokens": 8192},
 		"messages": [{"role": "user", "content": [{"type": "text", "text": "Multi block test"}]}]
 	}`)
 
