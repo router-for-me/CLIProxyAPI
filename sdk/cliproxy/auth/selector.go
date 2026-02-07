@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
@@ -19,6 +20,7 @@ import (
 type RoundRobinSelector struct {
 	mu      sync.Mutex
 	cursors map[string]int
+	maxKeys int
 }
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
@@ -119,6 +121,19 @@ func authPriority(auth *Auth) int {
 	return parsed
 }
 
+func canonicalModelKey(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	parsed := thinking.ParseSuffix(model)
+	modelName := strings.TrimSpace(parsed.ModelName)
+	if modelName == "" {
+		return model
+	}
+	return modelName
+}
+
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
@@ -185,9 +200,16 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	if err != nil {
 		return nil, err
 	}
-	key := provider + ":" + model
+	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
+		s.cursors = make(map[string]int)
+	}
+	limit := s.maxKeys
+	if limit <= 0 {
+		limit = 4096
+	}
+	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
 		s.cursors = make(map[string]int)
 	}
 	index := s.cursors[key]
@@ -223,7 +245,14 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
-			if state, ok := auth.ModelStates[model]; ok && state != nil {
+			state, ok := auth.ModelStates[model]
+			if (!ok || state == nil) && model != "" {
+				baseModel := canonicalModelKey(model)
+				if baseModel != "" && baseModel != model {
+					state, ok = auth.ModelStates[baseModel]
+				}
+			}
+			if ok && state != nil {
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
 				}
