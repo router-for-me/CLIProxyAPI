@@ -543,27 +543,32 @@ func (s *Service) Run(ctx context.Context) error {
 			return
 		}
 
-		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-		normalizeStrategy := func(strategy string) string {
-			switch strategy {
-			case "fill-first", "fillfirst", "ff":
-				return "fill-first"
-			default:
-				return "round-robin"
-			}
+	nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
+	normalizeStrategy := func(strategy string) string {
+		switch strategy {
+		case "fill-first", "fillfirst", "ff":
+			return "fill-first"
+		case "max-quota", "maxquota", "mq", "quota-aware", "quotaaware":
+			return "max-quota"
+		default:
+			return "round-robin"
 		}
-		previousStrategy = normalizeStrategy(previousStrategy)
-		nextStrategy = normalizeStrategy(nextStrategy)
-		if s.coreManager != nil && previousStrategy != nextStrategy {
-			var selector coreauth.Selector
-			switch nextStrategy {
-			case "fill-first":
-				selector = &coreauth.FillFirstSelector{}
-			default:
-				selector = &coreauth.RoundRobinSelector{}
-			}
-			s.coreManager.SetSelector(selector)
+	}
+	previousStrategy = normalizeStrategy(previousStrategy)
+	nextStrategy = normalizeStrategy(nextStrategy)
+	if s.coreManager != nil && previousStrategy != nextStrategy {
+		var selector coreauth.Selector
+		switch nextStrategy {
+		case "fill-first":
+			selector = &coreauth.FillFirstSelector{}
+		case "max-quota":
+			selector = &coreauth.MaxQuotaSelector{}
+		default:
+			selector = &coreauth.RoundRobinSelector{}
 		}
+		s.coreManager.SetSelector(selector)
+		log.WithField("strategy", nextStrategy).Debug("Selector strategy updated")
+	}
 
 		s.applyRetryConfig(newCfg)
 		s.applyPprofConfig(newCfg)
