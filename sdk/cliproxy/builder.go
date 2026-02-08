@@ -207,6 +207,8 @@ func (b *Builder) Build() (*Service, error) {
 		switch strategy {
 		case "fill-first", "fillfirst", "ff":
 			selector = &coreauth.FillFirstSelector{}
+		case "max-quota", "maxquota", "mq":
+			selector = &coreauth.MaxQuotaSelector{}
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}
