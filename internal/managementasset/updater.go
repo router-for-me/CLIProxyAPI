@@ -28,6 +28,7 @@ const (
 	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
 	managementAssetName          = "management.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
+	managementSyncMinInterval    = 30 * time.Second
 	updateCheckInterval          = 3 * time.Hour
 )
 
@@ -37,9 +38,7 @@ const ManagementFileName = managementAssetName
 var (
 	lastUpdateCheckMu   sync.Mutex
 	lastUpdateCheckTime time.Time
-
 	currentConfigPtr    atomic.Pointer[config.Config]
-	disableControlPanel atomic.Bool
 	schedulerOnce       sync.Once
 	schedulerConfigPath atomic.Value
 )
@@ -50,16 +49,7 @@ func SetCurrentConfig(cfg *config.Config) {
 		currentConfigPtr.Store(nil)
 		return
 	}
-
-	prevDisabled := disableControlPanel.Load()
 	currentConfigPtr.Store(cfg)
-	disableControlPanel.Store(cfg.RemoteManagement.DisableControlPanel)
-
-	if prevDisabled && !cfg.RemoteManagement.DisableControlPanel {
-		lastUpdateCheckMu.Lock()
-		lastUpdateCheckTime = time.Time{}
-		lastUpdateCheckMu.Unlock()
-	}
 }
 
 // StartAutoUpdater launches a background goroutine that periodically ensures the management asset is up to date.
@@ -92,7 +82,7 @@ func runAutoUpdater(ctx context.Context) {
 			log.Debug("management asset auto-updater skipped: config not yet available")
 			return
 		}
-		if disableControlPanel.Load() {
+		if cfg.RemoteManagement.DisableControlPanel {
 			log.Debug("management asset auto-updater skipped: control panel disabled")
 			return
 		}
@@ -182,15 +172,9 @@ func FilePath(configFilePath string) string {
 
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
 // The function is designed to run in a background goroutine and will never panic.
-// It enforces a 3-hour rate limit to avoid frequent checks on config/auth file changes.
 func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-
-	if disableControlPanel.Load() {
-		log.Debug("management asset sync skipped: control panel disabled by configuration")
-		return
 	}
 
 	staticDir = strings.TrimSpace(staticDir)
@@ -198,6 +182,21 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 		log.Debug("management asset sync skipped: empty static directory")
 		return
 	}
+
+	lastUpdateCheckMu.Lock()
+	now := time.Now()
+	timeSinceLastAttempt := now.Sub(lastUpdateCheckTime)
+	if !lastUpdateCheckTime.IsZero() && timeSinceLastAttempt < managementSyncMinInterval {
+		lastUpdateCheckMu.Unlock()
+		log.Debugf(
+			"management asset sync skipped by throttle: last attempt %v ago (interval %v)",
+			timeSinceLastAttempt.Round(time.Second),
+			managementSyncMinInterval,
+		)
+		return
+	}
+	lastUpdateCheckTime = now
+	lastUpdateCheckMu.Unlock()
 
 	localPath := filepath.Join(staticDir, managementAssetName)
 	localFileMissing := false
@@ -208,18 +207,6 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			log.WithError(errStat).Debug("failed to stat local management asset")
 		}
 	}
-
-	// Rate limiting: check only once every 3 hours
-	lastUpdateCheckMu.Lock()
-	now := time.Now()
-	timeSinceLastCheck := now.Sub(lastUpdateCheckTime)
-	if timeSinceLastCheck < updateCheckInterval {
-		lastUpdateCheckMu.Unlock()
-		log.Debugf("management asset update check skipped: last check was %v ago (interval: %v)", timeSinceLastCheck.Round(time.Second), updateCheckInterval)
-		return
-	}
-	lastUpdateCheckTime = now
-	lastUpdateCheckMu.Unlock()
 
 	if errMkdirAll := os.MkdirAll(staticDir, 0o755); errMkdirAll != nil {
 		log.WithError(errMkdirAll).Warn("failed to prepare static directory for management asset")
