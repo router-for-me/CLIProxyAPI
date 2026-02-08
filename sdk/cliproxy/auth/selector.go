@@ -223,6 +223,12 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 // Pick selects the auth with the highest remaining quota percentage.
 // It reuses getAvailableAuths for cooldown/priority filtering, then sorts
 // by quota percentage (highest first) with deterministic tie-breaking by ID.
+//
+// Quota fields are read without holding QuotaTracker.mu — a concurrent Update
+// may produce a briefly inconsistent Percentage(). This is acceptable: the
+// worst case is a single suboptimal routing decision, and adding per-Auth
+// locks would contend on every request for negligible benefit.
+// Accounts without quota data (0% remaining) are sorted equivalently by ID.
 func (s *MaxQuotaSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = ctx
 	_ = opts

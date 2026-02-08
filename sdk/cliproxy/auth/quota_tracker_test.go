@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 )
@@ -170,12 +171,12 @@ func TestQuotaTrackerUpdate_RecoveryReset(t *testing.T) {
 		ID:       "test-auth",
 		Provider: "test-provider",
 		Quota: QuotaState{
-			Exceeded:        true,
-			BackoffLevel:    3,
-			NextRecoverAt:   time.Now().Add(-1 * time.Hour), // past recovery time
-			Used:            100,
-			Limit:           100,
-			Remaining:       0,
+			Exceeded:      true,
+			BackoffLevel:  3,
+			NextRecoverAt: time.Now().Add(-1 * time.Hour), // past recovery time
+			Used:          100,
+			Limit:         100,
+			Remaining:     0,
 		},
 	}
 
@@ -421,14 +422,14 @@ func TestQuotaStatePercentage(t *testing.T) {
 				Limit:     3,
 				Remaining: 2,
 			},
-			want: 66.66666666666667, // 2/3 * 100
+			want: 2.0 / 3.0 * 100,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.quota.Percentage()
-			if got != tt.want {
+			if math.Abs(got-tt.want) > 1e-9 {
 				t.Errorf("Percentage() = %v, want %v", got, tt.want)
 			}
 		})
@@ -440,14 +441,13 @@ func TestQuotaTrackerPersistCallback(t *testing.T) {
 
 	tracker := &QuotaTracker{} // Use new instance to avoid interfering with other tests
 
-	// Track if callback was invoked
-	var callbackInvoked bool
+	done := make(chan struct{})
 	var callbackAuth *Auth
 
 	// Set up callback
 	tracker.SetPersistCallback(func(ctx context.Context, auth *Auth) error {
-		callbackInvoked = true
 		callbackAuth = auth
+		close(done)
 		return nil
 	})
 
@@ -469,13 +469,12 @@ func TestQuotaTrackerPersistCallback(t *testing.T) {
 		Remaining: 80,
 	})
 
-	// Give goroutine time to execute
-	time.Sleep(100 * time.Millisecond)
-
-	// Verify callback was invoked
-	if !callbackInvoked {
-		t.Error("Persist callback was not invoked for >10% quota change")
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Persist callback was not invoked for >10% quota change")
 	}
+
 	if callbackAuth == nil {
 		t.Error("Persist callback received nil auth")
 	}
