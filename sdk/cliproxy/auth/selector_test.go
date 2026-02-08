@@ -367,3 +367,86 @@ func TestMaxQuotaSelectorPick_AllCooldown(t *testing.T) {
 		t.Fatalf("cooldownError.model = %q, want %q", cooldownErr.model, model)
 	}
 }
+
+func TestMaxQuotaSelectorIntegration_RealisticScenario(t *testing.T) {
+	t.Parallel()
+
+	selector := &MaxQuotaSelector{}
+	now := time.Now()
+	model := "gemini-2.0-flash"
+
+	ultra := &Auth{
+		ID:       "ultra-account",
+		Provider: "gemini",
+		Quota: QuotaState{
+			Used:      100,
+			Limit:     1000,
+			Remaining: 900, // 90%
+		},
+	}
+
+	pro1 := &Auth{
+		ID:       "pro-account-1",
+		Provider: "gemini",
+		Quota: QuotaState{
+			Used:      10,
+			Limit:     50,
+			Remaining: 40, // 80%
+		},
+	}
+
+	pro2 := &Auth{
+		ID:       "pro-account-2",
+		Provider: "gemini",
+		Quota: QuotaState{
+			Used:      40,
+			Limit:     50,
+			Remaining: 10, // 20%
+		},
+	}
+
+	pro3 := &Auth{
+		ID:       "pro-account-3",
+		Provider: "gemini",
+		Quota: QuotaState{
+			Used:      50,
+			Limit:     50,
+			Remaining: 0, // 0%, cooldown
+			Exceeded:  true,
+		},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(15 * time.Minute),
+				Quota: QuotaState{
+					Exceeded: true,
+				},
+			},
+		},
+	}
+
+	auths := []*Auth{pro1, pro2, pro3, ultra} // Unordered to test sorting
+
+	// Test 1: Picks ultra account (highest quota)
+	got, err := selector.Pick(context.Background(), "gemini", model, cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != "ultra-account" {
+		t.Errorf("Pick() selected %q, want %q (90%% quota)", got.ID, "ultra-account")
+	}
+
+	// Test 2: Verify cooldown account is excluded
+	authsWithoutUltra := []*Auth{pro1, pro2, pro3}
+	got2, err := selector.Pick(context.Background(), "gemini", model, cliproxyexecutor.Options{}, authsWithoutUltra)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got2.ID != "pro-account-1" {
+		t.Errorf("Pick() selected %q, want %q (80%% quota, pro-3 should be skipped)", got2.ID, "pro-account-1")
+	}
+	if got2.ID == "pro-account-3" {
+		t.Errorf("Pick() selected cooldown account, should skip it")
+	}
+}
