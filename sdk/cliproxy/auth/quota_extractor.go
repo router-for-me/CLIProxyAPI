@@ -13,6 +13,8 @@ import (
 // It captures quota information from either HTTP headers or JSON response bodies,
 // depending on the provider's reporting format.
 type QuotaInfo struct {
+	// Used is the number of requests or tokens consumed in the current quota window.
+	Used int64
 	// Remaining is the number of requests or tokens remaining in the current quota window.
 	Remaining int64
 	// Limit is the maximum quota allowed in the current window.
