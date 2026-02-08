@@ -95,15 +95,13 @@ func (qt *QuotaTracker) Update(auth *Auth, info *QuotaInfo) {
 	// Capture old quota state before modifications for persistence check
 	oldQuota := auth.Quota
 
-	// Update quota fields if values are present (> 0)
-	// Providers may omit certain fields, so we only update when data is available
+	// Limit and Remaining are updated together because Remaining=0 is a valid
+	// value (quota exhausted) and must not be skipped.
 	if info.Used > 0 {
 		auth.Quota.Used = info.Used
 	}
 	if info.Limit > 0 {
 		auth.Quota.Limit = info.Limit
-	}
-	if info.Remaining > 0 {
 		auth.Quota.Remaining = info.Remaining
 	}
 

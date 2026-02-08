@@ -425,8 +425,22 @@ func logQuotaUsage(ctx context.Context, auth *cliproxyauth.Auth, info *cliproxya
 		"auth_index": auth.EnsureIndex(),
 		"remaining":  info.Remaining,
 		"limit":      info.Limit,
-		"percentage": fmt.Sprintf("%.1f%%", pct),
+		"percentage": pct,
 		"source":     info.Source,
 		"exceeded":   info.Exceeded,
 	}).Debugf("Quota update for account %s", auth.ID)
+}
+
+func trackClaudeQuota(ctx context.Context, auth *cliproxyauth.Auth, headers http.Header, statusCode int) {
+	if quotaInfo := cliproxyauth.ExtractClaudeQuota(headers, statusCode); quotaInfo != nil {
+		cliproxyauth.GetTracker().Update(auth, quotaInfo)
+		logQuotaUsage(ctx, auth, quotaInfo)
+	}
+}
+
+func trackGeminiQuota(ctx context.Context, auth *cliproxyauth.Auth, body []byte, statusCode int) {
+	if quotaInfo := cliproxyauth.ExtractGeminiQuota(body, statusCode); quotaInfo != nil {
+		cliproxyauth.GetTracker().Update(auth, quotaInfo)
+		logQuotaUsage(ctx, auth, quotaInfo)
+	}
 }

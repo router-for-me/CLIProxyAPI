@@ -287,7 +287,7 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 		return "round-robin", true
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
-	case "max-quota", "maxquota", "mq":
+	case "max-quota", "maxquota", "mq", "quota-aware", "quotaaware":
 		return "max-quota", true
 	default:
 		return "", false

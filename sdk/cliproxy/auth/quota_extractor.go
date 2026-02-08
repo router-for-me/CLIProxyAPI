@@ -76,8 +76,10 @@ func ExtractGeminiQuota(body []byte, statusCode int) *QuotaInfo {
 		return nil // No quota information available
 	}
 
-	// Note: These field names are illustrative. Actual Gemini quota fields
-	// may differ. This implementation should be verified against real API responses.
+	// These field paths are placeholders. The Gemini API does not currently
+	// expose per-request quota remaining/limit in response bodies. This
+	// implementation is forward-looking for when Google adds quota metadata.
+	// Until then, quota tracking for Gemini relies on 429 status detection.
 	remaining := gjson.GetBytes(body, "usageMetadata.quotaRemaining").Int()
 	limit := gjson.GetBytes(body, "usageMetadata.quotaLimit").Int()
 
