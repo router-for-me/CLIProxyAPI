@@ -4,12 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -453,11 +457,42 @@ func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+apiKey)
 	r.Header.Set("User-Agent", iflowUserAgent)
+
+	// Generate session-id
+	sessionID := "session-" + generateUUID()
+	r.Header.Set("session-id", sessionID)
+
+	// Generate timestamp and signature
+	timestamp := time.Now().UnixMilli()
+	r.Header.Set("x-iflow-timestamp", fmt.Sprintf("%d", timestamp))
+
+	signature := createIFlowSignature(iflowUserAgent, sessionID, timestamp, apiKey)
+	if signature != "" {
+		r.Header.Set("x-iflow-signature", signature)
+	}
+
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 	} else {
 		r.Header.Set("Accept", "application/json")
 	}
+}
+
+// createIFlowSignature generates HMAC-SHA256 signature for iFlow API requests.
+// The signature payload format is: userAgent:sessionId:timestamp
+func createIFlowSignature(userAgent, sessionID string, timestamp int64, apiKey string) string {
+	if apiKey == "" {
+		return ""
+	}
+	payload := fmt.Sprintf("%s:%s:%d", userAgent, sessionID, timestamp)
+	h := hmac.New(sha256.New, []byte(apiKey))
+	h.Write([]byte(payload))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// generateUUID generates a random UUID v4 string.
+func generateUUID() string {
+	return uuid.New().String()
 }
 
 func iflowCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
