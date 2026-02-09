@@ -1053,6 +1053,470 @@ func errInvalidTimeRange() error {
 	return &monitorValidationError{msg: "invalid time range parameter"}
 }
 
+// --- Aggregation API types ---
+
+type monitorKpiResponse struct {
+	TotalRequests   int64            `json:"total_requests"`
+	SuccessRequests int64            `json:"success_requests"`
+	FailedRequests  int64            `json:"failed_requests"`
+	SuccessRate     float64          `json:"success_rate"`
+	TotalTokens     int64            `json:"total_tokens"`
+	InputTokens     int64            `json:"input_tokens"`
+	OutputTokens    int64            `json:"output_tokens"`
+	ReasoningTokens int64            `json:"reasoning_tokens"`
+	CachedTokens    int64            `json:"cached_tokens"`
+	AvgTpm          float64          `json:"avg_tpm"`
+	AvgRpm          float64          `json:"avg_rpm"`
+	AvgRpd          float64          `json:"avg_rpd"`
+	TimeRange       monitorTimeRange `json:"time_range"`
+}
+
+type monitorModelDistributionItem struct {
+	Model    string `json:"model"`
+	Requests int64  `json:"requests"`
+	Tokens   int64  `json:"tokens"`
+}
+
+type monitorDailyTrendItem struct {
+	Date            string `json:"date"`
+	Requests        int64  `json:"requests"`
+	SuccessRequests int64  `json:"success_requests"`
+	FailedRequests  int64  `json:"failed_requests"`
+	InputTokens     int64  `json:"input_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+}
+
+type monitorHourlyModelsResponse struct {
+	Hours        []string           `json:"hours"`
+	Models       []string           `json:"models"`
+	ModelData    map[string][]int64 `json:"model_data"`
+	SuccessRates []float64          `json:"success_rates"`
+	TimeRange    monitorTimeRange   `json:"time_range"`
+}
+
+type monitorHourlyTokensResponse struct {
+	Hours           []string         `json:"hours"`
+	TotalTokens     []int64          `json:"total_tokens"`
+	InputTokens     []int64          `json:"input_tokens"`
+	OutputTokens    []int64          `json:"output_tokens"`
+	ReasoningTokens []int64          `json:"reasoning_tokens"`
+	CachedTokens    []int64          `json:"cached_tokens"`
+	TimeRange       monitorTimeRange `json:"time_range"`
+}
+
+// GetMonitorKpi returns aggregated KPI metrics from usage records.
+func (h *Handler) GetMonitorKpi(c *gin.Context) {
+	start, end, err := parseMonitorTimeRange(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	status, err := parseStatusFilter(firstQuery(c, "status"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	filter := monitorRecordFilter{
+		APIKey:      firstQuery(c, "api", "api_key"),
+		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
+		Model:       firstQuery(c, "model"),
+		Source:      firstQuery(c, "source", "channel"),
+		Status:      status,
+		Start:       start,
+		End:         end,
+	}
+
+	var resp monitorKpiResponse
+	var minTs, maxTs time.Time
+
+	visitSnapshotRecords(h.usageSnapshot(), func(record monitorRecord) {
+		if !filter.matches(record) {
+			return
+		}
+		resp.TotalRequests++
+		if record.Failed {
+			resp.FailedRequests++
+		} else {
+			resp.SuccessRequests++
+			resp.TotalTokens += record.TotalTokens
+			resp.InputTokens += record.InputTokens
+			resp.OutputTokens += record.OutputTokens
+			resp.ReasoningTokens += record.ReasoningTokens
+			resp.CachedTokens += record.CachedTokens
+		}
+		if minTs.IsZero() || record.Timestamp.Before(minTs) {
+			minTs = record.Timestamp
+		}
+		if maxTs.IsZero() || record.Timestamp.After(maxTs) {
+			maxTs = record.Timestamp
+		}
+	})
+
+	resp.SuccessRate = calcRate(resp.SuccessRequests, resp.TotalRequests)
+
+	if resp.TotalRequests > 0 && !minTs.IsZero() && !maxTs.IsZero() {
+		spanMinutes := maxTs.Sub(minTs).Minutes()
+		if spanMinutes < 1 {
+			spanMinutes = 1
+		}
+		spanDays := spanMinutes / (60 * 24)
+		if spanDays < 1 {
+			spanDays = 1
+		}
+		resp.AvgTpm = math.Round(float64(resp.TotalTokens)/spanMinutes*10) / 10
+		resp.AvgRpm = math.Round(float64(resp.TotalRequests)/spanMinutes*10) / 10
+		resp.AvgRpd = math.Round(float64(resp.TotalRequests)/spanDays*10) / 10
+	}
+
+	resp.TimeRange = monitorTimeRange{Start: start, End: end}
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetMonitorModelDistribution returns per-model request and token counts.
+func (h *Handler) GetMonitorModelDistribution(c *gin.Context) {
+	start, end, err := parseMonitorTimeRange(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	limit, err := parseTopLimit(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	filter := monitorRecordFilter{
+		APIKey:      firstQuery(c, "api", "api_key"),
+		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
+		Model:       firstQuery(c, "model"),
+		Source:      firstQuery(c, "source", "channel"),
+		Start:       start,
+		End:         end,
+	}
+
+	type modelAcc struct {
+		Requests int64
+		Tokens   int64
+	}
+	modelMap := make(map[string]*modelAcc)
+
+	visitSnapshotRecords(h.usageSnapshot(), func(record monitorRecord) {
+		if !filter.matches(record) {
+			return
+		}
+		acc, ok := modelMap[record.Model]
+		if !ok {
+			acc = &modelAcc{}
+			modelMap[record.Model] = acc
+		}
+		acc.Requests++
+		acc.Tokens += record.TotalTokens
+	})
+
+	items := make([]monitorModelDistributionItem, 0, len(modelMap))
+	for model, acc := range modelMap {
+		items = append(items, monitorModelDistributionItem{
+			Model:    model,
+			Requests: acc.Requests,
+			Tokens:   acc.Tokens,
+		})
+	}
+
+	sortField := strings.ToLower(firstQuery(c, "sort"))
+	if sortField == "tokens" {
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].Tokens == items[j].Tokens {
+				return items[i].Model < items[j].Model
+			}
+			return items[i].Tokens > items[j].Tokens
+		})
+	} else {
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].Requests == items[j].Requests {
+				return items[i].Model < items[j].Model
+			}
+			return items[i].Requests > items[j].Requests
+		})
+	}
+
+	if len(items) > limit {
+		items = items[:limit]
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items":      items,
+		"time_range": monitorTimeRange{Start: start, End: end},
+	})
+}
+
+// GetMonitorDailyTrend returns per-day request and token aggregates.
+func (h *Handler) GetMonitorDailyTrend(c *gin.Context) {
+	start, end, err := parseMonitorTimeRange(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	filter := monitorRecordFilter{
+		APIKey:      firstQuery(c, "api", "api_key"),
+		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
+		Model:       firstQuery(c, "model"),
+		Source:      firstQuery(c, "source", "channel"),
+		Start:       start,
+		End:         end,
+	}
+
+	type dayAcc struct {
+		Requests        int64
+		SuccessRequests int64
+		FailedRequests  int64
+		InputTokens     int64
+		OutputTokens    int64
+		ReasoningTokens int64
+		CachedTokens    int64
+	}
+	dayMap := make(map[string]*dayAcc)
+
+	visitSnapshotRecords(h.usageSnapshot(), func(record monitorRecord) {
+		if !filter.matches(record) {
+			return
+		}
+		dateKey := record.Timestamp.Local().Format("2006-01-02")
+		acc, ok := dayMap[dateKey]
+		if !ok {
+			acc = &dayAcc{}
+			dayMap[dateKey] = acc
+		}
+		acc.Requests++
+		if record.Failed {
+			acc.FailedRequests++
+		} else {
+			acc.SuccessRequests++
+			acc.InputTokens += record.InputTokens
+			acc.OutputTokens += record.OutputTokens
+			acc.ReasoningTokens += record.ReasoningTokens
+			acc.CachedTokens += record.CachedTokens
+		}
+	})
+
+	items := make([]monitorDailyTrendItem, 0, len(dayMap))
+	for date, acc := range dayMap {
+		items = append(items, monitorDailyTrendItem{
+			Date:            date,
+			Requests:        acc.Requests,
+			SuccessRequests: acc.SuccessRequests,
+			FailedRequests:  acc.FailedRequests,
+			InputTokens:     acc.InputTokens,
+			OutputTokens:    acc.OutputTokens,
+			ReasoningTokens: acc.ReasoningTokens,
+			CachedTokens:    acc.CachedTokens,
+		})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Date < items[j].Date
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"items":      items,
+		"time_range": monitorTimeRange{Start: start, End: end},
+	})
+}
+
+// GetMonitorHourlyModels returns per-hour per-model request counts for the top N models.
+func (h *Handler) GetMonitorHourlyModels(c *gin.Context) {
+	start, end, err := parseMonitorTimeRange(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	hours, err := parseHoursParam(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	limit, err := parseBoundedInt(firstQuery(c, "limit"), 6, 1, 20)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	filter := monitorRecordFilter{
+		APIKey:      firstQuery(c, "api", "api_key"),
+		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
+		Model:       firstQuery(c, "model"),
+		Source:      firstQuery(c, "source", "channel"),
+		Start:       start,
+		End:         end,
+	}
+
+	now := time.Now()
+	cutoff := now.Truncate(time.Hour).Add(-time.Duration(hours-1) * time.Hour)
+
+	// Generate hour slots
+	hourSlots := make([]string, 0, hours)
+	hourIndex := make(map[string]int, hours)
+	for t := cutoff; !t.After(now.Truncate(time.Hour)); t = t.Add(time.Hour) {
+		key := t.Local().Format("2006-01-02T15")
+		hourIndex[key] = len(hourSlots)
+		hourSlots = append(hourSlots, key)
+	}
+	slotCount := len(hourSlots)
+
+	// Per-hour per-model counts and per-hour success tracking
+	type hourModelKey struct {
+		hour  string
+		model string
+	}
+	hmCounts := make(map[hourModelKey]int64)
+	modelTotals := make(map[string]int64)
+	hourSuccess := make([]int64, slotCount)
+	hourTotal := make([]int64, slotCount)
+
+	visitSnapshotRecords(h.usageSnapshot(), func(record monitorRecord) {
+		if record.Timestamp.Before(cutoff) {
+			return
+		}
+		if !filter.matches(record) {
+			return
+		}
+		hourKey := record.Timestamp.Local().Truncate(time.Hour).Format("2006-01-02T15")
+		idx, ok := hourIndex[hourKey]
+		if !ok {
+			return
+		}
+		hmCounts[hourModelKey{hour: hourKey, model: record.Model}]++
+		modelTotals[record.Model]++
+		hourTotal[idx]++
+		if !record.Failed {
+			hourSuccess[idx]++
+		}
+	})
+
+	// Find top N models
+	type modelCount struct {
+		model string
+		count int64
+	}
+	mc := make([]modelCount, 0, len(modelTotals))
+	for m, cnt := range modelTotals {
+		mc = append(mc, modelCount{model: m, count: cnt})
+	}
+	sort.Slice(mc, func(i, j int) bool {
+		if mc[i].count == mc[j].count {
+			return mc[i].model < mc[j].model
+		}
+		return mc[i].count > mc[j].count
+	})
+	if len(mc) > limit {
+		mc = mc[:limit]
+	}
+
+	topModels := make([]string, len(mc))
+	modelData := make(map[string][]int64, len(mc))
+	for i, m := range mc {
+		topModels[i] = m.model
+		data := make([]int64, slotCount)
+		for si, slot := range hourSlots {
+			data[si] = hmCounts[hourModelKey{hour: slot, model: m.model}]
+		}
+		modelData[m.model] = data
+	}
+
+	successRates := make([]float64, slotCount)
+	for i := range hourSlots {
+		successRates[i] = calcRate(hourSuccess[i], hourTotal[i])
+	}
+
+	c.JSON(http.StatusOK, monitorHourlyModelsResponse{
+		Hours:        hourSlots,
+		Models:       topModels,
+		ModelData:    modelData,
+		SuccessRates: successRates,
+		TimeRange:    monitorTimeRange{Start: start, End: end},
+	})
+}
+
+// GetMonitorHourlyTokens returns per-hour token breakdowns.
+func (h *Handler) GetMonitorHourlyTokens(c *gin.Context) {
+	start, end, err := parseMonitorTimeRange(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	hours, err := parseHoursParam(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	filter := monitorRecordFilter{
+		APIKey:      firstQuery(c, "api", "api_key"),
+		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
+		Model:       firstQuery(c, "model"),
+		Source:      firstQuery(c, "source", "channel"),
+		Start:       start,
+		End:         end,
+	}
+
+	now := time.Now()
+	cutoff := now.Truncate(time.Hour).Add(-time.Duration(hours-1) * time.Hour)
+
+	hourSlots := make([]string, 0, hours)
+	hourIndex := make(map[string]int, hours)
+	for t := cutoff; !t.After(now.Truncate(time.Hour)); t = t.Add(time.Hour) {
+		key := t.Local().Format("2006-01-02T15")
+		hourIndex[key] = len(hourSlots)
+		hourSlots = append(hourSlots, key)
+	}
+	slotCount := len(hourSlots)
+
+	totalTokens := make([]int64, slotCount)
+	inputTokens := make([]int64, slotCount)
+	outputTokens := make([]int64, slotCount)
+	reasoningTokens := make([]int64, slotCount)
+	cachedTokens := make([]int64, slotCount)
+
+	visitSnapshotRecords(h.usageSnapshot(), func(record monitorRecord) {
+		if record.Timestamp.Before(cutoff) {
+			return
+		}
+		if !filter.matches(record) {
+			return
+		}
+		if record.Failed {
+			return
+		}
+		hourKey := record.Timestamp.Local().Truncate(time.Hour).Format("2006-01-02T15")
+		idx, ok := hourIndex[hourKey]
+		if !ok {
+			return
+		}
+		totalTokens[idx] += record.TotalTokens
+		inputTokens[idx] += record.InputTokens
+		outputTokens[idx] += record.OutputTokens
+		reasoningTokens[idx] += record.ReasoningTokens
+		cachedTokens[idx] += record.CachedTokens
+	})
+
+	c.JSON(http.StatusOK, monitorHourlyTokensResponse{
+		Hours:           hourSlots,
+		TotalTokens:     totalTokens,
+		InputTokens:     inputTokens,
+		OutputTokens:    outputTokens,
+		ReasoningTokens: reasoningTokens,
+		CachedTokens:    cachedTokens,
+		TimeRange:       monitorTimeRange{Start: start, End: end},
+	})
+}
+
+func parseHoursParam(c *gin.Context) (int, error) {
+	return parseBoundedInt(firstQuery(c, "hours"), 24, 1, 168)
+}
+
 type monitorValidationError struct {
 	msg string
 }
