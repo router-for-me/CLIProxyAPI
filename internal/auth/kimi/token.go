@@ -29,6 +29,15 @@ type KimiTokenStorage struct {
 	Expired string `json:"expired,omitempty"`
 	// Type indicates the authentication provider type, always "kimi" for this storage.
 	Type string `json:"type"`
+
+	// Metadata holds arbitrary key-value pairs injected via hooks.
+	// It is not exported to JSON directly to allow flattening during serialization.
+	Metadata map[string]any `json:"-"`
+}
+
+// SetMetadata allows external callers to inject metadata into the storage before saving.
+func (ts *KimiTokenStorage) SetMetadata(meta map[string]any) {
+	ts.Metadata = meta
 }
 
 // KimiTokenData holds the raw OAuth token response from Kimi.
@@ -86,9 +95,26 @@ func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
 		_ = f.Close()
 	}()
 
+	// Convert struct to map for merging
+	data := make(map[string]any)
+	temp, errJson := json.Marshal(ts)
+	if errJson != nil {
+		return fmt.Errorf("failed to marshal struct: %w", errJson)
+	}
+	if errUnmarshal := json.Unmarshal(temp, &data); errUnmarshal != nil {
+		return fmt.Errorf("failed to unmarshal struct map: %w", errUnmarshal)
+	}
+
+	// Merge extra metadata
+	if ts.Metadata != nil {
+		for k, v := range ts.Metadata {
+			data[k] = v
+		}
+	}
+
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")
-	if err = encoder.Encode(ts); err != nil {
+	if err = encoder.Encode(data); err != nil {
 		return fmt.Errorf("failed to write token to file: %w", err)
 	}
 	return nil

@@ -21,6 +21,15 @@ type IFlowTokenStorage struct {
 	Scope        string `json:"scope"`
 	Cookie       string `json:"cookie"`
 	Type         string `json:"type"`
+
+	// Metadata holds arbitrary key-value pairs injected via hooks.
+	// It is not exported to JSON directly to allow flattening during serialization.
+	Metadata map[string]any `json:"-"`
+}
+
+// SetMetadata allows external callers to inject metadata into the storage before saving.
+func (ts *IFlowTokenStorage) SetMetadata(meta map[string]any) {
+	ts.Metadata = meta
 }
 
 // SaveTokenToFile serialises the token storage to disk.
@@ -37,7 +46,24 @@ func (ts *IFlowTokenStorage) SaveTokenToFile(authFilePath string) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	if err = json.NewEncoder(f).Encode(ts); err != nil {
+	// Convert struct to map for merging
+	data := make(map[string]any)
+	temp, errJson := json.Marshal(ts)
+	if errJson != nil {
+		return fmt.Errorf("failed to marshal struct: %w", errJson)
+	}
+	if errUnmarshal := json.Unmarshal(temp, &data); errUnmarshal != nil {
+		return fmt.Errorf("failed to unmarshal struct map: %w", errUnmarshal)
+	}
+
+	// Merge extra metadata
+	if ts.Metadata != nil {
+		for k, v := range ts.Metadata {
+			data[k] = v
+		}
+	}
+
+	if err = json.NewEncoder(f).Encode(data); err != nil {
 		return fmt.Errorf("iflow token: encode token failed: %w", err)
 	}
 	return nil
