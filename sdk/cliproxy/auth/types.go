@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,18 @@ import (
 
 	baseauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth"
 )
+
+// PostAuthHook defines a function that is called after an Auth record is created
+// but before it is persisted to storage. This allows for modification of the
+// Auth record (e.g., injecting metadata) based on external context.
+type PostAuthHook func(context.Context, *Auth) error
+
+// RequestInfo holds information extracted from the HTTP request.
+// It is injected into the context passed to PostAuthHook.
+type RequestInfo struct {
+	Query   map[string]string
+	Headers map[string]string
+}
 
 // Auth encapsulates the runtime state and metadata associated with a single credential.
 type Auth struct {

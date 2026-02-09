@@ -51,6 +51,7 @@ type serverOptionConfig struct {
 	keepAliveEnabled     bool
 	keepAliveTimeout     time.Duration
 	keepAliveOnTimeout   func()
+	postAuthHook         auth.PostAuthHook
 }
 
 // ServerOption customises HTTP server construction.
@@ -108,6 +109,13 @@ func WithKeepAliveEndpoint(timeout time.Duration, onTimeout func()) ServerOption
 func WithRequestLoggerFactory(factory func(*config.Config, string) logging.RequestLogger) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.requestLoggerFactory = factory
+	}
+}
+
+// WithPostAuthHook registers a hook to be called after auth record creation.
+func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.postAuthHook = hook
 	}
 }
 
@@ -262,6 +270,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	logDir := logging.ResolveLogDirectory(cfg)
 	s.mgmt.SetLogDirectory(logDir)
+	if optionState.postAuthHook != nil {
+		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
+	}
 	s.localPassword = optionState.localPassword
 
 	// Setup routes
