@@ -683,14 +683,17 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
-			go managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
-			c.AbortWithStatus(http.StatusNotFound)
+			// Synchronously ensure management.html is available with a detached context.
+			// Control panel bootstrap should not be canceled by client disconnects.
+			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
+		} else {
+			log.WithError(err).Error("failed to stat management control panel asset")
+			c.AbortWithStatus(http.StatusInternalServerError)
 			return
 		}
-
-		log.WithError(err).Error("failed to stat management control panel asset")
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
 	}
 
 	c.File(filePath)
@@ -980,10 +983,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 
-	if !cfg.RemoteManagement.DisableControlPanel {
-		staticDir := managementasset.StaticDir(s.configFilePath)
-		go managementasset.EnsureLatestManagementHTML(context.Background(), staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
-	}
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)

@@ -278,6 +278,18 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
+			ID:                  "claude-opus-4.6",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "github-copilot",
+			Type:                "github-copilot",
+			DisplayName:         "Claude Opus 4.6",
+			Description:         "Anthropic Claude Opus 4.6 via GitHub Copilot",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
 			ID:                  "claude-sonnet-4",
 			Object:              "model",
 			Created:             now,
