@@ -238,6 +238,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 				}
 			}
 
+			// Extract and attach groundingMetadata if present (compact to prevent SSE newline framing issues).
+			if gm := candidate.Get("groundingMetadata"); gm.Exists() {
+				template, _ = sjson.SetRaw(template, "choices.0.grounding_metadata", strings.ReplaceAll(strings.ReplaceAll(gm.Raw, "\n", ""), "\r", ""))
+			}
+
 			responseStrings = append(responseStrings, template)
 			return true // continue loop
 		})
@@ -395,6 +400,11 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 			if hasFunctionCall {
 				choiceTemplate, _ = sjson.Set(choiceTemplate, "finish_reason", "tool_calls")
 				choiceTemplate, _ = sjson.Set(choiceTemplate, "native_finish_reason", "tool_calls")
+			}
+
+			// Extract and attach groundingMetadata if present.
+			if gm := candidate.Get("groundingMetadata"); gm.Exists() {
+				choiceTemplate, _ = sjson.SetRaw(choiceTemplate, "grounding_metadata", gm.Raw)
 			}
 
 			// Append the constructed choice to the main choices array.

@@ -43,6 +43,7 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - Amp CLI and IDE extensions support with provider routing
 - Streaming and non-streaming responses
 - Function calling/tools support
+- Google Search grounding, code execution, and URL context tool passthrough
 - Multimodal input support (text and images)
 - Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Qwen and iFlow)
 - Simple CLI authentication flows (Gemini, OpenAI, Claude, Qwen and iFlow)
@@ -75,6 +76,89 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 - Security-first design with localhost-only management endpoints
 
 **→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
+
+## Google Search Grounding
+
+Gemini models support [Google Search grounding](https://ai.google.dev/gemini-api/docs/google-search) which lets the model search the web before responding. CLIProxyAPI passes through `google_search`, `code_execution`, and `url_context` tools across all API formats (OpenAI Chat Completions, OpenAI Responses, and Claude Messages).
+
+### Enabling Google Search
+
+Include `{"google_search": {}}` in your `tools` array. Works with all three API formats:
+
+**OpenAI Chat Completions:**
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "messages": [{"role": "user", "content": "What happened in the news today?"}],
+    "tools": [{"google_search": {}}]
+  }'
+```
+
+**Claude Messages:**
+```bash
+curl http://localhost:8080/v1/messages \
+  -H "x-api-key: YOUR_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "What happened in the news today?"}],
+    "tools": [{"google_search": {}}]
+  }'
+```
+
+### Grounding Metadata in Responses
+
+When Google Search is used, the upstream Gemini response includes `groundingMetadata` with search queries, source URLs, and text-to-source mappings. CLIProxyAPI passes this through as a `grounding_metadata` field on the response:
+
+**OpenAI Chat Completions** — on each choice object (`choices[i].grounding_metadata`):
+```json
+{
+  "choices": [{
+    "message": {"role": "assistant", "content": "..."},
+    "finish_reason": "stop",
+    "grounding_metadata": {
+      "webSearchQueries": ["query used by the model"],
+      "groundingChunks": [{"web": {"uri": "https://...", "title": "...", "domain": "..."}}],
+      "groundingSupports": [{"segment": {"text": "...", "startIndex": 0, "endIndex": 100}, "groundingChunkIndices": [0]}],
+      "searchEntryPoint": {"renderedContent": "<!-- Google Search widget HTML -->"},
+      "retrievalMetadata": {}
+    }
+  }]
+}
+```
+
+**Claude Messages** — on the top-level response object (`grounding_metadata`):
+```json
+{
+  "type": "message",
+  "content": [{"type": "text", "text": "..."}],
+  "grounding_metadata": {
+    "webSearchQueries": ["..."],
+    "groundingChunks": [{"web": {"uri": "...", "title": "..."}}],
+    "groundingSupports": [...]
+  }
+}
+```
+
+**OpenAI Responses API** — on the response object (`grounding_metadata`):
+```json
+{
+  "id": "resp_...",
+  "output": [...],
+  "grounding_metadata": {
+    "webSearchQueries": ["..."],
+    "groundingChunks": [{"web": {"uri": "...", "title": "..."}}],
+    "groundingSupports": [...]
+  }
+}
+```
+
+> **Note:** `grounding_metadata` is a passthrough of Google's raw `groundingMetadata` object. The field is additive and will be silently ignored by standard OpenAI/Claude SDKs. See the [Gemini grounding docs](https://ai.google.dev/gemini-api/docs/google-search) for the full schema.
 
 ## SDK Docs
 

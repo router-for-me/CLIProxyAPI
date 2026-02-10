@@ -43,6 +43,7 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 - 新增 iFlow 支持（OAuth 登录）
 - 支持流式与非流式响应
 - 函数调用/工具支持
+- Google 搜索 grounding、代码执行、URL 上下文工具透传
 - 多模态输入（文本、图片）
 - 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Qwen 与 iFlow）
 - 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Qwen 与 iFlow）
@@ -74,6 +75,89 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 - 以安全为先的设计，管理端点仅限 localhost
 
 **→ [Amp CLI 完整集成指南](https://help.router-for.me/cn/agent-client/amp-cli.html)**
+
+## Google 搜索 Grounding
+
+Gemini 模型支持 [Google 搜索 grounding](https://ai.google.dev/gemini-api/docs/google-search)，允许模型在回答前搜索网络。CLIProxyAPI 在所有 API 格式（OpenAI Chat Completions、OpenAI Responses 和 Claude Messages）中透传 `google_search`、`code_execution` 和 `url_context` 工具。
+
+### 启用 Google 搜索
+
+在 `tools` 数组中加入 `{"google_search": {}}`，适用于所有三种 API 格式：
+
+**OpenAI Chat Completions:**
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "messages": [{"role": "user", "content": "今天有什么新闻？"}],
+    "tools": [{"google_search": {}}]
+  }'
+```
+
+**Claude Messages:**
+```bash
+curl http://localhost:8080/v1/messages \
+  -H "x-api-key: YOUR_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "今天有什么新闻？"}],
+    "tools": [{"google_search": {}}]
+  }'
+```
+
+### 响应中的 Grounding 元数据
+
+当使用 Google 搜索时，上游 Gemini 响应包含 `groundingMetadata`（搜索查询、来源 URL、文本与来源的映射关系）。CLIProxyAPI 将其作为 `grounding_metadata` 字段透传到响应中：
+
+**OpenAI Chat Completions** — 位于每个 choice 对象上 (`choices[i].grounding_metadata`)：
+```json
+{
+  "choices": [{
+    "message": {"role": "assistant", "content": "..."},
+    "finish_reason": "stop",
+    "grounding_metadata": {
+      "webSearchQueries": ["模型使用的搜索查询"],
+      "groundingChunks": [{"web": {"uri": "https://...", "title": "...", "domain": "..."}}],
+      "groundingSupports": [{"segment": {"text": "...", "startIndex": 0, "endIndex": 100}, "groundingChunkIndices": [0]}],
+      "searchEntryPoint": {"renderedContent": "<!-- Google 搜索小部件 HTML -->"},
+      "retrievalMetadata": {}
+    }
+  }]
+}
+```
+
+**Claude Messages** — 位于顶层响应对象上 (`grounding_metadata`)：
+```json
+{
+  "type": "message",
+  "content": [{"type": "text", "text": "..."}],
+  "grounding_metadata": {
+    "webSearchQueries": ["..."],
+    "groundingChunks": [{"web": {"uri": "...", "title": "..."}}],
+    "groundingSupports": [...]
+  }
+}
+```
+
+**OpenAI Responses API** — 位于响应对象上 (`grounding_metadata`)：
+```json
+{
+  "id": "resp_...",
+  "output": [...],
+  "grounding_metadata": {
+    "webSearchQueries": ["..."],
+    "groundingChunks": [{"web": {"uri": "...", "title": "..."}}],
+    "groundingSupports": [...]
+  }
+}
+```
+
+> **注意：** `grounding_metadata` 是 Google 原始 `groundingMetadata` 对象的直接透传。该字段是附加性的，标准 OpenAI/Claude SDK 会静默忽略它。完整 schema 请参阅 [Gemini grounding 文档](https://ai.google.dev/gemini-api/docs/google-search)。
 
 ## SDK 文档
 

@@ -145,8 +145,28 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 
 	// tools
 	if toolsResult := gjson.GetBytes(rawJSON, "tools"); toolsResult.IsArray() {
-		hasTools := false
+		hasFunction := false
+		functionToolNode := `{}`
+		var extraToolNodes []string
 		toolsResult.ForEach(func(_, toolResult gjson.Result) bool {
+			// Handle google_search passthrough
+			if gs := toolResult.Get("google_search"); gs.Exists() {
+				node, _ := sjson.SetRaw(`{}`, "googleSearch", gs.Raw)
+				extraToolNodes = append(extraToolNodes, node)
+				return true
+			}
+			// Handle code_execution passthrough
+			if ce := toolResult.Get("code_execution"); ce.Exists() {
+				node, _ := sjson.SetRaw(`{}`, "codeExecution", ce.Raw)
+				extraToolNodes = append(extraToolNodes, node)
+				return true
+			}
+			// Handle url_context passthrough
+			if uc := toolResult.Get("url_context"); uc.Exists() {
+				node, _ := sjson.SetRaw(`{}`, "urlContext", uc.Raw)
+				extraToolNodes = append(extraToolNodes, node)
+				return true
+			}
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				inputSchema := inputSchemaResult.Raw
@@ -157,16 +177,25 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 				tool, _ = sjson.Delete(tool, "type")
 				tool, _ = sjson.Delete(tool, "cache_control")
 				if gjson.Valid(tool) && gjson.Parse(tool).IsObject() {
-					if !hasTools {
-						out, _ = sjson.SetRaw(out, "request.tools", `[{"functionDeclarations":[]}]`)
-						hasTools = true
+					if !hasFunction {
+						functionToolNode, _ = sjson.SetRaw(functionToolNode, "functionDeclarations", `[]`)
+						hasFunction = true
 					}
-					out, _ = sjson.SetRaw(out, "request.tools.0.functionDeclarations.-1", tool)
+					functionToolNode, _ = sjson.SetRaw(functionToolNode, "functionDeclarations.-1", tool)
 				}
 			}
 			return true
 		})
-		if !hasTools {
+		if hasFunction || len(extraToolNodes) > 0 {
+			toolsNode := `[]`
+			if hasFunction {
+				toolsNode, _ = sjson.SetRaw(toolsNode, "-1", functionToolNode)
+			}
+			for _, node := range extraToolNodes {
+				toolsNode, _ = sjson.SetRaw(toolsNode, "-1", node)
+			}
+			out, _ = sjson.SetRaw(out, "request.tools", toolsNode)
+		} else {
 			out, _ = sjson.Delete(out, "request.tools")
 		}
 	}

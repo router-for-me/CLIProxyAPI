@@ -554,6 +554,11 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			}
 		}
 
+		// Extract and attach groundingMetadata if present (compact to prevent SSE newline framing issues).
+		if gm := root.Get("candidates.0.groundingMetadata"); gm.Exists() {
+			completed, _ = sjson.SetRaw(completed, "response.grounding_metadata", strings.ReplaceAll(strings.ReplaceAll(gm.Raw, "\n", ""), "\r", ""))
+		}
+
 		out = append(out, emitEvent("response.completed", completed))
 	}
 
@@ -752,6 +757,11 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		if v := um.Get("totalTokenCount"); v.Exists() {
 			resp, _ = sjson.Set(resp, "usage.total_tokens", v.Int())
 		}
+	}
+
+	// Extract and attach groundingMetadata if present.
+	if gm := root.Get("candidates.0.groundingMetadata"); gm.Exists() {
+		resp, _ = sjson.SetRaw(resp, "grounding_metadata", gm.Raw)
 	}
 
 	return resp

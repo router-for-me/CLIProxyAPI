@@ -317,9 +317,29 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Convert tools to Gemini functionDeclarations format
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		geminiTools := `[{"functionDeclarations":[]}]`
+		hasFunction := false
+		functionToolNode := `{}`
+		var extraToolNodes []string
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
+			// Handle google_search passthrough
+			if gs := tool.Get("google_search"); gs.Exists() {
+				node, _ := sjson.SetRaw(`{}`, "googleSearch", gs.Raw)
+				extraToolNodes = append(extraToolNodes, node)
+				return true
+			}
+			// Handle code_execution passthrough
+			if ce := tool.Get("code_execution"); ce.Exists() {
+				node, _ := sjson.SetRaw(`{}`, "codeExecution", ce.Raw)
+				extraToolNodes = append(extraToolNodes, node)
+				return true
+			}
+			// Handle url_context passthrough
+			if uc := tool.Get("url_context"); uc.Exists() {
+				node, _ := sjson.SetRaw(`{}`, "urlContext", uc.Raw)
+				extraToolNodes = append(extraToolNodes, node)
+				return true
+			}
 			if tool.Get("type").String() == "function" {
 				funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
 
@@ -348,14 +368,24 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
 				}
 
-				geminiTools, _ = sjson.SetRaw(geminiTools, "0.functionDeclarations.-1", funcDecl)
+				if !hasFunction {
+					functionToolNode, _ = sjson.SetRaw(functionToolNode, "functionDeclarations", `[]`)
+					hasFunction = true
+				}
+				functionToolNode, _ = sjson.SetRaw(functionToolNode, "functionDeclarations.-1", funcDecl)
 			}
 			return true
 		})
 
-		// Only add tools if there are function declarations
-		if funcDecls := gjson.Get(geminiTools, "0.functionDeclarations"); funcDecls.Exists() && len(funcDecls.Array()) > 0 {
-			out, _ = sjson.SetRaw(out, "tools", geminiTools)
+		if hasFunction || len(extraToolNodes) > 0 {
+			toolsNode := `[]`
+			if hasFunction {
+				toolsNode, _ = sjson.SetRaw(toolsNode, "-1", functionToolNode)
+			}
+			for _, node := range extraToolNodes {
+				toolsNode, _ = sjson.SetRaw(toolsNode, "-1", node)
+			}
+			out, _ = sjson.SetRaw(out, "tools", toolsNode)
 		}
 	}
 

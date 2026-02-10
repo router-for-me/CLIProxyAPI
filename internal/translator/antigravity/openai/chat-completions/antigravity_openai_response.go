@@ -216,6 +216,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		template, _ = sjson.Set(template, "choices.0.native_finish_reason", strings.ToLower(upstreamFinishReason))
 	}
 
+	// Extract and attach groundingMetadata if present (compact to prevent SSE newline framing issues).
+	if gm := gjson.GetBytes(rawJSON, "response.candidates.0.groundingMetadata"); gm.Exists() {
+		template, _ = sjson.SetRaw(template, "choices.0.grounding_metadata", strings.ReplaceAll(strings.ReplaceAll(gm.Raw, "\n", ""), "\r", ""))
+	}
+
 	return []string{template}
 }
 

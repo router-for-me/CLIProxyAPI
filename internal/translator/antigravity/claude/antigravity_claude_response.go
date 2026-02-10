@@ -39,6 +39,7 @@ type Params struct {
 	HasSentFinalEvents   bool   // Indicates if final content/message events have been sent
 	HasToolUse           bool   // Indicates if tool use was observed in the stream
 	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
+	GroundingMetadataRaw string // Cached compact groundingMetadata JSON for the message_delta event
 
 	// Signature caching support
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
@@ -291,6 +292,11 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		}
 	}
 
+	// Cache groundingMetadata for inclusion in the message_delta event.
+	if gm := gjson.GetBytes(rawJSON, "response.candidates.0.groundingMetadata"); gm.Exists() {
+		params.GroundingMetadataRaw = strings.ReplaceAll(strings.ReplaceAll(gm.Raw, "\n", ""), "\r", "")
+	}
+
 	if params.HasUsageMetadata && params.HasFinishReason {
 		appendFinalEvents(params, &output, false)
 	}
@@ -338,6 +344,9 @@ func appendFinalEvents(params *Params, output *string, force bool) {
 		if err != nil {
 			log.Warnf("antigravity claude response: failed to set cache_read_input_tokens: %v", err)
 		}
+	}
+	if params.GroundingMetadataRaw != "" {
+		delta, _ = sjson.SetRaw(delta, "grounding_metadata", params.GroundingMetadataRaw)
 	}
 	*output = *output + delta + "\n\n\n"
 
@@ -513,6 +522,11 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		if usageMeta := root.Get("response.usageMetadata"); !usageMeta.Exists() {
 			responseJSON, _ = sjson.Delete(responseJSON, "usage")
 		}
+	}
+
+	// Extract and attach groundingMetadata if present.
+	if gm := root.Get("response.candidates.0.groundingMetadata"); gm.Exists() {
+		responseJSON, _ = sjson.SetRaw(responseJSON, "grounding_metadata", gm.Raw)
 	}
 
 	return responseJSON

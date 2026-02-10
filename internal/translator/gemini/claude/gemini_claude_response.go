@@ -259,6 +259,11 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				template, _ = sjson.Set(template, "usage.output_tokens", candidatesTokenCountResult.Int()+thoughtsTokenCount)
 				template, _ = sjson.Set(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
 
+				// Attach groundingMetadata if present (compact to prevent SSE newline framing issues).
+				if gm := gjson.GetBytes(rawJSON, "candidates.0.groundingMetadata"); gm.Exists() {
+					template, _ = sjson.SetRaw(template, "grounding_metadata", strings.ReplaceAll(strings.ReplaceAll(gm.Raw, "\n", ""), "\r", ""))
+				}
+
 				output = output + template + "\n\n\n"
 			}
 		}
@@ -371,6 +376,11 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		}
 	}
 	out, _ = sjson.Set(out, "stop_reason", stopReason)
+
+	// Extract and attach groundingMetadata if present.
+	if gm := root.Get("candidates.0.groundingMetadata"); gm.Exists() {
+		out, _ = sjson.SetRaw(out, "grounding_metadata", gm.Raw)
+	}
 
 	if inputTokens == int64(0) && outputTokens == int64(0) && !root.Get("usageMetadata").Exists() {
 		out, _ = sjson.Delete(out, "usage")
