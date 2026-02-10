@@ -17,6 +17,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// remoteWebSearchDescription is a minimal fallback for when dynamic fetch from MCP tools/list hasn't completed yet.
+const remoteWebSearchDescription = "WebSearch looks up information outside the model's training data. Supports multiple queries to gather comprehensive information."
 
 // Kiro API request structs - field order determines JSON key order
 
@@ -33,7 +35,6 @@ type KiroInferenceConfig struct {
 	Temperature float64 `json:"temperature,omitempty"`
 	TopP        float64 `json:"topP,omitempty"`
 }
-
 
 // KiroConversationState holds the conversation context
 type KiroConversationState struct {
@@ -380,7 +381,6 @@ func hasThinkingTagInBody(body []byte) bool {
 	return strings.Contains(bodyStr, "<thinking_mode>") || strings.Contains(bodyStr, "<max_thinking_length>")
 }
 
-
 // IsThinkingEnabledFromHeader checks if thinking mode is enabled via Anthropic-Beta header.
 // Claude CLI uses "Anthropic-Beta: interleaved-thinking-2025-05-14" to enable thinking.
 func IsThinkingEnabledFromHeader(headers http.Header) bool {
@@ -539,6 +539,18 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		if strings.TrimSpace(description) == "" {
 			description = fmt.Sprintf("Tool: %s", name)
 			log.Debugf("kiro: tool '%s' has empty description, using default: %s", name, description)
+		}
+
+		// Rename web_search → remote_web_search for Kiro API compatibility
+		if name == "web_search" {
+			name = "remote_web_search"
+			// Prefer dynamically fetched description, fall back to hardcoded constant
+			if cached := GetWebSearchDescription(); cached != "" {
+				description = cached
+			} else {
+				description = remoteWebSearchDescription
+			}
+			log.Debugf("kiro: renamed tool web_search → remote_web_search")
 		}
 
 		// Truncate long descriptions (individual tool limit)
@@ -846,6 +858,11 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 						inputMap[key.String()] = value.Value()
 						return true
 					})
+				}
+
+				// Rename web_search → remote_web_search to match convertClaudeToolsToKiro
+				if toolName == "web_search" {
+					toolName = "remote_web_search"
 				}
 
 				toolUses = append(toolUses, KiroToolUse{
