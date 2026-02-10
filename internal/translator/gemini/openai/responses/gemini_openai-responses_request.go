@@ -117,20 +117,28 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			switch itemType {
 			case "message":
 				if strings.EqualFold(itemRole, "system") {
-					if contentArray := item.Get("content"); contentArray.Exists() && contentArray.IsArray() {
-						var builder strings.Builder
-						contentArray.ForEach(func(_, contentItem gjson.Result) bool {
-							text := contentItem.Get("text").String()
-							if builder.Len() > 0 && text != "" {
-								builder.WriteByte('\n')
+					if content := item.Get("content"); content.Exists() {
+						if content.IsArray() {
+							var builder strings.Builder
+							content.ForEach(func(_, contentItem gjson.Result) bool {
+								text := contentItem.Get("text").String()
+								if builder.Len() > 0 && text != "" {
+									builder.WriteByte('\n')
+								}
+								builder.WriteString(text)
+								return true
+							})
+							if !gjson.Get(out, "system_instruction").Exists() {
+								systemInstr := `{"parts":[{"text":""}]}`
+								systemInstr, _ = sjson.Set(systemInstr, "parts.0.text", builder.String())
+								out, _ = sjson.SetRaw(out, "system_instruction", systemInstr)
 							}
-							builder.WriteString(text)
-							return true
-						})
-						if !gjson.Get(out, "system_instruction").Exists() {
-							systemInstr := `{"parts":[{"text":""}]}`
-							systemInstr, _ = sjson.Set(systemInstr, "parts.0.text", builder.String())
-							out, _ = sjson.SetRaw(out, "system_instruction", systemInstr)
+						} else if content.Type == gjson.String {
+							if !gjson.Get(out, "system_instruction").Exists() {
+								systemInstr := `{"parts":[{"text":""}]}`
+								systemInstr, _ = sjson.Set(systemInstr, "parts.0.text", content.String())
+								out, _ = sjson.SetRaw(out, "system_instruction", systemInstr)
+							}
 						}
 					}
 					continue
@@ -140,30 +148,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				// Note: In Responses format, model outputs may appear as content items with type "output_text"
 				// even when the message.role is "user". We split such items into distinct Gemini messages
 				// with roles derived from the content type to match docs/convert-2.md.
-				if contentArray := item.Get("content"); contentArray.Exists() && contentArray.IsArray() {
-					currentRole := ""
-					var currentParts []string
-
-					flush := func() {
-						if currentRole == "" || len(currentParts) == 0 {
-							currentParts = nil
-							return
-						}
-						one := `{"role":"","parts":[]}`
-						one, _ = sjson.Set(one, "role", currentRole)
-						for _, part := range currentParts {
-							one, _ = sjson.SetRaw(one, "parts.-1", part)
-						}
-						out, _ = sjson.SetRaw(out, "contents.-1", one)
-						currentParts = nil
-					}
-
-					contentArray.ForEach(func(_, contentItem gjson.Result) bool {
-						contentType := contentItem.Get("type").String()
-						if contentType == "" {
-							contentType = "input_text"
-						}
-
+				if content := item.Get("content"); content.Exists() {
+					if !content.IsArray() {
 						effRole := "user"
 						if itemRole != "" {
 							switch strings.ToLower(itemRole) {
@@ -173,69 +159,111 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 								effRole = strings.ToLower(itemRole)
 							}
 						}
-						if contentType == "output_text" {
-							effRole = "model"
-						}
 						if effRole == "assistant" {
 							effRole = "model"
 						}
 
-						if currentRole != "" && effRole != currentRole {
-							flush()
-							currentRole = ""
-						}
-						if currentRole == "" {
-							currentRole = effRole
+						one := `{"role":"","parts":[{"text":""}]}`
+						one, _ = sjson.Set(one, "role", effRole)
+						one, _ = sjson.Set(one, "parts.0.text", content.String())
+						out, _ = sjson.SetRaw(out, "contents.-1", one)
+					} else {
+						currentRole := ""
+						var currentParts []string
+
+						flush := func() {
+							if currentRole == "" || len(currentParts) == 0 {
+								currentParts = nil
+								return
+							}
+							one := `{"role":"","parts":[]}`
+							one, _ = sjson.Set(one, "role", currentRole)
+							for _, part := range currentParts {
+								one, _ = sjson.SetRaw(one, "parts.-1", part)
+							}
+							out, _ = sjson.SetRaw(out, "contents.-1", one)
+							currentParts = nil
 						}
 
-						var partJSON string
-						switch contentType {
-						case "input_text", "output_text":
-							if text := contentItem.Get("text"); text.Exists() {
-								partJSON = `{"text":""}`
-								partJSON, _ = sjson.Set(partJSON, "text", text.String())
+						content.ForEach(func(_, contentItem gjson.Result) bool {
+							contentType := contentItem.Get("type").String()
+							if contentType == "" {
+								contentType = "input_text"
 							}
-						case "input_image":
-							imageURL := contentItem.Get("image_url").String()
-							if imageURL == "" {
-								imageURL = contentItem.Get("url").String()
+
+							effRole := "user"
+							if itemRole != "" {
+								switch strings.ToLower(itemRole) {
+								case "assistant", "model":
+									effRole = "model"
+								default:
+									effRole = strings.ToLower(itemRole)
+								}
 							}
-							if imageURL != "" {
-								mimeType := "application/octet-stream"
-								data := ""
-								if strings.HasPrefix(imageURL, "data:") {
-									trimmed := strings.TrimPrefix(imageURL, "data:")
-									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-									if len(mediaAndData) == 2 {
-										if mediaAndData[0] != "" {
-											mimeType = mediaAndData[0]
-										}
-										data = mediaAndData[1]
-									} else {
-										mediaAndData = strings.SplitN(trimmed, ",", 2)
+							if contentType == "output_text" {
+								effRole = "model"
+							}
+							if effRole == "assistant" {
+								effRole = "model"
+							}
+
+							if currentRole != "" && effRole != currentRole {
+								flush()
+								currentRole = ""
+							}
+							if currentRole == "" {
+								currentRole = effRole
+							}
+
+							var partJSON string
+							switch contentType {
+							case "input_text", "output_text":
+								if text := contentItem.Get("text"); text.Exists() {
+									partJSON = `{"text":""}`
+									partJSON, _ = sjson.Set(partJSON, "text", text.String())
+								}
+							case "input_image":
+								imageURL := contentItem.Get("image_url").String()
+								if imageURL == "" {
+									imageURL = contentItem.Get("url").String()
+								}
+								if imageURL != "" {
+									mimeType := "application/octet-stream"
+									data := ""
+									if strings.HasPrefix(imageURL, "data:") {
+										trimmed := strings.TrimPrefix(imageURL, "data:")
+										mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
 										if len(mediaAndData) == 2 {
 											if mediaAndData[0] != "" {
 												mimeType = mediaAndData[0]
 											}
 											data = mediaAndData[1]
+										} else {
+											mediaAndData = strings.SplitN(trimmed, ",", 2)
+											if len(mediaAndData) == 2 {
+												if mediaAndData[0] != "" {
+													mimeType = mediaAndData[0]
+												}
+												data = mediaAndData[1]
+											}
 										}
 									}
-								}
-								if data != "" {
-									partJSON = `{"inline_data":{"mime_type":"","data":""}}`
-									partJSON, _ = sjson.Set(partJSON, "inline_data.mime_type", mimeType)
-									partJSON, _ = sjson.Set(partJSON, "inline_data.data", data)
+									if data != "" {
+										partJSON = `{"inline_data":{"mime_type":"","data":""}}`
+										partJSON, _ = sjson.Set(partJSON, "inline_data.mime_type", mimeType)
+										partJSON, _ = sjson.Set(partJSON, "inline_data.data", data)
+									}
 								}
 							}
-						}
 
-						if partJSON != "" {
-							currentParts = append(currentParts, partJSON)
-						}
-						return true
-					})
+							if partJSON != "" {
+								currentParts = append(currentParts, partJSON)
+							}
+							return true
+						})
 
-					flush()
+						flush()
+					}
 				}
 
 			case "function_call":
