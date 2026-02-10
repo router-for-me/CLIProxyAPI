@@ -189,7 +189,7 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 
 	// Error handler for proxy failures
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		// Client-side cancellations are common during polling; return 499 without logging
+		// Client-side cancellations are common during polling; suppress logging in this case
 		if err == context.Canceled {
 			return
 		}
