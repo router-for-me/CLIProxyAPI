@@ -63,14 +63,17 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	if thinkingConfig := root.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 		if thinkingType := thinkingConfig.Get("type"); thinkingType.Exists() {
 			switch thinkingType.String() {
-			case "enabled":
+			case "enabled", "adaptive":
 				if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
 					budget := int(budgetTokens.Int())
 					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
 						out, _ = sjson.Set(out, "reasoning_effort", effort)
 					}
+				} else if thinkingType.String() == "adaptive" {
+					// "adaptive" without budget_tokens: default to high
+					out, _ = sjson.Set(out, "reasoning_effort", "high")
 				} else {
-					// No budget_tokens specified, default to "auto" for enabled thinking
+					// "enabled" without budget_tokens: preserve backward-compatible auto behavior
 					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
 						out, _ = sjson.Set(out, "reasoning_effort", effort)
 					}
@@ -80,6 +83,16 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					out, _ = sjson.Set(out, "reasoning_effort", effort)
 				}
 			}
+		}
+	}
+	// output_config.effort takes priority (Claude Opus 4.6+ adaptive thinking)
+	if effort := root.Get("output_config.effort"); effort.Exists() && effort.String() != "" {
+		if mapped := thinking.MapClaudeEffortToLevel(effort.String()); mapped != "" {
+			// Cap xhigh to high — OpenAI only supports low/medium/high
+			if mapped == string(thinking.LevelXHigh) {
+				mapped = string(thinking.LevelHigh)
+			}
+			out, _ = sjson.Set(out, "reasoning_effort", mapped)
 		}
 	}
 

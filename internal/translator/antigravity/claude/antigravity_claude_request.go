@@ -344,7 +344,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// Inject interleaved thinking hint when both tools and thinking are active
 	hasTools := toolDeclCount > 0
 	thinkingResult := gjson.GetBytes(rawJSON, "thinking")
-	hasThinking := thinkingResult.Exists() && thinkingResult.IsObject() && thinkingResult.Get("type").String() == "enabled"
+	thinkingType := ""
+	if thinkingResult.Exists() && thinkingResult.IsObject() {
+		thinkingType = thinkingResult.Get("type").String()
+	}
+	hasThinking := thinkingType == "enabled" || thinkingType == "adaptive"
 	isClaudeThinking := util.IsClaudeThinkingModel(modelName)
 
 	if hasTools && hasThinking && isClaudeThinking {
@@ -375,13 +379,28 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetRaw(out, "request.tools", toolsJSON)
 	}
 
-	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
+	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled or adaptive
 	if t := gjson.GetBytes(rawJSON, "thinking"); enableThoughtTranslate && t.Exists() && t.IsObject() {
-		if t.Get("type").String() == "enabled" {
+		tType := t.Get("type").String()
+		if tType == "enabled" || tType == "adaptive" {
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+			} else {
+				// No budget_tokens: signal auto so ApplyThinking resolves from model config
+				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+				// adaptive without budget_tokens defaults to level "high"
+				if tType == "adaptive" {
+					out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
+				}
+			}
+			// output_config.effort overrides the default level — ApplyThinking converts to budget via model config
+			if effort := gjson.GetBytes(rawJSON, "output_config.effort"); effort.Exists() && effort.String() != "" {
+				if level := thinking.MapClaudeEffortToLevel(effort.String()); level != "" {
+					out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", level)
+				}
 			}
 		}
 	}

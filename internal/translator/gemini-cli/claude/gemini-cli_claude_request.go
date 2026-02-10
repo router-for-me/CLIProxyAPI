@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -171,13 +172,28 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 		}
 	}
 
-	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
+	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled or adaptive
 	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() {
-		if t.Get("type").String() == "enabled" {
+		tType := t.Get("type").String()
+		if tType == "enabled" || tType == "adaptive" {
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+			} else {
+				// No budget_tokens: signal auto so ApplyThinking resolves from model config
+				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
+				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+				// adaptive without budget_tokens defaults to level "high"
+				if tType == "adaptive" {
+					out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
+				}
+			}
+			// output_config.effort overrides the default level — ApplyThinking converts to budget via model config
+			if effort := gjson.GetBytes(rawJSON, "output_config.effort"); effort.Exists() && effort.String() != "" {
+				if level := thinking.MapClaudeEffortToLevel(effort.String()); level != "" {
+					out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", level)
+				}
 			}
 		}
 	}

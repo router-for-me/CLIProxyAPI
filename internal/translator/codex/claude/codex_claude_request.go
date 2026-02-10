@@ -215,17 +215,31 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	reasoningEffort := "medium"
 	if thinkingConfig := rootResult.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 		switch thinkingConfig.Get("type").String() {
-		case "enabled":
+		case "enabled", "adaptive":
 			if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
 				budget := int(budgetTokens.Int())
 				if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
 					reasoningEffort = effort
 				}
+			} else if thinkingConfig.Get("type").String() == "adaptive" {
+				// "adaptive" without budget_tokens: default to "high"
+				reasoningEffort = "high"
 			}
+			// "enabled" without budget_tokens: keep default "medium"
 		case "disabled":
 			if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
 				reasoningEffort = effort
 			}
+		}
+	}
+	// output_config.effort takes priority (Claude Opus 4.6+ adaptive thinking)
+	if effort := rootResult.Get("output_config.effort"); effort.Exists() && effort.String() != "" {
+		if mapped := thinking.MapClaudeEffortToLevel(effort.String()); mapped != "" {
+			// Cap xhigh to high — Codex only supports low/medium/high
+			if mapped == string(thinking.LevelXHigh) {
+				mapped = string(thinking.LevelHigh)
+			}
+			reasoningEffort = mapped
 		}
 	}
 	template, _ = sjson.Set(template, "reasoning.effort", reasoningEffort)

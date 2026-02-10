@@ -342,12 +342,13 @@ func hasThinkingConfig(config ThinkingConfig) bool {
 // extractClaudeConfig extracts thinking configuration from Claude format request body.
 //
 // Claude API format:
-//   - thinking.type: "enabled" or "disabled"
+//   - thinking.type: "enabled", "disabled", or "adaptive"
 //   - thinking.budget_tokens: integer (-1=auto, 0=disabled, >0=budget)
 //
 // Priority: thinking.type="disabled" takes precedence over budget_tokens.
 // When type="enabled" without budget_tokens, returns ModeAuto to indicate
 // the user wants thinking enabled but didn't specify a budget.
+// When type="adaptive" without budget_tokens or effort, defaults to LevelHigh.
 func extractClaudeConfig(body []byte) ThinkingConfig {
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
 	if thinkingType == "disabled" {
@@ -367,12 +368,42 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 		}
 	}
 
-	// If type="enabled" but no budget_tokens, treat as auto (user wants thinking but no budget specified)
-	if thinkingType == "enabled" {
+	// If type="enabled" or "adaptive" but no budget_tokens, check output_config.effort
+	// "adaptive" is a newer Anthropic API thinking type where the model decides the thinking budget
+	if thinkingType == "enabled" || thinkingType == "adaptive" {
+		// Check output_config.effort (Claude Opus 4.6+ adaptive thinking parameter)
+		if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() && effort.String() != "" {
+			level := MapClaudeEffortToLevel(effort.String())
+			if level != "" {
+				return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(level)}
+			}
+		}
+		if thinkingType == "adaptive" {
+			// "adaptive" without explicit effort defaults to high
+			return ThinkingConfig{Mode: ModeLevel, Level: LevelHigh}
+		}
+		// "enabled" without budget_tokens: preserve backward-compatible auto behavior
 		return ThinkingConfig{Mode: ModeAuto, Budget: -1}
 	}
 
 	return ThinkingConfig{}
+}
+
+// MapClaudeEffortToLevel maps Claude API output_config.effort values to internal ThinkingLevel strings.
+// Claude effort levels: "max", "high", "medium", "low"
+func MapClaudeEffortToLevel(effort string) string {
+	switch strings.ToLower(effort) {
+	case "max":
+		return string(LevelXHigh)
+	case "high":
+		return string(LevelHigh)
+	case "medium":
+		return string(LevelMedium)
+	case "low":
+		return string(LevelLow)
+	default:
+		return ""
+	}
 }
 
 // extractGeminiConfig extracts thinking configuration from Gemini format request body.
