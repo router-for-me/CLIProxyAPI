@@ -25,6 +25,21 @@ type RequestInfo struct {
 	Headers map[string]string
 }
 
+type requestInfoKey struct{}
+
+// WithRequestInfo returns a new context with the given RequestInfo attached.
+func WithRequestInfo(ctx context.Context, info *RequestInfo) context.Context {
+	return context.WithValue(ctx, requestInfoKey{}, info)
+}
+
+// GetRequestInfo retrieves the RequestInfo from the context, if present.
+func GetRequestInfo(ctx context.Context) *RequestInfo {
+	if val, ok := ctx.Value(requestInfoKey{}).(*RequestInfo); ok {
+		return val
+	}
+	return nil
+}
+
 // Auth encapsulates the runtime state and metadata associated with a single credential.
 type Auth struct {
 	// ID uniquely identifies the auth record across restarts.

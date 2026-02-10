@@ -2286,19 +2286,19 @@ func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
 		Headers: make(map[string]string),
 	}
 
-	// Capture all query parameters
+	// Capture all query parameters, joining multiple values with a comma.
 	for k, v := range c.Request.URL.Query() {
 		if len(v) > 0 {
-			info.Query[k] = v[0]
+			info.Query[k] = strings.Join(v, ",")
 		}
 	}
 
-	// Capture all headers
+	// Capture all headers, joining multiple values with a comma.
 	for k, v := range c.Request.Header {
 		if len(v) > 0 {
-			info.Headers[k] = v[0]
+			info.Headers[k] = strings.Join(v, ",")
 		}
 	}
 
-	return context.WithValue(ctx, "request_info", info)
+	return coreauth.WithRequestInfo(ctx, info)
 }
