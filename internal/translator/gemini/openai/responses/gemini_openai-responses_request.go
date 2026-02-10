@@ -330,22 +330,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					funcDecl, _ = sjson.Set(funcDecl, "description", desc.String())
 				}
 				if params := tool.Get("parameters"); params.Exists() {
-					// Convert parameter types from OpenAI format to Gemini format
-					cleaned := params.Raw
-					// Convert type values to uppercase for Gemini
-					paramsResult := gjson.Parse(cleaned)
-					if properties := paramsResult.Get("properties"); properties.Exists() {
-						properties.ForEach(func(key, value gjson.Result) bool {
-							if propType := value.Get("type"); propType.Exists() {
-								upperType := strings.ToUpper(propType.String())
-								cleaned, _ = sjson.Set(cleaned, "properties."+key.String()+".type", upperType)
-							}
-							return true
-						})
-					}
-					// Set the overall type to OBJECT
-					cleaned, _ = sjson.Set(cleaned, "type", "OBJECT")
-					funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
+					funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", params.Raw)
 				}
 
 				geminiTools, _ = sjson.SetRaw(geminiTools, "0.functionDeclarations.-1", funcDecl)
