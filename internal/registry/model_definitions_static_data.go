@@ -36,7 +36,7 @@ func GetClaudeModels() []*ModelInfo {
 			Type:                "claude",
 			DisplayName:         "Claude 4.6 Opus",
 			Description:         "Premium model combining maximum intelligence with practical performance",
-			ContextLength:       1000000,
+			ContextLength:       200000,
 			MaxCompletionTokens: 128000,
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
 		},
