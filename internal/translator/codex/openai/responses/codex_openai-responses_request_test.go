@@ -276,7 +276,7 @@ func TestUserFieldDeletion(t *testing.T) {
 	  
 	// Verify user field is deleted  
 	userField := gjson.Get(outputStr, "user")  
-	if userField.Exists() {  
-		t.Error("user field should be deleted")  
-	}  
+	if userField.Exists() {
+		t.Errorf("user field should be deleted, but it was found with value: %s", userField.Raw)
+	}
 }
