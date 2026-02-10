@@ -1540,7 +1540,7 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	return []string{
 		antigravityBaseURLDaily,
 		antigravitySandboxBaseURLDaily,
-		antigravityBaseURLProd,
+		// antigravityBaseURLProd,
 	}
 }
 
@@ -1661,5 +1661,3 @@ func generateStableSessionID(payload []byte) string {
 	}
 	return generateSessionID()
 }
-
-
