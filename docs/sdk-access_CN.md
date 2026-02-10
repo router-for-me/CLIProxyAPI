@@ -7,80 +7,71 @@
 ```go
 import (
     sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
-    "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 ```
 
 通过 `go get github.com/router-for-me/CLIProxyAPI/v6/sdk/access` 添加依赖。
 
+## Provider Registry
+
+访问提供者是全局注册，然后以快照形式挂到 `Manager` 上：
+
+- `RegisterProvider(type, provider)` 注册一个已经初始化好的 provider 实例。
+- 每个 `type` 第一次出现时会记录其注册顺序。
+- `RegisteredProviders()` 会按该顺序返回 provider 列表。
+
 ## 管理器生命周期
 
 ```go
 manager := sdkaccess.NewManager()
-providers, err := sdkaccess.BuildProviders(cfg)
-if err != nil {
-    return err
-}
-manager.SetProviders(providers)
+manager.SetProviders(sdkaccess.RegisteredProviders())
 ```
 
 - `NewManager` 创建空管理器。
 - `SetProviders` 替换提供者切片并做防御性拷贝。
 - `Providers` 返回适合并发读取的快照。
-- `BuildProviders` 将 `config.Config` 中的访问配置转换成可运行的提供者。当配置没有显式声明但包含顶层 `api-keys` 时，会自动挂载内建的 `config-api-key` 提供者。
+
+如果管理器本身为 `nil` 或未配置任何 provider，调用会返回 `nil, nil`，可视为关闭访问控制。
 
 ## 认证请求
 
 ```go
-result, err := manager.Authenticate(ctx, req)
+result, authErr := manager.Authenticate(ctx, req)
 switch {
-case err == nil:
+case authErr == nil:
     // Authentication succeeded; result carries provider and principal.
-case errors.Is(err, sdkaccess.ErrNoCredentials):
+case sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeNoCredentials):
     // No recognizable credentials were supplied.
-case errors.Is(err, sdkaccess.ErrInvalidCredential):
+case sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeInvalidCredential):
     // Credentials were present but rejected.
 default:
     // Provider surfaced a transport-level failure.
 }
 ```
 
-`Manager.Authenticate` 按配置顺序遍历提供者。遇到成功立即返回，`ErrNotHandled` 会继续尝试下一个；若发现 `ErrNoCredentials` 或 `ErrInvalidCredential`，会在遍历结束后汇总给调用方。
-
-若管理器本身为 `nil` 或尚未注册提供者，调用会返回 `nil, nil`，让调用方无需针对错误做额外分支即可关闭访问控制。
+`Manager.Authenticate` 会按顺序遍历 provider：遇到成功立即返回，`AuthErrorCodeNotHandled` 会继续尝试下一个；`AuthErrorCodeNoCredentials` / `AuthErrorCodeInvalidCredential` 会在遍历结束后汇总给调用方。
 
 `Result` 提供认证提供者标识、解析出的主体以及可选元数据（例如凭证来源）。
 
-## 配置结构
+## 内建 `config-api-key` Provider
 
-在 `config.yaml` 的 `auth.providers` 下定义访问提供者：
+代理内置一个访问提供者：
 
-```yaml
-auth:
-  providers:
-    - name: inline-api
-      type: config-api-key
-      api-keys:
-        - sk-test-123
-        - sk-prod-456
-```
+- `config-api-key`：校验 `config.yaml` 顶层的 `api-keys`。
+  - 凭证来源：`Authorization: Bearer`、`X-Goog-Api-Key`、`X-Api-Key`、`?key=`、`?auth_token=`
+  - 元数据：`Result.Metadata["source"]` 会写入匹配到的来源标识
 
-条目映射到 `config.AccessProvider`：`name` 指定实例名，`type` 选择注册的工厂，`sdk` 可引用第三方模块，`api-keys` 提供内联凭证，`config` 用于传递特定选项。
-
-### 引入外部 SDK 提供者
-
-若要消费其它 Go 模块输出的访问提供者，可在配置里填写 `sdk` 字段并在代码中引入该包，利用其 `init` 注册过程：
+在 CLI 服务端与 `sdk/cliproxy` 中，该 provider 会根据加载到的配置自动注册。
 
 ```yaml
-auth:
-  providers:
-    - name: partner-auth
-      type: partner-token
-      sdk: github.com/acme/xplatform/sdk/access/providers/partner
-      config:
-        region: us-west-2
-        audience: cli-proxy
+api-keys:
+  - sk-test-123
+  - sk-prod-456
 ```
+
+## 引入外部 Go 模块提供者
+
+若要消费其它 Go 模块输出的访问提供者，直接用空白标识符导入以触发其 `init` 注册即可：
 
 ```go
 import (
@@ -89,19 +80,11 @@ import (
 )
 ```
 
-通过空白标识符导入即可确保 `init` 调用，先于 `BuildProviders` 完成 `sdkaccess.RegisterProvider`。
-
-## 内建提供者
-
-当前 SDK 默认内置：
-
-- `config-api-key`：校验配置中的 API Key。它从 `Authorization: Bearer`、`X-Goog-Api-Key`、`X-Api-Key` 以及查询参数 `?key=` 提取凭证，不匹配时抛出 `ErrInvalidCredential`。
-
-导入第三方包即可通过 `sdkaccess.RegisterProvider` 注册更多类型。
+空白导入可确保 `init` 先执行，从而在你调用 `RegisteredProviders()`（或 `cliproxy.NewBuilder().Build()`）之前完成 `sdkaccess.RegisterProvider`。
 
 ### 元数据与审计
 
-`Result.Metadata` 用于携带提供者特定的上下文信息。内建的 `config-api-key` 会记录凭证来源（`authorization`、`x-goog-api-key`、`x-api-key` 或 `query-key`）。自定义提供者同样可以填充该 Map，以便丰富日志与审计场景。
+`Result.Metadata` 用于携带提供者特定的上下文信息。内建的 `config-api-key` 会记录凭证来源（`authorization`、`x-goog-api-key`、`x-api-key`、`query-key`、`query-auth-token`）。自定义提供者同样可以填充该 Map，以便丰富日志与审计场景。
 
 ## 编写自定义提供者
 
@@ -110,13 +93,13 @@ type customProvider struct{}
 
 func (p *customProvider) Identifier() string { return "my-provider" }
 
-func (p *customProvider) Authenticate(ctx context.Context, r *http.Request) (*sdkaccess.Result, error) {
+func (p *customProvider) Authenticate(ctx context.Context, r *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
     token := r.Header.Get("X-Custom")
     if token == "" {
-        return nil, sdkaccess.ErrNoCredentials
+        return nil, sdkaccess.NewNotHandledError()
     }
     if token != "expected" {
-        return nil, sdkaccess.ErrInvalidCredential
+        return nil, sdkaccess.NewInvalidCredentialError()
     }
     return &sdkaccess.Result{
         Provider:  p.Identifier(),
@@ -126,51 +109,46 @@ func (p *customProvider) Authenticate(ctx context.Context, r *http.Request) (*sd
 }
 
 func init() {
-    sdkaccess.RegisterProvider("custom", func(cfg *config.AccessProvider, root *config.Config) (sdkaccess.Provider, error) {
-        return &customProvider{}, nil
-    })
+    sdkaccess.RegisterProvider("custom", &customProvider{})
 }
 ```
 
-自定义提供者需要实现 `Identifier()` 与 `Authenticate()`。在 `init` 中调用 `RegisterProvider` 暴露给配置层，工厂函数既能读取当前条目，也能访问完整根配置。
+自定义提供者需要实现 `Identifier()` 与 `Authenticate()`。在 `init` 中用已初始化实例调用 `RegisterProvider` 注册到全局 registry。
 
 ## 错误语义
 
-- `ErrNoCredentials`：任何提供者都未识别到凭证。
-- `ErrInvalidCredential`：至少一个提供者处理了凭证但判定无效。
-- `ErrNotHandled`：告诉管理器跳到下一个提供者，不影响最终错误统计。
+- `NewNoCredentialsError()`（`AuthErrorCodeNoCredentials`）：未提供或未识别到凭证。（HTTP 401）
+- `NewInvalidCredentialError()`（`AuthErrorCodeInvalidCredential`）：凭证存在但校验失败。（HTTP 401）
+- `NewNotHandledError()`（`AuthErrorCodeNotHandled`）：告诉管理器跳到下一个 provider。
+- `NewInternalAuthError(message, cause)`（`AuthErrorCodeInternal`）：网络/系统错误。（HTTP 500）
 
-自定义错误（例如网络异常）会马上冒泡返回。
+除可汇总的 `not_handled` / `no_credentials` / `invalid_credential` 外，其它错误会立即冒泡返回。
 
 ## 与 cliproxy 集成
 
-使用 `sdk/cliproxy` 构建服务时会自动接入 `@sdk/access`。如果需要扩展内置行为，可传入自定义管理器：
+使用 `sdk/cliproxy` 构建服务时会自动接入 `@sdk/access`。如果希望在宿主进程里复用同一个 `Manager` 实例，可传入自定义管理器：
 
 ```go
 coreCfg, _ := config.LoadConfig("config.yaml")
-providers, _ := sdkaccess.BuildProviders(coreCfg)
-manager := sdkaccess.NewManager()
-manager.SetProviders(providers)
+accessManager := sdkaccess.NewManager()
 
 svc, _ := cliproxy.NewBuilder().
   WithConfig(coreCfg).
-  WithAccessManager(manager).
+  WithConfigPath("config.yaml").
+  WithRequestAccessManager(accessManager).
   Build()
 ```
 
-服务会复用该管理器处理每一个入站请求，实现与 CLI 二进制一致的访问控制体验。
+请在调用 `Build()` 之前完成自定义 provider 的注册（通常通过空白导入触发 `init`），以确保它们被包含在全局 registry 的快照中。
 
 ### 动态热更新提供者
 
-当配置发生变化时，可以重新构建提供者并替换当前列表：
+当配置发生变化时，刷新依赖配置的 provider，然后重置 manager 的 provider 链：
 
 ```go
-providers, err := sdkaccess.BuildProviders(newCfg)
-if err != nil {
-    log.Errorf("reload auth providers failed: %v", err)
-    return
-}
-accessManager.SetProviders(providers)
+// configaccess is github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access
+configaccess.Register(&newCfg.SDKConfig)
+accessManager.SetProviders(sdkaccess.RegisteredProviders())
 ```
 
-这一流程与 `cliproxy.Service.refreshAccessProviders` 和 `api.Server.applyAccessConfig` 保持一致，避免为更新访问策略而重启进程。
+这一流程与 `internal/access.ApplyAccessProviders` 保持一致，避免为更新访问策略而重启进程。
