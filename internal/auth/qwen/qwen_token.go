@@ -66,21 +66,10 @@ func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 		_ = f.Close()
 	}()
 
-	// Convert struct to map for merging
-	data := make(map[string]any)
-	temp, errJson := json.Marshal(ts)
-	if errJson != nil {
-		return fmt.Errorf("failed to marshal struct: %w", errJson)
-	}
-	if errUnmarshal := json.Unmarshal(temp, &data); errUnmarshal != nil {
-		return fmt.Errorf("failed to unmarshal struct map: %w", errUnmarshal)
-	}
-
-	// Merge extra metadata
-	if ts.Metadata != nil {
-		for k, v := range ts.Metadata {
-			data[k] = v
-		}
+	// Merge metadata using helper
+	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
+	if errMerge != nil {
+		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}
 
 	if err = json.NewEncoder(f).Encode(data); err != nil {

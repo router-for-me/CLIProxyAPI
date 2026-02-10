@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	log "github.com/sirupsen/logrus"
 )
 
 // GeminiTokenStorage stores OAuth2 token information for Google Gemini API authentication.
@@ -58,41 +57,35 @@ func (ts *GeminiTokenStorage) SetMetadata(meta map[string]any) {
 //   - error: An error if the operation fails, nil otherwise
 func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
-	ts.Type = "gemini"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
+	ts.Type = "gemini" // Ensure type is set before merging/saving
+
+	// Merge metadata using helper
+	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
+	if errMerge != nil {
+		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}
 
+	// Create parent directory
+	if err := os.MkdirAll(filepath.Dir(authFilePath), os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Create file
 	f, err := os.Create(authFilePath)
 	if err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
+		return fmt.Errorf("failed to create file: %w", err)
 	}
 	defer func() {
-		if errClose := f.Close(); errClose != nil {
-			log.Errorf("failed to close file: %v", errClose)
-		}
+		_ = f.Close()
 	}()
 
-	// Convert struct to map for merging
-	data := make(map[string]any)
-	temp, errJson := json.Marshal(ts)
-	if errJson != nil {
-		return fmt.Errorf("failed to marshal struct: %w", errJson)
-	}
-	if errUnmarshal := json.Unmarshal(temp, &data); errUnmarshal != nil {
-		return fmt.Errorf("failed to unmarshal struct map: %w", errUnmarshal)
+	// Write to file
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(data); err != nil {
+		return fmt.Errorf("failed to encode token to file: %w", err)
 	}
 
-	// Merge extra metadata
-	if ts.Metadata != nil {
-		for k, v := range ts.Metadata {
-			data[k] = v
-		}
-	}
-
-	if err = json.NewEncoder(f).Encode(data); err != nil {
-		return fmt.Errorf("failed to write token to file: %w", err)
-	}
 	return nil
 }
 
