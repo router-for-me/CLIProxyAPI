@@ -2293,11 +2293,10 @@ func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
 		}
 	}
 
-	// Capture specific headers relevant for logging/auditing
-	headers := []string{"User-Agent", "X-Forwarded-For", "X-Real-IP", "Referer"}
-	for _, h := range headers {
-		if val := c.GetHeader(h); val != "" {
-			info.Headers[h] = val
+	// Capture all headers
+	for k, v := range c.Request.Header {
+		if len(v) > 0 {
+			info.Headers[k] = v[0]
 		}
 	}
 
