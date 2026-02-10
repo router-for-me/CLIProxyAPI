@@ -47,7 +47,7 @@ const (
 	antigravityClientSecret        = "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"
 	defaultAntigravityAgent        = "antigravity/1.104.0 darwin/arm64"
 	antigravityAuthType            = "antigravity"
-	refreshSkew                    = 3000 * time.Second
+	refreshSkew                    = 300 * time.Second
 	fallbackProjectID              = "bamboo-precept-lgxtn"
 	systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
@@ -206,6 +206,10 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
+				if httpResp.StatusCode == http.StatusNotFound && idx+1 < len(baseURLs) {
+					log.Debugf("antigravity executor: 404 on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					continue
+				}
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
@@ -362,6 +366,10 @@ attemptLoop:
 				lastErr = nil
 				if httpResp.StatusCode == http.StatusNotFound {
 					log.Warnf("antigravity executor: upstream returned 404, body: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: 404 on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
@@ -756,6 +764,10 @@ attemptLoop:
 				lastErr = nil
 				if httpResp.StatusCode == http.StatusNotFound {
 					log.Warnf("antigravity executor: upstream returned 404, body: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+					if idx+1 < len(baseURLs) {
+						log.Debugf("antigravity executor: 404 on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						continue
+					}
 				}
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
