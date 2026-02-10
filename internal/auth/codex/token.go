@@ -78,4 +78,5 @@ func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to write token to file: %w", err)
 	}
 	return nil
+
 }
