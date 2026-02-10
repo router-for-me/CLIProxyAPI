@@ -81,7 +81,7 @@ func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) error {
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(data); err != nil {
-		return fmt.Errorf("failed to encode token to file: %w", err)
+		return fmt.Errorf("failed to write token to file: %w", err)
 	}
 	return nil
 }
