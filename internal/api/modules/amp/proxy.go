@@ -3,6 +3,7 @@ package amp
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -188,6 +189,10 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 
 	// Error handler for proxy failures
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+		// Client-side cancellations are common during polling; return 499 without logging
+		if err == context.Canceled {
+			return
+		}
 		log.Errorf("amp upstream proxy error for %s %s: %v", req.Method, req.URL.Path, err)
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusBadGateway)
