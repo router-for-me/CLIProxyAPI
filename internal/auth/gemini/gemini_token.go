@@ -64,7 +64,7 @@ func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) error {
 	if errMerge != nil {
 		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}
-	if err := os.MkdirAll(filepath.Dir(authFilePath), os.ModePerm); err != nil {
+	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
