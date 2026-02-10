@@ -3,7 +3,9 @@ package management
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,9 +26,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
@@ -1798,6 +1803,89 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
+func (h *Handler) RequestGitHubToken(c *gin.Context) {
+	ctx := context.Background()
+
+	fmt.Println("Initializing GitHub Copilot authentication...")
+
+	state := fmt.Sprintf("gh-%d", time.Now().UnixNano())
+
+	// Initialize Copilot auth service
+	// We need to import "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot" first if not present
+	// Assuming copilot package is imported as "copilot"
+	deviceClient := copilot.NewDeviceFlowClient(h.cfg)
+
+	// Initiate device flow
+	deviceCode, err := deviceClient.RequestDeviceCode(ctx)
+	if err != nil {
+		log.Errorf("Failed to initiate device flow: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initiate device flow"})
+		return
+	}
+
+	authURL := deviceCode.VerificationURI
+	userCode := deviceCode.UserCode
+
+	RegisterOAuthSession(state, "github")
+
+	go func() {
+		fmt.Printf("Please visit %s and enter code: %s\n", authURL, userCode)
+
+		tokenData, errPoll := deviceClient.PollForToken(ctx, deviceCode)
+		if errPoll != nil {
+			SetOAuthSessionError(state, "Authentication failed")
+			fmt.Printf("Authentication failed: %v\n", errPoll)
+			return
+		}
+
+		username, errUser := deviceClient.FetchUserInfo(ctx, tokenData.AccessToken)
+		if errUser != nil {
+			log.Warnf("Failed to fetch user info: %v", errUser)
+			username = "github-user"
+		}
+
+		tokenStorage := &copilot.CopilotTokenStorage{
+			AccessToken: tokenData.AccessToken,
+			TokenType:   tokenData.TokenType,
+			Scope:       tokenData.Scope,
+			Username:    username,
+			Type:        "github-copilot",
+		}
+
+		fileName := fmt.Sprintf("github-%s.json", username)
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "github",
+			FileName: fileName,
+			Storage:  tokenStorage,
+			Metadata: map[string]any{
+				"email":    username,
+				"username": username,
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use GitHub Copilot services through this CLI")
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("github")
+	}()
+
+	c.JSON(200, gin.H{
+		"status":           "ok",
+		"url":              authURL,
+		"state":            state,
+		"user_code":        userCode,
+		"verification_uri": authURL,
+	})
+}
+
 func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 	ctx := context.Background()
 
@@ -2261,8 +2349,322 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 	if status != "" {
+		if strings.HasPrefix(status, "device_code|") {
+			parts := strings.SplitN(status, "|", 3)
+			if len(parts) == 3 {
+				c.JSON(http.StatusOK, gin.H{
+					"status":           "device_code",
+					"verification_url": parts[1],
+					"user_code":        parts[2],
+				})
+				return
+			}
+		}
+		if strings.HasPrefix(status, "auth_url|") {
+			authURL := strings.TrimPrefix(status, "auth_url|")
+			c.JSON(http.StatusOK, gin.H{
+				"status": "auth_url",
+				"url":    authURL,
+			})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"status": "error", "error": status})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
+}
+
+const kiroCallbackPort = 9876
+
+func (h *Handler) RequestKiroToken(c *gin.Context) {
+	ctx := context.Background()
+
+	// Get the login method from query parameter (default: aws for device code flow)
+	method := strings.ToLower(strings.TrimSpace(c.Query("method")))
+	if method == "" {
+		method = "aws"
+	}
+
+	fmt.Println("Initializing Kiro authentication...")
+
+	state := fmt.Sprintf("kiro-%d", time.Now().UnixNano())
+
+	switch method {
+	case "aws", "builder-id":
+		RegisterOAuthSession(state, "kiro")
+
+		// AWS Builder ID uses device code flow (no callback needed)
+		go func() {
+			ssoClient := kiroauth.NewSSOOIDCClient(h.cfg)
+
+			// Step 1: Register client
+			fmt.Println("Registering client...")
+			regResp, errRegister := ssoClient.RegisterClient(ctx)
+			if errRegister != nil {
+				log.Errorf("Failed to register client: %v", errRegister)
+				SetOAuthSessionError(state, "Failed to register client")
+				return
+			}
+
+			// Step 2: Start device authorization
+			fmt.Println("Starting device authorization...")
+			authResp, errAuth := ssoClient.StartDeviceAuthorization(ctx, regResp.ClientID, regResp.ClientSecret)
+			if errAuth != nil {
+				log.Errorf("Failed to start device auth: %v", errAuth)
+				SetOAuthSessionError(state, "Failed to start device authorization")
+				return
+			}
+
+			// Store the verification URL for the frontend to display.
+			// Using "|" as separator because URLs contain ":".
+			SetOAuthSessionError(state, "device_code|"+authResp.VerificationURIComplete+"|"+authResp.UserCode)
+
+			// Step 3: Poll for token
+			fmt.Println("Waiting for authorization...")
+			interval := 5 * time.Second
+			if authResp.Interval > 0 {
+				interval = time.Duration(authResp.Interval) * time.Second
+			}
+			deadline := time.Now().Add(time.Duration(authResp.ExpiresIn) * time.Second)
+
+			for time.Now().Before(deadline) {
+				select {
+				case <-ctx.Done():
+					SetOAuthSessionError(state, "Authorization cancelled")
+					return
+				case <-time.After(interval):
+					tokenResp, errToken := ssoClient.CreateToken(ctx, regResp.ClientID, regResp.ClientSecret, authResp.DeviceCode)
+					if errToken != nil {
+						errStr := errToken.Error()
+						if strings.Contains(errStr, "authorization_pending") {
+							continue
+						}
+						if strings.Contains(errStr, "slow_down") {
+							interval += 5 * time.Second
+							continue
+						}
+						log.Errorf("Token creation failed: %v", errToken)
+						SetOAuthSessionError(state, "Token creation failed")
+						return
+					}
+
+					// Success! Save the token
+					expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+					email := kiroauth.ExtractEmailFromJWT(tokenResp.AccessToken)
+
+					idPart := kiroauth.SanitizeEmailForFilename(email)
+					if idPart == "" {
+						idPart = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+					}
+
+					now := time.Now()
+					fileName := fmt.Sprintf("kiro-aws-%s.json", idPart)
+
+					record := &coreauth.Auth{
+						ID:       fileName,
+						Provider: "kiro",
+						FileName: fileName,
+						Metadata: map[string]any{
+							"type":          "kiro",
+							"access_token":  tokenResp.AccessToken,
+							"refresh_token": tokenResp.RefreshToken,
+							"expires_at":    expiresAt.Format(time.RFC3339),
+							"auth_method":   "builder-id",
+							"provider":      "AWS",
+							"client_id":     regResp.ClientID,
+							"client_secret": regResp.ClientSecret,
+							"email":         email,
+							"last_refresh":  now.Format(time.RFC3339),
+						},
+					}
+
+					savedPath, errSave := h.saveTokenRecord(ctx, record)
+					if errSave != nil {
+						log.Errorf("Failed to save authentication tokens: %v", errSave)
+						SetOAuthSessionError(state, "Failed to save authentication tokens")
+						return
+					}
+
+					fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+					if email != "" {
+						fmt.Printf("Authenticated as: %s\n", email)
+					}
+					CompleteOAuthSession(state)
+					return
+				}
+			}
+
+			SetOAuthSessionError(state, "Authorization timed out")
+		}()
+
+		// Return immediately with the state for polling
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "state": state, "method": "device_code"})
+
+	case "google", "github":
+		RegisterOAuthSession(state, "kiro")
+
+		// Social auth uses protocol handler - for WEB UI we use a callback forwarder
+		provider := "Google"
+		if method == "github" {
+			provider = "Github"
+		}
+
+		isWebUI := isWebUIRequest(c)
+		if isWebUI {
+			targetURL, errTarget := h.managementCallbackURL("/kiro/callback")
+			if errTarget != nil {
+				log.WithError(errTarget).Error("failed to compute kiro callback target")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+				return
+			}
+			if _, errStart := startCallbackForwarder(kiroCallbackPort, "kiro", targetURL); errStart != nil {
+				log.WithError(errStart).Error("failed to start kiro callback forwarder")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+				return
+			}
+		}
+
+		go func() {
+			if isWebUI {
+				defer stopCallbackForwarder(kiroCallbackPort)
+			}
+
+			socialClient := kiroauth.NewSocialAuthClient(h.cfg)
+
+			// Generate PKCE codes
+			codeVerifier, codeChallenge, errPKCE := generateKiroPKCE()
+			if errPKCE != nil {
+				log.Errorf("Failed to generate PKCE: %v", errPKCE)
+				SetOAuthSessionError(state, "Failed to generate PKCE")
+				return
+			}
+
+			// Build login URL
+			authURL := fmt.Sprintf("%s/login?idp=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256&state=%s&prompt=select_account",
+				"https://prod.us-east-1.auth.desktop.kiro.dev",
+				provider,
+				url.QueryEscape(kiroauth.KiroRedirectURI),
+				codeChallenge,
+				state,
+			)
+
+			// Store auth URL for frontend.
+			// Using "|" as separator because URLs contain ":".
+			SetOAuthSessionError(state, "auth_url|"+authURL)
+
+			// Wait for callback file
+			waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-kiro-%s.oauth", state))
+			deadline := time.Now().Add(5 * time.Minute)
+
+			for {
+				if time.Now().After(deadline) {
+					log.Error("oauth flow timed out")
+					SetOAuthSessionError(state, "OAuth flow timed out")
+					return
+				}
+				if data, errRead := os.ReadFile(waitFile); errRead == nil {
+					var m map[string]string
+					_ = json.Unmarshal(data, &m)
+					_ = os.Remove(waitFile)
+					if errStr := m["error"]; errStr != "" {
+						log.Errorf("Authentication failed: %s", errStr)
+						SetOAuthSessionError(state, "Authentication failed")
+						return
+					}
+					if m["state"] != state {
+						log.Errorf("State mismatch")
+						SetOAuthSessionError(state, "State mismatch")
+						return
+					}
+					code := m["code"]
+					if code == "" {
+						log.Error("No authorization code received")
+						SetOAuthSessionError(state, "No authorization code received")
+						return
+					}
+
+					// Exchange code for tokens
+					tokenReq := &kiroauth.CreateTokenRequest{
+						Code:         code,
+						CodeVerifier: codeVerifier,
+						RedirectURI:  kiroauth.KiroRedirectURI,
+					}
+
+					tokenResp, errToken := socialClient.CreateToken(ctx, tokenReq)
+					if errToken != nil {
+						log.Errorf("Failed to exchange code for tokens: %v", errToken)
+						SetOAuthSessionError(state, "Failed to exchange code for tokens")
+						return
+					}
+
+					// Save the token
+					expiresIn := tokenResp.ExpiresIn
+					if expiresIn <= 0 {
+						expiresIn = 3600
+					}
+					expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
+					email := kiroauth.ExtractEmailFromJWT(tokenResp.AccessToken)
+
+					idPart := kiroauth.SanitizeEmailForFilename(email)
+					if idPart == "" {
+						idPart = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+					}
+
+					now := time.Now()
+					fileName := fmt.Sprintf("kiro-%s-%s.json", strings.ToLower(provider), idPart)
+
+					record := &coreauth.Auth{
+						ID:       fileName,
+						Provider: "kiro",
+						FileName: fileName,
+						Metadata: map[string]any{
+							"type":          "kiro",
+							"access_token":  tokenResp.AccessToken,
+							"refresh_token": tokenResp.RefreshToken,
+							"profile_arn":   tokenResp.ProfileArn,
+							"expires_at":    expiresAt.Format(time.RFC3339),
+							"auth_method":   "social",
+							"provider":      provider,
+							"email":         email,
+							"last_refresh":  now.Format(time.RFC3339),
+						},
+					}
+
+					savedPath, errSave := h.saveTokenRecord(ctx, record)
+					if errSave != nil {
+						log.Errorf("Failed to save authentication tokens: %v", errSave)
+						SetOAuthSessionError(state, "Failed to save authentication tokens")
+						return
+					}
+
+					fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+					if email != "" {
+						fmt.Printf("Authenticated as: %s\n", email)
+					}
+					CompleteOAuthSession(state)
+					return
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}()
+
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "state": state, "method": "social"})
+
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid method, use 'aws', 'google', or 'github'"})
+	}
+}
+
+// generateKiroPKCE generates PKCE code verifier and challenge for Kiro OAuth.
+func generateKiroPKCE() (verifier, challenge string, err error) {
+	b := make([]byte, 32)
+	if _, errRead := io.ReadFull(rand.Reader, b); errRead != nil {
+		return "", "", fmt.Errorf("failed to generate random bytes: %w", errRead)
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(b)
+
+	h := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(h[:])
+
+	return verifier, challenge, nil
 }

@@ -84,6 +84,13 @@ type Config struct {
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
+	// KiroKey defines a list of Kiro (AWS CodeWhisperer) configurations.
+	KiroKey []KiroKey `yaml:"kiro" json:"kiro"`
+
+	// KiroPreferredEndpoint sets the global default preferred endpoint for all Kiro providers.
+	// Values: "ide" (default, CodeWhisperer) or "cli" (Amazon Q).
+	KiroPreferredEndpoint string `yaml:"kiro-preferred-endpoint" json:"kiro-preferred-endpoint"`
+
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
@@ -101,11 +108,12 @@ type Config struct {
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
+	// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
-	// gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow.
+	// gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
@@ -113,6 +121,11 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	// IncognitoBrowser enables opening OAuth URLs in incognito/private browsing mode.
+	// This is useful when you want to login with a different account without logging out
+	// from your current session. Default: false.
+	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
@@ -427,6 +440,35 @@ type GeminiModel struct {
 func (m GeminiModel) GetName() string  { return m.Name }
 func (m GeminiModel) GetAlias() string { return m.Alias }
 
+// KiroKey represents the configuration for Kiro (AWS CodeWhisperer) authentication.
+type KiroKey struct {
+	// TokenFile is the path to the Kiro token file (default: ~/.aws/sso/cache/kiro-auth-token.json)
+	TokenFile string `yaml:"token-file,omitempty" json:"token-file,omitempty"`
+
+	// AccessToken is the OAuth access token for direct configuration.
+	AccessToken string `yaml:"access-token,omitempty" json:"access-token,omitempty"`
+
+	// RefreshToken is the OAuth refresh token for token renewal.
+	RefreshToken string `yaml:"refresh-token,omitempty" json:"refresh-token,omitempty"`
+
+	// ProfileArn is the AWS CodeWhisperer profile ARN.
+	ProfileArn string `yaml:"profile-arn,omitempty" json:"profile-arn,omitempty"`
+
+	// Region is the AWS region (default: us-east-1).
+	Region string `yaml:"region,omitempty" json:"region,omitempty"`
+
+	// ProxyURL optionally overrides the global proxy for this configuration.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// AgentTaskType sets the Kiro API task type. Known values: "vibe", "dev", "chat".
+	// Leave empty to let API use defaults. Different values may inject different system prompts.
+	AgentTaskType string `yaml:"agent-task-type,omitempty" json:"agent-task-type,omitempty"`
+
+	// PreferredEndpoint sets the preferred Kiro API endpoint/quota.
+	// Values: "codewhisperer" (default, IDE quota) or "amazonq" (CLI quota).
+	PreferredEndpoint string `yaml:"preferred-endpoint,omitempty" json:"preferred-endpoint,omitempty"`
+}
+
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.
 type OpenAICompatibility struct {
@@ -533,6 +575,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.IncognitoBrowser = false // Default to normal browser (AWS uses incognito by force)
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -600,6 +643,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
+
+	// Sanitize Kiro keys: trim whitespace from credential fields
+	cfg.SanitizeKiroKeys()
 
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
@@ -779,6 +825,23 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+	}
+}
+
+// SanitizeKiroKeys trims whitespace from Kiro credential fields.
+func (cfg *Config) SanitizeKiroKeys() {
+	if cfg == nil || len(cfg.KiroKey) == 0 {
+		return
+	}
+	for i := range cfg.KiroKey {
+		entry := &cfg.KiroKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.AccessToken = strings.TrimSpace(entry.AccessToken)
+		entry.RefreshToken = strings.TrimSpace(entry.RefreshToken)
+		entry.ProfileArn = strings.TrimSpace(entry.ProfileArn)
+		entry.Region = strings.TrimSpace(entry.Region)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.PreferredEndpoint = strings.TrimSpace(entry.PreferredEndpoint)
 	}
 }
 

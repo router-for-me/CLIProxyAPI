@@ -16,6 +16,7 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -84,7 +85,21 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
-	if streamResult.Type == gjson.True {
+	stream := streamResult.Type == gjson.True
+
+	modelName := gjson.GetBytes(rawJSON, "model").String()
+	if overrideEndpoint, ok := resolveEndpointOverride(modelName, openAIResponsesEndpoint); ok && overrideEndpoint == openAIChatEndpoint {
+		chatJSON := responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
+		stream = gjson.GetBytes(chatJSON, "stream").Bool()
+		if stream {
+			h.handleStreamingResponseViaChat(c, rawJSON, chatJSON)
+		} else {
+			h.handleNonStreamingResponseViaChat(c, rawJSON, chatJSON)
+		}
+		return
+	}
+
+	if stream {
 		h.handleStreamingResponse(c, rawJSON)
 	} else {
 		h.handleNonStreamingResponse(c, rawJSON)
@@ -157,6 +172,31 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		return
 	}
 	_, _ = c.Writer.Write(resp)
+	cliCancel()
+}
+
+func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponseViaChat(c *gin.Context, originalResponsesJSON, chatJSON []byte) {
+	c.Header("Content-Type", "application/json")
+
+	modelName := gjson.GetBytes(chatJSON, "model").String()
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, OpenAI, modelName, chatJSON, "")
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	var param any
+	converted := responsesconverter.ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(cliCtx, modelName, originalResponsesJSON, originalResponsesJSON, resp, &param)
+	if converted == "" {
+		h.WriteErrorResponse(c, &interfaces.ErrorMessage{
+			StatusCode: http.StatusInternalServerError,
+			Error:      fmt.Errorf("failed to convert chat completion response to responses format"),
+		})
+		cliCancel(fmt.Errorf("response conversion failed"))
+		return
+	}
+	_, _ = c.Writer.Write([]byte(converted))
 	cliCancel()
 }
 
@@ -238,6 +278,116 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		}
 	}
+}
+
+func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Context, originalResponsesJSON, chatJSON []byte) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Streaming not supported",
+				Type:    "server_error",
+			},
+		})
+		return
+	}
+
+	modelName := gjson.GetBytes(chatJSON, "model").String()
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, OpenAI, modelName, chatJSON, "")
+	var param any
+
+	setSSEHeaders := func() {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("Access-Control-Allow-Origin", "*")
+	}
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			cliCancel(c.Request.Context().Err())
+			return
+		case errMsg, ok := <-errChan:
+			if !ok {
+				errChan = nil
+				continue
+			}
+			h.WriteErrorResponse(c, errMsg)
+			if errMsg != nil {
+				cliCancel(errMsg.Error)
+			} else {
+				cliCancel(nil)
+			}
+			return
+		case chunk, ok := <-dataChan:
+			if !ok {
+				setSSEHeaders()
+				_, _ = c.Writer.Write([]byte("\n"))
+				flusher.Flush()
+				cliCancel(nil)
+				return
+			}
+
+			setSSEHeaders()
+			writeChatAsResponsesChunk(c, cliCtx, modelName, originalResponsesJSON, chunk, &param)
+			flusher.Flush()
+
+			h.forwardChatAsResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, cliCtx, modelName, originalResponsesJSON, &param)
+			return
+		}
+	}
+}
+
+func writeChatAsResponsesChunk(c *gin.Context, ctx context.Context, modelName string, originalResponsesJSON, chunk []byte, param *any) {
+	outputs := responsesconverter.ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx, modelName, originalResponsesJSON, originalResponsesJSON, chunk, param)
+	for _, out := range outputs {
+		if out == "" {
+			continue
+		}
+		if bytes.HasPrefix([]byte(out), []byte("event:")) {
+			_, _ = c.Writer.Write([]byte("\n"))
+		}
+		_, _ = c.Writer.Write([]byte(out))
+		_, _ = c.Writer.Write([]byte("\n"))
+	}
+}
+
+func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, ctx context.Context, modelName string, originalResponsesJSON []byte, param *any) {
+	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		WriteChunk: func(chunk []byte) {
+			outputs := responsesconverter.ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx, modelName, originalResponsesJSON, originalResponsesJSON, chunk, param)
+			for _, out := range outputs {
+				if out == "" {
+					continue
+				}
+				if bytes.HasPrefix([]byte(out), []byte("event:")) {
+					_, _ = c.Writer.Write([]byte("\n"))
+				}
+				_, _ = c.Writer.Write([]byte(out))
+				_, _ = c.Writer.Write([]byte("\n"))
+			}
+		},
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			if errMsg == nil {
+				return
+			}
+			status := http.StatusInternalServerError
+			if errMsg.StatusCode > 0 {
+				status = errMsg.StatusCode
+			}
+			errText := http.StatusText(status)
+			if errMsg.Error != nil && errMsg.Error.Error() != "" {
+				errText = errMsg.Error.Error()
+			}
+			body := handlers.BuildErrorResponseBody(status, errText)
+			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(body))
+		},
+		WriteDone: func() {
+			_, _ = c.Writer.Write([]byte("\n"))
+		},
+	})
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
