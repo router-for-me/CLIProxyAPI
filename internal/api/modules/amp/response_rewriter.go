@@ -66,7 +66,7 @@ func (rw *ResponseRewriter) Flush() {
 }
 
 // modelFieldPaths lists all JSON paths where model name may appear
-var modelFieldPaths = []string{"model", "modelVersion", "response.modelVersion", "message.model"}
+var modelFieldPaths = []string{"message.model", "model", "modelVersion", "response.model", "response.modelVersion"}
 
 // rewriteModelInResponse replaces all occurrences of the mapped model with the original model in JSON
 // It also suppresses "thinking" blocks if "tool_use" is present to ensure Amp client compatibility
