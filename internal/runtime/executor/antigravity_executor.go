@@ -48,6 +48,7 @@ const (
 	defaultAntigravityAgent        = "antigravity/1.104.0 darwin/arm64"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
+	fallbackProjectID              = "bamboo-precept-lgxtn"
 	systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
@@ -197,7 +198,11 @@ attemptLoop:
 			appendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-				log.Debugf("antigravity executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+				if httpResp.StatusCode == http.StatusNotFound {
+					log.Warnf("antigravity executor: upstream returned 404, body: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+				} else {
+					log.Debugf("antigravity executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+				}
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
@@ -355,6 +360,9 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
+				if httpResp.StatusCode == http.StatusNotFound {
+					log.Warnf("antigravity executor: upstream returned 404, body: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+				}
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
@@ -746,6 +754,9 @@ attemptLoop:
 				lastStatus = httpResp.StatusCode
 				lastBody = append([]byte(nil), bodyBytes...)
 				lastErr = nil
+				if httpResp.StatusCode == http.StatusNotFound {
+					log.Warnf("antigravity executor: upstream returned 404, body: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
+				}
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
@@ -1580,11 +1591,12 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 		}
 	}
 
-	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
+	// Use real project ID from auth if available, otherwise fall back to a known stable ID
 	if projectID != "" {
 		template, _ = sjson.Set(template, "project", projectID)
 	} else {
-		template, _ = sjson.Set(template, "project", generateProjectID())
+		template, _ = sjson.Set(template, "project", fallbackProjectID)
+		log.Warnf("antigravity: no project ID available, using fallback: %s", fallbackProjectID)
 	}
 	template, _ = sjson.Set(template, "requestId", generateRequestID())
 	template, _ = sjson.Set(template, "request.sessionId", generateStableSessionID(payload))
@@ -1638,13 +1650,4 @@ func generateStableSessionID(payload []byte) string {
 	return generateSessionID()
 }
 
-func generateProjectID() string {
-	adjectives := []string{"useful", "bright", "swift", "calm", "bold"}
-	nouns := []string{"fuze", "wave", "spark", "flow", "core"}
-	randSourceMutex.Lock()
-	adj := adjectives[randSource.Intn(len(adjectives))]
-	noun := nouns[randSource.Intn(len(nouns))]
-	randSourceMutex.Unlock()
-	randomPart := strings.ToLower(uuid.NewString())[:5]
-	return adj + "-" + noun + "-" + randomPart
-}
+
