@@ -459,6 +459,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "DeepSeek 3.2 via Kiro",
 			ContextLength:       128000,
 			MaxCompletionTokens: 32768,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                  "kiro-minimax-m2-1",
@@ -470,6 +471,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "MiniMax M2.1 via Kiro",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                  "kiro-qwen3-coder-next",
@@ -481,6 +483,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         "Qwen3 Coder Next via Kiro",
 			ContextLength:       128000,
 			MaxCompletionTokens: 32768,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
 			ID:                  "kiro-gpt-4o",
