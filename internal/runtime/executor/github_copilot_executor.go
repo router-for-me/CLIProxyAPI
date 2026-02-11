@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -471,9 +472,14 @@ func detectVisionContent(body []byte) bool {
 	return false
 }
 
-// normalizeModel is a no-op as GitHub Copilot accepts model names directly.
-// Model mapping should be done at the registry level if needed.
-func (e *GitHubCopilotExecutor) normalizeModel(_ string, body []byte) []byte {
+// normalizeModel strips the suffix (e.g. "(medium)") from the model name
+// before sending to GitHub Copilot, as the upstream API does not accept
+// suffixed model identifiers.
+func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte {
+	baseModel := thinking.ParseSuffix(model).ModelName
+	if baseModel != model {
+		body, _ = sjson.SetBytes(body, "model", baseModel)
+	}
 	return body
 }
 
