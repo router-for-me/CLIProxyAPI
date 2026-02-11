@@ -69,6 +69,11 @@ type ThinkingSupport struct {
 	ZeroAllowed bool `json:"zero_allowed,omitempty"`
 	// DynamicAllowed indicates whether -1 is a valid value (dynamic thinking budget).
 	DynamicAllowed bool `json:"dynamic_allowed,omitempty"`
+	// AdaptiveAllowed indicates whether the model supports adaptive thinking mode.
+	// When true, the provider applier should emit adaptive-style config (e.g.,
+	// Claude's thinking.type:"adaptive" + output_config.effort) instead of
+	// explicit budget-based config.
+	AdaptiveAllowed bool `json:"adaptive_allowed,omitempty"`
 	// Levels defines discrete reasoning effort levels (e.g., "low", "medium", "high").
 	// When set, the model uses level-based reasoning instead of token budgets.
 	Levels []string `json:"levels,omitempty"`

@@ -103,6 +103,10 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		config.Level = ""
 	}
 
+	if config.Mode == ModeLevel {
+		config.Level = normalizeAdaptiveLevelAlias(config.Level, support, toFormat, model)
+	}
+
 	if len(support.Levels) > 0 && config.Mode == ModeLevel {
 		if !isLevelSupported(string(config.Level), support.Levels) {
 			if allowClampUnsupported {
@@ -201,7 +205,7 @@ func convertAutoToMidRange(config ThinkingConfig, support *registry.ThinkingSupp
 }
 
 // standardLevelOrder defines the canonical ordering of thinking levels from lowest to highest.
-var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh}
+var standardLevelOrder = []ThinkingLevel{LevelMinimal, LevelLow, LevelMedium, LevelHigh, LevelXHigh, LevelMax}
 
 // clampLevel clamps the given level to the nearest supported level.
 // On tie, prefers the lower level.
@@ -306,6 +310,28 @@ func isLevelSupported(level string, supported []string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeAdaptiveLevelAlias(level ThinkingLevel, support *registry.ThinkingSupport, provider, model string) ThinkingLevel {
+	if support == nil || !support.AdaptiveAllowed {
+		return level
+	}
+	if !strings.EqualFold(string(level), string(LevelXHigh)) {
+		return level
+	}
+	if isLevelSupported(string(level), support.Levels) {
+		return level
+	}
+	if isLevelSupported(string(LevelMax), support.Levels) {
+		log.WithFields(log.Fields{
+			"provider":       provider,
+			"model":          model,
+			"original_value": string(level),
+			"clamped_to":     string(LevelMax),
+		}).Debug("thinking: level alias normalized |")
+		return LevelMax
+	}
+	return level
 }
 
 func levelIndex(level string) int {

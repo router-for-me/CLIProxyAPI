@@ -15,7 +15,8 @@ var levelToBudgetMap = map[string]int{
 	"low":     1024,
 	"medium":  8192,
 	"high":    24576,
-	"xhigh":   32768,
+	"xhigh":  32768,
+	"max":    128000,
 }
 
 // ConvertLevelToBudget converts a thinking level to a budget value.
@@ -31,6 +32,7 @@ var levelToBudgetMap = map[string]int{
 //   - medium  → 8192
 //   - high    → 24576
 //   - xhigh   → 32768
+//   - max     → 128000
 //
 // Returns:
 //   - budget: The converted budget value
@@ -51,6 +53,8 @@ const (
 	ThresholdMedium = 8192
 	// ThresholdHigh is the upper bound for "high" level (8193-24576)
 	ThresholdHigh = 24576
+	// ThresholdXHigh is the upper bound for "xhigh" level (24577-32768)
+	ThresholdXHigh = 32768
 )
 
 // ConvertBudgetToLevel converts a budget value to the nearest thinking level.
@@ -59,13 +63,14 @@ const (
 // Uses threshold-based mapping for range conversion.
 //
 // Budget → Level thresholds:
-//   - -1        → auto
-//   - 0         → none
-//   - 1-512     → minimal
-//   - 513-1024  → low
-//   - 1025-8192 → medium
+//   - -1         → auto
+//   - 0          → none
+//   - 1-512      → minimal
+//   - 513-1024   → low
+//   - 1025-8192  → medium
 //   - 8193-24576 → high
-//   - 24577+    → xhigh
+//   - 24577-32768 → xhigh
+//   - 32769+     → max
 //
 // Returns:
 //   - level: The converted thinking level string
@@ -87,8 +92,10 @@ func ConvertBudgetToLevel(budget int) (string, bool) {
 		return string(LevelMedium), true
 	case budget <= ThresholdHigh:
 		return string(LevelHigh), true
-	default:
+	case budget <= ThresholdXHigh:
 		return string(LevelXHigh), true
+	default:
+		return string(LevelMax), true
 	}
 }
 

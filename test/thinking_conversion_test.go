@@ -34,6 +34,7 @@ type thinkingTestCase struct {
 	inputJSON       string
 	expectField     string
 	expectValue     string
+	absentFields    []string
 	includeThoughts string
 	expectErr       bool
 }
@@ -813,7 +814,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "medium",
 			expectErr:   false,
 		},
-		// Case 68: Budget 64000 → passthrough logic → xhigh
+		// Case 68: Budget 64000 → passthrough logic → max
 		{
 			name:        "68",
 			from:        "gemini",
@@ -821,7 +822,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			model:       "user-defined-model(64000)",
 			inputJSON:   `{"model":"user-defined-model(64000)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			expectField: "reasoning_effort",
-			expectValue: "xhigh",
+			expectValue: "max",
 			expectErr:   false,
 		},
 		// Case 69: Budget 0 → passthrough logic → none
@@ -868,7 +869,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "medium",
 			expectErr:   false,
 		},
-		// Case 73: Budget 64000 → passthrough logic → xhigh
+		// Case 73: Budget 64000 → passthrough logic → max
 		{
 			name:        "73",
 			from:        "claude",
@@ -876,7 +877,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			model:       "user-defined-model(64000)",
 			inputJSON:   `{"model":"user-defined-model(64000)","messages":[{"role":"user","content":"hi"}]}`,
 			expectField: "reasoning.effort",
-			expectValue: "xhigh",
+			expectValue: "max",
 			expectErr:   false,
 		},
 		// Case 74: Budget 0 → passthrough logic → none
@@ -2095,7 +2096,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue: "medium",
 			expectErr:   false,
 		},
-		// Case 68: thinkingBudget=64000 → xhigh (passthrough)
+		// Case 68: thinkingBudget=64000 → max (passthrough)
 		{
 			name:        "68",
 			from:        "gemini",
@@ -2103,7 +2104,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			model:       "user-defined-model",
 			inputJSON:   `{"model":"user-defined-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
 			expectField: "reasoning_effort",
-			expectValue: "xhigh",
+			expectValue: "max",
 			expectErr:   false,
 		},
 		// Case 69: thinkingBudget=0 → none
@@ -2150,7 +2151,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue: "medium",
 			expectErr:   false,
 		},
-		// Case 73: thinking.budget_tokens=64000 → xhigh (passthrough)
+		// Case 73: thinking.budget_tokens=64000 → max (passthrough)
 		{
 			name:        "73",
 			from:        "claude",
@@ -2158,7 +2159,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			model:       "user-defined-model",
 			inputJSON:   `{"model":"user-defined-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":64000}}`,
 			expectField: "reasoning.effort",
-			expectValue: "xhigh",
+			expectValue: "max",
 			expectErr:   false,
 		},
 		// Case 74: thinking.budget_tokens=0 → none
@@ -2648,16 +2649,51 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// A5: Claude adaptive passthrough for same protocol
+		// A5: Claude adaptive passthrough for adaptive-capable model
 		{
 			name:        "A5",
 			from:        "claude",
 			to:          "claude",
-			model:       "claude-budget-model",
-			inputJSON:   `{"model":"claude-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
+			model:       "claude-adaptive-model",
+			inputJSON:   `{"model":"claude-adaptive-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
 			expectField: "thinking.type",
 			expectValue: "adaptive",
 			expectErr:   false,
+		},
+		// A5b: Claude adaptive model budget conversion should clamp xhigh to max
+		{
+			name:        "A5b",
+			from:        "claude",
+			to:          "claude",
+			model:       "claude-adaptive-model",
+			inputJSON:   `{"model":"claude-adaptive-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":30000}}`,
+			expectField: "output_config.effort",
+			expectValue: "max",
+			expectErr:   false,
+		},
+		// A5c: Legacy Claude model should clear stale output_config when converting adaptive input
+		{
+			name:         "A5c",
+			from:         "claude",
+			to:           "claude",
+			model:        "claude-budget-model",
+			inputJSON:    `{"model":"claude-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+			expectField:  "thinking.budget_tokens",
+			expectValue:  "128000",
+			absentFields: []string{"output_config"},
+			expectErr:    false,
+		},
+		// A5d: User-defined Claude budget mode should clear stale output_config
+		{
+			name:         "A5d",
+			from:         "claude",
+			to:           "claude",
+			model:        "user-defined-model(8192)",
+			inputJSON:    `{"model":"user-defined-model(8192)","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+			expectField:  "thinking.budget_tokens",
+			expectValue:  "8192",
+			absentFields: []string{"output_config"},
+			expectErr:    false,
 		},
 		// A6: Claude adaptive to Antigravity budget model -> max budget
 		{
@@ -2719,6 +2755,41 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 	runThinkingTests(t, cases)
 }
 
+// TestThinkingClaudeAdaptiveXHighAlias verifies backward compatibility for xhigh inputs.
+// Adaptive Claude models should normalize xhigh to max instead of returning validation errors.
+func TestThinkingClaudeAdaptiveXHighAlias(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	uid := fmt.Sprintf("thinking-e2e-claude-adaptive-alias-%d", time.Now().UnixNano())
+
+	reg.RegisterClient(uid, "test", getTestModels())
+	defer reg.UnregisterClient(uid)
+
+	cases := []thinkingTestCase{
+		{
+			name:        "AliasBody",
+			from:        "claude",
+			to:          "claude",
+			model:       "claude-adaptive-model",
+			inputJSON:   `{"model":"claude-adaptive-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
+			expectField: "output_config.effort",
+			expectValue: "max",
+			expectErr:   false,
+		},
+		{
+			name:        "AliasSuffix",
+			from:        "claude",
+			to:          "claude",
+			model:       "claude-adaptive-model(xhigh)",
+			inputJSON:   `{"model":"claude-adaptive-model(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "output_config.effort",
+			expectValue: "max",
+			expectErr:   false,
+		},
+	}
+
+	runThinkingTests(t, cases)
+}
+
 // getTestModels returns the shared model definitions for E2E tests.
 func getTestModels() []*registry.ModelInfo {
 	return []*registry.ModelInfo{
@@ -2766,6 +2837,16 @@ func getTestModels() []*registry.ModelInfo {
 			Type:        "claude",
 			DisplayName: "Claude Budget Model",
 			Thinking:    &registry.ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:                  "claude-adaptive-model",
+			Object:              "model",
+			Created:             1700000000,
+			OwnedBy:             "test",
+			Type:                "claude",
+			DisplayName:         "Claude Adaptive Model",
+			MaxCompletionTokens: 128000,
+			Thinking:            &registry.ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true, AdaptiveAllowed: true, Levels: []string{"low", "medium", "high", "max"}},
 		},
 		{
 			ID:          "antigravity-budget-model",
@@ -2890,6 +2971,12 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 			}
 			if actualValue != tc.expectValue {
 				t.Fatalf("field %s: expected %q, got %q, body=%s", tc.expectField, tc.expectValue, actualValue, string(body))
+			}
+
+			for _, absentField := range tc.absentFields {
+				if gjson.GetBytes(body, absentField).Exists() {
+					t.Fatalf("expected field %s to be absent, body=%s", absentField, string(body))
+				}
 			}
 
 			if tc.includeThoughts != "" && (tc.to == "gemini" || tc.to == "gemini-cli" || tc.to == "antigravity") {

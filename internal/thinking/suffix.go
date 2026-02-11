@@ -140,6 +140,8 @@ func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
 		return LevelHigh, true
 	case "xhigh":
 		return LevelXHigh, true
+	case "max":
+		return LevelMax, true
 	default:
 		return "", false
 	}

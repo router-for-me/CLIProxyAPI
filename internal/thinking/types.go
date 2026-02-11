@@ -54,6 +54,8 @@ const (
 	LevelHigh ThinkingLevel = "high"
 	// LevelXHigh sets extra-high thinking effort
 	LevelXHigh ThinkingLevel = "xhigh"
+	// LevelMax sets maximum thinking effort (Claude Opus 4.6 adaptive mode)
+	LevelMax ThinkingLevel = "max"
 )
 
 // ThinkingConfig represents a unified thinking configuration.
