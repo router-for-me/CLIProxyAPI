@@ -273,26 +273,25 @@ func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 	if !ok || raw == nil {
 		return nil
 	}
+	var stringSlice []string
 	switch v := raw.(type) {
 	case []string:
-		result := make([]string, 0, len(v))
-		for _, s := range v {
-			if trimmed := strings.TrimSpace(s); trimmed != "" {
-				result = append(result, trimmed)
-			}
-		}
-		return result
+		stringSlice = v
 	case []interface{}:
-		result := make([]string, 0, len(v))
+		stringSlice = make([]string, 0, len(v))
 		for _, item := range v {
 			if s, ok := item.(string); ok {
-				if trimmed := strings.TrimSpace(s); trimmed != "" {
-					result = append(result, trimmed)
-				}
+				stringSlice = append(stringSlice, s)
 			}
 		}
-		return result
 	default:
 		return nil
 	}
+	result := make([]string, 0, len(stringSlice))
+	for _, s := range stringSlice {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
