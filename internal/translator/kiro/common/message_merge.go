@@ -33,6 +33,13 @@ func MergeAdjacentMessages(messages []gjson.Result) []gjson.Result {
 			continue
 		}
 
+		// Don't merge assistant messages that have tool_calls - these must stay separate
+		// so that subsequent tool results can match their tool_call IDs
+		if currentRole == "assistant" && (msg.Get("tool_calls").Exists() || lastMsg.Get("tool_calls").Exists()) {
+			merged = append(merged, msg)
+			continue
+		}
+
 		if currentRole == lastRole {
 			// Merge content from current message into last message
 			mergedContent := mergeMessageContent(lastMsg, msg)
