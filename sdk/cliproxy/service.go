@@ -740,6 +740,26 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		provider = "openai-compatibility"
 	}
 	excluded := s.oauthExcludedModels(provider, authKind)
+	// Merge per-account excluded models from auth attributes (set by synthesizer)
+	if a.Attributes != nil {
+		if perAccount := strings.TrimSpace(a.Attributes["excluded_models"]); perAccount != "" {
+			parts := strings.Split(perAccount, ",")
+			seen := make(map[string]struct{}, len(excluded)+len(parts))
+			for _, e := range excluded {
+				seen[strings.ToLower(strings.TrimSpace(e))] = struct{}{}
+			}
+			for _, p := range parts {
+				seen[strings.ToLower(strings.TrimSpace(p))] = struct{}{}
+			}
+			merged := make([]string, 0, len(seen))
+			for k := range seen {
+				if k != "" {
+					merged = append(merged, k)
+				}
+			}
+			excluded = merged
+		}
+	}
 	var models []*ModelInfo
 	switch provider {
 	case "gemini":
