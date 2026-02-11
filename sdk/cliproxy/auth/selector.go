@@ -35,14 +35,14 @@ type FillFirstSelector struct{}
 // then advances to the next one. When a previously used credential recovers,
 // it won't jump back - ensuring balanced usage across all credentials.
 //
-// For mixed-provider requests, a two-level selection is used:
-// first rotate between providers (round-robin), then apply sticky
-// selection within the chosen provider. This prevents a provider
-// with many credentials from starving providers with fewer.
+// For mixed-provider requests, a two-level sticky selection is used:
+// first stick to the current provider until all its credentials are
+// exhausted (in cooldown/unavailable), then advance to the next provider.
+// Within each provider, the same sticky sequential selection applies.
 type SequentialFillSelector struct {
 	mu              sync.Mutex
 	current         map[string]string // actualProvider:model -> current auth ID
-	providerCursors map[string]int    // model -> provider rotation index
+	stickyProvider  map[string]string // model -> current provider name (sticky)
 }
 
 type blockReason int
@@ -254,8 +254,8 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 }
 
 // Pick selects credentials sequentially without jumping back to earlier ones.
-// For mixed-provider requests, it rotates between providers before applying
-// sticky selection within the chosen provider.
+// For mixed-provider requests, it sticks to the current provider until all its
+// credentials are exhausted, then advances to the next provider.
 func (s *SequentialFillSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = ctx
 	_ = opts
@@ -290,6 +290,13 @@ func (s *SequentialFillSelector) Pick(ctx context.Context, provider, model strin
 		}
 	}
 
+	// Sticky provider selection: stick to the current provider as long as it
+	// has available credentials. Only advance when the current provider is
+	// exhausted (all its credentials are in cooldown/unavailable).
+	if s.stickyProvider == nil {
+		s.stickyProvider = make(map[string]string)
+	}
+
 	// Sort provider names for deterministic ordering.
 	providers := make([]string, 0, len(groups))
 	for p := range groups {
@@ -297,13 +304,26 @@ func (s *SequentialFillSelector) Pick(ctx context.Context, provider, model strin
 	}
 	sort.Strings(providers)
 
-	// Rotate between providers.
-	if s.providerCursors == nil {
-		s.providerCursors = make(map[string]int)
+	// If we have a sticky provider and it still has available credentials, use it.
+	if cp := s.stickyProvider[model]; cp != "" {
+		if auths, ok := groups[cp]; ok {
+			return s.pickSticky(cp, model, auths), nil
+		}
+		// Current provider exhausted, advance to the next one.
+		next := providers[0]
+		for _, p := range providers {
+			if p > cp {
+				next = p
+				break
+			}
+		}
+		s.stickyProvider[model] = next
+		return s.pickSticky(next, model, groups[next]), nil
 	}
-	idx := s.providerCursors[model] % len(providers)
-	s.providerCursors[model] = idx + 1
-	return s.pickSticky(providers[idx], model, groups[providers[idx]]), nil
+
+	// First access: start with the first provider.
+	s.stickyProvider[model] = providers[0]
+	return s.pickSticky(providers[0], model, groups[providers[0]]), nil
 }
 
 // pickSticky selects a credential from the given group with sticky sequential behavior.
