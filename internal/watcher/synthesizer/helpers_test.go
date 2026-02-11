@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -197,6 +198,30 @@ func TestApplyAuthExcludedModelsMeta(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestApplyAuthExcludedModelsMeta_OAuthMergeWritesCombinedModels(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider:   "claude",
+		Attributes: make(map[string]string),
+	}
+	cfg := &config.Config{
+		OAuthExcludedModels: map[string][]string{
+			"claude": {"global-a", "shared"},
+		},
+	}
+
+	ApplyAuthExcludedModelsMeta(auth, cfg, []string{"per", "SHARED"}, "oauth")
+
+	const wantCombined = "global-a,per,shared"
+	if gotCombined := auth.Attributes["excluded_models"]; gotCombined != wantCombined {
+		t.Fatalf("expected excluded_models=%q, got %q", wantCombined, gotCombined)
+	}
+
+	expectedHash := diff.ComputeExcludedModelsHash([]string{"global-a", "per", "shared"})
+	if gotHash := auth.Attributes["excluded_models_hash"]; gotHash != expectedHash {
+		t.Fatalf("expected excluded_models_hash=%q, got %q", expectedHash, gotHash)
 	}
 }
 
