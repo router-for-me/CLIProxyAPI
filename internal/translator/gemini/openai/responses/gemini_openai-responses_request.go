@@ -117,19 +117,29 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			switch itemType {
 			case "message":
 				if strings.EqualFold(itemRole, "system") {
-					if contentArray := item.Get("content"); contentArray.Exists() && contentArray.IsArray() {
-						var builder strings.Builder
-						contentArray.ForEach(func(_, contentItem gjson.Result) bool {
-							text := contentItem.Get("text").String()
-							if builder.Len() > 0 && text != "" {
-								builder.WriteByte('\n')
-							}
-							builder.WriteString(text)
-							return true
-						})
-						if !gjson.Get(out, "system_instruction").Exists() {
-							systemInstr := `{"parts":[{"text":""}]}`
-							systemInstr, _ = sjson.Set(systemInstr, "parts.0.text", builder.String())
+					if contentArray := item.Get("content"); contentArray.Exists() {
+						systemInstr := ""
+						if systemInstructionResult := gjson.Get(out, "system_instruction"); systemInstructionResult.Exists() {
+							systemInstr = systemInstructionResult.Raw
+						} else {
+							systemInstr = `{"parts":[]}`
+						}
+
+						if contentArray.IsArray() {
+							contentArray.ForEach(func(_, contentItem gjson.Result) bool {
+								part := `{"text":""}`
+								text := contentItem.Get("text").String()
+								part, _ = sjson.Set(part, "text", text)
+								systemInstr, _ = sjson.SetRaw(systemInstr, "parts.-1", part)
+								return true
+							})
+						} else if contentArray.Type == gjson.String {
+							part := `{"text":""}`
+							part, _ = sjson.Set(part, "text", contentArray.String())
+							systemInstr, _ = sjson.SetRaw(systemInstr, "parts.-1", part)
+						}
+
+						if systemInstr != `{"parts":[]}` {
 							out, _ = sjson.SetRaw(out, "system_instruction", systemInstr)
 						}
 					}
@@ -236,8 +246,22 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					})
 
 					flush()
-				}
+				} else if contentArray.Type == gjson.String {
+					effRole := "user"
+					if itemRole != "" {
+						switch strings.ToLower(itemRole) {
+						case "assistant", "model":
+							effRole = "model"
+						default:
+							effRole = strings.ToLower(itemRole)
+						}
+					}
 
+					one := `{"role":"","parts":[{"text":""}]}`
+					one, _ = sjson.Set(one, "role", effRole)
+					one, _ = sjson.Set(one, "parts.0.text", contentArray.String())
+					out, _ = sjson.SetRaw(out, "contents.-1", one)
+				}
 			case "function_call":
 				// Handle function calls - convert to model message with functionCall
 				name := item.Get("name").String()
