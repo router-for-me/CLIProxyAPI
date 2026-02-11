@@ -27,6 +27,10 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	FinishReason string
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
+	// Web search results accumulated from web_search_tool_result content blocks
+	WebSearchResultsRaw []string
+	// Citations accumulated from citations_delta events
+	CitationsRaw []string
 }
 
 // ToolCallAccumulator holds the state for accumulating tool call data
@@ -100,15 +104,19 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator == nil {
 				(*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
 			}
+			// Reset web search accumulators for new message
+			(*param).(*ConvertAnthropicResponseToOpenAIParams).WebSearchResultsRaw = nil
+			(*param).(*ConvertAnthropicResponseToOpenAIParams).CitationsRaw = nil
 		}
 		return []string{template}
 
 	case "content_block_start":
-		// Start of a content block (text, tool use, or reasoning)
+		// Start of a content block (text, tool use, reasoning, server_tool_use, web_search_tool_result)
 		if contentBlock := root.Get("content_block"); contentBlock.Exists() {
 			blockType := contentBlock.Get("type").String()
 
-			if blockType == "tool_use" {
+			switch blockType {
+			case "tool_use":
 				// Start of tool call - initialize accumulator to track arguments
 				toolCallID := contentBlock.Get("id").String()
 				toolName := contentBlock.Get("name").String()
@@ -125,12 +133,27 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 				// Don't output anything yet - wait for complete tool call
 				return []string{}
+			case "web_search_tool_result":
+				// Accumulate web search results for passthrough
+				if content := contentBlock.Get("content"); content.Exists() && content.IsArray() {
+					for _, result := range content.Array() {
+						if result.Get("type").String() == "web_search_result" {
+							compacted := strings.ReplaceAll(strings.ReplaceAll(result.Raw, "\n", ""), "\r", "")
+							(*param).(*ConvertAnthropicResponseToOpenAIParams).WebSearchResultsRaw = append(
+								(*param).(*ConvertAnthropicResponseToOpenAIParams).WebSearchResultsRaw, compacted)
+						}
+					}
+				}
+				return []string{}
+			case "server_tool_use":
+				// Server-side tool use (e.g. web_search) - silently skip
+				return []string{}
 			}
 		}
 		return []string{}
 
 	case "content_block_delta":
-		// Handle content delta (text, tool use arguments, or reasoning content)
+		// Handle content delta (text, tool use arguments, reasoning, or citations)
 		hasContent := false
 		if delta := root.Get("delta"); delta.Exists() {
 			deltaType := delta.Get("type").String()
@@ -146,6 +169,15 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				// Accumulate reasoning/thinking content
 				if thinking := delta.Get("thinking"); thinking.Exists() {
 					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", thinking.String())
+					hasContent = true
+				}
+			case "citations_delta":
+				// Citation from web_search - accumulate for passthrough and emit on chunk
+				if citation := delta.Get("citation"); citation.Exists() {
+					compacted := strings.ReplaceAll(strings.ReplaceAll(citation.Raw, "\n", ""), "\r", "")
+					(*param).(*ConvertAnthropicResponseToOpenAIParams).CitationsRaw = append(
+						(*param).(*ConvertAnthropicResponseToOpenAIParams).CitationsRaw, compacted)
+					template, _ = sjson.SetRaw(template, "choices.0.delta.citations.-1", compacted)
 					hasContent = true
 				}
 			case "input_json_delta":
@@ -212,6 +244,22 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens)
 			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cacheReadInputTokens)
 		}
+
+		// Attach accumulated web search results and citations on final message_delta
+		params := (*param).(*ConvertAnthropicResponseToOpenAIParams)
+		if len(params.WebSearchResultsRaw) > 0 {
+			template, _ = sjson.SetRaw(template, "choices.0.web_search_results", "[]")
+			for _, raw := range params.WebSearchResultsRaw {
+				template, _ = sjson.SetRaw(template, "choices.0.web_search_results.-1", raw)
+			}
+		}
+		if len(params.CitationsRaw) > 0 {
+			template, _ = sjson.SetRaw(template, "choices.0.citations", "[]")
+			for _, raw := range params.CitationsRaw {
+				template, _ = sjson.SetRaw(template, "choices.0.citations.-1", raw)
+			}
+		}
+
 		return []string{template}
 
 	case "message_stop":
@@ -287,6 +335,8 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	var stopReason string
 	var contentParts []string
 	var reasoningParts []string
+	var webSearchResultsRaw []string
+	var citationsRaw []string
 	toolCallsAccumulator := make(map[int]*ToolCallAccumulator)
 
 	for _, chunk := range chunks {
@@ -306,16 +356,26 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			// Handle different content block types at the beginning
 			if contentBlock := root.Get("content_block"); contentBlock.Exists() {
 				blockType := contentBlock.Get("type").String()
-				if blockType == "thinking" {
-					// Start of thinking/reasoning content - skip for now as it's handled in delta
+				switch blockType {
+				case "thinking":
 					continue
-				} else if blockType == "tool_use" {
-					// Initialize tool call accumulator for this index
+				case "tool_use":
 					index := int(root.Get("index").Int())
 					toolCallsAccumulator[index] = &ToolCallAccumulator{
 						ID:   contentBlock.Get("id").String(),
 						Name: contentBlock.Get("name").String(),
 					}
+				case "web_search_tool_result":
+					if content := contentBlock.Get("content"); content.Exists() && content.IsArray() {
+						for _, result := range content.Array() {
+							if result.Get("type").String() == "web_search_result" {
+								compacted := strings.ReplaceAll(strings.ReplaceAll(result.Raw, "\n", ""), "\r", "")
+								webSearchResultsRaw = append(webSearchResultsRaw, compacted)
+							}
+						}
+					}
+				case "server_tool_use":
+					continue
 				}
 			}
 
@@ -333,6 +393,11 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 					// Accumulate reasoning/thinking content
 					if thinking := delta.Get("thinking"); thinking.Exists() {
 						reasoningParts = append(reasoningParts, thinking.String())
+					}
+				case "citations_delta":
+					if citation := delta.Get("citation"); citation.Exists() {
+						compacted := strings.ReplaceAll(strings.ReplaceAll(citation.Raw, "\n", ""), "\r", "")
+						citationsRaw = append(citationsRaw, compacted)
 					}
 				case "input_json_delta":
 					// Accumulate tool call arguments
@@ -426,6 +491,20 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 		}
 	} else {
 		out, _ = sjson.Set(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
+	}
+
+	// Attach web search results and citations on the choice (consistent with Gemini grounding_metadata placement)
+	if len(webSearchResultsRaw) > 0 {
+		out, _ = sjson.SetRaw(out, "choices.0.web_search_results", "[]")
+		for _, raw := range webSearchResultsRaw {
+			out, _ = sjson.SetRaw(out, "choices.0.web_search_results.-1", raw)
+		}
+	}
+	if len(citationsRaw) > 0 {
+		out, _ = sjson.SetRaw(out, "choices.0.citations", "[]")
+		for _, raw := range citationsRaw {
+			out, _ = sjson.SetRaw(out, "choices.0.citations.-1", raw)
+		}
 	}
 
 	return out

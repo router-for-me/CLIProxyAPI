@@ -36,6 +36,9 @@ type claudeToResponsesState struct {
 	InputTokens  int64
 	OutputTokens int64
 	UsageSeen    bool
+	// web search citations passthrough
+	WebSearchResultsRaw []string
+	CitationsRaw        []string
 }
 
 var dataTag = []byte("data:")
@@ -91,6 +94,8 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.FuncArgsBuf = make(map[int]*strings.Builder)
 			st.FuncNames = make(map[int]string)
 			st.FuncCallIDs = make(map[int]string)
+			st.WebSearchResultsRaw = nil
+			st.CitationsRaw = nil
 			st.InputTokens = 0
 			st.OutputTokens = 0
 			st.UsageSeen = false
@@ -172,6 +177,18 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			part, _ = sjson.Set(part, "output_index", idx)
 			out = append(out, emitEvent("response.reasoning_summary_part.added", part))
 			st.ReasoningPartAdded = true
+		} else if typ == "web_search_tool_result" {
+			// Accumulate web search results for passthrough
+			if content := cb.Get("content"); content.Exists() && content.IsArray() {
+				for _, result := range content.Array() {
+					if result.Get("type").String() == "web_search_result" {
+						compacted := strings.ReplaceAll(strings.ReplaceAll(result.Raw, "\n", ""), "\r", "")
+						st.WebSearchResultsRaw = append(st.WebSearchResultsRaw, compacted)
+					}
+				}
+			}
+		} else if typ == "server_tool_use" {
+			// Server-side tool use (e.g. web_search) - silently skip
 		}
 	case "content_block_delta":
 		d := root.Get("delta")
@@ -214,6 +231,12 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					msg, _ = sjson.Set(msg, "delta", t.String())
 					out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
 				}
+			}
+		} else if dt == "citations_delta" {
+			// Citation from web_search - accumulate for passthrough
+			if citation := d.Get("citation"); citation.Exists() {
+				compacted := strings.ReplaceAll(strings.ReplaceAll(citation.Raw, "\n", ""), "\r", "")
+				st.CitationsRaw = append(st.CitationsRaw, compacted)
 			}
 		}
 	case "content_block_stop":
@@ -425,6 +448,20 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
 			}
 		}
+		// Attach accumulated web search results and citations
+		if len(st.WebSearchResultsRaw) > 0 {
+			completed, _ = sjson.SetRaw(completed, "response.web_search_results", "[]")
+			for _, raw := range st.WebSearchResultsRaw {
+				completed, _ = sjson.SetRaw(completed, "response.web_search_results.-1", raw)
+			}
+		}
+		if len(st.CitationsRaw) > 0 {
+			completed, _ = sjson.SetRaw(completed, "response.citations", "[]")
+			for _, raw := range st.CitationsRaw {
+				completed, _ = sjson.SetRaw(completed, "response.citations.-1", raw)
+			}
+		}
+
 		out = append(out, emitEvent("response.completed", completed))
 	}
 
@@ -459,16 +496,18 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// Aggregation state
 	var (
-		responseID      string
-		createdAt       int64
-		currentMsgID    string
-		currentFCID     string
-		textBuf         strings.Builder
-		reasoningBuf    strings.Builder
-		reasoningActive bool
-		reasoningItemID string
-		inputTokens     int64
-		outputTokens    int64
+		responseID          string
+		createdAt           int64
+		currentMsgID        string
+		currentFCID         string
+		textBuf             strings.Builder
+		reasoningBuf        strings.Builder
+		reasoningActive     bool
+		reasoningItemID     string
+		inputTokens         int64
+		outputTokens        int64
+		webSearchResultsRaw []string
+		citationsRaw        []string
 	)
 
 	// Per-index tool call aggregation
@@ -516,6 +555,17 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			case "thinking":
 				reasoningActive = true
 				reasoningItemID = fmt.Sprintf("rs_%s_%d", responseID, idx)
+			case "web_search_tool_result":
+				if content := cb.Get("content"); content.Exists() && content.IsArray() {
+					for _, result := range content.Array() {
+						if result.Get("type").String() == "web_search_result" {
+							compacted := strings.ReplaceAll(strings.ReplaceAll(result.Raw, "\n", ""), "\r", "")
+							webSearchResultsRaw = append(webSearchResultsRaw, compacted)
+						}
+					}
+				}
+			case "server_tool_use":
+				continue
 			}
 
 		case "content_block_delta":
@@ -542,6 +592,11 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 					if t := d.Get("thinking"); t.Exists() {
 						reasoningBuf.WriteString(t.String())
 					}
+				}
+			case "citations_delta":
+				if citation := d.Get("citation"); citation.Exists() {
+					compacted := strings.ReplaceAll(strings.ReplaceAll(citation.Raw, "\n", ""), "\r", "")
+					citationsRaw = append(citationsRaw, compacted)
 				}
 			}
 
@@ -681,6 +736,20 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		reasoningTokens := int64(len(reasoningBuf.String()) / 4)
 		if reasoningTokens > 0 {
 			out, _ = sjson.Set(out, "usage.output_tokens_details.reasoning_tokens", reasoningTokens)
+		}
+	}
+
+	// Attach web search results and citations if present
+	if len(webSearchResultsRaw) > 0 {
+		out, _ = sjson.SetRaw(out, "web_search_results", "[]")
+		for _, raw := range webSearchResultsRaw {
+			out, _ = sjson.SetRaw(out, "web_search_results.-1", raw)
+		}
+	}
+	if len(citationsRaw) > 0 {
+		out, _ = sjson.SetRaw(out, "citations", "[]")
+		for _, raw := range citationsRaw {
+			out, _ = sjson.SetRaw(out, "citations.-1", raw)
 		}
 	}
 

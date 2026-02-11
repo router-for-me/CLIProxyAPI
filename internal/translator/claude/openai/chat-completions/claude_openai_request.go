@@ -263,7 +263,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		hasAnthropicTools := false
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
+			toolType := tool.Get("type").String()
+			if toolType == "function" {
 				function := tool.Get("function")
 				anthropicTool := `{"name":"","description":""}`
 				anthropicTool, _ = sjson.Set(anthropicTool, "name", function.Get("name").String())
@@ -277,6 +278,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				}
 
 				out, _ = sjson.SetRaw(out, "tools.-1", anthropicTool)
+				hasAnthropicTools = true
+			} else if toolType != "" {
+				// Pass through Claude built-in tools (web_search_20250305, code_execution, etc.) as-is
+				out, _ = sjson.SetRaw(out, "tools.-1", tool.Raw)
 				hasAnthropicTools = true
 			}
 			return true
