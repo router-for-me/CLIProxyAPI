@@ -333,6 +333,9 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					anthropicTools = append(anthropicTools, gjson.Parse(anthropicTool).Value())
 					return true
 				})
+			} else if toolType := tool.Get("type").String(); toolType != "" {
+				// Pass through Claude built-in tools (web_search_20250305, code_execution, etc.) as-is
+				anthropicTools = append(anthropicTools, tool.Value())
 			}
 			return true
 		})

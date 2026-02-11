@@ -37,6 +37,10 @@ type ConvertAnthropicResponseToGeminiParams struct {
 	// Keyed by content_block index from Claude SSE events
 	ToolUseNames map[int]string           // function/tool name per block index
 	ToolUseArgs  map[int]*strings.Builder // accumulates partial_json across deltas
+
+	// Web search citations passthrough
+	WebSearchResultsRaw []string
+	CitationsRaw        []string
 }
 
 // ConvertClaudeResponseToGemini converts Claude Code streaming response format to Gemini format.
@@ -97,12 +101,17 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 			(*param).(*ConvertAnthropicResponseToGeminiParams).ResponseID = message.Get("id").String()
 			(*param).(*ConvertAnthropicResponseToGeminiParams).Model = message.Get("model").String()
 		}
+		// Reset web search accumulators for new message
+		(*param).(*ConvertAnthropicResponseToGeminiParams).WebSearchResultsRaw = nil
+		(*param).(*ConvertAnthropicResponseToGeminiParams).CitationsRaw = nil
 		return []string{}
 
 	case "content_block_start":
 		// Start of a content block - record tool_use name by index for functionCall assembly
 		if cb := root.Get("content_block"); cb.Exists() {
-			if cb.Get("type").String() == "tool_use" {
+			blockType := cb.Get("type").String()
+			switch blockType {
+			case "tool_use":
 				idx := int(root.Get("index").Int())
 				if (*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames == nil {
 					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames = map[int]string{}
@@ -110,6 +119,18 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 				if name := cb.Get("name"); name.Exists() {
 					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseNames[idx] = name.String()
 				}
+			case "web_search_tool_result":
+				if content := cb.Get("content"); content.Exists() && content.IsArray() {
+					for _, result := range content.Array() {
+						if result.Get("type").String() == "web_search_result" {
+							compacted := strings.ReplaceAll(strings.ReplaceAll(result.Raw, "\n", ""), "\r", "")
+							(*param).(*ConvertAnthropicResponseToGeminiParams).WebSearchResultsRaw = append(
+								(*param).(*ConvertAnthropicResponseToGeminiParams).WebSearchResultsRaw, compacted)
+						}
+					}
+				}
+			case "server_tool_use":
+				// silently skip
 			}
 		}
 		return []string{}
@@ -148,6 +169,14 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 				}
 				if pj := delta.Get("partial_json"); pj.Exists() {
 					b.WriteString(pj.String())
+				}
+				return []string{}
+			case "citations_delta":
+				// Citation from web_search - accumulate for passthrough
+				if citation := delta.Get("citation"); citation.Exists() {
+					compacted := strings.ReplaceAll(strings.ReplaceAll(citation.Raw, "\n", ""), "\r", "")
+					(*param).(*ConvertAnthropicResponseToGeminiParams).CitationsRaw = append(
+						(*param).(*ConvertAnthropicResponseToGeminiParams).CitationsRaw, compacted)
 				}
 				return []string{}
 			}
@@ -241,6 +270,25 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 		}
 		template, _ = sjson.Set(template, "candidates.0.finishReason", "STOP")
 
+		// Attach accumulated web search results and citations as groundingMetadata
+		params := (*param).(*ConvertAnthropicResponseToGeminiParams)
+		if len(params.WebSearchResultsRaw) > 0 || len(params.CitationsRaw) > 0 {
+			gm := `{}`
+			if len(params.WebSearchResultsRaw) > 0 {
+				gm, _ = sjson.SetRaw(gm, "webSearchResults", "[]")
+				for _, raw := range params.WebSearchResultsRaw {
+					gm, _ = sjson.SetRaw(gm, "webSearchResults.-1", raw)
+				}
+			}
+			if len(params.CitationsRaw) > 0 {
+				gm, _ = sjson.SetRaw(gm, "citations", "[]")
+				for _, raw := range params.CitationsRaw {
+					gm, _ = sjson.SetRaw(gm, "citations.-1", raw)
+				}
+			}
+			template, _ = sjson.SetRaw(template, "candidates.0.groundingMetadata", gm)
+		}
+
 		return []string{template}
 	case "message_stop":
 		// Final message with usage information - no additional output needed
@@ -315,6 +363,8 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 	var finalUsageJSON string
 	var responseID string
 	var createdAt int64
+	var webSearchResultsRaw []string
+	var citationsRaw []string
 
 	for _, eventData := range streamingEvents {
 		if len(eventData) == 0 {
@@ -341,14 +391,28 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 			// Prepare for content block; record tool_use name by index for later functionCall assembly
 			idx := int(root.Get("index").Int())
 			if cb := root.Get("content_block"); cb.Exists() {
-				if cb.Get("type").String() == "tool_use" {
+				blockType := cb.Get("type").String()
+				switch blockType {
+				case "tool_use":
 					if newParam.ToolUseNames == nil {
 						newParam.ToolUseNames = map[int]string{}
 					}
 					if name := cb.Get("name"); name.Exists() {
 						newParam.ToolUseNames[idx] = name.String()
 					}
+				case "web_search_tool_result":
+					if content := cb.Get("content"); content.Exists() && content.IsArray() {
+						for _, result := range content.Array() {
+							if result.Get("type").String() == "web_search_result" {
+								compacted := strings.ReplaceAll(strings.ReplaceAll(result.Raw, "\n", ""), "\r", "")
+								webSearchResultsRaw = append(webSearchResultsRaw, compacted)
+							}
+						}
+					}
+				case "server_tool_use":
+					// silently skip
 				}
+				_ = idx
 			}
 			continue
 
@@ -382,6 +446,11 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 					}
 					if pj := delta.Get("partial_json"); pj.Exists() {
 						newParam.ToolUseArgs[idx].WriteString(pj.String())
+					}
+				case "citations_delta":
+					if citation := delta.Get("citation"); citation.Exists() {
+						compacted := strings.ReplaceAll(strings.ReplaceAll(citation.Raw, "\n", ""), "\r", "")
+						citationsRaw = append(citationsRaw, compacted)
 					}
 				}
 			}
@@ -480,6 +549,24 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 	// Set usage metadata
 	if finalUsageJSON != "" {
 		template, _ = sjson.SetRaw(template, "usageMetadata", finalUsageJSON)
+	}
+
+	// Attach web search results and citations as groundingMetadata
+	if len(webSearchResultsRaw) > 0 || len(citationsRaw) > 0 {
+		gm := `{}`
+		if len(webSearchResultsRaw) > 0 {
+			gm, _ = sjson.SetRaw(gm, "webSearchResults", "[]")
+			for _, raw := range webSearchResultsRaw {
+				gm, _ = sjson.SetRaw(gm, "webSearchResults.-1", raw)
+			}
+		}
+		if len(citationsRaw) > 0 {
+			gm, _ = sjson.SetRaw(gm, "citations", "[]")
+			for _, raw := range citationsRaw {
+				gm, _ = sjson.SetRaw(gm, "citations.-1", raw)
+			}
+		}
+		template, _ = sjson.SetRaw(template, "candidates.0.groundingMetadata", gm)
 	}
 
 	return template
