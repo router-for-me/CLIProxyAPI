@@ -638,6 +638,57 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 		}
 	}
 
+	// POST-PROCESSING: Remove orphaned tool_results that have no matching tool_use
+	// in any assistant message. This happens when Claude Code compaction truncates
+	// the conversation and removes the assistant message containing the tool_use,
+	// but keeps the user message with the corresponding tool_result.
+	// Without this fix, Kiro API returns "Improperly formed request".
+	validToolUseIDs := make(map[string]bool)
+	for _, h := range history {
+		if h.AssistantResponseMessage != nil {
+			for _, tu := range h.AssistantResponseMessage.ToolUses {
+				validToolUseIDs[tu.ToolUseID] = true
+			}
+		}
+	}
+
+	// Filter orphaned tool results from history user messages
+	for i, h := range history {
+		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil {
+			ctx := h.UserInputMessage.UserInputMessageContext
+			if len(ctx.ToolResults) > 0 {
+				filtered := make([]KiroToolResult, 0, len(ctx.ToolResults))
+				for _, tr := range ctx.ToolResults {
+					if validToolUseIDs[tr.ToolUseID] {
+						filtered = append(filtered, tr)
+					} else {
+						log.Debugf("kiro: dropping orphaned tool_result in history[%d]: toolUseId=%s (no matching tool_use)", i, tr.ToolUseID)
+					}
+				}
+				ctx.ToolResults = filtered
+				if len(ctx.ToolResults) == 0 && len(ctx.Tools) == 0 {
+					h.UserInputMessage.UserInputMessageContext = nil
+				}
+			}
+		}
+	}
+
+	// Filter orphaned tool results from current message
+	if len(currentToolResults) > 0 {
+		filtered := make([]KiroToolResult, 0, len(currentToolResults))
+		for _, tr := range currentToolResults {
+			if validToolUseIDs[tr.ToolUseID] {
+				filtered = append(filtered, tr)
+			} else {
+				log.Debugf("kiro: dropping orphaned tool_result in currentMessage: toolUseId=%s (no matching tool_use)", tr.ToolUseID)
+			}
+		}
+		if len(filtered) != len(currentToolResults) {
+			log.Infof("kiro: dropped %d orphaned tool_result(s) from currentMessage (compaction artifact)", len(currentToolResults)-len(filtered))
+		}
+		currentToolResults = filtered
+	}
+
 	return history, currentUserMsg, currentToolResults
 }
 
