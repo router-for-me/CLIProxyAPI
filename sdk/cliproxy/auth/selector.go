@@ -34,9 +34,15 @@ type FillFirstSelector struct{}
 // this selector "sticks" to the current credential until it becomes unavailable,
 // then advances to the next one. When a previously used credential recovers,
 // it won't jump back - ensuring balanced usage across all credentials.
+//
+// For mixed-provider requests, a two-level selection is used:
+// first rotate between providers (round-robin), then apply sticky
+// selection within the chosen provider. This prevents a provider
+// with many credentials from starving providers with fewer.
 type SequentialFillSelector struct {
-	mu      sync.Mutex
-	current map[string]string // provider:model -> current auth ID
+	mu              sync.Mutex
+	current         map[string]string // actualProvider:model -> current auth ID
+	providerCursors map[string]int    // model -> provider rotation index
 }
 
 type blockReason int
@@ -248,6 +254,8 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 }
 
 // Pick selects credentials sequentially without jumping back to earlier ones.
+// For mixed-provider requests, it rotates between providers before applying
+// sticky selection within the chosen provider.
 func (s *SequentialFillSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = ctx
 	_ = opts
@@ -257,40 +265,78 @@ func (s *SequentialFillSelector) Pick(ctx context.Context, provider, model strin
 		return nil, err
 	}
 
-	key := provider + ":" + model
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.current == nil {
 		s.current = make(map[string]string)
 	}
-	currentID := s.current[key]
 
-	// First access: randomly select a starting credential
-	if currentID == "" {
-		startIndex := rand.Intn(len(available))
-		s.current[key] = available[startIndex].ID
-		return available[startIndex], nil
+	// Single provider path: flat sticky selection.
+	if provider != "mixed" {
+		return s.pickSticky(provider, model, available), nil
 	}
 
-	// Sticky: if current credential is still available, keep using it
+	// Mixed provider path: group by actual provider.
+	groups := make(map[string][]*Auth)
 	for _, auth := range available {
-		if auth.ID == currentID {
-			return auth, nil
+		groups[auth.Provider] = append(groups[auth.Provider], auth)
+	}
+
+	// Single actual provider in the mix: no rotation needed.
+	if len(groups) == 1 {
+		for p := range groups {
+			return s.pickSticky(p, model, groups[p]), nil
 		}
 	}
 
-	// Advance: find the first credential with ID > currentID
+	// Sort provider names for deterministic ordering.
+	providers := make([]string, 0, len(groups))
+	for p := range groups {
+		providers = append(providers, p)
+	}
+	sort.Strings(providers)
+
+	// Rotate between providers.
+	if s.providerCursors == nil {
+		s.providerCursors = make(map[string]int)
+	}
+	idx := s.providerCursors[model] % len(providers)
+	s.providerCursors[model] = idx + 1
+	return s.pickSticky(providers[idx], model, groups[providers[idx]]), nil
+}
+
+// pickSticky selects a credential from the given group with sticky sequential behavior.
+// Must be called with s.mu held.
+func (s *SequentialFillSelector) pickSticky(provider, model string, available []*Auth) *Auth {
+	key := provider + ":" + model
+	currentID := s.current[key]
+
+	// First access: randomly select a starting credential.
+	if currentID == "" {
+		i := rand.Intn(len(available))
+		s.current[key] = available[i].ID
+		return available[i]
+	}
+
+	// Sticky: if current credential is still available, keep using it.
+	for _, auth := range available {
+		if auth.ID == currentID {
+			return auth
+		}
+	}
+
+	// Advance: find the first credential with ID > currentID.
 	for _, auth := range available {
 		if auth.ID > currentID {
 			s.current[key] = auth.ID
-			return auth, nil
+			return auth
 		}
 	}
 
-	// New round: all subsequent credentials unavailable, start from beginning
+	// Wrap around: all subsequent credentials unavailable, start from beginning.
 	s.current[key] = available[0].ID
-	return available[0], nil
+	return available[0]
 }
 
 // MaxRetryAttempts implements RetryLimiter.

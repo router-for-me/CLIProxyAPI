@@ -91,6 +91,11 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
+// RetryLimiter may be implemented by a Selector to cap retry attempts.
+type RetryLimiter interface {
+	MaxRetryAttempts() int
+}
+
 // Hook captures lifecycle callbacks for observing auth changes.
 type Hook interface {
 	// OnAuthRegistered fires when a new auth is registered.
@@ -1049,7 +1054,13 @@ func (m *Manager) retrySettings() (int, time.Duration) {
 	if m == nil {
 		return 0, 0
 	}
-	return int(m.requestRetry.Load()), time.Duration(m.maxRetryInterval.Load())
+	retries := int(m.requestRetry.Load())
+	if rl, ok := m.selector.(RetryLimiter); ok {
+		if v := rl.MaxRetryAttempts(); v > 0 {
+			retries = v
+		}
+	}
+	return retries, time.Duration(m.maxRetryInterval.Load())
 }
 
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
@@ -1060,6 +1071,11 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 	defaultRetry := int(m.requestRetry.Load())
 	if defaultRetry < 0 {
 		defaultRetry = 0
+	}
+	if rl, ok := m.selector.(RetryLimiter); ok {
+		if v := rl.MaxRetryAttempts(); v > 0 {
+			defaultRetry = v
+		}
 	}
 	providerSet := make(map[string]struct{}, len(providers))
 	for i := range providers {
