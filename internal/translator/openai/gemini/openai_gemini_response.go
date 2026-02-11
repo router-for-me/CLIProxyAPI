@@ -24,6 +24,8 @@ type ConvertOpenAIResponseToGeminiParams struct {
 	ContentAccumulator strings.Builder
 	// Track if this is the first chunk
 	IsFirstChunk bool
+	// Accumulated annotations (url_citation) from OpenAI web search
+	AnnotationsRaw []string
 }
 
 // ToolCallAccumulator holds the state for accumulating tool call data
@@ -146,6 +148,15 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 				chunkOutputs = append(chunkOutputs, contentTemplate)
 			}
 
+			// Handle annotations (url_citation from web search)
+			if annotations := delta.Get("annotations"); annotations.Exists() && annotations.IsArray() {
+				annotations.ForEach(func(_, ann gjson.Result) bool {
+					compacted := strings.ReplaceAll(strings.ReplaceAll(ann.Raw, "\n", ""), "\r", "")
+					(*param).(*ConvertOpenAIResponseToGeminiParams).AnnotationsRaw = append((*param).(*ConvertOpenAIResponseToGeminiParams).AnnotationsRaw, compacted)
+					return true
+				})
+			}
+
 			if len(chunkOutputs) > 0 {
 				results = append(results, chunkOutputs...)
 				return true
@@ -222,6 +233,16 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 					// Clear accumulators
 					(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
+				}
+
+				// Attach accumulated annotations as groundingMetadata
+				if len((*param).(*ConvertOpenAIResponseToGeminiParams).AnnotationsRaw) > 0 {
+					gm := `{}`
+					gm, _ = sjson.SetRaw(gm, "citations", "[]")
+					for _, raw := range (*param).(*ConvertOpenAIResponseToGeminiParams).AnnotationsRaw {
+						gm, _ = sjson.SetRaw(gm, "citations.-1", raw)
+					}
+					template, _ = sjson.SetRaw(template, "candidates.0.groundingMetadata", gm)
 				}
 
 				results = append(results, template)
@@ -598,6 +619,18 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
 				out, _ = sjson.Set(out, "candidates.0.finishReason", geminiFinishReason)
+			}
+
+			// Handle annotations as groundingMetadata
+			if annotations := message.Get("annotations"); annotations.Exists() && annotations.IsArray() && len(annotations.Array()) > 0 {
+				gm := `{}`
+				gm, _ = sjson.SetRaw(gm, "citations", "[]")
+				annotations.ForEach(func(_, ann gjson.Result) bool {
+					compacted := strings.ReplaceAll(strings.ReplaceAll(ann.Raw, "\n", ""), "\r", "")
+					gm, _ = sjson.SetRaw(gm, "citations.-1", compacted)
+					return true
+				})
+				out, _ = sjson.SetRaw(out, "candidates.0.groundingMetadata", gm)
 			}
 
 			// Set index
