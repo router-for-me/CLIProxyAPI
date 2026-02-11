@@ -17,6 +17,9 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// remoteWebSearchDescription is a minimal fallback for when dynamic fetch from MCP tools/list hasn't completed yet.
+const remoteWebSearchDescription = "WebSearch looks up information outside the model's training data. Supports multiple queries to gather comprehensive information."
+
 // Kiro API request structs - field order determines JSON key order
 
 // KiroPayload is the top-level request structure for Kiro API
@@ -219,26 +222,7 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	}
 
 	// Convert Claude tools to Kiro format
-	kiroTools, hasWebSearch := convertClaudeToolsToKiro(tools)
-
-	// If web_search was requested but filtered, inject alternative hint
-	if hasWebSearch {
-		webSearchHint := `[CRITICAL WEB ACCESS INSTRUCTION]
-You have the Fetch/read_url_content tool available. When the user asks about current events, weather, news, or any information that requires web access:
-- DO NOT say you cannot search the web
-- DO NOT refuse to help with web-related queries
-- IMMEDIATELY use the Fetch tool to access relevant URLs
-- Use well-known official websites, documentation sites, or API endpoints
-- Construct appropriate URLs based on the query context
-
-IMPORTANT: Always attempt to fetch information FIRST before declining. You CAN access the web via Fetch.`
-		if systemPrompt != "" {
-			systemPrompt += "\n" + webSearchHint
-		} else {
-			systemPrompt = webSearchHint
-		}
-		log.Infof("kiro: injected web_search alternative hint (tool was filtered)")
-	}
+	kiroTools := convertClaudeToolsToKiro(tools)
 
 	// Thinking mode implementation:
 	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
@@ -527,27 +511,15 @@ func ensureKiroInputSchema(parameters interface{}) interface{} {
 	}
 }
 
-// convertClaudeToolsToKiro converts Claude tools to Kiro format.
-// Returns the converted tools and a boolean indicating if web_search was filtered.
-func convertClaudeToolsToKiro(tools gjson.Result) ([]KiroToolWrapper, bool) {
+// convertClaudeToolsToKiro converts Claude tools to Kiro format
+func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
-	hasWebSearch := false
 	if !tools.IsArray() {
-		return kiroTools, hasWebSearch
+		return kiroTools
 	}
 
 	for _, tool := range tools.Array() {
 		name := tool.Get("name").String()
-
-		// Filter out web_search/websearch tools (Kiro API doesn't support them)
-		// This matches the behavior in AIClient-2-API/claude-kiro.js
-		nameLower := strings.ToLower(name)
-		if nameLower == "web_search" || nameLower == "websearch" {
-			log.Debugf("kiro: skipping unsupported tool: %s", name)
-			hasWebSearch = true
-			continue
-		}
-
 		description := tool.Get("description").String()
 		inputSchemaResult := tool.Get("input_schema")
 		var inputSchema interface{}
@@ -567,6 +539,18 @@ func convertClaudeToolsToKiro(tools gjson.Result) ([]KiroToolWrapper, bool) {
 		if strings.TrimSpace(description) == "" {
 			description = fmt.Sprintf("Tool: %s", name)
 			log.Debugf("kiro: tool '%s' has empty description, using default: %s", name, description)
+		}
+
+		// Rename web_search → remote_web_search for Kiro API compatibility
+		if name == "web_search" {
+			name = "remote_web_search"
+			// Prefer dynamically fetched description, fall back to hardcoded constant
+			if cached := GetWebSearchDescription(); cached != "" {
+				description = cached
+			} else {
+				description = remoteWebSearchDescription
+			}
+			log.Debugf("kiro: renamed tool web_search → remote_web_search")
 		}
 
 		// Truncate long descriptions (individual tool limit)
@@ -591,7 +575,7 @@ func convertClaudeToolsToKiro(tools gjson.Result) ([]KiroToolWrapper, bool) {
 	// This prevents 500 errors when Claude Code sends too many tools
 	kiroTools = compressToolsIfNeeded(kiroTools)
 
-	return kiroTools, hasWebSearch
+	return kiroTools
 }
 
 // processMessages processes Claude messages and builds Kiro history
@@ -652,6 +636,57 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 				})
 			}
 		}
+	}
+
+	// POST-PROCESSING: Remove orphaned tool_results that have no matching tool_use
+	// in any assistant message. This happens when Claude Code compaction truncates
+	// the conversation and removes the assistant message containing the tool_use,
+	// but keeps the user message with the corresponding tool_result.
+	// Without this fix, Kiro API returns "Improperly formed request".
+	validToolUseIDs := make(map[string]bool)
+	for _, h := range history {
+		if h.AssistantResponseMessage != nil {
+			for _, tu := range h.AssistantResponseMessage.ToolUses {
+				validToolUseIDs[tu.ToolUseID] = true
+			}
+		}
+	}
+
+	// Filter orphaned tool results from history user messages
+	for i, h := range history {
+		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil {
+			ctx := h.UserInputMessage.UserInputMessageContext
+			if len(ctx.ToolResults) > 0 {
+				filtered := make([]KiroToolResult, 0, len(ctx.ToolResults))
+				for _, tr := range ctx.ToolResults {
+					if validToolUseIDs[tr.ToolUseID] {
+						filtered = append(filtered, tr)
+					} else {
+						log.Debugf("kiro: dropping orphaned tool_result in history[%d]: toolUseId=%s (no matching tool_use)", i, tr.ToolUseID)
+					}
+				}
+				ctx.ToolResults = filtered
+				if len(ctx.ToolResults) == 0 && len(ctx.Tools) == 0 {
+					h.UserInputMessage.UserInputMessageContext = nil
+				}
+			}
+		}
+	}
+
+	// Filter orphaned tool results from current message
+	if len(currentToolResults) > 0 {
+		filtered := make([]KiroToolResult, 0, len(currentToolResults))
+		for _, tr := range currentToolResults {
+			if validToolUseIDs[tr.ToolUseID] {
+				filtered = append(filtered, tr)
+			} else {
+				log.Debugf("kiro: dropping orphaned tool_result in currentMessage: toolUseId=%s (no matching tool_use)", tr.ToolUseID)
+			}
+		}
+		if len(filtered) != len(currentToolResults) {
+			log.Infof("kiro: dropped %d orphaned tool_result(s) from currentMessage (compaction artifact)", len(currentToolResults)-len(filtered))
+		}
+		currentToolResults = filtered
 	}
 
 	return history, currentUserMsg, currentToolResults
@@ -874,6 +909,11 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 						inputMap[key.String()] = value.Value()
 						return true
 					})
+				}
+
+				// Rename web_search → remote_web_search to match convertClaudeToolsToKiro
+				if toolName == "web_search" {
+					toolName = "remote_web_search"
 				}
 
 				toolUses = append(toolUses, KiroToolUse{
