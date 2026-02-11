@@ -33,18 +33,17 @@ func MergeAdjacentMessages(messages []gjson.Result) []gjson.Result {
 			continue
 		}
 
-		// Don't merge assistant messages that have tool_calls - these must stay separate
-		// so that subsequent tool results can match their tool_call IDs
-		if currentRole == "assistant" && (msg.Get("tool_calls").Exists() || lastMsg.Get("tool_calls").Exists()) {
-			merged = append(merged, msg)
-			continue
-		}
-
 		if currentRole == lastRole {
 			// Merge content from current message into last message
 			mergedContent := mergeMessageContent(lastMsg, msg)
-			// Create a new merged message JSON
-			mergedMsg := createMergedMessage(lastRole, mergedContent)
+			var mergedToolCalls []interface{}
+			if currentRole == "assistant" {
+				// Preserve assistant tool_calls when adjacent assistant messages are merged.
+				mergedToolCalls = mergeToolCalls(lastMsg.Get("tool_calls"), msg.Get("tool_calls"))
+			}
+
+			// Create a new merged message JSON.
+			mergedMsg := createMergedMessage(lastRole, mergedContent, mergedToolCalls)
 			merged[len(merged)-1] = gjson.Parse(mergedMsg)
 		} else {
 			merged = append(merged, msg)
@@ -128,12 +127,34 @@ func blockToMap(block gjson.Result) map[string]interface{} {
 	return result
 }
 
-// createMergedMessage creates a JSON string for a merged message
-func createMergedMessage(role string, content string) string {
+// createMergedMessage creates a JSON string for a merged message.
+// toolCalls is optional and only emitted for assistant role.
+func createMergedMessage(role string, content string, toolCalls []interface{}) string {
 	msg := map[string]interface{}{
 		"role":    role,
 		"content": json.RawMessage(content),
 	}
+	if role == "assistant" && len(toolCalls) > 0 {
+		msg["tool_calls"] = toolCalls
+	}
 	result, _ := json.Marshal(msg)
 	return string(result)
+}
+
+// mergeToolCalls combines tool_calls from two assistant messages while preserving order.
+func mergeToolCalls(tc1, tc2 gjson.Result) []interface{} {
+	var merged []interface{}
+
+	if tc1.IsArray() {
+		for _, tc := range tc1.Array() {
+			merged = append(merged, tc.Value())
+		}
+	}
+	if tc2.IsArray() {
+		for _, tc := range tc2.Array() {
+			merged = append(merged, tc.Value())
+		}
+	}
+
+	return merged
 }
