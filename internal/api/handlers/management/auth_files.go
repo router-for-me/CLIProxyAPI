@@ -2282,23 +2282,8 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 // PopulateAuthContext extracts request info and adds it to the context
 func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
 	info := &coreauth.RequestInfo{
-		Query:   make(map[string]string),
-		Headers: make(map[string]string),
+		Query:   c.Request.URL.Query(),
+		Headers: c.Request.Header,
 	}
-
-	// Capture all query parameters, joining multiple values with a comma.
-	for k, v := range c.Request.URL.Query() {
-		if len(v) > 0 {
-			info.Query[k] = strings.Join(v, ",")
-		}
-	}
-
-	// Capture all headers, joining multiple values with a comma.
-	for k, v := range c.Request.Header {
-		if len(v) > 0 {
-			info.Headers[k] = strings.Join(v, ",")
-		}
-	}
-
 	return coreauth.WithRequestInfo(ctx, info)
 }

@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,8 +23,8 @@ type PostAuthHook func(context.Context, *Auth) error
 // RequestInfo holds information extracted from the HTTP request.
 // It is injected into the context passed to PostAuthHook.
 type RequestInfo struct {
-	Query   map[string]string
-	Headers map[string]string
+	Query   url.Values
+	Headers http.Header
 }
 
 type requestInfoKey struct{}
