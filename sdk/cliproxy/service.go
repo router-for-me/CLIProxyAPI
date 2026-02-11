@@ -740,24 +740,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		provider = "openai-compatibility"
 	}
 	excluded := s.oauthExcludedModels(provider, authKind)
-	// Merge per-account excluded models from auth attributes (set by synthesizer)
+	// The synthesizer pre-merges per-account and global exclusions into the "excluded_models" attribute.
+	// If this attribute is present, it represents the complete list of exclusions and overrides the global config.
 	if a.Attributes != nil {
-		if perAccount := strings.TrimSpace(a.Attributes["excluded_models"]); perAccount != "" {
-			parts := strings.Split(perAccount, ",")
-			seen := make(map[string]struct{}, len(excluded)+len(parts))
-			for _, e := range excluded {
-				seen[strings.ToLower(strings.TrimSpace(e))] = struct{}{}
-			}
-			for _, p := range parts {
-				seen[strings.ToLower(strings.TrimSpace(p))] = struct{}{}
-			}
-			merged := make([]string, 0, len(seen))
-			for k := range seen {
-				if k != "" {
-					merged = append(merged, k)
-				}
-			}
-			excluded = merged
+		if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
+			excluded = strings.Split(val, ",")
 		}
 	}
 	var models []*ModelInfo
