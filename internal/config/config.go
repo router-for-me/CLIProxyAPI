@@ -736,8 +736,32 @@ func payloadRawString(value any) ([]byte, bool) {
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
 // It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
 // allows multiple aliases per upstream name, and ensures aliases are unique within each channel.
+// It also injects default aliases for channels that have built-in defaults (e.g., kiro)
+// when no user-configured aliases exist for those channels.
 func (cfg *Config) SanitizeOAuthModelAlias() {
-	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
+	if cfg == nil {
+		return
+	}
+
+	// Inject default Kiro aliases if no user-configured kiro aliases exist
+	if cfg.OAuthModelAlias == nil {
+		cfg.OAuthModelAlias = make(map[string][]OAuthModelAlias)
+	}
+	if _, hasKiro := cfg.OAuthModelAlias["kiro"]; !hasKiro {
+		// Check case-insensitive too
+		found := false
+		for k := range cfg.OAuthModelAlias {
+			if strings.EqualFold(strings.TrimSpace(k), "kiro") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
+		}
+	}
+
+	if len(cfg.OAuthModelAlias) == 0 {
 		return
 	}
 	out := make(map[string][]OAuthModelAlias, len(cfg.OAuthModelAlias))
