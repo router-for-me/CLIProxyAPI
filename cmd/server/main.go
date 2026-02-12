@@ -445,7 +445,7 @@ func main() {
 	}
 
 	// Register built-in access providers before constructing services.
-	configaccess.Register()
+	configaccess.Register(&cfg.SDKConfig)
 
 	// Handle different command modes based on the provided flags.
 

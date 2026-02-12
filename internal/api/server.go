@@ -1033,14 +1033,10 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 			return
 		}
 
-		switch {
-		case errors.Is(err, sdkaccess.ErrNoCredentials):
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Missing API key"})
-		case errors.Is(err, sdkaccess.ErrInvalidCredential):
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
-		default:
+		statusCode := err.HTTPStatusCode()
+		if statusCode >= http.StatusInternalServerError {
 			log.Errorf("authentication middleware error: %v", err)
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Authentication service error"})
 		}
+		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
 }

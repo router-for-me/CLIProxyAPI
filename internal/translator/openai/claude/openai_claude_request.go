@@ -75,6 +75,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						out, _ = sjson.Set(out, "reasoning_effort", effort)
 					}
 				}
+			case "adaptive":
+				// Claude adaptive means "enable with max capacity"; keep it as highest level
+				// and let ApplyThinking normalize per target model capability.
+				out, _ = sjson.Set(out, "reasoning_effort", string(thinking.LevelXHigh))
 			case "disabled":
 				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
 					out, _ = sjson.Set(out, "reasoning_effort", effort)
