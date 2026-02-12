@@ -3,8 +3,6 @@ name: docker-image
 on:
   workflow_dispatch:
   push:
-    tags:
-      - v*
 
 env:
   APP_NAME: CLIProxyAPI
