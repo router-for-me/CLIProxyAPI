@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -191,7 +192,6 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
 		// Client-side cancellations are common during polling; suppress logging in this case
 		if errors.Is(err, context.Canceled) {
-			rw.WriteHeader(gin.StatusClientClosedRequest)
 			return
 		}
 		log.Errorf("amp upstream proxy error for %s %s: %v", req.Method, req.URL.Path, err)
