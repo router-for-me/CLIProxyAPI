@@ -388,8 +388,8 @@ Do NOT apologize for bad results without first attempting a re-search.
 		return claudePayload, fmt.Errorf("failed to marshal updated payload: %w", err)
 	}
 
-	log.Infof("kiro/websearch: injected tool_use+tool_result (toolUseId=%s, query=%s, messages=%d)",
-		toolUseId, query, len(messages))
+	log.Infof("kiro/websearch: injected tool_use+tool_result (toolUseId=%s, messages=%d)",
+		toolUseId, len(messages))
 
 	return result, nil
 }

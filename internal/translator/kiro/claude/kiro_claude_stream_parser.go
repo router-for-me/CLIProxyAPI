@@ -226,7 +226,7 @@ func AnalyzeBufferedStream(chunks [][]byte) BufferedStreamResult {
 							result.WebSearchQuery = q
 						}
 					}
-					log.Debugf("kiro/websearch: detected web_search tool_use, query: %s", result.WebSearchQuery)
+					log.Debugf("kiro/websearch: detected web_search tool_use")
 				}
 				currentToolName = ""
 				currentToolIndex = -1
