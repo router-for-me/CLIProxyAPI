@@ -705,6 +705,12 @@ func TestConvertClaudeRequestToAntigravity_WebSearchTool_GoogleSearchInjected(t 
 			}
 		}
 	}
+
+	// Model should be forced to gemini-2.5-flash for googleSearch compatibility
+	model := gjson.Get(outputStr, "model").String()
+	if model != "gemini-2.5-flash" {
+		t.Errorf("Model should be forced to gemini-2.5-flash for web search, got: %s", model)
+	}
 }
 
 func TestConvertClaudeRequestToAntigravity_WebSearchOnly_ToolsArrayProduced(t *testing.T) {
@@ -730,10 +736,17 @@ func TestConvertClaudeRequestToAntigravity_WebSearchOnly_ToolsArrayProduced(t *t
 	if !lastTool.Get("googleSearch").Exists() {
 		t.Errorf("Last tool should be googleSearch, got: %s", lastTool.Raw)
 	}
+
+	// Model should be forced to gemini-2.5-flash for googleSearch compatibility
+	model := gjson.Get(outputStr, "model").String()
+	if model != "gemini-2.5-flash" {
+		t.Errorf("Model should be forced to gemini-2.5-flash for web search, got: %s", model)
+	}
 }
 
 func TestConvertClaudeRequestToAntigravity_WebSearchPlusFunctionTools(t *testing.T) {
-	// Both web_search and regular function tools should coexist
+	// When both web_search and function tools exist, googleSearch should be SKIPPED
+	// because Gemini v1internal does not support mixing tool types
 	inputJSON := []byte(`{
 		"model": "claude-sonnet-4-5",
 		"messages": [],
@@ -761,16 +774,17 @@ func TestConvertClaudeRequestToAntigravity_WebSearchPlusFunctionTools(t *testing
 		t.Errorf("Expected function declaration 'get_weather', got: %s", funcDecl.Raw)
 	}
 
-	// Should have googleSearch as a separate tool entry
-	hasGoogleSearch := false
+	// googleSearch should NOT be present — Gemini does not support mixed tool types
 	for _, tool := range tools.Array() {
 		if tool.Get("googleSearch").Exists() {
-			hasGoogleSearch = true
-			break
+			t.Errorf("googleSearch should NOT be present when function tools exist, got: %s", tools.Raw)
 		}
 	}
-	if !hasGoogleSearch {
-		t.Errorf("googleSearch should be present alongside function tools, got: %s", tools.Raw)
+
+	// Model should remain unchanged (no fallback when googleSearch is skipped)
+	model := gjson.Get(outputStr, "model").String()
+	if model != "claude-sonnet-4-5" {
+		t.Errorf("Model should remain claude-sonnet-4-5 when mixed tools, got: %s", model)
 	}
 }
 
@@ -802,6 +816,12 @@ func TestConvertClaudeRequestToAntigravity_WebSearchPrefixMatching(t *testing.T)
 	if !hasGoogleSearch {
 		t.Error("googleSearch should be injected for any web_search* type prefix")
 	}
+
+	// Model should be forced to gemini-2.5-flash
+	model := gjson.Get(outputStr, "model").String()
+	if model != "gemini-2.5-flash" {
+		t.Errorf("Model should be forced to gemini-2.5-flash for web search, got: %s", model)
+	}
 }
 
 func TestConvertClaudeRequestToAntigravity_WebSearchByNameOnly(t *testing.T) {
@@ -831,6 +851,12 @@ func TestConvertClaudeRequestToAntigravity_WebSearchByNameOnly(t *testing.T) {
 	}
 	if !hasGoogleSearch {
 		t.Error("googleSearch should be injected when tool name is 'web_search'")
+	}
+
+	// Model should be forced to gemini-2.5-flash
+	model := gjson.Get(outputStr, "model").String()
+	if model != "gemini-2.5-flash" {
+		t.Errorf("Model should be forced to gemini-2.5-flash for web search, got: %s", model)
 	}
 }
 

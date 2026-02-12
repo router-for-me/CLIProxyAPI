@@ -351,11 +351,19 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	// Inject googleSearch tool when web search was detected
-	if hasWebSearch {
+	// Gemini v1internal does not support mixing googleSearch with functionDeclarations,
+	// so only inject googleSearch when there are no function tools.
+	// When googleSearch is active, force model to gemini-2.5-flash as Claude model
+	// variants do not support grounding.
+	if hasWebSearch && toolDeclCount == 0 {
+		modelName = "gemini-2.5-flash"
 		if toolsJSON == "" {
 			toolsJSON = `[]`
 		}
 		toolsJSON, _ = sjson.SetRaw(toolsJSON, "-1", `{"googleSearch":{}}`)
+	} else if hasWebSearch && toolDeclCount > 0 {
+		// Cannot mix tool types — skip googleSearch, keep function tools on original model
+		hasWebSearch = false
 	}
 
 	// Build output Gemini CLI request JSON
