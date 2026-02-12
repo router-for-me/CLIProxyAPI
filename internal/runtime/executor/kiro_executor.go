@@ -4487,7 +4487,7 @@ func (e *KiroExecutor) handleWebSearchStream(
 				select {
 				case <-ctx.Done():
 					return
-				case out <- cliproxyexecutor.StreamChunk{Payload: []byte(event.ToSSEString())}:
+				case out <- cliproxyexecutor.StreamChunk{Payload: event}:
 				}
 			}
 			contentBlockIndex += 2
