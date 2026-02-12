@@ -661,6 +661,220 @@ func TestConvertClaudeRequestToAntigravity_ThinkingOnly_NoHint(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Web Search Support
+// ============================================================================
+
+func TestConvertClaudeRequestToAntigravity_WebSearchTool_GoogleSearchInjected(t *testing.T) {
+	// web_search_20250305 tool should be detected and googleSearch injected
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Search for Go tutorials"}]}],
+		"tools": [
+			{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	// Should have tools array with googleSearch
+	tools := gjson.Get(outputStr, "request.tools")
+	if !tools.Exists() || !tools.IsArray() {
+		t.Fatal("request.tools should exist and be an array")
+	}
+
+	// googleSearch should be present
+	found := false
+	for _, tool := range tools.Array() {
+		if tool.Get("googleSearch").Exists() {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("googleSearch tool should be injected, got tools: %s", tools.Raw)
+	}
+
+	// web_search should NOT appear as a functionDeclaration
+	funcDecls := gjson.Get(outputStr, "request.tools.0.functionDeclarations")
+	if funcDecls.Exists() && funcDecls.IsArray() {
+		for _, decl := range funcDecls.Array() {
+			if decl.Get("name").String() == "web_search" {
+				t.Error("web_search should not appear as a functionDeclaration")
+			}
+		}
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_WebSearchOnly_ToolsArrayProduced(t *testing.T) {
+	// When only web_search tool is present (no function tools), tools array should still be produced
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Search the web"}]}],
+		"tools": [
+			{"type": "web_search_20250305", "name": "web_search"}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	tools := gjson.Get(outputStr, "request.tools")
+	if !tools.Exists() {
+		t.Fatal("request.tools should exist even with web_search only")
+	}
+
+	// Should contain googleSearch
+	lastTool := tools.Array()[len(tools.Array())-1]
+	if !lastTool.Get("googleSearch").Exists() {
+		t.Errorf("Last tool should be googleSearch, got: %s", lastTool.Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_WebSearchPlusFunctionTools(t *testing.T) {
+	// Both web_search and regular function tools should coexist
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [],
+		"tools": [
+			{
+				"name": "get_weather",
+				"description": "Get weather",
+				"input_schema": {"type": "object", "properties": {"location": {"type": "string"}}}
+			},
+			{"type": "web_search_20250305", "name": "web_search"}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	tools := gjson.Get(outputStr, "request.tools")
+	if !tools.Exists() || !tools.IsArray() {
+		t.Fatal("request.tools should exist")
+	}
+
+	// Should have functionDeclarations for get_weather
+	funcDecl := gjson.Get(outputStr, "request.tools.0.functionDeclarations.0")
+	if funcDecl.Get("name").String() != "get_weather" {
+		t.Errorf("Expected function declaration 'get_weather', got: %s", funcDecl.Raw)
+	}
+
+	// Should have googleSearch as a separate tool entry
+	hasGoogleSearch := false
+	for _, tool := range tools.Array() {
+		if tool.Get("googleSearch").Exists() {
+			hasGoogleSearch = true
+			break
+		}
+	}
+	if !hasGoogleSearch {
+		t.Errorf("googleSearch should be present alongside function tools, got: %s", tools.Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_WebSearchPrefixMatching(t *testing.T) {
+	// Any tool type starting with "web_search" should be detected
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Search"}]}],
+		"tools": [
+			{"type": "web_search_20260101", "name": "web_search"}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	tools := gjson.Get(outputStr, "request.tools")
+	if !tools.Exists() {
+		t.Fatal("request.tools should exist for future web_search versions")
+	}
+
+	hasGoogleSearch := false
+	for _, tool := range tools.Array() {
+		if tool.Get("googleSearch").Exists() {
+			hasGoogleSearch = true
+			break
+		}
+	}
+	if !hasGoogleSearch {
+		t.Error("googleSearch should be injected for any web_search* type prefix")
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_WebSearchByNameOnly(t *testing.T) {
+	// Tool with name "web_search" but no type should also be detected
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Search"}]}],
+		"tools": [
+			{"name": "web_search"}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	tools := gjson.Get(outputStr, "request.tools")
+	if !tools.Exists() {
+		t.Fatal("request.tools should exist when web_search detected by name")
+	}
+
+	hasGoogleSearch := false
+	for _, tool := range tools.Array() {
+		if tool.Get("googleSearch").Exists() {
+			hasGoogleSearch = true
+			break
+		}
+	}
+	if !hasGoogleSearch {
+		t.Error("googleSearch should be injected when tool name is 'web_search'")
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ServerToolUseSkippedInHistory(t *testing.T) {
+	// server_tool_use and web_search_tool_result in message history should be skipped
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Search for Go tutorials"}]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "server_tool_use", "id": "srvtoolu_123", "name": "web_search", "input": {"query": "Go tutorials"}},
+					{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_123", "content": [{"type": "web_search_result", "url": "https://go.dev", "title": "Go"}]},
+					{"type": "text", "text": "Here are Go tutorials."}
+				]
+			},
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Tell me more"}]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	// The assistant message (contents.1) should only have the text part
+	parts := gjson.Get(outputStr, "request.contents.1.parts")
+	if !parts.IsArray() {
+		t.Fatal("Assistant message parts should exist")
+	}
+	partsArr := parts.Array()
+	if len(partsArr) != 1 {
+		t.Fatalf("Expected 1 part (only text, server_tool_use and web_search_tool_result skipped), got %d", len(partsArr))
+	}
+	if partsArr[0].Get("text").String() != "Here are Go tutorials." {
+		t.Errorf("Expected text 'Here are Go tutorials.', got '%s'", partsArr[0].Get("text").String())
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *testing.T) {
 	// When tools + thinking but no system instruction, should create one with hint
 	inputJSON := []byte(`{

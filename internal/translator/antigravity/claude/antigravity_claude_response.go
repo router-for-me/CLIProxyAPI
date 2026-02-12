@@ -39,6 +39,7 @@ type Params struct {
 	HasSentFinalEvents   bool   // Indicates if final content/message events have been sent
 	HasToolUse           bool   // Indicates if tool use was observed in the stream
 	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
+	HasWebSearch         bool   // Tracks if web search grounding was observed
 
 	// Signature caching support
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
@@ -271,6 +272,76 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		}
 	}
 
+	// Handle grounding metadata from googleSearch tool -> Claude web_search blocks
+	if groundingResult := gjson.GetBytes(rawJSON, "response.candidates.0.groundingMetadata"); groundingResult.Exists() && groundingResult.IsObject() {
+		params.HasWebSearch = true
+		params.HasToolUse = true
+
+		// Close any existing content block
+		if params.ResponseType != 0 {
+			output = output + "event: content_block_stop\n"
+			output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+			output = output + "\n\n\n"
+			params.ResponseIndex++
+			params.ResponseType = 0
+		}
+
+		// Extract search query
+		searchQuery := ""
+		if queries := groundingResult.Get("webSearchQueries"); queries.IsArray() && len(queries.Array()) > 0 {
+			searchQuery = queries.Array()[0].String()
+		}
+
+		// Generate tool use ID
+		toolUseID := fmt.Sprintf("srvtoolu_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1))
+
+		// Emit server_tool_use content_block_start
+		output = output + "event: content_block_start\n"
+		srvToolBlock := fmt.Sprintf(
+			`{"type":"content_block_start","index":%d,"content_block":{"type":"server_tool_use","id":"","name":"web_search","input":{}}}`,
+			params.ResponseIndex)
+		srvToolBlock, _ = sjson.Set(srvToolBlock, "content_block.id", toolUseID)
+		srvToolBlock, _ = sjson.Set(srvToolBlock, "content_block.input.query", searchQuery)
+		output = output + fmt.Sprintf("data: %s\n\n\n", srvToolBlock)
+
+		// Emit content_block_stop for server_tool_use
+		output = output + "event: content_block_stop\n"
+		output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+		output = output + "\n\n\n"
+		params.ResponseIndex++
+
+		// Emit web_search_tool_result content_block_start
+		output = output + "event: content_block_start\n"
+		resultBlock := fmt.Sprintf(
+			`{"type":"content_block_start","index":%d,"content_block":{"type":"web_search_tool_result","tool_use_id":"","content":[]}}`,
+			params.ResponseIndex)
+		resultBlock, _ = sjson.Set(resultBlock, "content_block.tool_use_id", toolUseID)
+
+		// Populate content array from groundingChunks
+		if chunks := groundingResult.Get("groundingChunks"); chunks.IsArray() {
+			for _, chunk := range chunks.Array() {
+				web := chunk.Get("web")
+				if !web.Exists() {
+					continue
+				}
+				searchResult := `{"type":"web_search_result","url":"","title":"","encrypted_content":""}`
+				searchResult, _ = sjson.Set(searchResult, "url", web.Get("uri").String())
+				searchResult, _ = sjson.Set(searchResult, "title", web.Get("title").String())
+				resultBlock, _ = sjson.SetRaw(resultBlock, "content_block.content.-1", searchResult)
+			}
+		}
+		output = output + fmt.Sprintf("data: %s\n\n\n", resultBlock)
+
+		// Emit content_block_stop for web_search_tool_result
+		output = output + "event: content_block_stop\n"
+		output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+		output = output + "\n\n\n"
+		params.ResponseIndex++
+
+		params.ResponseType = 0
+		params.HasContent = true
+	}
+
 	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
 		params.HasFinishReason = true
 		params.FinishReason = finishReasonResult.String()
@@ -491,6 +562,47 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 	flushThinking()
 	flushText()
+
+	// Handle grounding metadata from googleSearch tool -> Claude web_search blocks
+	if groundingResult := root.Get("response.candidates.0.groundingMetadata"); groundingResult.Exists() && groundingResult.IsObject() {
+		hasToolCall = true
+
+		// Extract search query
+		searchQuery := ""
+		if queries := groundingResult.Get("webSearchQueries"); queries.IsArray() && len(queries.Array()) > 0 {
+			searchQuery = queries.Array()[0].String()
+		}
+
+		// Generate tool use ID
+		toolIDCounter++
+		toolUseID := fmt.Sprintf("srvtoolu_%d", toolIDCounter)
+
+		// Add server_tool_use block
+		ensureContentArray()
+		srvToolBlock := `{"type":"server_tool_use","id":"","name":"web_search","input":{}}`
+		srvToolBlock, _ = sjson.Set(srvToolBlock, "id", toolUseID)
+		srvToolBlock, _ = sjson.Set(srvToolBlock, "input.query", searchQuery)
+		responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", srvToolBlock)
+
+		// Add web_search_tool_result block
+		resultBlock := `{"type":"web_search_tool_result","tool_use_id":"","content":[]}`
+		resultBlock, _ = sjson.Set(resultBlock, "tool_use_id", toolUseID)
+
+		if chunks := groundingResult.Get("groundingChunks"); chunks.IsArray() {
+			for _, chunk := range chunks.Array() {
+				web := chunk.Get("web")
+				if !web.Exists() {
+					continue
+				}
+				searchResult := `{"type":"web_search_result","url":"","title":"","encrypted_content":""}`
+				searchResult, _ = sjson.Set(searchResult, "url", web.Get("uri").String())
+				searchResult, _ = sjson.Set(searchResult, "title", web.Get("title").String())
+				resultBlock, _ = sjson.SetRaw(resultBlock, "content.-1", searchResult)
+			}
+		}
+
+		responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", resultBlock)
+	}
 
 	stopReason := "end_turn"
 	if hasToolCall {

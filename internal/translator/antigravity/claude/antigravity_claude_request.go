@@ -254,6 +254,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							partJSON, _ = sjson.SetRaw(partJSON, "inlineData", inlineDataJSON)
 							clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 						}
+					} else if contentTypeResult.Type == gjson.String && (contentTypeResult.String() == "server_tool_use" || contentTypeResult.String() == "web_search_tool_result") {
+						// Web search content from prior turns - skip during request translation
+						// Gemini handles grounding natively via googleSearch tool
+						continue
 					}
 				}
 
@@ -312,6 +316,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// tools
 	toolsJSON := ""
 	toolDeclCount := 0
+	hasWebSearch := false
 	allowedToolKeys := []string{"name", "description", "behavior", "parameters", "parametersJsonSchema", "response", "responseJsonSchema"}
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.IsArray() {
@@ -319,6 +324,14 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
+
+			// Detect web search tools (web_search* type or web_search name)
+			toolType := toolResult.Get("type").String()
+			if strings.HasPrefix(toolType, "web_search") || toolResult.Get("name").String() == "web_search" {
+				hasWebSearch = true
+				continue
+			}
+
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				// Sanitize the input schema for Antigravity API compatibility
@@ -337,12 +350,20 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
+	// Inject googleSearch tool when web search was detected
+	if hasWebSearch {
+		if toolsJSON == "" {
+			toolsJSON = `[]`
+		}
+		toolsJSON, _ = sjson.SetRaw(toolsJSON, "-1", `{"googleSearch":{}}`)
+	}
+
 	// Build output Gemini CLI request JSON
 	out := `{"model":"","request":{"contents":[]}}`
 	out, _ = sjson.Set(out, "model", modelName)
 
 	// Inject interleaved thinking hint when both tools and thinking are active
-	hasTools := toolDeclCount > 0
+	hasTools := toolDeclCount > 0 || hasWebSearch
 	thinkingResult := gjson.GetBytes(rawJSON, "thinking")
 	thinkingType := thinkingResult.Get("type").String()
 	hasThinking := thinkingResult.Exists() && thinkingResult.IsObject() && (thinkingType == "enabled" || thinkingType == "adaptive")
@@ -372,7 +393,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if hasContents {
 		out, _ = sjson.SetRaw(out, "request.contents", contentsJSON)
 	}
-	if toolDeclCount > 0 {
+	if toolDeclCount > 0 || hasWebSearch {
 		out, _ = sjson.SetRaw(out, "request.tools", toolsJSON)
 	}
 
