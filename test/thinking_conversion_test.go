@@ -2651,13 +2651,25 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 		},
 		// A5: Claude adaptive passthrough for adaptive-capable model
 		{
-			name:        "A5",
+			name:         "A5",
+			from:         "claude",
+			to:           "claude",
+			model:        "claude-adaptive-model",
+			inputJSON:    `{"model":"claude-adaptive-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
+			expectField:  "thinking.type",
+			expectValue:  "adaptive",
+			absentFields: []string{"output_config.effort"},
+			expectErr:    false,
+		},
+		// A5a: Claude adaptive explicit high should remain explicit
+		{
+			name:        "A5a",
 			from:        "claude",
 			to:          "claude",
 			model:       "claude-adaptive-model",
-			inputJSON:   `{"model":"claude-adaptive-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
-			expectField: "thinking.type",
-			expectValue: "adaptive",
+			inputJSON:   `{"model":"claude-adaptive-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
+			expectField: "output_config.effort",
+			expectValue: "high",
 			expectErr:   false,
 		},
 		// A5b: Claude adaptive model budget conversion should clamp xhigh to max
@@ -2693,6 +2705,18 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			expectField:  "thinking.budget_tokens",
 			expectValue:  "8192",
 			absentFields: []string{"output_config"},
+			expectErr:    false,
+		},
+		// A5e: Preserve non-thinking output_config fields when removing adaptive effort
+		{
+			name:         "A5e",
+			from:         "claude",
+			to:           "claude",
+			model:        "claude-budget-model",
+			inputJSON:    `{"model":"claude-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max","format":{"type":"json_schema","schema":{"type":"object"}}}}`,
+			expectField:  "output_config.format.type",
+			expectValue:  "json_schema",
+			absentFields: []string{"output_config.effort"},
 			expectErr:    false,
 		},
 		// A6: Claude adaptive to Antigravity budget model -> max budget
@@ -2788,6 +2812,21 @@ func TestThinkingClaudeAdaptiveXHighAlias(t *testing.T) {
 	}
 
 	runThinkingTests(t, cases)
+}
+
+func TestStripThinkingConfig_ClaudePreservesNonThinkingOutputConfig(t *testing.T) {
+	body := []byte(`{"model":"claude-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high","format":{"type":"json_schema","schema":{"type":"object"}}}}`)
+	out := thinking.StripThinkingConfig(body, "claude")
+
+	if gjson.GetBytes(out, "thinking").Exists() {
+		t.Fatalf("expected thinking to be stripped, body=%s", string(out))
+	}
+	if gjson.GetBytes(out, "output_config.effort").Exists() {
+		t.Fatalf("expected output_config.effort to be stripped, body=%s", string(out))
+	}
+	if got := gjson.GetBytes(out, "output_config.format.type").String(); got != "json_schema" {
+		t.Fatalf("expected output_config.format.type to be preserved as json_schema, got %q, body=%s", got, string(out))
+	}
 }
 
 // getTestModels returns the shared model definitions for E2E tests.

@@ -85,7 +85,7 @@ func (a *Applier) applyAdaptive(body []byte, config thinking.ThinkingConfig, mod
 	if config.Mode == thinking.ModeNone {
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result, _ = sjson.DeleteBytes(result, "output_config")
+		result = clearClaudeEffort(result)
 		return result, nil
 	}
 
@@ -110,7 +110,11 @@ func (a *Applier) applyAdaptive(body []byte, config thinking.ThinkingConfig, mod
 
 	if effort != "" {
 		effort = clampAdaptiveEffort(effort, modelInfo)
-		result, _ = sjson.SetBytes(result, "output_config.effort", effort)
+		if shouldPreserveAdaptiveDefault(body, config, effort) {
+			result = clearClaudeEffort(result)
+		} else {
+			result, _ = sjson.SetBytes(result, "output_config.effort", effort)
+		}
 	}
 
 	log.WithFields(log.Fields{
@@ -157,13 +161,13 @@ func (a *Applier) applyLegacy(body []byte, config thinking.ThinkingConfig, model
 	if config.Budget == 0 {
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result, _ = sjson.DeleteBytes(result, "output_config")
+		result = clearClaudeEffort(result)
 		return result, nil
 	}
 
 	result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 	result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
-	result, _ = sjson.DeleteBytes(result, "output_config")
+	result = clearClaudeEffort(result)
 
 	result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
 	return result, nil
@@ -226,23 +230,55 @@ func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte,
 	case thinking.ModeNone:
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result, _ = sjson.DeleteBytes(result, "output_config")
+		result = clearClaudeEffort(result)
 		return result, nil
 	case thinking.ModeAuto:
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result, _ = sjson.DeleteBytes(result, "output_config")
+		result = clearClaudeEffort(result)
 		return result, nil
 	case thinking.ModeLevel:
 		// User-defined models with level config: emit adaptive format
 		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
+		effort := string(config.Level)
+		if shouldPreserveAdaptiveDefault(body, config, effort) {
+			result = clearClaudeEffort(result)
+		} else {
+			result, _ = sjson.SetBytes(result, "output_config.effort", effort)
+		}
 		return result, nil
 	default:
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
-		result, _ = sjson.DeleteBytes(result, "output_config")
+		result = clearClaudeEffort(result)
 		return result, nil
 	}
+}
+
+// shouldPreserveAdaptiveDefault keeps Claude's native adaptive default behavior
+// for passthrough requests that already omit output_config.effort.
+func shouldPreserveAdaptiveDefault(body []byte, config thinking.ThinkingConfig, effort string) bool {
+	if !strings.EqualFold(effort, string(thinking.LevelHigh)) {
+		return false
+	}
+	if config.Mode != thinking.ModeLevel || !strings.EqualFold(string(config.Level), string(thinking.LevelHigh)) {
+		return false
+	}
+	if !strings.EqualFold(gjson.GetBytes(body, "thinking.type").String(), "adaptive") {
+		return false
+	}
+	adaptiveEffort := gjson.GetBytes(body, "output_config.effort")
+	return !adaptiveEffort.Exists()
+}
+
+// clearClaudeEffort removes output_config.effort but preserves other output_config fields.
+// If output_config becomes empty, it removes the parent object as well.
+func clearClaudeEffort(body []byte) []byte {
+	body, _ = sjson.DeleteBytes(body, "output_config.effort")
+	outputConfig := gjson.GetBytes(body, "output_config")
+	if outputConfig.Exists() && strings.TrimSpace(outputConfig.Raw) == "{}" {
+		body, _ = sjson.DeleteBytes(body, "output_config")
+	}
+	return body
 }

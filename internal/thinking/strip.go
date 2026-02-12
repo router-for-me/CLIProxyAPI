@@ -2,6 +2,8 @@
 package thinking
 
 import (
+	"strings"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -30,7 +32,7 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 	var paths []string
 	switch provider {
 	case "claude":
-		paths = []string{"thinking", "output_config"}
+		paths = []string{"thinking", "output_config.effort"}
 	case "gemini":
 		paths = []string{"generationConfig.thinkingConfig"}
 	case "gemini-cli", "antigravity":
@@ -53,6 +55,12 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 	result := body
 	for _, path := range paths {
 		result, _ = sjson.DeleteBytes(result, path)
+	}
+	if provider == "claude" {
+		outputConfig := gjson.GetBytes(result, "output_config")
+		if outputConfig.Exists() && strings.TrimSpace(outputConfig.Raw) == "{}" {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
 	}
 	return result
 }
