@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -189,9 +190,21 @@ func (h *Handler) APICall(c *gin.Context) {
 		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
 	}
 
+	// When caller indicates CBOR in request headers, convert JSON string payload to CBOR bytes.
+	useCBORPayload := headerContainsValue(reqHeaders, "Content-Type", "application/cbor")
+
 	var requestBody io.Reader
 	if body.Data != "" {
-		requestBody = strings.NewReader(body.Data)
+		if useCBORPayload {
+			cborPayload, errEncode := encodeJSONStringToCBOR(body.Data)
+			if errEncode != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json data for cbor content-type"})
+				return
+			}
+			requestBody = bytes.NewReader(cborPayload)
+		} else {
+			requestBody = strings.NewReader(body.Data)
+		}
 	}
 
 	req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
@@ -234,10 +247,18 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	// For CBOR upstream responses, decode into plain text or JSON string before returning.
+	responseBodyText := string(respBody)
+	if headerContainsValue(reqHeaders, "Accept", "application/cbor") || strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/cbor") {
+		if decodedBody, errDecode := decodeCBORBodyToTextOrJSON(respBody); errDecode == nil {
+			responseBodyText = decodedBody
+		}
+	}
+
 	response := apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
-		Body:       string(respBody),
+		Body:       responseBodyText,
 	}
 
 	// If this is a GitHub Copilot token endpoint response, try to enrich with quota information
@@ -745,6 +766,83 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 
 	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
 	return nil
+}
+
+// headerContainsValue checks whether a header map contains a target value (case-insensitive key and value).
+func headerContainsValue(headers map[string]string, targetKey, targetValue string) bool {
+	if len(headers) == 0 {
+		return false
+	}
+	for key, value := range headers {
+		if !strings.EqualFold(strings.TrimSpace(key), strings.TrimSpace(targetKey)) {
+			continue
+		}
+		if strings.Contains(strings.ToLower(value), strings.ToLower(strings.TrimSpace(targetValue))) {
+			return true
+		}
+	}
+	return false
+}
+
+// encodeJSONStringToCBOR converts a JSON string payload into CBOR bytes.
+func encodeJSONStringToCBOR(jsonString string) ([]byte, error) {
+	var payload any
+	if errUnmarshal := json.Unmarshal([]byte(jsonString), &payload); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	return cbor.Marshal(payload)
+}
+
+// decodeCBORBodyToTextOrJSON decodes CBOR bytes to plain text (for string payloads) or JSON string.
+func decodeCBORBodyToTextOrJSON(raw []byte) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+
+	var payload any
+	if errUnmarshal := cbor.Unmarshal(raw, &payload); errUnmarshal != nil {
+		return "", errUnmarshal
+	}
+
+	jsonCompatible := cborValueToJSONCompatible(payload)
+	switch typed := jsonCompatible.(type) {
+	case string:
+		return typed, nil
+	case []byte:
+		return string(typed), nil
+	default:
+		jsonBytes, errMarshal := json.Marshal(jsonCompatible)
+		if errMarshal != nil {
+			return "", errMarshal
+		}
+		return string(jsonBytes), nil
+	}
+}
+
+// cborValueToJSONCompatible recursively converts CBOR-decoded values into JSON-marshalable values.
+func cborValueToJSONCompatible(value any) any {
+	switch typed := value.(type) {
+	case map[any]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[fmt.Sprint(key)] = cborValueToJSONCompatible(item)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = cborValueToJSONCompatible(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = cborValueToJSONCompatible(item)
+		}
+		return out
+	default:
+		return typed
+	}
 }
 
 // QuotaDetail represents quota information for a specific resource type
