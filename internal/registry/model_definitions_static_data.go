@@ -749,7 +749,7 @@ func GetOpenAIModels() []*ModelInfo {
 			OwnedBy:             "openai",
 			Type:                "openai",
 			Version:             "gpt-5.3",
-			DisplayName:         "GPT-5.3-Codex-Spark",
+DisplayName:         "GPT 5.3 Codex Spark",
 			Description:         "Ultra-fast coding model.",
 			ContextLength:       128000,
 			MaxCompletionTokens: 128000,
