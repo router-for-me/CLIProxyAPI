@@ -184,3 +184,128 @@ func PendingTagSuffix(buffer, tag string) int {
 	}
 	return 0
 }
+
+// GenerateSearchIndicatorEvents generates ONLY the search indicator SSE events
+// (server_tool_use + web_search_tool_result) without text summary or message termination.
+// These events trigger Claude Code's search indicator UI.
+// The caller is responsible for sending message_start before and message_delta/stop after.
+func GenerateSearchIndicatorEvents(
+	query string,
+	toolUseID string,
+	searchResults *WebSearchResults,
+	startIndex int,
+) []sseEvent {
+	events := make([]sseEvent, 0, 4)
+
+	// 1. content_block_start (server_tool_use)
+	events = append(events, sseEvent{
+		Event: "content_block_start",
+		Data: map[string]interface{}{
+			"type":  "content_block_start",
+			"index": startIndex,
+			"content_block": map[string]interface{}{
+				"id":    toolUseID,
+				"type":  "server_tool_use",
+				"name":  "web_search",
+				"input": map[string]interface{}{},
+			},
+		},
+	})
+
+	// 2. content_block_delta (input_json_delta)
+	inputJSON, _ := json.Marshal(map[string]string{"query": query})
+	events = append(events, sseEvent{
+		Event: "content_block_delta",
+		Data: map[string]interface{}{
+			"type":  "content_block_delta",
+			"index": startIndex,
+			"delta": map[string]interface{}{
+				"type":         "input_json_delta",
+				"partial_json": string(inputJSON),
+			},
+		},
+	})
+
+	// 3. content_block_stop (server_tool_use)
+	events = append(events, sseEvent{
+		Event: "content_block_stop",
+		Data: map[string]interface{}{
+			"type":  "content_block_stop",
+			"index": startIndex,
+		},
+	})
+
+	// 4. content_block_start (web_search_tool_result)
+	searchContent := make([]map[string]interface{}, 0)
+	if searchResults != nil {
+		for _, r := range searchResults.Results {
+			snippet := ""
+			if r.Snippet != nil {
+				snippet = *r.Snippet
+			}
+			searchContent = append(searchContent, map[string]interface{}{
+				"type":              "web_search_result",
+				"title":             r.Title,
+				"url":               r.URL,
+				"encrypted_content": snippet,
+				"page_age":          nil,
+			})
+		}
+	}
+	events = append(events, sseEvent{
+		Event: "content_block_start",
+		Data: map[string]interface{}{
+			"type":  "content_block_start",
+			"index": startIndex + 1,
+			"content_block": map[string]interface{}{
+				"type":        "web_search_tool_result",
+				"tool_use_id": toolUseID,
+				"content":     searchContent,
+			},
+		},
+	})
+
+	// 5. content_block_stop (web_search_tool_result)
+	events = append(events, sseEvent{
+		Event: "content_block_stop",
+		Data: map[string]interface{}{
+			"type":  "content_block_stop",
+			"index": startIndex + 1,
+		},
+	})
+
+	return events
+}
+
+// BuildFallbackTextEvents generates SSE events for a fallback text response
+// when the Kiro API fails during the search loop. Uses BuildClaude*Event()
+// functions to align with streamToChannel patterns.
+// Returns raw SSE byte slices ready to be sent to the client channel.
+func BuildFallbackTextEvents(contentBlockIndex int, query string, results *WebSearchResults) [][]byte {
+	summary := FormatSearchContextPrompt(query, results)
+	outputTokens := len(summary) / 4
+	if len(summary) > 0 && outputTokens == 0 {
+		outputTokens = 1
+	}
+
+	var events [][]byte
+
+	// content_block_start (text)
+	events = append(events, BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", ""))
+
+	// content_block_delta (text_delta)
+	events = append(events, BuildClaudeStreamEvent(summary, contentBlockIndex))
+
+	// content_block_stop
+	events = append(events, BuildClaudeContentBlockStopEvent(contentBlockIndex))
+
+	// message_delta with end_turn
+	events = append(events, BuildClaudeMessageDeltaEvent("end_turn", usage.Detail{
+		OutputTokens: int64(outputTokens),
+	}))
+
+	// message_stop
+	events = append(events, BuildClaudeMessageStopOnlyEvent())
+
+	return events
+}
