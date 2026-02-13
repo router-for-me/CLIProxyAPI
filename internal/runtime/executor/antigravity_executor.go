@@ -45,11 +45,15 @@ const (
 	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
 	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret        = "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"
-	defaultAntigravityAgent        = "antigravity/1.104.0 darwin/arm64"
+	antigravityAgentVersion        = "1.104.0"
+	defaultAntigravityAgent        = "antigravity/" + antigravityAgentVersion + " darwin/arm64"
+	antigravityAPIClient           = "google-cloud-sdk vscode_cloudshelleditor/0.1"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
 	systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
+
+var antigravityPlatforms = []string{"windows/amd64", "darwin/arm64", "darwin/amd64"}
 
 var (
 	randSource      = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -920,7 +924,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		applyAntigravityHeaders(httpReq.Header, auth)
 		httpReq.Header.Set("Accept", "application/json")
 		if host := resolveHost(base); host != "" {
 			httpReq.Host = host
@@ -1025,7 +1029,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		applyAntigravityHeaders(httpReq.Header, auth)
 		if host := resolveHost(baseURL); host != "" {
 			httpReq.Host = host
 		}
@@ -1157,6 +1161,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	httpReq.Header.Set("Host", "oauth2.googleapis.com")
 	httpReq.Header.Set("User-Agent", defaultAntigravityAgent)
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Header.Set("X-Goog-Api-Client", antigravityAPIClient)
+	httpReq.Header.Set("Client-Metadata", antigravityClientMetadataForUserAgent(defaultAntigravityAgent))
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
@@ -1322,7 +1328,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	applyAntigravityHeaders(httpReq.Header, auth)
 	if stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
 	} else {
@@ -1433,6 +1439,32 @@ func resolveHost(base string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 }
 
+func randomizedAntigravityUserAgent() string {
+	randSourceMutex.Lock()
+	platform := antigravityPlatforms[randSource.Intn(len(antigravityPlatforms))]
+	randSourceMutex.Unlock()
+	return "antigravity/" + antigravityAgentVersion + " " + platform
+}
+
+func metadataPlatformFromUserAgent(ua string) string {
+	if strings.Contains(strings.ToLower(ua), "windows/") {
+		return "WINDOWS"
+	}
+	return "MACOS"
+}
+
+func antigravityClientMetadataForUserAgent(ua string) string {
+	platform := metadataPlatformFromUserAgent(ua)
+	return fmt.Sprintf(`{"ideType":"ANTIGRAVITY","platform":"%s","pluginType":"GEMINI"}`, platform)
+}
+
+func applyAntigravityHeaders(h http.Header, auth *cliproxyauth.Auth) {
+	ua := resolveUserAgent(auth)
+	h.Set("User-Agent", ua)
+	h.Set("X-Goog-Api-Client", antigravityAPIClient)
+	h.Set("Client-Metadata", antigravityClientMetadataForUserAgent(ua))
+}
+
 func resolveUserAgent(auth *cliproxyauth.Auth) string {
 	if auth != nil {
 		if auth.Attributes != nil {
@@ -1446,7 +1478,7 @@ func resolveUserAgent(auth *cliproxyauth.Auth) string {
 			}
 		}
 	}
-	return defaultAntigravityAgent
+	return randomizedAntigravityUserAgent()
 }
 
 func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
