@@ -870,6 +870,57 @@ func TestCleanJSONSchemaForAntigravity_BooleanEnumToString(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *testing.T) {
+	input := `{
+		"$schema": "http://json-schema.org/draft-07/schema#",
+		"$id": "root-schema",
+		"type": "object",
+		"properties": {
+			"payload": {
+				"type": "object",
+				"prefill": "hello",
+				"properties": {
+					"mode": {
+						"type": "string",
+						"enum": ["a", "b"],
+						"enumTitles": ["A", "B"]
+					}
+				},
+				"patternProperties": {
+					"^x-": {"type": "string"}
+				}
+			},
+			"$id": {
+				"type": "string",
+				"description": "property name should not be removed"
+			}
+		}
+	}`
+
+	expected := `{
+		"type": "object",
+		"properties": {
+			"payload": {
+				"type": "object",
+				"properties": {
+					"mode": {
+						"type": "string",
+						"enum": ["a", "b"],
+						"description": "Allowed: a, b"
+					}
+				}
+			},
+			"$id": {
+				"type": "string",
+				"description": "property name should not be removed"
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	compareJSON(t, expected, result)
+}
+
 func TestRemoveExtensionFields(t *testing.T) {
 	tests := []struct {
 		name     string
