@@ -37,17 +37,17 @@ const (
 	APIClient    = "google-cloud-sdk vscode_cloudshelleditor/0.1"
 )
 
-func runtimeMetadataPlatform() string {
-	switch runtime.GOOS {
-	case "windows":
+func metadataPlatformForGOOS(goos string) string {
+	// Antigravity clients are Windows/macOS-oriented; for non-Windows
+	// environments (including Linux servers), masquerade as macOS.
+	if goos == "windows" {
 		return "WINDOWS"
-	case "darwin":
-		return "MACOS"
-	case "linux":
-		return "LINUX"
-	default:
-		return "PLATFORM_UNSPECIFIED"
 	}
+	return "MACOS"
+}
+
+func runtimeMetadataPlatform() string {
+	return metadataPlatformForGOOS(runtime.GOOS)
 }
 
 var antigravityPlatform = runtimeMetadataPlatform()
