@@ -5,6 +5,10 @@ on:
     branches:
       - fix/antigravity-metadata-alignment
       - hotfix/**
+  pull_request:
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 permissions:
@@ -40,7 +44,7 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=hotfix-latest
+            type=raw,value=hotfix-latest,enable=${{ github.event_name == 'push' }}
             type=sha,prefix=hotfix-
 
       - name: Build and push image
