@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/andybalholm/brotli v1.0.6
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/gin-gonic/gin v1.10.1
 	github.com/go-git/go-git/v6 v6.0.0-20251009132922-75a182125145
 	github.com/google/uuid v1.6.0
@@ -13,9 +14,9 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/klauspost/compress v1.17.4
 	github.com/minio/minio-go/v7 v7.0.66
+	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/refraction-networking/utls v1.8.2
 	github.com/sirupsen/logrus v1.9.3
-	github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966
 	github.com/tidwall/gjson v1.18.0
 	github.com/tidwall/sjson v1.2.5
 	github.com/tiktoken-go/tokenizer v0.7.0
@@ -23,6 +24,7 @@ require (
 	golang.org/x/net v0.47.0
 	golang.org/x/oauth2 v0.30.0
 	golang.org/x/sync v0.18.0
+	golang.org/x/term v0.37.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -69,6 +71,7 @@ require (
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/arch v0.8.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
