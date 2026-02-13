@@ -742,6 +742,20 @@ func GetOpenAIModels() []*ModelInfo {
 			SupportedParameters: []string{"tools"},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
+		{
+			ID:                  "gpt-5.3-codex-spark",
+			Object:              "model",
+			Created:             1770912000,
+			OwnedBy:             "openai",
+			Type:                "openai",
+			Version:             "gpt-5.3",
+			DisplayName:         "GPT 5.3 Codex Spark",
+			Description:         "Ultra-fast coding model.",
+			ContextLength:       128000,
+			MaxCompletionTokens: 128000,
+			SupportedParameters: []string{"tools"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+		},
 	}
 }
 
