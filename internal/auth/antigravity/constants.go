@@ -38,20 +38,28 @@ const (
 )
 
 func runtimeMetadataPlatform() string {
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		return "WINDOWS"
+	case "darwin":
+		return "MACOS"
+	case "linux":
+		return "LINUX"
+	default:
+		return "PLATFORM_UNSPECIFIED"
 	}
-	return "MACOS"
 }
 
+var antigravityPlatform = runtimeMetadataPlatform()
+
 func antigravityJSONClientMetadata() string {
-	return fmt.Sprintf(`{"ideType":"ANTIGRAVITY","platform":"%s","pluginType":"GEMINI"}`, runtimeMetadataPlatform())
+	return fmt.Sprintf(`{"ideType":"ANTIGRAVITY","platform":"%s","pluginType":"GEMINI"}`, antigravityPlatform)
 }
 
 func antigravityRequestMetadata() map[string]string {
 	return map[string]string{
 		"ideType":    "ANTIGRAVITY",
-		"platform":   runtimeMetadataPlatform(),
+		"platform":   antigravityPlatform,
 		"pluginType": "GEMINI",
 	}
 }
