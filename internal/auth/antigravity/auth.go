@@ -154,11 +154,7 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 // FetchProjectID retrieves the project ID for the authenticated user via loadCodeAssist
 func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string) (string, error) {
 	loadReqBody := map[string]any{
-		"metadata": map[string]string{
-			"ideType":    "ANTIGRAVITY",
-			"platform":   "PLATFORM_UNSPECIFIED",
-			"pluginType": "GEMINI",
-		},
+		"metadata": antigravityRequestMetadata(),
 	}
 
 	rawBody, errMarshal := json.Marshal(loadReqBody)
@@ -175,7 +171,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", APIUserAgent)
 	req.Header.Set("X-Goog-Api-Client", APIClient)
-	req.Header.Set("Client-Metadata", ClientMetadata)
+	req.Header.Set("Client-Metadata", antigravityJSONClientMetadata())
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -246,11 +242,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 	log.Infof("Antigravity: onboarding user with tier: %s", tierID)
 	requestBody := map[string]any{
 		"tierId": tierID,
-		"metadata": map[string]string{
-			"ideType":    "ANTIGRAVITY",
-			"platform":   "PLATFORM_UNSPECIFIED",
-			"pluginType": "GEMINI",
-		},
+		"metadata": antigravityRequestMetadata(),
 	}
 
 	rawBody, errMarshal := json.Marshal(requestBody)
@@ -279,7 +271,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", APIUserAgent)
 		req.Header.Set("X-Goog-Api-Client", APIClient)
-		req.Header.Set("Client-Metadata", ClientMetadata)
+		req.Header.Set("Client-Metadata", antigravityJSONClientMetadata())
 
 		resp, errDo := o.httpClient.Do(req)
 		if errDo != nil {

@@ -1,6 +1,11 @@
 // Package antigravity provides OAuth2 authentication functionality for the Antigravity provider.
 package antigravity
 
+import (
+	"fmt"
+	"runtime"
+)
+
 // OAuth client credentials and configuration
 const (
 	ClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -26,9 +31,27 @@ const (
 
 // Antigravity API configuration
 const (
-	APIEndpoint    = "https://cloudcode-pa.googleapis.com"
-	APIVersion     = "v1internal"
-	APIUserAgent   = "google-api-nodejs-client/9.15.1"
-	APIClient      = "google-cloud-sdk vscode_cloudshelleditor/0.1"
-	ClientMetadata = `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
+	APIEndpoint  = "https://cloudcode-pa.googleapis.com"
+	APIVersion   = "v1internal"
+	APIUserAgent = "google-api-nodejs-client/9.15.1"
+	APIClient    = "google-cloud-sdk vscode_cloudshelleditor/0.1"
 )
+
+func runtimeMetadataPlatform() string {
+	if runtime.GOOS == "windows" {
+		return "WINDOWS"
+	}
+	return "MACOS"
+}
+
+func antigravityJSONClientMetadata() string {
+	return fmt.Sprintf(`{"ideType":"ANTIGRAVITY","platform":"%s","pluginType":"GEMINI"}`, runtimeMetadataPlatform())
+}
+
+func antigravityRequestMetadata() map[string]string {
+	return map[string]string{
+		"ideType":    "ANTIGRAVITY",
+		"platform":   runtimeMetadataPlatform(),
+		"pluginType": "GEMINI",
+	}
+}
