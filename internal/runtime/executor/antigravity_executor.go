@@ -1007,8 +1007,12 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
 	exec := &AntigravityExecutor{cfg: cfg}
 	token, updatedAuth, errToken := exec.ensureAccessToken(ctx, auth)
-	if errToken != nil || token == "" {
+	if errToken != nil {
 		log.Warnf("antigravity executor: fetch models failed for %s: token error: %v", auth.ID, errToken)
+		return nil
+	}
+	if token == "" {
+		log.Warnf("antigravity executor: fetch models failed for %s: got empty token", auth.ID)
 		return nil
 	}
 	if updatedAuth != nil {
