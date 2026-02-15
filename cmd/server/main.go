@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -68,6 +70,7 @@ func main() {
 	var vertexImport string
 	var configPath string
 	var password string
+	var tuiMode bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -84,6 +87,7 @@ func main() {
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&password, "password", "", "")
+	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -481,6 +485,71 @@ func main() {
 		}
 		// Start the main proxy service
 		managementasset.StartAutoUpdater(context.Background(), configFilePath)
-		cmd.StartService(cfg, configFilePath, password)
+		if tuiMode {
+			// Install logrus hook to capture logs for TUI
+			hook := tui.NewLogHook(2000)
+			hook.SetFormatter(&logging.LogFormatter{})
+			log.AddHook(hook)
+			// Suppress logrus stdout output (TUI owns the terminal)
+			log.SetOutput(io.Discard)
+
+			// Redirect os.Stdout and os.Stderr to /dev/null so that
+			// stray fmt.Print* calls in the backend don't corrupt the TUI.
+			origStdout := os.Stdout
+			origStderr := os.Stderr
+			devNull, errNull := os.Open(os.DevNull)
+			if errNull == nil {
+				os.Stdout = devNull
+				os.Stderr = devNull
+			}
+
+			// Generate a random local password for management API authentication.
+			// This is passed to the server (accepted for localhost requests)
+			// and used by the TUI HTTP client as the Bearer token.
+			localMgmtPassword := fmt.Sprintf("tui-%d-%d", os.Getpid(), time.Now().UnixNano())
+			if password == "" {
+				password = localMgmtPassword
+			}
+
+			// Ensure management routes are registered (secret-key must be set)
+			if cfg.RemoteManagement.SecretKey == "" {
+				cfg.RemoteManagement.SecretKey = "$tui-placeholder$"
+			}
+
+			// Start server in background
+			cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+
+			// Wait for server to be ready by polling management API
+			{
+				client := tui.NewClient(cfg.Port, password)
+				for i := 0; i < 50; i++ {
+					time.Sleep(100 * time.Millisecond)
+					if _, err := client.GetConfig(); err == nil {
+						break
+					}
+				}
+			}
+
+			// Run TUI (blocking) — use the local password for API auth
+			if err := tui.Run(cfg.Port, password, hook, origStdout); err != nil {
+				// Restore stdout/stderr before printing error
+				os.Stdout = origStdout
+				os.Stderr = origStderr
+				fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+			}
+
+			// Restore stdout/stderr for shutdown messages
+			os.Stdout = origStdout
+			os.Stderr = origStderr
+			if devNull != nil {
+				_ = devNull.Close()
+			}
+
+			// Shutdown server
+			cancel()
+			<-done
+		} else {
+			cmd.StartService(cfg, configFilePath, password)
+		}
 	}
 }
