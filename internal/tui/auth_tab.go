@@ -106,132 +106,16 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 	case tea.KeyMsg:
 		// ---- Editing mode ----
 		if m.editing {
-			switch msg.String() {
-			case "enter":
-				value := m.editInput.Value()
-				fieldKey := authEditableFields[m.editField].key
-				fileName := m.editFileName
-				m.editing = false
-				m.editInput.Blur()
-				fields := map[string]any{}
-				if fieldKey == "priority" {
-p, err := strconv.Atoi(value)
-if err != nil {
-    return m, func() tea.Msg {
-        return authActionMsg{err: fmt.Errorf("invalid priority: must be a number")}
-    }
-}
-					fields[fieldKey] = p
-				} else {
-					fields[fieldKey] = value
-				}
-				return m, func() tea.Msg {
-					err := m.client.PatchAuthFileFields(fileName, fields)
-					if err != nil {
-						return authActionMsg{err: err}
-					}
-					return authActionMsg{action: fmt.Sprintf(T("updated_field"), fieldKey, fileName)}
-				}
-			case "esc":
-				m.editing = false
-				m.editInput.Blur()
-				m.viewport.SetContent(m.renderContent())
-				return m, nil
-			default:
-				var cmd tea.Cmd
-				m.editInput, cmd = m.editInput.Update(msg)
-				m.viewport.SetContent(m.renderContent())
-				return m, cmd
-			}
+			return m.handleEditInput(msg)
 		}
 
 		// ---- Delete confirmation mode ----
 		if m.confirm >= 0 {
-			switch msg.String() {
-			case "y", "Y":
-				idx := m.confirm
-				m.confirm = -1
-				if idx < len(m.files) {
-					name := getString(m.files[idx], "name")
-					return m, func() tea.Msg {
-						err := m.client.DeleteAuthFile(name)
-						if err != nil {
-							return authActionMsg{err: err}
-						}
-						return authActionMsg{action: fmt.Sprintf(T("deleted"), name)}
-					}
-				}
-				m.viewport.SetContent(m.renderContent())
-				return m, nil
-			case "n", "N", "esc":
-				m.confirm = -1
-				m.viewport.SetContent(m.renderContent())
-				return m, nil
-			}
-			return m, nil
+			return m.handleConfirmInput(msg)
 		}
 
 		// ---- Normal mode ----
-		switch msg.String() {
-		case "j", "down":
-			if len(m.files) > 0 {
-				m.cursor = (m.cursor + 1) % len(m.files)
-				m.viewport.SetContent(m.renderContent())
-			}
-			return m, nil
-		case "k", "up":
-			if len(m.files) > 0 {
-				m.cursor = (m.cursor - 1 + len(m.files)) % len(m.files)
-				m.viewport.SetContent(m.renderContent())
-			}
-			return m, nil
-		case "enter", " ":
-			if m.expanded == m.cursor {
-				m.expanded = -1
-			} else {
-				m.expanded = m.cursor
-			}
-			m.viewport.SetContent(m.renderContent())
-			return m, nil
-		case "d", "D":
-			if m.cursor < len(m.files) {
-				m.confirm = m.cursor
-				m.viewport.SetContent(m.renderContent())
-			}
-			return m, nil
-		case "e", "E":
-			if m.cursor < len(m.files) {
-				f := m.files[m.cursor]
-				name := getString(f, "name")
-				disabled := getBool(f, "disabled")
-				newDisabled := !disabled
-				return m, func() tea.Msg {
-					err := m.client.ToggleAuthFile(name, newDisabled)
-					if err != nil {
-						return authActionMsg{err: err}
-					}
-					action := T("enabled")
-					if newDisabled {
-						action = T("disabled")
-					}
-					return authActionMsg{action: fmt.Sprintf("%s %s", action, name)}
-				}
-			}
-			return m, nil
-		case "1":
-			return m, m.startEdit(0) // prefix
-		case "2":
-			return m, m.startEdit(1) // proxy_url
-		case "3":
-			return m, m.startEdit(2) // priority
-		case "r":
-			m.status = ""
-			return m, m.fetchFiles
-		default:
-			var cmd tea.Cmd
-			m.viewport, cmd = m.viewport.Update(msg)
-			return m, cmd
-		}
+		return m.handleNormalInput(msg)
 	}
 
 	var cmd tea.Cmd
@@ -441,4 +325,132 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m authTabModel) handleEditInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		value := m.editInput.Value()
+		fieldKey := authEditableFields[m.editField].key
+		fileName := m.editFileName
+		m.editing = false
+		m.editInput.Blur()
+		fields := map[string]any{}
+		if fieldKey == "priority" {
+			p, err := strconv.Atoi(value)
+			if err != nil {
+				return m, func() tea.Msg {
+					return authActionMsg{err: fmt.Errorf("%s: %s", T("invalid_int"), value)}
+				}
+			}
+			fields[fieldKey] = p
+		} else {
+			fields[fieldKey] = value
+		}
+		return m, func() tea.Msg {
+			err := m.client.PatchAuthFileFields(fileName, fields)
+			if err != nil {
+				return authActionMsg{err: err}
+			}
+			return authActionMsg{action: fmt.Sprintf(T("updated_field"), fieldKey, fileName)}
+		}
+	case "esc":
+		m.editing = false
+		m.editInput.Blur()
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.editInput, cmd = m.editInput.Update(msg)
+		m.viewport.SetContent(m.renderContent())
+		return m, cmd
+	}
+}
+
+func (m authTabModel) handleConfirmInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		idx := m.confirm
+		m.confirm = -1
+		if idx < len(m.files) {
+			name := getString(m.files[idx], "name")
+			return m, func() tea.Msg {
+				err := m.client.DeleteAuthFile(name)
+				if err != nil {
+					return authActionMsg{err: err}
+				}
+				return authActionMsg{action: fmt.Sprintf(T("deleted"), name)}
+			}
+		}
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
+	case "n", "N", "esc":
+		m.confirm = -1
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		if len(m.files) > 0 {
+			m.cursor = (m.cursor + 1) % len(m.files)
+			m.viewport.SetContent(m.renderContent())
+		}
+		return m, nil
+	case "k", "up":
+		if len(m.files) > 0 {
+			m.cursor = (m.cursor - 1 + len(m.files)) % len(m.files)
+			m.viewport.SetContent(m.renderContent())
+		}
+		return m, nil
+	case "enter", " ":
+		if m.expanded == m.cursor {
+			m.expanded = -1
+		} else {
+			m.expanded = m.cursor
+		}
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
+	case "d", "D":
+		if m.cursor < len(m.files) {
+			m.confirm = m.cursor
+			m.viewport.SetContent(m.renderContent())
+		}
+		return m, nil
+	case "e", "E":
+		if m.cursor < len(m.files) {
+			f := m.files[m.cursor]
+			name := getString(f, "name")
+			disabled := getBool(f, "disabled")
+			newDisabled := !disabled
+			return m, func() tea.Msg {
+				err := m.client.ToggleAuthFile(name, newDisabled)
+				if err != nil {
+					return authActionMsg{err: err}
+				}
+				action := T("enabled")
+				if newDisabled {
+					action = T("disabled")
+				}
+				return authActionMsg{action: fmt.Sprintf("%s %s", action, name)}
+			}
+		}
+		return m, nil
+	case "1":
+		return m, m.startEdit(0) // prefix
+	case "2":
+		return m, m.startEdit(1) // proxy_url
+	case "3":
+		return m, m.startEdit(2) // priority
+	case "r":
+		m.status = ""
+		return m, m.fetchFiles
+	default:
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
+	}
 }
