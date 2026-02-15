@@ -47,6 +47,9 @@ func (m logsTabModel) waitForLog() tea.Msg {
 
 func (m logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case localeChangedMsg:
+		m.viewport.SetContent(m.renderLogs())
+		return m, nil
 	case logLineMsg:
 		m.lines = append(m.lines, string(msg))
 		if len(m.lines) > m.maxLines {
@@ -122,7 +125,7 @@ func (m *logsTabModel) SetSize(w, h int) {
 
 func (m logsTabModel) View() string {
 	if !m.ready {
-		return "Loading logs..."
+		return T("loading")
 	}
 	return m.viewport.View()
 }
@@ -130,26 +133,26 @@ func (m logsTabModel) View() string {
 func (m logsTabModel) renderLogs() string {
 	var sb strings.Builder
 
-	scrollStatus := successStyle.Render("● AUTO-SCROLL")
+	scrollStatus := successStyle.Render(T("logs_auto_scroll"))
 	if !m.autoScroll {
-		scrollStatus = warningStyle.Render("○ PAUSED")
+		scrollStatus = warningStyle.Render(T("logs_paused"))
 	}
 	filterLabel := "ALL"
 	if m.filter != "" {
 		filterLabel = strings.ToUpper(m.filter) + "+"
 	}
 
-	header := fmt.Sprintf(" 📋 Logs  %s  Filter: %s  Lines: %d",
-		scrollStatus, filterLabel, len(m.lines))
+	header := fmt.Sprintf(" %s  %s  %s: %s  %s: %d",
+		T("logs_title"), scrollStatus, T("logs_filter"), filterLabel, T("logs_lines"), len(m.lines))
 	sb.WriteString(titleStyle.Render(header))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(" [a]uto-scroll • [c]lear • [1]all [2]info+ [3]warn+ [4]error • [↑↓] scroll"))
+	sb.WriteString(helpStyle.Render(T("logs_help")))
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", m.width))
 	sb.WriteString("\n")
 
 	if len(m.lines) == 0 {
-		sb.WriteString(subtitleStyle.Render("\n  Waiting for log output..."))
+		sb.WriteString(subtitleStyle.Render(T("logs_waiting")))
 		return sb.String()
 	}
 

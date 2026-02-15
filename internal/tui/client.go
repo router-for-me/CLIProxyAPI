@@ -206,6 +206,34 @@ func (c *Client) GetAPIKeys() ([]string, error) {
 	return result, nil
 }
 
+// AddAPIKey adds a new API key by sending old=nil, new=key which appends.
+func (c *Client) AddAPIKey(key string) error {
+	body := map[string]any{"old": nil, "new": key}
+	jsonBody, _ := json.Marshal(body)
+	_, err := c.patch("/v0/management/api-keys", strings.NewReader(string(jsonBody)))
+	return err
+}
+
+// EditAPIKey replaces an API key at the given index.
+func (c *Client) EditAPIKey(index int, newValue string) error {
+	body := map[string]any{"index": index, "value": newValue}
+	jsonBody, _ := json.Marshal(body)
+	_, err := c.patch("/v0/management/api-keys", strings.NewReader(string(jsonBody)))
+	return err
+}
+
+// DeleteAPIKey deletes an API key by index.
+func (c *Client) DeleteAPIKey(index int) error {
+	_, code, err := c.doRequest("DELETE", fmt.Sprintf("/v0/management/api-keys?index=%d", index), nil)
+	if err != nil {
+		return err
+	}
+	if code >= 400 {
+		return fmt.Errorf("delete failed (HTTP %d)", code)
+	}
+	return nil
+}
+
 // GetGeminiKeys fetches Gemini API keys.
 // API returns {"gemini-api-key": [...]}.
 func (c *Client) GetGeminiKeys() ([]map[string]any, error) {

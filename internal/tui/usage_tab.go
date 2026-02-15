@@ -43,6 +43,9 @@ func (m usageTabModel) fetchData() tea.Msg {
 
 func (m usageTabModel) Update(msg tea.Msg) (usageTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case localeChangedMsg:
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
 	case usageDataMsg:
 		if msg.err != nil {
 			m.err = msg.err
@@ -82,7 +85,7 @@ func (m *usageTabModel) SetSize(w, h int) {
 
 func (m usageTabModel) View() string {
 	if !m.ready {
-		return "Loading..."
+		return T("loading")
 	}
 	return m.viewport.View()
 }
@@ -90,9 +93,9 @@ func (m usageTabModel) View() string {
 func (m usageTabModel) renderContent() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("📈 使用统计"))
+	sb.WriteString(titleStyle.Render(T("usage_title")))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(" [r] refresh • [↑↓] scroll"))
+	sb.WriteString(helpStyle.Render(T("usage_help")))
 	sb.WriteString("\n\n")
 
 	if m.err != nil {
@@ -102,14 +105,14 @@ func (m usageTabModel) renderContent() string {
 	}
 
 	if m.usage == nil {
-		sb.WriteString(subtitleStyle.Render("  Usage data not available"))
+		sb.WriteString(subtitleStyle.Render(T("usage_no_data")))
 		sb.WriteString("\n")
 		return sb.String()
 	}
 
 	usageMap, _ := m.usage["usage"].(map[string]any)
 	if usageMap == nil {
-		sb.WriteString(subtitleStyle.Render("  No usage data"))
+		sb.WriteString(subtitleStyle.Render(T("usage_no_data")))
 		sb.WriteString("\n")
 		return sb.String()
 	}
@@ -137,17 +140,17 @@ func (m usageTabModel) renderContent() string {
 	// Total Requests
 	card1 := cardStyle.Copy().BorderForeground(lipgloss.Color("111")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
-		lipgloss.NewStyle().Foreground(colorMuted).Render("总请求数"),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_total_reqs")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")).Render(fmt.Sprintf("%d", totalReqs)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("● 成功: %d  ● 失败: %d", successCnt, failureCnt)),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("● %s: %d  ● %s: %d", T("usage_success"), successCnt, T("usage_failure"), failureCnt)),
 	))
 
 	// Total Tokens
 	card2 := cardStyle.Copy().BorderForeground(lipgloss.Color("214")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
-		lipgloss.NewStyle().Foreground(colorMuted).Render("总 Token 数"),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_total_tokens")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(formatLargeNumber(totalTokens)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("总Token: %s", formatLargeNumber(totalTokens))),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s: %s", T("usage_total_token_l"), formatLargeNumber(totalTokens))),
 	))
 
 	// RPM
@@ -159,9 +162,9 @@ func (m usageTabModel) renderContent() string {
 	}
 	card3 := cardStyle.Copy().BorderForeground(lipgloss.Color("76")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
-		lipgloss.NewStyle().Foreground(colorMuted).Render("RPM"),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_rpm")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("76")).Render(fmt.Sprintf("%.2f", rpm)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("总请求数: %d", totalReqs)),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s: %d", T("usage_total_reqs"), totalReqs)),
 	))
 
 	// TPM
@@ -173,9 +176,9 @@ func (m usageTabModel) renderContent() string {
 	}
 	card4 := cardStyle.Copy().BorderForeground(lipgloss.Color("170")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
-		lipgloss.NewStyle().Foreground(colorMuted).Render("TPM"),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_tpm")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(fmt.Sprintf("%.2f", tpm)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("总Token数: %s", formatLargeNumber(totalTokens))),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s: %s", T("usage_total_tokens"), formatLargeNumber(totalTokens))),
 	))
 
 	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2, " ", card3, " ", card4))
@@ -183,7 +186,7 @@ func (m usageTabModel) renderContent() string {
 
 	// ━━━ Requests by Hour (ASCII bar chart) ━━━
 	if rByH, ok := usageMap["requests_by_hour"].(map[string]any); ok && len(rByH) > 0 {
-		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render("请求趋势 (按小时)"))
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("usage_req_by_hour")))
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 		sb.WriteString("\n")
@@ -193,7 +196,7 @@ func (m usageTabModel) renderContent() string {
 
 	// ━━━ Tokens by Hour ━━━
 	if tByH, ok := usageMap["tokens_by_hour"].(map[string]any); ok && len(tByH) > 0 {
-		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render("Token 使用趋势 (按小时)"))
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("usage_tok_by_hour")))
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 		sb.WriteString("\n")
@@ -203,7 +206,7 @@ func (m usageTabModel) renderContent() string {
 
 	// ━━━ Requests by Day ━━━
 	if rByD, ok := usageMap["requests_by_day"].(map[string]any); ok && len(rByD) > 0 {
-		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render("请求趋势 (按天)"))
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("usage_req_by_day")))
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 		sb.WriteString("\n")
@@ -213,12 +216,12 @@ func (m usageTabModel) renderContent() string {
 
 	// ━━━ API Detail Stats ━━━
 	if apis, ok := usageMap["apis"].(map[string]any); ok && len(apis) > 0 {
-		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render("API 详细统计"))
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("usage_api_detail")))
 		sb.WriteString("\n")
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 80)))
 		sb.WriteString("\n")
 
-		header := fmt.Sprintf("  %-30s %10s %12s", "API", "Requests", "Tokens")
+		header := fmt.Sprintf("  %-30s %10s %12s", "API", T("requests"), T("tokens"))
 		sb.WriteString(tableHeaderStyle.Render(header))
 		sb.WriteString("\n")
 
@@ -289,16 +292,16 @@ func (m usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
 
 	parts := []string{}
 	if inputTotal > 0 {
-		parts = append(parts, fmt.Sprintf("输入:%s", formatLargeNumber(inputTotal)))
+		parts = append(parts, fmt.Sprintf("%s:%s", T("usage_input"), formatLargeNumber(inputTotal)))
 	}
 	if outputTotal > 0 {
-		parts = append(parts, fmt.Sprintf("输出:%s", formatLargeNumber(outputTotal)))
+		parts = append(parts, fmt.Sprintf("%s:%s", T("usage_output"), formatLargeNumber(outputTotal)))
 	}
 	if cachedTotal > 0 {
-		parts = append(parts, fmt.Sprintf("缓存:%s", formatLargeNumber(cachedTotal)))
+		parts = append(parts, fmt.Sprintf("%s:%s", T("usage_cached"), formatLargeNumber(cachedTotal)))
 	}
 	if reasoningTotal > 0 {
-		parts = append(parts, fmt.Sprintf("思考:%s", formatLargeNumber(reasoningTotal)))
+		parts = append(parts, fmt.Sprintf("%s:%s", T("usage_reasoning"), formatLargeNumber(reasoningTotal)))
 	}
 
 	return fmt.Sprintf("    │  %s\n",

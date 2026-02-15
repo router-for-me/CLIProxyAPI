@@ -76,6 +76,9 @@ func (m authTabModel) fetchFiles() tea.Msg {
 
 func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case localeChangedMsg:
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
 	case authFilesMsg:
 		if msg.err != nil {
 			m.err = msg.err
@@ -122,7 +125,7 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 					if err != nil {
 						return authActionMsg{err: err}
 					}
-					return authActionMsg{action: fmt.Sprintf("Updated %s on %s", fieldKey, fileName)}
+					return authActionMsg{action: fmt.Sprintf(T("updated_field"), fieldKey, fileName)}
 				}
 			case "esc":
 				m.editing = false
@@ -150,7 +153,7 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 						if err != nil {
 							return authActionMsg{err: err}
 						}
-						return authActionMsg{action: fmt.Sprintf("Deleted %s", name)}
+						return authActionMsg{action: fmt.Sprintf(T("deleted"), name)}
 					}
 				}
 				m.viewport.SetContent(m.renderContent())
@@ -202,9 +205,9 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 					if err != nil {
 						return authActionMsg{err: err}
 					}
-					action := "Enabled"
+					action := T("enabled")
 					if newDisabled {
-						action = "Disabled"
+						action = T("disabled")
 					}
 					return authActionMsg{action: fmt.Sprintf("%s %s", action, name)}
 				}
@@ -267,7 +270,7 @@ func (m *authTabModel) SetSize(w, h int) {
 
 func (m authTabModel) View() string {
 	if !m.ready {
-		return "Loading..."
+		return T("loading")
 	}
 	return m.viewport.View()
 }
@@ -275,11 +278,11 @@ func (m authTabModel) View() string {
 func (m authTabModel) renderContent() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("🔑 Auth Files"))
+	sb.WriteString(titleStyle.Render(T("auth_title")))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(" [↑↓/jk] navigate • [Enter] expand • [e] enable/disable • [d] delete • [r] refresh"))
+	sb.WriteString(helpStyle.Render(T("auth_help1")))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(" [1] edit prefix • [2] edit proxy_url • [3] edit priority"))
+	sb.WriteString(helpStyle.Render(T("auth_help2")))
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", m.width))
 	sb.WriteString("\n")
@@ -291,7 +294,7 @@ func (m authTabModel) renderContent() string {
 	}
 
 	if len(m.files) == 0 {
-		sb.WriteString(subtitleStyle.Render("\n  No auth files found"))
+		sb.WriteString(subtitleStyle.Render(T("no_auth_files")))
 		sb.WriteString("\n")
 		return sb.String()
 	}
@@ -303,10 +306,10 @@ func (m authTabModel) renderContent() string {
 		disabled := getBool(f, "disabled")
 
 		statusIcon := successStyle.Render("●")
-		statusText := "active"
+		statusText := T("status_active")
 		if disabled {
 			statusIcon = lipgloss.NewStyle().Foreground(colorMuted).Render("○")
-			statusText = "disabled"
+			statusText = T("status_disabled")
 		}
 
 		cursor := "  "
@@ -332,7 +335,7 @@ func (m authTabModel) renderContent() string {
 
 		// Delete confirmation
 		if m.confirm == i {
-			sb.WriteString(warningStyle.Render(fmt.Sprintf("    ⚠ Delete %s? [y/n] ", name)))
+			sb.WriteString(warningStyle.Render(fmt.Sprintf("    "+T("confirm_delete"), name)))
 			sb.WriteString("\n")
 		}
 
@@ -340,7 +343,7 @@ func (m authTabModel) renderContent() string {
 		if m.editing && i == m.cursor {
 			sb.WriteString(m.editInput.View())
 			sb.WriteString("\n")
-			sb.WriteString(helpStyle.Render("    Enter: save • Esc: cancel"))
+			sb.WriteString(helpStyle.Render("    " + T("enter_save") + " • " + T("esc_cancel")))
 			sb.WriteString("\n")
 		}
 
@@ -398,7 +401,7 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		val := getAnyString(f, field.key)
 		if val == "" || val == "<nil>" {
 			if field.editable {
-				val = "(not set)"
+				val = T("not_set")
 			} else {
 				continue
 			}

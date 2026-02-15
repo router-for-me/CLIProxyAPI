@@ -93,6 +93,9 @@ func (m oauthTabModel) Init() tea.Cmd {
 
 func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case localeChangedMsg:
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
 	case oauthStartMsg:
 		if msg.err != nil {
 			m.state = oauthError
@@ -133,9 +136,9 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 
 	case oauthCallbackSubmitMsg:
 		if msg.err != nil {
-			m.message = errorStyle.Render("✗ 提交回调失败: " + msg.err.Error())
+			m.message = errorStyle.Render(T("oauth_submit_fail") + ": " + msg.err.Error())
 		} else {
-			m.message = successStyle.Render("✓ 回调已提交，等待处理...")
+			m.message = successStyle.Render(T("oauth_submit_ok"))
 		}
 		m.viewport.SetContent(m.renderContent())
 		return m, nil
@@ -151,7 +154,7 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 				}
 				m.inputActive = false
 				m.callbackInput.Blur()
-				m.message = warningStyle.Render("⏳ 提交回调中...")
+				m.message = warningStyle.Render(T("oauth_submitting"))
 				m.viewport.SetContent(m.renderContent())
 				return m, m.submitCallback(callbackURL)
 			case "esc":
@@ -217,7 +220,7 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 			if m.cursor >= 0 && m.cursor < len(oauthProviders) {
 				provider := oauthProviders[m.cursor]
 				m.state = oauthPending
-				m.message = warningStyle.Render("⏳ 正在初始化 " + provider.name + " 登录...")
+				m.message = warningStyle.Render(fmt.Sprintf(T("oauth_initiating"), provider.name))
 				m.viewport.SetContent(m.renderContent())
 				return m, m.startOAuth(provider)
 			}
@@ -307,7 +310,7 @@ func (m oauthTabModel) pollOAuthStatus(state string) tea.Cmd {
 		deadline := time.Now().Add(5 * time.Minute)
 		for {
 			if time.Now().After(deadline) {
-				return oauthPollMsg{done: false, err: fmt.Errorf("OAuth flow timed out (5 minutes)")}
+				return oauthPollMsg{done: false, err: fmt.Errorf("%s", T("oauth_timeout"))}
 			}
 
 			time.Sleep(2 * time.Second)
@@ -321,19 +324,19 @@ func (m oauthTabModel) pollOAuthStatus(state string) tea.Cmd {
 			case "ok":
 				return oauthPollMsg{
 					done:    true,
-					message: "认证成功! 请刷新 Auth Files 标签查看新凭证。",
+					message: T("oauth_success"),
 				}
 			case "error":
 				return oauthPollMsg{
 					done: false,
-					err:  fmt.Errorf("认证失败: %s", errMsg),
+					err:  fmt.Errorf("%s: %s", T("oauth_failed"), errMsg),
 				}
 			case "wait":
 				continue
 			default:
 				return oauthPollMsg{
 					done:    true,
-					message: "认证流程已完成。",
+					message: T("oauth_completed"),
 				}
 			}
 		}
@@ -356,7 +359,7 @@ func (m *oauthTabModel) SetSize(w, h int) {
 
 func (m oauthTabModel) View() string {
 	if !m.ready {
-		return "Loading..."
+		return T("loading")
 	}
 	return m.viewport.View()
 }
@@ -364,7 +367,7 @@ func (m oauthTabModel) View() string {
 func (m oauthTabModel) renderContent() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("🔐 OAuth 登录"))
+	sb.WriteString(titleStyle.Render(T("oauth_title")))
 	sb.WriteString("\n\n")
 
 	if m.message != "" {
@@ -379,11 +382,11 @@ func (m oauthTabModel) renderContent() string {
 	}
 
 	if m.state == oauthPending {
-		sb.WriteString(helpStyle.Render("  Press [Esc] to cancel"))
+		sb.WriteString(helpStyle.Render(T("oauth_press_esc")))
 		return sb.String()
 	}
 
-	sb.WriteString(helpStyle.Render("  选择提供商并按 [Enter] 开始 OAuth 登录:"))
+	sb.WriteString(helpStyle.Render(T("oauth_select")))
 	sb.WriteString("\n\n")
 
 	for i, p := range oauthProviders {
@@ -404,7 +407,7 @@ func (m oauthTabModel) renderContent() string {
 	}
 
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render("  [↑↓/jk] 导航 • [Enter] 登录 • [Esc] 清除状态"))
+	sb.WriteString(helpStyle.Render(T("oauth_help")))
 
 	return sb.String()
 }
@@ -417,7 +420,7 @@ func (m oauthTabModel) renderRemoteMode() string {
 	sb.WriteString("\n\n")
 
 	// Auth URL section
-	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render("  授权链接:"))
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_auth_url")))
 	sb.WriteString("\n")
 
 	// Wrap URL to fit terminal width
@@ -432,23 +435,23 @@ func (m oauthTabModel) renderRemoteMode() string {
 	}
 	sb.WriteString("\n")
 
-	sb.WriteString(helpStyle.Render("  远程浏览器模式：在浏览器中打开上述链接完成授权后，将回调 URL 粘贴到下方。"))
+	sb.WriteString(helpStyle.Render(T("oauth_remote_hint")))
 	sb.WriteString("\n\n")
 
 	// Callback URL input
-	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render("  回调 URL:"))
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_callback_url")))
 	sb.WriteString("\n")
 
 	if m.inputActive {
 		sb.WriteString(m.callbackInput.View())
 		sb.WriteString("\n")
-		sb.WriteString(helpStyle.Render("  Enter: 提交 • Esc: 取消输入"))
+		sb.WriteString(helpStyle.Render("  " + T("enter_submit") + " • " + T("esc_cancel")))
 	} else {
-		sb.WriteString(helpStyle.Render("  按 [c] 输入回调 URL • [Esc] 返回"))
+		sb.WriteString(helpStyle.Render(T("oauth_press_c")))
 	}
 
 	sb.WriteString("\n\n")
-	sb.WriteString(warningStyle.Render("  等待认证中..."))
+	sb.WriteString(warningStyle.Render(T("oauth_waiting")))
 
 	return sb.String()
 }
