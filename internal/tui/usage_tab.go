@@ -231,7 +231,7 @@ func (m usageTabModel) renderContent() string {
 				apiToks := int64(getFloat(apiMap, "total_tokens"))
 
 				row := fmt.Sprintf("  %-30s %10d %12s",
-					truncate(apiName, 30), apiReqs, formatLargeNumber(apiToks))
+					truncate(maskKey(apiName), 30), apiReqs, formatLargeNumber(apiToks))
 				sb.WriteString(lipgloss.NewStyle().Bold(true).Render(row))
 				sb.WriteString("\n")
 
