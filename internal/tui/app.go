@@ -20,8 +20,6 @@ const (
 	tabLogs
 )
 
-var tabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
-
 // App is the root bubbletea model that contains all tab sub-models.
 type App struct {
 	activeTab int
@@ -50,7 +48,7 @@ func NewApp(port int, secretKey string, hook *LogHook) App {
 	client := NewClient(port, secretKey)
 	return App{
 		activeTab: tabDashboard,
-		tabs:      tabNames,
+		tabs:      TabNames(),
 		dashboard: newDashboardModel(client),
 		config:    newConfigTabModel(client),
 		auth:      newAuthTabModel(client),
@@ -102,13 +100,50 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.activeTab != tabLogs {
 				return a, tea.Quit
 			}
+		case "L":
+			ToggleLocale()
+			a.tabs = TabNames()
+			// Broadcast locale change to ALL tabs so each re-renders
+			var cmds []tea.Cmd
+			var cmd tea.Cmd
+			a.dashboard, cmd = a.dashboard.Update(localeChangedMsg{})
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			a.config, cmd = a.config.Update(localeChangedMsg{})
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			a.auth, cmd = a.auth.Update(localeChangedMsg{})
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			a.keys, cmd = a.keys.Update(localeChangedMsg{})
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			a.oauth, cmd = a.oauth.Update(localeChangedMsg{})
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			a.usage, cmd = a.usage.Update(localeChangedMsg{})
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			a.logs, cmd = a.logs.Update(localeChangedMsg{})
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return a, tea.Batch(cmds...)
 		case "tab":
 			prevTab := a.activeTab
 			a.activeTab = (a.activeTab + 1) % len(a.tabs)
+			a.tabs = TabNames()
 			return a, a.initTabIfNeeded(prevTab)
 		case "shift+tab":
 			prevTab := a.activeTab
 			a.activeTab = (a.activeTab - 1 + len(a.tabs)) % len(a.tabs)
+			a.tabs = TabNames()
 			return a, a.initTabIfNeeded(prevTab)
 		}
 	}
@@ -145,6 +180,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
+// localeChangedMsg is broadcast to all tabs when the user toggles locale.
+type localeChangedMsg struct{}
+
 func (a *App) initTabIfNeeded(_ int) tea.Cmd {
 	if a.initialized[a.activeTab] {
 		return nil
@@ -171,7 +209,7 @@ func (a *App) initTabIfNeeded(_ int) tea.Cmd {
 
 func (a App) View() string {
 	if !a.ready {
-		return "Initializing TUI..."
+		return T("initializing_tui")
 	}
 
 	var sb strings.Builder
@@ -219,8 +257,8 @@ func (a App) renderTabBar() string {
 }
 
 func (a App) renderStatusBar() string {
-	left := " CLIProxyAPI Management TUI"
-	right := "Tab/Shift+Tab: switch • q/Ctrl+C: quit "
+	left := T("status_left")
+	right := T("status_right")
 	gap := a.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 0 {
 		gap = 0

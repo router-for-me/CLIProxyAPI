@@ -64,6 +64,9 @@ func (m configTabModel) fetchConfig() tea.Msg {
 
 func (m configTabModel) Update(msg tea.Msg) (configTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case localeChangedMsg:
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
 	case configDataMsg:
 		if msg.err != nil {
 			m.err = msg.err
@@ -79,7 +82,7 @@ func (m configTabModel) Update(msg tea.Msg) (configTabModel, tea.Cmd) {
 		if msg.err != nil {
 			m.message = errorStyle.Render("✗ " + msg.err.Error())
 		} else {
-			m.message = successStyle.Render("✓ Updated successfully")
+			m.message = successStyle.Render(T("updated_ok"))
 		}
 		m.viewport.SetContent(m.renderContent())
 		// Refresh config from server
@@ -178,7 +181,7 @@ func (m configTabModel) submitEdit(idx int, newValue string) tea.Cmd {
 		case "int":
 			v, parseErr := strconv.Atoi(newValue)
 			if parseErr != nil {
-				return configUpdateMsg{err: fmt.Errorf("invalid integer: %s", newValue)}
+				return configUpdateMsg{err: fmt.Errorf("%s: %s", T("invalid_int"), newValue)}
 			}
 			err = m.client.PutIntField(f.apiPath, v)
 		case "string":
@@ -214,7 +217,7 @@ func (m *configTabModel) ensureCursorVisible() {
 
 func (m configTabModel) View() string {
 	if !m.ready {
-		return "Loading..."
+		return T("loading")
 	}
 	return m.viewport.View()
 }
@@ -222,7 +225,7 @@ func (m configTabModel) View() string {
 func (m configTabModel) renderContent() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("⚙ Configuration"))
+	sb.WriteString(titleStyle.Render(T("config_title")))
 	sb.WriteString("\n")
 
 	if m.message != "" {
@@ -230,9 +233,9 @@ func (m configTabModel) renderContent() string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString(helpStyle.Render("  [↑↓/jk] navigate • [Enter/Space] edit • [r] refresh"))
+	sb.WriteString(helpStyle.Render(T("config_help1")))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render("  Bool fields: Enter to toggle • String/Int: Enter to type, Enter to confirm, Esc to cancel"))
+	sb.WriteString(helpStyle.Render(T("config_help2")))
 	sb.WriteString("\n\n")
 
 	if m.err != nil {
@@ -241,7 +244,7 @@ func (m configTabModel) renderContent() string {
 	}
 
 	if len(m.fields) == 0 {
-		sb.WriteString(subtitleStyle.Render("  No configuration loaded"))
+		sb.WriteString(subtitleStyle.Render(T("no_config")))
 		return sb.String()
 	}
 
@@ -341,23 +344,23 @@ func (m configTabModel) parseConfig(cfg map[string]any) []configField {
 
 func fieldSection(apiPath string) string {
 	if strings.HasPrefix(apiPath, "ampcode/") {
-		return "AMP Code"
+		return T("section_ampcode")
 	}
 	if strings.HasPrefix(apiPath, "quota-exceeded/") {
-		return "Quota Exceeded Handling"
+		return T("section_quota")
 	}
 	if strings.HasPrefix(apiPath, "routing/") {
-		return "Routing"
+		return T("section_routing")
 	}
 	switch apiPath {
 	case "port", "host", "debug", "proxy-url", "request-retry", "max-retry-interval", "force-model-prefix":
-		return "Server"
+		return T("section_server")
 	case "logging-to-file", "logs-max-total-size-mb", "error-logs-max-files", "usage-statistics-enabled", "request-log":
-		return "Logging & Stats"
+		return T("section_logging")
 	case "ws-auth":
-		return "WebSocket"
+		return T("section_websocket")
 	default:
-		return "Other"
+		return T("section_other")
 	}
 }
 
@@ -378,7 +381,7 @@ func getBoolNested(m map[string]any, keys ...string) bool {
 
 func maskIfNotEmpty(s string) string {
 	if s == "" {
-		return "(not set)"
+		return T("not_set")
 	}
 	return maskKey(s)
 }

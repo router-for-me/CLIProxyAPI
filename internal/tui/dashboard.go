@@ -57,6 +57,9 @@ func (m dashboardModel) fetchData() tea.Msg {
 
 func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case localeChangedMsg:
+		// Re-fetch data to re-render with new locale
+		return m, m.fetchData
 	case dashboardDataMsg:
 		if msg.err != nil {
 			m.err = msg.err
@@ -97,7 +100,7 @@ func (m *dashboardModel) SetSize(w, h int) {
 
 func (m dashboardModel) View() string {
 	if !m.ready {
-		return "Loading..."
+		return T("loading")
 	}
 	return m.viewport.View()
 }
@@ -105,19 +108,15 @@ func (m dashboardModel) View() string {
 func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []map[string]any, apiKeys []string) string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("📊 Dashboard"))
+	sb.WriteString(titleStyle.Render(T("dashboard_title")))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(" [r] refresh • [↑↓] scroll"))
+	sb.WriteString(helpStyle.Render(T("dashboard_help")))
 	sb.WriteString("\n\n")
 
 	// ━━━ Connection Status ━━━
-	port := 0.0
-	if cfg != nil {
-		port = getFloat(cfg, "port")
-	}
 	connStyle := lipgloss.NewStyle().Bold(true).Foreground(colorSuccess)
-	sb.WriteString(connStyle.Render("● 已连接"))
-	sb.WriteString(fmt.Sprintf("  http://127.0.0.1:%.0f", port))
+	sb.WriteString(connStyle.Render(T("connected")))
+	sb.WriteString(fmt.Sprintf("  %s", m.client.baseURL))
 	sb.WriteString("\n\n")
 
 	// ━━━ Stats Cards ━━━
@@ -141,7 +140,7 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	card1 := cardStyle.Render(fmt.Sprintf(
 		"%s\n%s",
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")).Render(fmt.Sprintf("🔑 %d", keyCount)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render("管理密钥"),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("mgmt_keys")),
 	))
 
 	// Card 2: Auth Files
@@ -155,7 +154,7 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	card2 := cardStyle.Render(fmt.Sprintf(
 		"%s\n%s",
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("76")).Render(fmt.Sprintf("📄 %d", authCount)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("认证文件 (%d active)", activeAuth)),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s (%d %s)", T("auth_files_label"), activeAuth, T("active_suffix"))),
 	))
 
 	// Card 3: Total Requests
@@ -174,7 +173,7 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	card3 := cardStyle.Render(fmt.Sprintf(
 		"%s\n%s",
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("📈 %d", totalReqs)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("请求 (✓%d ✗%d)", successReqs, failedReqs)),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s (✓%d ✗%d)", T("total_requests"), successReqs, failedReqs)),
 	))
 
 	// Card 4: Total Tokens
@@ -182,14 +181,14 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	card4 := cardStyle.Render(fmt.Sprintf(
 		"%s\n%s",
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(fmt.Sprintf("🔤 %s", tokenStr)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render("总 Tokens"),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("total_tokens")),
 	))
 
 	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2, " ", card3, " ", card4))
 	sb.WriteString("\n\n")
 
 	// ━━━ Current Config ━━━
-	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render("当前配置"))
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("current_config")))
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 	sb.WriteString("\n")
@@ -210,16 +209,16 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 			label string
 			value string
 		}{
-			{"启用调试模式", boolEmoji(debug)},
-			{"启用使用统计", boolEmoji(usageEnabled)},
-			{"启用日志记录到文件", boolEmoji(loggingToFile)},
-			{"重试次数", fmt.Sprintf("%.0f", retry)},
+			{T("debug_mode"), boolEmoji(debug)},
+			{T("usage_stats"), boolEmoji(usageEnabled)},
+			{T("log_to_file"), boolEmoji(loggingToFile)},
+			{T("retry_count"), fmt.Sprintf("%.0f", retry)},
 		}
 		if proxyURL != "" {
 			configItems = append(configItems, struct {
 				label string
 				value string
-			}{"代理 URL", proxyURL})
+			}{T("proxy_url"), proxyURL})
 		}
 
 		// Render config items as a compact row
@@ -237,7 +236,7 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 			}
 		}
 		sb.WriteString(fmt.Sprintf("  %s %s\n",
-			labelStyle.Render("路由策略:"),
+			labelStyle.Render(T("routing_strategy")+":"),
 			valueStyle.Render(strategy)))
 	}
 
@@ -247,12 +246,12 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	if usage != nil {
 		if usageMap, ok := usage["usage"].(map[string]any); ok {
 			if apis, ok := usageMap["apis"].(map[string]any); ok && len(apis) > 0 {
-				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render("模型统计"))
+				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("model_stats")))
 				sb.WriteString("\n")
 				sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 				sb.WriteString("\n")
 
-				header := fmt.Sprintf("  %-40s %10s %12s", "Model", "Requests", "Tokens")
+				header := fmt.Sprintf("  %-40s %10s %12s", T("model"), T("requests"), T("tokens"))
 				sb.WriteString(tableHeaderStyle.Render(header))
 				sb.WriteString("\n")
 
@@ -315,9 +314,9 @@ func getBool(m map[string]any, key string) bool {
 
 func boolEmoji(b bool) string {
 	if b {
-		return "是 ✓"
+		return T("bool_yes")
 	}
-	return "否"
+	return T("bool_no")
 }
 
 func formatLargeNumber(n int64) string {
