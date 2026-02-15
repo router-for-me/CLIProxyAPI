@@ -81,7 +81,21 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 	// Extract and set usage metadata (token counts).
 	if usageResult := gjson.GetBytes(rawJSON, "response.usage"); usageResult.Exists() {
-		template = setOpenAIUsageFromCodexUsage(template, usageResult)
+		if outputTokensResult := usageResult.Get("output_tokens"); outputTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokensResult.Int())
+		}
+		if totalTokensResult := usageResult.Get("total_tokens"); totalTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.total_tokens", totalTokensResult.Int())
+		}
+		if inputTokensResult := usageResult.Get("input_tokens"); inputTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokensResult.Int())
+		}
+		if cachedTokensResult := usageResult.Get("input_tokens_details.cached_tokens"); cachedTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cachedTokensResult.Int())
+		}
+		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int())
+		}
 	}
 
 	if dataType == "response.reasoning_summary_text.delta" {
@@ -185,7 +199,21 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 	// Extract and set usage metadata (token counts).
 	if usageResult := responseResult.Get("usage"); usageResult.Exists() {
-		template = setOpenAIUsageFromCodexUsage(template, usageResult)
+		if outputTokensResult := usageResult.Get("output_tokens"); outputTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokensResult.Int())
+		}
+		if totalTokensResult := usageResult.Get("total_tokens"); totalTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.total_tokens", totalTokensResult.Int())
+		}
+		if inputTokensResult := usageResult.Get("input_tokens"); inputTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokensResult.Int())
+		}
+		if cachedTokensResult := usageResult.Get("input_tokens_details.cached_tokens"); cachedTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cachedTokensResult.Int())
+		}
+		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int())
+		}
 	}
 
 	// Process the output array for content and function calls
@@ -277,25 +305,6 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		}
 	}
 
-	return template
-}
-
-func setOpenAIUsageFromCodexUsage(template string, usageResult gjson.Result) string {
-	if outputTokensResult := usageResult.Get("output_tokens"); outputTokensResult.Exists() {
-		template, _ = sjson.Set(template, "usage.completion_tokens", outputTokensResult.Int())
-	}
-	if totalTokensResult := usageResult.Get("total_tokens"); totalTokensResult.Exists() {
-		template, _ = sjson.Set(template, "usage.total_tokens", totalTokensResult.Int())
-	}
-	if inputTokensResult := usageResult.Get("input_tokens"); inputTokensResult.Exists() {
-		template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokensResult.Int())
-	}
-	if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
-		template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int())
-	}
-	if cachedTokensResult := usageResult.Get("input_tokens_details.cached_tokens"); cachedTokensResult.Exists() {
-		template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cachedTokensResult.Int())
-	}
 	return template
 }
 

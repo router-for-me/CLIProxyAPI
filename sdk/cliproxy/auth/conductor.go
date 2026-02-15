@@ -604,8 +604,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				return cliproxyexecutor.Response{}, errCtx
 			}
 			result.Error = &Error{Message: errExec.Error()}
-			var se cliproxyexecutor.StatusError
-			if errors.As(errExec, &se) && se != nil {
+			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 				result.Error.HTTPStatus = se.StatusCode()
 			}
 			if ra := retryAfterFromError(errExec); ra != nil {
@@ -660,8 +659,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				return cliproxyexecutor.Response{}, errCtx
 			}
 			result.Error = &Error{Message: errExec.Error()}
-			var se cliproxyexecutor.StatusError
-			if errors.As(errExec, &se) && se != nil {
+			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 				result.Error.HTTPStatus = se.StatusCode()
 			}
 			if ra := retryAfterFromError(errExec); ra != nil {
@@ -715,8 +713,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errCtx
 			}
 			rerr := &Error{Message: errStream.Error()}
-			var se cliproxyexecutor.StatusError
-			if errors.As(errStream, &se) && se != nil {
+			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
@@ -737,8 +734,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if chunk.Err != nil && !failed {
 					failed = true
 					rerr := &Error{Message: chunk.Err.Error()}
-					var se cliproxyexecutor.StatusError
-					if errors.As(chunk.Err, &se) && se != nil {
+					if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
 					}
 					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
@@ -1451,8 +1447,7 @@ func retryAfterFromError(err error) *time.Duration {
 	if retryAfter == nil {
 		return nil
 	}
-	val := *retryAfter
-	return &val
+	return new(*retryAfter)
 }
 
 func statusCodeFromResult(err *Error) int {

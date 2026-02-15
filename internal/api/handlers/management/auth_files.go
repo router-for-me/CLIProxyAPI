@@ -1188,6 +1188,30 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			}
 			ts.ProjectID = strings.Join(projects, ",")
 			ts.Checked = true
+		} else if strings.EqualFold(requestedProjectID, "GOOGLE_ONE") {
+			ts.Auto = false
+			if errSetup := performGeminiCLISetup(ctx, gemClient, &ts, ""); errSetup != nil {
+				log.Errorf("Google One auto-discovery failed: %v", errSetup)
+				SetOAuthSessionError(state, "Google One auto-discovery failed")
+				return
+			}
+			if strings.TrimSpace(ts.ProjectID) == "" {
+				log.Error("Google One auto-discovery returned empty project ID")
+				SetOAuthSessionError(state, "Google One auto-discovery returned empty project ID")
+				return
+			}
+			isChecked, errCheck := checkCloudAPIIsEnabled(ctx, gemClient, ts.ProjectID)
+			if errCheck != nil {
+				log.Errorf("Failed to verify Cloud AI API status: %v", errCheck)
+				SetOAuthSessionError(state, "Failed to verify Cloud AI API status")
+				return
+			}
+			ts.Checked = isChecked
+			if !isChecked {
+				log.Error("Cloud AI API is not enabled for the auto-discovered project")
+				SetOAuthSessionError(state, "Cloud AI API not enabled")
+				return
+			}
 		} else {
 			if errEnsure := ensureGeminiProjectAndOnboard(ctx, gemClient, &ts, requestedProjectID); errEnsure != nil {
 				log.Errorf("Failed to complete Gemini CLI onboarding: %v", errEnsure)
@@ -2036,7 +2060,48 @@ func performGeminiCLISetup(ctx context.Context, httpClient *http.Client, storage
 		}
 	}
 	if projectID == "" {
-		return &projectSelectionRequiredError{}
+		// Auto-discovery: try onboardUser without specifying a project
+		// to let Google auto-provision one (matches Gemini CLI headless behavior
+		// and Antigravity's FetchProjectID pattern).
+		autoOnboardReq := map[string]any{
+			"tierId":   tierID,
+			"metadata": metadata,
+		}
+
+		autoCtx, autoCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer autoCancel()
+		for attempt := 1; ; attempt++ {
+			var onboardResp map[string]any
+			if errOnboard := callGeminiCLI(autoCtx, httpClient, "onboardUser", autoOnboardReq, &onboardResp); errOnboard != nil {
+				return fmt.Errorf("auto-discovery onboardUser: %w", errOnboard)
+			}
+
+			if done, okDone := onboardResp["done"].(bool); okDone && done {
+				if resp, okResp := onboardResp["response"].(map[string]any); okResp {
+					switch v := resp["cloudaicompanionProject"].(type) {
+					case string:
+						projectID = strings.TrimSpace(v)
+					case map[string]any:
+						if id, okID := v["id"].(string); okID {
+							projectID = strings.TrimSpace(id)
+						}
+					}
+				}
+				break
+			}
+
+			log.Debugf("Auto-discovery: onboarding in progress, attempt %d...", attempt)
+			select {
+			case <-autoCtx.Done():
+				return &projectSelectionRequiredError{}
+			case <-time.After(2 * time.Second):
+			}
+		}
+
+		if projectID == "" {
+			return &projectSelectionRequiredError{}
+		}
+		log.Infof("Auto-discovered project ID via onboarding: %s", projectID)
 	}
 
 	onboardReqBody := map[string]any{
