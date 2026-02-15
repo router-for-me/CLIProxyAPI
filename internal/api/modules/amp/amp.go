@@ -127,8 +127,7 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 		m.modelMapper = NewModelMapper(settings.ModelMappings)
 
 		// Store initial config for partial reload comparison
-		settingsCopy := settings
-		m.lastConfig = &settingsCopy
+		m.lastConfig = new(settings)
 
 		// Initialize localhost restriction setting (hot-reloadable)
 		m.setRestrictToLocalhost(settings.RestrictManagementToLocalhost)

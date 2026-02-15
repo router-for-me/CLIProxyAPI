@@ -596,8 +596,7 @@ func (r *ModelRegistry) SetModelQuotaExceeded(clientID, modelID string) {
 	defer r.mutex.Unlock()
 
 	if registration, exists := r.models[modelID]; exists {
-		now := time.Now()
-		registration.QuotaExceededClients[clientID] = &now
+		registration.QuotaExceededClients[clientID] = new(time.Now())
 		log.Debugf("Marked model %s as quota exceeded for client %s", modelID, clientID)
 	}
 }
