@@ -232,7 +232,7 @@ func TestExecuteCountMixedOnce_AllFourXXDoesNotFreezeKeys(t *testing.T) {
 	}
 }
 
-func TestExecuteMixedOnce_InvalidRequestErrorStillStopsFallback(t *testing.T) {
+func TestExecuteMixedOnce_ClaudeInvalidRequestErrorFallsBack(t *testing.T) {
 	model := uniqueTestModel(t)
 	executor := newScriptedProviderExecutor(
 		map[string][]scriptedOutcome{
@@ -257,20 +257,17 @@ func TestExecuteMixedOnce_InvalidRequestErrorStillStopsFallback(t *testing.T) {
 	registerTestAuthForModel(t, manager, "a-auth", model)
 	registerTestAuthForModel(t, manager, "b-auth", model)
 
-	_, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
-	if err == nil {
-		t.Fatalf("Execute() expected invalid_request_error, got nil")
+	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want nil", err)
 	}
-	if status := statusCodeFromError(err); status != http.StatusBadRequest {
-		t.Fatalf("Execute() status = %d, want %d", status, http.StatusBadRequest)
-	}
-	if !strings.Contains(err.Error(), "invalid_request_error") {
-		t.Fatalf("Execute() error = %q, want invalid_request_error", err.Error())
+	if string(resp.Payload) != `{"ok":true}` {
+		t.Fatalf("Execute() payload = %q, want %q", string(resp.Payload), `{"ok":true}`)
 	}
 	if got := executor.ExecuteCalls("a-auth"); got != 1 {
 		t.Fatalf("ExecuteCalls(a-auth) = %d, want 1", got)
 	}
-	if got := executor.ExecuteCalls("b-auth"); got != 0 {
-		t.Fatalf("ExecuteCalls(b-auth) = %d, want 0", got)
+	if got := executor.ExecuteCalls("b-auth"); got != 1 {
+		t.Fatalf("ExecuteCalls(b-auth) = %d, want 1", got)
 	}
 }
