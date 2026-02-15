@@ -32,8 +32,7 @@ func (a *ClaudeAuthenticator) Provider() string {
 }
 
 func (a *ClaudeAuthenticator) RefreshLead() *time.Duration {
-	d := 4 * time.Hour
-	return &d
+	return new(4 * time.Hour)
 }
 
 func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
