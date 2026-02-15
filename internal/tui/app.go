@@ -103,38 +103,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "L":
 			ToggleLocale()
 			a.tabs = TabNames()
-			// Broadcast locale change to ALL tabs so each re-renders
-			var cmds []tea.Cmd
-			var cmd tea.Cmd
-			a.dashboard, cmd = a.dashboard.Update(localeChangedMsg{})
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			a.config, cmd = a.config.Update(localeChangedMsg{})
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			a.auth, cmd = a.auth.Update(localeChangedMsg{})
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			a.keys, cmd = a.keys.Update(localeChangedMsg{})
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			a.oauth, cmd = a.oauth.Update(localeChangedMsg{})
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			a.usage, cmd = a.usage.Update(localeChangedMsg{})
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			a.logs, cmd = a.logs.Update(localeChangedMsg{})
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			return a, tea.Batch(cmds...)
+			return a.broadcastToAllTabs(localeChangedMsg{})
 		case "tab":
 			prevTab := a.activeTab
 			a.activeTab = (a.activeTab + 1) % len(a.tabs)
@@ -277,4 +246,40 @@ func Run(port int, secretKey string, hook *LogHook, output io.Writer) error {
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithOutput(output))
 	_, err := p.Run()
 	return err
+}
+
+func (a App) broadcastToAllTabs(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	var cmd tea.Cmd
+
+	a.dashboard, cmd = a.dashboard.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	a.config, cmd = a.config.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	a.auth, cmd = a.auth.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	a.keys, cmd = a.keys.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	a.oauth, cmd = a.oauth.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	a.usage, cmd = a.usage.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	a.logs, cmd = a.logs.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	return a, tea.Batch(cmds...)
 }

@@ -284,8 +284,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		optionState.routerConfigurator(engine, s.handlers, cfg)
 	}
 
-	// Register management routes when configuration or environment secrets are available.
-	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret
+	// Register management routes when configuration or environment secrets are available,
+	// or when a local management password is provided (e.g. TUI mode).
+	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != ""
 	s.managementRoutesEnabled.Store(hasManagementSecret)
 	if hasManagementSecret {
 		s.registerManagementRoutes()

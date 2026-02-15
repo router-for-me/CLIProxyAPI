@@ -19,6 +19,12 @@ type dashboardModel struct {
 	width    int
 	height   int
 	ready    bool
+
+	// Cached data for re-rendering on locale change
+	lastConfig    map[string]any
+	lastUsage     map[string]any
+	lastAuthFiles []map[string]any
+	lastAPIKeys   []string
 }
 
 type dashboardDataMsg struct {
@@ -58,14 +64,24 @@ func (m dashboardModel) fetchData() tea.Msg {
 func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
-		// Re-fetch data to re-render with new locale
+		// Re-render immediately with cached data using new locale
+		m.content = m.renderDashboard(m.lastConfig, m.lastUsage, m.lastAuthFiles, m.lastAPIKeys)
+		m.viewport.SetContent(m.content)
+		// Also fetch fresh data in background
 		return m, m.fetchData
+
 	case dashboardDataMsg:
 		if msg.err != nil {
 			m.err = msg.err
 			m.content = errorStyle.Render("⚠ Error: " + msg.err.Error())
 		} else {
 			m.err = nil
+			// Cache data for locale switching
+			m.lastConfig = msg.config
+			m.lastUsage = msg.usage
+			m.lastAuthFiles = msg.authFiles
+			m.lastAPIKeys = msg.apiKeys
+
 			m.content = m.renderDashboard(msg.config, msg.usage, msg.authFiles, msg.apiKeys)
 		}
 		m.viewport.SetContent(m.content)

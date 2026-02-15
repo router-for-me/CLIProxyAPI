@@ -511,21 +511,21 @@ func main() {
 				password = localMgmtPassword
 			}
 
-			// Ensure management routes are registered (secret-key must be set)
-			if cfg.RemoteManagement.SecretKey == "" {
-				cfg.RemoteManagement.SecretKey = "$tui-placeholder$"
-			}
-
 			// Start server in background
 			cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
 
-			// Wait for server to be ready by polling management API
+			// Wait for server to be ready by polling management API with exponential backoff
 			{
 				client := tui.NewClient(cfg.Port, password)
-				for i := 0; i < 50; i++ {
-					time.Sleep(100 * time.Millisecond)
+				backoff := 100 * time.Millisecond
+				// Try for up to ~10-15 seconds
+				for i := 0; i < 30; i++ {
 					if _, err := client.GetConfig(); err == nil {
 						break
+					}
+					time.Sleep(backoff)
+					if backoff < 1*time.Second {
+						backoff = time.Duration(float64(backoff) * 1.5)
 					}
 				}
 			}
