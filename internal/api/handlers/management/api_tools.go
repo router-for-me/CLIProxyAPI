@@ -8,10 +8,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -701,4 +704,192 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 
 	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
 	return nil
+}
+
+const (
+	codexVerifyURL       = "https://chatgpt.com/backend-api/wham/usage"
+	codexVerifyUserAgent = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
+)
+
+// CleanupCodexAuth verifies all codex credentials and removes invalid ones.
+//
+// Endpoint:
+//
+//	POST /v0/management/custom/codex-cleanup
+//
+// For each codex credential, sends a GET request to chatgpt.com to verify token
+// validity. If the upstream returns 401, the credential file is deleted and the
+// auth record is disabled.
+//
+// Response: NDJSON stream (application/x-ndjson), one JSON object per line:
+//
+//	{"type":"start","total":N}
+//	{"type":"progress","index":1,"total":N,"name":"...","auth_index":"...","status_code":200,"deleted":false}
+//	{"type":"done","total":N,"deleted":M}
+func (h *Handler) CleanupCodexAuth(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	auths := h.authManager.List()
+
+	// Collect codex auths first to know total count.
+	var codexAuths []*coreauth.Auth
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			continue
+		}
+		if auth.Disabled {
+			continue
+		}
+		auth.EnsureIndex()
+		codexAuths = append(codexAuths, auth)
+	}
+
+	total := len(codexAuths)
+	log.Infof("[codex-cleanup] starting cleanup, %d codex credentials", total)
+
+	c.Writer.Header().Set("Content-Type", "application/x-ndjson")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+
+	writeEvent := func(v any) {
+		data, _ := json.Marshal(v)
+		data = append(data, '\n')
+		_, _ = c.Writer.Write(data)
+		c.Writer.Flush()
+	}
+
+	writeEvent(gin.H{"type": "start", "total": total})
+
+	deleted := 0
+	for i, auth := range codexAuths {
+		name := strings.TrimSpace(auth.FileName)
+		if name == "" {
+			name = auth.ID
+		}
+
+		ev := gin.H{
+			"type":       "progress",
+			"index":      i + 1,
+			"total":      total,
+			"name":       name,
+			"auth_index": auth.Index,
+		}
+
+		// Resolve access token.
+		token, tokenErr := h.resolveTokenForAuth(ctx, auth)
+		if tokenErr != nil || token == "" {
+			errMsg := "token not available"
+			if tokenErr != nil {
+				errMsg = tokenErr.Error()
+			}
+			log.Warnf("[codex-cleanup] %s: token resolve failed: %s", name, errMsg)
+			ev["error"] = errMsg
+			writeEvent(ev)
+			continue
+		}
+
+		// Extract chatgpt_account_id from ID token claims.
+		accountID := extractCodexAccountID(auth)
+
+		// Verify token.
+		statusCode, verifyErr := h.verifyCodexToken(ctx, auth, token, accountID)
+		ev["status_code"] = statusCode
+		if verifyErr != nil {
+			log.Warnf("[codex-cleanup] %s: verify request failed: %v", name, verifyErr)
+			ev["error"] = verifyErr.Error()
+			writeEvent(ev)
+			continue
+		}
+
+		// Delete invalid credentials.
+		if statusCode == http.StatusUnauthorized {
+			log.Infof("[codex-cleanup] %s: token invalid (401), removing", name)
+			if delErr := h.removeCodexAuth(ctx, auth); delErr != nil {
+				log.Errorf("[codex-cleanup] %s: delete failed: %v", name, delErr)
+				ev["deleted"] = false
+				ev["error"] = delErr.Error()
+			} else {
+				log.Infof("[codex-cleanup] %s: deleted successfully", name)
+				ev["deleted"] = true
+				deleted++
+			}
+		} else {
+			ev["deleted"] = false
+			log.Debugf("[codex-cleanup] %s: valid (status %d)", name, statusCode)
+		}
+		writeEvent(ev)
+	}
+
+	writeEvent(gin.H{"type": "done", "total": total, "deleted": deleted})
+	log.Infof("[codex-cleanup] finished: checked %d, deleted %d", total, deleted)
+}
+
+func (h *Handler) verifyCodexToken(ctx context.Context, auth *coreauth.Auth, token, accountID string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexVerifyURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", codexVerifyUserAgent)
+	if accountID != "" {
+		req.Header.Set("Chatgpt-Account-Id", accountID)
+	}
+
+	client := &http.Client{
+		Timeout:   defaultAPICallTimeout,
+		Transport: h.apiCallTransport(auth),
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	// Drain body so the connection can be reused.
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	return resp.StatusCode, nil
+}
+
+func (h *Handler) removeCodexAuth(ctx context.Context, auth *coreauth.Auth) error {
+	path := strings.TrimSpace(authAttribute(auth, "path"))
+	if path == "" {
+		path = filepath.Join(h.cfg.AuthDir, auth.FileName)
+	}
+	if !filepath.IsAbs(path) {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove file: %w", err)
+	}
+	if err := h.deleteTokenRecord(ctx, path); err != nil {
+		return fmt.Errorf("failed to delete token record: %w", err)
+	}
+	h.disableAuth(ctx, path)
+	return nil
+}
+
+func extractCodexAccountID(auth *coreauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	idTokenRaw, ok := auth.Metadata["id_token"].(string)
+	if !ok {
+		return ""
+	}
+	claims, err := codex.ParseJWTToken(strings.TrimSpace(idTokenRaw))
+	if err != nil || claims == nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.GetAccountID())
 }

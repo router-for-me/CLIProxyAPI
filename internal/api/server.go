@@ -518,6 +518,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
 
 		mgmt.POST("/api-call", s.mgmt.APICall)
+		mgmt.POST("/custom/codex-cleanup", s.mgmt.CleanupCodexAuth)
 
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
 		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
