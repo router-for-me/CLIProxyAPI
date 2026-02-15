@@ -177,6 +177,19 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 
 		output += "event: content_block_delta\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
+	} else if typeStr == "response.function_call_arguments.done" {
+		// Some models (e.g. gpt-5.3-codex-spark) send function call arguments
+		// in a single "done" event without preceding "delta" events.
+		// Emit the full arguments as a single input_json_delta so the
+		// downstream Claude client receives the complete tool input.
+		if args := rootResult.Get("arguments").String(); args != "" {
+			template = `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
+			template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+			template, _ = sjson.Set(template, "delta.partial_json", args)
+
+			output += "event: content_block_delta\n"
+			output += fmt.Sprintf("data: %s\n\n", template)
+		}
 	}
 
 	return []string{output}
