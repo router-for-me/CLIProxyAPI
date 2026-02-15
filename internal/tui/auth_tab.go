@@ -115,7 +115,12 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 				m.editInput.Blur()
 				fields := map[string]any{}
 				if fieldKey == "priority" {
-					p, _ := strconv.Atoi(value)
+p, err := strconv.Atoi(value)
+if err != nil {
+    return m, func() tea.Msg {
+        return authActionMsg{err: fmt.Errorf("invalid priority: must be a number")}
+    }
+}
 					fields[fieldKey] = p
 				} else {
 					fields[fieldKey] = value
