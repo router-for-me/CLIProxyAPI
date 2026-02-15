@@ -3,7 +3,7 @@ package tui
 // i18n provides a simple internationalization system for the TUI.
 // Supported locales: "zh" (Chinese, default), "en" (English).
 
-var currentLocale = "zh"
+var currentLocale = "en"
 
 // SetLocale changes the active locale.
 func SetLocale(locale string) {
