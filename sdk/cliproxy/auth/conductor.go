@@ -660,6 +660,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
+			if status := statusCodeFromError(errExec); status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+				lastErr = errExec
+				continue
+			}
 			m.MarkResult(execCtx, result)
 			if isRequestInvalidError(errExec) {
 				return cliproxyexecutor.Response{}, errExec
