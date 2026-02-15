@@ -6,7 +6,7 @@ func GetKiloModels() []*ModelInfo {
 	return []*ModelInfo{
 		// --- Base Models ---
 		{
-			ID:                  "kilo-auto",
+			ID:                  "kilo/auto",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "kilo",

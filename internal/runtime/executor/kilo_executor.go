@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,9 +13,11 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -67,13 +71,222 @@ func (e *KiloExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 }
 
 // Execute performs a non-streaming request.
-func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, fmt.Errorf("kilo: execution not fully implemented yet")
+func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
+	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.trackFailure(ctx, &err)
+
+	accessToken, orgID := kiloCredentials(auth)
+	if accessToken == "" {
+		return resp, fmt.Errorf("kilo: missing access token")
+	}
+
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("openai")
+	endpoint := "/api/openrouter/chat/completions"
+
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return resp, err
+	}
+
+	url := "https://api.kilo.ai" + endpoint
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	if err != nil {
+		return resp, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+	if orgID != "" {
+		httpReq.Header.Set("X-Kilocode-OrganizationID", orgID)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-kilo")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      translated,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer httpResp.Body.Close()
+
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return resp, err
+	}
+
+	body, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	appendAPIResponseChunk(ctx, e.cfg, body)
+	reporter.publish(ctx, parseOpenAIUsage(body))
+	reporter.ensurePublished(ctx)
+
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
+	resp = cliproxyexecutor.Response{Payload: []byte(out)}
+	return resp, nil
 }
 
 // ExecuteStream performs a streaming request.
-func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
-	return nil, fmt.Errorf("kilo: streaming execution not fully implemented yet")
+func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
+	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.trackFailure(ctx, &err)
+
+	accessToken, orgID := kiloCredentials(auth)
+	if accessToken == "" {
+		return nil, fmt.Errorf("kilo: missing access token")
+	}
+
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("openai")
+	endpoint := "/api/openrouter/chat/completions"
+
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return nil, err
+	}
+
+	url := "https://api.kilo.ai" + endpoint
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+	if orgID != "" {
+		httpReq.Header.Set("X-Kilocode-OrganizationID", orgID)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-kilo")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("Cache-Control", "no-cache")
+
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      translated,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return nil, err
+	}
+
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		httpResp.Body.Close()
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return nil, err
+	}
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+	stream = out
+	go func() {
+		defer close(out)
+		defer httpResp.Body.Close()
+
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(nil, 52_428_800)
+		var param any
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			appendAPIResponseChunk(ctx, e.cfg, line)
+			if detail, ok := parseOpenAIStreamUsage(line); ok {
+				reporter.publish(ctx, detail)
+			}
+			if len(line) == 0 {
+				continue
+			}
+			if !bytes.HasPrefix(line, []byte("data:")) {
+				continue
+			}
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
+			for i := range chunks {
+				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+			}
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			recordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.publishFailure(ctx)
+			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+		}
+		reporter.ensurePublished(ctx)
+	}()
+
+	return stream, nil
 }
 
 // Refresh validates the Kilo token.
@@ -98,13 +311,25 @@ func kiloCredentials(auth *cliproxyauth.Auth) (accessToken, orgID string) {
 		if token, ok := auth.Metadata["access_token"].(string); ok {
 			accessToken = token
 		}
+		if token, ok := auth.Metadata["kilocodeToken"].(string); ok {
+			accessToken = token
+		}
 		if org, ok := auth.Metadata["organization_id"].(string); ok {
+			orgID = org
+		}
+		if org, ok := auth.Metadata["kilocodeOrganizationId"].(string); ok {
 			orgID = org
 		}
 	}
 	if accessToken == "" && auth.Attributes != nil {
 		accessToken = auth.Attributes["access_token"]
+		if accessToken == "" {
+			accessToken = auth.Attributes["kilocodeToken"]
+		}
 		orgID = auth.Attributes["organization_id"]
+		if orgID == "" {
+			orgID = auth.Attributes["kilocodeOrganizationId"]
+		}
 	}
 	return accessToken, orgID
 }
@@ -113,9 +338,11 @@ func kiloCredentials(auth *cliproxyauth.Auth) (accessToken, orgID string) {
 func FetchKiloModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
 	accessToken, orgID := kiloCredentials(auth)
 	if accessToken == "" {
-		log.Infof("kilo: no access token found, skipping dynamic model fetch (using static kilo-auto)")
+		log.Infof("kilo: no access token found, skipping dynamic model fetch (using static kilo/auto)")
 		return registry.GetKiloModels()
 	}
+
+	log.Debugf("kilo: fetching dynamic models (orgID: %s)", orgID)
 
 	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.kilo.ai/api/openrouter/models", nil)
@@ -128,6 +355,7 @@ func FetchKiloModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 	if orgID != "" {
 		req.Header.Set("X-Kilocode-OrganizationID", orgID)
 	}
+	req.Header.Set("User-Agent", "cli-proxy-kilo")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -169,6 +397,7 @@ func FetchKiloModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 
 	result.ForEach(func(key, value gjson.Result) bool {
 		totalCount++
+		id := value.Get("id").String()
 		pIdxResult := value.Get("preferredIndex")
 		preferredIndex := pIdxResult.Int()
 
@@ -177,8 +406,25 @@ func FetchKiloModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 			return true
 		}
 
+		// Check if it's free. We look for :free suffix, is_free flag, or zero pricing.
+		isFree := strings.HasSuffix(id, ":free") || id == "giga-potato" || value.Get("is_free").Bool()
+		if !isFree {
+			// Check pricing as fallback
+			promptPricing := value.Get("pricing.prompt").String()
+			if promptPricing == "0" || promptPricing == "0.0" {
+				isFree = true
+			}
+		}
+
+		if !isFree {
+			log.Debugf("kilo: skipping curated paid model: %s", id)
+			return true
+		}
+
+		log.Debugf("kilo: found curated model: %s (preferredIndex: %d)", id, preferredIndex)
+
 		dynamicModels = append(dynamicModels, &registry.ModelInfo{
-			ID:            value.Get("id").String(),
+			ID:            id,
 			DisplayName:   value.Get("name").String(),
 			ContextLength: int(value.Get("context_length").Int()),
 			OwnedBy:       "kilo",
@@ -190,13 +436,13 @@ func FetchKiloModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 		return true
 	})
 
-	log.Infof("kilo: fetched %d models from API, %d curated (preferredIndex > 0)", totalCount, count)
+	log.Infof("kilo: fetched %d models from API, %d curated free (preferredIndex > 0)", totalCount, count)
 	if count == 0 && totalCount > 0 {
-		log.Warn("kilo: no curated models found (all preferredIndex <= 0). Check API response.")
+		log.Warn("kilo: no curated free models found (check API response fields)")
 	}
 
 	staticModels := registry.GetKiloModels()
-	// Always include kilo-auto (first static model)
+	// Always include kilo/auto (first static model)
 	allModels := append(staticModels[:1], dynamicModels...)
 
 	return allModels
