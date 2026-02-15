@@ -3,7 +3,7 @@
 # syntax=docker/dockerfile:1.4
 
 # 构建阶段 - 使用 BUILDPLATFORM 在原生架构执行
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 # 版本号参数
 ARG VERSION=dev
