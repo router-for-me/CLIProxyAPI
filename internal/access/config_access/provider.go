@@ -29,8 +29,9 @@ func Register(cfg *sdkconfig.SDKConfig) {
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name     string
+	keys     map[string]struct{}
+	prefixes []string
 }
 
 func newProvider(name string, keys []string) *provider {
@@ -39,10 +40,15 @@ func newProvider(name string, keys []string) *provider {
 		providerName = sdkaccess.DefaultAccessProviderName
 	}
 	keySet := make(map[string]struct{}, len(keys))
+	var prefixes []string
 	for _, key := range keys {
-		keySet[key] = struct{}{}
+		if strings.HasSuffix(key, "*") {
+			prefixes = append(prefixes, strings.TrimSuffix(key, "*"))
+		} else {
+			keySet[key] = struct{}{}
+		}
 	}
-	return &provider{name: providerName, keys: keySet}
+	return &provider{name: providerName, keys: keySet, prefixes: prefixes}
 }
 
 func (p *provider) Identifier() string {
@@ -56,7 +62,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	if p == nil {
 		return nil, sdkaccess.NewNotHandledError()
 	}
-	if len(p.keys) == 0 {
+	if len(p.keys) == 0 && len(p.prefixes) == 0 {
 		return nil, sdkaccess.NewNotHandledError()
 	}
 	authHeader := r.Header.Get("Authorization")
@@ -97,6 +103,17 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 					"source": candidate.source,
 				},
 			}, nil
+		}
+		for _, prefix := range p.prefixes {
+			if strings.HasPrefix(candidate.value, prefix) {
+				return &sdkaccess.Result{
+					Provider:  p.Identifier(),
+					Principal: candidate.value,
+					Metadata: map[string]string{
+						"source": candidate.source,
+					},
+				}, nil
+			}
 		}
 	}
 
