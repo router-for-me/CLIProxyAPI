@@ -71,17 +71,17 @@ func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) error {
 
 // CredentialFileName returns the filename used to persist Gemini CLI credentials.
 // When projectID represents multiple projects (comma-separated or literal ALL),
-// the suffix is normalized to "all" and a "gemini-" prefix is enforced to keep
+// the suffix is normalized to "all" and a "geminicli-" prefix is enforced to keep
 // web and CLI generated files consistent.
 func CredentialFileName(email, projectID string, includeProviderPrefix bool) string {
 	email = strings.TrimSpace(email)
 	project := strings.TrimSpace(projectID)
 	if strings.EqualFold(project, "all") || strings.Contains(project, ",") {
-		return fmt.Sprintf("gemini-%s-all.json", email)
+		return fmt.Sprintf("geminicli-%s-all.json", email)
 	}
 	prefix := ""
 	if includeProviderPrefix {
-		prefix = "gemini-"
+		prefix = "geminicli-"
 	}
 	return fmt.Sprintf("%s%s-%s.json", prefix, email, project)
 }
