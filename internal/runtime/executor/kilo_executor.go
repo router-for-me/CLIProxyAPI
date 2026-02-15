@@ -307,30 +307,39 @@ func kiloCredentials(auth *cliproxyauth.Auth) (accessToken, orgID string) {
 	if auth == nil {
 		return "", ""
 	}
+
+	// Prefer kilocode specific keys, then fall back to generic keys.
+	// Check metadata first, then attributes.
 	if auth.Metadata != nil {
-		if token, ok := auth.Metadata["access_token"].(string); ok {
+		if token, ok := auth.Metadata["kilocodeToken"].(string); ok && token != "" {
+			accessToken = token
+		} else if token, ok := auth.Metadata["access_token"].(string); ok && token != "" {
 			accessToken = token
 		}
-		if token, ok := auth.Metadata["kilocodeToken"].(string); ok {
-			accessToken = token
-		}
-		if org, ok := auth.Metadata["organization_id"].(string); ok {
+
+		if org, ok := auth.Metadata["kilocodeOrganizationId"].(string); ok && org != "" {
 			orgID = org
-		}
-		if org, ok := auth.Metadata["kilocodeOrganizationId"].(string); ok {
+		} else if org, ok := auth.Metadata["organization_id"].(string); ok && org != "" {
 			orgID = org
 		}
 	}
+
 	if accessToken == "" && auth.Attributes != nil {
-		accessToken = auth.Attributes["access_token"]
-		if accessToken == "" {
-			accessToken = auth.Attributes["kilocodeToken"]
-		}
-		orgID = auth.Attributes["organization_id"]
-		if orgID == "" {
-			orgID = auth.Attributes["kilocodeOrganizationId"]
+		if token := auth.Attributes["kilocodeToken"]; token != "" {
+			accessToken = token
+		} else if token := auth.Attributes["access_token"]; token != "" {
+			accessToken = token
 		}
 	}
+
+	if orgID == "" && auth.Attributes != nil {
+		if org := auth.Attributes["kilocodeOrganizationId"]; org != "" {
+			orgID = org
+		} else if org := auth.Attributes["organization_id"]; org != "" {
+			orgID = org
+		}
+	}
+
 	return accessToken, orgID
 }
 

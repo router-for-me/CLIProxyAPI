@@ -75,8 +75,8 @@ func (a *KiloAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 				return nil, err
 			}
 			var choice int
-			fmt.Sscanf(input, "%d", &choice)
-			if choice > 0 && choice <= len(profile.Orgs) {
+			_, err = fmt.Sscan(input, &choice)
+			if err == nil && choice > 0 && choice <= len(profile.Orgs) {
 				orgID = profile.Orgs[choice-1].ID
 			} else {
 				orgID = profile.Orgs[0].ID

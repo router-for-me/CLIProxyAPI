@@ -114,7 +114,10 @@ func (k *KiloAuth) PollForToken(ctx context.Context, code string) (*DeviceStatus
 
 // GetProfile fetches the user's profile.
 func (k *KiloAuth) GetProfile(ctx context.Context, token string) (*Profile, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", BaseURL+"/profile", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", BaseURL+"/profile", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create get profile request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := k.client.Do(req)
@@ -141,7 +144,10 @@ func (k *KiloAuth) GetDefaults(ctx context.Context, token, orgID string) (*Defau
 		url = BaseURL + "/organizations/" + orgID + "/defaults"
 	}
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create get defaults request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := k.client.Do(req)
