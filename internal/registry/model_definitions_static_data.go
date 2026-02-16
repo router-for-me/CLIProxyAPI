@@ -504,7 +504,7 @@ func GetAIStudioModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}},
 		},
 		{
 			ID:                         "gemini-3-flash-preview",
@@ -519,7 +519,7 @@ func GetAIStudioModels() []*ModelInfo {
 			InputTokenLimit:            1048576,
 			OutputTokenLimit:           65536,
 			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}},
 		},
 		{
 			ID:                         "gemini-pro-latest",

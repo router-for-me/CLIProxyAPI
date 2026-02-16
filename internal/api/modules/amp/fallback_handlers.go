@@ -298,34 +298,32 @@ func rewriteModelInRequest(body []byte, newModel string) []byte {
 
 // extractModelFromRequest attempts to extract the model name from various request formats
 func extractModelFromRequest(body []byte, c *gin.Context) string {
+	var modelName string
+
 	// First try to parse from JSON body (OpenAI, Claude, etc.)
 	// Check common model field names
 	if result := gjson.GetBytes(body, "model"); result.Exists() && result.Type == gjson.String {
-		return result.String()
-	}
-
-	// For Gemini requests, model is in the URL path
-	// Standard format: /models/{model}:generateContent -> :action parameter
-	if action := c.Param("action"); action != "" {
+		modelName = result.String()
+	} else if action := c.Param("action"); action != "" {
+		// For Gemini requests, model is in the URL path
+		// Standard format: /models/{model}:generateContent -> :action parameter
 		// Split by colon to get model name (e.g., "gemini-pro:generateContent" -> "gemini-pro")
 		parts := strings.Split(action, ":")
 		if len(parts) > 0 && parts[0] != "" {
-			return parts[0]
+			modelName = parts[0]
 		}
-	}
-
-	// AMP CLI format: /publishers/google/models/{model}:method -> *path parameter
-	// Example: /publishers/google/models/gemini-3-pro-preview:streamGenerateContent
-	if path := c.Param("path"); path != "" {
+	} else if path := c.Param("path"); path != "" {
+		// AMP CLI format: /publishers/google/models/{model}:method -> *path parameter
+		// Example: /publishers/google/models/gemini-3-pro-preview:streamGenerateContent
 		// Look for /models/{model}:method pattern
 		if idx := strings.Index(path, "/models/"); idx >= 0 {
 			modelPart := path[idx+8:] // Skip "/models/"
 			// Split by colon to get model name
 			if colonIdx := strings.Index(modelPart, ":"); colonIdx > 0 {
-				return modelPart[:colonIdx]
+				modelName = modelPart[:colonIdx]
 			}
 		}
 	}
 
-	return ""
+	return strings.TrimLeft(strings.TrimSpace(modelName), "/ ")
 }

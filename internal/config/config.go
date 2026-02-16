@@ -75,6 +75,13 @@ type Config struct {
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
+	// ReadTimeout is the maximum duration for reading the entire request, including the body.
+	ReadTimeout int `yaml:"read-timeout" json:"read-timeout"`
+	// WriteTimeout is the maximum duration before timing out writes of the response.
+	WriteTimeout int `yaml:"write-timeout" json:"write-timeout"`
+	// IdleTimeout is the maximum amount of time to wait for the next request when keep-alives are enabled.
+	IdleTimeout int `yaml:"idle-timeout" json:"idle-timeout"`
+
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
@@ -533,7 +540,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
-	if err = yaml.Unmarshal(data, &cfg); err != nil {
+	if err = yaml.Unmarshal([]byte(os.ExpandEnv(string(data))), &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
 			return &Config{}, nil

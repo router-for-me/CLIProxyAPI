@@ -929,24 +929,41 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 		count int
 	}
 	providers := make([]providerCount, 0, len(registration.Providers))
-	// suspendedByProvider := make(map[string]int)
-	// if registration.SuspendedClients != nil {
-	// 	for clientID := range registration.SuspendedClients {
-	// 		if provider, ok := r.clientProviders[clientID]; ok && provider != "" {
-	// 			suspendedByProvider[provider]++
-	// 		}
-	// 	}
-	// }
+	suspendedByProvider := make(map[string]int)
+	if registration.SuspendedClients != nil {
+		for clientID, reason := range registration.SuspendedClients {
+			if reason == "" {
+				// No reason given means not a quota suspension, potentially something else.
+				// But we should check for quota suspension specifically.
+			}
+			if provider, ok := r.clientProviders[clientID]; ok && provider != "" {
+				suspendedByProvider[provider]++
+			}
+		}
+	}
+
+	// Also account for quota exceeded clients
+	now := time.Now()
+	quotaExpiredDuration := 5 * time.Minute
+	if registration.QuotaExceededClients != nil {
+		for clientID, quotaTime := range registration.QuotaExceededClients {
+			if quotaTime != nil && now.Sub(*quotaTime) < quotaExpiredDuration {
+				if provider, ok := r.clientProviders[clientID]; ok && provider != "" {
+					suspendedByProvider[provider]++
+				}
+			}
+		}
+	}
+
 	for name, count := range registration.Providers {
 		if count <= 0 {
 			continue
 		}
-		// adjusted := count - suspendedByProvider[name]
-		// if adjusted <= 0 {
-		// 	continue
-		// }
-		// providers = append(providers, providerCount{name: name, count: adjusted})
-		providers = append(providers, providerCount{name: name, count: count})
+		adjusted := count - suspendedByProvider[name]
+		if adjusted <= 0 {
+			continue
+		}
+		providers = append(providers, providerCount{name: name, count: adjusted})
 	}
 	if len(providers) == 0 {
 		return nil

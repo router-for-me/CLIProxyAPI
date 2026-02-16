@@ -203,6 +203,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Add middleware
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(contextCancellationMiddleware())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
@@ -297,8 +298,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create HTTP server
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler: engine,
+		Addr:         fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Handler:      engine,
+		ReadTimeout:  time.Duration(cfg.ReadTimeout) * time.Second,
+		WriteTimeout: time.Duration(cfg.WriteTimeout) * time.Second,
+		IdleTimeout:  time.Duration(cfg.IdleTimeout) * time.Second,
 	}
 
 	return s
@@ -853,6 +857,35 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {
 	}
 	if _, err := access.ApplyAccessProviders(s.accessManager, oldCfg, newCfg); err != nil {
 		return
+	}
+}
+
+func contextCancellationMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Next()
+
+		if len(c.Errors) > 0 {
+			for _, err := range c.Errors {
+				if errors.Is(err.Err, context.Canceled) || errors.Is(err.Err, context.DeadlineExceeded) {
+					if !c.Writer.Written() {
+						c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{
+							"error": "request cancelled or timed out",
+						})
+					}
+					return
+				}
+			}
+		}
+
+		if err := c.Request.Context().Err(); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if !c.Writer.Written() {
+					c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{
+						"error": "request cancelled or timed out",
+					})
+				}
+			}
+		}
 	}
 }
 

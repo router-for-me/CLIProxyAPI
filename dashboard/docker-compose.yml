@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: dashboard
+      POSTGRES_DB: dashboard
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - dashboard-net
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    environment:
+      CONTAINERS: 1
+      NETWORKS: 1
+      SERVICES: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - dashboard-net
+
+  dashboard:
+    image: cliproxy-dashboard:local
+    ports:
+      - "3001:3000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      MANAGEMENT_API_KEY: ${MANAGEMENT_API_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      CLIPROXYAPI_MANAGEMENT_URL: ${CLIPROXYAPI_MANAGEMENT_URL}
+      DOCKER_HOST: tcp://docker-proxy:2375
+    depends_on:
+      - postgres
+      - docker-proxy
+    networks:
+      - dashboard-net
+      - cli-proxy-api_default
+
+networks:
+  dashboard-net:
+  cli-proxy-api_default:
+    external: true
+
+volumes:
+  postgres_data:

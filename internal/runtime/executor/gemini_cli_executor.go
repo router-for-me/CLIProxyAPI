@@ -759,20 +759,16 @@ func geminiCLIClientMetadata() string {
 // cliPreviewFallbackOrder returns preview model candidates for a base model.
 func cliPreviewFallbackOrder(model string) []string {
 	switch model {
+	case "gemini-3-pro-preview":
+		return []string{"gemini-2.5-pro", "gemini-pro-latest"}
+	case "gemini-3-flash-preview":
+		return []string{"gemini-2.5-flash", "gemini-flash-latest"}
 	case "gemini-2.5-pro":
-		return []string{
-			// "gemini-2.5-pro-preview-05-06",
-			// "gemini-2.5-pro-preview-06-05",
-		}
+		return []string{"gemini-pro-latest"}
 	case "gemini-2.5-flash":
-		return []string{
-			// "gemini-2.5-flash-preview-04-17",
-			// "gemini-2.5-flash-preview-05-20",
-		}
+		return []string{"gemini-flash-latest"}
 	case "gemini-2.5-flash-lite":
-		return []string{
-			// "gemini-2.5-flash-lite-preview-06-17",
-		}
+		return []string{"gemini-flash-lite-latest"}
 	default:
 		return nil
 	}
