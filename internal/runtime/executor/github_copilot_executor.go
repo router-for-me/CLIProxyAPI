@@ -550,6 +550,17 @@ func flattenAssistantContent(body []byte) []byte {
 		if !content.Exists() || !content.IsArray() {
 			continue
 		}
+		// Skip flattening if the content contains non-text blocks (tool_use, thinking, etc.)
+		hasNonText := false
+		for _, part := range content.Array() {
+			if t := part.Get("type").String(); t != "" && t != "text" {
+				hasNonText = true
+				break
+			}
+		}
+		if hasNonText {
+			continue
+		}
 		var textParts []string
 		for _, part := range content.Array() {
 			if part.Get("type").String() == "text" {
@@ -597,31 +608,173 @@ func normalizeGitHubCopilotChatTools(body []byte) []byte {
 func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if input.Exists() {
-		if input.Type == gjson.String {
+		// If input is already a string or array, keep it as-is.
+		if input.Type == gjson.String || input.IsArray() {
 			return body
 		}
-		inputString := input.Raw
-		if input.Type != gjson.JSON {
-			inputString = input.String()
-		}
-		body, _ = sjson.SetBytes(body, "input", inputString)
+		// Non-string/non-array input: stringify as fallback.
+		body, _ = sjson.SetBytes(body, "input", input.Raw)
 		return body
 	}
 
-	var parts []string
+	// Convert Claude messages format to OpenAI Responses API input array.
+	// This preserves the conversation structure (roles, tool calls, tool results)
+	// which is critical for multi-turn tool-use conversations.
+	inputArr := "[]"
+
+	// System messages → developer role
 	if system := gjson.GetBytes(body, "system"); system.Exists() {
-		if text := strings.TrimSpace(collectTextFromNode(system)); text != "" {
-			parts = append(parts, text)
+		var systemParts []string
+		if system.IsArray() {
+			for _, part := range system.Array() {
+				if txt := part.Get("text").String(); txt != "" {
+					systemParts = append(systemParts, txt)
+				}
+			}
+		} else if system.Type == gjson.String {
+			systemParts = append(systemParts, system.String())
+		}
+		if len(systemParts) > 0 {
+			msg := `{"type":"message","role":"developer","content":[]}`
+			for _, txt := range systemParts {
+				part := `{"type":"input_text","text":""}`
+				part, _ = sjson.Set(part, "text", txt)
+				msg, _ = sjson.SetRaw(msg, "content.-1", part)
+			}
+			inputArr, _ = sjson.SetRaw(inputArr, "-1", msg)
 		}
 	}
+
+	// Messages → structured input items
 	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
 		for _, msg := range messages.Array() {
-			if text := strings.TrimSpace(collectTextFromNode(msg.Get("content"))); text != "" {
-				parts = append(parts, text)
+			role := msg.Get("role").String()
+			content := msg.Get("content")
+
+			if !content.Exists() {
+				continue
+			}
+
+			// Simple string content
+			if content.Type == gjson.String {
+				textType := "input_text"
+				if role == "assistant" {
+					textType = "output_text"
+				}
+				item := `{"type":"message","role":"","content":[]}`
+				item, _ = sjson.Set(item, "role", role)
+				part := fmt.Sprintf(`{"type":"%s","text":""}`, textType)
+				part, _ = sjson.Set(part, "text", content.String())
+				item, _ = sjson.SetRaw(item, "content.-1", part)
+				inputArr, _ = sjson.SetRaw(inputArr, "-1", item)
+				continue
+			}
+
+			if !content.IsArray() {
+				continue
+			}
+
+			// Array content: split into message parts vs tool items
+			var msgParts []string
+			for _, c := range content.Array() {
+				cType := c.Get("type").String()
+				switch cType {
+				case "text":
+					textType := "input_text"
+					if role == "assistant" {
+						textType = "output_text"
+					}
+					part := fmt.Sprintf(`{"type":"%s","text":""}`, textType)
+					part, _ = sjson.Set(part, "text", c.Get("text").String())
+					msgParts = append(msgParts, part)
+				case "image":
+					source := c.Get("source")
+					if source.Exists() {
+						data := source.Get("data").String()
+						if data == "" {
+							data = source.Get("base64").String()
+						}
+						mediaType := source.Get("media_type").String()
+						if mediaType == "" {
+							mediaType = source.Get("mime_type").String()
+						}
+						if mediaType == "" {
+							mediaType = "application/octet-stream"
+						}
+						if data != "" {
+							part := `{"type":"input_image","image_url":""}`
+							part, _ = sjson.Set(part, "image_url", fmt.Sprintf("data:%s;base64,%s", mediaType, data))
+							msgParts = append(msgParts, part)
+						}
+					}
+				case "tool_use":
+					// Flush any accumulated message parts first
+					if len(msgParts) > 0 {
+						item := `{"type":"message","role":"","content":[]}`
+						item, _ = sjson.Set(item, "role", role)
+						for _, p := range msgParts {
+							item, _ = sjson.SetRaw(item, "content.-1", p)
+						}
+						inputArr, _ = sjson.SetRaw(inputArr, "-1", item)
+						msgParts = nil
+					}
+					fc := `{"type":"function_call","call_id":"","name":"","arguments":""}`
+					fc, _ = sjson.Set(fc, "call_id", c.Get("id").String())
+					fc, _ = sjson.Set(fc, "name", c.Get("name").String())
+					if inputRaw := c.Get("input"); inputRaw.Exists() {
+						fc, _ = sjson.Set(fc, "arguments", inputRaw.Raw)
+					}
+					inputArr, _ = sjson.SetRaw(inputArr, "-1", fc)
+				case "tool_result":
+					// Flush any accumulated message parts first
+					if len(msgParts) > 0 {
+						item := `{"type":"message","role":"","content":[]}`
+						item, _ = sjson.Set(item, "role", role)
+						for _, p := range msgParts {
+							item, _ = sjson.SetRaw(item, "content.-1", p)
+						}
+						inputArr, _ = sjson.SetRaw(inputArr, "-1", item)
+						msgParts = nil
+					}
+					fco := `{"type":"function_call_output","call_id":"","output":""}`
+					fco, _ = sjson.Set(fco, "call_id", c.Get("tool_use_id").String())
+					// Extract output text
+					resultContent := c.Get("content")
+					if resultContent.Type == gjson.String {
+						fco, _ = sjson.Set(fco, "output", resultContent.String())
+					} else if resultContent.IsArray() {
+						var resultParts []string
+						for _, rc := range resultContent.Array() {
+							if txt := rc.Get("text").String(); txt != "" {
+								resultParts = append(resultParts, txt)
+							}
+						}
+						fco, _ = sjson.Set(fco, "output", strings.Join(resultParts, "\n"))
+					} else if resultContent.Exists() {
+						fco, _ = sjson.Set(fco, "output", resultContent.String())
+					}
+					inputArr, _ = sjson.SetRaw(inputArr, "-1", fco)
+				case "thinking":
+					// Skip thinking blocks - not part of the API input
+				}
+			}
+
+			// Flush remaining message parts
+			if len(msgParts) > 0 {
+				item := `{"type":"message","role":"","content":[]}`
+				item, _ = sjson.Set(item, "role", role)
+				for _, p := range msgParts {
+					item, _ = sjson.SetRaw(item, "content.-1", p)
+				}
+				inputArr, _ = sjson.SetRaw(inputArr, "-1", item)
 			}
 		}
 	}
-	body, _ = sjson.SetBytes(body, "input", strings.Join(parts, "\n"))
+
+	body, _ = sjson.SetRawBytes(body, "input", []byte(inputArr))
+	// Remove messages/system since we've converted them to input
+	body, _ = sjson.DeleteBytes(body, "messages")
+	body, _ = sjson.DeleteBytes(body, "system")
 	return body
 }
 
@@ -747,6 +900,8 @@ type githubCopilotResponsesStreamState struct {
 	TextBlockIndex    int
 	NextContentIndex  int
 	HasToolUse        bool
+	ReasoningActive   bool
+	ReasoningIndex    int
 	OutputIndexToTool map[int]*githubCopilotResponsesStreamToolState
 	ItemIDToTool      map[string]*githubCopilotResponsesStreamToolState
 }
@@ -761,6 +916,33 @@ func translateGitHubCopilotResponsesNonStreamToClaude(data []byte) string {
 	if output := root.Get("output"); output.Exists() && output.IsArray() {
 		for _, item := range output.Array() {
 			switch item.Get("type").String() {
+			case "reasoning":
+				var thinkingText string
+				if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+					var parts []string
+					for _, part := range summary.Array() {
+						if txt := part.Get("text").String(); txt != "" {
+							parts = append(parts, txt)
+						}
+					}
+					thinkingText = strings.Join(parts, "")
+				}
+				if thinkingText == "" {
+					if content := item.Get("content"); content.Exists() && content.IsArray() {
+						var parts []string
+						for _, part := range content.Array() {
+							if txt := part.Get("text").String(); txt != "" {
+								parts = append(parts, txt)
+							}
+						}
+						thinkingText = strings.Join(parts, "")
+					}
+				}
+				if thinkingText != "" {
+					block := `{"type":"thinking","thinking":""}`
+					block, _ = sjson.Set(block, "thinking", thinkingText)
+					out, _ = sjson.SetRaw(out, "content.-1", block)
+				}
 			case "message":
 				if content := item.Get("content"); content.Exists() && content.IsArray() {
 					for _, part := range content.Array() {
@@ -798,10 +980,19 @@ func translateGitHubCopilotResponsesNonStreamToClaude(data []byte) string {
 
 	inputTokens := root.Get("usage.input_tokens").Int()
 	outputTokens := root.Get("usage.output_tokens").Int()
+	cachedTokens := root.Get("usage.input_tokens_details.cached_tokens").Int()
+	if cachedTokens > 0 && inputTokens >= cachedTokens {
+		inputTokens -= cachedTokens
+	}
 	out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
 	out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
+	if cachedTokens > 0 {
+		out, _ = sjson.Set(out, "usage.cache_read_input_tokens", cachedTokens)
+	}
 	if hasToolUse {
 		out, _ = sjson.Set(out, "stop_reason", "tool_use")
+	} else if sr := root.Get("stop_reason").String(); sr == "max_tokens" || sr == "stop" {
+		out, _ = sjson.Set(out, "stop_reason", sr)
 	} else {
 		out, _ = sjson.Set(out, "stop_reason", "end_turn")
 	}
@@ -892,6 +1083,31 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) []st
 			contentDelta, _ = sjson.Set(contentDelta, "delta.text", delta)
 			results = append(results, "event: content_block_delta\ndata: "+contentDelta+"\n\n")
 		}
+	case "response.reasoning_summary_part.added":
+		ensureMessageStart()
+		state.ReasoningActive = true
+		state.ReasoningIndex = state.NextContentIndex
+		state.NextContentIndex++
+		thinkingStart := `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
+		thinkingStart, _ = sjson.Set(thinkingStart, "index", state.ReasoningIndex)
+		results = append(results, "event: content_block_start\ndata: "+thinkingStart+"\n\n")
+	case "response.reasoning_summary_text.delta":
+		if state.ReasoningActive {
+			delta := gjson.GetBytes(payload, "delta").String()
+			if delta != "" {
+				thinkingDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`
+				thinkingDelta, _ = sjson.Set(thinkingDelta, "index", state.ReasoningIndex)
+				thinkingDelta, _ = sjson.Set(thinkingDelta, "delta.thinking", delta)
+				results = append(results, "event: content_block_delta\ndata: "+thinkingDelta+"\n\n")
+			}
+		}
+	case "response.reasoning_summary_part.done":
+		if state.ReasoningActive {
+			thinkingStop := `{"type":"content_block_stop","index":0}`
+			thinkingStop, _ = sjson.Set(thinkingStop, "index", state.ReasoningIndex)
+			results = append(results, "event: content_block_stop\ndata: "+thinkingStop+"\n\n")
+			state.ReasoningActive = false
+		}
 	case "response.output_item.added":
 		if gjson.GetBytes(payload, "item.type").String() != "function_call" {
 			break
@@ -938,6 +1154,23 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) []st
 		inputDelta, _ = sjson.Set(inputDelta, "index", tool.Index)
 		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", partial)
 		results = append(results, "event: content_block_delta\ndata: "+inputDelta+"\n\n")
+	case "response.function_call_arguments.delta":
+		// Copilot sends tool call arguments via this event type (not response.output_item.delta).
+		// Data format: {"delta":"...", "item_id":"...", "output_index":N, ...}
+		itemID := gjson.GetBytes(payload, "item_id").String()
+		outputIndex := int(gjson.GetBytes(payload, "output_index").Int())
+		tool := resolveTool(itemID, outputIndex)
+		if tool == nil {
+			break
+		}
+		partial := gjson.GetBytes(payload, "delta").String()
+		if partial == "" {
+			break
+		}
+		inputDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
+		inputDelta, _ = sjson.Set(inputDelta, "index", tool.Index)
+		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", partial)
+		results = append(results, "event: content_block_delta\ndata: "+inputDelta+"\n\n")
 	case "response.output_item.done":
 		if gjson.GetBytes(payload, "item.type").String() != "function_call" {
 			break
@@ -956,11 +1189,22 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) []st
 			stopReason := "end_turn"
 			if state.HasToolUse {
 				stopReason = "tool_use"
+			} else if sr := gjson.GetBytes(payload, "response.stop_reason").String(); sr == "max_tokens" || sr == "stop" {
+				stopReason = sr
+			}
+			inputTokens := gjson.GetBytes(payload, "response.usage.input_tokens").Int()
+			outputTokens := gjson.GetBytes(payload, "response.usage.output_tokens").Int()
+			cachedTokens := gjson.GetBytes(payload, "response.usage.input_tokens_details.cached_tokens").Int()
+			if cachedTokens > 0 && inputTokens >= cachedTokens {
+				inputTokens -= cachedTokens
 			}
 			messageDelta := `{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
 			messageDelta, _ = sjson.Set(messageDelta, "delta.stop_reason", stopReason)
-			messageDelta, _ = sjson.Set(messageDelta, "usage.input_tokens", gjson.GetBytes(payload, "response.usage.input_tokens").Int())
-			messageDelta, _ = sjson.Set(messageDelta, "usage.output_tokens", gjson.GetBytes(payload, "response.usage.output_tokens").Int())
+			messageDelta, _ = sjson.Set(messageDelta, "usage.input_tokens", inputTokens)
+			messageDelta, _ = sjson.Set(messageDelta, "usage.output_tokens", outputTokens)
+			if cachedTokens > 0 {
+				messageDelta, _ = sjson.Set(messageDelta, "usage.cache_read_input_tokens", cachedTokens)
+			}
 			results = append(results, "event: message_delta\ndata: "+messageDelta+"\n\n")
 			results = append(results, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 			state.MessageStopSent = true

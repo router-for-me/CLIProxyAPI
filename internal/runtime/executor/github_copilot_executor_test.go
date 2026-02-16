@@ -103,11 +103,18 @@ func TestNormalizeGitHubCopilotResponsesInput_MissingInputExtractedFromSystemAnd
 	body := []byte(`{"system":"sys text","messages":[{"role":"user","content":"user text"},{"role":"assistant","content":[{"type":"text","text":"assistant text"}]}]}`)
 	got := normalizeGitHubCopilotResponsesInput(body)
 	in := gjson.GetBytes(got, "input")
-	if in.Type != gjson.String {
-		t.Fatalf("input type = %v, want string", in.Type)
+	if !in.IsArray() {
+		t.Fatalf("input type = %v, want array", in.Type)
 	}
-	if !strings.Contains(in.String(), "sys text") || !strings.Contains(in.String(), "user text") || !strings.Contains(in.String(), "assistant text") {
-		t.Fatalf("input = %q, want merged text", in.String())
+	raw := in.Raw
+	if !strings.Contains(raw, "sys text") || !strings.Contains(raw, "user text") || !strings.Contains(raw, "assistant text") {
+		t.Fatalf("input = %s, want structured array with all texts", raw)
+	}
+	if gjson.GetBytes(got, "messages").Exists() {
+		t.Fatal("messages should be removed after conversion")
+	}
+	if gjson.GetBytes(got, "system").Exists() {
+		t.Fatal("system should be removed after conversion")
 	}
 }
 
