@@ -98,3 +98,31 @@ func TestStripClaudeToolPrefixFromStreamLine_WithToolReference(t *testing.T) {
 		t.Fatalf("content_block.tool_name = %q, want %q", got, "beta")
 	}
 }
+
+func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"mcp__nia__manage_resource"}]}]}]}`)
+	out := applyClaudeToolPrefix(input, "proxy_")
+	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
+	if got != "proxy_mcp__nia__manage_resource" {
+		t.Fatalf("nested tool_reference tool_name = %q, want %q", got, "proxy_mcp__nia__manage_resource")
+	}
+}
+
+func TestStripClaudeToolPrefixFromResponse_NestedToolReference(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"proxy_mcp__nia__manage_resource"}]}]}`)
+	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
+	got := gjson.GetBytes(out, "content.0.content.0.tool_name").String()
+	if got != "mcp__nia__manage_resource" {
+		t.Fatalf("nested tool_reference tool_name = %q, want %q", got, "mcp__nia__manage_resource")
+	}
+}
+
+func TestApplyClaudeToolPrefix_NestedToolReferenceWithStringContent(t *testing.T) {
+	// tool_result.content can be a string - should not be processed
+	input := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"plain string result"}]}]}`)
+	out := applyClaudeToolPrefix(input, "proxy_")
+	got := gjson.GetBytes(out, "messages.0.content.0.content").String()
+	if got != "plain string result" {
+		t.Fatalf("string content should remain unchanged = %q", got)
+	}
+}
