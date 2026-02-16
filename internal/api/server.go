@@ -864,26 +864,27 @@ func contextCancellationMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Next()
 
-		if len(c.Errors) > 0 {
-			for _, err := range c.Errors {
-				if errors.Is(err.Err, context.Canceled) || errors.Is(err.Err, context.DeadlineExceeded) {
-					if !c.Writer.Written() {
-						c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{
-							"error": "request cancelled or timed out",
-						})
-					}
-					return
+		var err error
+		// First, check if the request context itself was cancelled.
+		// This is the most common case for client disconnects or server timeouts.
+		if ctxErr := c.Request.Context().Err(); ctxErr != nil {
+			err = ctxErr
+		} else {
+			// If not, check if any downstream handler attached a cancellation error.
+			for _, ginErr := range c.Errors {
+				if errors.Is(ginErr.Err, context.Canceled) || errors.Is(ginErr.Err, context.DeadlineExceeded) {
+					err = ginErr.Err
+					break
 				}
 			}
 		}
 
-		if err := c.Request.Context().Err(); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				if !c.Writer.Written() {
-					c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{
-						"error": "request cancelled or timed out",
-					})
-				}
+		if err != nil {
+			// If a cancellation or timeout error was found, abort the request if not already written.
+			if !c.Writer.Written() {
+				c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{
+					"error": "request cancelled or timed out",
+				})
 			}
 		}
 	}
