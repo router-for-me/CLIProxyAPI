@@ -146,3 +146,111 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RUnlock()
 	return snapshotCoreAuths(cfg, w.authDir)
 }
+
+// NotifyTokenRefreshed 处理后台刷新器的 token 更新通知
+// 当后台刷新器成功刷新 token 后调用此方法，更新内存中的 Auth 对象
+// tokenID: token 文件名（如 kiro-xxx.json）
+// accessToken: 新的 access token
+// refreshToken: 新的 refresh token
+// expiresAt: 新的过期时间
+func (w *Watcher) NotifyTokenRefreshed(tokenID, accessToken, refreshToken, expiresAt string) {
+	if w == nil {
+		return
+	}
+
+	w.clientsMutex.Lock()
+	defer w.clientsMutex.Unlock()
+
+	// 遍历 currentAuths，找到匹配的 Auth 并更新
+	updated := false
+	for id, auth := range w.currentAuths {
+		if auth == nil || auth.Metadata == nil {
+			continue
+		}
+
+		// 检查是否是 kiro 类型的 auth
+		authType, _ := auth.Metadata["type"].(string)
+		if authType != "kiro" {
+			continue
+		}
+
+		// 多种匹配方式，解决不同来源的 auth 对象字段差异
+		matched := false
+
+		// 1. 通过 auth.ID 匹配（ID 可能包含文件名）
+		if !matched && auth.ID != "" {
+			if auth.ID == tokenID || strings.HasSuffix(auth.ID, "/"+tokenID) || strings.HasSuffix(auth.ID, "\\"+tokenID) {
+				matched = true
+			}
+			// ID 可能是 "kiro-xxx" 格式（无扩展名），tokenID 是 "kiro-xxx.json"
+			if !matched && strings.TrimSuffix(tokenID, ".json") == auth.ID {
+				matched = true
+			}
+		}
+
+		// 2. 通过 auth.Attributes["path"] 匹配
+		if !matched && auth.Attributes != nil {
+			if authPath := auth.Attributes["path"]; authPath != "" {
+				// 提取文件名部分进行比较
+				pathBase := authPath
+				if idx := strings.LastIndexAny(authPath, "/\\"); idx >= 0 {
+					pathBase = authPath[idx+1:]
+				}
+				if pathBase == tokenID || strings.TrimSuffix(pathBase, ".json") == strings.TrimSuffix(tokenID, ".json") {
+					matched = true
+				}
+			}
+		}
+
+		// 3. 通过 auth.FileName 匹配（原有逻辑）
+		if !matched && auth.FileName != "" {
+			if auth.FileName == tokenID || strings.HasSuffix(auth.FileName, "/"+tokenID) || strings.HasSuffix(auth.FileName, "\\"+tokenID) {
+				matched = true
+			}
+		}
+
+		if matched {
+			// 更新内存中的 token
+			auth.Metadata["access_token"] = accessToken
+			auth.Metadata["refresh_token"] = refreshToken
+			auth.Metadata["expires_at"] = expiresAt
+			auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+			auth.UpdatedAt = time.Now()
+			auth.LastRefreshedAt = time.Now()
+
+			log.Infof("watcher: updated in-memory auth for token %s (auth ID: %s)", tokenID, id)
+			updated = true
+
+			// 同时更新 runtimeAuths 中的副本（如果存在）
+			if w.runtimeAuths != nil {
+				if runtimeAuth, ok := w.runtimeAuths[id]; ok && runtimeAuth != nil {
+					if runtimeAuth.Metadata == nil {
+						runtimeAuth.Metadata = make(map[string]any)
+					}
+					runtimeAuth.Metadata["access_token"] = accessToken
+					runtimeAuth.Metadata["refresh_token"] = refreshToken
+					runtimeAuth.Metadata["expires_at"] = expiresAt
+					runtimeAuth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+					runtimeAuth.UpdatedAt = time.Now()
+					runtimeAuth.LastRefreshedAt = time.Now()
+				}
+			}
+
+			// 发送更新通知到 authQueue
+			if w.authQueue != nil {
+				go func(authClone *coreauth.Auth) {
+					update := AuthUpdate{
+						Action: AuthUpdateActionModify,
+						ID:     authClone.ID,
+						Auth:   authClone,
+					}
+					w.dispatchAuthUpdates([]AuthUpdate{update})
+				}(auth.Clone())
+			}
+		}
+	}
+
+	if !updated {
+		log.Debugf("watcher: no matching auth found for token %s, will be picked up on next file scan", tokenID)
+	}
+}
