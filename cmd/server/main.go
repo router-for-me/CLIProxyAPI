@@ -119,6 +119,7 @@ func main() {
 	var err error
 	var cfg *config.Config
 	var isCloudDeploy bool
+	var usageStore usage.UsageStore
 	var (
 		usePostgresStore     bool
 		pgStoreDSN           string
@@ -386,6 +387,16 @@ func main() {
 		cfg = &config.Config{}
 	}
 
+	if configFilePath != "" {
+		usagePath := filepath.Join(filepath.Dir(configFilePath), "usage.json")
+		usageStore = usage.NewFileUsageStore(usagePath)
+		if mergeResult, loadErr := usage.GetRequestStatistics().LoadFromStore(context.Background(), usageStore); loadErr != nil {
+			log.WithError(loadErr).Warnf("failed to load persisted usage statistics from %s", usagePath)
+		} else if mergeResult.Added > 0 || mergeResult.Skipped > 0 {
+			log.Infof("loaded usage statistics from %s (added=%d skipped=%d)", usagePath, mergeResult.Added, mergeResult.Skipped)
+		}
+	}
+
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
 	if isCloudDeploy {
@@ -480,7 +491,16 @@ func main() {
 			return
 		}
 		// Start the main proxy service
+		stopFlush := usage.StartPeriodicFlush(context.Background(), usage.GetRequestStatistics(), usageStore, 0)
+		defer stopFlush()
+
 		managementasset.StartAutoUpdater(context.Background(), configFilePath)
 		cmd.StartService(cfg, configFilePath, password)
+
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if errFlush := usage.GetRequestStatistics().FlushToStore(flushCtx, usageStore); errFlush != nil {
+			log.WithError(errFlush).Warn("failed to persist usage statistics during shutdown")
+		}
+		flushCancel()
 	}
 }

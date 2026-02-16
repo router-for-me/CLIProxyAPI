@@ -282,6 +282,29 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	return result
 }
 
+// LoadFromStore loads an existing snapshot from a store and merges it into memory.
+func (s *RequestStatistics) LoadFromStore(ctx context.Context, store UsageStore) (MergeResult, error) {
+	result := MergeResult{}
+	if s == nil || store == nil {
+		return result, nil
+	}
+
+	snapshot, err := store.Load(ctx)
+	if err != nil {
+		return result, err
+	}
+
+	return s.MergeSnapshot(snapshot), nil
+}
+
+// FlushToStore persists the current in-memory snapshot to the provided store.
+func (s *RequestStatistics) FlushToStore(ctx context.Context, store UsageStore) error {
+	if s == nil || store == nil {
+		return nil
+	}
+	return store.Save(ctx, s.Snapshot())
+}
+
 type MergeResult struct {
 	Added   int64 `json:"added"`
 	Skipped int64 `json:"skipped"`
