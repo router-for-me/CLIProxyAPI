@@ -103,10 +103,15 @@ func (s *FileUsageStore) Save(ctx context.Context, snapshot StatisticsSnapshot) 
 		return err
 	}
 
-	tmpPath := fmt.Sprintf("%s.tmp.%d", s.path, time.Now().UnixNano())
-	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	file, err := os.CreateTemp(dir, filepath.Base(s.path)+".tmp.*")
 	if err != nil {
-		return fmt.Errorf("open temp usage snapshot %q: %w", tmpPath, err)
+		return fmt.Errorf("open temp usage snapshot in %q: %w", dir, err)
+	}
+	tmpPath := file.Name()
+	if errChmod := file.Chmod(0o644); errChmod != nil {
+		_ = file.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp usage snapshot %q: %w", tmpPath, errChmod)
 	}
 
 	if _, errWrite := file.Write(data); errWrite != nil {
