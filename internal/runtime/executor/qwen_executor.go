@@ -22,9 +22,7 @@ import (
 )
 
 const (
-	qwenUserAgent           = "google-api-nodejs-client/9.15.1"
-	qwenXGoogAPIClient      = "gl-node/22.17.0"
-	qwenClientMetadataValue = "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
+	qwenUserAgent = "QwenCode/0.10.3 (darwin; arm64)"
 )
 
 // QwenExecutor is a stateless executor for Qwen Code using OpenAI-compatible chat completions.
@@ -344,8 +342,18 @@ func applyQwenHeaders(r *http.Request, token string, stream bool) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.Header.Set("User-Agent", qwenUserAgent)
-	r.Header.Set("X-Goog-Api-Client", qwenXGoogAPIClient)
-	r.Header.Set("Client-Metadata", qwenClientMetadataValue)
+	r.Header.Set("X-Dashscope-Useragent", qwenUserAgent)
+	r.Header.Set("X-Stainless-Runtime-Version", "v22.17.0")
+	r.Header.Set("Sec-Fetch-Mode", "cors")
+	r.Header.Set("X-Stainless-Lang", "js")
+	r.Header.Set("X-Stainless-Arch", "arm64")
+	r.Header.Set("X-Stainless-Package-Version", "5.11.0")
+	r.Header.Set("X-Dashscope-Cachecontrol", "enable")
+	r.Header.Set("X-Stainless-Retry-Count", "0")
+	r.Header.Set("X-Stainless-Os", "MacOS")
+	r.Header.Set("X-Dashscope-Authtype", "qwen-oauth")
+	r.Header.Set("X-Stainless-Runtime", "node")
+
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 		return
