@@ -19,6 +19,7 @@ import (
 //   - codex
 //   - qwen
 //   - iflow
+//   - kimi
 //   - kiro
 //   - github-copilot
 //   - kiro
@@ -43,6 +44,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetQwenModels()
 	case "iflow":
 		return GetIFlowModels()
+	case "kimi":
+		return GetKimiModels()
 	case "github-copilot":
 		return GetGitHubCopilotModels()
 	case "kiro":
@@ -93,6 +96,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetOpenAIModels(),
 		GetQwenModels(),
 		GetIFlowModels(),
+		GetKimiModels(),
 		GetGitHubCopilotModels(),
 		GetKiroModels(),
 		GetAmazonQModels(),
