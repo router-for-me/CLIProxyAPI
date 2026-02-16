@@ -799,6 +799,21 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 					}
 					path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 					body, _ = sjson.SetBytes(body, path, prefix+toolName)
+				} else if partType == "tool_result" {
+					// Handle nested tool_reference blocks inside tool_result.content[]
+					nestedContent := part.Get("content")
+					if nestedContent.Exists() && nestedContent.IsArray() {
+						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
+							if nestedPart.Get("type").String() == "tool_reference" {
+								nestedToolName := nestedPart.Get("tool_name").String()
+								if nestedToolName != "" && !strings.HasPrefix(nestedToolName, prefix) {
+									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
+									body, _ = sjson.SetBytes(body, nestedPath, prefix+nestedToolName)
+								}
+							}
+							return true
+						})
+					}
 				}
 				return true
 			})
@@ -833,6 +848,21 @@ func stripClaudeToolPrefixFromResponse(body []byte, prefix string) []byte {
 			}
 			path := fmt.Sprintf("content.%d.tool_name", index.Int())
 			body, _ = sjson.SetBytes(body, path, strings.TrimPrefix(toolName, prefix))
+		} else if partType == "tool_result" {
+			// Handle nested tool_reference blocks inside tool_result.content[]
+			nestedContent := part.Get("content")
+			if nestedContent.Exists() && nestedContent.IsArray() {
+				nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
+					if nestedPart.Get("type").String() == "tool_reference" {
+						nestedToolName := nestedPart.Get("tool_name").String()
+						if strings.HasPrefix(nestedToolName, prefix) {
+							nestedPath := fmt.Sprintf("content.%d.content.%d.tool_name", index.Int(), nestedIndex.Int())
+							body, _ = sjson.SetBytes(body, nestedPath, strings.TrimPrefix(nestedToolName, prefix))
+						}
+					}
+					return true
+				})
+			}
 		}
 		return true
 	})
