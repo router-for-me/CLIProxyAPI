@@ -25,6 +25,18 @@ func TestApplyClaudeToolPrefix(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
+	input := []byte(`{"tools":[{"name":"alpha"}],"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"beta"},{"type":"tool_reference","tool_name":"proxy_gamma"}]}]}`)
+	out := applyClaudeToolPrefix(input, "proxy_")
+
+	if got := gjson.GetBytes(out, "messages.0.content.0.tool_name").String(); got != "proxy_beta" {
+		t.Fatalf("messages.0.content.0.tool_name = %q, want %q", got, "proxy_beta")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != "proxy_gamma" {
+		t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, "proxy_gamma")
+	}
+}
+
 func TestApplyClaudeToolPrefix_SkipsBuiltinTools(t *testing.T) {
 	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"my_custom_tool","input_schema":{"type":"object"}}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")
@@ -49,6 +61,18 @@ func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	}
 }
 
+func TestStripClaudeToolPrefixFromResponse_WithToolReference(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_reference","tool_name":"proxy_alpha"},{"type":"tool_reference","tool_name":"bravo"}]}`)
+	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
+
+	if got := gjson.GetBytes(out, "content.0.tool_name").String(); got != "alpha" {
+		t.Fatalf("content.0.tool_name = %q, want %q", got, "alpha")
+	}
+	if got := gjson.GetBytes(out, "content.1.tool_name").String(); got != "bravo" {
+		t.Fatalf("content.1.tool_name = %q, want %q", got, "bravo")
+	}
+}
+
 func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
 	line := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"proxy_alpha","id":"t1"},"index":0}`)
 	out := stripClaudeToolPrefixFromStreamLine(line, "proxy_")
@@ -59,5 +83,18 @@ func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
 	}
 	if got := gjson.GetBytes(payload, "content_block.name").String(); got != "alpha" {
 		t.Fatalf("content_block.name = %q, want %q", got, "alpha")
+	}
+}
+
+func TestStripClaudeToolPrefixFromStreamLine_WithToolReference(t *testing.T) {
+	line := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_reference","tool_name":"proxy_beta"},"index":0}`)
+	out := stripClaudeToolPrefixFromStreamLine(line, "proxy_")
+
+	payload := bytes.TrimSpace(out)
+	if bytes.HasPrefix(payload, []byte("data:")) {
+		payload = bytes.TrimSpace(payload[len("data:"):])
+	}
+	if got := gjson.GetBytes(payload, "content_block.tool_name").String(); got != "beta" {
+		t.Fatalf("content_block.tool_name = %q, want %q", got, "beta")
 	}
 }
