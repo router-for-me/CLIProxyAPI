@@ -492,10 +492,12 @@ func main() {
 		}
 		// Start the main proxy service
 		stopFlush := usage.StartPeriodicFlush(context.Background(), usage.GetRequestStatistics(), usageStore, 0)
-		defer stopFlush()
 
 		managementasset.StartAutoUpdater(context.Background(), configFilePath)
 		cmd.StartService(cfg, configFilePath, password)
+
+		// Stop periodic flush loop first so shutdown flush remains the final persisted state.
+		stopFlush()
 
 		flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if errFlush := usage.GetRequestStatistics().FlushToStore(flushCtx, usageStore); errFlush != nil {
