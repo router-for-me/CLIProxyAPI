@@ -126,3 +126,12 @@ func TestApplyClaudeToolPrefix_NestedToolReferenceWithStringContent(t *testing.T
 		t.Fatalf("string content should remain unchanged = %q", got)
 	}
 }
+
+func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
+	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}]}`)
+	out := applyClaudeToolPrefix(input, "proxy_")
+	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
+	if got != "web_search" {
+		t.Fatalf("built-in tool_reference should not be prefixed, got %q", got)
+	}
+}

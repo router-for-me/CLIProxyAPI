@@ -753,6 +753,19 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 		return body
 	}
 
+	// Build a set of built-in tool names (tools with a "type" field)
+	builtinTools := make(map[string]bool)
+	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+				if name := tool.Get("name").String(); name != "" {
+					builtinTools[name] = true
+				}
+			}
+			return true
+		})
+	}
+
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
 			// Skip built-in tools (web_search, code_execution, etc.) which have
@@ -785,28 +798,29 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 			}
 			content.ForEach(func(contentIndex, part gjson.Result) bool {
 				partType := part.Get("type").String()
-				if partType == "tool_use" {
+				switch partType {
+				case "tool_use":
 					name := part.Get("name").String()
 					if name == "" || strings.HasPrefix(name, prefix) {
 						return true
 					}
 					path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 					body, _ = sjson.SetBytes(body, path, prefix+name)
-				} else if partType == "tool_reference" {
+				case "tool_reference":
 					toolName := part.Get("tool_name").String()
-					if toolName == "" || strings.HasPrefix(toolName, prefix) {
+					if toolName == "" || strings.HasPrefix(toolName, prefix) || builtinTools[toolName] {
 						return true
 					}
 					path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 					body, _ = sjson.SetBytes(body, path, prefix+toolName)
-				} else if partType == "tool_result" {
+				case "tool_result":
 					// Handle nested tool_reference blocks inside tool_result.content[]
 					nestedContent := part.Get("content")
 					if nestedContent.Exists() && nestedContent.IsArray() {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
-								if nestedToolName != "" && !strings.HasPrefix(nestedToolName, prefix) {
+								if nestedToolName != "" && !strings.HasPrefix(nestedToolName, prefix) && !builtinTools[nestedToolName] {
 									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 									body, _ = sjson.SetBytes(body, nestedPath, prefix+nestedToolName)
 								}
@@ -834,21 +848,22 @@ func stripClaudeToolPrefixFromResponse(body []byte, prefix string) []byte {
 	}
 	content.ForEach(func(index, part gjson.Result) bool {
 		partType := part.Get("type").String()
-		if partType == "tool_use" {
+		switch partType {
+		case "tool_use":
 			name := part.Get("name").String()
 			if !strings.HasPrefix(name, prefix) {
 				return true
 			}
 			path := fmt.Sprintf("content.%d.name", index.Int())
 			body, _ = sjson.SetBytes(body, path, strings.TrimPrefix(name, prefix))
-		} else if partType == "tool_reference" {
+		case "tool_reference":
 			toolName := part.Get("tool_name").String()
 			if !strings.HasPrefix(toolName, prefix) {
 				return true
 			}
 			path := fmt.Sprintf("content.%d.tool_name", index.Int())
 			body, _ = sjson.SetBytes(body, path, strings.TrimPrefix(toolName, prefix))
-		} else if partType == "tool_result" {
+		case "tool_result":
 			// Handle nested tool_reference blocks inside tool_result.content[]
 			nestedContent := part.Get("content")
 			if nestedContent.Exists() && nestedContent.IsArray() {
@@ -886,7 +901,8 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 	var updated []byte
 	var err error
 
-	if blockType == "tool_use" {
+	switch blockType {
+	case "tool_use":
 		name := contentBlock.Get("name").String()
 		if !strings.HasPrefix(name, prefix) {
 			return line
@@ -895,7 +911,7 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 		if err != nil {
 			return line
 		}
-	} else if blockType == "tool_reference" {
+	case "tool_reference":
 		toolName := contentBlock.Get("tool_name").String()
 		if !strings.HasPrefix(toolName, prefix) {
 			return line
@@ -904,7 +920,7 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 		if err != nil {
 			return line
 		}
-	} else {
+	default:
 		return line
 	}
 
