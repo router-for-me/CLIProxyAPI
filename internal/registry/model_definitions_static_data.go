@@ -801,6 +801,19 @@ func GetQwenModels() []*ModelInfo {
 			MaxCompletionTokens: 2048,
 			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
 		},
+		{
+			ID:                  "coder-model",
+			Object:              "model",
+			Created:             1771113600,
+			OwnedBy:             "qwen",
+			Type:                "qwen",
+			Version:             "3.5",
+			DisplayName:         "Qwen Coder Model",
+			Description:         "Qwen 3.5 Plus — efficient hybrid model with leading coding performance",
+			ContextLength:       1048576, // 与 qwen3.5-plus 一致
+			MaxCompletionTokens: 65536,
+			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
+		},
 	}
 }
 
