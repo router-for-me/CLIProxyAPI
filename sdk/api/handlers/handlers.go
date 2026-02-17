@@ -22,6 +22,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -164,6 +165,11 @@ type BaseAPIHandler struct {
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
+
+	// modelMappings holds the ampcode model mappings for fallback on auth errors.
+	// Key: from model (lowercase), Value: to model
+	modelMappings map[string]string
+	mu            sync.RWMutex
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -177,8 +183,9 @@ type BaseAPIHandler struct {
 //   - *BaseAPIHandler: A new API handlers instance
 func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *BaseAPIHandler {
 	return &BaseAPIHandler{
-		Cfg:         cfg,
-		AuthManager: authManager,
+		Cfg:           cfg,
+		AuthManager:   authManager,
+		modelMappings: make(map[string]string),
 	}
 }
 
@@ -189,6 +196,63 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
+
+// SetModelMappings updates the model mappings for fallback on auth errors.
+// This is typically called from server.go when the config is loaded or reloaded.
+//
+// Parameters:
+//   - mappings: A slice of AmpModelMapping from config.AmpCode.ModelMappings
+func (h *BaseAPIHandler) SetModelMappings(mappings []config.AmpModelMapping) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.modelMappings = make(map[string]string, len(mappings))
+	for _, m := range mappings {
+		from := strings.TrimSpace(m.From)
+		to := strings.TrimSpace(m.To)
+		if from != "" && to != "" {
+			h.modelMappings[strings.ToLower(from)] = to
+		}
+	}
+}
+
+// getFallbackModel returns the fallback model for a given model name.
+// Returns empty string if no mapping exists.
+func (h *BaseAPIHandler) getFallbackModel(modelName string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.modelMappings) == 0 {
+		return ""
+	}
+	// Parse thinking suffix
+	suffixResult := thinking.ParseSuffix(modelName)
+	baseModel := strings.ToLower(strings.TrimSpace(suffixResult.ModelName))
+	
+	target, ok := h.modelMappings[baseModel]
+	if !ok {
+		return ""
+	}
+	
+	// Preserve thinking suffix if present in original but not in target
+	target = strings.TrimSpace(target)
+	if suffixResult.HasSuffix && suffixResult.RawSuffix != "" {
+		targetSuffix := thinking.ParseSuffix(target)
+		if !targetSuffix.HasSuffix {
+			target = target + "(" + suffixResult.RawSuffix + ")"
+		}
+	}
+	return target
+}
+
+// isAuthUnavailableError checks if the error is an auth unavailable error.
+func isAuthUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "auth_unavailable") ||
+		strings.Contains(errStr, "auth_not_found") ||
+		strings.Contains(errStr, "no auth available")
+}
 
 // GetAlt extracts the 'alt' parameter from the request query string.
 // It checks both 'alt' and '$alt' parameters and returns the appropriate value.
@@ -370,7 +434,13 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
+// When auth is unavailable, it falls back to the mapped model if configured.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
+	return h.executeWithFallback(ctx, handlerType, modelName, rawJSON, alt, false)
+}
+
+// executeWithFallback is the internal implementation that handles model fallback on auth errors.
+func (h *BaseAPIHandler) executeWithFallback(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, isCount bool) ([]byte, *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, errMsg
@@ -392,7 +462,38 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+
+	var resp coreexecutor.Response
+	var err error
+	if isCount {
+		resp, err = h.AuthManager.ExecuteCount(ctx, providers, req, opts)
+	} else {
+		resp, err = h.AuthManager.Execute(ctx, providers, req, opts)
+	}
+
+	// If auth unavailable, try fallback model
+	if err != nil && isAuthUnavailableError(err) {
+		if fallbackModel := h.getFallbackModel(normalizedModel); fallbackModel != "" {
+			log.Warnf("Auth unavailable for model %s, falling back to %s", normalizedModel, fallbackModel)
+			fallbackProviders, fallbackNormalized, fallbackErrMsg := h.getRequestDetails(fallbackModel)
+			if fallbackErrMsg == nil && len(fallbackProviders) > 0 {
+				req.Model = fallbackNormalized
+				reqMeta[coreexecutor.RequestedModelMetadataKey] = fallbackNormalized
+				opts.Metadata = reqMeta
+				if isCount {
+					resp, err = h.AuthManager.ExecuteCount(ctx, fallbackProviders, req, opts)
+				} else {
+					resp, err = h.AuthManager.Execute(ctx, fallbackProviders, req, opts)
+				}
+				if err == nil {
+					log.Infof("Successfully fell back from %s to %s", normalizedModel, fallbackModel)
+					return resp.Payload, nil
+				}
+				log.Warnf("Fallback to %s also failed: %v", fallbackModel, err)
+			}
+		}
+	}
+
 	if err != nil {
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -413,49 +514,14 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
+// When auth is unavailable, it falls back to the mapped model if configured.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
-	if errMsg != nil {
-		return nil, errMsg
-	}
-	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
-	req := coreexecutor.Request{
-		Model:   normalizedModel,
-		Payload: payload,
-	}
-	opts := coreexecutor.Options{
-		Stream:          false,
-		Alt:             alt,
-		OriginalRequest: rawJSON,
-		SourceFormat:    sdktranslator.FromString(handlerType),
-	}
-	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
-	}
-	return resp.Payload, nil
+	return h.executeWithFallback(ctx, handlerType, modelName, rawJSON, alt, true)
 }
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
+// When auth is unavailable, it falls back to the mapped model if configured.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
@@ -482,6 +548,28 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	opts.Metadata = reqMeta
 	chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+	
+	// If auth unavailable on initial connection, try fallback model immediately
+	if err != nil && isAuthUnavailableError(err) {
+		if fallbackModel := h.getFallbackModel(normalizedModel); fallbackModel != "" {
+			log.Warnf("Auth unavailable for model %s, falling back to %s", normalizedModel, fallbackModel)
+			fallbackProviders, fallbackNormalized, fallbackErrMsg := h.getRequestDetails(fallbackModel)
+			if fallbackErrMsg == nil && len(fallbackProviders) > 0 {
+				req.Model = fallbackNormalized
+				reqMeta[coreexecutor.RequestedModelMetadataKey] = fallbackNormalized
+				opts.Metadata = reqMeta
+				fallbackChunks, fallbackErr := h.AuthManager.ExecuteStream(ctx, fallbackProviders, req, opts)
+				if fallbackErr == nil {
+					log.Infof("Successfully fell back from %s to %s (streaming)", normalizedModel, fallbackModel)
+					chunks = fallbackChunks
+					err = nil
+				} else {
+					log.Warnf("Fallback to %s also failed: %v", fallbackModel, fallbackErr)
+				}
+			}
+		}
+	}
+	
 	if err != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		status := http.StatusInternalServerError
@@ -508,6 +596,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+		fallbackAttempted := false
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -579,6 +668,26 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 								continue outer
 							}
 							streamErr = retryErr
+						}
+						// If bootstrap retries exhausted and auth unavailable, try fallback model
+						if !fallbackAttempted && isAuthUnavailableError(streamErr) {
+							fallbackAttempted = true
+							if fallbackModel := h.getFallbackModel(normalizedModel); fallbackModel != "" {
+								log.Warnf("Auth unavailable for model %s during stream, falling back to %s", normalizedModel, fallbackModel)
+								fallbackProviders, fallbackNormalized, fallbackErrMsg := h.getRequestDetails(fallbackModel)
+								if fallbackErrMsg == nil && len(fallbackProviders) > 0 {
+									req.Model = fallbackNormalized
+									reqMeta[coreexecutor.RequestedModelMetadataKey] = fallbackNormalized
+									opts.Metadata = reqMeta
+									fallbackChunks, fallbackErr := h.AuthManager.ExecuteStream(ctx, fallbackProviders, req, opts)
+									if fallbackErr == nil {
+										log.Infof("Successfully fell back from %s to %s (streaming)", normalizedModel, fallbackModel)
+										chunks = fallbackChunks
+										continue outer
+									}
+									log.Warnf("Fallback to %s also failed: %v", fallbackModel, fallbackErr)
+								}
+							}
 						}
 					}
 

@@ -234,9 +234,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	envManagementSecret := envAdminPasswordSet && envAdminPassword != ""
 
 	// Create server instance
+	handlersInstance := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager)
+	handlersInstance.SetModelMappings(cfg.AmpCode.ModelMappings)
 	s := &Server{
 		engine:              engine,
-		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
+		handlers:            handlersInstance,
 		cfg:                 cfg,
 		accessManager:       accessManager,
 		requestLogger:       requestLogger,
@@ -315,8 +317,10 @@ func (s *Server) setupRoutes() {
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
 
 	// OpenAI compatible API routes
+	// ForceModelMapping applies ampcode.force-model-mappings to /v1 so clients like Claude Desktop
+	// get model fallback (e.g. claude-opus-4-6-thinking -> gemini-3-pro-preview) and avoid 429.
 	v1 := s.engine.Group("/v1")
-	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(AuthMiddleware(s.accessManager), middleware.ForceModelMapping(s.cfg))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -954,6 +958,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 
 	s.handlers.UpdateClients(&cfg.SDKConfig)
+	s.handlers.SetModelMappings(cfg.AmpCode.ModelMappings)
 
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
