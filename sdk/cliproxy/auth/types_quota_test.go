@@ -395,7 +395,7 @@ func TestAuth_GetQuotaInfo(t *testing.T) {
 			Reason:        "quota",
 			NextRecoverAt: future,
 			BackoffLevel:  2,
-			UsedTokens:    800,
+			UsedTokens:    850, // 85% = near exhaustion
 			MaxTokens:     1000,
 			ResetPattern:  "daily",
 			ResetTimeZone: "UTC",
@@ -413,7 +413,7 @@ func TestAuth_GetQuotaInfo(t *testing.T) {
 	if info["backoff_level"] != 2 {
 		t.Error("GetQuotaInfo backoff_level mismatch")
 	}
-	if info["used_tokens"] != int64(800) {
+	if info["used_tokens"] != int64(850) {
 		t.Error("GetQuotaInfo used_tokens mismatch")
 	}
 	if info["max_tokens"] != int64(1000) {
