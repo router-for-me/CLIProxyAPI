@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
@@ -245,5 +246,88 @@ func TestTranslateGitHubCopilotResponsesStreamToClaude_TextLifecycle(t *testing.
 	joinedCompleted := strings.Join(completed, "")
 	if !strings.Contains(joinedCompleted, "message_delta") || !strings.Contains(joinedCompleted, "message_stop") {
 		t.Fatalf("completed events = %#v, want message_delta + message_stop", completed)
+	}
+}
+
+// --- Tests for X-Initiator detection logic (Problem L) ---
+
+func TestApplyHeaders_XInitiator_UserOnly(t *testing.T) {
+	t.Parallel()
+	e := &GitHubCopilotExecutor{}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	body := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"}]}`)
+	e.applyHeaders(req, "token", body)
+	if got := req.Header.Get("X-Initiator"); got != "user" {
+		t.Fatalf("X-Initiator = %q, want user", got)
+	}
+}
+
+func TestApplyHeaders_XInitiator_AgentWithAssistantAndUserToolResult(t *testing.T) {
+	t.Parallel()
+	e := &GitHubCopilotExecutor{}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	// Claude Code typical flow: last message is user (tool result), but has assistant in history
+	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"I will read the file"},{"role":"user","content":"tool result here"}]}`)
+	e.applyHeaders(req, "token", body)
+	if got := req.Header.Get("X-Initiator"); got != "agent" {
+		t.Fatalf("X-Initiator = %q, want agent (assistant exists in messages)", got)
+	}
+}
+
+func TestApplyHeaders_XInitiator_AgentWithToolRole(t *testing.T) {
+	t.Parallel()
+	e := &GitHubCopilotExecutor{}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"tool","content":"result"}]}`)
+	e.applyHeaders(req, "token", body)
+	if got := req.Header.Get("X-Initiator"); got != "agent" {
+		t.Fatalf("X-Initiator = %q, want agent (tool role exists)", got)
+	}
+}
+
+// --- Tests for x-github-api-version header (Problem M) ---
+
+func TestApplyHeaders_GitHubAPIVersion(t *testing.T) {
+	t.Parallel()
+	e := &GitHubCopilotExecutor{}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	e.applyHeaders(req, "token", nil)
+	if got := req.Header.Get("X-Github-Api-Version"); got != "2025-04-01" {
+		t.Fatalf("X-Github-Api-Version = %q, want 2025-04-01", got)
+	}
+}
+
+// --- Tests for vision detection (Problem P) ---
+
+func TestDetectVisionContent_WithImageURL(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}]}]}`)
+	if !detectVisionContent(body) {
+		t.Fatal("expected vision content to be detected")
+	}
+}
+
+func TestDetectVisionContent_WithImageType(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"image","source":{"data":"abc","media_type":"image/png"}}]}]}`)
+	if !detectVisionContent(body) {
+		t.Fatal("expected image type to be detected")
+	}
+}
+
+func TestDetectVisionContent_NoVision(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+	if detectVisionContent(body) {
+		t.Fatal("expected no vision content")
+	}
+}
+
+func TestDetectVisionContent_NoMessages(t *testing.T) {
+	t.Parallel()
+	// After Responses API normalization, messages is removed — detection should return false
+	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	if detectVisionContent(body) {
+		t.Fatal("expected no vision content when messages field is absent")
 	}
 }
