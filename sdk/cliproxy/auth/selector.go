@@ -185,10 +185,79 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 	}
 
 	available := availableByPriority[bestPriority]
+	
+	// Sort available auths by quota state for intelligent selection:
+	// 1. Higher quota priority score first (more remaining quota, sooner recovery)
+	// 2. Provider reset pattern (prefer providers that reset sooner if exhausted)
+	// 3. Stable ordering by ID for deterministic results
 	if len(available) > 1 {
-		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+		sort.Slice(available, func(i, j int) bool {
+			// First compare by quota priority score (higher score = better)
+			scoreI := getQuotaPriorityScore(available[i], model, now)
+			scoreJ := getQuotaPriorityScore(available[j], model, now)
+			if scoreI != scoreJ {
+				return scoreI > scoreJ
+			}
+			// Tie-breaker: prefer providers with sooner reset times if both have quota issues
+			resetI := getNextResetTime(available[i], model)
+			resetJ := getNextResetTime(available[j], model)
+			if !resetI.IsZero() && !resetJ.IsZero() && resetI != resetJ {
+				return resetI.Before(resetJ)
+			}
+			// Final tie-breaker: stable ID ordering
+			return available[i].ID < available[j].ID
+		})
 	}
 	return available, nil
+}
+
+// getQuotaPriorityScore returns a composite priority score for auth selection
+// Higher score = better candidate for selection
+func getQuotaPriorityScore(auth *Auth, model string, now time.Time) int {
+	if auth == nil {
+		return -10000
+	}
+
+	// Check model-specific quota first
+	if model != "" && len(auth.ModelStates) > 0 {
+		if state, ok := auth.ModelStates[model]; ok && state != nil {
+			return state.Quota.GetQuotaPriorityScore(now)
+		}
+		// Try canonical model key
+		baseModel := canonicalModelKey(model)
+		if baseModel != "" && baseModel != model {
+			if state, ok := auth.ModelStates[baseModel]; ok && state != nil {
+				return state.Quota.GetQuotaPriorityScore(now)
+			}
+		}
+	}
+
+	// Fall back to auth-level quota
+	return auth.Quota.GetQuotaPriorityScore(now)
+}
+
+// getNextResetTime returns the next quota reset time for the auth/model
+func getNextResetTime(auth *Auth, model string) time.Time {
+	if auth == nil {
+		return time.Time{}
+	}
+
+	// Check model-specific quota first
+	if model != "" && len(auth.ModelStates) > 0 {
+		if state, ok := auth.ModelStates[model]; ok && state != nil {
+			return state.Quota.NextRecoverAt
+		}
+		// Try canonical model key
+		baseModel := canonicalModelKey(model)
+		if baseModel != "" && baseModel != model {
+			if state, ok := auth.ModelStates[baseModel]; ok && state != nil {
+				return state.Quota.NextRecoverAt
+			}
+		}
+	}
+
+	// Fall back to auth-level quota
+	return auth.Quota.NextRecoverAt
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
@@ -244,6 +313,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonDisabled, time.Time{}
 	}
 	if model != "" {
+		// Check if there's a specific model state for this model
 		if len(auth.ModelStates) > 0 {
 			state, ok := auth.ModelStates[model]
 			if (!ok || state == nil) && model != "" {
@@ -253,6 +323,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 				}
 			}
 			if ok && state != nil {
+				// Found a state for this model - check if it's blocked
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
 				}
@@ -274,11 +345,17 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 						return true, blockReasonOther, next
 					}
 				}
+				// Model has a state but is not unavailable - auth is available
 				return false, blockReasonNone, time.Time{}
 			}
+			// ModelStates exists but model not found - this means auth hasn't been used
+			// with this model yet, so it should be considered AVAILABLE (not blocked)
+			return false, blockReasonNone, time.Time{}
 		}
+		// No ModelStates at all - auth is available for any model
 		return false, blockReasonNone, time.Time{}
 	}
+	// No model specified - check auth-level availability
 	if auth.Unavailable && auth.NextRetryAfter.After(now) {
 		next := auth.NextRetryAfter
 		if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {

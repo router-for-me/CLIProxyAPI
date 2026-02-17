@@ -236,6 +236,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Create server instance
 	handlersInstance := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager)
 	handlersInstance.SetModelMappings(cfg.AmpCode.ModelMappings)
+
+	// Also set model mappings on AuthManager for cross-provider fallback
+	if authManager != nil {
+		authManager.SetModelMappings(buildModelMappingsMap(cfg.AmpCode.ModelMappings))
+	}
+
 	s := &Server{
 		engine:              engine,
 		handlers:            handlersInstance,
@@ -960,6 +966,11 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 	s.handlers.SetModelMappings(cfg.AmpCode.ModelMappings)
 
+	// Also set model mappings on AuthManager for cross-provider fallback
+	if s.handlers.AuthManager != nil {
+		s.handlers.AuthManager.SetModelMappings(buildModelMappingsMap(cfg.AmpCode.ModelMappings))
+	}
+
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
@@ -1044,4 +1055,19 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
+}
+
+// buildModelMappingsMap converts AmpModelMapping slice to a simple map for AuthManager.
+// This is used for cross-provider fallback when all accounts in one provider are exhausted.
+func buildModelMappingsMap(mappings []config.AmpModelMapping) map[string]string {
+	result := make(map[string]string, len(mappings))
+	for _, m := range mappings {
+		from := strings.TrimSpace(m.From)
+		to := strings.TrimSpace(m.To)
+		if from != "" && to != "" && !m.Regex {
+			// Only exact mappings are supported for cross-provider fallback
+			result[from] = to
+		}
+	}
+	return result
 }

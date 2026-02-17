@@ -367,6 +367,8 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		return
 	}
 	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
+		// Use the EXACT provider key from config attributes, which matches the provider
+		// that will be used when registering models in registerModelsForAuth()
 		if compatProviderKey == "" {
 			compatProviderKey = strings.ToLower(strings.TrimSpace(a.Provider))
 		}
@@ -878,7 +880,14 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						if providerKey == "" {
 							providerKey = "openai-compatibility"
 						}
-						GlobalModelRegistry().RegisterClient(a.ID, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+						// Apply auth-level prefix (from a.Prefix) first
+						ms = applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix)
+						// Also apply compat-level prefix if different from auth prefix
+						// This ensures models are registered under both "model-name" and "prefix/model-name"
+						if compat.Prefix != "" && compat.Prefix != a.Prefix {
+							ms = applyModelPrefixes(ms, compat.Prefix, s.cfg.ForceModelPrefix)
+						}
+						GlobalModelRegistry().RegisterClient(a.ID, providerKey, ms)
 					} else {
 						// Ensure stale registrations are cleared when model list becomes empty.
 						GlobalModelRegistry().UnregisterClient(a.ID)

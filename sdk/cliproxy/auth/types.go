@@ -75,6 +75,14 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// ResetTimeZone is the timezone for quota resets (e.g., "America/Los_Angeles" for Anthropic, "Asia/Shanghai" for Kimi)
+	ResetTimeZone string `json:"reset_time_zone,omitempty"`
+	// ResetPattern indicates the quota reset pattern: "daily", "hourly", "monthly", "weekly", "unknown"
+	ResetPattern string `json:"reset_pattern,omitempty"`
+	// UsedTokens tracks the cumulative token usage for this quota period
+	UsedTokens int64 `json:"used_tokens,omitempty"`
+	// MaxTokens is the quota limit if known (0 if unknown)
+	MaxTokens int64 `json:"max_tokens,omitempty"`
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.

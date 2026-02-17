@@ -24,6 +24,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// Ensure util package is used for model-to-provider resolution
+var _ = util.GetProviderName
+
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
 type ProviderExecutor interface {
 	// Identifier returns the provider key handled by this executor.
@@ -144,6 +147,11 @@ type Manager struct {
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
+
+	// modelMappings stores fallback model mappings for cross-provider fallback.
+	// Key: from model (lowercase), Value: to model
+	modelMappings map[string]string
+	muMappings    sync.RWMutex
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -384,6 +392,50 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration) {
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
 }
 
+// SetModelMappings updates the fallback model mappings for cross-provider fallback.
+// This is called when the config is loaded or reloaded.
+func (m *Manager) SetModelMappings(mappings map[string]string) {
+	if m == nil {
+		return
+	}
+	m.muMappings.Lock()
+	defer m.muMappings.Unlock()
+	m.modelMappings = make(map[string]string, len(mappings))
+	for k, v := range mappings {
+		m.modelMappings[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
+	}
+}
+
+// getMappedModel returns the mapped model name for fallback, or empty if no mapping exists.
+func (m *Manager) getMappedModel(modelName string) string {
+	if m == nil {
+		return ""
+	}
+	m.muMappings.RLock()
+	defer m.muMappings.RUnlock()
+	if len(m.modelMappings) == 0 {
+		return ""
+	}
+	// Parse thinking suffix
+	parsed := thinking.ParseSuffix(modelName)
+	baseModel := strings.ToLower(strings.TrimSpace(parsed.ModelName))
+
+	target, ok := m.modelMappings[baseModel]
+	if !ok {
+		return ""
+	}
+
+	target = strings.TrimSpace(target)
+	// Preserve thinking suffix if present in original but not in target
+	if parsed.HasSuffix && parsed.RawSuffix != "" {
+		targetParsed := thinking.ParseSuffix(target)
+		if !targetParsed.HasSuffix {
+			target = target + "(" + parsed.RawSuffix + ")"
+		}
+	}
+	return target
+}
+
 // RegisterExecutor registers a provider executor with the manager.
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if executor == nil {
@@ -471,6 +523,7 @@ func (m *Manager) Load(ctx context.Context) error {
 
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
+// When all providers are exhausted, it attempts cross-provider fallback using model mappings.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -480,20 +533,53 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	_, maxWait := m.retrySettings()
 
 	var lastErr error
-	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts)
-		if errExec == nil {
-			return resp, nil
+	attemptedModels := make(map[string]struct{})
+	currentModel := req.Model
+
+	for {
+		// Track this model as attempted to prevent infinite loops
+		attemptedModels[strings.ToLower(strings.TrimSpace(currentModel))] = struct{}{}
+
+		var attempt int
+		for {
+			resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts)
+			if errExec == nil {
+				return resp, nil
+			}
+			lastErr = errExec
+			wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, currentModel, maxWait)
+			if !shouldRetry {
+				break
+			}
+			if errWait := waitForCooldown(ctx, wait); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			}
+			attempt++
 		}
-		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
-		if !shouldRetry {
-			break
+
+		// Check if we should try a fallback model (cross-provider fallback)
+		// Only fallback if the error indicates no auth available (all providers exhausted)
+		if lastErr != nil && m.isAllProvidersExhaustedError(lastErr) {
+			mappedModel := m.getMappedModel(currentModel)
+			if mappedModel != "" && mappedModel != currentModel {
+				// Check if we've already tried this model to prevent infinite loops
+				if _, alreadyTried := attemptedModels[strings.ToLower(strings.TrimSpace(mappedModel))]; alreadyTried {
+					break
+				}
+				log.Warnf("All providers exhausted for model %s, attempting fallback to %s", currentModel, mappedModel)
+				currentModel = mappedModel
+				req.Model = currentModel
+				// Get new providers for the mapped model
+				normalized = m.getProvidersForModel(mappedModel)
+				if len(normalized) == 0 {
+					break
+				}
+				continue // Retry with new model
+			}
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return cliproxyexecutor.Response{}, errWait
-		}
+		break
 	}
+
 	if lastErr != nil {
 		return cliproxyexecutor.Response{}, lastErr
 	}
@@ -502,6 +588,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // ExecuteCount performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
+// When all providers are exhausted, it attempts cross-provider fallback using model mappings.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -511,20 +598,52 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	_, maxWait := m.retrySettings()
 
 	var lastErr error
-	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts)
-		if errExec == nil {
-			return resp, nil
+	attemptedModels := make(map[string]struct{})
+	currentModel := req.Model
+
+	for {
+		// Track this model as attempted to prevent infinite loops
+		attemptedModels[strings.ToLower(strings.TrimSpace(currentModel))] = struct{}{}
+
+		var attempt int
+		for {
+			resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts)
+			if errExec == nil {
+				return resp, nil
+			}
+			lastErr = errExec
+			wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, currentModel, maxWait)
+			if !shouldRetry {
+				break
+			}
+			if errWait := waitForCooldown(ctx, wait); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			}
+			attempt++
 		}
-		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
-		if !shouldRetry {
-			break
+
+		// Check if we should try a fallback model (cross-provider fallback)
+		if lastErr != nil && m.isAllProvidersExhaustedError(lastErr) {
+			mappedModel := m.getMappedModel(currentModel)
+			if mappedModel != "" && mappedModel != currentModel {
+				// Check if we've already tried this model to prevent infinite loops
+				if _, alreadyTried := attemptedModels[strings.ToLower(strings.TrimSpace(mappedModel))]; alreadyTried {
+					break
+				}
+				log.Warnf("All providers exhausted for model %s, attempting fallback to %s", currentModel, mappedModel)
+				currentModel = mappedModel
+				req.Model = currentModel
+				// Get new providers for the mapped model
+				normalized = m.getProvidersForModel(mappedModel)
+				if len(normalized) == 0 {
+					break
+				}
+				continue // Retry with new model
+			}
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return cliproxyexecutor.Response{}, errWait
-		}
+		break
 	}
+
 	if lastErr != nil {
 		return cliproxyexecutor.Response{}, lastErr
 	}
@@ -533,6 +652,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
+// When all providers are exhausted, it attempts cross-provider fallback using model mappings.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -542,20 +662,52 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	_, maxWait := m.retrySettings()
 
 	var lastErr error
-	for attempt := 0; ; attempt++ {
-		chunks, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts)
-		if errStream == nil {
-			return chunks, nil
+	attemptedModels := make(map[string]struct{})
+	currentModel := req.Model
+
+	for {
+		// Track this model as attempted to prevent infinite loops
+		attemptedModels[strings.ToLower(strings.TrimSpace(currentModel))] = struct{}{}
+
+		var attempt int
+		for {
+			chunks, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts)
+			if errStream == nil {
+				return chunks, nil
+			}
+			lastErr = errStream
+			wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, currentModel, maxWait)
+			if !shouldRetry {
+				break
+			}
+			if errWait := waitForCooldown(ctx, wait); errWait != nil {
+				return nil, errWait
+			}
+			attempt++
 		}
-		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
-		if !shouldRetry {
-			break
+
+		// Check if we should try a fallback model (cross-provider fallback)
+		if lastErr != nil && m.isAllProvidersExhaustedError(lastErr) {
+			mappedModel := m.getMappedModel(currentModel)
+			if mappedModel != "" && mappedModel != currentModel {
+				// Check if we've already tried this model to prevent infinite loops
+				if _, alreadyTried := attemptedModels[strings.ToLower(strings.TrimSpace(mappedModel))]; alreadyTried {
+					break
+				}
+				log.Warnf("All providers exhausted for model %s, attempting fallback to %s", currentModel, mappedModel)
+				currentModel = mappedModel
+				req.Model = currentModel
+				// Get new providers for the mapped model
+				normalized = m.getProvidersForModel(mappedModel)
+				if len(normalized) == 0 {
+					break
+				}
+				continue // Retry with new model
+			}
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return nil, errWait
-		}
+		break
 	}
+
 	if lastErr != nil {
 		return nil, lastErr
 	}
@@ -1139,6 +1291,47 @@ func waitForCooldown(ctx context.Context, wait time.Duration) error {
 	}
 }
 
+// isAllProvidersExhaustedError checks if the error indicates all providers are exhausted.
+// This includes auth_not_found errors and 429 rate limit errors.
+func (m *Manager) isAllProvidersExhaustedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	// Check for auth not available errors
+	if strings.Contains(errStr, "auth_not_found") ||
+		strings.Contains(errStr, "no auth available") ||
+		strings.Contains(errStr, "auth_unavailable") {
+		return true
+	}
+	// Check for rate limit errors (429)
+	if statusCodeFromError(err) == http.StatusTooManyRequests {
+		return true
+	}
+	return false
+}
+
+// getProvidersForModel returns the list of providers that support the given model.
+// This is used during cross-provider fallback to get the correct provider list for a mapped model.
+func (m *Manager) getProvidersForModel(modelName string) []string {
+	if modelName == "" {
+		return nil
+	}
+	// Parse thinking suffix to get base model name
+	parsed := thinking.ParseSuffix(modelName)
+	baseModel := strings.TrimSpace(parsed.ModelName)
+	if baseModel == "" {
+		return nil
+	}
+
+	// Use the util package to get providers for this model
+	providers := util.GetProviderName(baseModel)
+	if len(providers) == 0 {
+		return nil
+	}
+	return m.normalizeProviders(providers)
+}
+
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
@@ -1204,11 +1397,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				case 429:
 					var next time.Time
 					backoffLevel := state.Quota.BackoffLevel
+					resetPattern := string(GetProviderResetPattern(auth.Provider))
+					resetTZ := GetProviderResetTimeZone(auth.Provider)
+					
 					if result.RetryAfter != nil {
 						next = now.Add(*result.RetryAfter)
 					} else {
+						// Use provider-specific reset time prediction
+						predictedReset := PredictQuotaResetTime(auth.Provider, now)
 						cooldown, nextLevel := nextQuotaCooldown(backoffLevel, quotaCooldownDisabledForAuth(auth))
-						if cooldown > 0 {
+						
+						// Use the longer of: predicted reset or exponential backoff
+						if predictedReset.After(now.Add(cooldown)) {
+							next = predictedReset
+						} else if cooldown > 0 {
 							next = now.Add(cooldown)
 						}
 						backoffLevel = nextLevel
@@ -1219,6 +1421,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						Reason:        "quota",
 						NextRecoverAt: next,
 						BackoffLevel:  backoffLevel,
+						ResetTimeZone: resetTZ,
+						ResetPattern:  resetPattern,
 					}
 					suspendReason = "quota"
 					shouldSuspendModel = true
@@ -1480,12 +1684,20 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "quota exhausted"
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
+		auth.Quota.ResetPattern = string(GetProviderResetPattern(auth.Provider))
+		auth.Quota.ResetTimeZone = GetProviderResetTimeZone(auth.Provider)
 		var next time.Time
 		if retryAfter != nil {
 			next = now.Add(*retryAfter)
 		} else {
+			// Use provider-specific reset time prediction
+			predictedReset := PredictQuotaResetTime(auth.Provider, now)
 			cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel, quotaCooldownDisabledForAuth(auth))
-			if cooldown > 0 {
+			
+			// Use the longer of: predicted reset or exponential backoff
+			if predictedReset.After(now.Add(cooldown)) {
+				next = predictedReset
+			} else if cooldown > 0 {
 				next = now.Add(cooldown)
 			}
 			auth.Quota.BackoffLevel = nextLevel
@@ -1650,6 +1862,29 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			continue
 		}
 		candidates = append(candidates, candidate)
+	}
+	// If no candidates found with model restriction, try without model restriction
+	// as a fallback to find ANY available auth for the provider
+	if len(candidates) == 0 && modelKey != "" {
+		for _, candidate := range m.auths {
+			if candidate == nil || candidate.Disabled {
+				continue
+			}
+			providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
+			if providerKey == "" {
+				continue
+			}
+			if _, ok := providerSet[providerKey]; !ok {
+				continue
+			}
+			if _, used := tried[candidate.ID]; used {
+				continue
+			}
+			if _, ok := m.executors[providerKey]; !ok {
+				continue
+			}
+			candidates = append(candidates, candidate)
+		}
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
