@@ -134,7 +134,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
-	if isClaudeOAuthToken(apiKey) {
+	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
@@ -208,7 +208,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	} else {
 		reporter.publish(ctx, parseClaudeUsage(data))
 	}
-	if isClaudeOAuthToken(apiKey) {
+	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
 	}
 	var param any
@@ -275,7 +275,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
-	if isClaudeOAuthToken(apiKey) {
+	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
@@ -348,7 +348,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if detail, ok := parseClaudeStreamUsage(line); ok {
 					reporter.publish(ctx, detail)
 				}
-				if isClaudeOAuthToken(apiKey) {
+				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 				}
 				// Forward the line as-is to preserve SSE format
@@ -375,7 +375,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if detail, ok := parseClaudeStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}
-			if isClaudeOAuthToken(apiKey) {
+			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 			}
 			chunks := sdktranslator.TranslateStream(
@@ -423,7 +423,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
-	if isClaudeOAuthToken(apiKey) {
+	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
