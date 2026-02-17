@@ -332,6 +332,7 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 
 	// Check if this chunk has any meaningful content
 	hasContent := false
+	hasUsage := root.Get("usage").Exists()
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
 		chatChoices.ForEach(func(_, choice gjson.Result) bool {
 			// Check if delta has content or finish_reason
@@ -350,8 +351,8 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 		})
 	}
 
-	// If no meaningful content, return nil to indicate this chunk should be skipped
-	if !hasContent {
+	// If no meaningful content and no usage, return nil to indicate this chunk should be skipped
+	if !hasContent && !hasUsage {
 		return nil
 	}
 
@@ -408,6 +409,11 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 	if len(choices) > 0 {
 		choicesJSON, _ := json.Marshal(choices)
 		out, _ = sjson.SetRaw(out, "choices", string(choicesJSON))
+	}
+
+	// Copy usage if present
+	if usage := root.Get("usage"); usage.Exists() {
+		out, _ = sjson.SetRaw(out, "usage", usage.Raw)
 	}
 
 	return []byte(out)
