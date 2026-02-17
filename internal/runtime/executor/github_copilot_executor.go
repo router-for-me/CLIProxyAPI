@@ -39,7 +39,7 @@ const (
 	copilotEditorVersion = "vscode/1.107.0"
 	copilotPluginVersion = "copilot-chat/0.35.0"
 	copilotIntegrationID = "vscode-chat"
-	copilotOpenAIIntent  = "conversation-edits"
+	copilotOpenAIIntent  = "conversation-panel"
 )
 
 // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
