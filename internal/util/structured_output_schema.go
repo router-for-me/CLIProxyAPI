@@ -53,11 +53,10 @@ func normalizeStructuredOutputSchemaNode(node any) any {
 	normalizeStructuredOutputSchemaValue(schema, "else")
 	normalizeStructuredOutputSchemaValue(schema, "unevaluatedItems")
 	normalizeStructuredOutputSchemaValue(schema, "unevaluatedProperties")
-
-	normalizeStructuredOutputSchemaArray(schema, "allOf")
-	normalizeStructuredOutputSchemaArray(schema, "anyOf")
-	normalizeStructuredOutputSchemaArray(schema, "oneOf")
-	normalizeStructuredOutputSchemaArray(schema, "prefixItems")
+	normalizeStructuredOutputSchemaValue(schema, "allOf")
+	normalizeStructuredOutputSchemaValue(schema, "anyOf")
+	normalizeStructuredOutputSchemaValue(schema, "oneOf")
+	normalizeStructuredOutputSchemaValue(schema, "prefixItems")
 
 	return schema
 }
@@ -91,21 +90,6 @@ func normalizeStructuredOutputSchemaValue(schema map[string]any, key string) {
 		}
 		schema[key] = child
 	}
-}
-
-func normalizeStructuredOutputSchemaArray(schema map[string]any, key string) {
-	raw, ok := schema[key]
-	if !ok {
-		return
-	}
-	arr, ok := raw.([]any)
-	if !ok {
-		return
-	}
-	for i := range arr {
-		arr[i] = normalizeStructuredOutputSchemaNode(arr[i])
-	}
-	schema[key] = arr
 }
 
 func isStructuredOutputObjectSchema(schema map[string]any) bool {
