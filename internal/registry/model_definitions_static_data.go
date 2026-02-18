@@ -29,6 +29,17 @@ func GetClaudeModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
 		},
 		{
+			ID:                  "claude-sonnet-4-6",
+			Object:              "model",
+			Created:             1771372800, // 2026-02-17
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.6 Sonnet",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
 			ID:                  "claude-opus-4-6",
 			Object:              "model",
 			Created:             1770318000, // 2026-02-05
@@ -789,6 +800,19 @@ func GetQwenModels() []*ModelInfo {
 			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
 		},
 		{
+			ID:                  "coder-model",
+			Object:              "model",
+			Created:             1771171200,
+			OwnedBy:             "qwen",
+			Type:                "qwen",
+			Version:             "3.5",
+			DisplayName:         "Qwen 3.5 Plus",
+			Description:         "efficient hybrid model with leading coding performance",
+			ContextLength:       1048576,
+			MaxCompletionTokens: 65536,
+			SupportedParameters: []string{"temperature", "top_p", "max_tokens", "stream", "stop"},
+		},
+		{
 			ID:                  "vision-model",
 			Object:              "model",
 			Created:             1758672000,
@@ -884,6 +908,8 @@ func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
 		"claude-opus-4-5-thinking":   {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-opus-4-6-thinking":   {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-sonnet-4-5":          {MaxCompletionTokens: 64000},
+		"claude-sonnet-4-6":          {MaxCompletionTokens: 64000},
+		"claude-sonnet-4-6-thinking": {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"gpt-oss-120b-medium":        {},
 		"tab_flash_lite_preview":     {},
 	}
