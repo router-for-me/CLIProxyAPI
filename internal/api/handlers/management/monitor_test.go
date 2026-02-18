@@ -357,3 +357,107 @@ func assertStringSliceEqual(t *testing.T, got, want []string) {
 		}
 	}
 }
+
+func TestGetMonitorServiceHealth_BasicBucketing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	now := time.Now()
+
+	h := newMonitorTestHandler(
+		// 30 minutes ago -> block index 670 (near the end)
+		testUsageRecord(now.Add(-30*time.Minute), "api-1", "model-a", "source-a", false),
+		testUsageRecord(now.Add(-30*time.Minute), "api-1", "model-a", "source-a", true),
+		// 2 hours ago -> block index ~664
+		testUsageRecord(now.Add(-2*time.Hour), "api-2", "model-b", "source-b", false),
+		// 8 days ago -> outside the window, should be excluded
+		testUsageRecord(now.Add(-8*24*time.Hour), "api-3", "model-c", "source-c", false),
+	)
+
+	rr := executeMonitorRequest(h.GetMonitorServiceHealth, "/monitor/service-health")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Rows            int     `json:"rows"`
+		Cols            int     `json:"cols"`
+		BlockDurationMs int     `json:"block_duration_ms"`
+		Blocks          []struct {
+			Success int64 `json:"success"`
+			Failure int64 `json:"failure"`
+		} `json:"blocks"`
+		TotalSuccess int64   `json:"total_success"`
+		TotalFailure int64   `json:"total_failure"`
+		SuccessRate  float64 `json:"success_rate"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+
+	if resp.Rows != 7 {
+		t.Fatalf("unexpected rows: got %d want 7", resp.Rows)
+	}
+	if resp.Cols != 96 {
+		t.Fatalf("unexpected cols: got %d want 96", resp.Cols)
+	}
+	if resp.BlockDurationMs != 900000 {
+		t.Fatalf("unexpected block_duration_ms: got %d want 900000", resp.BlockDurationMs)
+	}
+	if len(resp.Blocks) != 672 {
+		t.Fatalf("unexpected blocks length: got %d want 672", len(resp.Blocks))
+	}
+	if resp.TotalSuccess != 2 {
+		t.Fatalf("unexpected total_success: got %d want 2", resp.TotalSuccess)
+	}
+	if resp.TotalFailure != 1 {
+		t.Fatalf("unexpected total_failure: got %d want 1", resp.TotalFailure)
+	}
+
+	// 8-day-old record should be excluded
+	total := resp.TotalSuccess + resp.TotalFailure
+	if total != 3 {
+		t.Fatalf("unexpected total requests (success+failure): got %d want 3", total)
+	}
+
+	// Verify non-zero blocks exist
+	nonZero := 0
+	for _, b := range resp.Blocks {
+		if b.Success > 0 || b.Failure > 0 {
+			nonZero++
+		}
+	}
+	if nonZero == 0 {
+		t.Fatal("expected at least one non-zero block")
+	}
+}
+
+func TestGetMonitorServiceHealth_EmptySnapshot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	h := newMonitorTestHandler() // no records
+
+	rr := executeMonitorRequest(h.GetMonitorServiceHealth, "/monitor/service-health")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Blocks       []struct{} `json:"blocks"`
+		TotalSuccess int64      `json:"total_success"`
+		TotalFailure int64      `json:"total_failure"`
+		SuccessRate  float64    `json:"success_rate"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+
+	if len(resp.Blocks) != 672 {
+		t.Fatalf("unexpected blocks length: got %d want 672", len(resp.Blocks))
+	}
+	if resp.TotalSuccess != 0 || resp.TotalFailure != 0 {
+		t.Fatalf("expected zero totals, got success=%d failure=%d", resp.TotalSuccess, resp.TotalFailure)
+	}
+	if resp.SuccessRate != 0 {
+		t.Fatalf("expected 0 success rate for empty data, got %f", resp.SuccessRate)
+	}
+}

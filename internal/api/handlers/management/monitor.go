@@ -1527,3 +1527,54 @@ func (e *monitorValidationError) Error() string {
 	}
 	return e.msg
 }
+
+// GetMonitorServiceHealth returns a 7-day health grid with 15-minute granularity.
+func (h *Handler) GetMonitorServiceHealth(c *gin.Context) {
+	const (
+		rows            = 7
+		cols            = 96
+		totalBlocks     = rows * cols // 672
+		blockDurationMs = 900000      // 15 minutes
+		blockDuration   = 15 * time.Minute
+		windowDuration  = 7 * 24 * time.Hour
+	)
+
+	now := time.Now()
+	windowStart := now.Add(-windowDuration)
+
+	type healthBlock struct {
+		Success int64 `json:"success"`
+		Failure int64 `json:"failure"`
+	}
+
+	blocks := make([]healthBlock, totalBlocks)
+	var totalSuccess, totalFailure int64
+
+	visitSnapshotRecords(h.usageSnapshot(), func(record monitorRecord) {
+		if record.Timestamp.Before(windowStart) || record.Timestamp.After(now) {
+			return
+		}
+		idx := int(record.Timestamp.Sub(windowStart) / blockDuration)
+		if idx >= totalBlocks {
+			idx = totalBlocks - 1
+		}
+		if record.Failed {
+			blocks[idx].Failure++
+			totalFailure++
+		} else {
+			blocks[idx].Success++
+			totalSuccess++
+		}
+	})
+
+	total := totalSuccess + totalFailure
+	c.JSON(http.StatusOK, gin.H{
+		"rows":              rows,
+		"cols":              cols,
+		"block_duration_ms": blockDurationMs,
+		"blocks":            blocks,
+		"total_success":     totalSuccess,
+		"total_failure":     totalFailure,
+		"success_rate":      calcRate(totalSuccess, total),
+	})
+}

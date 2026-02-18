@@ -485,6 +485,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/custom/monitor/daily-trend", s.mgmt.GetMonitorDailyTrend)
 		mgmt.GET("/custom/monitor/hourly-models", s.mgmt.GetMonitorHourlyModels)
 		mgmt.GET("/custom/monitor/hourly-tokens", s.mgmt.GetMonitorHourlyTokens)
+		mgmt.GET("/custom/monitor/service-health", s.mgmt.GetMonitorServiceHealth)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)
