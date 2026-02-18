@@ -43,11 +43,11 @@ func GetClaudeModels() []*ModelInfo {
 		{
 			ID:                  "claude-sonnet-4-6",
 			Object:              "model",
-			Created:             1739836800, // 2025-02-18
+			Created:             1771286400, // 2026-02-17
 			OwnedBy:             "anthropic",
 			Type:                "claude",
 			DisplayName:         "Claude 4.6 Sonnet",
-			Description:         "High-performance model balancing intelligence and speed",
+			Description:         "Best combination of speed and intelligence",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
@@ -905,11 +905,13 @@ func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
 		"gemini-3-pro-high":          {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
 		"gemini-3-pro-image":         {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
 		"gemini-3-flash":             {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}}},
-		"claude-sonnet-4-5-thinking": {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-opus-4-5-thinking":   {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-opus-4-6-thinking":   {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-sonnet-4-6-thinking": {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-sonnet-4-5":          {MaxCompletionTokens: 64000},
+		"claude-sonnet-4-5-thinking": {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
+		"claude-sonnet-4-6":          {MaxCompletionTokens: 64000},
+		"claude-sonnet-4-6-thinking": {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"gpt-oss-120b-medium":        {},
 		"tab_flash_lite_preview":     {},
 	}
