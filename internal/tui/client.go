@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,11 +22,16 @@ type Client struct {
 func NewClient(port int, secretKey string) *Client {
 	return &Client{
 		baseURL:   fmt.Sprintf("http://127.0.0.1:%d", port),
-		secretKey: secretKey,
+		secretKey: strings.TrimSpace(secretKey),
 		http: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 	}
+}
+
+// SetSecretKey updates management API bearer token used by this client.
+func (c *Client) SetSecretKey(secretKey string) {
+	c.secretKey = strings.TrimSpace(secretKey)
 }
 
 func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, error) {
@@ -150,7 +157,10 @@ func (c *Client) GetAuthFiles() ([]map[string]any, error) {
 
 // DeleteAuthFile deletes a single auth file by name.
 func (c *Client) DeleteAuthFile(name string) error {
-	_, code, err := c.doRequest("DELETE", "/v0/management/auth-files?name="+name, nil)
+	query := url.Values{}
+	query.Set("name", name)
+	path := "/v0/management/auth-files?" + query.Encode()
+	_, code, err := c.doRequest("DELETE", path, nil)
 	if err != nil {
 		return err
 	}
@@ -176,12 +186,57 @@ func (c *Client) PatchAuthFileFields(name string, fields map[string]any) error {
 }
 
 // GetLogs fetches log lines from the server.
-func (c *Client) GetLogs(cutoff int64, limit int) (map[string]any, error) {
-	path := fmt.Sprintf("/v0/management/logs?limit=%d", limit)
-	if cutoff > 0 {
-		path += fmt.Sprintf("&cutoff=%d", cutoff)
+func (c *Client) GetLogs(after int64, limit int) ([]string, int64, error) {
+	query := url.Values{}
+	if limit > 0 {
+		query.Set("limit", strconv.Itoa(limit))
 	}
-	return c.getJSON(path)
+	if after > 0 {
+		query.Set("after", strconv.FormatInt(after, 10))
+	}
+
+	path := "/v0/management/logs"
+	encodedQuery := query.Encode()
+	if encodedQuery != "" {
+		path += "?" + encodedQuery
+	}
+
+	wrapper, err := c.getJSON(path)
+	if err != nil {
+		return nil, after, err
+	}
+
+	lines := []string{}
+	if rawLines, ok := wrapper["lines"]; ok && rawLines != nil {
+		rawJSON, errMarshal := json.Marshal(rawLines)
+		if errMarshal != nil {
+			return nil, after, errMarshal
+		}
+		if errUnmarshal := json.Unmarshal(rawJSON, &lines); errUnmarshal != nil {
+			return nil, after, errUnmarshal
+		}
+	}
+
+	latest := after
+	if rawLatest, ok := wrapper["latest-timestamp"]; ok {
+		switch value := rawLatest.(type) {
+		case float64:
+			latest = int64(value)
+		case json.Number:
+			if parsed, errParse := value.Int64(); errParse == nil {
+				latest = parsed
+			}
+		case int64:
+			latest = value
+		case int:
+			latest = int64(value)
+		}
+	}
+	if latest < after {
+		latest = after
+	}
+
+	return lines, latest, nil
 }
 
 // GetAPIKeys fetches the list of API keys.
@@ -303,7 +358,10 @@ func (c *Client) GetDebug() (bool, error) {
 // GetAuthStatus polls the OAuth session status.
 // Returns status ("wait", "ok", "error") and optional error message.
 func (c *Client) GetAuthStatus(state string) (string, string, error) {
-	wrapper, err := c.getJSON("/v0/management/get-auth-status?state=" + state)
+	query := url.Values{}
+	query.Set("state", state)
+	path := "/v0/management/get-auth-status?" + query.Encode()
+	wrapper, err := c.getJSON(path)
 	if err != nil {
 		return "", "", err
 	}
