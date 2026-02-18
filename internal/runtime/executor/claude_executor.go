@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -143,7 +144,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -284,7 +285,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas)
+	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -432,7 +433,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -638,7 +639,49 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string) {
+// mapStainlessOS maps runtime.GOOS to Stainless SDK OS names.
+func mapStainlessOS() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "MacOS"
+	case "windows":
+		return "Windows"
+	case "linux":
+		return "Linux"
+	case "freebsd":
+		return "FreeBSD"
+	default:
+		return "Other::" + runtime.GOOS
+	}
+}
+
+// mapStainlessArch maps runtime.GOARCH to Stainless SDK architecture names.
+func mapStainlessArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "arm64":
+		return "arm64"
+	case "386":
+		return "x86"
+	default:
+		return "other::" + runtime.GOARCH
+	}
+}
+
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
+	hdrDefault := func(cfgVal, fallback string) string {
+		if cfgVal != "" {
+			return cfgVal
+		}
+		return fallback
+	}
+
+	var hd config.ClaudeHeaderDefaults
+	if cfg != nil {
+		hd = cfg.ClaudeHeaderDefaults
+	}
+
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
 	isAnthropicBase := r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com")
 	if isAnthropicBase && useAPIKey {
@@ -685,16 +728,17 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
+	// Values below match Claude Code 2.1.44 / @anthropic-ai/sdk 0.74.0 (captured 2026-02-17).
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Helper-Method", "stream")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime-Version", "v24.3.0")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Package-Version", "0.55.1")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime-Version", hdrDefault(hd.RuntimeVersion, "v24.3.0"))
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Package-Version", hdrDefault(hd.PackageVersion, "0.74.0"))
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Arch", "arm64")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Os", "MacOS")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", "60")
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", "claude-cli/1.0.83 (external, cli)")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Arch", mapStainlessArch())
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Os", mapStainlessOS())
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
+	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", hdrDefault(hd.UserAgent, "claude-cli/2.1.44 (external, sdk-cli)"))
 	r.Header.Set("Connection", "keep-alive")
 	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {
@@ -702,6 +746,8 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	} else {
 		r.Header.Set("Accept", "application/json")
 	}
+	// Keep OS/Arch mapping dynamic (not configurable).
+	// They intentionally continue to derive from runtime.GOOS/runtime.GOARCH.
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
