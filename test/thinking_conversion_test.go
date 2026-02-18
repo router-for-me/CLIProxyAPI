@@ -1316,6 +1316,122 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
+
+		// GitHub Copilot tests: gpt-5, gpt-5.1, gpt-5.2 (Levels=low/medium/high, some with none/xhigh)
+		// Testing /chat/completions endpoint (openai format) - with suffix
+
+		// Case 112: OpenAI to gpt-5, level high → high
+		{
+			name:        "112",
+			from:        "openai",
+			to:          "github-copilot",
+			model:       "gpt-5(high)",
+			inputJSON:   `{"model":"gpt-5(high)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		// Case 113: OpenAI to gpt-5, level none → clamped to low (ZeroAllowed=false)
+		{
+			name:        "113",
+			from:        "openai",
+			to:          "github-copilot",
+			model:       "gpt-5(none)",
+			inputJSON:   `{"model":"gpt-5(none)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning_effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
+		// Case 114: OpenAI to gpt-5.1, level none → none (ZeroAllowed=true)
+		{
+			name:        "114",
+			from:        "openai",
+			to:          "github-copilot",
+			model:       "gpt-5.1(none)",
+			inputJSON:   `{"model":"gpt-5.1(none)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning_effort",
+			expectValue: "none",
+			expectErr:   false,
+		},
+		// Case 115: OpenAI to gpt-5.2, level xhigh → xhigh
+		{
+			name:        "115",
+			from:        "openai",
+			to:          "github-copilot",
+			model:       "gpt-5.2(xhigh)",
+			inputJSON:   `{"model":"gpt-5.2(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning_effort",
+			expectValue: "xhigh",
+			expectErr:   false,
+		},
+		// Case 116: OpenAI to gpt-5, level xhigh (out of range) → error
+		{
+			name:        "116",
+			from:        "openai",
+			to:          "github-copilot",
+			model:       "gpt-5(xhigh)",
+			inputJSON:   `{"model":"gpt-5(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "",
+			expectErr:   true,
+		},
+		// Case 117: Claude to gpt-5.1, budget 0 → none (ZeroAllowed=true)
+		{
+			name:        "117",
+			from:        "claude",
+			to:          "github-copilot",
+			model:       "gpt-5.1(0)",
+			inputJSON:   `{"model":"gpt-5.1(0)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning_effort",
+			expectValue: "none",
+			expectErr:   false,
+		},
+
+		// GitHub Copilot tests: /responses endpoint (codex format) - with suffix
+
+		// Case 118: OpenAI-Response to gpt-5-codex, level high → high
+		{
+			name:        "118",
+			from:        "openai-response",
+			to:          "github-copilot",
+			model:       "gpt-5-codex(high)",
+			inputJSON:   `{"model":"gpt-5-codex(high)","input":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		// Case 119: OpenAI-Response to gpt-5.2-codex, level xhigh → xhigh
+		{
+			name:        "119",
+			from:        "openai-response",
+			to:          "github-copilot",
+			model:       "gpt-5.2-codex(xhigh)",
+			inputJSON:   `{"model":"gpt-5.2-codex(xhigh)","input":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "xhigh",
+			expectErr:   false,
+		},
+		// Case 120: OpenAI-Response to gpt-5.2-codex, level none → none
+		{
+			name:        "120",
+			from:        "openai-response",
+			to:          "github-copilot",
+			model:       "gpt-5.2-codex(none)",
+			inputJSON:   `{"model":"gpt-5.2-codex(none)","input":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "none",
+			expectErr:   false,
+		},
+		// Case 121: OpenAI-Response to gpt-5-codex, level none → clamped to low (ZeroAllowed=false)
+		{
+			name:        "121",
+			from:        "openai-response",
+			to:          "github-copilot",
+			model:       "gpt-5-codex(none)",
+			inputJSON:   `{"model":"gpt-5-codex(none)","input":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
 	}
 
 	runThinkingTests(t, cases)
@@ -2585,6 +2701,122 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
+
+		// GitHub Copilot tests: gpt-5, gpt-5.1, gpt-5.2 (Levels=low/medium/high, some with none/xhigh)
+		// Testing /chat/completions endpoint (openai format) - with body params
+
+		// Case 112: OpenAI to gpt-5, reasoning_effort=high → high
+		{
+			name:        "112",
+			from:        "openai",
+			to:          "github-copilot",
+			model:       "gpt-5",
+			inputJSON:   `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		// Case 113: OpenAI to gpt-5, reasoning_effort=none → clamped to low (ZeroAllowed=false)
+		{
+			name:        "113",
+			from:        "openai",
+			to:          "github-copilot",
+			model:       "gpt-5",
+			inputJSON:   `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			expectField: "reasoning_effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
+		// Case 114: OpenAI to gpt-5.1, reasoning_effort=none → none (ZeroAllowed=true)
+		{
+			name:        "114",
+			from:        "openai",
+			to:          "github-copilot",
+			model:       "gpt-5.1",
+			inputJSON:   `{"model":"gpt-5.1","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
+			expectField: "reasoning_effort",
+			expectValue: "none",
+			expectErr:   false,
+		},
+		// Case 115: OpenAI to gpt-5.2, reasoning_effort=xhigh → xhigh
+		{
+			name:        "115",
+			from:        "openai",
+			to:          "github-copilot",
+			model:       "gpt-5.2",
+			inputJSON:   `{"model":"gpt-5.2","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
+			expectField: "reasoning_effort",
+			expectValue: "xhigh",
+			expectErr:   false,
+		},
+		// Case 116: OpenAI to gpt-5, reasoning_effort=xhigh (out of range) → error
+		{
+			name:        "116",
+			from:        "openai",
+			to:          "github-copilot",
+			model:       "gpt-5",
+			inputJSON:   `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
+			expectField: "",
+			expectErr:   true,
+		},
+		// Case 117: Claude to gpt-5.1, thinking.budget_tokens=0 → none (ZeroAllowed=true)
+		{
+			name:        "117",
+			from:        "claude",
+			to:          "github-copilot",
+			model:       "gpt-5.1",
+			inputJSON:   `{"model":"gpt-5.1","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+			expectField: "reasoning_effort",
+			expectValue: "none",
+			expectErr:   false,
+		},
+
+		// GitHub Copilot tests: /responses endpoint (codex format) - with body params
+
+		// Case 118: OpenAI-Response to gpt-5-codex, reasoning.effort=high → high
+		{
+			name:        "118",
+			from:        "openai-response",
+			to:          "github-copilot",
+			model:       "gpt-5-codex",
+			inputJSON:   `{"model":"gpt-5-codex","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"high"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		// Case 119: OpenAI-Response to gpt-5.2-codex, reasoning.effort=xhigh → xhigh
+		{
+			name:        "119",
+			from:        "openai-response",
+			to:          "github-copilot",
+			model:       "gpt-5.2-codex",
+			inputJSON:   `{"model":"gpt-5.2-codex","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"xhigh"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "xhigh",
+			expectErr:   false,
+		},
+		// Case 120: OpenAI-Response to gpt-5.2-codex, reasoning.effort=none → none
+		{
+			name:        "120",
+			from:        "openai-response",
+			to:          "github-copilot",
+			model:       "gpt-5.2-codex",
+			inputJSON:   `{"model":"gpt-5.2-codex","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "none",
+			expectErr:   false,
+		},
+		// Case 121: OpenAI-Response to gpt-5-codex, reasoning.effort=none → clamped to low (ZeroAllowed=false)
+		{
+			name:        "121",
+			from:        "openai-response",
+			to:          "github-copilot",
+			model:       "gpt-5-codex",
+			inputJSON:   `{"model":"gpt-5-codex","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
 	}
 
 	runThinkingTests(t, cases)
@@ -2813,6 +3045,51 @@ func getTestModels() []*registry.ModelInfo {
 			DisplayName: "MiniMax Test Model",
 			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
 		},
+		{
+			ID:          "gpt-5",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "github-copilot",
+			Type:        "github-copilot",
+			DisplayName: "GPT-5",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: false, DynamicAllowed: false},
+		},
+		{
+			ID:          "gpt-5.1",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "github-copilot",
+			Type:        "github-copilot",
+			DisplayName: "GPT-5.1",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:          "gpt-5.2",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "github-copilot",
+			Type:        "github-copilot",
+			DisplayName: "GPT-5.2",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:          "gpt-5-codex",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "github-copilot",
+			Type:        "github-copilot",
+			DisplayName: "GPT-5 Codex",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: false, DynamicAllowed: false},
+		},
+		{
+			ID:          "gpt-5.2-codex",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "github-copilot",
+			Type:        "github-copilot",
+			DisplayName: "GPT-5.2 Codex",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
 	}
 }
 
@@ -2830,6 +3107,15 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 			if tc.to == "iflow" {
 				translateTo = "openai"
 				applyTo = "iflow"
+			}
+			if tc.to == "github-copilot" {
+				if tc.from == "openai-response" {
+					translateTo = "codex"
+					applyTo = "codex"
+				} else {
+					translateTo = "openai"
+					applyTo = "openai"
+				}
 			}
 
 			body := sdktranslator.TranslateRequest(

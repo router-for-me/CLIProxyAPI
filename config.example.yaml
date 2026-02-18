@@ -1,6 +1,6 @@
 # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
 # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
-host: ""
+host: ''
 
 # Server port
 port: 8317
@@ -8,8 +8,8 @@ port: 8317
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
-  cert: ""
-  key: ""
+  cert: ''
+  key: ''
 
 # Management API settings
 remote-management:
@@ -20,22 +20,22 @@ remote-management:
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
-  secret-key: ""
+  secret-key: ''
 
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+  panel-github-repository: 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center'
 
 # Authentication directory (supports ~ for home directory)
-auth-dir: "~/.cli-proxy-api"
+auth-dir: '~/.cli-proxy-api'
 
 # API keys for authentication
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+  - 'your-api-key-1'
+  - 'your-api-key-2'
+  - 'your-api-key-3'
 
 # Enable debug logging
 debug: false
@@ -43,10 +43,15 @@ debug: false
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false
-  addr: "127.0.0.1:8316"
+  addr: '127.0.0.1:8316'
 
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
+
+# Open OAuth URLs in incognito/private browser mode.
+# Useful when you want to login with a different account without logging out from your current session.
+# Default: false (but Kiro auth defaults to true for multi-account support)
+incognito-browser: true
 
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
@@ -63,7 +68,7 @@ error-logs-max-files: 10
 usage-statistics-enabled: false
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
-proxy-url: ""
+proxy-url: ''
 
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
@@ -81,7 +86,7 @@ quota-exceeded:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), fill-first
+  strategy: 'round-robin' # round-robin (default), fill-first
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
@@ -164,6 +169,31 @@ nonstream-keepalive-interval: 0
 #   runtime-version: "v24.3.0"
 #   timeout: "600"
 
+# Kiro (AWS CodeWhisperer) configuration
+# Note: Kiro API currently only operates in us-east-1 region
+#kiro:
+#  - token-file: "~/.aws/sso/cache/kiro-auth-token.json" # path to Kiro token file
+#    agent-task-type: "" # optional: "vibe" or empty (API default)
+#  - access-token: "aoaAAAAA..." # or provide tokens directly
+#    refresh-token: "aorAAAAA..."
+#    profile-arn: "arn:aws:codewhisperer:us-east-1:..."
+#    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy override
+
+# Kilocode (OAuth-based code assistant)
+# Note: Kilocode uses OAuth device flow authentication.
+# Use the CLI command: ./server --kilo-login
+# This will save credentials to the auth directory (default: ~/.cli-proxy-api/)
+# oauth-model-alias:
+#   kilo:
+#     - name: "minimax/minimax-m2.5:free"
+#       alias: "minimax-m2.5"
+#     - name: "z-ai/glm-5:free"
+#       alias: "glm-5"
+# oauth-excluded-models:
+#   kilo:
+#     - "kilo-claude-opus-4-6"  # exclude specific models (exact match)
+#     - "*:free"                # wildcard matching suffix (e.g. all free models)
+
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
@@ -229,10 +259,25 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot, kimi.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-alias:
+#  antigravity:
+#    - name: "rev19-uic3-1p"
+#      alias: "gemini-2.5-computer-use-preview-10-2025"
+#    - name: "gemini-3-pro-image"
+#      alias: "gemini-3-pro-image-preview"
+#    - name: "gemini-3-pro-high"
+#      alias: "gemini-3-pro-preview"
+#    - name: "gemini-3-flash"
+#      alias: "gemini-3-flash-preview"
+#    - name: "claude-sonnet-4-5"
+#      alias: "gemini-claude-sonnet-4-5"
+#    - name: "claude-sonnet-4-5-thinking"
+#      alias: "gemini-claude-sonnet-4-5-thinking"
+#    - name: "claude-opus-4-5-thinking"
+#      alias: "gemini-claude-opus-4-5-thinking"
 #   gemini-cli:
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
@@ -243,9 +288,6 @@ nonstream-keepalive-interval: 0
 #   aistudio:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
-#   antigravity:
-#     - name: "gemini-3-pro-high"
-#       alias: "gemini-3-pro-preview"
 #   claude:
 #     - name: "claude-sonnet-4-5-20250929"
 #       alias: "cs4.5"
@@ -261,8 +303,15 @@ nonstream-keepalive-interval: 0
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
+#   kiro:
+#     - name: "kiro-claude-opus-4-5"
+#       alias: "op45"
+#   github-copilot:
+#     - name: "gpt-5"
+#       alias: "copilot-gpt5"
 
 # OAuth provider excluded models
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 # oauth-excluded-models:
 #   gemini-cli:
 #     - "gemini-2.5-pro"     # exclude specific models (exact match)
@@ -285,6 +334,10 @@ nonstream-keepalive-interval: 0
 #     - "tstars2.0"
 #   kimi:
 #     - "kimi-k2-thinking"
+#   kiro:
+#     - "kiro-claude-haiku-4-5"
+#   github-copilot:
+#     - "raptor-mini"
 
 # Optional payload configuration
 # payload:
