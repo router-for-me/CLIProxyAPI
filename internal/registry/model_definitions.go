@@ -19,7 +19,9 @@ import (
 //   - codex
 //   - qwen
 //   - iflow
+//   - kimi
 //   - kiro
+//   - kilo
 //   - github-copilot
 //   - kiro
 //   - amazonq
@@ -43,10 +45,14 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetQwenModels()
 	case "iflow":
 		return GetIFlowModels()
+	case "kimi":
+		return GetKimiModels()
 	case "github-copilot":
 		return GetGitHubCopilotModels()
 	case "kiro":
 		return GetKiroModels()
+	case "kilo":
+		return GetKiloModels()
 	case "amazonq":
 		return GetAmazonQModels()
 	case "antigravity":
@@ -93,8 +99,10 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetOpenAIModels(),
 		GetQwenModels(),
 		GetIFlowModels(),
+		GetKimiModels(),
 		GetGitHubCopilotModels(),
 		GetKiroModels(),
+		GetKiloModels(),
 		GetAmazonQModels(),
 	}
 	for _, models := range allModels {

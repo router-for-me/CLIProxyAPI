@@ -27,4 +27,7 @@ const (
 
 	// Kiro represents the AWS CodeWhisperer (Kiro) provider identifier.
 	Kiro = "kiro"
+
+	// Kilo represents the Kilo AI provider identifier.
+	Kilo = "kilo"
 )
