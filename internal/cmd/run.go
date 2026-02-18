@@ -55,6 +55,34 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	}
 }
 
+// StartServiceBackground starts the proxy service in a background goroutine
+// and returns a cancel function for shutdown and a done channel.
+func StartServiceBackground(cfg *config.Config, configPath string, localPassword string) (cancel func(), done <-chan struct{}) {
+	builder := cliproxy.NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(configPath).
+		WithLocalManagementPassword(localPassword)
+
+	ctx, cancelFn := context.WithCancel(context.Background())
+	doneCh := make(chan struct{})
+
+	service, err := builder.Build()
+	if err != nil {
+		log.Errorf("failed to build proxy service: %v", err)
+		close(doneCh)
+		return cancelFn, doneCh
+	}
+
+	go func() {
+		defer close(doneCh)
+		if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Errorf("proxy service exited with error: %v", err)
+		}
+	}()
+
+	return cancelFn, doneCh
+}
+
 // WaitForCloudDeploy waits indefinitely for shutdown signals in cloud deploy mode
 // when no configuration file is available.
 func WaitForCloudDeploy() {
