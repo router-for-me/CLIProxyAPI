@@ -64,11 +64,6 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
 
-## 管理 TUI
-
-一个用于管理配置、密钥/认证文件以及查看实时日志的终端界面。使用以下命令启动：
-`./CLIProxyAPI --tui`
-
 ## Amp CLI 支持
 
 CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支持，可让你使用自己的 Google/ChatGPT/Claude OAuth 订阅来配合 Amp 编码工具：

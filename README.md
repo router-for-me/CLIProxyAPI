@@ -64,11 +64,6 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
-## Management TUI
-
-A terminal-based interface for managing configuration, keys/auth files, and viewing real-time logs. Run with:
-`./CLIProxyAPI --tui`
-
 ## Amp CLI Support
 
 CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
