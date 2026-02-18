@@ -161,6 +161,14 @@ nonstream-keepalive-interval: 0
 #         - "API"
 #         - "proxy"
 
+# Default headers for Claude API requests. Update when Claude Code releases new versions.
+# These are used as fallbacks when the client does not send its own headers.
+# claude-header-defaults:
+#   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
+#   package-version: "0.74.0"
+#   runtime-version: "v24.3.0"
+#   timeout: "600"
+
 # Kiro (AWS CodeWhisperer) configuration
 # Note: Kiro API currently only operates in us-east-1 region
 #kiro:

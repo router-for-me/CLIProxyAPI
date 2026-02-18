@@ -52,6 +52,45 @@ const (
 	defaultStreamingBootstrapRetries = 0
 )
 
+type pinnedAuthContextKey struct{}
+type selectedAuthCallbackContextKey struct{}
+type executionSessionContextKey struct{}
+
+// WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
+func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, pinnedAuthContextKey{}, authID)
+}
+
+// WithSelectedAuthIDCallback returns a child context that receives the selected auth ID.
+func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) context.Context {
+	if callback == nil {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
+}
+
+// WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
+func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
+}
+
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
 func BuildErrorResponseBody(status int, errText string) []byte {
@@ -152,7 +191,59 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if key == "" {
 		key = uuid.NewString()
 	}
-	return map[string]any{idempotencyKeyMetadataKey: key}
+
+	meta := map[string]any{idempotencyKeyMetadataKey: key}
+	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
+		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
+	}
+	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
+		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
+	}
+	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
+		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+	}
+	return meta
+}
+
+func pinnedAuthIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(pinnedAuthContextKey{})
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
+}
+
+func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx.Value(selectedAuthCallbackContextKey{})
+	if callback, ok := raw.(func(string)); ok && callback != nil {
+		return callback
+	}
+	return nil
+}
+
+func executionSessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(executionSessionContextKey{})
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
 }
 
 // BaseAPIHandler contains the handlers for API endpoints.
