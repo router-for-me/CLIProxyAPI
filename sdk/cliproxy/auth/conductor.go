@@ -41,6 +41,17 @@ type ProviderExecutor interface {
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
+// ExecutionSessionCloser allows executors to release per-session runtime resources.
+type ExecutionSessionCloser interface {
+	CloseExecutionSession(sessionID string)
+}
+
+const (
+	// CloseAllExecutionSessionsID asks an executor to release all active execution sessions.
+	// Executors that do not support this marker may ignore it.
+	CloseAllExecutionSessionsID = "__all_execution_sessions__"
+)
+
 // RefreshEvaluator allows runtime state to override refresh decisions.
 type RefreshEvaluator interface {
 	ShouldRefresh(now time.Time, auth *Auth) bool
@@ -389,9 +400,23 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if executor == nil {
 		return
 	}
+	provider := strings.TrimSpace(executor.Identifier())
+	if provider == "" {
+		return
+	}
+
+	var replaced ProviderExecutor
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.executors[executor.Identifier()] = executor
+	replaced = m.executors[provider]
+	m.executors[provider] = executor
+	m.mu.Unlock()
+
+	if replaced == nil || replaced == executor {
+		return
+	}
+	if closer, ok := replaced.(ExecutionSessionCloser); ok && closer != nil {
+		closer.CloseExecutionSession(CloseAllExecutionSessionsID)
+	}
 }
 
 // UnregisterExecutor removes the executor associated with the provider key.
@@ -581,6 +606,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -636,6 +662,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -691,6 +718,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -791,6 +819,38 @@ func hasRequestedModelMetadata(meta map[string]any) bool {
 		return strings.TrimSpace(string(v)) != ""
 	default:
 		return false
+	}
+}
+
+func pinnedAuthIDFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[cliproxyexecutor.PinnedAuthMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch val := raw.(type) {
+	case string:
+		return strings.TrimSpace(val)
+	case []byte:
+		return strings.TrimSpace(string(val))
+	default:
+		return ""
+	}
+}
+
+func publishSelectedAuthMetadata(meta map[string]any, authID string) {
+	if len(meta) == 0 {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	meta[cliproxyexecutor.SelectedAuthMetadataKey] = authID
+	if callback, ok := meta[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string)); ok && callback != nil {
+		callback(authID)
 	}
 }
 
@@ -1550,7 +1610,56 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	return auth.Clone(), true
 }
 
+// Executor returns the registered provider executor for a provider key.
+func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
+	if m == nil {
+		return nil, false
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return nil, false
+	}
+
+	m.mu.RLock()
+	executor, okExecutor := m.executors[provider]
+	if !okExecutor {
+		lowerProvider := strings.ToLower(provider)
+		if lowerProvider != provider {
+			executor, okExecutor = m.executors[lowerProvider]
+		}
+	}
+	m.mu.RUnlock()
+
+	if !okExecutor || executor == nil {
+		return nil, false
+	}
+	return executor, true
+}
+
+// CloseExecutionSession asks all registered executors to release the supplied execution session.
+func (m *Manager) CloseExecutionSession(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if m == nil || sessionID == "" {
+		return
+	}
+
+	m.mu.RLock()
+	executors := make([]ProviderExecutor, 0, len(m.executors))
+	for _, exec := range m.executors {
+		executors = append(executors, exec)
+	}
+	m.mu.RUnlock()
+
+	for i := range executors {
+		if closer, ok := executors[i].(ExecutionSessionCloser); ok && closer != nil {
+			closer.CloseExecutionSession(sessionID)
+		}
+	}
+}
+
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+
 	m.mu.RLock()
 	executor, okExecutor := m.executors[provider]
 	if !okExecutor {
@@ -1569,6 +1678,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
 		if candidate.Provider != provider || candidate.Disabled {
+			continue
+		}
+		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
 			continue
 		}
 		if _, used := tried[candidate.ID]; used {
@@ -1606,6 +1718,8 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
 		p := strings.TrimSpace(strings.ToLower(provider))
@@ -1631,6 +1745,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
 		if candidate == nil || candidate.Disabled {
+			continue
+		}
+		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
 			continue
 		}
 		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))

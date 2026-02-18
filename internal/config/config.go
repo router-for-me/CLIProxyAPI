@@ -355,6 +355,9 @@ type CodexKey struct {
 	// If empty, the default Codex API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// Websockets enables the Responses API websocket transport for this credential.
+	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 

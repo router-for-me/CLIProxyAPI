@@ -325,6 +325,9 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		if _, err := s.coreManager.Update(ctx, existing); err != nil {
 			log.Errorf("failed to disable auth %s: %v", id, err)
 		}
+		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
+			s.ensureExecutorsForAuth(existing)
+		}
 	}
 }
 
@@ -357,7 +360,24 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 }
 
 func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
-	if s == nil || a == nil {
+	s.ensureExecutorsForAuthWithMode(a, false)
+}
+
+func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace bool) {
+	if s == nil || s.coreManager == nil || a == nil {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
+		if !forceReplace {
+			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
+			if hasExecutor {
+				_, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
+				if isCodexAutoExecutor {
+					return
+				}
+			}
+		}
+		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
 		return
 	}
 	// Skip disabled auth entries when (re)binding executors.
@@ -392,8 +412,6 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
-	case "codex":
-		s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg))
 	case "qwen":
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "iflow":
@@ -415,8 +433,15 @@ func (s *Service) rebindExecutors() {
 		return
 	}
 	auths := s.coreManager.List()
+	reboundCodex := false
 	for _, auth := range auths {
-		s.ensureExecutorsForAuth(auth)
+		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			if reboundCodex {
+				continue
+			}
+			reboundCodex = true
+		}
+		s.ensureExecutorsForAuthWithMode(auth, true)
 	}
 }
 
