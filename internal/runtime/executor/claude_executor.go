@@ -844,7 +844,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
-					if name == "" || strings.HasPrefix(name, prefix) {
+					if name == "" || strings.HasPrefix(name, prefix) || builtinTools[name] {
 						return true
 					}
 					path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
