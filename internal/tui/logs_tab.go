@@ -3,13 +3,15 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// logsTabModel displays real-time log lines from the logrus hook.
+// logsTabModel displays real-time log lines from hook/API source.
 type logsTabModel struct {
+	client     *Client
 	hook       *LogHook
 	viewport   viewport.Model
 	lines      []string
@@ -19,13 +21,22 @@ type logsTabModel struct {
 	height     int
 	ready      bool
 	filter     string // "", "debug", "info", "warn", "error"
+	after      int64
+	lastErr    error
 }
 
-// logLineMsg carries a new log line from the logrus hook channel.
+type logsPollMsg struct {
+	lines  []string
+	latest int64
+	err    error
+}
+
+type logsTickMsg struct{}
 type logLineMsg string
 
-func newLogsTabModel(hook *LogHook) logsTabModel {
+func newLogsTabModel(client *Client, hook *LogHook) logsTabModel {
 	return logsTabModel{
+		client:     client,
 		hook:       hook,
 		maxLines:   5000,
 		autoScroll: true,
@@ -33,11 +44,31 @@ func newLogsTabModel(hook *LogHook) logsTabModel {
 }
 
 func (m logsTabModel) Init() tea.Cmd {
-	return m.waitForLog
+	if m.hook != nil {
+		return m.waitForLog
+	}
+	return m.fetchLogs
 }
 
-// waitForLog listens on the hook channel and returns a logLineMsg.
+func (m logsTabModel) fetchLogs() tea.Msg {
+	lines, latest, err := m.client.GetLogs(m.after, 200)
+	return logsPollMsg{
+		lines:  lines,
+		latest: latest,
+		err:    err,
+	}
+}
+
+func (m logsTabModel) waitForNextPoll() tea.Cmd {
+	return tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+		return logsTickMsg{}
+	})
+}
+
 func (m logsTabModel) waitForLog() tea.Msg {
+	if m.hook == nil {
+		return nil
+	}
 	line, ok := <-m.hook.Chan()
 	if !ok {
 		return nil
@@ -50,6 +81,32 @@ func (m logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderLogs())
 		return m, nil
+	case logsTickMsg:
+		if m.hook != nil {
+			return m, nil
+		}
+		return m, m.fetchLogs
+	case logsPollMsg:
+		if m.hook != nil {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.lastErr = msg.err
+		} else {
+			m.lastErr = nil
+			m.after = msg.latest
+			if len(msg.lines) > 0 {
+				m.lines = append(m.lines, msg.lines...)
+				if len(m.lines) > m.maxLines {
+					m.lines = m.lines[len(m.lines)-m.maxLines:]
+				}
+			}
+		}
+		m.viewport.SetContent(m.renderLogs())
+		if m.autoScroll {
+			m.viewport.GotoBottom()
+		}
+		return m, m.waitForNextPoll()
 	case logLineMsg:
 		m.lines = append(m.lines, string(msg))
 		if len(m.lines) > m.maxLines {
@@ -71,6 +128,7 @@ func (m logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 			return m, nil
 		case "c":
 			m.lines = nil
+			m.lastErr = nil
 			m.viewport.SetContent(m.renderLogs())
 			return m, nil
 		case "1":
@@ -150,6 +208,11 @@ func (m logsTabModel) renderLogs() string {
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", m.width))
 	sb.WriteString("\n")
+
+	if m.lastErr != nil {
+		sb.WriteString(errorStyle.Render("⚠ Error: " + m.lastErr.Error()))
+		sb.WriteString("\n")
+	}
 
 	if len(m.lines) == 0 {
 		sb.WriteString(subtitleStyle.Render(T("logs_waiting")))

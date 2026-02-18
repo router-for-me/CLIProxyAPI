@@ -71,6 +71,7 @@ func main() {
 	var configPath string
 	var password string
 	var tuiMode bool
+	var standalone bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -88,6 +89,7 @@ func main() {
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
+	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -483,72 +485,82 @@ func main() {
 			cmd.WaitForCloudDeploy()
 			return
 		}
-		// Start the main proxy service
-		managementasset.StartAutoUpdater(context.Background(), configFilePath)
 		if tuiMode {
-			// Install logrus hook to capture logs for TUI
-			hook := tui.NewLogHook(2000)
-			hook.SetFormatter(&logging.LogFormatter{})
-			log.AddHook(hook)
-			// Suppress logrus stdout output (TUI owns the terminal)
-			log.SetOutput(io.Discard)
+			if standalone {
+				// Standalone mode: start an embedded local server and connect TUI client to it.
+				managementasset.StartAutoUpdater(context.Background(), configFilePath)
+				hook := tui.NewLogHook(2000)
+				hook.SetFormatter(&logging.LogFormatter{})
+				log.AddHook(hook)
 
-			// Redirect os.Stdout and os.Stderr to /dev/null so that
-			// stray fmt.Print* calls in the backend don't corrupt the TUI.
-			origStdout := os.Stdout
-			origStderr := os.Stderr
-			devNull, errNull := os.Open(os.DevNull)
-			if errNull == nil {
-				os.Stdout = devNull
-				os.Stderr = devNull
-			}
+				origStdout := os.Stdout
+				origStderr := os.Stderr
+				origLogOutput := log.StandardLogger().Out
+				log.SetOutput(io.Discard)
 
-			// Generate a random local password for management API authentication.
-			// This is passed to the server (accepted for localhost requests)
-			// and used by the TUI HTTP client as the Bearer token.
-			localMgmtPassword := fmt.Sprintf("tui-%d-%d", os.Getpid(), time.Now().UnixNano())
-			if password == "" {
-				password = localMgmtPassword
-			}
+				devNull, errOpenDevNull := os.Open(os.DevNull)
+				if errOpenDevNull == nil {
+					os.Stdout = devNull
+					os.Stderr = devNull
+				}
 
-			// Start server in background
-			cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+				restoreIO := func() {
+					os.Stdout = origStdout
+					os.Stderr = origStderr
+					log.SetOutput(origLogOutput)
+					if devNull != nil {
+						_ = devNull.Close()
+					}
+				}
 
-			// Wait for server to be ready by polling management API with exponential backoff
-			{
+				localMgmtPassword := fmt.Sprintf("tui-%d-%d", os.Getpid(), time.Now().UnixNano())
+				if password == "" {
+					password = localMgmtPassword
+				}
+
+				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+
 				client := tui.NewClient(cfg.Port, password)
+				ready := false
 				backoff := 100 * time.Millisecond
-				// Try for up to ~10-15 seconds
 				for i := 0; i < 30; i++ {
-					if _, err := client.GetConfig(); err == nil {
+					if _, errGetConfig := client.GetConfig(); errGetConfig == nil {
+						ready = true
 						break
 					}
 					time.Sleep(backoff)
-					if backoff < 1*time.Second {
+					if backoff < time.Second {
 						backoff = time.Duration(float64(backoff) * 1.5)
 					}
 				}
-			}
 
-			// Run TUI (blocking) — use the local password for API auth
-			if err := tui.Run(cfg.Port, password, hook, origStdout); err != nil {
-				// Restore stdout/stderr before printing error
-				os.Stdout = origStdout
-				os.Stderr = origStderr
-				fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
-			}
+				if !ready {
+					restoreIO()
+					cancel()
+					<-done
+					fmt.Fprintf(os.Stderr, "TUI error: embedded server is not ready\n")
+					return
+				}
 
-			// Restore stdout/stderr for shutdown messages
-			os.Stdout = origStdout
-			os.Stderr = origStderr
-			if devNull != nil {
-				_ = devNull.Close()
-			}
+				if errRun := tui.Run(cfg.Port, password, hook, origStdout); errRun != nil {
+					restoreIO()
+					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+				} else {
+					restoreIO()
+				}
 
-			// Shutdown server
-			cancel()
-			<-done
+				cancel()
+				<-done
+			} else {
+				// Default TUI mode: pure management client.
+				// The proxy server must already be running.
+				if errRun := tui.Run(cfg.Port, password, nil, os.Stdout); errRun != nil {
+					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+				}
+			}
 		} else {
+			// Start the main proxy service
+			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}

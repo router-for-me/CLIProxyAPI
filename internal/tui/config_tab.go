@@ -41,7 +41,9 @@ type configDataMsg struct {
 }
 
 type configUpdateMsg struct {
-	err error
+	path  string
+	value any
+	err   error
 }
 
 func newConfigTabModel(client *Client) configTabModel {
@@ -132,7 +134,7 @@ func (m configTabModel) handleNormalKey(msg tea.KeyMsg) (configTabModel, tea.Cmd
 			}
 			// Start editing for int/string
 			m.editing = true
-			m.textInput.SetValue(f.value)
+			m.textInput.SetValue(configFieldEditValue(f))
 			m.textInput.Focus()
 			m.viewport.SetContent(m.renderContent())
 			return m, textinput.Blink
@@ -168,8 +170,13 @@ func (m configTabModel) toggleBool(idx int) tea.Cmd {
 	return func() tea.Msg {
 		f := m.fields[idx]
 		current := f.value == "true"
-		err := m.client.PutBoolField(f.apiPath, !current)
-		return configUpdateMsg{err: err}
+		newValue := !current
+		errPutBool := m.client.PutBoolField(f.apiPath, newValue)
+		return configUpdateMsg{
+			path:  f.apiPath,
+			value: newValue,
+			err:   errPutBool,
+		}
 	}
 }
 
@@ -177,18 +184,35 @@ func (m configTabModel) submitEdit(idx int, newValue string) tea.Cmd {
 	return func() tea.Msg {
 		f := m.fields[idx]
 		var err error
+		var value any
 		switch f.kind {
 		case "int":
-			v, parseErr := strconv.Atoi(newValue)
-			if parseErr != nil {
-				return configUpdateMsg{err: fmt.Errorf("%s: %s", T("invalid_int"), newValue)}
+			valueInt, errAtoi := strconv.Atoi(newValue)
+			if errAtoi != nil {
+				return configUpdateMsg{
+					path: f.apiPath,
+					err:  fmt.Errorf("%s: %s", T("invalid_int"), newValue),
+				}
 			}
-			err = m.client.PutIntField(f.apiPath, v)
+			value = valueInt
+			err = m.client.PutIntField(f.apiPath, valueInt)
 		case "string":
+			value = newValue
 			err = m.client.PutStringField(f.apiPath, newValue)
 		}
-		return configUpdateMsg{err: err}
+		return configUpdateMsg{
+			path:  f.apiPath,
+			value: value,
+			err:   err,
+		}
 	}
+}
+
+func configFieldEditValue(f configField) string {
+	if rawString, ok := f.rawValue.(string); ok {
+		return rawString
+	}
+	return f.value
 }
 
 func (m *configTabModel) SetSize(w, h int) {
@@ -334,8 +358,10 @@ func (m configTabModel) parseConfig(cfg map[string]any) []configField {
 
 	// AMP settings
 	if amp, ok := cfg["ampcode"].(map[string]any); ok {
-		fields = append(fields, configField{"AMP Upstream URL", "ampcode/upstream-url", "string", getString(amp, "upstream-url"), nil})
-		fields = append(fields, configField{"AMP Upstream API Key", "ampcode/upstream-api-key", "string", maskIfNotEmpty(getString(amp, "upstream-api-key")), nil})
+		upstreamURL := getString(amp, "upstream-url")
+		upstreamAPIKey := getString(amp, "upstream-api-key")
+		fields = append(fields, configField{"AMP Upstream URL", "ampcode/upstream-url", "string", upstreamURL, upstreamURL})
+		fields = append(fields, configField{"AMP Upstream API Key", "ampcode/upstream-api-key", "string", maskIfNotEmpty(upstreamAPIKey), upstreamAPIKey})
 		fields = append(fields, configField{"AMP Restrict Mgmt Localhost", "ampcode/restrict-management-to-localhost", "bool", fmt.Sprintf("%v", getBool(amp, "restrict-management-to-localhost")), nil})
 	}
 

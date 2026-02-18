@@ -83,9 +83,16 @@ var zhStrings = map[string]string{
 	"error_prefix": "⚠ 错误: ",
 
 	// ── Status bar ──
-	"status_left":      " CLIProxyAPI 管理终端",
-	"status_right":     "Tab/Shift+Tab: 切换 • L: 语言 • q/Ctrl+C: 退出 ",
-	"initializing_tui": "正在初始化...",
+	"status_left":                 " CLIProxyAPI 管理终端",
+	"status_right":                "Tab/Shift+Tab: 切换 • L: 语言 • q/Ctrl+C: 退出 ",
+	"initializing_tui":            "正在初始化...",
+	"auth_gate_title":             "🔐 连接管理 API",
+	"auth_gate_help":              " 请输入管理密码并按 Enter 连接",
+	"auth_gate_password":          "密码",
+	"auth_gate_enter":             " Enter: 连接 • q/Ctrl+C: 退出 • L: 语言",
+	"auth_gate_connecting":        "正在连接...",
+	"auth_gate_connect_fail":      "连接失败：%s",
+	"auth_gate_password_required": "请输入密码",
 
 	// ── Dashboard ──
 	"dashboard_title":  "📊 仪表盘",
@@ -227,9 +234,16 @@ var enStrings = map[string]string{
 	"error_prefix": "⚠ Error: ",
 
 	// ── Status bar ──
-	"status_left":      " CLIProxyAPI Management TUI",
-	"status_right":     "Tab/Shift+Tab: switch • L: lang • q/Ctrl+C: quit ",
-	"initializing_tui": "Initializing...",
+	"status_left":                 " CLIProxyAPI Management TUI",
+	"status_right":                "Tab/Shift+Tab: switch • L: lang • q/Ctrl+C: quit ",
+	"initializing_tui":            "Initializing...",
+	"auth_gate_title":             "🔐 Connect Management API",
+	"auth_gate_help":              " Enter management password and press Enter to connect",
+	"auth_gate_password":          "Password",
+	"auth_gate_enter":             " Enter: connect • q/Ctrl+C: quit • L: lang",
+	"auth_gate_connecting":        "Connecting...",
+	"auth_gate_connect_fail":      "Connection failed: %s",
+	"auth_gate_password_required": "password is required",
 
 	// ── Dashboard ──
 	"dashboard_title":  "📊 Dashboard",
