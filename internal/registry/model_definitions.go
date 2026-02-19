@@ -378,6 +378,17 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			MaxCompletionTokens: 65536,
 		},
 		{
+			ID:                  "gemini-3.1-pro-preview",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "github-copilot",
+			Type:                "github-copilot",
+			DisplayName:         "Gemini 3.1 Pro (Preview)",
+			Description:         "Google Gemini 3.1 Pro Preview via GitHub Copilot",
+			ContextLength:       1048576,
+			MaxCompletionTokens: 65536,
+		},
+		{
 			ID:                  "gemini-3-flash-preview",
 			Object:              "model",
 			Created:             now,
