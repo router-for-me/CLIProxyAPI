@@ -753,18 +753,22 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
 	normalized := normalizedMap[channel]
 	if len(normalized) == 0 {
+		// Only delete if channel exists, otherwise just create empty entry
+		if h.cfg.OAuthModelAlias != nil {
+			if _, ok := h.cfg.OAuthModelAlias[channel]; ok {
+				delete(h.cfg.OAuthModelAlias, channel)
+				if len(h.cfg.OAuthModelAlias) == 0 {
+					h.cfg.OAuthModelAlias = nil
+				}
+				h.persist(c)
+				return
+			}
+		}
+		// Create new channel with empty aliases
 		if h.cfg.OAuthModelAlias == nil {
-			c.JSON(404, gin.H{"error": "channel not found"})
-			return
+			h.cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
 		}
-		if _, ok := h.cfg.OAuthModelAlias[channel]; !ok {
-			c.JSON(404, gin.H{"error": "channel not found"})
-			return
-		}
-		delete(h.cfg.OAuthModelAlias, channel)
-		if len(h.cfg.OAuthModelAlias) == 0 {
-			h.cfg.OAuthModelAlias = nil
-		}
+		h.cfg.OAuthModelAlias[channel] = []config.OAuthModelAlias{}
 		h.persist(c)
 		return
 	}
@@ -792,10 +796,10 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
 	}
-	delete(h.cfg.OAuthModelAlias, channel)
-	if len(h.cfg.OAuthModelAlias) == 0 {
-		h.cfg.OAuthModelAlias = nil
-	}
+	// Set to nil instead of deleting the key so that the "explicitly disabled"
+	// marker survives config reload and prevents SanitizeOAuthModelAlias from
+	// re-injecting default aliases (fixes #222).
+	h.cfg.OAuthModelAlias[channel] = nil
 	h.persist(c)
 }
 
