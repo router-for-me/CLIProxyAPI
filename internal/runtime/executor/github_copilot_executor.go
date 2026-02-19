@@ -35,12 +35,12 @@ const (
 	maxScannerBufferSize = 20_971_520
 
 	// Copilot API header values.
-	copilotUserAgent      = "GitHubCopilotChat/0.35.0"
-	copilotEditorVersion  = "vscode/1.107.0"
-	copilotPluginVersion  = "copilot-chat/0.35.0"
-	copilotIntegrationID  = "vscode-chat"
-	copilotOpenAIIntent   = "conversation-panel"
-	copilotGitHubAPIVer   = "2025-04-01"
+	copilotUserAgent     = "GitHubCopilotChat/0.35.0"
+	copilotEditorVersion = "vscode/1.107.0"
+	copilotPluginVersion = "copilot-chat/0.35.0"
+	copilotIntegrationID = "vscode-chat"
+	copilotOpenAIIntent  = "conversation-panel"
+	copilotGitHubAPIVer  = "2025-04-01"
 )
 
 // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
@@ -232,7 +232,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 }
 
 // ExecuteStream handles streaming requests to GitHub Copilot.
-func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	apiToken, baseURL, errToken := e.ensureAPIToken(ctx, auth)
 	if errToken != nil {
 		return nil, errToken
@@ -341,7 +341,6 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
-	stream = out
 
 	go func() {
 		defer close(out)
@@ -394,7 +393,10 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		}
 	}()
 
-	return stream, nil
+	return &cliproxyexecutor.StreamResult{
+		Headers: httpResp.Header.Clone(),
+		Chunks:  out,
+	}, nil
 }
 
 // CountTokens is not supported for GitHub Copilot.
