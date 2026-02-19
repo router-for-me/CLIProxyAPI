@@ -1218,30 +1218,45 @@ func normalizeModelPrefix(prefix string) string {
 	return trimmed
 }
 
-// InjectPremadeFromEnv injects premade providers (zen, nim) if their environment variables are set.
-// This implements Recommendation: Option B from LLM_PROXY_RESEARCH_AUDIT_PLAN.md.
-func (cfg *Config) InjectPremadeFromEnv() {
-	// Zen
-	cfg.injectPremade("zen", "https://opencode.ai/zen/v1",
-		[]string{"ZEN_API_KEY", "OPENCODE_API_KEY", "THGENT_ZEN_API_KEY"},
-		[]OpenAICompatibilityModel{
+// PremadeOAICompatSpec defines a premade OpenAI-compatible provider.
+type PremadeOAICompatSpec struct {
+	BaseURL       string
+	EnvVars       []string
+	DefaultModels []OpenAICompatibilityModel
+}
+
+// PremadeOAICompatRegistry maps provider names to their premade specifications.
+var PremadeOAICompatRegistry = map[string]PremadeOAICompatSpec{
+	"zen": {
+		BaseURL: "https://opencode.ai/zen/v1",
+		EnvVars: []string{"ZEN_API_KEY", "OPENCODE_API_KEY", "THGENT_ZEN_API_KEY"},
+		DefaultModels: []OpenAICompatibilityModel{
 			{Name: "glm-5", Alias: "glm-5"},
 			{Name: "glm-5", Alias: "z-ai/glm-5"},
 			{Name: "glm-5", Alias: "gpt-5-mini"},
 			{Name: "glm-5", Alias: "gemini-3-flash"},
-		})
-
-	// NVIDIA NIM
-	cfg.injectPremade("nim", "https://integrate.api.nvidia.com/v1",
-		[]string{"NIM_API_KEY", "THGENT_NIM_API_KEY", "NVIDIA_API_KEY"},
-		[]OpenAICompatibilityModel{
+		},
+	},
+	"nim": {
+		BaseURL: "https://integrate.api.nvidia.com/v1",
+		EnvVars: []string{"NIM_API_KEY", "THGENT_NIM_API_KEY", "NVIDIA_API_KEY"},
+		DefaultModels: []OpenAICompatibilityModel{
 			{Name: "z-ai/glm-5", Alias: "z-ai/glm-5"},
 			{Name: "z-ai/glm-5", Alias: "glm-5"},
 			{Name: "z-ai/glm-5", Alias: "step-3.5-flash"},
-		})
+		},
+	},
 }
 
-func (cfg *Config) injectPremade(name, baseURL string, envVars []string, models []OpenAICompatibilityModel) {
+// InjectPremadeFromEnv injects premade providers (zen, nim) if their environment variables are set.
+// This implements Recommendation: Option B from LLM_PROXY_RESEARCH_AUDIT_PLAN.md.
+func (cfg *Config) InjectPremadeFromEnv() {
+	for name, spec := range PremadeOAICompatRegistry {
+		cfg.injectPremadeFromSpec(name, spec)
+	}
+}
+
+func (cfg *Config) injectPremadeFromSpec(name string, spec PremadeOAICompatSpec) {
 	// Check if already in config
 	for _, compat := range cfg.OpenAICompatibility {
 		if strings.ToLower(compat.Name) == name {
@@ -1251,7 +1266,7 @@ func (cfg *Config) injectPremade(name, baseURL string, envVars []string, models 
 
 	// Check env vars
 	var apiKey string
-	for _, ev := range envVars {
+	for _, ev := range spec.EnvVars {
 		if val := os.Getenv(ev); val != "" {
 			apiKey = val
 			break
@@ -1264,11 +1279,11 @@ func (cfg *Config) injectPremade(name, baseURL string, envVars []string, models 
 	// Inject virtual entry
 	entry := OpenAICompatibility{
 		Name:    name,
-		BaseURL: baseURL,
+		BaseURL: spec.BaseURL,
 		APIKeyEntries: []OpenAICompatibilityAPIKey{
 			{APIKey: apiKey},
 		},
-		Models: models,
+		Models: spec.DefaultModels,
 	}
 	cfg.OpenAICompatibility = append(cfg.OpenAICompatibility, entry)
 }
