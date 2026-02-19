@@ -179,6 +179,12 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	return retries
 }
 
+// PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
+// Default is false.
+func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
+	return cfg != nil && cfg.PassthroughHeaders
+}
+
 func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// It is forwarded as execution metadata; when absent we generate a UUID.
@@ -499,6 +505,9 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		}
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
+	if !PassthroughHeadersEnabled(h.Cfg) {
+		return resp.Payload, nil, nil
+	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
 }
 
@@ -541,6 +550,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 			}
 		}
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+	}
+	if !PassthroughHeadersEnabled(h.Cfg) {
+		return resp.Payload, nil, nil
 	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
 }
@@ -592,11 +604,15 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, nil, errChan
 	}
+	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
 	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
-	upstreamHeaders := cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
-	if upstreamHeaders == nil {
-		upstreamHeaders = make(http.Header)
+	var upstreamHeaders http.Header
+	if passthroughHeadersEnabled {
+		upstreamHeaders = cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
+		if upstreamHeaders == nil {
+			upstreamHeaders = make(http.Header)
+		}
 	}
 	chunks := streamResult.Chunks
 	dataChan := make(chan []byte)
@@ -674,7 +690,9 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							bootstrapRetries++
 							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 							if retryErr == nil {
-								replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+								if passthroughHeadersEnabled {
+									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+								}
 								chunks = retryResult.Chunks
 								continue outer
 							}

@@ -237,6 +237,7 @@ func TestExecuteStreamWithAuthManager_RetriesBeforeFirstByte(t *testing.T) {
 	})
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		PassthroughHeaders: true,
 		Streaming: sdkconfig.StreamingConfig{
 			BootstrapRetries: 1,
 		},
@@ -266,6 +267,66 @@ func TestExecuteStreamWithAuthManager_RetriesBeforeFirstByte(t *testing.T) {
 	upstreamAttemptHeader := upstreamHeaders.Get("X-Upstream-Attempt")
 	if upstreamAttemptHeader != "2" {
 		t.Fatalf("expected upstream header from retry attempt, got %q", upstreamAttemptHeader)
+	}
+}
+
+func TestExecuteStreamWithAuthManager_HeaderPassthroughDisabledByDefault(t *testing.T) {
+	executor := &failOnceStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth1 := &coreauth.Auth{
+		ID:       "auth1",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test1@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("manager.Register(auth1): %v", err)
+	}
+
+	auth2 := &coreauth.Auth{
+		ID:       "auth2",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test2@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth2); err != nil {
+		t.Fatalf("manager.Register(auth2): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	registry.GetGlobalRegistry().RegisterClient(auth2.ID, auth2.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+		registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			BootstrapRetries: 1,
+		},
+	}, manager)
+	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected error: %+v", msg)
+		}
+	}
+
+	if string(got) != "ok" {
+		t.Fatalf("expected payload ok, got %q", string(got))
+	}
+	if upstreamHeaders != nil {
+		t.Fatalf("expected nil upstream headers when passthrough is disabled, got %#v", upstreamHeaders)
 	}
 }
 
