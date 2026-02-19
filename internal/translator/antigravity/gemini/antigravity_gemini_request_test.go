@@ -7,6 +7,62 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertGeminiRequestToAntigravity_ToolParametersKeyPreserved(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-pro-preview",
+		"tools": [
+			{
+				"function_declarations": [
+					{
+						"name": "test_tool",
+						"description": "test",
+						"parameters": {"type":"OBJECT","properties":{"a":{"type":"STRING"}}}
+					}
+				]
+			}
+		],
+		"contents": [{"role":"user","parts":[{"text":"hi"}]}]
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
+	outStr := string(output)
+
+	if !gjson.Get(outStr, "request.tools.0.function_declarations.0.parameters").Exists() {
+		t.Fatalf("expected request.tools[0].function_declarations[0].parameters to exist")
+	}
+	if gjson.Get(outStr, "request.tools.0.function_declarations.0.parametersJsonSchema").Exists() {
+		t.Fatalf("expected request.tools[0].function_declarations[0].parametersJsonSchema to NOT exist")
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_ToolParametersJsonSchemaNormalized(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-pro-preview",
+		"tools": [
+			{
+				"function_declarations": [
+					{
+						"name": "test_tool",
+						"description": "test",
+						"parametersJsonSchema": {"type":"OBJECT","properties":{"a":{"type":"STRING"}}}
+					}
+				]
+			}
+		],
+		"contents": [{"role":"user","parts":[{"text":"hi"}]}]
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
+	outStr := string(output)
+
+	if !gjson.Get(outStr, "request.tools.0.function_declarations.0.parameters").Exists() {
+		t.Fatalf("expected request.tools[0].function_declarations[0].parameters to exist")
+	}
+	if gjson.Get(outStr, "request.tools.0.function_declarations.0.parametersJsonSchema").Exists() {
+		t.Fatalf("expected request.tools[0].function_declarations[0].parametersJsonSchema to NOT exist")
+	}
+}
+
 func TestConvertGeminiRequestToAntigravity_PreserveValidSignature(t *testing.T) {
 	// Valid signature on functionCall should be preserved
 	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
