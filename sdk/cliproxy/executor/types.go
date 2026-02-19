@@ -57,6 +57,8 @@ type Response struct {
 	Payload []byte
 	// Metadata exposes optional structured data for translators.
 	Metadata map[string]any
+	// Headers carries upstream HTTP response headers for passthrough to clients.
+	Headers http.Header
 }
 
 // StreamChunk represents a single streaming payload unit emitted by provider executors.
@@ -65,6 +67,15 @@ type StreamChunk struct {
 	Payload []byte
 	// Err reports any terminal error encountered while producing chunks.
 	Err error
+}
+
+// StreamResult wraps the streaming response, providing both the chunk channel
+// and the upstream HTTP response headers captured before streaming begins.
+type StreamResult struct {
+	// Headers carries upstream HTTP response headers from the initial connection.
+	Headers http.Header
+	// Chunks is the channel of streaming payload units.
+	Chunks <-chan StreamChunk
 }
 
 // StatusError represents an error that carries an HTTP-like status code.

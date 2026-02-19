@@ -24,10 +24,10 @@ func (e *replaceAwareExecutor) Execute(context.Context, *Auth, cliproxyexecutor.
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (e *replaceAwareExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *replaceAwareExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	ch := make(chan cliproxyexecutor.StreamChunk)
 	close(ch)
-	return ch, nil
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
 }
 
 func (e *replaceAwareExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
@@ -89,7 +89,11 @@ func TestManagerExecutorReturnsRegisteredExecutor(t *testing.T) {
 	if !okResolved {
 		t.Fatal("expected registered executor to be found")
 	}
-	if resolved != current {
+	resolvedExecutor, okResolvedExecutor := resolved.(*replaceAwareExecutor)
+	if !okResolvedExecutor {
+		t.Fatalf("expected resolved executor type %T, got %T", current, resolved)
+	}
+	if resolvedExecutor != current {
 		t.Fatal("expected resolved executor to match registered executor")
 	}
 
