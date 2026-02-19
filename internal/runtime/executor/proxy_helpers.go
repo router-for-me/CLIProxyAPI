@@ -124,7 +124,8 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 	var transport *http.Transport
 
 	// Handle different proxy schemes
-	if parsedURL.Scheme == "socks5" {
+	switch parsedURL.Scheme {
+	case "socks5":
 		// Configure SOCKS5 proxy with optional authentication
 		var proxyAuth *proxy.Auth
 		if parsedURL.User != nil {
@@ -143,10 +144,10 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 				return dialer.Dial(network, addr)
 			},
 		}
-	} else if parsedURL.Scheme == "http" || parsedURL.Scheme == "https" {
+	case "http", "https":
 		// Configure HTTP or HTTPS proxy
 		transport = &http.Transport{Proxy: http.ProxyURL(parsedURL)}
-	} else {
+	default:
 		log.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
 		return nil
 	}

@@ -224,7 +224,7 @@ func (h *ProtocolHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if errParam != "" {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, `<!DOCTYPE html>
+		_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
 <head><title>Login Failed</title></head>
 <body>
@@ -234,7 +234,7 @@ func (h *ProtocolHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 </body>
 </html>`, html.EscapeString(errParam))
 	} else {
-		fmt.Fprint(w, `<!DOCTYPE html>
+		_, _ = fmt.Fprint(w, `<!DOCTYPE html>
 <html>
 <head><title>Login Successful</title></head>
 <body>

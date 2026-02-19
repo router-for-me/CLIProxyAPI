@@ -9,10 +9,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -281,21 +284,55 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	})
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+	const maxRetries = 5
+	retryableStatus := map[int]bool{429: true, 502: true, 503: true, 504: true}
+	var httpResp *http.Response
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		reqForAttempt, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if errReq != nil {
+			return nil, errReq
+		}
+		reqForAttempt.Header = httpReq.Header.Clone()
+		httpResp, err = httpClient.Do(reqForAttempt)
+		if err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
+			if attempt < maxRetries {
+				backoff := time.Duration(1+attempt*2) * time.Second
+				if jitter := time.Duration(rand.Intn(500)) * time.Millisecond; jitter > 0 {
+					backoff += jitter
+				}
+				log.Warnf("gemini executor: attempt %d/%d failed (connection error), retrying in %v: %v", attempt+1, maxRetries+1, backoff, err)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(backoff):
+				}
+				continue
+			}
+			return nil, err
+		}
+		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			break
+		}
 		b, _ := io.ReadAll(httpResp.Body)
+		_ = httpResp.Body.Close()
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("gemini executor: close response body error: %v", errClose)
+		if !retryableStatus[httpResp.StatusCode] || attempt >= maxRetries {
+			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+			return nil, err
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return nil, err
+		backoff := time.Duration(1+attempt*2) * time.Second
+		if jitter := time.Duration(rand.Intn(500)) * time.Millisecond; jitter > 0 {
+			backoff += jitter
+		}
+		log.Warnf("gemini executor: attempt %d/%d got %d (high demand/transient), retrying in %v", attempt+1, maxRetries+1, httpResp.StatusCode, backoff)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	stream = out
@@ -354,7 +391,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
@@ -458,45 +495,6 @@ func resolveGeminiBaseURL(auth *cliproxyauth.Auth) string {
 		return glEndpoint
 	}
 	return base
-}
-
-func (e *GeminiExecutor) resolveGeminiConfig(auth *cliproxyauth.Auth) *config.GeminiKey {
-	if auth == nil || e.cfg == nil {
-		return nil
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range e.cfg.GeminiKey {
-		entry := &e.cfg.GeminiKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && attrBase != "" {
-			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	if attrKey != "" {
-		for i := range e.cfg.GeminiKey {
-			entry := &e.cfg.GeminiKey[i]
-			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
-				return entry
-			}
-		}
-	}
-	return nil
 }
 
 func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth) {

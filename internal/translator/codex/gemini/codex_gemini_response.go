@@ -108,24 +108,25 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		}
 	}
 
-	if typeStr == "response.created" { // Handle response creation - set model and response ID
+	switch typeStr {
+	case "response.created": // Handle response creation - set model and response ID
 		template, _ = sjson.Set(template, "modelVersion", rootResult.Get("response.model").String())
 		template, _ = sjson.Set(template, "responseId", rootResult.Get("response.id").String())
 		(*param).(*ConvertCodexResponseToGeminiParams).ResponseID = rootResult.Get("response.id").String()
-	} else if typeStr == "response.reasoning_summary_text.delta" { // Handle reasoning/thinking content delta
+	case "response.reasoning_summary_text.delta": // Handle reasoning/thinking content delta
 		part := `{"thought":true,"text":""}`
 		part, _ = sjson.Set(part, "text", rootResult.Get("delta").String())
 		template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
-	} else if typeStr == "response.output_text.delta" { // Handle regular text content delta
+	case "response.output_text.delta": // Handle regular text content delta
 		part := `{"text":""}`
 		part, _ = sjson.Set(part, "text", rootResult.Get("delta").String())
 		template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
-	} else if typeStr == "response.completed" { // Handle response completion with usage metadata
+	case "response.completed": // Handle response completion with usage metadata
 		template, _ = sjson.Set(template, "usageMetadata.promptTokenCount", rootResult.Get("response.usage.input_tokens").Int())
 		template, _ = sjson.Set(template, "usageMetadata.candidatesTokenCount", rootResult.Get("response.usage.output_tokens").Int())
 		totalTokens := rootResult.Get("response.usage.input_tokens").Int() + rootResult.Get("response.usage.output_tokens").Int()
 		template, _ = sjson.Set(template, "usageMetadata.totalTokenCount", totalTokens)
-	} else {
+	default:
 		return []string{}
 	}
 

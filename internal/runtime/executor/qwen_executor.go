@@ -317,7 +317,7 @@ func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		return auth, nil
 	}
 
-	svc := qwenauth.NewQwenAuth(e.cfg)
+	svc := qwenauth.NewQwenAuth(e.cfg, nil)
 	td, err := svc.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		return nil, err

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -150,7 +152,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
 
 	var authID, authLabel, authType, authValue string
 	authID = auth.ID
@@ -298,7 +300,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	}
 
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
 
 	var authID, authLabel, authType, authValue string
 	authID = auth.ID
@@ -377,9 +379,53 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				}
 				continue
 			}
+			// Retry 502/503/504 (high demand, transient) on same model with backoff
+			if (httpResp.StatusCode == 502 || httpResp.StatusCode == 503 || httpResp.StatusCode == 504) && idx == 0 {
+				const maxRetries = 5
+				for attempt := 0; attempt < maxRetries; attempt++ {
+					backoff := time.Duration(1+attempt*2) * time.Second
+					if jitter := time.Duration(rand.Intn(500)) * time.Millisecond; jitter > 0 {
+						backoff += jitter
+					}
+					log.Warnf("gemini cli executor: attempt %d/%d got %d (high demand/transient), retrying in %v", attempt+1, maxRetries, httpResp.StatusCode, backoff)
+					select {
+					case <-ctx.Done():
+						err = ctx.Err()
+						return nil, err
+					case <-time.After(backoff):
+					}
+					reqHTTP, _ = http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+					reqHTTP.Header.Set("Content-Type", "application/json")
+					reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+					applyGeminiCLIHeaders(reqHTTP)
+					reqHTTP.Header.Set("Accept", "text/event-stream")
+					httpResp, errDo = httpClient.Do(reqHTTP)
+					if errDo != nil {
+						recordAPIResponseError(ctx, e.cfg, errDo)
+						err = errDo
+						return nil, err
+					}
+					recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+					if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+						goto streamBlock
+					}
+					data, _ = io.ReadAll(httpResp.Body)
+					_ = httpResp.Body.Close()
+					lastStatus = httpResp.StatusCode
+					lastBody = append([]byte(nil), data...)
+					if httpResp.StatusCode != 502 && httpResp.StatusCode != 503 && httpResp.StatusCode != 504 {
+						err = newGeminiStatusErr(httpResp.StatusCode, data)
+						return nil, err
+					}
+				}
+				err = newGeminiStatusErr(lastStatus, lastBody)
+				return nil, err
+			}
 			err = newGeminiStatusErr(httpResp.StatusCode, data)
 			return nil, err
 		}
+
+	streamBlock:
 
 		out := make(chan cliproxyexecutor.StreamChunk)
 		stream = out
@@ -472,7 +518,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	}
 
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {

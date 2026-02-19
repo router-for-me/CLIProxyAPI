@@ -6,7 +6,7 @@
 package geminiCLI
 
 import (
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/gemini"
+	openaigemini "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/gemini"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -23,5 +23,5 @@ func ConvertGeminiCLIRequestToOpenAI(modelName string, inputRawJSON []byte, stre
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "systemInstruction")
 	}
 
-	return ConvertGeminiRequestToOpenAI(modelName, rawJSON, stream)
+	return openaigemini.ConvertGeminiRequestToOpenAI(modelName, rawJSON, stream)
 }

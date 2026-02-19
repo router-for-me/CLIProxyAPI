@@ -59,11 +59,12 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 		valid := role == "user" || role == "model"
 		if role == "" || !valid {
 			var newRole string
-			if prevRole == "" {
+			switch prevRole {
+			case "":
 				newRole = "user"
-			} else if prevRole == "user" {
+			case "user":
 				newRole = "model"
-			} else {
+			default:
 				newRole = "user"
 			}
 			path := fmt.Sprintf("contents.%d.role", idx)

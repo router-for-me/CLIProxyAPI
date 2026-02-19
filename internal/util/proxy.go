@@ -23,7 +23,8 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 	proxyURL, errParse := url.Parse(cfg.ProxyURL)
 	if errParse == nil {
 		// Handle different proxy schemes.
-		if proxyURL.Scheme == "socks5" {
+		switch proxyURL.Scheme {
+		case "socks5":
 			// Configure SOCKS5 proxy with optional authentication.
 			var proxyAuth *proxy.Auth
 			if proxyURL.User != nil {
@@ -42,7 +43,7 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 					return dialer.Dial(network, addr)
 				},
 			}
-		} else if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
+		case "http", "https":
 			// Configure HTTP or HTTPS proxy.
 			transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
 		}

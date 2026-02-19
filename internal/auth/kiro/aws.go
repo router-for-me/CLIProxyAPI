@@ -487,36 +487,30 @@ func ExtractIDCIdentifier(startURL string) string {
 }
 
 // GenerateTokenFileName generates a unique filename for token storage.
-// Priority: email > startUrl identifier (for IDC) > authMethod only
-// Email is unique, so no sequence suffix needed. Sequence is only added
-// when email is unavailable to prevent filename collisions.
-// Format: kiro-{authMethod}-{identifier}[-{seq}].json
+// Priority: email > startUrl identifier (IDC or builder-id) > authMethod only
+// Format: kiro-{authMethod}-{identifier}.json or kiro-{authMethod}.json
 func GenerateTokenFileName(tokenData *KiroTokenData) string {
 	authMethod := tokenData.AuthMethod
 	if authMethod == "" {
 		authMethod = "unknown"
 	}
 
-	// Priority 1: Use email if available (no sequence needed, email is unique)
+	// Priority 1: Use email if available (email is unique)
 	if tokenData.Email != "" {
-		// Sanitize email for filename (replace @ and . with -)
 		sanitizedEmail := tokenData.Email
 		sanitizedEmail = strings.ReplaceAll(sanitizedEmail, "@", "-")
 		sanitizedEmail = strings.ReplaceAll(sanitizedEmail, ".", "-")
 		return fmt.Sprintf("kiro-%s-%s.json", authMethod, sanitizedEmail)
 	}
 
-	// Generate sequence only when email is unavailable
-	seq := time.Now().UnixNano() % 100000
-
-	// Priority 2: For IDC, use startUrl identifier with sequence
+	// Priority 2: For IDC only, use startUrl identifier when available
 	if authMethod == "idc" && tokenData.StartURL != "" {
 		identifier := ExtractIDCIdentifier(tokenData.StartURL)
 		if identifier != "" {
-			return fmt.Sprintf("kiro-%s-%s-%05d.json", authMethod, identifier, seq)
+			return fmt.Sprintf("kiro-%s-%s.json", authMethod, identifier)
 		}
 	}
 
-	// Priority 3: Fallback to authMethod only with sequence
-	return fmt.Sprintf("kiro-%s-%05d.json", authMethod, seq)
+	// Priority 3: Fallback to authMethod only
+	return fmt.Sprintf("kiro-%s.json", authMethod)
 }

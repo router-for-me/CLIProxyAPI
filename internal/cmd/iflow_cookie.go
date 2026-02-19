@@ -50,7 +50,7 @@ func DoIFlowCookieAuth(cfg *config.Config, options *LoginOptions) {
 	}
 
 	// Authenticate with cookie
-	auth := iflow.NewIFlowAuth(cfg)
+	auth := iflow.NewIFlowAuth(cfg, nil)
 	ctx := context.Background()
 
 	tokenData, err := auth.AuthenticateWithCookie(ctx, cookie)

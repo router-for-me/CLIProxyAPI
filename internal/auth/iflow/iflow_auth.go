@@ -59,7 +59,13 @@ type IFlowAuth struct {
 }
 
 // NewIFlowAuth constructs a new IFlowAuth with proxy-aware transport.
-func NewIFlowAuth(cfg *config.Config) *IFlowAuth {
+func NewIFlowAuth(cfg *config.Config, httpClient *http.Client) *IFlowAuth {
+	if httpClient != nil {
+		return &IFlowAuth{httpClient: httpClient}
+	}
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	return &IFlowAuth{httpClient: util.SetProxy(&cfg.SDKConfig, client)}
 }

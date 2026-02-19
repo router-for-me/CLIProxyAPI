@@ -21,8 +21,11 @@ import (
 //   - iflow
 //   - kiro
 //   - github-copilot
-//   - kiro
 //   - amazonq
+//   - cursor (via cursor-api; use dedicated cursor: block)
+//   - minimax (use dedicated minimax: block; api.minimax.io)
+//   - roo (use dedicated roo: block; api.roocode.com)
+//   - kilo (use dedicated kilo: block; api.kilo.ai)
 //   - antigravity (returns static overrides only)
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
@@ -49,6 +52,30 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKiroModels()
 	case "amazonq":
 		return GetAmazonQModels()
+	case "cursor":
+		return GetCursorModels()
+	case "minimax":
+		return GetMiniMaxModels()
+	case "roo":
+		return GetRooModels()
+	case "kilo":
+		return GetKiloModels()
+	case "deepseek":
+		return GetDeepSeekModels()
+	case "groq":
+		return GetGroqModels()
+	case "mistral":
+		return GetMistralModels()
+	case "siliconflow":
+		return GetSiliconFlowModels()
+	case "openrouter":
+		return GetOpenRouterModels()
+	case "together":
+		return GetTogetherModels()
+	case "fireworks":
+		return GetFireworksModels()
+	case "novita":
+		return GetNovitaModels()
 	case "antigravity":
 		cfg := GetAntigravityModelConfig()
 		if len(cfg) == 0 {
@@ -96,6 +123,18 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetGitHubCopilotModels(),
 		GetKiroModels(),
 		GetAmazonQModels(),
+		GetCursorModels(),
+		GetMiniMaxModels(),
+		GetRooModels(),
+		GetKiloModels(),
+		GetDeepSeekModels(),
+		GetGroqModels(),
+		GetMistralModels(),
+		GetSiliconFlowModels(),
+		GetOpenRouterModels(),
+		GetTogetherModels(),
+		GetFireworksModels(),
+		GetNovitaModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {
@@ -651,6 +690,402 @@ func GetAmazonQModels() []*ModelInfo {
 			Description:         "Claude Haiku 4.5 via Amazon Q (0.4x credit)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+		},
+	}
+}
+
+// GetCursorModels returns model definitions for Cursor via cursor-api (wisdgod).
+// Use dedicated cursor: block in config (token-file, cursor-api-url).
+func GetCursorModels() []*ModelInfo {
+	now := int64(1732752000)
+	return []*ModelInfo{
+		{
+			ID:                  "claude-4.5-opus-high-thinking",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "cursor",
+			Type:                "cursor",
+			DisplayName:         "Claude 4.5 Opus High Thinking",
+			Description:         "Anthropic Claude 4.5 Opus via Cursor (cursor-api)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "claude-4.5-opus-high",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "cursor",
+			Type:                "cursor",
+			DisplayName:         "Claude 4.5 Opus High",
+			Description:         "Anthropic Claude 4.5 Opus via Cursor (cursor-api)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "claude-4.5-sonnet-thinking",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "cursor",
+			Type:                "cursor",
+			DisplayName:         "Claude 4.5 Sonnet Thinking",
+			Description:         "Anthropic Claude 4.5 Sonnet via Cursor (cursor-api)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "claude-4-sonnet",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "cursor",
+			Type:                "cursor",
+			DisplayName:         "Claude 4 Sonnet",
+			Description:         "Anthropic Claude 4 Sonnet via Cursor (cursor-api)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "gpt-4o",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "cursor",
+			Type:                "cursor",
+			DisplayName:         "GPT-4o",
+			Description:         "OpenAI GPT-4o via Cursor (cursor-api)",
+			ContextLength:       128000,
+			MaxCompletionTokens: 16384,
+		},
+		{
+			ID:                  "gpt-5.1-codex",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "cursor",
+			Type:                "cursor",
+			DisplayName:         "GPT-5.1 Codex",
+			Description:         "OpenAI GPT-5.1 Codex via Cursor (cursor-api)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+		},
+		{
+			ID:                  "default",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "cursor",
+			Type:                "cursor",
+			DisplayName:         "Default",
+			Description:         "Cursor server-selected default model",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+	}
+}
+
+// GetMiniMaxModels returns model definitions for MiniMax (api.minimax.chat).
+// Use dedicated minimax: block in config (OAuth token-file or api-key).
+func GetMiniMaxModels() []*ModelInfo {
+	now := int64(1758672000)
+	return []*ModelInfo{
+		{
+			ID:                  "minimax-m2",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "minimax",
+			Type:                "minimax",
+			DisplayName:         "MiniMax M2",
+			Description:         "MiniMax M2 via api.minimax.chat",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:                  "minimax-m2.1",
+			Object:              "model",
+			Created:             1766448000,
+			OwnedBy:             "minimax",
+			Type:                "minimax",
+			DisplayName:         "MiniMax M2.1",
+			Description:         "MiniMax M2.1 via api.minimax.chat",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:                  "minimax-m2.5",
+			Object:              "model",
+			Created:             1770825600,
+			OwnedBy:             "minimax",
+			Type:                "minimax",
+			DisplayName:         "MiniMax M2.5",
+			Description:         "MiniMax M2.5 via api.minimax.chat",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+	}
+}
+
+// GetRooModels returns model definitions for Roo Code (RooCodeInc).
+// Use dedicated roo: block in config (token-file or api-key).
+func GetRooModels() []*ModelInfo {
+	now := int64(1758672000)
+	return []*ModelInfo{
+		{
+			ID:                  "roo-default",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "roo",
+			Type:                "roo",
+			DisplayName:         "Roo Default",
+			Description:         "Roo Code default model via api.roocode.com",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+		},
+	}
+}
+
+// GetKiloModels returns model definitions for Kilo (Kilo-Org/kilocode).
+// Use dedicated kilo: block in config (token-file or api-key).
+func GetKiloModels() []*ModelInfo {
+	now := int64(1758672000)
+	return []*ModelInfo{
+		{
+			ID:                  "kilo-default",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "kilo",
+			Type:                "kilo",
+			DisplayName:         "Kilo Default",
+			Description:         "Kilo default model via api.kilo.ai",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+		},
+	}
+}
+
+// GetDeepSeekModels returns static model definitions for DeepSeek.
+func GetDeepSeekModels() []*ModelInfo {
+	now := int64(1738672000)
+	return []*ModelInfo{
+		{
+			ID:                  "deepseek-chat",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "deepseek",
+			Type:                "deepseek",
+			DisplayName:         "DeepSeek V3",
+			Description:         "DeepSeek-V3 chat model",
+			ContextLength:       64000,
+			MaxCompletionTokens: 8192,
+		},
+		{
+			ID:                  "deepseek-reasoner",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "deepseek",
+			Type:                "deepseek",
+			DisplayName:         "DeepSeek R1",
+			Description:         "DeepSeek-R1 reasoning model",
+			ContextLength:       64000,
+			MaxCompletionTokens: 8192,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+	}
+}
+
+// GetGroqModels returns static model definitions for Groq.
+func GetGroqModels() []*ModelInfo {
+	now := int64(1738672000)
+	return []*ModelInfo{
+		{
+			ID:                  "llama-3.3-70b-versatile",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "groq",
+			Type:                "groq",
+			DisplayName:         "Llama 3.3 70B (Groq)",
+			Description:         "Llama 3.3 70B via Groq LPU",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+		},
+		{
+			ID:                  "llama-3.1-8b-instant",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "groq",
+			Type:                "groq",
+			DisplayName:         "Llama 3.1 8B (Groq)",
+			Description:         "Llama 3.1 8B via Groq LPU",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+		},
+	}
+}
+
+// GetMistralModels returns static model definitions for Mistral AI.
+func GetMistralModels() []*ModelInfo {
+	now := int64(1738672000)
+	return []*ModelInfo{
+		{
+			ID:                  "mistral-large-latest",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "mistral",
+			Type:                "mistral",
+			DisplayName:         "Mistral Large",
+			Description:         "Mistral Large latest model",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+		},
+		{
+			ID:                  "codestral-latest",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "mistral",
+			Type:                "mistral",
+			DisplayName:         "Codestral",
+			Description:         "Mistral code-specialized model",
+			ContextLength:       32000,
+			MaxCompletionTokens: 32768,
+		},
+	}
+}
+
+// GetSiliconFlowModels returns static model definitions for SiliconFlow.
+func GetSiliconFlowModels() []*ModelInfo {
+	now := int64(1738672000)
+	return []*ModelInfo{
+		{
+			ID:                  "deepseek-ai/DeepSeek-V3",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "siliconflow",
+			Type:                "siliconflow",
+			DisplayName:         "DeepSeek V3 (SiliconFlow)",
+			Description:         "DeepSeek-V3 via SiliconFlow",
+			ContextLength:       64000,
+			MaxCompletionTokens: 8192,
+		},
+		{
+			ID:                  "deepseek-ai/DeepSeek-R1",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "siliconflow",
+			Type:                "siliconflow",
+			DisplayName:         "DeepSeek R1 (SiliconFlow)",
+			Description:         "DeepSeek-R1 via SiliconFlow",
+			ContextLength:       64000,
+			MaxCompletionTokens: 8192,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+	}
+}
+
+// GetOpenRouterModels returns static model definitions for OpenRouter.
+func GetOpenRouterModels() []*ModelInfo {
+	now := int64(1738672000)
+	return []*ModelInfo{
+		{
+			ID:                  "anthropic/claude-3.5-sonnet",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "openrouter",
+			Type:                "openrouter",
+			DisplayName:         "Claude 3.5 Sonnet (OpenRouter)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 8192,
+		},
+		{
+			ID:                  "google/gemini-2.0-flash-001",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "openrouter",
+			Type:                "openrouter",
+			DisplayName:         "Gemini 2.0 Flash (OpenRouter)",
+			ContextLength:       1000000,
+			MaxCompletionTokens: 8192,
+		},
+	}
+}
+
+// GetTogetherModels returns static model definitions for Together AI.
+func GetTogetherModels() []*ModelInfo {
+	now := int64(1738672000)
+	return []*ModelInfo{
+		{
+			ID:                  "deepseek-ai/DeepSeek-V3",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "together",
+			Type:                "together",
+			DisplayName:         "DeepSeek V3 (Together)",
+			ContextLength:       64000,
+			MaxCompletionTokens: 8192,
+		},
+		{
+			ID:                  "deepseek-ai/DeepSeek-R1",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "together",
+			Type:                "together",
+			DisplayName:         "DeepSeek R1 (Together)",
+			ContextLength:       64000,
+			MaxCompletionTokens: 8192,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+	}
+}
+
+// GetFireworksModels returns static model definitions for Fireworks AI.
+func GetFireworksModels() []*ModelInfo {
+	now := int64(1738672000)
+	return []*ModelInfo{
+		{
+			ID:                  "accounts/fireworks/models/deepseek-v3",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "fireworks",
+			Type:                "fireworks",
+			DisplayName:         "DeepSeek V3 (Fireworks)",
+			ContextLength:       64000,
+			MaxCompletionTokens: 8192,
+		},
+		{
+			ID:                  "accounts/fireworks/models/deepseek-r1",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "fireworks",
+			Type:                "fireworks",
+			DisplayName:         "DeepSeek R1 (Fireworks)",
+			ContextLength:       64000,
+			MaxCompletionTokens: 8192,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+	}
+}
+
+// GetNovitaModels returns static model definitions for Novita AI.
+func GetNovitaModels() []*ModelInfo {
+	now := int64(1738672000)
+	return []*ModelInfo{
+		{
+			ID:                  "deepseek/deepseek-v3",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "novita",
+			Type:                "novita",
+			DisplayName:         "DeepSeek V3 (Novita)",
+			ContextLength:       64000,
+			MaxCompletionTokens: 8192,
+		},
+		{
+			ID:                  "deepseek/deepseek-r1",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "novita",
+			Type:                "novita",
+			DisplayName:         "DeepSeek R1 (Novita)",
+			ContextLength:       64000,
+			MaxCompletionTokens: 8192,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 	}
 }

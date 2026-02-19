@@ -60,7 +60,7 @@ func FetchToolDescription(mcpEndpoint, authToken string, httpClient *http.Client
 			toolDescOnce.Store(&sync.Once{}) // allow retry
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil || resp.StatusCode != http.StatusOK {
@@ -209,7 +209,7 @@ func (h *WebSearchHandler) CallMcpAPI(request *McpRequest) (*McpResponse, error)
 		}
 
 		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("failed to read MCP response: %w", err)
 			continue // read error → retry

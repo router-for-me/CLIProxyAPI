@@ -171,6 +171,83 @@ nonstream-keepalive-interval: 0
 #    profile-arn: "arn:aws:codewhisperer:us-east-1:..."
 #    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy override
 
+# Cursor (via cursor-api): uses LOGIN PROTOCOL, not static API key.
+# User logs in at cursor.com; token from WorkosCursorSessionToken cookie.
+# cursor-api /build-key converts token to short-lived keys; /tokens/refresh for renewal.
+# See sharecli/docs/guides/CURSOR_ZERO_ACTION_FLOW_SPEC.md
+#
+# Option A (manual): Put sk-... from cursor-api /build-key in a file
+#cursor:
+#  - token-file: "~/.cursor/session-token.txt" # path to Cursor session token
+#    cursor-api-url: "http://127.0.0.1:3000"   # cursor-api server (default)
+#
+# Option B (zero-action): Login to Cursor IDE only; token auto-read from IDE storage.
+# Requires cursor-api AUTH_TOKEN env; set auth-token to match.
+#cursor:
+#  - cursor-api-url: "http://127.0.0.1:3000"
+#    auth-token: "${CURSOR_API_AUTH_TOKEN}"   # optional; required if cursor-api uses AUTH_TOKEN
+
+# MiniMax: OAuth (user-code flow) + optional API key. Dedicated block for parity with Kiro.
+# API key: platform.minimax.io; OAuth: OpenClaw minimax-portal-auth (Coding plan).
+# See thegent/docs/plans/CLIPROXY_API_AND_THGENT_UNIFIED_PLAN.md
+#minimax:
+#  - token-file: "~/.minimax/oauth-token.json" # OAuth token (access/refresh)
+#    base-url: "https://api.minimax.io/anthropic" # optional
+#  - api-key: "sk-..." # or API key fallback
+#    base-url: "https://api.minimax.io/anthropic"
+
+# Roo Code: OAuth/Cloud or API key. Dedicated block for parity.
+#roo:
+#  - token-file: "~/.roo/oauth-token.json"
+#    base-url: "https://api.roocode.com/v1"
+#  - api-key: "sk-..."
+#    base-url: "https://api.roocode.com/v1"
+
+# Kilo: Free credits or optional API key. Dedicated block for parity.
+#kilo:
+#  - api-key: "sk-..."
+#    base-url: "https://api.kilo.ai/v1"
+
+# DeepSeek: High performance, ultra-low cost reasoning models.
+#deepseek:
+#  - api-key: "sk-..."
+#    base-url: "https://api.deepseek.com"
+
+# Groq: Fastest inference (LPU).
+#groq:
+#  - api-key: "gsk_..."
+#    base-url: "https://api.groq.com/openai/v1"
+
+# Mistral AI: Premier European models, including Codestral for coding.
+#mistral:
+#  - api-key: "..."
+#    base-url: "https://api.mistral.ai/v1"
+
+# SiliconFlow: Fast, cheap access to DeepSeek and other OSS models.
+#siliconflow:
+#  - api-key: "sk-..."
+#    base-url: "https://api.siliconflow.cn/v1"
+
+# OpenRouter: Aggregate provider with many free and low-cost models.
+#openrouter:
+#  - api-key: "sk-or-v1-..."
+#    base-url: "https://openrouter.ai/api/v1"
+
+# Together AI: Large variety of OSS models with competitive pricing and free trial.
+#together:
+#  - api-key: "..."
+#    base-url: "https://api.together.xyz/v1"
+
+# Fireworks AI: High-speed inference for OSS models.
+#fireworks:
+#  - api-key: "..."
+#    base-url: "https://api.fireworks.ai/inference/v1"
+
+# Novita AI: Extremely low-cost provider for DeepSeek and Llama models.
+#novita:
+#  - api-key: "..."
+#    base-url: "https://api.novita.ai/v1"
+
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
@@ -185,6 +262,9 @@ nonstream-keepalive-interval: 0
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.
+#
+#   # Cursor: use dedicated cursor: block above (login protocol). Do NOT use api-key-entries.
+#   # MiniMax: use dedicated minimax: block above (OAuth + API key). Do NOT use openai-compat only.
 
 # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
 # vertex-api-key:

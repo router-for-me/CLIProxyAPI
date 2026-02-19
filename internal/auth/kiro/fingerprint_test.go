@@ -220,7 +220,7 @@ func TestKiroHashFormat(t *testing.T) {
 	}
 
 	for _, c := range fp.KiroHash {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Errorf("invalid hex character in KiroHash: %c", c)
 		}
 	}

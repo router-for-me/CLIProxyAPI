@@ -89,7 +89,7 @@ func DetectTruncation(toolName, toolUseID, rawInput string, parsedInput map[stri
 	}
 
 	// Scenario 2: JSON parse failure - syntactically invalid JSON
-	if parsedInput == nil || len(parsedInput) == 0 {
+	if len(parsedInput) == 0 {
 		// Check if the raw input looks like truncated JSON
 		if looksLikeTruncatedJSON(rawInput) {
 			info.IsTruncated = true
@@ -218,8 +218,9 @@ func extractPartialFields(raw string) map[string]string {
 		part = strings.TrimSpace(part)
 		if colonIdx := strings.Index(part, ":"); colonIdx > 0 {
 			key := strings.TrimSpace(part[:colonIdx])
-			key = strings.Trim(key, `"`)
+			key = strings.Trim(key, `"'`)
 			value := strings.TrimSpace(part[colonIdx+1:])
+			value = strings.Trim(value, `"'`)
 
 			// Truncate long values for display
 			if len(value) > 50 {

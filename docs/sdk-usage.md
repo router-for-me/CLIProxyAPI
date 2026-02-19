@@ -76,6 +76,14 @@ These options mirror the internals used by the CLI server.
 - Remote access additionally requires `remote-management.allow-remote: true`.
 - See MANAGEMENT_API.md for endpoints. Your embedded server exposes them under `/v0/management` on the configured port.
 
+## Provider Metrics
+
+The proxy exposes a metrics endpoint for routing optimization (cost, latency, throughput):
+
+- `GET /v1/metrics/providers`: Returns per-provider rolling statistics.
+
+This endpoint is used by `thegent` to implement routing policies like `cheapest` or `fastest`.
+
 ## Using the Core Auth Manager
 
 The service uses a core `auth.Manager` for selection, execution, and auto‑refresh. When embedding, you can provide your own manager to customize transports or hooks:

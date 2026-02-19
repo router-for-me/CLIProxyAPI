@@ -145,9 +145,7 @@ func ExtractSearchQuery(body []byte) string {
 
 	// Remove prefix "Perform a web search for the query: "
 	const prefix = "Perform a web search for the query: "
-	if strings.HasPrefix(text, prefix) {
-		text = text[len(prefix):]
-	}
+	text = strings.TrimPrefix(text, prefix)
 
 	return strings.TrimSpace(text)
 }
@@ -970,7 +968,7 @@ func AnalyzeBufferedStream(chunks [][]byte) BufferedStreamResult {
 
 	// Track tool use state across chunks
 	var currentToolName string
-	var currentToolIndex int = -1
+	currentToolIndex := -1
 	var toolInputBuilder strings.Builder
 
 	for _, chunk := range chunks {

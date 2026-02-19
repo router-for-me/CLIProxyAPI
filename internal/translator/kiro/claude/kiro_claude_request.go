@@ -374,13 +374,6 @@ func checkThinkingMode(claudeBody []byte) (bool, int64) {
 	return thinkingEnabled, budgetTokens
 }
 
-// hasThinkingTagInBody checks if the request body already contains thinking configuration tags.
-// This is used to prevent duplicate injection when client (e.g., AMP/Cursor) already includes thinking config.
-func hasThinkingTagInBody(body []byte) bool {
-	bodyStr := string(body)
-	return strings.Contains(bodyStr, "<thinking_mode>") || strings.Contains(bodyStr, "<max_thinking_length>")
-}
-
 // IsThinkingEnabledFromHeader checks if thinking mode is enabled via Anthropic-Beta header.
 // Claude CLI uses "Anthropic-Beta: interleaved-thinking-2025-05-14" to enable thinking.
 func IsThinkingEnabledFromHeader(headers http.Header) bool {
@@ -601,7 +594,8 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 		role := msg.Get("role").String()
 		isLastMessage := i == len(messagesArray)-1
 
-		if role == "user" {
+		switch role {
+		case "user":
 			userMsg, toolResults := BuildUserMessageStruct(msg, modelID, origin)
 			// CRITICAL: Kiro API requires content to be non-empty for ALL user messages
 			// This includes both history messages and the current message.
@@ -629,7 +623,7 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 					UserInputMessage: &userMsg,
 				})
 			}
-		} else if role == "assistant" {
+		case "assistant":
 			assistantMsg := BuildAssistantMessageStruct(msg)
 			if isLastMessage {
 				history = append(history, KiroHistoryMessage{

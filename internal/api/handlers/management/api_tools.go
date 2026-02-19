@@ -878,12 +878,6 @@ type CopilotUsageResponse struct {
 	QuotaSnapshots        QuotaSnapshots `json:"quota_snapshots"`
 }
 
-type copilotQuotaRequest struct {
-	AuthIndexSnake  *string `json:"auth_index"`
-	AuthIndexCamel  *string `json:"authIndex"`
-	AuthIndexPascal *string `json:"AuthIndex"`
-}
-
 // GetCopilotQuota fetches GitHub Copilot quota information from the /copilot_internal/user endpoint.
 //
 // Endpoint:

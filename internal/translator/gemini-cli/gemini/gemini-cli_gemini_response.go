@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -35,7 +36,7 @@ func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, originalReq
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
-	if alt, ok := ctx.Value("alt").(string); ok {
+	if alt, ok := ctx.Value(interfaces.ContextKeyAlt).(string); ok {
 		var chunk []byte
 		if alt == "" {
 			responseResult := gjson.GetBytes(rawJSON, "response")

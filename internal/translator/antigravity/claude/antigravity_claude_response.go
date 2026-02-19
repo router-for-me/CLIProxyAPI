@@ -157,11 +157,6 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 						// Transition from another state to thinking
 						// First, close any existing content block
 						if params.ResponseType != 0 {
-							if params.ResponseType == 2 {
-								// output = output + "event: content_block_delta\n"
-								// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
-								// output = output + "\n\n\n"
-							}
 							output = output + "event: content_block_stop\n"
 							output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
 							output = output + "\n\n\n"
@@ -195,11 +190,6 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 							// Transition from another state to text content
 							// First, close any existing content block
 							if params.ResponseType != 0 {
-								if params.ResponseType == 2 {
-									// output = output + "event: content_block_delta\n"
-									// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
-									// output = output + "\n\n\n"
-								}
 								output = output + "event: content_block_stop\n"
 								output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
 								output = output + "\n\n\n"
@@ -237,9 +227,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 
 				// Special handling for thinking state transition
 				if params.ResponseType == 2 {
-					// output = output + "event: content_block_delta\n"
-					// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
-					// output = output + "\n\n\n"
+					params.ResponseType = 0
 				}
 
 				// Close any other existing content block

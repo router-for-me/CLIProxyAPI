@@ -276,11 +276,11 @@ func (s *OAuthServer) generateSuccessHTML(setupRequired bool, platformURL string
 	html := LoginSuccessHtml
 
 	// Replace platform URL placeholder
-	html = strings.Replace(html, "{{PLATFORM_URL}}", platformURL, -1)
+	html = strings.ReplaceAll(html, "{{PLATFORM_URL}}", platformURL)
 
 	// Add setup notice if required
 	if setupRequired {
-		setupNotice := strings.Replace(SetupNoticeHtml, "{{PLATFORM_URL}}", platformURL, -1)
+		setupNotice := strings.ReplaceAll(SetupNoticeHtml, "{{PLATFORM_URL}}", platformURL)
 		html = strings.Replace(html, "{{SETUP_NOTICE}}", setupNotice, 1)
 	} else {
 		html = strings.Replace(html, "{{SETUP_NOTICE}}", "", 1)

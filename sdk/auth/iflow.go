@@ -47,7 +47,7 @@ func (a *IFlowAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		callbackPort = opts.CallbackPort
 	}
 
-	authSvc := iflow.NewIFlowAuth(cfg)
+	authSvc := iflow.NewIFlowAuth(cfg, nil)
 
 	oauthServer := iflow.NewOAuthServer(callbackPort)
 	if err := oauthServer.Start(); err != nil {

@@ -172,10 +172,6 @@ func DoKiroAWSAuthCodeLogin(cfg *config.Config, options *LoginOptions) {
 //   - cfg: The application configuration
 //   - options: Login options (currently unused for import)
 func DoKiroImport(cfg *config.Config, options *LoginOptions) {
-	if options == nil {
-		options = &LoginOptions{}
-	}
-
 	manager := newAuthManager()
 
 	// Use ImportFromKiroIDE instead of Login

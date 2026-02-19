@@ -333,6 +333,9 @@ func (s *Server) setupRoutes() {
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
 
+	// WebSocket endpoint for /v1/responses (Codex streaming)
+	s.AttachWebsocketRoute("/v1/responses", ResponsesWebSocketHandler())
+
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
@@ -350,8 +353,14 @@ func (s *Server) setupRoutes() {
 				"POST /v1/chat/completions",
 				"POST /v1/completions",
 				"GET /v1/models",
+				"GET /v1/metrics/providers",
 			},
 		})
+	})
+
+	// Provider metrics for OpenRouter-style routing (thegent cost/throughput/latency)
+	s.engine.GET("/v1/metrics/providers", func(c *gin.Context) {
+		c.JSON(http.StatusOK, usage.GetProviderMetrics())
 	})
 
 	// Event logging endpoint - handles Claude Code telemetry requests

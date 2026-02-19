@@ -87,6 +87,43 @@ type Config struct {
 	// KiroKey defines a list of Kiro (AWS CodeWhisperer) configurations.
 	KiroKey []KiroKey `yaml:"kiro" json:"kiro"`
 
+	// CursorKey defines Cursor (via cursor-api) configurations. Uses login protocol, not static API key.
+	// Token file contains sk-... key from cursor-api /build-key, or token:checksum for /build-key.
+	CursorKey []CursorKey `yaml:"cursor" json:"cursor"`
+
+	// MiniMaxKey defines MiniMax (api.minimax.chat) configurations. OAuth token-file or API key fallback.
+	MiniMaxKey []MiniMaxKey `yaml:"minimax" json:"minimax"`
+
+	// RooKey defines Roo Code (RooCodeInc) configurations. OAuth/Cloud auth; token-file or API key.
+	RooKey []RooKey `yaml:"roo" json:"roo"`
+
+	// KiloKey defines Kilo (Kilo-Org/kilocode) configurations. Free credits or optional API key.
+	KiloKey []KiloKey `yaml:"kilo" json:"kilo"`
+
+	// DeepSeekKey defines DeepSeek (api.deepseek.com) configurations.
+	DeepSeekKey []DeepSeekKey `yaml:"deepseek" json:"deepseek"`
+
+	// GroqKey defines Groq (api.groq.com) configurations.
+	GroqKey []GroqKey `yaml:"groq" json:"groq"`
+
+	// MistralKey defines Mistral AI (api.mistral.ai) configurations.
+	MistralKey []MistralKey `yaml:"mistral" json:"mistral"`
+
+	// SiliconFlowKey defines SiliconFlow (api.siliconflow.cn) configurations.
+	SiliconFlowKey []SiliconFlowKey `yaml:"siliconflow" json:"siliconflow"`
+
+	// OpenRouterKey defines OpenRouter (openrouter.ai) configurations.
+	OpenRouterKey []OpenRouterKey `yaml:"openrouter" json:"openrouter"`
+
+	// TogetherKey defines Together AI (api.together.xyz) configurations.
+	TogetherKey []TogetherKey `yaml:"together" json:"together"`
+
+	// FireworksKey defines Fireworks AI (api.fireworks.ai) configurations.
+	FireworksKey []FireworksKey `yaml:"fireworks" json:"fireworks"`
+
+	// NovitaKey defines Novita AI (api.novita.ai) configurations.
+	NovitaKey []NovitaKey `yaml:"novita" json:"novita"`
+
 	// KiroPreferredEndpoint sets the global default preferred endpoint for all Kiro providers.
 	// Values: "ide" (default, CodeWhisperer) or "cli" (Amazon Q).
 	KiroPreferredEndpoint string `yaml:"kiro-preferred-endpoint" json:"kiro-preferred-endpoint"`
@@ -126,8 +163,6 @@ type Config struct {
 	// This is useful when you want to login with a different account without logging out
 	// from your current session. Default: false.
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
-
-	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -469,6 +504,88 @@ type KiroKey struct {
 	PreferredEndpoint string `yaml:"preferred-endpoint,omitempty" json:"preferred-endpoint,omitempty"`
 }
 
+// CursorKey represents Cursor (via cursor-api) configuration. Uses login protocol.
+// Token file contains sk-... key from cursor-api /build-key, or token:checksum for /build-key.
+// When token-file is absent, token is auto-read from Cursor IDE storage (zero-action flow).
+type CursorKey struct {
+	// TokenFile is the path to the Cursor token file (sk-... key or token:checksum).
+	// Optional: when empty, token is auto-read from Cursor IDE state.vscdb.
+	TokenFile string `yaml:"token-file,omitempty" json:"token-file,omitempty"`
+
+	// CursorAPIURL is the cursor-api server URL (default: http://127.0.0.1:3000).
+	CursorAPIURL string `yaml:"cursor-api-url,omitempty" json:"cursor-api-url,omitempty"`
+
+	// AuthToken is the cursor-api admin token (matches AUTH_TOKEN env). Required for zero-action
+	// flow when using /tokens/add to register IDE token. Used as Bearer for chat when token-file absent.
+	AuthToken string `yaml:"auth-token,omitempty" json:"auth-token,omitempty"`
+
+	// ProxyURL optionally overrides the global proxy for this configuration.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+}
+
+// OAICompatProviderConfig represents a common configuration for OpenAI-compatible providers.
+type OAICompatProviderConfig struct {
+	// TokenFile is the path to OAuth token file (access/refresh). Optional when APIKey is set.
+	TokenFile string `yaml:"token-file,omitempty" json:"token-file,omitempty"`
+
+	// APIKey is the API key for direct auth (fallback when token-file not used).
+	APIKey string `yaml:"api-key,omitempty" json:"api-key,omitempty"`
+
+	// BaseURL is the API base URL.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL optionally overrides the global proxy for this configuration.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines optional model configurations including aliases for routing.
+	Models []OpenAICompatibilityModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Priority controls selection preference.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Prefix optionally namespaces model aliases for this provider.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent with this key.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+}
+
+// MiniMaxKey represents MiniMax (api.minimax.chat) configuration.
+type MiniMaxKey = OAICompatProviderConfig
+
+// RooKey represents Roo Code (RooCodeInc) configuration.
+type RooKey = OAICompatProviderConfig
+
+// KiloKey represents Kilo (Kilo-Org/kilocode) configuration.
+type KiloKey = OAICompatProviderConfig
+
+// DeepSeekKey represents DeepSeek (api.deepseek.com) configuration.
+type DeepSeekKey = OAICompatProviderConfig
+
+// GroqKey represents Groq (api.groq.com) configuration.
+type GroqKey = OAICompatProviderConfig
+
+// MistralKey represents Mistral AI (api.mistral.ai) configuration.
+type MistralKey = OAICompatProviderConfig
+
+// SiliconFlowKey represents SiliconFlow (api.siliconflow.cn) configuration.
+type SiliconFlowKey = OAICompatProviderConfig
+
+// OpenRouterKey represents OpenRouter (openrouter.ai) configuration.
+type OpenRouterKey = OAICompatProviderConfig
+
+// TogetherKey represents Together AI (api.together.xyz) configuration.
+type TogetherKey = OAICompatProviderConfig
+
+// FireworksKey represents Fireworks AI (api.fireworks.ai) configuration.
+type FireworksKey = OAICompatProviderConfig
+
+// NovitaKey represents Novita AI (api.novita.ai) configuration.
+type NovitaKey = OAICompatProviderConfig
+
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.
 type OpenAICompatibility struct {
@@ -497,6 +614,9 @@ type OpenAICompatibility struct {
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
 type OpenAICompatibilityAPIKey struct {
+	// TokenFile is the path to OAuth token file (access/refresh). Optional when APIKey is set.
+	TokenFile string `yaml:"token-file,omitempty" json:"token-file,omitempty"`
+
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
@@ -647,8 +767,29 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Kiro keys: trim whitespace from credential fields
 	cfg.SanitizeKiroKeys()
 
+	// Sanitize Cursor keys: trim whitespace
+	cfg.SanitizeCursorKeys()
+
+	// Sanitize MiniMax keys: trim whitespace
+	cfg.SanitizeMiniMaxKeys()
+
+	// Sanitize Roo, Kilo, DeepSeek, Groq, Mistral, SiliconFlow, OpenRouter, Together, Fireworks, Novita keys: trim whitespace
+	cfg.SanitizeRooKeys()
+	cfg.SanitizeKiloKeys()
+	cfg.SanitizeDeepSeekKeys()
+	cfg.SanitizeGroqKeys()
+	cfg.SanitizeMistralKeys()
+	cfg.SanitizeSiliconFlowKeys()
+	cfg.SanitizeOpenRouterKeys()
+	cfg.SanitizeTogetherKeys()
+	cfg.SanitizeFireworksKeys()
+	cfg.SanitizeNovitaKeys()
+
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
+
+	// Strategy E1: Inject premade providers (zen, nim) from environment if missing in config
+	cfg.InjectPremadeFromEnv()
 
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
@@ -869,6 +1010,174 @@ func (cfg *Config) SanitizeKiroKeys() {
 	}
 }
 
+// SanitizeCursorKeys trims whitespace from Cursor credential fields.
+func (cfg *Config) SanitizeCursorKeys() {
+	if cfg == nil || len(cfg.CursorKey) == 0 {
+		return
+	}
+	for i := range cfg.CursorKey {
+		entry := &cfg.CursorKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.CursorAPIURL = strings.TrimSpace(entry.CursorAPIURL)
+		entry.AuthToken = strings.TrimSpace(entry.AuthToken)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeMiniMaxKeys trims whitespace from MiniMax credential fields.
+func (cfg *Config) SanitizeMiniMaxKeys() {
+	if cfg == nil || len(cfg.MiniMaxKey) == 0 {
+		return
+	}
+	for i := range cfg.MiniMaxKey {
+		entry := &cfg.MiniMaxKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeRooKeys trims whitespace from Roo credential fields.
+func (cfg *Config) SanitizeRooKeys() {
+	if cfg == nil || len(cfg.RooKey) == 0 {
+		return
+	}
+	for i := range cfg.RooKey {
+		entry := &cfg.RooKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeKiloKeys trims whitespace from Kilo credential fields.
+func (cfg *Config) SanitizeKiloKeys() {
+	if cfg == nil || len(cfg.KiloKey) == 0 {
+		return
+	}
+	for i := range cfg.KiloKey {
+		entry := &cfg.KiloKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeDeepSeekKeys trims whitespace from DeepSeek credential fields.
+func (cfg *Config) SanitizeDeepSeekKeys() {
+	if cfg == nil || len(cfg.DeepSeekKey) == 0 {
+		return
+	}
+	for i := range cfg.DeepSeekKey {
+		entry := &cfg.DeepSeekKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeGroqKeys trims whitespace from Groq credential fields.
+func (cfg *Config) SanitizeGroqKeys() {
+	if cfg == nil || len(cfg.GroqKey) == 0 {
+		return
+	}
+	for i := range cfg.GroqKey {
+		entry := &cfg.GroqKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeMistralKeys trims whitespace from Mistral credential fields.
+func (cfg *Config) SanitizeMistralKeys() {
+	if cfg == nil || len(cfg.MistralKey) == 0 {
+		return
+	}
+	for i := range cfg.MistralKey {
+		entry := &cfg.MistralKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeSiliconFlowKeys trims whitespace from SiliconFlow credential fields.
+func (cfg *Config) SanitizeSiliconFlowKeys() {
+	if cfg == nil || len(cfg.SiliconFlowKey) == 0 {
+		return
+	}
+	for i := range cfg.SiliconFlowKey {
+		entry := &cfg.SiliconFlowKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeOpenRouterKeys trims whitespace from OpenRouter credential fields.
+func (cfg *Config) SanitizeOpenRouterKeys() {
+	if cfg == nil || len(cfg.OpenRouterKey) == 0 {
+		return
+	}
+	for i := range cfg.OpenRouterKey {
+		entry := &cfg.OpenRouterKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeTogetherKeys trims whitespace from Together AI credential fields.
+func (cfg *Config) SanitizeTogetherKeys() {
+	if cfg == nil || len(cfg.TogetherKey) == 0 {
+		return
+	}
+	for i := range cfg.TogetherKey {
+		entry := &cfg.TogetherKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeFireworksKeys trims whitespace from Fireworks AI credential fields.
+func (cfg *Config) SanitizeFireworksKeys() {
+	if cfg == nil || len(cfg.FireworksKey) == 0 {
+		return
+	}
+	for i := range cfg.FireworksKey {
+		entry := &cfg.FireworksKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
+// SanitizeNovitaKeys trims whitespace from Novita AI credential fields.
+func (cfg *Config) SanitizeNovitaKeys() {
+	if cfg == nil || len(cfg.NovitaKey) == 0 {
+		return
+	}
+	for i := range cfg.NovitaKey {
+		entry := &cfg.NovitaKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.
 func (cfg *Config) SanitizeGeminiKeys() {
 	if cfg == nil {
@@ -907,6 +1216,61 @@ func normalizeModelPrefix(prefix string) string {
 		return ""
 	}
 	return trimmed
+}
+
+// InjectPremadeFromEnv injects premade providers (zen, nim) if their environment variables are set.
+// This implements Recommendation: Option B from LLM_PROXY_RESEARCH_AUDIT_PLAN.md.
+func (cfg *Config) InjectPremadeFromEnv() {
+	// Zen
+	cfg.injectPremade("zen", "https://opencode.ai/zen/v1",
+		[]string{"ZEN_API_KEY", "OPENCODE_API_KEY", "THGENT_ZEN_API_KEY"},
+		[]OpenAICompatibilityModel{
+			{Name: "glm-5", Alias: "glm-5"},
+			{Name: "glm-5", Alias: "z-ai/glm-5"},
+			{Name: "glm-5", Alias: "gpt-5-mini"},
+			{Name: "glm-5", Alias: "gemini-3-flash"},
+		})
+
+	// NVIDIA NIM
+	cfg.injectPremade("nim", "https://integrate.api.nvidia.com/v1",
+		[]string{"NIM_API_KEY", "THGENT_NIM_API_KEY", "NVIDIA_API_KEY"},
+		[]OpenAICompatibilityModel{
+			{Name: "z-ai/glm-5", Alias: "z-ai/glm-5"},
+			{Name: "z-ai/glm-5", Alias: "glm-5"},
+			{Name: "z-ai/glm-5", Alias: "step-3.5-flash"},
+		})
+}
+
+func (cfg *Config) injectPremade(name, baseURL string, envVars []string, models []OpenAICompatibilityModel) {
+	// Check if already in config
+	for _, compat := range cfg.OpenAICompatibility {
+		if strings.ToLower(compat.Name) == name {
+			return
+		}
+	}
+
+	// Check env vars
+	var apiKey string
+	for _, ev := range envVars {
+		if val := os.Getenv(ev); val != "" {
+			apiKey = val
+			break
+		}
+	}
+	if apiKey == "" {
+		return
+	}
+
+	// Inject virtual entry
+	entry := OpenAICompatibility{
+		Name:    name,
+		BaseURL: baseURL,
+		APIKeyEntries: []OpenAICompatibilityAPIKey{
+			{APIKey: apiKey},
+		},
+		Models: models,
+	}
+	cfg.OpenAICompatibility = append(cfg.OpenAICompatibility, entry)
 }
 
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.
@@ -1710,153 +2074,6 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 	}
 }
 
-// Legacy migration helpers (move deprecated config keys into structured fields).
-type legacyConfigData struct {
-	LegacyGeminiKeys      []string                    `yaml:"generative-language-api-key"`
-	OpenAICompat          []legacyOpenAICompatibility `yaml:"openai-compatibility"`
-	AmpUpstreamURL        string                      `yaml:"amp-upstream-url"`
-	AmpUpstreamAPIKey     string                      `yaml:"amp-upstream-api-key"`
-	AmpRestrictManagement *bool                       `yaml:"amp-restrict-management-to-localhost"`
-	AmpModelMappings      []AmpModelMapping           `yaml:"amp-model-mappings"`
-}
-
-type legacyOpenAICompatibility struct {
-	Name    string   `yaml:"name"`
-	BaseURL string   `yaml:"base-url"`
-	APIKeys []string `yaml:"api-keys"`
-}
-
-func (cfg *Config) migrateLegacyGeminiKeys(legacy []string) bool {
-	if cfg == nil || len(legacy) == 0 {
-		return false
-	}
-	changed := false
-	seen := make(map[string]struct{}, len(cfg.GeminiKey))
-	for i := range cfg.GeminiKey {
-		key := strings.TrimSpace(cfg.GeminiKey[i].APIKey)
-		if key == "" {
-			continue
-		}
-		seen[key] = struct{}{}
-	}
-	for _, raw := range legacy {
-		key := strings.TrimSpace(raw)
-		if key == "" {
-			continue
-		}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		cfg.GeminiKey = append(cfg.GeminiKey, GeminiKey{APIKey: key})
-		seen[key] = struct{}{}
-		changed = true
-	}
-	return changed
-}
-
-func (cfg *Config) migrateLegacyOpenAICompatibilityKeys(legacy []legacyOpenAICompatibility) bool {
-	if cfg == nil || len(cfg.OpenAICompatibility) == 0 || len(legacy) == 0 {
-		return false
-	}
-	changed := false
-	for _, legacyEntry := range legacy {
-		if len(legacyEntry.APIKeys) == 0 {
-			continue
-		}
-		target := findOpenAICompatTarget(cfg.OpenAICompatibility, legacyEntry.Name, legacyEntry.BaseURL)
-		if target == nil {
-			continue
-		}
-		if mergeLegacyOpenAICompatAPIKeys(target, legacyEntry.APIKeys) {
-			changed = true
-		}
-	}
-	return changed
-}
-
-func mergeLegacyOpenAICompatAPIKeys(entry *OpenAICompatibility, keys []string) bool {
-	if entry == nil || len(keys) == 0 {
-		return false
-	}
-	changed := false
-	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
-	for i := range entry.APIKeyEntries {
-		key := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
-		if key == "" {
-			continue
-		}
-		existing[key] = struct{}{}
-	}
-	for _, raw := range keys {
-		key := strings.TrimSpace(raw)
-		if key == "" {
-			continue
-		}
-		if _, ok := existing[key]; ok {
-			continue
-		}
-		entry.APIKeyEntries = append(entry.APIKeyEntries, OpenAICompatibilityAPIKey{APIKey: key})
-		existing[key] = struct{}{}
-		changed = true
-	}
-	return changed
-}
-
-func findOpenAICompatTarget(entries []OpenAICompatibility, legacyName, legacyBase string) *OpenAICompatibility {
-	nameKey := strings.ToLower(strings.TrimSpace(legacyName))
-	baseKey := strings.ToLower(strings.TrimSpace(legacyBase))
-	if nameKey != "" && baseKey != "" {
-		for i := range entries {
-			if strings.ToLower(strings.TrimSpace(entries[i].Name)) == nameKey &&
-				strings.ToLower(strings.TrimSpace(entries[i].BaseURL)) == baseKey {
-				return &entries[i]
-			}
-		}
-	}
-	if baseKey != "" {
-		for i := range entries {
-			if strings.ToLower(strings.TrimSpace(entries[i].BaseURL)) == baseKey {
-				return &entries[i]
-			}
-		}
-	}
-	if nameKey != "" {
-		for i := range entries {
-			if strings.ToLower(strings.TrimSpace(entries[i].Name)) == nameKey {
-				return &entries[i]
-			}
-		}
-	}
-	return nil
-}
-
-func (cfg *Config) migrateLegacyAmpConfig(legacy *legacyConfigData) bool {
-	if cfg == nil || legacy == nil {
-		return false
-	}
-	changed := false
-	if cfg.AmpCode.UpstreamURL == "" {
-		if val := strings.TrimSpace(legacy.AmpUpstreamURL); val != "" {
-			cfg.AmpCode.UpstreamURL = val
-			changed = true
-		}
-	}
-	if cfg.AmpCode.UpstreamAPIKey == "" {
-		if val := strings.TrimSpace(legacy.AmpUpstreamAPIKey); val != "" {
-			cfg.AmpCode.UpstreamAPIKey = val
-			changed = true
-		}
-	}
-	if legacy.AmpRestrictManagement != nil {
-		cfg.AmpCode.RestrictManagementToLocalhost = *legacy.AmpRestrictManagement
-		changed = true
-	}
-	if len(cfg.AmpCode.ModelMappings) == 0 && len(legacy.AmpModelMappings) > 0 {
-		cfg.AmpCode.ModelMappings = append([]AmpModelMapping(nil), legacy.AmpModelMappings...)
-		changed = true
-	}
-	return changed
-}
 
 func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {
 	if root == nil || root.Kind != yaml.MappingNode {

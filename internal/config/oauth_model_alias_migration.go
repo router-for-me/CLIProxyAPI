@@ -285,7 +285,7 @@ func writeYAMLNode(configFile string, root *yaml.Node) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	enc := yaml.NewEncoder(f)
 	enc.SetIndent(2)

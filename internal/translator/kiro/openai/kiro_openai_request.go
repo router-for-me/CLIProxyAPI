@@ -758,16 +758,6 @@ func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResul
 	return finalContent
 }
 
-// checkThinkingModeFromOpenAI checks if thinking mode is enabled in the OpenAI request.
-// Returns thinkingEnabled.
-// Supports:
-// - reasoning_effort parameter (low/medium/high/auto)
-// - Model name containing "thinking" or "reason"
-// - <thinking_mode> tag in system prompt (AMP/Cursor format)
-func checkThinkingModeFromOpenAI(openaiBody []byte) bool {
-	return checkThinkingModeFromOpenAIWithHeaders(openaiBody, nil)
-}
-
 // checkThinkingModeFromOpenAIWithHeaders checks if thinking mode is enabled in the OpenAI request.
 // Returns thinkingEnabled.
 // Supports:
@@ -823,14 +813,6 @@ func checkThinkingModeFromOpenAIWithHeaders(openaiBody []byte, headers http.Head
 	log.Debugf("kiro-openai: no thinking mode detected in OpenAI request")
 	return false
 }
-
-// hasThinkingTagInBody checks if the request body already contains thinking configuration tags.
-// This is used to prevent duplicate injection when client (e.g., AMP/Cursor) already includes thinking config.
-func hasThinkingTagInBody(body []byte) bool {
-	bodyStr := string(body)
-	return strings.Contains(bodyStr, "<thinking_mode>") || strings.Contains(bodyStr, "<max_thinking_length>")
-}
-
 
 // extractToolChoiceHint extracts tool_choice from OpenAI request and returns a system prompt hint.
 // OpenAI tool_choice values:

@@ -1,29 +1,20 @@
 # Binaries
 cli-proxy-api
+cli-proxy-api-plus
+cli-proxy-api-plus-integration-test
 cliproxy
 *.exe
+*.out
+coverage_*.out
 
-# Configuration
-config.yaml
-.env
-
-# Generated content
-bin/*
-logs/*
-conv/*
-temp/*
-refs/*
-tmp/*
+# Git cache
+.git-cache/
 
 # Storage backends
 pgstore/*
 gitstore/*
 objectstore/*
-
-# Static assets
-static/*
-
-# Authentication data
+internal/cursorstorage/*
 auths/*
 !auths/.gitkeep
 

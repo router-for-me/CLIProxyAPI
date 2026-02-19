@@ -151,7 +151,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	w.captureCurrentHeaders()
 
 	// Detect streaming based on Content-Type
-	contentType := w.ResponseWriter.Header().Get("Content-Type")
+	contentType := w.Header().Get("Content-Type")
 	w.isStreaming = w.detectStreaming(contentType)
 
 	// If streaming, initialize streaming log writer
@@ -198,7 +198,7 @@ func (w *ResponseWriterWrapper) captureCurrentHeaders() {
 	}
 
 	// Capture all current headers from the underlying ResponseWriter
-	for key, values := range w.ResponseWriter.Header() {
+	for key, values := range w.Header() {
 		// Make a copy of the values slice to avoid reference issues
 		headerValues := make([]string, len(values))
 		copy(headerValues, values)

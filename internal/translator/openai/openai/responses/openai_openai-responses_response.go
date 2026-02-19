@@ -707,10 +707,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		includeReasoning = gjson.GetBytes(requestRawJSON, "reasoning").Exists()
 	}
 	if includeReasoning {
-		rid := id
-		if strings.HasPrefix(rid, "resp_") {
-			rid = strings.TrimPrefix(rid, "resp_")
-		}
+		rid := strings.TrimPrefix(id, "resp_")
 		// Prefer summary_text from reasoning_content; encrypted_content is optional
 		reasoningItem := `{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`
 		reasoningItem, _ = sjson.Set(reasoningItem, "id", fmt.Sprintf("rs_%s", rid))

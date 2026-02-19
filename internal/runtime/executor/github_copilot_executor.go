@@ -366,7 +366,7 @@ func (e *GitHubCopilotExecutor) Refresh(ctx context.Context, auth *cliproxyauth.
 	}
 
 	// Validate the token can still get a Copilot API token
-	copilotAuth := copilotauth.NewCopilotAuth(e.cfg)
+	copilotAuth := copilotauth.NewCopilotAuth(e.cfg, nil)
 	_, err := copilotAuth.GetCopilotAPIToken(ctx, accessToken)
 	if err != nil {
 		return nil, statusErr{code: http.StatusUnauthorized, msg: fmt.Sprintf("github-copilot token validation failed: %v", err)}
@@ -396,7 +396,7 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
 	e.mu.RUnlock()
 
 	// Get a new Copilot API token
-	copilotAuth := copilotauth.NewCopilotAuth(e.cfg)
+	copilotAuth := copilotauth.NewCopilotAuth(e.cfg, nil)
 	apiToken, err := copilotAuth.GetCopilotAPIToken(ctx, accessToken)
 	if err != nil {
 		return "", statusErr{code: http.StatusUnauthorized, msg: fmt.Sprintf("failed to get copilot api token: %v", err)}

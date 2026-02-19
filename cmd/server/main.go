@@ -84,6 +84,17 @@ func main() {
 	var kiroAWSAuthCode bool
 	var kiroImport bool
 	var githubCopilotLogin bool
+	var rooLogin bool
+	var kiloLogin bool
+	var minimaxLogin bool
+	var deepseekLogin bool
+	var groqLogin bool
+	var mistralLogin bool
+	var siliconflowLogin bool
+	var openrouterLogin bool
+	var togetherLogin bool
+	var fireworksLogin bool
+	var novitaLogin bool
 	var projectID string
 	var vertexImport string
 	var configPath string
@@ -110,6 +121,17 @@ func main() {
 	flag.BoolVar(&kiroAWSAuthCode, "kiro-aws-authcode", false, "Login to Kiro using AWS Builder ID (authorization code flow, better UX)")
 	flag.BoolVar(&kiroImport, "kiro-import", false, "Import Kiro token from Kiro IDE (~/.aws/sso/cache/kiro-auth-token.json)")
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
+	flag.BoolVar(&rooLogin, "roo-login", false, "Login to Roo Code (runs roo auth login)")
+	flag.BoolVar(&kiloLogin, "kilo-login", false, "Login to Kilo (runs kilo auth or kilocode auth)")
+	flag.BoolVar(&minimaxLogin, "minimax-login", false, "MiniMax config instructions (add minimax: block with api-key)")
+	flag.BoolVar(&deepseekLogin, "deepseek-login", false, "Login to DeepSeek using API key (stored in auth-dir)")
+	flag.BoolVar(&groqLogin, "groq-login", false, "Login to Groq using API key (stored in auth-dir)")
+	flag.BoolVar(&mistralLogin, "mistral-login", false, "Login to Mistral using API key (stored in auth-dir)")
+	flag.BoolVar(&siliconflowLogin, "siliconflow-login", false, "Login to SiliconFlow using API key (stored in auth-dir)")
+	flag.BoolVar(&openrouterLogin, "openrouter-login", false, "Login to OpenRouter using API key (stored in auth-dir)")
+	flag.BoolVar(&togetherLogin, "together-login", false, "Login to Together AI using API key (stored in auth-dir)")
+	flag.BoolVar(&fireworksLogin, "fireworks-login", false, "Login to Fireworks AI using API key (stored in auth-dir)")
+	flag.BoolVar(&novitaLogin, "novita-login", false, "Login to Novita AI using API key (stored in auth-dir)")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -461,6 +483,7 @@ func main() {
 	options := &cmd.LoginOptions{
 		NoBrowser:    noBrowser,
 		CallbackPort: oauthCallbackPort,
+		ConfigPath:   configFilePath,
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.
@@ -529,6 +552,28 @@ func main() {
 		cmd.DoKiroAWSAuthCodeLogin(cfg, options)
 	} else if kiroImport {
 		cmd.DoKiroImport(cfg, options)
+	} else if rooLogin {
+		cmd.DoRooLogin(cfg, options)
+	} else if kiloLogin {
+		cmd.DoKiloLogin(cfg, options)
+	} else if minimaxLogin {
+		cmd.DoMinimaxLogin(cfg, options)
+	} else if deepseekLogin {
+		cmd.DoDeepSeekLogin(cfg, options)
+	} else if groqLogin {
+		cmd.DoGroqLogin(cfg, options)
+	} else if mistralLogin {
+		cmd.DoMistralLogin(cfg, options)
+	} else if siliconflowLogin {
+		cmd.DoSiliconFlowLogin(cfg, options)
+	} else if openrouterLogin {
+		cmd.DoOpenRouterLogin(cfg, options)
+	} else if togetherLogin {
+		cmd.DoTogetherLogin(cfg, options)
+	} else if fireworksLogin {
+		cmd.DoFireworksLogin(cfg, options)
+	} else if novitaLogin {
+		cmd.DoNovitaLogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

@@ -189,10 +189,9 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 	var content string
 	var reasoningContent string
 	var toolUses []KiroToolUse
-	var stopReason string
 
 	// Get stop_reason
-	stopReason = response.Get("stop_reason").String()
+	stopReason := response.Get("stop_reason").String()
 
 	// Process content blocks
 	contentBlocks := response.Get("content")

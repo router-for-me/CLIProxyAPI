@@ -1,8 +1,8 @@
-# CLIProxyAPI Plus
+# cliproxyapi++
 
 English | [Chinese](README_CN.md)
 
-This is the Plus version of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), adding support for third-party providers on top of the mainline project.
+Fork of [CLIProxyAPI Plus](https://github.com/router-for-me/CLIProxyAPIPlus) — the Plus version of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), adding support for third-party providers on top of the mainline project.
 
 All third-party provider support is maintained by community contributors; CLIProxyAPI does not provide technical support. Please contact the corresponding community maintainer if you need assistance.
 

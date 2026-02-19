@@ -94,14 +94,15 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	systemMsgJSON := `{"role":"system","content":[]}`
 	hasSystemContent := false
 	if system := root.Get("system"); system.Exists() {
-		if system.Type == gjson.String {
+		switch system.Type {
+		case gjson.String:
 			if system.String() != "" {
 				oldSystem := `{"type":"text","text":""}`
 				oldSystem, _ = sjson.Set(oldSystem, "text", system.String())
 				systemMsgJSON, _ = sjson.SetRaw(systemMsgJSON, "content.-1", oldSystem)
 				hasSystemContent = true
 			}
-		} else if system.Type == gjson.JSON {
+		case gjson.JSON:
 			if system.IsArray() {
 				systemResults := system.Array()
 				for i := 0; i < len(systemResults); i++ {
@@ -190,7 +191,6 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				hasContent := len(contentItems) > 0
 				hasReasoning := reasoningContent != ""
 				hasToolCalls := len(toolCalls) > 0
-				hasToolResults := len(toolResults) > 0
 
 				// OpenAI requires: tool messages MUST immediately follow the assistant message with tool_calls.
 				// Therefore, we emit tool_result messages FIRST (they respond to the previous assistant's tool_calls),
@@ -243,8 +243,6 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						msgJSON, _ = sjson.SetRaw(msgJSON, "content", contentArrayJSON)
 
 						messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(msgJSON).Value())
-					} else if hasToolResults && !hasContent {
-						// tool_results already emitted above, no additional user message needed
 					}
 				}
 

@@ -24,6 +24,9 @@ type LoginOptions struct {
 
 	// Prompt allows the caller to provide interactive input when needed.
 	Prompt func(prompt string) (string, error)
+
+	// ConfigPath is the path to the config file (for login flows that write config, e.g. minimax).
+	ConfigPath string
 }
 
 // DoCodexLogin triggers the Codex OAuth flow through the shared authentication manager.

@@ -6,7 +6,7 @@
 package geminiCLI
 
 import (
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/gemini"
+	codexgemini "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/gemini"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -37,5 +37,5 @@ func ConvertGeminiCLIRequestToCodex(modelName string, inputRawJSON []byte, strea
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "systemInstruction")
 	}
 
-	return ConvertGeminiRequestToCodex(modelName, rawJSON, stream)
+	return codexgemini.ConvertGeminiRequestToCodex(modelName, rawJSON, stream)
 }

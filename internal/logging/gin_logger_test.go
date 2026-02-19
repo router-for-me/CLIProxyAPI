@@ -58,3 +58,51 @@ func TestGinLogrusRecoveryHandlesRegularPanic(t *testing.T) {
 		t.Fatalf("expected 500, got %d", recorder.Code)
 	}
 }
+
+func TestGinLogrusLogger(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	engine := gin.New()
+	engine.Use(GinLogrusLogger())
+	engine.GET("/v1/chat/completions", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+	engine.GET("/skip", func(c *gin.Context) {
+		SkipGinRequestLogging(c)
+		c.String(http.StatusOK, "skipped")
+	})
+
+	// AI API path
+	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+
+	// Regular path
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	recorder = httptest.NewRecorder()
+	engine.ServeHTTP(recorder, req)
+
+	// Skipped path
+	req = httptest.NewRequest(http.MethodGet, "/skip", nil)
+	recorder = httptest.NewRecorder()
+	engine.ServeHTTP(recorder, req)
+}
+
+func TestIsAIAPIPath(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/v1/chat/completions", true},
+		{"/v1/messages", true},
+		{"/other", false},
+	}
+	for _, tc := range cases {
+		if got := isAIAPIPath(tc.path); got != tc.want {
+			t.Errorf("isAIAPIPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}

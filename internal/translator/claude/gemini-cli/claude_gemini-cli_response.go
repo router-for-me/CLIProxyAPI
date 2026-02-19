@@ -7,7 +7,7 @@ package geminiCLI
 import (
 	"context"
 
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/gemini"
+	claudegemini "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/gemini"
 	"github.com/tidwall/sjson"
 )
 
@@ -25,7 +25,7 @@ import (
 // Returns:
 //   - []string: A slice of strings, each containing a Gemini-compatible JSON response wrapped in a response object
 func ConvertClaudeResponseToGeminiCLI(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
-	outputs := ConvertClaudeResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	outputs := claudegemini.ConvertClaudeResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 	// Wrap each converted response in a "response" object to match Gemini CLI API structure
 	newOutputs := make([]string, 0)
 	for i := 0; i < len(outputs); i++ {
@@ -49,7 +49,7 @@ func ConvertClaudeResponseToGeminiCLI(ctx context.Context, modelName string, ori
 // Returns:
 //   - string: A Gemini-compatible JSON response wrapped in a response object
 func ConvertClaudeResponseToGeminiCLINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
-	strJSON := ConvertClaudeResponseToGeminiNonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	strJSON := claudegemini.ConvertClaudeResponseToGeminiNonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 	// Wrap the converted response in a "response" object to match Gemini CLI API structure
 	json := `{"response": {}}`
 	strJSON, _ = sjson.SetRaw(json, "response", strJSON)
@@ -57,5 +57,5 @@ func ConvertClaudeResponseToGeminiCLINonStream(ctx context.Context, modelName st
 }
 
 func GeminiCLITokenCount(ctx context.Context, count int64) string {
-	return GeminiTokenCount(ctx, count)
+	return claudegemini.GeminiTokenCount(ctx, count)
 }

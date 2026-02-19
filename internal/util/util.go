@@ -33,7 +33,7 @@ func SanitizeFunctionName(name string) string {
 	// Re-reading requirements: Must start with a letter or an underscore.
 	if len(sanitized) > 0 {
 		first := sanitized[0]
-		if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+		if (first < 'a' || first > 'z') && (first < 'A' || first > 'Z') && first != '_' {
 			// If it starts with an allowed character but not allowed at the beginning (digit, dot, colon, dash),
 			// we must prepend an underscore.
 

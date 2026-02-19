@@ -24,7 +24,7 @@ What type of CLI account do you use?  (gemini-cli, gemini, codex, claude code or
 What model are you using? (example: gemini-2.5-pro, claude-sonnet-4-20250514, gpt-5, etc.)
 
 **LLM Client**
-What LLM Client are you using? (example: roo-code, cline, claude code, etc.)
+What LLM Client are you using? (example: roo-code, claude code, etc.)
 
 **Request Information**
 The best way is to paste the cURL command of the HTTP request here.

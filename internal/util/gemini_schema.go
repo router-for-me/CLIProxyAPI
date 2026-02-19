@@ -718,7 +718,7 @@ func orDefault(val, def string) string {
 }
 
 func escapeGJSONPathKey(key string) string {
-	if strings.IndexAny(key, ".*?") == -1 {
+	if !strings.ContainsAny(key, ".*?") {
 		return key
 	}
 	return gjsonPathKeyReplacer.Replace(key)
@@ -771,11 +771,11 @@ func splitGJSONPath(path string) []string {
 
 func mergeDescriptionRaw(schemaRaw, parentDesc string) string {
 	childDesc := gjson.Get(schemaRaw, "description").String()
-	switch {
-	case childDesc == "":
+	switch childDesc {
+	case "":
 		schemaRaw, _ = sjson.Set(schemaRaw, "description", parentDesc)
 		return schemaRaw
-	case childDesc == parentDesc:
+	case parentDesc:
 		return schemaRaw
 	default:
 		combined := fmt.Sprintf("%s (%s)", parentDesc, childDesc)

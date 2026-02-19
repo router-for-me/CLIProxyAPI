@@ -266,6 +266,71 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
+	// Cursor config
+	if len(oldCfg.CursorKey) != len(newCfg.CursorKey) {
+		changes = append(changes, fmt.Sprintf("cursor: count %d -> %d", len(oldCfg.CursorKey), len(newCfg.CursorKey)))
+	} else {
+		for i := range oldCfg.CursorKey {
+			o, n := oldCfg.CursorKey[i], newCfg.CursorKey[i]
+			if strings.TrimSpace(o.TokenFile) != strings.TrimSpace(n.TokenFile) {
+				changes = append(changes, fmt.Sprintf("cursor[%d].token-file: updated", i))
+			}
+			if strings.TrimSpace(o.CursorAPIURL) != strings.TrimSpace(n.CursorAPIURL) {
+				changes = append(changes, fmt.Sprintf("cursor[%d].cursor-api-url: updated", i))
+			}
+		}
+	}
+
+	// MiniMax config
+	if len(oldCfg.MiniMaxKey) != len(newCfg.MiniMaxKey) {
+		changes = append(changes, fmt.Sprintf("minimax: count %d -> %d", len(oldCfg.MiniMaxKey), len(newCfg.MiniMaxKey)))
+	} else {
+		for i := range oldCfg.MiniMaxKey {
+			o, n := oldCfg.MiniMaxKey[i], newCfg.MiniMaxKey[i]
+			if strings.TrimSpace(o.TokenFile) != strings.TrimSpace(n.TokenFile) {
+				changes = append(changes, fmt.Sprintf("minimax[%d].token-file: updated", i))
+			}
+			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
+				changes = append(changes, fmt.Sprintf("minimax[%d].api-key: updated", i))
+			}
+			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
+				changes = append(changes, fmt.Sprintf("minimax[%d].base-url: updated", i))
+			}
+		}
+	}
+
+	// Roo, Kilo, DeepSeek, Groq, Mistral, SiliconFlow config
+	if len(oldCfg.RooKey) != len(newCfg.RooKey) {
+		changes = append(changes, fmt.Sprintf("roo: count %d -> %d", len(oldCfg.RooKey), len(newCfg.RooKey)))
+	}
+	if len(oldCfg.KiloKey) != len(newCfg.KiloKey) {
+		changes = append(changes, fmt.Sprintf("kilo: count %d -> %d", len(oldCfg.KiloKey), len(newCfg.KiloKey)))
+	}
+	if len(oldCfg.DeepSeekKey) != len(newCfg.DeepSeekKey) {
+		changes = append(changes, fmt.Sprintf("deepseek: count %d -> %d", len(oldCfg.DeepSeekKey), len(newCfg.DeepSeekKey)))
+	}
+	if len(oldCfg.GroqKey) != len(newCfg.GroqKey) {
+		changes = append(changes, fmt.Sprintf("groq: count %d -> %d", len(oldCfg.GroqKey), len(newCfg.GroqKey)))
+	}
+	if len(oldCfg.MistralKey) != len(newCfg.MistralKey) {
+		changes = append(changes, fmt.Sprintf("mistral: count %d -> %d", len(oldCfg.MistralKey), len(newCfg.MistralKey)))
+	}
+	if len(oldCfg.SiliconFlowKey) != len(newCfg.SiliconFlowKey) {
+		changes = append(changes, fmt.Sprintf("siliconflow: count %d -> %d", len(oldCfg.SiliconFlowKey), len(newCfg.SiliconFlowKey)))
+	}
+	if len(oldCfg.OpenRouterKey) != len(newCfg.OpenRouterKey) {
+		changes = append(changes, fmt.Sprintf("openrouter: count %d -> %d", len(oldCfg.OpenRouterKey), len(newCfg.OpenRouterKey)))
+	}
+	if len(oldCfg.TogetherKey) != len(newCfg.TogetherKey) {
+		changes = append(changes, fmt.Sprintf("together: count %d -> %d", len(oldCfg.TogetherKey), len(newCfg.TogetherKey)))
+	}
+	if len(oldCfg.FireworksKey) != len(newCfg.FireworksKey) {
+		changes = append(changes, fmt.Sprintf("fireworks: count %d -> %d", len(oldCfg.FireworksKey), len(newCfg.FireworksKey)))
+	}
+	if len(oldCfg.NovitaKey) != len(newCfg.NovitaKey) {
+		changes = append(changes, fmt.Sprintf("novita: count %d -> %d", len(oldCfg.NovitaKey), len(newCfg.NovitaKey)))
+	}
+
 	// OpenAI compatibility providers (summarized)
 	if compat := DiffOpenAICompatibility(oldCfg.OpenAICompatibility, newCfg.OpenAICompatibility); len(compat) > 0 {
 		changes = append(changes, "openai-compatibility:")

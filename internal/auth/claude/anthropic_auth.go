@@ -55,10 +55,17 @@ type ClaudeAuth struct {
 //
 // Parameters:
 //   - cfg: The application configuration containing proxy settings
+//   - httpClient: Optional custom HTTP client for testing
 //
 // Returns:
 //   - *ClaudeAuth: A new Claude authentication service instance
-func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
+func NewClaudeAuth(cfg *config.Config, httpClient *http.Client) *ClaudeAuth {
+	if httpClient != nil {
+		return &ClaudeAuth{httpClient: httpClient}
+	}
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
 	// Use custom HTTP client with Firefox TLS fingerprint to bypass
 	// Cloudflare's bot detection on Anthropic domains
 	return &ClaudeAuth{
