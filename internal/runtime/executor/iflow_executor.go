@@ -557,7 +557,14 @@ func (e *IFlowExecutor) executeChatCompletionsRequest(
 		return httpResp, nil
 	}
 
-	firstBody, _ := io.ReadAll(httpResp.Body)
+	firstBody, errRead := io.ReadAll(httpResp.Body)
+	if errRead != nil {
+		recordAPIResponseError(ctx, e.cfg, errRead)
+		logWithRequestID(ctx).
+			WithError(errRead).
+			Warn("iflow executor: failed to read 406 response body before unsigned retry")
+		firstBody = nil
+	}
 	if errClose := httpResp.Body.Close(); errClose != nil {
 		log.Errorf("iflow executor: close response body error: %v", errClose)
 	}
@@ -639,9 +646,9 @@ func iflowRequestIDs(opts cliproxyexecutor.Options, body []byte) (sessionID, con
 	}
 	if conversationID == "" && len(opts.OriginalRequest) > 0 {
 		conversationID = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "conversation_id").String())
-	}
-	if conversationID == "" && len(opts.OriginalRequest) > 0 {
-		conversationID = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "conversationId").String())
+		if conversationID == "" {
+			conversationID = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "conversationId").String())
+		}
 	}
 
 	if sessionID == "" {
@@ -649,9 +656,9 @@ func iflowRequestIDs(opts cliproxyexecutor.Options, body []byte) (sessionID, con
 	}
 	if sessionID == "" && len(opts.OriginalRequest) > 0 {
 		sessionID = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "session_id").String())
-	}
-	if sessionID == "" && len(opts.OriginalRequest) > 0 {
-		sessionID = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "sessionId").String())
+		if sessionID == "" {
+			sessionID = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "sessionId").String())
+		}
 	}
 
 	// Keep session id stable and non-empty for signature generation.
