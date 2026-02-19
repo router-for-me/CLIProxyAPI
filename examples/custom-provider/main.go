@@ -159,13 +159,13 @@ func (MyExecutor) CountTokens(context.Context, *coreauth.Auth, clipexec.Request,
 	return clipexec.Response{}, errors.New("count tokens not implemented")
 }
 
-func (MyExecutor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (<-chan clipexec.StreamChunk, error) {
+func (MyExecutor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (*clipexec.StreamResult, error) {
 	ch := make(chan clipexec.StreamChunk, 1)
 	go func() {
 		defer close(ch)
 		ch <- clipexec.StreamChunk{Payload: []byte("data: {\"ok\":true}\n\n")}
 	}()
-	return ch, nil
+	return &clipexec.StreamResult{Chunks: ch}, nil
 }
 
 func (MyExecutor) Refresh(ctx context.Context, a *coreauth.Auth) (*coreauth.Auth, error) {
