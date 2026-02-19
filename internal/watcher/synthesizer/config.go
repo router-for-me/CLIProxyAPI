@@ -35,43 +35,51 @@ func (s *ConfigSynthesizer) synthesizeOAICompatFromDedicatedBlocks(ctx *Synthesi
 	now := ctx.Now
 	idGen := ctx.IDGenerator
 
-	type spec struct {
-		name    string
-		baseURL string
-		entries []config.OAICompatProviderConfig
-	}
-
-	specs := []spec{
-		{"minimax", "https://api.minimax.chat/v1", cfg.MiniMaxKey},
-		{"roo", "https://api.roocode.com/v1", cfg.RooKey},
-		{"kilo", "https://api.kilo.ai/v1", cfg.KiloKey},
-		{"deepseek", "https://api.deepseek.com", cfg.DeepSeekKey},
-		{"groq", "https://api.groq.com/openai/v1", cfg.GroqKey},
-		{"mistral", "https://api.mistral.ai/v1", cfg.MistralKey},
-		{"siliconflow", "https://api.siliconflow.cn/v1", cfg.SiliconFlowKey},
-		{"openrouter", "https://openrouter.ai/api/v1", cfg.OpenRouterKey},
-		{"together", "https://api.together.xyz/v1", cfg.TogetherKey},
-		{"fireworks", "https://api.fireworks.ai/inference/v1", cfg.FireworksKey},
-		{"novita", "https://api.novita.ai/v1", cfg.NovitaKey},
-	}
-
 	out := make([]*coreauth.Auth, 0)
-	for _, sp := range specs {
-		for i := range sp.entries {
-			entry := &sp.entries[i]
-			apiKey := s.resolveAPIKeyFromEntry(entry.TokenFile, entry.APIKey, i, sp.name)
+	for _, p := range config.GetDedicatedProviders() {
+		var entries []config.OAICompatProviderConfig
+		switch p.YAMLKey {
+		case "minimax":
+			entries = cfg.MiniMaxKey
+		case "roo":
+			entries = cfg.RooKey
+		case "kilo":
+			entries = cfg.KiloKey
+		case "deepseek":
+			entries = cfg.DeepSeekKey
+		case "groq":
+			entries = cfg.GroqKey
+		case "mistral":
+			entries = cfg.MistralKey
+		case "siliconflow":
+			entries = cfg.SiliconFlowKey
+		case "openrouter":
+			entries = cfg.OpenRouterKey
+		case "together":
+			entries = cfg.TogetherKey
+		case "fireworks":
+			entries = cfg.FireworksKey
+		case "novita":
+			entries = cfg.NovitaKey
+		default:
+			continue
+		}
+
+		for i := range entries {
+			entry := &entries[i]
+			apiKey := s.resolveAPIKeyFromEntry(entry.TokenFile, entry.APIKey, i, p.Name)
 			if apiKey == "" {
 				continue
 			}
 			baseURL := strings.TrimSpace(entry.BaseURL)
 			if baseURL == "" {
-				baseURL = sp.baseURL
+				baseURL = p.BaseURL
 			}
 			baseURL = strings.TrimSuffix(baseURL, "/")
 
-			id, _ := idGen.Next(sp.name+":key", apiKey, baseURL)
+			id, _ := idGen.Next(p.Name+":key", apiKey, baseURL)
 			attrs := map[string]string{
-				"source":   fmt.Sprintf("config:%s[%d]", sp.name, i),
+				"source":   fmt.Sprintf("config:%s[%d]", p.Name, i),
 				"base_url": baseURL,
 				"api_key":  apiKey,
 			}
@@ -85,8 +93,8 @@ func (s *ConfigSynthesizer) synthesizeOAICompatFromDedicatedBlocks(ctx *Synthesi
 
 			a := &coreauth.Auth{
 				ID:         id,
-				Provider:   sp.name,
-				Label:      sp.name + "-key",
+				Provider:   p.Name,
+				Label:      p.Name + "-key",
 				Prefix:     entry.Prefix,
 				Status:     coreauth.StatusActive,
 				ProxyURL:   strings.TrimSpace(entry.ProxyURL),

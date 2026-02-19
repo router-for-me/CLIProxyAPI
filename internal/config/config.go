@@ -908,7 +908,13 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 	out := make(map[string][]OAuthModelAlias, len(cfg.OAuthModelAlias))
 	for rawChannel, aliases := range cfg.OAuthModelAlias {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
-		if channel == "" || len(aliases) == 0 {
+		if channel == "" {
+			continue
+		}
+		// Preserve channels that were explicitly set to empty/nil – they act
+		// as "disabled" markers so default injection won't re-add them (#222).
+		if len(aliases) == 0 {
+			out[channel] = nil
 			continue
 		}
 		seenAlias := make(map[string]struct{}, len(aliases))
@@ -1218,45 +1224,15 @@ func normalizeModelPrefix(prefix string) string {
 	return trimmed
 }
 
-// PremadeOAICompatSpec defines a premade OpenAI-compatible provider.
-type PremadeOAICompatSpec struct {
-	BaseURL       string
-	EnvVars       []string
-	DefaultModels []OpenAICompatibilityModel
-}
-
-// PremadeOAICompatRegistry maps provider names to their premade specifications.
-var PremadeOAICompatRegistry = map[string]PremadeOAICompatSpec{
-	"zen": {
-		BaseURL: "https://opencode.ai/zen/v1",
-		EnvVars: []string{"ZEN_API_KEY", "OPENCODE_API_KEY", "THGENT_ZEN_API_KEY"},
-		DefaultModels: []OpenAICompatibilityModel{
-			{Name: "glm-5", Alias: "glm-5"},
-			{Name: "glm-5", Alias: "z-ai/glm-5"},
-			{Name: "glm-5", Alias: "gpt-5-mini"},
-			{Name: "glm-5", Alias: "gemini-3-flash"},
-		},
-	},
-	"nim": {
-		BaseURL: "https://integrate.api.nvidia.com/v1",
-		EnvVars: []string{"NIM_API_KEY", "THGENT_NIM_API_KEY", "NVIDIA_API_KEY"},
-		DefaultModels: []OpenAICompatibilityModel{
-			{Name: "z-ai/glm-5", Alias: "z-ai/glm-5"},
-			{Name: "z-ai/glm-5", Alias: "glm-5"},
-			{Name: "z-ai/glm-5", Alias: "step-3.5-flash"},
-		},
-	},
-}
-
 // InjectPremadeFromEnv injects premade providers (zen, nim) if their environment variables are set.
 // This implements Recommendation: Option B from LLM_PROXY_RESEARCH_AUDIT_PLAN.md.
 func (cfg *Config) InjectPremadeFromEnv() {
-	for name, spec := range PremadeOAICompatRegistry {
-		cfg.injectPremadeFromSpec(name, spec)
+	for _, spec := range GetPremadeProviders() {
+		cfg.injectPremadeFromSpec(spec.Name, spec)
 	}
 }
 
-func (cfg *Config) injectPremadeFromSpec(name string, spec PremadeOAICompatSpec) {
+func (cfg *Config) injectPremadeFromSpec(name string, spec ProviderSpec) {
 	// Check if already in config
 	for _, compat := range cfg.OpenAICompatibility {
 		if strings.ToLower(compat.Name) == name {
