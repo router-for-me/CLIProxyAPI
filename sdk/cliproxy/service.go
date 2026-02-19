@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -826,6 +829,14 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
+		if authKind == "oauth" {
+			models = applyExcludedModels(models, []string{"gpt-5.3-codex-spark"})
+			if planType := codexOAuthPlanType(a); codexPlanAllowsSpark(planType) {
+				if spark := registry.LookupStaticModelInfo("gpt-5.3-codex-spark"); spark != nil {
+					models = appendModelIfMissing(models, spark)
+				}
+			}
+		}
 		models = applyExcludedModels(models, excluded)
 	case "qwen":
 		models = registry.GetQwenModels()
@@ -1067,6 +1078,108 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
+}
+
+func codexOAuthPlanType(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if raw, ok := auth.Metadata["chatgpt_plan_type"].(string); ok {
+			if normalized := normalizeCodexPlanType(raw); normalized != "" {
+				return normalized
+			}
+		}
+		if raw, ok := auth.Metadata["plan_type"].(string); ok {
+			if normalized := normalizeCodexPlanType(raw); normalized != "" {
+				return normalized
+			}
+		}
+		if rawIDToken, ok := auth.Metadata["id_token"].(string); ok {
+			idToken := strings.TrimSpace(rawIDToken)
+			if idToken != "" {
+				if claims, err := codexauth.ParseJWTToken(idToken); err == nil && claims != nil {
+					if normalized := normalizeCodexPlanType(claims.CodexAuthInfo.ChatgptPlanType); normalized != "" {
+						return normalized
+					}
+				}
+			}
+		}
+	}
+	if parsed := codexPlanTypeFromFileName(auth.FileName); parsed != "" {
+		return parsed
+	}
+	if parsed := codexPlanTypeFromFileName(auth.ID); parsed != "" {
+		return parsed
+	}
+	if auth.Attributes != nil {
+		if parsed := codexPlanTypeFromFileName(auth.Attributes["path"]); parsed != "" {
+			return parsed
+		}
+	}
+	return ""
+}
+
+func codexPlanAllowsSpark(planType string) bool {
+	normalized := normalizeCodexPlanType(planType)
+	if normalized == "" {
+		return false
+	}
+	if normalized == "pro" || strings.HasPrefix(normalized, "pro-") || strings.HasSuffix(normalized, "-pro") {
+		return true
+	}
+	return false
+}
+
+func appendModelIfMissing(models []*ModelInfo, model *ModelInfo) []*ModelInfo {
+	if model == nil {
+		return models
+	}
+	modelID := strings.TrimSpace(model.ID)
+	if modelID == "" {
+		return models
+	}
+	for _, existing := range models {
+		if existing == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(existing.ID), modelID) {
+			return models
+		}
+	}
+	return append(models, model)
+}
+
+func codexPlanTypeFromFileName(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	base := strings.ToLower(strings.TrimSpace(filepath.Base(trimmed)))
+	if strings.HasSuffix(base, ".json") {
+		base = strings.TrimSuffix(base, ".json")
+	}
+	if strings.HasSuffix(base, "-pro") {
+		return "pro"
+	}
+	return ""
+}
+
+func normalizeCodexPlanType(planType string) string {
+	planType = strings.TrimSpace(planType)
+	if planType == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(planType, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	if len(parts) == 0 {
+		return ""
+	}
+	for i := range parts {
+		parts[i] = strings.ToLower(strings.TrimSpace(parts[i]))
+	}
+	return strings.Join(parts, "-")
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
