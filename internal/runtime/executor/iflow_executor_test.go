@@ -457,7 +457,7 @@ func TestIFlowExecutorExecuteStream_ReturnsRateLimitErrorWhenUpstreamReturnsBusi
 	}
 
 	var gotErr error
-	for chunk := range stream {
+	for chunk := range stream.Chunks {
 		if len(chunk.Payload) > 0 {
 			t.Fatalf("expected no payload when business error occurs, got: %s", string(chunk.Payload))
 		}
@@ -565,7 +565,7 @@ func TestIFlowExecutorExecuteStream_ReturnsErrorWhenUpstreamSSENetworkErrorWitho
 	}
 
 	var gotErr error
-	for chunk := range stream {
+	for chunk := range stream.Chunks {
 		if len(chunk.Payload) > 0 {
 			t.Fatalf("expected no payload when network_error without content occurs, got: %s", string(chunk.Payload))
 		}
@@ -586,11 +586,14 @@ func TestIFlowExecutorExecuteStream_ReturnsErrorWhenUpstreamSSENetworkErrorWitho
 	}
 }
 
-func collectIFlowStreamPayload(t *testing.T, stream <-chan cliproxyexecutor.StreamChunk) string {
+func collectIFlowStreamPayload(t *testing.T, stream *cliproxyexecutor.StreamResult) string {
 	t.Helper()
+	if stream == nil {
+		t.Fatal("stream result is nil")
+	}
 
 	var builder strings.Builder
-	for chunk := range stream {
+	for chunk := range stream.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream chunk returned error: %v", chunk.Err)
 		}
