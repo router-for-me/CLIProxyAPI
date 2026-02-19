@@ -810,7 +810,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
-	if msg != nil && msg.Addon != nil {
+	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {
 			if len(values) == 0 {
 				continue
