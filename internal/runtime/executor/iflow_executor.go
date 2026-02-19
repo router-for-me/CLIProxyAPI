@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,11 +30,28 @@ import (
 const (
 	iflowDefaultEndpoint = "/chat/completions"
 	iflowUserAgent       = "iFlow-Cli"
+
+	// requestExecutionMetadata in handlers stores idempotency under this key.
+	iflowSessionIDMetadataKey = "idempotency_key"
+
+	// Optional metadata key for explicit conversation binding.
+	iflowConversationIDMetadataKey = "conversation_id"
 )
 
 // IFlowExecutor executes OpenAI-compatible chat completions against the iFlow API using API keys derived from OAuth.
 type IFlowExecutor struct {
 	cfg *config.Config
+}
+
+type iflowRequestAttempt struct {
+	WithSignature bool
+	UserAgent     string
+	SessionID     string
+	Conversation  string
+	Accept        string
+	ContentType   string
+	HasSignature  bool
+	HasTimestamp  bool
 }
 
 // NewIFlowExecutor constructs a new executor instance.
@@ -110,34 +128,10 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return resp, err
-	}
-	applyIFlowHeaders(httpReq, apiKey, false)
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       endpoint,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-
+	sessionID, conversationID := iflowRequestIDs(opts, body)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := e.executeChatCompletionsRequest(ctx, httpClient, auth, endpoint, apiKey, body, false, sessionID, conversationID)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
 	defer func() {
@@ -161,6 +155,13 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
+	if bizErr, ok := parseIFlowBusinessStatusError(data); ok {
+		logWithRequestID(ctx).
+			WithField("mapped_status", bizErr.code).
+			Warnf("iflow executor: upstream returned business error payload: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		err = bizErr
+		return resp, err
+	}
 	reporter.publish(ctx, parseOpenAIUsage(data))
 	// Ensure usage is recorded even if upstream omits usage metadata.
 	reporter.ensurePublished(ctx)
@@ -218,34 +219,10 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	applyIFlowHeaders(httpReq, apiKey, true)
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       endpoint,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-
+	sessionID, conversationID := iflowRequestIDs(opts, body)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := e.executeChatCompletionsRequest(ctx, httpClient, auth, endpoint, apiKey, body, true, sessionID, conversationID)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
 
@@ -262,6 +239,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
+	responseContentType := strings.ToLower(strings.TrimSpace(httpResp.Header.Get("Content-Type")))
 	go func() {
 		defer close(out)
 		defer func() {
@@ -270,24 +248,96 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}()
 
+		var param any
+		emitChunks := func(chunks []string) {
+			for i := range chunks {
+				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+			}
+		}
+		emitDone := func() {
+			doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("data: [DONE]"), &param)
+			emitChunks(doneChunks)
+			if len(doneChunks) == 0 {
+				doneChunks = sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+				emitChunks(doneChunks)
+			}
+		}
+
+		if !strings.Contains(responseContentType, "text/event-stream") {
+			data, errRead := io.ReadAll(httpResp.Body)
+			if errRead != nil {
+				recordAPIResponseError(ctx, e.cfg, errRead)
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: errRead}
+				return
+			}
+
+			appendAPIResponseChunk(ctx, e.cfg, data)
+			if bizErr, ok := parseIFlowBusinessStatusError(data); ok {
+				reporter.publishFailure(ctx)
+				logWithRequestID(ctx).
+					WithField("mapped_status", bizErr.code).
+					Warnf("iflow executor: upstream returned business error payload on stream request: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+				out <- cliproxyexecutor.StreamChunk{Err: bizErr}
+				return
+			}
+
+			reporter.publish(ctx, parseOpenAIUsage(data))
+			logWithRequestID(ctx).
+				WithField("response_content_type", strings.TrimSpace(httpResp.Header.Get("Content-Type"))).
+				Warn("iflow executor: upstream returned non-SSE response for stream request, synthesizing stream chunks")
+
+			fallbackChunks := synthesizeOpenAIStreamingChunksFromNonStream(data)
+			if len(fallbackChunks) == 0 {
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{
+					Err: statusErr{
+						code: http.StatusBadGateway,
+						msg:  "iflow executor: upstream returned non-SSE response without valid choices",
+					},
+				}
+				return
+			}
+			for i := range fallbackChunks {
+				line := append([]byte("data: "), fallbackChunks[i]...)
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, line, &param)
+				emitChunks(chunks)
+			}
+			emitDone()
+			// Guarantee a usage record exists even if no usage metadata was emitted in stream chunks.
+			reporter.ensurePublished(ctx)
+			return
+		}
+
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
-		var param any
+		emittedPayload := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
-			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+			if streamErr, ok := parseOpenAIStreamNetworkErrorWithoutContent(line); ok {
+				reporter.publishFailure(ctx)
+				if emittedPayload {
+					logWithRequestID(ctx).Warnf("iflow executor: upstream stream ended with network_error after payload: %s", streamErr.msg)
+				}
+				out <- cliproxyexecutor.StreamChunk{Err: streamErr}
+				return
 			}
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
+			if len(chunks) > 0 {
+				emittedPayload = true
+			}
+			emitChunks(chunks)
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+		} else {
+			emitDone()
 		}
 		// Guarantee a usage record exists even if the stream never emitted usage data.
 		reporter.ensurePublished(ctx)
@@ -452,29 +502,108 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 	return auth, nil
 }
 
-func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {
+func (e *IFlowExecutor) executeChatCompletionsRequest(
+	ctx context.Context,
+	httpClient *http.Client,
+	auth *cliproxyauth.Auth,
+	endpoint, apiKey string,
+	body []byte,
+	stream bool,
+	sessionID, conversationID string,
+) (*http.Response, error) {
+	send := func(withSignature bool) (*http.Response, iflowRequestAttempt, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, iflowRequestAttempt{}, err
+		}
+		applyIFlowHeaders(httpReq, apiKey, stream, withSignature, sessionID, conversationID)
+		attempt := snapshotIFlowRequestAttempt(httpReq, withSignature)
+
+		var authID, authLabel, authType, authValue string
+		if auth != nil {
+			authID = auth.ID
+			authLabel = auth.Label
+			authType, authValue = auth.AccountInfo()
+		}
+		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+			URL:       endpoint,
+			Method:    http.MethodPost,
+			Headers:   httpReq.Header.Clone(),
+			Body:      body,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+
+		httpResp, err := httpClient.Do(httpReq)
+		if err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
+			return nil, iflowRequestAttempt{}, err
+		}
+		return httpResp, attempt, nil
+	}
+
+	httpResp, firstAttempt, err := send(true)
+	if err != nil {
+		return nil, err
+	}
+	if httpResp.StatusCode == http.StatusForbidden {
+		logIFlowRejectedRequestDiagnostic(ctx, httpResp.StatusCode, firstAttempt, httpResp.Header.Clone(), "", false)
+		return httpResp, nil
+	}
+	if httpResp.StatusCode != http.StatusNotAcceptable {
+		return httpResp, nil
+	}
+
+	firstBody, _ := io.ReadAll(httpResp.Body)
+	if errClose := httpResp.Body.Close(); errClose != nil {
+		log.Errorf("iflow executor: close response body error: %v", errClose)
+	}
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	appendAPIResponseChunk(ctx, e.cfg, firstBody)
+	logIFlowRejectedRequestDiagnostic(
+		ctx,
+		httpResp.StatusCode,
+		firstAttempt,
+		httpResp.Header.Clone(),
+		summarizeErrorBody(httpResp.Header.Get("Content-Type"), firstBody),
+		true,
+	)
+
+	retryResp, retryAttempt, err := send(false)
+	if err != nil {
+		return nil, err
+	}
+	if retryResp.StatusCode == http.StatusForbidden || retryResp.StatusCode == http.StatusNotAcceptable {
+		logIFlowRejectedRequestDiagnostic(ctx, retryResp.StatusCode, retryAttempt, retryResp.Header.Clone(), "", false)
+	}
+	return retryResp, nil
+}
+
+func applyIFlowHeaders(r *http.Request, apiKey string, stream bool, withSignature bool, sessionID, conversationID string) {
+	// iFlow CLI does not set an explicit Accept header for chat/completions requests.
+	// The upstream decides stream format from payload.stream.
+	_ = stream
+
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+apiKey)
-	r.Header.Set("User-Agent", iflowUserAgent)
-
-	// Generate session-id
-	sessionID := "session-" + generateUUID()
+	r.Header.Set("user-agent", iflowUserAgent)
 	r.Header.Set("session-id", sessionID)
+	r.Header.Set("conversation-id", conversationID)
 
-	// Generate timestamp and signature
-	timestamp := time.Now().UnixMilli()
-	r.Header.Set("x-iflow-timestamp", fmt.Sprintf("%d", timestamp))
+	if withSignature {
+		// Generate timestamp and signature
+		timestamp := time.Now().UnixMilli()
+		r.Header.Set("x-iflow-timestamp", fmt.Sprintf("%d", timestamp))
 
-	signature := createIFlowSignature(iflowUserAgent, sessionID, timestamp, apiKey)
-	if signature != "" {
-		r.Header.Set("x-iflow-signature", signature)
+		signature := createIFlowSignature(iflowUserAgent, sessionID, timestamp, apiKey)
+		if signature != "" {
+			r.Header.Set("x-iflow-signature", signature)
+		}
 	}
-
-	if stream {
-		r.Header.Set("Accept", "text/event-stream")
-	} else {
-		r.Header.Set("Accept", "application/json")
-	}
+	r.Header.Del("Accept")
 }
 
 // createIFlowSignature generates HMAC-SHA256 signature for iFlow API requests.
@@ -492,6 +621,110 @@ func createIFlowSignature(userAgent, sessionID string, timestamp int64, apiKey s
 // generateUUID generates a random UUID v4 string.
 func generateUUID() string {
 	return uuid.New().String()
+}
+
+func iflowRequestIDs(opts cliproxyexecutor.Options, body []byte) (sessionID, conversationID string) {
+	if len(opts.Metadata) > 0 {
+		if v, ok := opts.Metadata[iflowSessionIDMetadataKey]; ok {
+			sessionID = normalizeMetadataString(v)
+		}
+		if v, ok := opts.Metadata[iflowConversationIDMetadataKey]; ok {
+			conversationID = normalizeMetadataString(v)
+		}
+	}
+
+	// Best-effort extraction from request payload when metadata is unavailable.
+	if conversationID == "" {
+		conversationID = strings.TrimSpace(gjson.GetBytes(body, "conversation_id").String())
+	}
+	if conversationID == "" && len(opts.OriginalRequest) > 0 {
+		conversationID = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "conversation_id").String())
+	}
+	if conversationID == "" && len(opts.OriginalRequest) > 0 {
+		conversationID = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "conversationId").String())
+	}
+
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(gjson.GetBytes(body, "session_id").String())
+	}
+	if sessionID == "" && len(opts.OriginalRequest) > 0 {
+		sessionID = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "session_id").String())
+	}
+	if sessionID == "" && len(opts.OriginalRequest) > 0 {
+		sessionID = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "sessionId").String())
+	}
+
+	// Keep session id stable and non-empty for signature generation.
+	if sessionID == "" && conversationID != "" {
+		sessionID = conversationID
+	}
+	if sessionID == "" {
+		sessionID = generateUUID()
+	}
+
+	return sessionID, conversationID
+}
+
+func normalizeMetadataString(v any) string {
+	switch typed := v.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []byte:
+		return strings.TrimSpace(string(typed))
+	default:
+		return ""
+	}
+}
+
+func snapshotIFlowRequestAttempt(r *http.Request, withSignature bool) iflowRequestAttempt {
+	if r == nil {
+		return iflowRequestAttempt{WithSignature: withSignature}
+	}
+	return iflowRequestAttempt{
+		WithSignature: withSignature,
+		UserAgent:     strings.TrimSpace(r.Header.Get("user-agent")),
+		SessionID:     strings.TrimSpace(r.Header.Get("session-id")),
+		Conversation:  strings.TrimSpace(r.Header.Get("conversation-id")),
+		Accept:        strings.TrimSpace(r.Header.Get("Accept")),
+		ContentType:   strings.TrimSpace(r.Header.Get("Content-Type")),
+		HasSignature:  strings.TrimSpace(r.Header.Get("x-iflow-signature")) != "",
+		HasTimestamp:  strings.TrimSpace(r.Header.Get("x-iflow-timestamp")) != "",
+	}
+}
+
+func logIFlowRejectedRequestDiagnostic(
+	ctx context.Context,
+	status int,
+	attempt iflowRequestAttempt,
+	responseHeaders http.Header,
+	errorSummary string,
+	retryingWithoutSignature bool,
+) {
+	if status != http.StatusForbidden && status != http.StatusNotAcceptable {
+		return
+	}
+
+	fields := log.Fields{
+		"status":                     status,
+		"with_signature":             attempt.WithSignature,
+		"request_user_agent":         attempt.UserAgent,
+		"request_session_id":         util.HideAPIKey(attempt.SessionID),
+		"request_conversation_id":    util.HideAPIKey(attempt.Conversation),
+		"request_accept":             attempt.Accept,
+		"request_content_type":       attempt.ContentType,
+		"request_has_signature":      attempt.HasSignature,
+		"request_has_timestamp":      attempt.HasTimestamp,
+		"response_content_type":      strings.TrimSpace(responseHeaders.Get("Content-Type")),
+		"response_server":            strings.TrimSpace(responseHeaders.Get("Server")),
+		"response_www_authenticate":  util.MaskSensitiveHeaderValue("WWW-Authenticate", strings.TrimSpace(responseHeaders.Get("WWW-Authenticate"))),
+		"response_x_request_id":      strings.TrimSpace(responseHeaders.Get("X-Request-Id")),
+		"retrying_without_signature": retryingWithoutSignature,
+	}
+	if errorSummary != "" {
+		fields["error_summary"] = errorSummary
+	}
+
+	logWithRequestID(ctx).WithFields(fields).Warn("iflow executor: upstream rejected request")
 }
 
 func iflowCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
@@ -526,6 +759,209 @@ func ensureToolsArray(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+func synthesizeOpenAIStreamingChunksFromNonStream(raw []byte) [][]byte {
+	root := gjson.ParseBytes(raw)
+	choices := root.Get("choices")
+	if !choices.Exists() || !choices.IsArray() || len(choices.Array()) == 0 {
+		return nil
+	}
+
+	chunk := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[]}`
+	chunk, _ = sjson.Set(chunk, "id", root.Get("id").String())
+	chunk, _ = sjson.Set(chunk, "object", "chat.completion.chunk")
+	chunk, _ = sjson.Set(chunk, "created", root.Get("created").Int())
+	chunk, _ = sjson.Set(chunk, "model", root.Get("model").String())
+
+	choices.ForEach(func(key, choice gjson.Result) bool {
+		index := int(choice.Get("index").Int())
+		if !choice.Get("index").Exists() {
+			index = int(key.Int())
+		}
+
+		streamChoice := `{"index":0,"delta":{},"finish_reason":null}`
+		streamChoice, _ = sjson.Set(streamChoice, "index", index)
+
+		role := strings.TrimSpace(choice.Get("message.role").String())
+		if role != "" {
+			streamChoice, _ = sjson.Set(streamChoice, "delta.role", role)
+		}
+
+		content := choice.Get("message.content")
+		if content.Exists() && content.Type != gjson.Null {
+			if content.Type == gjson.String {
+				streamChoice, _ = sjson.Set(streamChoice, "delta.content", content.String())
+			} else {
+				streamChoice, _ = sjson.SetRaw(streamChoice, "delta.content", content.Raw)
+			}
+		}
+
+		reasoning := choice.Get("message.reasoning_content")
+		if reasoning.Exists() && reasoning.Type != gjson.Null {
+			streamChoice, _ = sjson.SetRaw(streamChoice, "delta.reasoning_content", reasoning.Raw)
+		}
+
+		toolCalls := choice.Get("message.tool_calls")
+		if toolCalls.Exists() && toolCalls.Type != gjson.Null {
+			streamChoice, _ = sjson.SetRaw(streamChoice, "delta.tool_calls", toolCalls.Raw)
+		}
+
+		finishReason := choice.Get("finish_reason")
+		if finishReason.Exists() && finishReason.Type != gjson.Null {
+			streamChoice, _ = sjson.Set(streamChoice, "finish_reason", finishReason.String())
+		}
+
+		path := fmt.Sprintf("choices.%d", index)
+		chunk, _ = sjson.SetRaw(chunk, path, streamChoice)
+		return true
+	})
+
+	out := [][]byte{[]byte(chunk)}
+	usage := root.Get("usage")
+	if usage.Exists() && usage.Type != gjson.Null {
+		usageChunk := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[],"usage":{}}`
+		usageChunk, _ = sjson.Set(usageChunk, "id", root.Get("id").String())
+		usageChunk, _ = sjson.Set(usageChunk, "object", "chat.completion.chunk")
+		usageChunk, _ = sjson.Set(usageChunk, "created", root.Get("created").Int())
+		usageChunk, _ = sjson.Set(usageChunk, "model", root.Get("model").String())
+		usageChunk, _ = sjson.SetRaw(usageChunk, "usage", usage.Raw)
+		out = append(out, []byte(usageChunk))
+	}
+	return out
+}
+
+func parseIFlowBusinessStatusError(raw []byte) (statusErr, bool) {
+	root := gjson.ParseBytes(raw)
+
+	message := strings.TrimSpace(root.Get("msg").String())
+	if message == "" {
+		message = strings.TrimSpace(root.Get("message").String())
+	}
+	if message == "" {
+		message = strings.TrimSpace(root.Get("error.message").String())
+	}
+
+	statusRaw := strings.TrimSpace(root.Get("status").String())
+	statusCode := parseNumericStatus(statusRaw)
+	if statusCode == 0 {
+		statusCode = int(root.Get("status").Int())
+	}
+	if statusCode == 0 {
+		statusCode = parseNumericStatus(strings.TrimSpace(root.Get("error.code").String()))
+	}
+
+	normalized := normalizeIFlowBusinessStatus(statusCode, message)
+	if normalized > 0 {
+		if message == "" {
+			message = fmt.Sprintf("status %d", normalized)
+		}
+		return statusErr{code: normalized, msg: message}, true
+	}
+
+	// No explicit business status. If an error object is present, treat it as a bad request.
+	if root.Get("error").Exists() {
+		if message == "" {
+			message = strings.TrimSpace(root.Get("error").Raw)
+		}
+		if message == "" {
+			message = "iflow upstream returned error payload"
+		}
+		return statusErr{code: http.StatusBadRequest, msg: message}, true
+	}
+	return statusErr{}, false
+}
+
+func parseNumericStatus(raw string) int {
+	if strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0
+	}
+	return code
+}
+
+func normalizeIFlowBusinessStatus(statusCode int, message string) int {
+	if statusCode == 449 {
+		// iFlow business status used for rate-limiting.
+		return http.StatusTooManyRequests
+	}
+	if statusCode >= 400 && statusCode < 600 {
+		return statusCode
+	}
+
+	msg := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case strings.Contains(msg, "rate limit"),
+		strings.Contains(msg, "too many requests"),
+		strings.Contains(msg, "quota"):
+		return http.StatusTooManyRequests
+	case strings.Contains(msg, "forbidden"):
+		return http.StatusForbidden
+	case strings.Contains(msg, "unauthorized"),
+		strings.Contains(msg, "invalid api key"),
+		strings.Contains(msg, "invalid token"):
+		return http.StatusUnauthorized
+	case strings.Contains(msg, "not acceptable"):
+		return http.StatusNotAcceptable
+	case strings.Contains(msg, "timeout"):
+		return http.StatusRequestTimeout
+	default:
+		return 0
+	}
+}
+
+func parseOpenAIStreamNetworkErrorWithoutContent(line []byte) (statusErr, bool) {
+	payload := bytes.TrimSpace(line)
+	if len(payload) == 0 {
+		return statusErr{}, false
+	}
+
+	// SSE data frame.
+	if bytes.HasPrefix(payload, []byte("data:")) {
+		payload = bytes.TrimSpace(payload[len("data:"):])
+	}
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return statusErr{}, false
+	}
+	if !gjson.ValidBytes(payload) {
+		return statusErr{}, false
+	}
+
+	root := gjson.ParseBytes(payload)
+	choices := root.Get("choices")
+	if !choices.Exists() || !choices.IsArray() || len(choices.Array()) == 0 {
+		return statusErr{}, false
+	}
+
+	hasNetworkError := false
+	hasContent := false
+	choices.ForEach(func(_, choice gjson.Result) bool {
+		if strings.EqualFold(strings.TrimSpace(choice.Get("finish_reason").String()), "network_error") {
+			hasNetworkError = true
+		}
+
+		content := strings.TrimSpace(choice.Get("delta.content").String())
+		reasoning := strings.TrimSpace(choice.Get("delta.reasoning_content").String())
+		toolCalls := choice.Get("delta.tool_calls")
+		if content != "" || reasoning != "" || (toolCalls.Exists() && toolCalls.Type != gjson.Null && strings.TrimSpace(toolCalls.Raw) != "" && toolCalls.Raw != "[]") {
+			hasContent = true
+		}
+		return true
+	})
+
+	if !hasNetworkError || hasContent {
+		return statusErr{}, false
+	}
+
+	model := strings.TrimSpace(root.Get("model").String())
+	if model == "" {
+		model = "unknown"
+	}
+	msg := fmt.Sprintf("iflow upstream stream network_error for model %s", model)
+	return statusErr{code: http.StatusBadGateway, msg: msg}, true
 }
 
 // preserveReasoningContentInMessages checks if reasoning_content from assistant messages

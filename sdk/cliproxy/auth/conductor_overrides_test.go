@@ -95,3 +95,83 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", state.NextRetryAfter)
 	}
 }
+
+func TestManager_MarkResult_TransientErrorWithoutAlternativeDoesNotCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "iflow",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "glm-5"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   "auth-1",
+		Provider: "iflow",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: 500, Message: "boom"},
+	})
+
+	updated, ok := m.GetByID("auth-1")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be zero when no alternative auth is available, got %v", state.NextRetryAfter)
+	}
+	blocked, _, _ := isAuthBlockedForModel(updated, model, time.Now())
+	if blocked {
+		t.Fatalf("expected auth to stay selectable when no alternative auth exists")
+	}
+}
+
+func TestManager_MarkResult_TransientErrorWithAlternativeKeepsCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	authPrimary := &Auth{
+		ID:       "auth-1",
+		Provider: "iflow",
+	}
+	authSecondary := &Auth{
+		ID:       "auth-2",
+		Provider: "iflow",
+	}
+	if _, errRegister := m.Register(context.Background(), authPrimary); errRegister != nil {
+		t.Fatalf("register primary auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), authSecondary); errRegister != nil {
+		t.Fatalf("register secondary auth: %v", errRegister)
+	}
+
+	model := "glm-5"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   "auth-1",
+		Provider: "iflow",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: 500, Message: "boom"},
+	})
+
+	updated, ok := m.GetByID("auth-1")
+	if !ok || updated == nil {
+		t.Fatalf("expected primary auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be set when alternative auth exists")
+	}
+	if !state.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("expected NextRetryAfter to be in the future, got %v", state.NextRetryAfter)
+	}
+}

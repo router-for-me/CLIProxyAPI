@@ -228,7 +228,12 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 			}
 			return nil, newModelCooldownError(model, providerForError, resetIn)
 		}
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+		return nil, &Error{
+			Code:       "auth_unavailable",
+			Message:    "no auth available",
+			Retryable:  true,
+			HTTPStatus: http.StatusServiceUnavailable,
+		}
 	}
 
 	bestPriority := 0

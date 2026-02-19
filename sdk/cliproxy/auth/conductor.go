@@ -82,6 +82,15 @@ func quotaCooldownDisabledForAuth(auth *Auth) bool {
 	return quotaCooldownDisabled.Load()
 }
 
+func noAuthAvailableError() *Error {
+	return &Error{
+		Code:       "auth_unavailable",
+		Message:    "no auth available",
+		Retryable:  true,
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
+}
+
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
 	// AuthID references the auth that produced this result.
@@ -523,7 +532,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if lastErr != nil {
 		return cliproxyexecutor.Response{}, lastErr
 	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return cliproxyexecutor.Response{}, noAuthAvailableError()
 }
 
 // ExecuteCount performs a non-streaming execution using the configured selector and executor.
@@ -554,7 +563,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if lastErr != nil {
 		return cliproxyexecutor.Response{}, lastErr
 	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return cliproxyexecutor.Response{}, noAuthAvailableError()
 }
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
@@ -585,7 +594,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	return nil, noAuthAvailableError()
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -1288,7 +1297,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					shouldSuspendModel = true
 					setModelQuota = true
 				case 408, 500, 502, 503, 504:
-					if quotaCooldownDisabledForAuth(auth) {
+					providerForAvailability := strings.TrimSpace(result.Provider)
+					if providerForAvailability == "" {
+						providerForAvailability = strings.TrimSpace(auth.Provider)
+					}
+					if quotaCooldownDisabledForAuth(auth) || !m.hasAlternativeAuthForModelLocked(auth.ID, providerForAvailability, result.Model, now) {
 						state.NextRetryAfter = time.Time{}
 					} else {
 						next := now.Add(1 * time.Minute)
@@ -1338,6 +1351,48 @@ func ensureModelState(auth *Auth, model string) *ModelState {
 	state := &ModelState{Status: StatusActive}
 	auth.ModelStates[model] = state
 	return state
+}
+
+func (m *Manager) hasAlternativeAuthForModelLocked(currentAuthID, provider, model string, now time.Time) bool {
+	if m == nil {
+		return false
+	}
+	providerKey := strings.TrimSpace(strings.ToLower(provider))
+	if providerKey == "" {
+		return false
+	}
+	modelKey := strings.TrimSpace(model)
+	if modelKey != "" {
+		parsed := thinking.ParseSuffix(modelKey)
+		if parsed.ModelName != "" {
+			modelKey = strings.TrimSpace(parsed.ModelName)
+		}
+	}
+	registryRef := registry.GetGlobalRegistry()
+	for _, candidate := range m.auths {
+		if candidate == nil || candidate.ID == currentAuthID {
+			continue
+		}
+		if candidate.Disabled || candidate.Status == StatusDisabled {
+			continue
+		}
+		candidateProvider := strings.TrimSpace(strings.ToLower(candidate.Provider))
+		if candidateProvider != providerKey {
+			continue
+		}
+		if modelKey != "" && registryRef != nil {
+			models := registryRef.GetModelsForClient(candidate.ID)
+			if len(models) > 0 && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+				continue
+			}
+		}
+		blocked, _, _ := isAuthBlockedForModel(candidate, model, now)
+		if blocked {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func resetModelState(state *ModelState, now time.Time) {
@@ -1697,7 +1752,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
-		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		return nil, nil, noAuthAvailableError()
 	}
 	selected, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
 	if errPick != nil {
@@ -1774,7 +1829,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
-		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+		return nil, nil, "", noAuthAvailableError()
 	}
 	selected, errPick := m.selector.Pick(ctx, "mixed", model, opts, candidates)
 	if errPick != nil {
