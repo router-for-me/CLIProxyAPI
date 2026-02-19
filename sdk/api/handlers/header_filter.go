@@ -1,6 +1,9 @@
 package handlers
 
-import "net/http"
+import (
+	"net/http"
+	"strings"
+)
 
 // hopByHopHeaders lists RFC 7230 Section 6.1 hop-by-hop headers that MUST NOT
 // be forwarded by proxies, plus security-sensitive headers that should not leak.
@@ -27,9 +30,14 @@ func FilterUpstreamHeaders(src http.Header) http.Header {
 	if src == nil {
 		return nil
 	}
+	connectionScoped := connectionScopedHeaders(src)
 	dst := make(http.Header)
 	for key, values := range src {
-		if _, blocked := hopByHopHeaders[http.CanonicalHeaderKey(key)]; blocked {
+		canonicalKey := http.CanonicalHeaderKey(key)
+		if _, blocked := hopByHopHeaders[canonicalKey]; blocked {
+			continue
+		}
+		if _, scoped := connectionScoped[canonicalKey]; scoped {
 			continue
 		}
 		dst[key] = values
@@ -38,6 +46,20 @@ func FilterUpstreamHeaders(src http.Header) http.Header {
 		return nil
 	}
 	return dst
+}
+
+func connectionScopedHeaders(src http.Header) map[string]struct{} {
+	scoped := make(map[string]struct{})
+	for _, rawValue := range src.Values("Connection") {
+		for _, token := range strings.Split(rawValue, ",") {
+			headerName := strings.TrimSpace(token)
+			if headerName == "" {
+				continue
+			}
+			scoped[http.CanonicalHeaderKey(headerName)] = struct{}{}
+		}
+	}
+	return scoped
 }
 
 // WriteUpstreamHeaders writes filtered upstream headers to the gin response writer.

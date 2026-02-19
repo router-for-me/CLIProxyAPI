@@ -593,7 +593,11 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
-	upstreamHeaders := FilterUpstreamHeaders(streamResult.Headers)
+	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
+	upstreamHeaders := cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
+	if upstreamHeaders == nil {
+		upstreamHeaders = make(http.Header)
+	}
 	chunks := streamResult.Chunks
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -670,6 +674,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							bootstrapRetries++
 							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 							if retryErr == nil {
+								replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
 								chunks = retryResult.Chunks
 								continue outer
 							}
@@ -759,6 +764,26 @@ func cloneBytes(src []byte) []byte {
 	dst := make([]byte, len(src))
 	copy(dst, src)
 	return dst
+}
+
+func cloneHeader(src http.Header) http.Header {
+	if src == nil {
+		return nil
+	}
+	dst := make(http.Header, len(src))
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
+	return dst
+}
+
+func replaceHeader(dst http.Header, src http.Header) {
+	for key := range dst {
+		delete(dst, key)
+	}
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
