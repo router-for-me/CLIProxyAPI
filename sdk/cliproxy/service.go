@@ -336,9 +336,6 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		if _, err := s.coreManager.Update(ctx, existing); err != nil {
 			log.Errorf("failed to disable auth %s: %v", id, err)
 		}
-		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
-			s.ensureExecutorsForAuth(existing)
-		}
 	}
 }
 
@@ -371,24 +368,7 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 }
 
 func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
-	s.ensureExecutorsForAuthWithMode(a, false)
-}
-
-func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace bool) {
-	if s == nil || s.coreManager == nil || a == nil {
-		return
-	}
-	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
-		if !forceReplace {
-			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
-			if hasExecutor {
-				_, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
-				if isCodexAutoExecutor {
-					return
-				}
-			}
-		}
-		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
+	if s == nil || a == nil {
 		return
 	}
 	// Skip disabled auth entries when (re)binding executors.
@@ -423,6 +403,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+	case "codex":
+		s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg))
 	case "qwen":
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "iflow":
@@ -431,8 +413,30 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "kiro":
 		s.coreManager.RegisterExecutor(executor.NewKiroExecutor(s.cfg))
+	case "cursor":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("cursor", s.cfg))
+	case "minimax":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("minimax", s.cfg))
+	case "roo":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("roo", s.cfg))
 	case "kilo":
-		s.coreManager.RegisterExecutor(executor.NewKiloExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("kilo", s.cfg))
+	case "deepseek":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("deepseek", s.cfg))
+	case "groq":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("groq", s.cfg))
+	case "mistral":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("mistral", s.cfg))
+	case "siliconflow":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("siliconflow", s.cfg))
+	case "openrouter":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("openrouter", s.cfg))
+	case "together":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("together", s.cfg))
+	case "fireworks":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("fireworks", s.cfg))
+	case "novita":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("novita", s.cfg))
 	case "github-copilot":
 		s.coreManager.RegisterExecutor(executor.NewGitHubCopilotExecutor(s.cfg))
 	default:
@@ -450,15 +454,8 @@ func (s *Service) rebindExecutors() {
 		return
 	}
 	auths := s.coreManager.List()
-	reboundCodex := false
 	for _, auth := range auths {
-		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-			if reboundCodex {
-				continue
-			}
-			reboundCodex = true
-		}
-		s.ensureExecutorsForAuthWithMode(auth, true)
+		s.ensureExecutorsForAuth(auth)
 	}
 }
 
@@ -501,20 +498,14 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}
 
-	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
+	_, err := s.tokenProvider.Load(ctx, s.cfg)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
-	}
-	if tokenResult == nil {
-		tokenResult = &TokenClientResult{}
 	}
 
-	apiKeyResult, err := s.apiKeyProvider.Load(ctx, s.cfg)
+	_, err = s.apiKeyProvider.Load(ctx, s.cfg)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
-	}
-	if apiKeyResult == nil {
-		apiKeyResult = &APIKeyClientResult{}
 	}
 
 	// legacy clients removed; no caches to refresh
@@ -529,6 +520,8 @@ func (s *Service) Run(ctx context.Context) error {
 	s.ensureWebsocketGateway()
 	if s.server != nil && s.wsGateway != nil {
 		s.server.AttachWebsocketRoute(s.wsGateway.Path(), s.wsGateway.Handler())
+		// Codex expects WebSocket at /v1/responses; register same handler for compatibility
+		s.server.AttachWebsocketRoute("/v1/responses", s.wsGateway.Handler())
 		s.server.SetWebsocketAuthChangeHandler(func(oldEnabled, newEnabled bool) {
 			if oldEnabled == newEnabled {
 				return
@@ -864,15 +857,84 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
-    models = applyExcludedModels(models, excluded)
+		models = applyExcludedModels(models, excluded)
 	case "github-copilot":
 		models = registry.GetGitHubCopilotModels()
 		models = applyExcludedModels(models, excluded)
 	case "kiro":
 		models = s.fetchKiroModels(a)
 		models = applyExcludedModels(models, excluded)
+	case "cursor":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "cursor")
+		if models == nil {
+			models = registry.GetCursorModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "minimax":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "minimax")
+		if models == nil {
+			models = registry.GetMiniMaxModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "roo":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "roo")
+		if models == nil {
+			models = registry.GetRooModels()
+		}
+		models = applyExcludedModels(models, excluded)
 	case "kilo":
-		models = executor.FetchKiloModels(context.Background(), a, s.cfg)
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "kilo")
+		if models == nil {
+			models = registry.GetKiloModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "deepseek":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "deepseek")
+		if models == nil {
+			models = registry.GetDeepSeekModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "groq":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "groq")
+		if models == nil {
+			models = registry.GetGroqModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "mistral":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "mistral")
+		if models == nil {
+			models = registry.GetMistralModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "siliconflow":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "siliconflow")
+		if models == nil {
+			models = registry.GetSiliconFlowModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "openrouter":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "openrouter")
+		if models == nil {
+			models = registry.GetOpenRouterModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "together":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "together")
+		if models == nil {
+			models = registry.GetTogetherModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "fireworks":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "fireworks")
+		if models == nil {
+			models = registry.GetFireworksModels()
+		}
+		models = applyExcludedModels(models, excluded)
+	case "novita":
+		models = executor.FetchOpenAIModels(context.Background(), a, s.cfg, "novita")
+		if models == nil {
+			models = registry.GetNovitaModels()
+		}
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
@@ -916,7 +978,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			for i := range s.cfg.OpenAICompatibility {
 				compat := &s.cfg.OpenAICompatibility[i]
 				if strings.EqualFold(compat.Name, compatName) {
-					isCompatAuth = true
 					// Convert compatibility models to registry models
 					ms := make([]*ModelInfo, 0, len(compat.Models))
 					for j := range compat.Models {

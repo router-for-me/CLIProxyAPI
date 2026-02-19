@@ -551,86 +551,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 		}
 
 		if message := choice.Get("message"); message.Exists() {
-			if contentResult := message.Get("content"); contentResult.Exists() {
-				if contentResult.IsArray() {
-					var textBuilder strings.Builder
-					var thinkingBuilder strings.Builder
-
-					flushText := func() {
-						if textBuilder.Len() == 0 {
-							return
-						}
-						block := `{"type":"text","text":""}`
-						block, _ = sjson.Set(block, "text", textBuilder.String())
-						out, _ = sjson.SetRaw(out, "content.-1", block)
-						textBuilder.Reset()
-					}
-
-					flushThinking := func() {
-						if thinkingBuilder.Len() == 0 {
-							return
-						}
-						block := `{"type":"thinking","thinking":""}`
-						block, _ = sjson.Set(block, "thinking", thinkingBuilder.String())
-						out, _ = sjson.SetRaw(out, "content.-1", block)
-						thinkingBuilder.Reset()
-					}
-
-					for _, item := range contentResult.Array() {
-						switch item.Get("type").String() {
-						case "text":
-							flushThinking()
-							textBuilder.WriteString(item.Get("text").String())
-						case "tool_calls":
-							flushThinking()
-							flushText()
-							toolCalls := item.Get("tool_calls")
-							if toolCalls.IsArray() {
-								toolCalls.ForEach(func(_, tc gjson.Result) bool {
-									hasToolCall = true
-									toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
-									toolUse, _ = sjson.Set(toolUse, "id", tc.Get("id").String())
-									toolUse, _ = sjson.Set(toolUse, "name", tc.Get("function.name").String())
-
-									argsStr := util.FixJSON(tc.Get("function.arguments").String())
-									if argsStr != "" && gjson.Valid(argsStr) {
-										argsJSON := gjson.Parse(argsStr)
-										if argsJSON.IsObject() {
-											toolUse, _ = sjson.SetRaw(toolUse, "input", argsJSON.Raw)
-										} else {
-											toolUse, _ = sjson.SetRaw(toolUse, "input", "{}")
-										}
-									} else {
-										toolUse, _ = sjson.SetRaw(toolUse, "input", "{}")
-									}
-
-									out, _ = sjson.SetRaw(out, "content.-1", toolUse)
-									return true
-								})
-							}
-						case "reasoning":
-							flushText()
-							if thinking := item.Get("text"); thinking.Exists() {
-								thinkingBuilder.WriteString(thinking.String())
-							}
-						default:
-							flushThinking()
-							flushText()
-						}
-					}
-
-					flushThinking()
-					flushText()
-				} else if contentResult.Type == gjson.String {
-					textContent := contentResult.String()
-					if textContent != "" {
-						block := `{"type":"text","text":""}`
-						block, _ = sjson.Set(block, "text", textContent)
-						out, _ = sjson.SetRaw(out, "content.-1", block)
-					}
-				}
-			}
-
+			// 1. Process reasoning content first (Anthropic requirement)
 			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
 				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
 					if reasoningText == "" {
@@ -642,6 +563,27 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 				}
 			}
 
+			// 2. Process content
+			if contentResult := message.Get("content"); contentResult.Exists() {
+				if contentResult.IsArray() {
+					for _, item := range contentResult.Array() {
+						if item.Get("type").String() == "text" {
+							block := `{"type":"text","text":""}`
+							block, _ = sjson.Set(block, "text", item.Get("text").String())
+							out, _ = sjson.SetRaw(out, "content.-1", block)
+						}
+					}
+				} else if contentResult.Type == gjson.String {
+					textContent := contentResult.String()
+					if textContent != "" {
+						block := `{"type":"text","text":""}`
+						block, _ = sjson.Set(block, "text", textContent)
+						out, _ = sjson.SetRaw(out, "content.-1", block)
+					}
+				}
+			}
+
+			// 3. Process tool calls
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 					hasToolCall = true

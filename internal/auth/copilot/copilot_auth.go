@@ -60,9 +60,12 @@ type CopilotAuth struct {
 
 // NewCopilotAuth creates a new CopilotAuth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
-func NewCopilotAuth(cfg *config.Config) *CopilotAuth {
+func NewCopilotAuth(cfg *config.Config, httpClient *http.Client) *CopilotAuth {
+	if httpClient == nil {
+		httpClient = util.SetProxy(&cfg.SDKConfig, &http.Client{Timeout: 30 * time.Second})
+	}
 	return &CopilotAuth{
-		httpClient:   util.SetProxy(&cfg.SDKConfig, &http.Client{Timeout: 30 * time.Second}),
+		httpClient:   httpClient,
 		deviceClient: NewDeviceFlowClient(cfg),
 		cfg:          cfg,
 	}
@@ -212,11 +215,6 @@ func (c *CopilotAuth) MakeAuthenticatedRequest(ctx context.Context, method, url 
 	req.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
 
 	return req, nil
-}
-
-// buildChatCompletionURL builds the URL for chat completions API.
-func buildChatCompletionURL() string {
-	return copilotAPIEndpoint + "/chat/completions"
 }
 
 // isHTTPSuccess checks if the status code indicates success (2xx).

@@ -15,8 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
@@ -131,7 +129,7 @@ func (c *SocialAuthClient) startWebCallbackServer(ctx context.Context, expectedS
 		if errParam != "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, `<!DOCTYPE html>
+			_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html><head><title>Login Failed</title></head>
 <body><h1>Login Failed</h1><p>%s</p><p>You can close this window.</p></body></html>`, html.EscapeString(errParam))
 			resultChan <- WebCallbackResult{Error: errParam}
@@ -141,7 +139,7 @@ func (c *SocialAuthClient) startWebCallbackServer(ctx context.Context, expectedS
 		if state != expectedState {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `<!DOCTYPE html>
+			_, _ = fmt.Fprint(w, `<!DOCTYPE html>
 <html><head><title>Login Failed</title></head>
 <body><h1>Login Failed</h1><p>Invalid state parameter</p><p>You can close this window.</p></body></html>`)
 			resultChan <- WebCallbackResult{Error: "state mismatch"}
@@ -149,7 +147,7 @@ func (c *SocialAuthClient) startWebCallbackServer(ctx context.Context, expectedS
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, `<!DOCTYPE html>
+		_, _ = fmt.Fprint(w, `<!DOCTYPE html>
 <html><head><title>Login Successful</title></head>
 <body><h1>Login Successful!</h1><p>You can close this window and return to the terminal.</p>
 <script>window.close();</script></body></html>`)
@@ -168,7 +166,6 @@ func (c *SocialAuthClient) startWebCallbackServer(ctx context.Context, expectedS
 		select {
 		case <-ctx.Done():
 		case <-time.After(socialAuthTimeout):
-		case <-resultChan:
 		}
 		_ = server.Shutdown(context.Background())
 	}()
@@ -235,7 +232,7 @@ func (c *SocialAuthClient) CreateToken(ctx context.Context, req *CreateTokenRequ
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -275,7 +272,7 @@ func (c *SocialAuthClient) RefreshSocialToken(ctx context.Context, refreshToken 
 	if err != nil {
 		return nil, fmt.Errorf("refresh request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -457,21 +454,6 @@ func (c *SocialAuthClient) LoginWithGoogle(ctx context.Context) (*KiroTokenData,
 // LoginWithGitHub performs OAuth login with GitHub.
 func (c *SocialAuthClient) LoginWithGitHub(ctx context.Context) (*KiroTokenData, error) {
 	return c.LoginWithSocial(ctx, ProviderGitHub)
-}
-
-// forceDefaultProtocolHandler sets our protocol handler as the default for kiro:// URLs.
-// This prevents the "Open with" dialog from appearing on Linux.
-// On non-Linux platforms, this is a no-op as they use different mechanisms.
-func forceDefaultProtocolHandler() {
-	if runtime.GOOS != "linux" {
-		return // Non-Linux platforms use different handler mechanisms
-	}
-	
-	// Set our handler as default using xdg-mime
-	cmd := exec.Command("xdg-mime", "default", "kiro-oauth-handler.desktop", "x-scheme-handler/kiro")
-	if err := cmd.Run(); err != nil {
-		log.Warnf("Failed to set default protocol handler: %v. You may see a handler selection dialog.", err)
-	}
 }
 
 // isInteractiveTerminal checks if stdin is connected to an interactive terminal.

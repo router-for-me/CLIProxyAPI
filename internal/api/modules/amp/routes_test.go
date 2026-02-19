@@ -23,7 +23,7 @@ func TestRegisterManagementRoutes(t *testing.T) {
 	mockProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxyCalled = true
 		w.WriteHeader(200)
-		w.Write([]byte("proxied"))
+		_, _ = w.Write([]byte("proxied"))
 	}))
 	defer mockProxy.Close()
 
@@ -73,7 +73,7 @@ func TestRegisterManagementRoutes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("request failed: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			if resp.StatusCode == http.StatusNotFound {
 				t.Fatalf("route %s not registered", path.path)

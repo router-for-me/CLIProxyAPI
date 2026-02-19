@@ -69,10 +69,3 @@ func setCodexCache(key string, cache codexCache) {
 	codexCacheMap[key] = cache
 	codexCacheMu.Unlock()
 }
-
-// deleteCodexCache deletes a cache entry.
-func deleteCodexCache(key string) {
-	codexCacheMu.Lock()
-	delete(codexCacheMap, key)
-	codexCacheMu.Unlock()
-}

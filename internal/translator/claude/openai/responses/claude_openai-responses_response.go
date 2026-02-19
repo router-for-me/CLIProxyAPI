@@ -123,8 +123,8 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			return out
 		}
 		idx := int(root.Get("index").Int())
-		typ := cb.Get("type").String()
-		if typ == "text" {
+		switch cb.Get("type").String() {
+		case "text":
 			// open message item + content part
 			st.InTextBlock = true
 			st.CurrentMsgID = fmt.Sprintf("msg_%s_0", st.ResponseID)
@@ -137,7 +137,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			part, _ = sjson.Set(part, "sequence_number", nextSeq())
 			part, _ = sjson.Set(part, "item_id", st.CurrentMsgID)
 			out = append(out, emitEvent("response.content_part.added", part))
-		} else if typ == "tool_use" {
+		case "tool_use":
 			st.InFuncBlock = true
 			st.CurrentFCID = cb.Get("id").String()
 			name := cb.Get("name").String()
@@ -154,7 +154,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			// record function metadata for aggregation
 			st.FuncCallIDs[idx] = st.CurrentFCID
 			st.FuncNames[idx] = name
-		} else if typ == "thinking" {
+		case "thinking":
 			// start reasoning item
 			st.ReasoningActive = true
 			st.ReasoningIndex = idx
@@ -178,8 +178,8 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		if !d.Exists() {
 			return out
 		}
-		dt := d.Get("type").String()
-		if dt == "text_delta" {
+		switch d.Get("type").String() {
+		case "text_delta":
 			if t := d.Get("text"); t.Exists() {
 				msg := `{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`
 				msg, _ = sjson.Set(msg, "sequence_number", nextSeq())
@@ -189,7 +189,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				// aggregate text for response.output
 				st.TextBuf.WriteString(t.String())
 			}
-		} else if dt == "input_json_delta" {
+		case "input_json_delta":
 			idx := int(root.Get("index").Int())
 			if pj := d.Get("partial_json"); pj.Exists() {
 				if st.FuncArgsBuf[idx] == nil {
@@ -203,7 +203,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				msg, _ = sjson.Set(msg, "delta", pj.String())
 				out = append(out, emitEvent("response.function_call_arguments.delta", msg))
 			}
-		} else if dt == "thinking_delta" {
+		case "thinking_delta":
 			if st.ReasoningActive {
 				if t := d.Get("thinking"); t.Exists() {
 					st.ReasoningBuf.WriteString(t.String())

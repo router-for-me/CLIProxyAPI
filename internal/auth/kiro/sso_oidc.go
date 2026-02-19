@@ -181,7 +181,7 @@ func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region str
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -227,7 +227,7 @@ func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, cli
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -274,7 +274,7 @@ func (c *SSOOIDCClient) CreateTokenWithRegion(ctx context.Context, clientID, cli
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -348,7 +348,7 @@ func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, cl
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -443,7 +443,7 @@ func (c *SSOOIDCClient) LoginWithIDC(ctx context.Context, startURL, region strin
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			browser.CloseBrowser()
+			_ = browser.CloseBrowser()
 			return nil, ctx.Err()
 		case <-time.After(interval):
 			tokenResp, err := c.CreateTokenWithRegion(ctx, regResp.ClientID, regResp.ClientSecret, authResp.DeviceCode, region)
@@ -456,7 +456,7 @@ func (c *SSOOIDCClient) LoginWithIDC(ctx context.Context, startURL, region strin
 					interval += 5 * time.Second
 					continue
 				}
-				browser.CloseBrowser()
+				_ = browser.CloseBrowser()
 				return nil, fmt.Errorf("token creation failed: %w", err)
 			}
 
@@ -557,7 +557,7 @@ func (c *SSOOIDCClient) RegisterClient(ctx context.Context) (*RegisterClientResp
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -601,7 +601,7 @@ func (c *SSOOIDCClient) StartDeviceAuthorization(ctx context.Context, clientID, 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -646,7 +646,7 @@ func (c *SSOOIDCClient) CreateToken(ctx context.Context, clientID, clientSecret,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -714,7 +714,7 @@ func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -810,7 +810,7 @@ func (c *SSOOIDCClient) LoginWithBuilderID(ctx context.Context) (*KiroTokenData,
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			browser.CloseBrowser() // Cleanup on cancel
+			_ = browser.CloseBrowser() // Cleanup on cancel
 			return nil, ctx.Err()
 		case <-time.After(interval):
 			tokenResp, err := c.CreateToken(ctx, regResp.ClientID, regResp.ClientSecret, authResp.DeviceCode)
@@ -824,7 +824,7 @@ func (c *SSOOIDCClient) LoginWithBuilderID(ctx context.Context) (*KiroTokenData,
 					continue
 				}
 				// Close browser on error before returning
-				browser.CloseBrowser()
+				_ = browser.CloseBrowser()
 				return nil, fmt.Errorf("token creation failed: %w", err)
 			}
 
@@ -896,7 +896,7 @@ func (c *SSOOIDCClient) tryUserInfoEndpoint(ctx context.Context, accessToken str
 		log.Debugf("userinfo request failed: %v", err)
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -968,7 +968,7 @@ func (c *SSOOIDCClient) tryListProfiles(ctx context.Context, accessToken string)
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 
@@ -1025,7 +1025,7 @@ func (c *SSOOIDCClient) tryListCustomizations(ctx context.Context, accessToken s
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 
@@ -1085,7 +1085,7 @@ func (c *SSOOIDCClient) RegisterClientForAuthCode(ctx context.Context, redirectU
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1143,7 +1143,7 @@ func (c *SSOOIDCClient) startAuthCodeCallbackServer(ctx context.Context, expecte
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if errParam != "" {
 			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, `<!DOCTYPE html>
+			_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html><head><title>Login Failed</title></head>
 <body><h1>Login Failed</h1><p>Error: %s</p><p>You can close this window.</p></body></html>`, html.EscapeString(errParam))
 			resultChan <- AuthCodeCallbackResult{Error: errParam}
@@ -1152,14 +1152,14 @@ func (c *SSOOIDCClient) startAuthCodeCallbackServer(ctx context.Context, expecte
 
 		if state != expectedState {
 			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `<!DOCTYPE html>
+			_, _ = fmt.Fprint(w, `<!DOCTYPE html>
 <html><head><title>Login Failed</title></head>
 <body><h1>Login Failed</h1><p>Invalid state parameter</p><p>You can close this window.</p></body></html>`)
 			resultChan <- AuthCodeCallbackResult{Error: "state mismatch"}
 			return
 		}
 
-		fmt.Fprint(w, `<!DOCTYPE html>
+		_, _ = fmt.Fprint(w, `<!DOCTYPE html>
 <html><head><title>Login Successful</title></head>
 <body><h1>Login Successful!</h1><p>You can close this window and return to the terminal.</p>
 <script>window.close();</script></body></html>`)
@@ -1234,7 +1234,7 @@ func (c *SSOOIDCClient) CreateTokenWithAuthCode(ctx context.Context, clientID, c
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1325,14 +1325,14 @@ func (c *SSOOIDCClient) LoginWithBuilderIDAuthCode(ctx context.Context) (*KiroTo
 	// Step 6: Wait for callback
 	select {
 	case <-ctx.Done():
-		browser.CloseBrowser()
+		_ = browser.CloseBrowser()
 		return nil, ctx.Err()
 	case <-time.After(10 * time.Minute):
-		browser.CloseBrowser()
+		_ = browser.CloseBrowser()
 		return nil, fmt.Errorf("authorization timed out")
 	case result := <-resultChan:
 		if result.Error != "" {
-			browser.CloseBrowser()
+			_ = browser.CloseBrowser()
 			return nil, fmt.Errorf("authorization failed: %s", result.Error)
 		}
 

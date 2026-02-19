@@ -177,9 +177,10 @@ func findMatchingBracket(text string, startPos int) int {
 		}
 
 		if !inString {
-			if char == openChar {
+			switch char {
+			case openChar:
 				depth++
-			} else if char == closeChar {
+			case closeChar:
 				depth--
 				if depth == 0 {
 					return i

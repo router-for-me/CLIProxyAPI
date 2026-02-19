@@ -41,7 +41,7 @@ func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		opts = &LoginOptions{}
 	}
 
-	authSvc := qwen.NewQwenAuth(cfg)
+	authSvc := qwen.NewQwenAuth(cfg, nil)
 
 	deviceFlow, err := authSvc.InitiateDeviceFlow(ctx)
 	if err != nil {

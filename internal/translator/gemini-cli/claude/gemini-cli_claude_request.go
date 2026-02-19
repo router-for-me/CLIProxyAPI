@@ -36,7 +36,7 @@ const geminiCLIClaudeThoughtSignature = "skip_thought_signature_validator"
 //   - []byte: The transformed request data in Gemini CLI API format
 func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
-	rawJSON = bytes.Replace(rawJSON, []byte(`"url":{"type":"string","format":"uri",`), []byte(`"url":{"type":"string",`), -1)
+	rawJSON = bytes.ReplaceAll(rawJSON, []byte(`"url":{"type":"string","format":"uri",`), []byte(`"url":{"type":"string",`))
 
 	// Build output Gemini CLI request JSON
 	out := `{"model":"","request":{"contents":[]}}`

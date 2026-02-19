@@ -293,7 +293,7 @@ func TestCleanJSONSchemaForAntigravity_CyclicRefDefaults(t *testing.T) {
 	result := CleanJSONSchemaForAntigravity(input)
 
 	var resMap map[string]interface{}
-	json.Unmarshal([]byte(result), &resMap)
+	_ = json.Unmarshal([]byte(result), &resMap)
 
 	if resMap["type"] != "object" {
 		t.Errorf("Expected type: object, got: %v", resMap["type"])
@@ -388,7 +388,7 @@ func TestCleanJSONSchemaForAntigravity_PropertyNameCollision(t *testing.T) {
 	compareJSON(t, expected, result)
 
 	var resMap map[string]interface{}
-	json.Unmarshal([]byte(result), &resMap)
+	_ = json.Unmarshal([]byte(result), &resMap)
 	props, _ := resMap["properties"].(map[string]interface{})
 	if _, ok := props["description"]; ok {
 		t.Errorf("Invalid 'description' property injected into properties map")

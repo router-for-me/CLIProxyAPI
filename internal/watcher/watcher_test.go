@@ -311,7 +311,7 @@ func TestStartFailsWhenConfigMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
-	defer w.Stop()
+	defer func() { _ = w.Stop() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -564,7 +564,7 @@ func TestReloadClientsFiltersProvidersWithNilCurrentAuths(t *testing.T) {
 		config:  &config.Config{AuthDir: tmp},
 	}
 	w.reloadClients(false, []string{"match"}, false)
-	if w.currentAuths != nil && len(w.currentAuths) != 0 {
+	if len(w.currentAuths) != 0 {
 		t.Fatalf("expected currentAuths to be nil or empty, got %d", len(w.currentAuths))
 	}
 }
@@ -1251,7 +1251,7 @@ func TestStartFailsWhenAuthDirMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
-	defer w.Stop()
+	defer func() { _ = w.Stop() }()
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
 	ctx, cancel := context.WithCancel(context.Background())

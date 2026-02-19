@@ -16,7 +16,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
@@ -46,7 +46,7 @@ func NewClaudeCodeAPIHandler(apiHandlers *handlers.BaseAPIHandler) *ClaudeCodeAP
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *ClaudeCodeAPIHandler) HandlerType() string {
-	return Claude
+	return constant.Claude
 }
 
 // Models returns a list of models supported by this handler.

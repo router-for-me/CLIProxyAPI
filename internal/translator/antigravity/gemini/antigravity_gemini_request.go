@@ -62,11 +62,12 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			valid := role == "user" || role == "model"
 			if role == "" || !valid {
 				var newRole string
-				if prevRole == "" {
+				switch prevRole {
+				case "":
 					newRole = "user"
-				} else if prevRole == "user" {
+				case "user":
 					newRole = "model"
-				} else {
+				default:
 					newRole = "user"
 				}
 				path := fmt.Sprintf("request.contents.%d.role", idx)

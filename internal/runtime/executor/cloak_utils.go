@@ -40,8 +40,3 @@ func shouldCloak(cloakMode string, userAgent string) bool {
 		return !strings.HasPrefix(userAgent, "claude-cli")
 	}
 }
-
-// isClaudeCodeClient checks if the User-Agent indicates a Claude Code client.
-func isClaudeCodeClient(userAgent string) bool {
-	return strings.HasPrefix(userAgent, "claude-cli")
-}

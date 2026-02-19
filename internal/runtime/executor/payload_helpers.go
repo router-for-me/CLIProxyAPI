@@ -220,9 +220,7 @@ func buildPayloadPath(root, path string) string {
 	if p == "" {
 		return r
 	}
-	if strings.HasPrefix(p, ".") {
-		p = p[1:]
-	}
+	p = strings.TrimPrefix(p, ".")
 	return r + "." + p
 }
 

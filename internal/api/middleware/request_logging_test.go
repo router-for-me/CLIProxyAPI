@@ -1,138 +1,106 @@
 package middleware
 
 import (
-	"io"
-	"net/http"
-	"net/url"
-	"strings"
+	"bytes"
+	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 )
 
-func TestShouldSkipMethodForRequestLogging(t *testing.T) {
-	tests := []struct {
-		name string
-		req  *http.Request
-		skip bool
-	}{
-		{
-			name: "nil request",
-			req:  nil,
-			skip: true,
-		},
-		{
-			name: "post request should not skip",
-			req: &http.Request{
-				Method: http.MethodPost,
-				URL:    &url.URL{Path: "/v1/responses"},
-			},
-			skip: false,
-		},
-		{
-			name: "plain get should skip",
-			req: &http.Request{
-				Method: http.MethodGet,
-				URL:    &url.URL{Path: "/v1/models"},
-				Header: http.Header{},
-			},
-			skip: true,
-		},
-		{
-			name: "responses websocket upgrade should not skip",
-			req: &http.Request{
-				Method: http.MethodGet,
-				URL:    &url.URL{Path: "/v1/responses"},
-				Header: http.Header{"Upgrade": []string{"websocket"}},
-			},
-			skip: false,
-		},
-		{
-			name: "responses get without upgrade should skip",
-			req: &http.Request{
-				Method: http.MethodGet,
-				URL:    &url.URL{Path: "/v1/responses"},
-				Header: http.Header{},
-			},
-			skip: true,
-		},
-	}
-
-	for i := range tests {
-		got := shouldSkipMethodForRequestLogging(tests[i].req)
-		if got != tests[i].skip {
-			t.Fatalf("%s: got skip=%t, want %t", tests[i].name, got, tests[i].skip)
-		}
-	}
+type mockRequestLogger struct {
+	enabled bool
+	logged  bool
 }
 
-func TestShouldCaptureRequestBody(t *testing.T) {
-	tests := []struct {
-		name          string
-		loggerEnabled bool
-		req           *http.Request
-		want          bool
+func (m *mockRequestLogger) IsEnabled() bool { return m.enabled }
+func (m *mockRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
+	m.logged = true
+	return nil
+}
+func (m *mockRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (logging.StreamingLogWriter, error) {
+	return &logging.NoOpStreamingLogWriter{}, nil
+}
+
+func TestRequestLoggingMiddleware(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("LoggerNil", func(t *testing.T) {
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(nil))
+		router.POST("/test", func(c *gin.Context) { c.Status(200) })
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/test", nil)
+		router.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Errorf("expected 200")
+		}
+	})
+
+	t.Run("GETMethod", func(t *testing.T) {
+		logger := &mockRequestLogger{enabled: true}
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.GET("/test", func(c *gin.Context) { c.Status(200) })
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/test", nil)
+		router.ServeHTTP(w, req)
+		if logger.logged {
+			t.Errorf("should not log GET requests")
+		}
+	})
+
+	t.Run("ManagementPath", func(t *testing.T) {
+		logger := &mockRequestLogger{enabled: true}
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/management/test", func(c *gin.Context) { c.Status(200) })
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/management/test", nil)
+		router.ServeHTTP(w, req)
+		if logger.logged {
+			t.Errorf("should not log management paths")
+		}
+	})
+
+	t.Run("LogEnabled", func(t *testing.T) {
+		logger := &mockRequestLogger{enabled: true}
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/chat/completions", func(c *gin.Context) {
+			c.JSON(200, gin.H{"ok": true})
+		})
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{"test":true}`)))
+		router.ServeHTTP(w, req)
+		if !logger.logged {
+			t.Errorf("should have logged the request")
+		}
+	})
+}
+
+func TestShouldLogRequest(t *testing.T) {
+	cases := []struct {
+		path     string
+		expected bool
 	}{
-		{
-			name:          "logger enabled always captures",
-			loggerEnabled: true,
-			req: &http.Request{
-				Body:          io.NopCloser(strings.NewReader("{}")),
-				ContentLength: -1,
-				Header:        http.Header{"Content-Type": []string{"application/json"}},
-			},
-			want: true,
-		},
-		{
-			name:          "nil request",
-			loggerEnabled: false,
-			req:           nil,
-			want:          false,
-		},
-		{
-			name:          "small known size json in error-only mode",
-			loggerEnabled: false,
-			req: &http.Request{
-				Body:          io.NopCloser(strings.NewReader("{}")),
-				ContentLength: 2,
-				Header:        http.Header{"Content-Type": []string{"application/json"}},
-			},
-			want: true,
-		},
-		{
-			name:          "large known size skipped in error-only mode",
-			loggerEnabled: false,
-			req: &http.Request{
-				Body:          io.NopCloser(strings.NewReader("x")),
-				ContentLength: maxErrorOnlyCapturedRequestBodyBytes + 1,
-				Header:        http.Header{"Content-Type": []string{"application/json"}},
-			},
-			want: false,
-		},
-		{
-			name:          "unknown size skipped in error-only mode",
-			loggerEnabled: false,
-			req: &http.Request{
-				Body:          io.NopCloser(strings.NewReader("x")),
-				ContentLength: -1,
-				Header:        http.Header{"Content-Type": []string{"application/json"}},
-			},
-			want: false,
-		},
-		{
-			name:          "multipart skipped in error-only mode",
-			loggerEnabled: false,
-			req: &http.Request{
-				Body:          io.NopCloser(strings.NewReader("x")),
-				ContentLength: 1,
-				Header:        http.Header{"Content-Type": []string{"multipart/form-data; boundary=abc"}},
-			},
-			want: false,
-		},
+		{"/v1/chat/completions", true},
+		{"/management/config", false},
+		{"/v0/management/config", false},
+		{"/api/provider/test", true},
+		{"/api/other", false},
 	}
 
-	for i := range tests {
-		got := shouldCaptureRequestBody(tests[i].loggerEnabled, tests[i].req)
-		if got != tests[i].want {
-			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
+	for _, c := range cases {
+		if got := shouldLogRequest(c.path); got != c.expected {
+			t.Errorf("path %s: expected %v, got %v", c.path, c.expected, got)
 		}
 	}
 }

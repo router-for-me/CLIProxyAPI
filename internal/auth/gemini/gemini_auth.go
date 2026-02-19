@@ -84,7 +84,8 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 	proxyURL, err := url.Parse(cfg.ProxyURL)
 	if err == nil {
 		var transport *http.Transport
-		if proxyURL.Scheme == "socks5" {
+		switch proxyURL.Scheme {
+		case "socks5":
 			// Handle SOCKS5 proxy.
 			username := proxyURL.User.Username()
 			password, _ := proxyURL.User.Password()
@@ -99,7 +100,7 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 					return dialer.Dial(network, addr)
 				},
 			}
-		} else if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
+		case "http", "https":
 			// Handle HTTP/HTTPS proxy.
 			transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
 		}

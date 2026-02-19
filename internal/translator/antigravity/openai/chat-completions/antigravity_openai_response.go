@@ -15,7 +15,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
+	geminiopenai "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -235,7 +235,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 func ConvertAntigravityResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
-		return ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, []byte(responseResult.Raw), param)
+		return geminiopenai.ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, []byte(responseResult.Raw), param)
 	}
 	return ""
 }

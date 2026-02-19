@@ -244,7 +244,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	} else {
 		// If there are no candidates (e.g., a pure usageMetadata chunk), return the usage chunk if present.
 		if gjson.GetBytes(rawJSON, "usageMetadata").Exists() && len(responseStrings) == 0 {
-			responseStrings = append(responseStrings, baseTemplate)
+			// OpenAI spec: chunks with only usage should have empty choices or OMIT it.
+			// LiteLLM can fail with "missing finish_reason for choice 0" if a choice exists with null finish_reason.
+			template, _ := sjson.Delete(baseTemplate, "choices")
+			template, _ = sjson.SetRaw(template, "choices", "[]")
+			responseStrings = append(responseStrings, template)
 		}
 	}
 

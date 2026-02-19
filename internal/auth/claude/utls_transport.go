@@ -111,14 +111,14 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloFirefox_Auto)
 
 	if err := tlsConn.Handshake(); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 
 	tr := &http2.Transport{}
 	h2Conn, err := tr.NewClientConn(tlsConn)
 	if err != nil {
-		tlsConn.Close()
+		_ = tlsConn.Close()
 		return nil, err
 	}
 

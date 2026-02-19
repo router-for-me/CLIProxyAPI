@@ -40,7 +40,7 @@ func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Confi
 		opts = &LoginOptions{}
 	}
 
-	authSvc := copilot.NewCopilotAuth(cfg)
+	authSvc := copilot.NewCopilotAuth(cfg, nil)
 
 	// Start the device flow
 	fmt.Println("Starting GitHub Copilot authentication...")
@@ -117,7 +117,7 @@ func RefreshGitHubCopilotToken(ctx context.Context, cfg *config.Config, storage 
 		return fmt.Errorf("no token available")
 	}
 
-	authSvc := copilot.NewCopilotAuth(cfg)
+	authSvc := copilot.NewCopilotAuth(cfg, nil)
 
 	// Validate the token can still get a Copilot API token
 	_, err := authSvc.GetCopilotAPIToken(ctx, storage.AccessToken)

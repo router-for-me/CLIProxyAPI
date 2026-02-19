@@ -109,7 +109,7 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 	if posTextDone == -1 || posPartDone == -1 || posMessageDone == -1 || posFuncAdded == -1 {
 		t.Fatalf("missing ordering events: textDone=%d partDone=%d messageDone=%d funcAdded=%d", posTextDone, posPartDone, posMessageDone, posFuncAdded)
 	}
-	if !(posTextDone < posPartDone && posPartDone < posMessageDone && posMessageDone < posFuncAdded) {
+	if posTextDone >= posPartDone || posPartDone >= posMessageDone || posMessageDone >= posFuncAdded {
 		t.Fatalf("unexpected message/function ordering: textDone=%d partDone=%d messageDone=%d funcAdded=%d", posTextDone, posPartDone, posMessageDone, posFuncAdded)
 	}
 	if !gotMessageDone {
@@ -277,10 +277,10 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 		if posAdded[idx] == -1 || posArgsDelta[idx] == -1 || posArgsDone[idx] == -1 || posItemDone[idx] == -1 {
 			t.Fatalf("missing function call events for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d", idx, posAdded[idx], posArgsDelta[idx], posArgsDone[idx], posItemDone[idx])
 		}
-		if !(posAdded[idx] < posArgsDelta[idx] && posArgsDelta[idx] < posArgsDone[idx] && posArgsDone[idx] < posItemDone[idx]) {
+		if posAdded[idx] >= posArgsDelta[idx] || posArgsDelta[idx] >= posArgsDone[idx] || posArgsDone[idx] >= posItemDone[idx] {
 			t.Fatalf("unexpected ordering for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d", idx, posAdded[idx], posArgsDelta[idx], posArgsDone[idx], posItemDone[idx])
 		}
-		if idx > 0 && !(posItemDone[idx-1] < posAdded[idx]) {
+		if idx > 0 && posItemDone[idx-1] >= posAdded[idx] {
 			t.Fatalf("function call events overlap between %d and %d: prevDone=%d nextAdded=%d", idx-1, idx, posItemDone[idx-1], posAdded[idx])
 		}
 	}
@@ -294,7 +294,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 	if deltaByIndex[2] == "" || !gjson.Valid(deltaByIndex[2]) || gjson.Get(deltaByIndex[2], "a").Int() != 1 {
 		t.Fatalf("unexpected delta for output_index 2: got %q", deltaByIndex[2])
 	}
-	if !(posItemDone[2] < posCompleted) {
+	if posItemDone[2] >= posCompleted {
 		t.Fatalf("response.completed should be after last output_item.done: last=%d completed=%d", posItemDone[2], posCompleted)
 	}
 }
@@ -344,10 +344,10 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 	if posFuncDone == -1 || posMsgAdded == -1 || posCompleted == -1 {
 		t.Fatalf("missing required events: funcDone=%d msgAdded=%d completed=%d", posFuncDone, posMsgAdded, posCompleted)
 	}
-	if !(posFuncDone < posMsgAdded) {
+	if posFuncDone >= posMsgAdded {
 		t.Fatalf("expected function_call to complete before message is added: funcDone=%d msgAdded=%d", posFuncDone, posMsgAdded)
 	}
-	if !(posMsgAdded < posCompleted) {
+	if posMsgAdded >= posCompleted {
 		t.Fatalf("expected response.completed after message added: msgAdded=%d completed=%d", posMsgAdded, posCompleted)
 	}
 }

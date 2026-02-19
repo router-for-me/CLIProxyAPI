@@ -47,7 +47,7 @@ func TestSanitizeFunctionName(t *testing.T) {
 			}
 			if len(got) > 0 {
 				first := got[0]
-				if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+				if (first < 'a' || first > 'z') && (first < 'A' || first > 'Z') && first != '_' {
 					t.Errorf("SanitizeFunctionName(%q) result starts with invalid char: %c", tt.input, first)
 				}
 			}

@@ -304,9 +304,10 @@ func collectClaudeContent(content gjson.Result, segments *[]string) {
 				addIfNotEmpty(segments, part.Get("thinking").String())
 			default:
 				// For unknown types, try to extract any text content
-				if part.Type == gjson.String {
+				switch part.Type {
+				case gjson.String:
 					addIfNotEmpty(segments, part.String())
-				} else if part.Type == gjson.JSON {
+				case gjson.JSON:
 					addIfNotEmpty(segments, part.Raw)
 				}
 			}

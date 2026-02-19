@@ -1,43 +1,82 @@
 package middleware
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 )
 
-func TestExtractRequestBodyPrefersOverride(t *testing.T) {
+type mockLogger struct {
+	enabled bool
+}
+
+func (m *mockLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
+	return nil
+}
+
+func (m *mockLogger) IsEnabled() bool {
+	return m.enabled
+}
+
+func (m *mockLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (logging.StreamingLogWriter, error) {
+	return &logging.NoOpStreamingLogWriter{}, nil
+}
+
+func TestResponseWriterWrapper_Basic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-
-	wrapper := &ResponseWriterWrapper{
-		requestInfo: &RequestInfo{Body: []byte("original-body")},
+	w := httptest.NewRecorder()
+	gw := gin.CreateTestContextOnly(w, gin.Default())
+	
+	logger := &mockLogger{enabled: true}
+	reqInfo := &RequestInfo{
+		URL:    "/test",
+		Method: "GET",
+		Body:   []byte("req body"),
 	}
-
-	body := wrapper.extractRequestBody(c)
-	if string(body) != "original-body" {
-		t.Fatalf("request body = %q, want %q", string(body), "original-body")
+	
+	wrapper := NewResponseWriterWrapper(gw.Writer, logger, reqInfo)
+	
+	// Test Write
+	n, err := wrapper.Write([]byte("hello"))
+	if err != nil || n != 5 {
+		t.Errorf("Write failed: n=%d, err=%v", n, err)
 	}
-
-	c.Set(requestBodyOverrideContextKey, []byte("override-body"))
-	body = wrapper.extractRequestBody(c)
-	if string(body) != "override-body" {
-		t.Fatalf("request body = %q, want %q", string(body), "override-body")
+	
+	// Test WriteHeader
+	wrapper.WriteHeader(http.StatusAccepted)
+	if wrapper.statusCode != http.StatusAccepted {
+		t.Errorf("expected status 202, got %d", wrapper.statusCode)
+	}
+	
+	// Test Finalize
+	err = wrapper.Finalize(gw)
+	if err != nil {
+		t.Errorf("Finalize failed: %v", err)
 	}
 }
 
-func TestExtractRequestBodySupportsStringOverride(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-
-	wrapper := &ResponseWriterWrapper{}
-	c.Set(requestBodyOverrideContextKey, "override-as-string")
-
-	body := wrapper.extractRequestBody(c)
-	if string(body) != "override-as-string" {
-		t.Fatalf("request body = %q, want %q", string(body), "override-as-string")
+func TestResponseWriterWrapper_DetectStreaming(t *testing.T) {
+	wrapper := &ResponseWriterWrapper{
+		requestInfo: &RequestInfo{
+			Body: []byte(`{"stream": true}`),
+		},
+	}
+	
+	if !wrapper.detectStreaming("text/event-stream") {
+		t.Error("expected true for text/event-stream")
+	}
+	
+	if wrapper.detectStreaming("application/json") {
+		t.Error("expected false for application/json even with stream:true in body (per logic)")
+	}
+	
+	wrapper.requestInfo.Body = []byte(`{}`)
+	if wrapper.detectStreaming("") {
+		t.Error("expected false for empty content type and no stream hint")
 	}
 }

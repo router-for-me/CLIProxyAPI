@@ -3,6 +3,8 @@ package gemini
 import (
 	"context"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 )
 
 func TestRestoreUsageMetadata(t *testing.T) {
@@ -67,7 +69,7 @@ func TestConvertAntigravityResponseToGeminiNonStream(t *testing.T) {
 }
 
 func TestConvertAntigravityResponseToGeminiStream(t *testing.T) {
-	ctx := context.WithValue(context.Background(), "alt", "")
+	ctx := context.WithValue(context.Background(), interfaces.ContextKeyAlt, "")
 
 	tests := []struct {
 		name     string

@@ -97,21 +97,23 @@ type DeviceFlowClient struct {
 
 // NewDeviceFlowClient creates a new device flow client.
 func NewDeviceFlowClient(cfg *config.Config) *DeviceFlowClient {
-	return NewDeviceFlowClientWithDeviceID(cfg, "")
+	return NewDeviceFlowClientWithDeviceID(cfg, "", nil)
 }
 
 // NewDeviceFlowClientWithDeviceID creates a new device flow client with the specified device ID.
-func NewDeviceFlowClientWithDeviceID(cfg *config.Config, deviceID string) *DeviceFlowClient {
-	client := &http.Client{Timeout: 30 * time.Second}
-	if cfg != nil {
-		client = util.SetProxy(&cfg.SDKConfig, client)
+func NewDeviceFlowClientWithDeviceID(cfg *config.Config, deviceID string, httpClient *http.Client) *DeviceFlowClient {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+		if cfg != nil {
+			httpClient = util.SetProxy(&cfg.SDKConfig, httpClient)
+		}
 	}
 	resolvedDeviceID := strings.TrimSpace(deviceID)
 	if resolvedDeviceID == "" {
 		resolvedDeviceID = getOrCreateDeviceID()
 	}
 	return &DeviceFlowClient{
-		httpClient: client,
+		httpClient: httpClient,
 		cfg:        cfg,
 		deviceID:   resolvedDeviceID,
 	}

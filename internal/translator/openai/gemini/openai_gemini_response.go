@@ -459,11 +459,12 @@ func captureBracketed(runes []rune, i int) (string, int) {
 	}
 	startRune := runes[i]
 	var endRune rune
-	if startRune == '{' {
+	switch startRune {
+	case '{':
 		endRune = '}'
-	} else if startRune == '[' {
+	case '[':
 		endRune = ']'
-	} else {
+	default:
 		return "", -1
 	}
 	depth := 0
@@ -491,9 +492,10 @@ func captureBracketed(runes []rune, i int) (string, int) {
 			j++
 			continue
 		}
-		if r == startRune {
+		switch r {
+		case startRune:
 			depth++
-		} else if r == endRune {
+		case endRune:
 			depth--
 			if depth == 0 {
 				return string(runes[i : j+1]), j + 1

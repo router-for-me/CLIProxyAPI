@@ -56,7 +56,6 @@ type webAuthSession struct {
 	authMethod       string // "google", "github", "builder-id", "idc"
 	startURL         string // Used for IDC
 	codeVerifier     string // Used for social auth PKCE
-	codeChallenge    string // Used for social auth PKCE
 }
 
 type OAuthWebHandler struct {
@@ -122,63 +121,6 @@ func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 	default:
 		h.renderError(c, fmt.Sprintf("Unknown authentication method: %s", method))
 	}
-}
-
-func (h *OAuthWebHandler) startSocialAuth(c *gin.Context, method string) {
-	stateID, err := generateStateID()
-	if err != nil {
-		h.renderError(c, "Failed to generate state parameter")
-		return
-	}
-
-	codeVerifier, codeChallenge, err := generatePKCE()
-	if err != nil {
-		h.renderError(c, "Failed to generate PKCE parameters")
-		return
-	}
-
-	socialClient := NewSocialAuthClient(h.cfg)
-	
-	var provider string
-	if method == "google" {
-		provider = string(ProviderGoogle)
-	} else {
-		provider = string(ProviderGitHub)
-	}
-
-	redirectURI := h.getSocialCallbackURL(c)
-	authURL := socialClient.buildLoginURL(provider, redirectURI, codeChallenge, stateID)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-
-	session := &webAuthSession{
-		stateID:       stateID,
-		authMethod:    method,
-		authURL:       authURL,
-		status:        statusPending,
-		startedAt:     time.Now(),
-		expiresIn:     600,
-		codeVerifier:  codeVerifier,
-		codeChallenge: codeChallenge,
-		region:        "us-east-1",
-		cancelFunc:    cancel,
-	}
-
-	h.mu.Lock()
-	h.sessions[stateID] = session
-	h.mu.Unlock()
-
-	go func() {
-		<-ctx.Done()
-		h.mu.Lock()
-		if session.status == statusPending {
-			session.status = statusFailed
-			session.error = "Authentication timed out"
-		}
-		h.mu.Unlock()
-	}()
-
-	c.Redirect(http.StatusFound, authURL)
 }
 
 func (h *OAuthWebHandler) getSocialCallbackURL(c *gin.Context) string {
@@ -495,11 +437,12 @@ func (h *OAuthWebHandler) handleCallback(c *gin.Context) {
 		return
 	}
 
-	if session.status == statusSuccess {
+	switch session.status {
+	case statusSuccess:
 		h.renderSuccess(c, session)
-	} else if session.status == statusFailed {
+	case statusFailed:
 		h.renderError(c, session.error)
-	} else {
+	default:
 		c.Redirect(http.StatusFound, "/v0/oauth/kiro/start")
 	}
 }

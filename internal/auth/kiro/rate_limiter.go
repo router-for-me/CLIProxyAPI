@@ -233,10 +233,7 @@ func (rl *RateLimiter) IsTokenAvailable(tokenKey string) bool {
 
 	// 检查是否被暂停
 	if state.IsSuspended {
-		if now.After(state.SuspendedAt.Add(rl.suspendCooldown)) {
-			return true
-		}
-		return false
+		return now.After(state.SuspendedAt.Add(rl.suspendCooldown))
 	}
 
 	// 检查是否在冷却期
@@ -253,11 +250,7 @@ func (rl *RateLimiter) IsTokenAvailable(tokenKey string) bool {
 	rl.mu.Unlock()
 	rl.mu.RLock()
 
-	if dailyRequests >= dailyMax {
-		return false
-	}
-
-	return true
+	return dailyRequests < dailyMax
 }
 
 // calculateBackoff 计算指数退避时间
