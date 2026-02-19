@@ -29,6 +29,17 @@ func GetClaudeModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
 		},
 		{
+			ID:                  "claude-sonnet-4-6",
+			Object:              "model",
+			Created:             1771372800, // 2026-02-17
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.6 Sonnet",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
 			ID:                  "claude-opus-4-6",
 			Object:              "model",
 			Created:             1770318000, // 2026-02-05
@@ -897,6 +908,8 @@ func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
 		"claude-opus-4-5-thinking":   {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-opus-4-6-thinking":   {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-sonnet-4-5":          {MaxCompletionTokens: 64000},
+		"claude-sonnet-4-6":          {MaxCompletionTokens: 64000},
+		"claude-sonnet-4-6-thinking": {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"gpt-oss-120b-medium":        {},
 		"tab_flash_lite_preview":     {},
 	}

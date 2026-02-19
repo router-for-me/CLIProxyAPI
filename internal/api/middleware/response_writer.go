@@ -14,6 +14,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 )
 
+const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
+
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
 type RequestInfo struct {
 	URL       string              // URL is the request URL.
@@ -223,8 +225,8 @@ func (w *ResponseWriterWrapper) detectStreaming(contentType string) bool {
 
 	// Only fall back to request payload hints when Content-Type is not set yet.
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
-		bodyStr := string(w.requestInfo.Body)
-		return strings.Contains(bodyStr, `"stream": true`) || strings.Contains(bodyStr, `"stream":true`)
+		return bytes.Contains(w.requestInfo.Body, []byte(`"stream": true`)) ||
+			bytes.Contains(w.requestInfo.Body, []byte(`"stream":true`))
 	}
 
 	return false
@@ -310,7 +312,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		return nil
 	}
 
-	return w.logRequest(finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
@@ -361,14 +363,30 @@ func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time
 	return time.Time{}
 }
 
-func (w *ResponseWriterWrapper) logRequest(statusCode int, headers map[string][]string, body []byte, apiRequestBody, apiResponseBody []byte, apiResponseTimestamp time.Time, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
+func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
+	if c != nil {
+		if bodyOverride, isExist := c.Get(requestBodyOverrideContextKey); isExist {
+			switch value := bodyOverride.(type) {
+			case []byte:
+				if len(value) > 0 {
+					return bytes.Clone(value)
+				}
+			case string:
+				if strings.TrimSpace(value) != "" {
+					return []byte(value)
+				}
+			}
+		}
+	}
+	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
+		return w.requestInfo.Body
+	}
+	return nil
+}
+
+func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, headers map[string][]string, body []byte, apiRequestBody, apiResponseBody []byte, apiResponseTimestamp time.Time, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
 	if w.requestInfo == nil {
 		return nil
-	}
-
-	var requestBody []byte
-	if len(w.requestInfo.Body) > 0 {
-		requestBody = w.requestInfo.Body
 	}
 
 	if loggerWithOptions, ok := w.logger.(interface {

@@ -15,10 +15,12 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
+const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
+
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
-// and uses the provided RequestLogger to record this data. When logging is disabled in the
-// logger, it still captures data so that upstream errors can be persisted.
+// and uses the provided RequestLogger to record this data. When full request logging is disabled,
+// body capture is limited to small known-size payloads to avoid large per-request memory spikes.
 func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if logger == nil {
@@ -26,7 +28,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
-		if c.Request.Method == http.MethodGet {
+		if shouldSkipMethodForRequestLogging(c.Request) {
 			c.Next()
 			return
 		}
@@ -37,8 +39,10 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
+		loggerEnabled := logger.IsEnabled()
+
 		// Capture request information
-		requestInfo, err := captureRequestInfo(c)
+		requestInfo, err := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled, c.Request))
 		if err != nil {
 			// Log error but continue processing
 			// In a real implementation, you might want to use a proper logger here
@@ -48,7 +52,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
-		if !logger.IsEnabled() {
+		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
 		}
 		c.Writer = wrapper
@@ -64,10 +68,47 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 	}
 }
 
+func shouldSkipMethodForRequestLogging(req *http.Request) bool {
+	if req == nil {
+		return true
+	}
+	if req.Method != http.MethodGet {
+		return false
+	}
+	return !isResponsesWebsocketUpgrade(req)
+}
+
+func isResponsesWebsocketUpgrade(req *http.Request) bool {
+	if req == nil || req.URL == nil {
+		return false
+	}
+	if req.URL.Path != "/v1/responses" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(req.Header.Get("Upgrade")), "websocket")
+}
+
+func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
+	if loggerEnabled {
+		return true
+	}
+	if req == nil || req.Body == nil {
+		return false
+	}
+	contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		return false
+	}
+	if req.ContentLength <= 0 {
+		return false
+	}
+	return req.ContentLength <= maxErrorOnlyCapturedRequestBodyBytes
+}
+
 // captureRequestInfo extracts relevant information from the incoming HTTP request.
 // It captures the URL, method, headers, and body. The request body is read and then
 // restored so that it can be processed by subsequent handlers.
-func captureRequestInfo(c *gin.Context) (*RequestInfo, error) {
+func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) {
 	// Capture URL with sensitive query parameters masked
 	maskedQuery := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 	url := c.Request.URL.Path
@@ -86,7 +127,7 @@ func captureRequestInfo(c *gin.Context) (*RequestInfo, error) {
 
 	// Capture request body
 	var body []byte
-	if c.Request.Body != nil {
+	if captureBody && c.Request.Body != nil {
 		// Read the body
 		bodyBytes, err := io.ReadAll(c.Request.Body)
 		if err != nil {

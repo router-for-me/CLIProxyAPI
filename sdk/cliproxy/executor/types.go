@@ -10,6 +10,17 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+const (
+	// PinnedAuthMetadataKey locks execution to a specific auth ID.
+	PinnedAuthMetadataKey = "pinned_auth_id"
+	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
+	SelectedAuthMetadataKey = "selected_auth_id"
+	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.
+	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
+	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
+	ExecutionSessionMetadataKey = "execution_session_id"
+)
+
 // Request encapsulates the translated payload that will be sent to a provider executor.
 type Request struct {
 	// Model is the upstream model identifier after translation.
