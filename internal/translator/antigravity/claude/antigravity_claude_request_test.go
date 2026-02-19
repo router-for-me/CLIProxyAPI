@@ -661,6 +661,85 @@ func TestConvertClaudeRequestToAntigravity_ThinkingOnly_NoHint(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_ToolResultNoContent(t *testing.T) {
+	// Bug repro: tool_result with no content field produces invalid JSON
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "tool_use",
+						"id": "MyTool-123-456",
+						"name": "MyTool",
+						"input": {"key": "value"}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "MyTool-123-456"
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, true)
+	outputStr := string(output)
+
+	if !gjson.Valid(outputStr) {
+		t.Errorf("Result is not valid JSON:\n%s", outputStr)
+	}
+
+	// Verify the functionResponse has a valid result value
+	fr := gjson.Get(outputStr, "request.contents.1.parts.0.functionResponse.response.result")
+	if !fr.Exists() {
+		t.Error("functionResponse.response.result should exist")
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ToolResultNullContent(t *testing.T) {
+	// Bug repro: tool_result with null content produces invalid JSON
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "tool_use",
+						"id": "MyTool-123-456",
+						"name": "MyTool",
+						"input": {"key": "value"}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "MyTool-123-456",
+						"content": null
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, true)
+	outputStr := string(output)
+
+	if !gjson.Valid(outputStr) {
+		t.Errorf("Result is not valid JSON:\n%s", outputStr)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *testing.T) {
 	// When tools + thinking but no system instruction, should create one with hint
 	inputJSON := []byte(`{
