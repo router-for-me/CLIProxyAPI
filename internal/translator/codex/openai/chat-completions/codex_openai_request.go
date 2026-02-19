@@ -59,7 +59,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	} else {
 		out, _ = sjson.Set(out, "reasoning.effort", "medium")
 	}
-	out, _ = sjson.Set(out, "parallel_tool_calls", true)
+	hasStrictStructuredOutput := false
 	out, _ = sjson.Set(out, "reasoning.summary", "auto")
 	out, _ = sjson.Set(out, "include", []string{"reasoning.encrypted_content"})
 
@@ -240,6 +240,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				}
 				if v := js.Get("strict"); v.Exists() {
 					out, _ = sjson.Set(out, "text.format.strict", v.Value())
+					if v.Bool() {
+						hasStrictStructuredOutput = true
+					}
 				}
 				if v := js.Get("schema"); v.Exists() {
 					out, _ = sjson.SetRaw(out, "text.format.schema", v.Raw)
@@ -300,6 +303,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					}
 					if v := fn.Get("strict"); v.Exists() {
 						item, _ = sjson.Set(item, "strict", v.Value())
+						if v.Bool() {
+							hasStrictStructuredOutput = true
+						}
 					}
 				}
 				out, _ = sjson.SetRaw(out, "tools.-1", item)
@@ -337,6 +343,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			}
 		}
 	}
+	out, _ = sjson.Set(out, "parallel_tool_calls", !hasStrictStructuredOutput)
 
 	out, _ = sjson.Set(out, "store", false)
 	return []byte(out)

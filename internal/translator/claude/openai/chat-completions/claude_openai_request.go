@@ -259,6 +259,20 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		})
 	}
 
+	// Map OpenAI structured output to Claude output_config format.
+	if responseFormat := root.Get("response_format"); responseFormat.Exists() && responseFormat.Get("type").String() == "json_schema" {
+		if jsonSchema := responseFormat.Get("json_schema"); jsonSchema.Exists() {
+			claudeFormat := `{"type":"json_schema"}`
+			if schema := jsonSchema.Get("schema"); schema.Exists() {
+				claudeFormat, _ = sjson.SetRaw(claudeFormat, "schema", schema.Raw)
+			}
+			if name := jsonSchema.Get("name"); name.Exists() {
+				claudeFormat, _ = sjson.Set(claudeFormat, "name", name.Value())
+			}
+			out, _ = sjson.SetRaw(out, "output_config.format", claudeFormat)
+		}
+	}
+
 	// Tools mapping: OpenAI tools -> Claude Code tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		hasAnthropicTools := false
@@ -274,6 +288,11 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", parameters.Raw)
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
 					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", parameters.Raw)
+				}
+				if strict := function.Get("strict"); strict.Exists() {
+					anthropicTool, _ = sjson.Set(anthropicTool, "strict", strict.Value())
+				} else if strict := tool.Get("strict"); strict.Exists() {
+					anthropicTool, _ = sjson.Set(anthropicTool, "strict", strict.Value())
 				}
 
 				out, _ = sjson.SetRaw(out, "tools.-1", anthropicTool)

@@ -285,6 +285,29 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		})
 	}
 
+	// Map OpenAI structured output to Claude output_config format.
+	if textFormat := root.Get("text.format"); textFormat.Exists() && textFormat.Get("type").String() == "json_schema" {
+		claudeFormat := `{"type":"json_schema"}`
+		if schema := textFormat.Get("schema"); schema.Exists() {
+			claudeFormat, _ = sjson.SetRaw(claudeFormat, "schema", schema.Raw)
+		}
+		if name := textFormat.Get("name"); name.Exists() {
+			claudeFormat, _ = sjson.Set(claudeFormat, "name", name.Value())
+		}
+		out, _ = sjson.SetRaw(out, "output_config.format", claudeFormat)
+	} else if responseFormat := root.Get("response_format"); responseFormat.Exists() && responseFormat.Get("type").String() == "json_schema" {
+		if jsonSchema := responseFormat.Get("json_schema"); jsonSchema.Exists() {
+			claudeFormat := `{"type":"json_schema"}`
+			if schema := jsonSchema.Get("schema"); schema.Exists() {
+				claudeFormat, _ = sjson.SetRaw(claudeFormat, "schema", schema.Raw)
+			}
+			if name := jsonSchema.Get("name"); name.Exists() {
+				claudeFormat, _ = sjson.Set(claudeFormat, "name", name.Value())
+			}
+			out, _ = sjson.SetRaw(out, "output_config.format", claudeFormat)
+		}
+	}
+
 	// tools mapping: parameters -> input_schema
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		toolsJSON := "[]"
@@ -301,6 +324,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				tJSON, _ = sjson.SetRaw(tJSON, "input_schema", params.Raw)
 			} else if params = tool.Get("parametersJsonSchema"); params.Exists() {
 				tJSON, _ = sjson.SetRaw(tJSON, "input_schema", params.Raw)
+			}
+			if strict := tool.Get("strict"); strict.Exists() {
+				tJSON, _ = sjson.Set(tJSON, "strict", strict.Value())
 			}
 
 			toolsJSON, _ = sjson.SetRaw(toolsJSON, "-1", tJSON)

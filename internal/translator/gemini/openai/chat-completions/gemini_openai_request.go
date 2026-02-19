@@ -97,6 +97,24 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 	}
 
+	// Map OpenAI structured output to Gemini generationConfig.
+	if responseFormat := gjson.GetBytes(rawJSON, "response_format"); responseFormat.Exists() {
+		switch responseFormat.Get("type").String() {
+		case "json_object":
+			out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
+		case "json_schema":
+			out, _ = sjson.SetBytes(out, "generationConfig.responseMimeType", "application/json")
+			if schema := responseFormat.Get("json_schema.schema"); schema.Exists() {
+				cleaned := util.CleanJSONSchemaForGemini(schema.Raw)
+				if gjson.Valid(cleaned) {
+					out, _ = sjson.SetRawBytes(out, "generationConfig.responseJsonSchema", []byte(cleaned))
+				} else {
+					out, _ = sjson.SetRawBytes(out, "generationConfig.responseJsonSchema", []byte(schema.Raw))
+				}
+			}
+		}
+	}
+
 	// messages -> systemInstruction + contents
 	messages := gjson.GetBytes(rawJSON, "messages")
 	if messages.IsArray() {

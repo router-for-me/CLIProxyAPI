@@ -407,9 +407,13 @@ func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts c
 	payload = fixGeminiImageAspectRatio(baseModel, payload)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	payload = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", payload, originalTranslated, requestedModel)
+	hasStructuredOutput := gjson.GetBytes(payload, "generationConfig.responseMimeType").Exists() ||
+		gjson.GetBytes(payload, "generationConfig.responseJsonSchema").Exists()
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.maxOutputTokens")
-	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseMimeType")
-	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseJsonSchema")
+	if !hasStructuredOutput {
+		payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseMimeType")
+		payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseJsonSchema")
+	}
 	metadataAction := "generateContent"
 	if req.Metadata != nil {
 		if action, _ := req.Metadata["action"].(string); action == "countTokens" {

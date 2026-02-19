@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -383,11 +384,45 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		}
 	}
 
+	// Map OpenAI structured output fields to Gemini generationConfig.
+	if textFormat := root.Get("text.format"); textFormat.Exists() {
+		switch textFormat.Get("type").String() {
+		case "json_object":
+			out, _ = sjson.Set(out, "generationConfig.responseMimeType", "application/json")
+		case "json_schema":
+			out, _ = sjson.Set(out, "generationConfig.responseMimeType", "application/json")
+			if schema := textFormat.Get("schema"); schema.Exists() {
+				cleaned := util.CleanJSONSchemaForGemini(schema.Raw)
+				if gjson.Valid(cleaned) {
+					out, _ = sjson.SetRaw(out, "generationConfig.responseJsonSchema", cleaned)
+				} else {
+					out, _ = sjson.SetRaw(out, "generationConfig.responseJsonSchema", schema.Raw)
+				}
+			}
+		}
+	} else if responseFormat := root.Get("response_format"); responseFormat.Exists() {
+		switch responseFormat.Get("type").String() {
+		case "json_object":
+			out, _ = sjson.Set(out, "generationConfig.responseMimeType", "application/json")
+		case "json_schema":
+			out, _ = sjson.Set(out, "generationConfig.responseMimeType", "application/json")
+			if schema := responseFormat.Get("json_schema.schema"); schema.Exists() {
+				cleaned := util.CleanJSONSchemaForGemini(schema.Raw)
+				if gjson.Valid(cleaned) {
+					out, _ = sjson.SetRaw(out, "generationConfig.responseJsonSchema", cleaned)
+				} else {
+					out, _ = sjson.SetRaw(out, "generationConfig.responseJsonSchema", schema.Raw)
+				}
+			}
+		}
+	}
+
 	// Handle generation config from OpenAI format
 	if maxOutputTokens := root.Get("max_output_tokens"); maxOutputTokens.Exists() {
-		genConfig := `{"maxOutputTokens":0}`
-		genConfig, _ = sjson.Set(genConfig, "maxOutputTokens", maxOutputTokens.Int())
-		out, _ = sjson.SetRaw(out, "generationConfig", genConfig)
+		if !gjson.Get(out, "generationConfig").Exists() {
+			out, _ = sjson.SetRaw(out, "generationConfig", `{}`)
+		}
+		out, _ = sjson.Set(out, "generationConfig.maxOutputTokens", maxOutputTokens.Int())
 	}
 
 	// Handle temperature if present
