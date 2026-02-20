@@ -264,19 +264,52 @@ func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	}
 }
 
-func TestUserFieldDeletion(t *testing.T) {  
+func TestUserFieldDeletion(t *testing.T) {
 	inputJSON := []byte(`{  
 		"model": "gpt-5.2",  
 		"user": "test-user",  
 		"input": [{"role": "user", "content": "Hello"}]  
-	}`)  
-	  
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)  
-	outputStr := string(output)  
-	  
-	// Verify user field is deleted  
-	userField := gjson.Get(outputStr, "user")  
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	// Verify user field is deleted
+	userField := gjson.Get(outputStr, "user")
 	if userField.Exists() {
 		t.Errorf("user field should be deleted, but it was found with value: %s", userField.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesStructuredOutputSchema(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"gpt-5.2",
+		"text":{
+			"format":{
+				"type":"json_schema",
+				"name":"structured_output",
+				"schema":{
+					"type":"object",
+					"properties":{
+						"result":{
+							"type":"object",
+							"additionalProperties":true,
+							"properties":{"ok":{"type":"boolean"}}
+						}
+					}
+				}
+			}
+		},
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "text.format.schema.additionalProperties"); got.Type != gjson.False {
+		t.Fatalf("root additionalProperties must be false, got %s", got.Raw)
+	}
+	if got := gjson.Get(outputStr, "text.format.schema.properties.result.additionalProperties"); got.Type != gjson.False {
+		t.Fatalf("nested additionalProperties must be false, got %s", got.Raw)
 	}
 }

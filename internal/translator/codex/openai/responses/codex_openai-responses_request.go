@@ -3,6 +3,7 @@ package responses
 import (
 	"fmt"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -29,6 +30,13 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	// Delete the user field as it is not supported by the Codex upstream.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
+
+	// Codex strict structured outputs require object schemas to explicitly
+	// include additionalProperties=false.
+	if schema := gjson.GetBytes(rawJSON, "text.format.schema"); schema.Exists() && schema.IsObject() {
+		cleaned := util.NormalizeStructuredOutputSchema(schema.Raw)
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "text.format.schema", []byte(cleaned))
+	}
 
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
