@@ -1,5 +1,5 @@
 builds:
-  - id: "cli-proxy-api-plus"
+  - id: "cliproxyapi-plusplus"
     env:
       - CGO_ENABLED=0
     goos:
@@ -10,11 +10,11 @@ builds:
       - amd64
       - arm64
     main: ./cmd/server/
-    binary: cli-proxy-api-plus
+    binary: cliproxyapi-plusplus
     ldflags:
-      - -s -w -X 'main.Version={{.Version}}-plus' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
+      - -s -w -X 'main.Version={{.Version}}-plusplus' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
 archives:
-  - id: "cli-proxy-api-plus"
+  - id: "cliproxyapi-plusplus"
     format: tar.gz
     format_overrides:
       - goos: windows

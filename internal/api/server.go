@@ -292,7 +292,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.registerManagementRoutes()
 	}
 
-	// === CLIProxyAPIPlus 扩展: 注册 Kiro OAuth Web 路由 ===
+	// === cliproxyapi++ 扩展: 注册 Kiro OAuth Web 路由 ===
 	kiroOAuthHandler := kiro.NewOAuthWebHandler(cfg)
 	kiroOAuthHandler.RegisterRoutes(engine)
 	log.Info("Kiro OAuth Web routes registered at /v0/oauth/kiro/*")
