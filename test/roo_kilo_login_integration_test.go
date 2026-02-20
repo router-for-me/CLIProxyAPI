@@ -1,5 +1,5 @@
 // Integration tests for -roo-login and -kilo-login flags.
-// Runs the cliproxyapi-plusplus binary with fake roo/kilo in PATH.
+// Runs the cliproxyapi++ binary with fake roo/kilo in PATH.
 package test
 
 import (

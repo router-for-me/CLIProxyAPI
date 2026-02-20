@@ -1,0 +1,88 @@
+# Taskfile for cliproxyapi++
+# Unified DX for building, testing, and managing the proxy.
+
+version: '3'
+
+vars:
+  BINARY_NAME: cliproxyapi++
+  DOCKER_IMAGE: kooshapari/cliproxyapi-plusplus
+  GO_FILES:
+    sh: find . -name "*.go" | grep -v "vendor"
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  # -- Build & Run --
+  build:
+    desc: "Build the cliproxyapi++ binary"
+    cmds:
+      - go build -o {{.BINARY_NAME}} ./cmd/server
+    sources:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+    generates:
+      - "{{.BINARY_NAME}}"
+
+  run:
+    desc: "Run the proxy locally with default config"
+    deps: [build]
+    cmds:
+      - ./{{.BINARY_NAME}} --config config.example.yaml
+
+  # -- Testing & Quality --
+  test:
+    desc: "Run all Go tests"
+    cmds:
+      - go test -v ./...
+
+  lint:
+    desc: "Run golangci-lint"
+    cmds:
+      - golangci-lint run ./...
+
+  tidy:
+    desc: "Tidy Go modules"
+    cmds:
+      - go mod tidy
+
+  # -- Docker Operations --
+  docker:build:
+    desc: "Build Docker image locally"
+    cmds:
+      - docker build -t {{.DOCKER_IMAGE}}:local .
+
+  docker:run:
+    desc: "Run proxy via Docker"
+    cmds:
+      - docker compose up -d
+
+  docker:stop:
+    desc: "Stop Docker proxy"
+    cmds:
+      - docker compose down
+
+  # -- Health & Diagnostics (UX/DX) --
+  doctor:
+    desc: "Check environment health for cliproxyapi++"
+    cmds:
+      - |
+        echo "Checking Go version..."
+        go version
+        echo "Checking dependencies..."
+        if [ ! -f go.mod ]; then echo "❌ go.mod missing"; exit 1; fi
+        echo "Checking config template..."
+        if [ ! -f config.example.yaml ]; then echo "❌ config.example.yaml missing"; exit 1; fi
+        echo "Checking Docker..."
+        docker --version || echo "⚠️ Docker not installed"
+        echo "✅ cliproxyapi++ environment looks healthy!"
+
+  # -- Agent Experience (AX) --
+  ax:spec:
+    desc: "Generate or verify agent-readable specs"
+    cmds:
+      - echo "Checking for llms.txt..."
+      - if [ ! -f llms.txt ]; then echo "⚠️ llms.txt missing"; else echo "✅ llms.txt present"; fi

@@ -10,9 +10,9 @@ builds:
       - amd64
       - arm64
     main: ./cmd/server/
-    binary: cliproxyapi-plusplus
+    binary: cliproxyapi++
     ldflags:
-      - -s -w -X 'main.Version={{.Version}}-plusplus' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
+      - -s -w -X 'main.Version={{.Version}}-++' -X 'main.Commit={{.ShortCommit}}' -X 'main.BuildDate={{.Date}}'
 archives:
   - id: "cliproxyapi-plusplus"
     format: tar.gz
