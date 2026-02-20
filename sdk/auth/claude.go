@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	// legacy client removed
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"

@@ -8,7 +8,7 @@ package openai
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"

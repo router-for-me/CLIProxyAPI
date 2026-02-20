@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 )
 
 func TestNewModelMapper(t *testing.T) {

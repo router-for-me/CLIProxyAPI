@@ -23,19 +23,18 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
-	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
-	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kilo"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/copilot"
+	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/gemini"
+	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/iflow"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kimi"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -812,87 +811,6 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
-}
-
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, priority) of an auth file.
-func (h *Handler) PatchAuthFileFields(c *gin.Context) {
-	if h.authManager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
-		return
-	}
-
-	var req struct {
-		Name     string  `json:"name"`
-		Prefix   *string `json:"prefix"`
-		ProxyURL *string `json:"proxy_url"`
-		Priority *int    `json:"priority"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
-		return
-	}
-
-	ctx := c.Request.Context()
-
-	// Find auth by name or ID
-	var targetAuth *coreauth.Auth
-	if auth, ok := h.authManager.GetByID(name); ok {
-		targetAuth = auth
-	} else {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name {
-				targetAuth = auth
-				break
-			}
-		}
-	}
-
-	if targetAuth == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
-		return
-	}
-
-	changed := false
-	if req.Prefix != nil {
-		targetAuth.Prefix = *req.Prefix
-		changed = true
-	}
-	if req.ProxyURL != nil {
-		targetAuth.ProxyURL = *req.ProxyURL
-		changed = true
-	}
-	if req.Priority != nil {
-		if targetAuth.Metadata == nil {
-			targetAuth.Metadata = make(map[string]any)
-		}
-		if *req.Priority == 0 {
-			delete(targetAuth.Metadata, "priority")
-		} else {
-			targetAuth.Metadata["priority"] = *req.Priority
-		}
-		changed = true
-	}
-
-	if !changed {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
-		return
-	}
-
-	targetAuth.UpdatedAt = time.Now()
-
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 func (h *Handler) disableAuth(ctx context.Context, id string) {
@@ -1917,7 +1835,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	state := fmt.Sprintf("gh-%d", time.Now().UnixNano())
 
 	// Initialize Copilot auth service
-	// We need to import "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot" first if not present
+	// We need to import "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/copilot" first if not present
 	// Assuming copilot package is imported as "copilot"
 	deviceClient := copilot.NewDeviceFlowClient(h.cfg)
 
@@ -2814,89 +2732,4 @@ func generateKiroPKCE() (verifier, challenge string, err error) {
 	challenge = base64.RawURLEncoding.EncodeToString(h[:])
 
 	return verifier, challenge, nil
-}
-
-func (h *Handler) RequestKiloToken(c *gin.Context) {
-	ctx := context.Background()
-
-	fmt.Println("Initializing Kilo authentication...")
-
-	state := fmt.Sprintf("kil-%d", time.Now().UnixNano())
-	kilocodeAuth := kilo.NewKiloAuth()
-
-	resp, err := kilocodeAuth.InitiateDeviceFlow(ctx)
-	if err != nil {
-		log.Errorf("Failed to initiate device flow: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initiate device flow"})
-		return
-	}
-
-	RegisterOAuthSession(state, "kilo")
-
-	go func() {
-		fmt.Printf("Please visit %s and enter code: %s\n", resp.VerificationURL, resp.Code)
-
-		status, err := kilocodeAuth.PollForToken(ctx, resp.Code)
-		if err != nil {
-			SetOAuthSessionError(state, "Authentication failed")
-			fmt.Printf("Authentication failed: %v\n", err)
-			return
-		}
-
-		profile, err := kilocodeAuth.GetProfile(ctx, status.Token)
-		if err != nil {
-			log.Warnf("Failed to fetch profile: %v", err)
-			profile = &kilo.Profile{Email: status.UserEmail}
-		}
-
-		var orgID string
-		if len(profile.Orgs) > 0 {
-			orgID = profile.Orgs[0].ID
-		}
-
-		defaults, err := kilocodeAuth.GetDefaults(ctx, status.Token, orgID)
-		if err != nil {
-			defaults = &kilo.Defaults{}
-		}
-
-		ts := &kilo.KiloTokenStorage{
-			Token:          status.Token,
-			OrganizationID: orgID,
-			Model:          defaults.Model,
-			Email:          status.UserEmail,
-			Type:           "kilo",
-		}
-
-		fileName := kilo.CredentialFileName(status.UserEmail)
-		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "kilo",
-			FileName: fileName,
-			Storage:  ts,
-			Metadata: map[string]any{
-				"email":           status.UserEmail,
-				"organization_id": orgID,
-				"model":          defaults.Model,
-			},
-		}
-
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
-		if errSave != nil {
-			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
-			return
-		}
-
-		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-		CompleteOAuthSession(state)
-		CompleteOAuthSessionsByProvider("kilo")
-	}()
-
-	c.JSON(200, gin.H{
-		"status":           "ok",
-		"url":              resp.VerificationURL,
-		"state":            state,
-		"user_code":        resp.Code,
-		"verification_uri": resp.VerificationURL,
-	})
 }

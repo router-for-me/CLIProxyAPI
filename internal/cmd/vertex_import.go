@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/vertex"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/vertex"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
