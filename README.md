@@ -15,6 +15,10 @@ English | [中文](README_CN.md)
 
 Why choose **cliproxyapi++** over the mainline? While the mainline focus is on open-source stability, the `++` variant is built for high-scale, production environments where security, automated lifecycle management, and broad provider support are critical.
 
+Full feature-by-feature change reference:
+
+- **[Feature Changes in ++](./docs/FEATURE_CHANGES_PLUSPLUS.md)**
+
 ### 📊 Feature Comparison Matrix
 
 | Feature | Mainline | CLIProxyAPI+ | **cliproxyapi++** |
@@ -112,6 +116,36 @@ We maintain strict quality gates to preserve the "hardened" status of the projec
 3.  **Governance**: Changes to core `pkg/` logic require a corresponding Issue discussion.
 
 See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
+
+---
+
+## 📚 Documentation
+
+- **[Docsets](./docs/docsets/)** — Role-oriented documentation sets.
+  - [Developer (Internal)](./docs/docsets/developer/internal/)
+  - [Developer (External)](./docs/docsets/developer/external/)
+  - [Technical User](./docs/docsets/user/)
+  - [Agent Operator](./docs/docsets/agent/)
+- **[Feature Changes in ++](./docs/FEATURE_CHANGES_PLUSPLUS.md)** — Comprehensive list of `++` differences and impacts.
+- **[Docs README](./docs/README.md)** — Core docs map.
+
+---
+
+## 🚢 Docs Deploy
+
+Local VitePress docs:
+
+```bash
+cd docs
+npm install
+npm run docs:dev
+npm run docs:build
+```
+
+GitHub Pages:
+
+- Workflow: `.github/workflows/vitepress-pages.yml`
+- URL convention: `https://<owner>.github.io/cliproxyapi-plusplus/`
 
 ---
 
