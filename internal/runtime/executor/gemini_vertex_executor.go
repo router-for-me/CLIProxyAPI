@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	vertexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/vertex"
+	vertexauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/vertex"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"

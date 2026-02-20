@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/gemini"
 	// legacy client removed
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"

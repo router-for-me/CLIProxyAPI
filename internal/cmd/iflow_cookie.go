@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 )
 

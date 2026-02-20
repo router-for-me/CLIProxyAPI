@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	qwenauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	qwenauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"

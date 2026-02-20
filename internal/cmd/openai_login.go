@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	log "github.com/sirupsen/logrus"

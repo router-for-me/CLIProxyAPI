@@ -11,7 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/diff"
 	"gopkg.in/yaml.v3"
 
 	log "github.com/sirupsen/logrus"

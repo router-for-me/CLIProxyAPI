@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
+	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
