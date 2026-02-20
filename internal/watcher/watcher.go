@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"gopkg.in/yaml.v3"
 
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"

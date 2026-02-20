@@ -3,7 +3,7 @@ package synthesizer
 import (
 	"testing"
 	"time"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 )
 
 func TestConfigSynthesizer_Synthesize(t *testing.T) {

@@ -4,7 +4,7 @@
 // embed CLIProxyAPI without importing internal packages.
 package config
 
-import internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+import internalconfig "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 
 type SDKConfig = internalconfig.SDKConfig
 
