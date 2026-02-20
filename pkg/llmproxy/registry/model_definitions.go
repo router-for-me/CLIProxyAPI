@@ -19,7 +19,9 @@ import (
 //   - codex
 //   - qwen
 //   - iflow
+//   - kimi
 //   - kiro
+//   - kilo
 //   - github-copilot
 //   - amazonq
 //   - cursor (via cursor-api; use dedicated cursor: block)
@@ -46,6 +48,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetQwenModels()
 	case "iflow":
 		return GetIFlowModels()
+	case "kimi":
+		return GetKimiModels()
 	case "github-copilot":
 		return GetGitHubCopilotModels()
 	case "kiro":
@@ -120,8 +124,10 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetOpenAIModels(),
 		GetQwenModels(),
 		GetIFlowModels(),
+		GetKimiModels(),
 		GetGitHubCopilotModels(),
 		GetKiroModels(),
+		GetKiloModels(),
 		GetAmazonQModels(),
 		GetCursorModels(),
 		GetMiniMaxModels(),
@@ -290,6 +296,19 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
+			ID:                  "gpt-5.3-codex",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "github-copilot",
+			Type:                "github-copilot",
+			DisplayName:         "GPT-5.3 Codex",
+			Description:         "OpenAI GPT-5.3 Codex via GitHub Copilot",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
+		},
+		{
 			ID:                  "claude-haiku-4.5",
 			Object:              "model",
 			Created:             now,
@@ -357,6 +376,18 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Type:                "github-copilot",
 			DisplayName:         "Claude Sonnet 4.5",
 			Description:         "Anthropic Claude Sonnet 4.5 via GitHub Copilot",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "claude-sonnet-4.6",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "github-copilot",
+			Type:                "github-copilot",
+			DisplayName:         "Claude Sonnet 4.6",
+			Description:         "Anthropic Claude Sonnet 4.6 via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
 			SupportedEndpoints:  []string{"/chat/completions"},
@@ -444,6 +475,18 @@ func GetKiroModels() []*ModelInfo {
 			Type:                "kiro",
 			DisplayName:         "Kiro Claude Opus 4.6",
 			Description:         "Claude Opus 4.6 via Kiro (2.2x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:                  "kiro-claude-sonnet-4-6",
+			Object:              "model",
+			Created:             1739836800, // 2025-02-18
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Sonnet 4.6",
+			Description:         "Claude Sonnet 4.6 via Kiro (1.3x credit)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
@@ -586,6 +629,18 @@ func GetKiroModels() []*ModelInfo {
 			Type:                "kiro",
 			DisplayName:         "Kiro Claude Opus 4.6 (Agentic)",
 			Description:         "Claude Opus 4.6 optimized for coding agents (chunked writes)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:                  "kiro-claude-sonnet-4-6-agentic",
+			Object:              "model",
+			Created:             1739836800, // 2025-02-18
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Sonnet 4.6 (Agentic)",
+			Description:         "Claude Sonnet 4.6 optimized for coding agents (chunked writes)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},

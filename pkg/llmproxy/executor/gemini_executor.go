@@ -545,3 +545,5 @@ func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
 	}
 	return rawJSON
 }
+
+func (e *GeminiExecutor) CloseExecutionSession(sessionID string) {}

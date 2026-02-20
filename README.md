@@ -7,72 +7,73 @@
 
 English | [中文](README_CN.md)
 
-**cliproxyapi++** is a high-performance, hardened fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). It provides a unified, OpenAI-compatible proxy interface for various LLM providers (Claude, Gemini, Codex, etc.) with advanced enterprise-grade features and enhanced third-party provider support.
+**cliproxyapi++** is the definitive high-performance, security-hardened fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). Designed with a "Defense in Depth" philosophy and a "Library-First" architecture, it provides an OpenAI-compatible interface for proprietary LLMs with enterprise-grade stability.
 
 ---
 
-## 📋 Table of Contents
+## 🏆 Deep Dive: The `++` Advantage
 
-- [Key Features](#-key-features)
-- [Differences from Mainline](#-differences-from-mainline)
-- [Getting Started](#-getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Docker Quick Start](#docker-quick-start)
-  - [Binary Installation](#binary-installation)
-- [Usage](#-usage)
-  - [Configuration](#configuration)
-  - [API Examples](#api-examples)
-- [Authentication](#-authentication)
-  - [Kiro OAuth](#kiro-oauth)
-  - [GitHub Copilot](#github-copilot)
-- [Governance & Hardening](#-governance--hardening)
-- [Contributing](#-contributing)
-- [License](#-license)
+Why choose **cliproxyapi++** over the mainline? While the mainline focus is on open-source stability, the `++` variant is built for high-scale, production environments where security, automated lifecycle management, and broad provider support are critical.
 
----
+### 📊 Feature Comparison Matrix
 
-## ✨ Key Features
-
-- 🛠 **OpenAI Compatibility**: Seamlessly use Claude, Gemini, and others through standard OpenAI SDKs.
-- 🔐 **OAuth Web Authentication**: Beautiful, browser-based login flow for providers like Kiro (AWS CodeWhisperer).
-- ⚡ **Performance & Scaling**: Built-in rate limiting, intelligent cooldown management, and smart routing.
-- 🔄 **Background Token Refresh**: Never worry about token expiration; tokens refresh automatically 10 minutes before they expire.
-- 📊 **Metrics & Monitoring**: Real-time request metrics collection for debugging and usage auditing.
-- 🛡 **Security Hardened**: Device fingerprinting and strict path guards for translator logic.
-- 🌍 **Multi-arch Support**: Official Docker images for both `amd64` and `arm64`.
+| Feature | Mainline | CLIProxyAPI+ | **cliproxyapi++** |
+| :--- | :---: | :---: | :---: |
+| **Core Proxy Logic** | ✅ | ✅ | ✅ |
+| **Basic Provider Support** | ✅ | ✅ | ✅ |
+| **Standard UI** | ❌ | ✅ | ✅ |
+| **Advanced Auth (Kiro/Copilot)** | ❌ | ⚠️ | ✅ **(Full Support)** |
+| **Background Token Refresh** | ❌ | ❌ | ✅ **(Auto-Refresh)** |
+| **Security Hardening** | Basic | Basic | ✅ **(Enterprise-Grade)** |
+| **Rate Limiting & Cooldown** | ❌ | ❌ | ✅ **(Intelligent)** |
+| **Core Reusability** | `internal/` | `internal/` | ✅ **(`pkg/llmproxy`)** |
+| **CI/CD Pipeline** | Basic | Basic | ✅ **(Signed/Multi-arch)** |
 
 ---
 
-## 🔍 Differences from Mainline
+## 🔍 Technical Differences & Hardening
 
-This fork (`cliproxyapi++`) extends the core CLIProxyAPI with:
-- **Full GitHub Copilot Support**: Integrated OAuth login and quota tracking.
-- **Kiro (AWS CodeWhisperer) Integration**: Specialized handlers for Kiro's unique protocol.
-- **Extended Provider Registry**: Support for MiniMax, Roo Code, Kilo AI, DeepSeek, Groq, Mistral, and more.
-- **Automated Packaging**: Full Goreleaser and multi-arch Docker CI/CD pipeline.
+### 1. Architectural Evolution: `pkg/llmproxy`
+Unlike the mainline which keeps its core logic in `internal/` (preventing external Go projects from importing it), **cliproxyapi++** has refactored its entire translation and proxying engine into a clean, public `pkg/llmproxy` library.
+*   **Reusability**: Import the proxy logic directly into your own Go applications.
+*   **Decoupling**: Configuration management is strictly separated from execution logic.
+
+### 2. Enterprise Authentication & Lifecycle
+*   **Full GitHub Copilot Integration**: Not just an API wrapper. `++` includes a full OAuth device flow, per-credential quota tracking, and intelligent session management.
+*   **Kiro (AWS CodeWhisperer) 2.0**: A custom-built web UI (`/v0/oauth/kiro`) for browser-based AWS Builder ID and Identity Center logins.
+*   **Background Token Refresh**: A dedicated worker service monitors tokens and automatically refreshes them 10 minutes before expiration, ensuring zero downtime for your agents.
+
+### 3. Security Hardening ("Defense in Depth")
+*   **Path Guard**: A custom GitHub Action workflow (`pr-path-guard`) that prevents any unauthorized changes to critical `internal/translator/` logic during PRs.
+*   **Device Fingerprinting**: Generates unique, immutable device identifiers to satisfy strict provider security checks and prevent account flagging.
+*   **Hardened Docker Base**: Built on a specific, audited Alpine 3.22.0 layer with minimal packages, reducing the potential attack surface.
+
+### 4. High-Scale Operations
+*   **Intelligent Cooldown**: Automated "cooling" mechanism that detects provider-side rate limits and intelligently pauses requests to specific providers while routing others.
+*   **Unified Model Converter**: A sophisticated mapping layer that allows you to request `claude-3-5-sonnet` and have the proxy automatically handle the specific protocol requirements of the target provider (Vertex, AWS, Anthropic, etc.).
 
 ---
 
 ## 🚀 Getting Started
 
 ### Prerequisites
-- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) (recommended)
-- OR [Go 1.26+](https://golang.org/dl/) for binary builds.
+- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
+- OR [Go 1.26+](https://golang.org/dl/)
 
-### Docker Quick Start
+### One-Command Deployment (Docker)
 
 ```bash
-# Create deployment directory
+# Setup deployment
 mkdir -p ~/cliproxy && cd ~/cliproxy
+curl -o config.yaml https://raw.githubusercontent.com/KooshaPari/cliproxyapi-plusplus/main/config.example.yaml
 
-# Create docker-compose.yml
+# Create compose file
 cat > docker-compose.yml << 'EOF'
 services:
-  cli-proxy-api:
+  cliproxy:
     image: KooshaPari/cliproxyapi-plusplus:latest
     container_name: cliproxyapi++
-    ports:
-      - "8317:8317"
+    ports: ["8317:8317"]
     volumes:
       - ./config.yaml:/CLIProxyAPI/config.yaml
       - ./auths:/root/.cli-proxy-api
@@ -80,97 +81,37 @@ services:
     restart: unless-stopped
 EOF
 
-# Download example config
-curl -o config.yaml https://raw.githubusercontent.com/KooshaPari/cliproxyapi-plusplus/main/config.example.yaml
-
-# Start the proxy
 docker compose up -d
 ```
 
-### Binary Installation
-
-Download the latest release for your platform from the [Releases page](https://github.com/KooshaPari/cliproxyapi-plusplus/releases).
-
-```bash
-chmod +x cliproxyapi++
-./cliproxyapi++ --config config.yaml
-```
-
 ---
 
-## 📖 Usage
+## 🛠️ Advanced Usage
 
-### Configuration
+### Extended Provider Support
+`cliproxyapi++` supports a massive registry of providers out-of-the-box:
+*   **Direct**: Claude, Gemini, OpenAI, Mistral, Groq, DeepSeek.
+*   **Aggregators**: OpenRouter, Together AI, Fireworks AI, Novita AI, SiliconFlow.
+*   **Proprietary**: Kiro (AWS), GitHub Copilot, Roo Code, Kilo AI, MiniMax.
 
-Edit `config.yaml` to add your API keys or configure provider settings. cliproxyapi++ supports hot-reloading; most changes take effect immediately without restart.
-
-```yaml
-server:
-  port: 8317
-  debug: false
-
-# Example: Claude API Key
-claude:
-  - api-key: "sk-ant-..."
-```
-
-### API Examples
-
-**List Models:**
-```bash
-curl http://localhost:8317/v1/models \
-  -H "Authorization: Bearer YOUR_ACCESS_KEY"
-```
-
-**Chat Completion (Claude via OpenAI format):**
-```bash
-curl http://localhost:8317/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_ACCESS_KEY" \
-  -d '{
-    "model": "claude-3-5-sonnet",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
-
----
-
-## 🔑 Authentication
-
-### Kiro OAuth
-Access the dedicated web UI for Kiro authentication:
-`http://your-server:8317/v0/oauth/kiro`
-
-Supports:
-- AWS Builder ID
-- AWS Identity Center (IDC)
-- Token migration from Kiro IDE
-
-### GitHub Copilot
-Login via the command line:
-```bash
-./cliproxyapi++ --github-login
-```
-
----
-
-## 🛡 Governance & Hardening
-
-**cliproxyapi++** is built with "Defense in Depth" in mind:
-1. **Path Protection**: The `pr-path-guard` CI workflow prevents unauthorized changes to core translation logic.
-2. **Resource Hardening**: Optimized Alpine-based Docker images with minimal attack surface.
-3. **Auditability**: Comprehensive logging and request tracking (disabled by default for privacy).
-4. **Packaging Governance**: All releases are cryptographically signed and checksummed using Goreleaser.
+### API Specification
+The proxy provides two main API surfaces:
+1.  **OpenAI Interface**: `/v1/chat/completions` and `/v1/models` (Full parity).
+2.  **Management Interface**:
+    *   `GET /v0/config`: Inspect current (hot-reloaded) config.
+    *   `GET /v0/oauth/kiro`: Interactive Kiro auth UI.
+    *   `GET /v0/logs`: Real-time log inspection.
 
 ---
 
 ## 🤝 Contributing
 
-We welcome community contributions! 
-- **Third-party Providers**: PRs for new LLM providers should be submitted directly to this repository.
-- **Core Features**: Changes to core logic (not provider-specific) should generally be proposed to the [mainline project](https://github.com/router-for-me/CLIProxyAPI).
+We maintain strict quality gates to preserve the "hardened" status of the project:
+1.  **Linting**: Must pass `golangci-lint` with zero warnings.
+2.  **Coverage**: All new translator logic MUST include unit tests.
+3.  **Governance**: Changes to core `pkg/` logic require a corresponding Issue discussion.
 
-Please see our [CONTRIBUTING.md](CONTRIBUTING.md) (coming soon) for more details.
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
 
 ---
 
@@ -181,5 +122,6 @@ Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
 ---
 
 <p align="center">
-  Built with ❤️ by the community
+  <b>Hardened AI Infrastructure for the Modern Agentic Stack.</b><br>
+  Built with ❤️ by the community.
 </p>

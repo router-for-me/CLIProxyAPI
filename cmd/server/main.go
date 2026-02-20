@@ -17,18 +17,18 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
+	configaccess "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/store"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/tui"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -88,7 +88,6 @@ func main() {
 	var kiroImport bool
 	var githubCopilotLogin bool
 	var rooLogin bool
-	var kiloLogin bool
 	var minimaxLogin bool
 	var deepseekLogin bool
 	var groqLogin bool
@@ -128,7 +127,6 @@ func main() {
 	flag.BoolVar(&kiroImport, "kiro-import", false, "Import Kiro token from Kiro IDE (~/.aws/sso/cache/kiro-auth-token.json)")
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
 	flag.BoolVar(&rooLogin, "roo-login", false, "Login to Roo Code (runs roo auth login)")
-	flag.BoolVar(&kiloLogin, "kilo-login", false, "Login to Kilo (runs kilo auth or kilocode auth)")
 	flag.BoolVar(&minimaxLogin, "minimax-login", false, "MiniMax config instructions (add minimax: block with api-key)")
 	flag.BoolVar(&deepseekLogin, "deepseek-login", false, "Login to DeepSeek using API key (stored in auth-dir)")
 	flag.BoolVar(&groqLogin, "groq-login", false, "Login to Groq using API key (stored in auth-dir)")

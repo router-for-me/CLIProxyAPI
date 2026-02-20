@@ -1028,3 +1028,5 @@ func vertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	}
 	return tok.AccessToken, nil
 }
+
+func (e *GeminiVertexExecutor) CloseExecutionSession(sessionID string) {}

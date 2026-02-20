@@ -1607,3 +1607,5 @@ func generateProjectID() string {
 	randomPart := strings.ToLower(uuid.NewString())[:5]
 	return adj + "-" + noun + "-" + randomPart
 }
+
+func (e *AntigravityExecutor) CloseExecutionSession(sessionID string) {}

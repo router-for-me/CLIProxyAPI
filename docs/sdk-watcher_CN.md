@@ -10,7 +10,7 @@
 
 ## Watcher行为
 
-- `internal/watcher/watcher.go`维护`currentAuths`快照，文件或配置事件触发后会重建快照并与旧快照对比，生成最小化的`AuthUpdate`列表。
+- `pkg/llmproxy/watcher/watcher.go`维护`currentAuths`快照，文件或配置事件触发后会重建快照并与旧快照对比，生成最小化的`AuthUpdate`列表。
 - 以凭据ID为维度对更新进行合并，同一凭据在短时间内的多次变更只会保留最新状态（例如先写后删只会下发`delete`）。
 - watcher内部运行异步分发循环：生产者只向内存缓冲追加事件并唤醒分发协程，即使通道暂时写满也不会阻塞文件事件线程。watcher停止时会取消分发循环，确保协程正常退出。
 

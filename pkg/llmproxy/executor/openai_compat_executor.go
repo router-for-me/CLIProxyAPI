@@ -361,3 +361,5 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+func (e *OpenAICompatExecutor) CloseExecutionSession(sessionID string) {}

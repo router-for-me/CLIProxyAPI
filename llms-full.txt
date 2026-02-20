@@ -6,9 +6,9 @@ cliproxyapi++ is a Go-based proxy that translates various proprietary AI model A
 ### Core Components
 - **Server**: `cmd/server/main.go` - Handles flag parsing, configuration loading, and starting the HTTP server.
 - **SDK**: `sdk/cliproxy/` - Contains the main service logic and authentication provider registry.
-- **LLM Proxy Logic**: `pkg/llmproxy/` - Implements the core translation, authentication, and communication protocols for each provider.
-- **Translators**: `internal/translator/` - Contains specialized logic for mapping between different API formats (e.g., Kiro, Codex, Gemini).
-- **Watcher/Synthesizer**: `internal/watcher/` - Manages configuration synthesis and dynamic updates.
+- **LLM Proxy Logic**: `pkg/llmproxy/` - Implements the core translation, authentication, and communication protocols for each provider. All core logic has been moved from `internal/` to this public package.
+- **Translators**: `pkg/llmproxy/translator/` - Contains specialized logic for mapping between different API formats (e.g., Kiro, Codex, Gemini).
+- **Watcher/Synthesizer**: `pkg/llmproxy/watcher/` - Manages configuration synthesis and dynamic updates.
 
 ### Configuration (`config.yaml`)
 - `server`: Port and debug settings.

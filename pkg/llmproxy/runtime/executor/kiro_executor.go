@@ -1831,7 +1831,7 @@ type eventStreamMessage struct {
 	Payload   []byte // JSON payload of the message
 }
 
-// NOTE: Request building functions moved to internal/translator/kiro/claude/kiro_claude_request.go
+// NOTE: Request building functions moved to pkg/llmproxy/translator/kiro/claude/kiro_claude_request.go
 // The executor now uses kiroclaude.BuildKiroPayload() instead
 
 // parseEventStream parses AWS Event Stream binary format.
@@ -2501,7 +2501,7 @@ func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 	return ""
 }
 
-// NOTE: Response building functions moved to internal/translator/kiro/claude/kiro_claude_response.go
+// NOTE: Response building functions moved to pkg/llmproxy/translator/kiro/claude/kiro_claude_response.go
 // The executor now uses kiroclaude.BuildClaudeResponse() and kiroclaude.ExtractThinkingFromContent() instead
 
 // streamToChannel converts AWS Event Stream to channel-based streaming.
@@ -3710,7 +3710,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// reporter.publish is called via defer
 }
 
-// NOTE: Claude SSE event builders moved to internal/translator/kiro/claude/kiro_claude_stream.go
+// NOTE: Claude SSE event builders moved to pkg/llmproxy/translator/kiro/claude/kiro_claude_stream.go
 // The executor now uses kiroclaude.BuildClaude*Event() functions instead
 
 // CountTokens counts tokens locally using tiktoken since Kiro API doesn't expose a token counting endpoint.
