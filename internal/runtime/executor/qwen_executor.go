@@ -12,7 +12,7 @@ import (
 
 	qwenauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"

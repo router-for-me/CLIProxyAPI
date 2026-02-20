@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 )
 
 // IFlowTokenStorage persists iFlow OAuth credentials alongside the derived API key.

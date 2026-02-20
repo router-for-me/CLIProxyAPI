@@ -8,7 +8,7 @@ package claude
 
 import (
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

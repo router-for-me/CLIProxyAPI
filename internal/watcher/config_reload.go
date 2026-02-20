@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/diff"
 	"gopkg.in/yaml.v3"
 
