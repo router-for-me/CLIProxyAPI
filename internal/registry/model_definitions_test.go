@@ -7,6 +7,7 @@ func TestGitHubCopilotGeminiModelsAreChatOnly(t *testing.T) {
 	required := map[string]bool{
 		"gemini-2.5-pro":         false,
 		"gemini-3-pro-preview":   false,
+		"gemini-3.1-pro-preview": false,
 		"gemini-3-flash-preview": false,
 	}
 
