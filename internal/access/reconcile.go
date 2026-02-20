@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	log "github.com/sirupsen/logrus"
 )
