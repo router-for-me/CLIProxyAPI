@@ -107,6 +107,44 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultKiroAliases(t *testing.T) {
 	}
 }
 
+func TestSanitizeOAuthModelAlias_InjectsDefaultGitHubCopilotAliases(t *testing.T) {
+	cfg := &Config{
+		OAuthModelAlias: map[string][]OAuthModelAlias{
+			"codex": {
+				{Name: "gpt-5", Alias: "g5"},
+			},
+		},
+	}
+
+	cfg.SanitizeOAuthModelAlias()
+
+	copilotAliases := cfg.OAuthModelAlias["github-copilot"]
+	if len(copilotAliases) == 0 {
+		t.Fatal("expected default github-copilot aliases to be injected")
+	}
+
+	aliasSet := make(map[string]bool, len(copilotAliases))
+	for _, a := range copilotAliases {
+		aliasSet[a.Alias] = true
+		if !a.Fork {
+			t.Fatalf("expected all default github-copilot aliases to have fork=true, got fork=false for %q", a.Alias)
+		}
+	}
+	expectedAliases := []string{
+		"claude-haiku-4-5",
+		"claude-opus-4-1",
+		"claude-opus-4-5",
+		"claude-opus-4-6",
+		"claude-sonnet-4-5",
+		"claude-sonnet-4-6",
+	}
+	for _, expected := range expectedAliases {
+		if !aliasSet[expected] {
+			t.Fatalf("expected default github-copilot alias %q to be present", expected)
+		}
+	}
+}
+
 func TestSanitizeOAuthModelAlias_DoesNotOverrideUserKiroAliases(t *testing.T) {
 	// When user has configured kiro aliases, defaults should NOT be injected
 	cfg := &Config{
@@ -125,6 +163,26 @@ func TestSanitizeOAuthModelAlias_DoesNotOverrideUserKiroAliases(t *testing.T) {
 	}
 	if kiroAliases[0].Alias != "my-custom-sonnet" {
 		t.Fatalf("expected user alias to be preserved, got %q", kiroAliases[0].Alias)
+	}
+}
+
+func TestSanitizeOAuthModelAlias_DoesNotOverrideUserGitHubCopilotAliases(t *testing.T) {
+	cfg := &Config{
+		OAuthModelAlias: map[string][]OAuthModelAlias{
+			"github-copilot": {
+				{Name: "claude-opus-4.6", Alias: "my-opus", Fork: true},
+			},
+		},
+	}
+
+	cfg.SanitizeOAuthModelAlias()
+
+	copilotAliases := cfg.OAuthModelAlias["github-copilot"]
+	if len(copilotAliases) != 1 {
+		t.Fatalf("expected 1 user-configured github-copilot alias, got %d", len(copilotAliases))
+	}
+	if copilotAliases[0].Alias != "my-opus" {
+		t.Fatalf("expected user alias to be preserved, got %q", copilotAliases[0].Alias)
 	}
 }
 
@@ -151,6 +209,24 @@ func TestSanitizeOAuthModelAlias_DoesNotReinjectAfterExplicitDeletion(t *testing
 	// Other channels should be unaffected
 	if len(cfg.OAuthModelAlias["codex"]) != 1 {
 		t.Fatal("expected codex aliases to be preserved")
+	}
+}
+
+func TestSanitizeOAuthModelAlias_GitHubCopilotDoesNotReinjectAfterExplicitDeletion(t *testing.T) {
+	cfg := &Config{
+		OAuthModelAlias: map[string][]OAuthModelAlias{
+			"github-copilot": nil, // explicitly deleted
+		},
+	}
+
+	cfg.SanitizeOAuthModelAlias()
+
+	copilotAliases := cfg.OAuthModelAlias["github-copilot"]
+	if len(copilotAliases) != 0 {
+		t.Fatalf("expected github-copilot aliases to remain empty after explicit deletion, got %d aliases", len(copilotAliases))
+	}
+	if _, exists := cfg.OAuthModelAlias["github-copilot"]; !exists {
+		t.Fatal("expected github-copilot key to be preserved as nil marker after sanitization")
 	}
 }
 
