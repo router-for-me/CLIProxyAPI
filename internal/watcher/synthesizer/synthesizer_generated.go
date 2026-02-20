@@ -9,21 +9,21 @@ import (
 func (s *ConfigSynthesizer) getDedicatedProviderEntries(p config.ProviderSpec, cfg *config.Config) []config.OAICompatProviderConfig {
 	switch p.YAMLKey {
 	case "minimax":
-		return cfg.MinimaxKey
+		return cfg.MiniMaxKey
 	case "roo":
 		return cfg.RooKey
 	case "kilo":
 		return cfg.KiloKey
 	case "deepseek":
-		return cfg.DeepseekKey
+		return cfg.DeepSeekKey
 	case "groq":
 		return cfg.GroqKey
 	case "mistral":
 		return cfg.MistralKey
 	case "siliconflow":
-		return cfg.SiliconflowKey
+		return cfg.SiliconFlowKey
 	case "openrouter":
-		return cfg.OpenrouterKey
+		return cfg.OpenRouterKey
 	case "together":
 		return cfg.TogetherKey
 	case "fireworks":

@@ -1,0 +1,89 @@
+[
+  {
+    "name": "minimax",
+    "yaml_key": "minimax",
+    "go_name": "MiniMax",
+    "base_url": "https://api.minimax.chat/v1"
+  },
+  {
+    "name": "roo",
+    "yaml_key": "roo",
+    "go_name": "Roo",
+    "base_url": "https://api.roocode.com/v1"
+  },
+  {
+    "name": "kilo",
+    "yaml_key": "kilo",
+    "go_name": "Kilo",
+    "base_url": "https://api.kilo.ai/v1"
+  },
+  {
+    "name": "deepseek",
+    "yaml_key": "deepseek",
+    "go_name": "DeepSeek",
+    "base_url": "https://api.deepseek.com"
+  },
+  {
+    "name": "groq",
+    "yaml_key": "groq",
+    "go_name": "Groq",
+    "base_url": "https://api.groq.com/openai/v1"
+  },
+  {
+    "name": "mistral",
+    "yaml_key": "mistral",
+    "go_name": "Mistral",
+    "base_url": "https://api.mistral.ai/v1"
+  },
+  {
+    "name": "siliconflow",
+    "yaml_key": "siliconflow",
+    "go_name": "SiliconFlow",
+    "base_url": "https://api.siliconflow.cn/v1"
+  },
+  {
+    "name": "openrouter",
+    "yaml_key": "openrouter",
+    "go_name": "OpenRouter",
+    "base_url": "https://openrouter.ai/api/v1"
+  },
+  {
+    "name": "together",
+    "yaml_key": "together",
+    "go_name": "Together",
+    "base_url": "https://api.together.xyz/v1"
+  },
+  {
+    "name": "fireworks",
+    "yaml_key": "fireworks",
+    "go_name": "Fireworks",
+    "base_url": "https://api.fireworks.ai/inference/v1"
+  },
+  {
+    "name": "novita",
+    "yaml_key": "novita",
+    "go_name": "Novita",
+    "base_url": "https://api.novita.ai/v1"
+  },
+  {
+    "name": "zen",
+    "base_url": "https://opencode.ai/zen/v1",
+    "env_vars": ["ZEN_API_KEY", "OPENCODE_API_KEY", "THGENT_ZEN_API_KEY"],
+    "default_models": [
+      { "name": "glm-5", "alias": "glm-5" },
+      { "name": "glm-5", "alias": "z-ai/glm-5" },
+      { "name": "glm-5", "alias": "gpt-5-mini" },
+      { "name": "glm-5", "alias": "gemini-3-flash" }
+    ]
+  },
+  {
+    "name": "nim",
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "env_vars": ["NIM_API_KEY", "THGENT_NIM_API_KEY", "NVIDIA_API_KEY"],
+    "default_models": [
+      { "name": "z-ai/glm-5", "alias": "z-ai/glm-5" },
+      { "name": "z-ai/glm-5", "alias": "glm-5" },
+      { "name": "z-ai/glm-5", "alias": "step-3.5-flash" }
+    ]
+  }
+]

@@ -494,10 +494,21 @@ func ParseSearchResults(response *McpResponse) *WebSearchResults {
 	return &results
 }
 
+// SseEvent represents a Server-Sent Event
+type SseEvent struct {
+	Event string
+	Data  interface{}
+}
+
 // ToSSEString converts the event to SSE wire format
 func (e *SseEvent) ToSSEString() string {
 	dataBytes, _ := json.Marshal(e.Data)
 	return fmt.Sprintf("event: %s\ndata: %s\n\n", e.Event, string(dataBytes))
+}
+
+// GenerateMessageID generates a unique message ID for Claude API
+func GenerateMessageID() string {
+	return "msg_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:24]
 }
 
 // GenerateWebSearchEvents generates the 11-event SSE sequence for web search.
@@ -711,91 +722,3 @@ func generateSearchSummary(query string, results *WebSearchResults) string {
 	return sb.String()
 }
 
-// GenerateSearchIndicatorEvents generates ONLY the search indicator SSE events
-func GenerateSearchIndicatorEvents(
-	query string,
-	toolUseID string,
-	searchResults *WebSearchResults,
-	startIndex int,
-) []SseEvent {
-	events := make([]SseEvent, 0, 4)
-
-	// 1. content_block_start (server_tool_use)
-	events = append(events, SseEvent{
-		Event: "content_block_start",
-		Data: map[string]interface{}{
-			"type":  "content_block_start",
-			"index": startIndex,
-			"content_block": map[string]interface{}{
-				"id":    toolUseID,
-				"type":  "server_tool_use",
-				"name":  "web_search",
-				"input": map[string]interface{}{},
-			},
-		},
-	})
-
-	// 2. content_block_delta (input_json_delta)
-	inputJSON, _ := json.Marshal(map[string]string{"query": query})
-	events = append(events, SseEvent{
-		Event: "content_block_delta",
-		Data: map[string]interface{}{
-			"type":  "content_block_delta",
-			"index": startIndex,
-			"delta": map[string]interface{}{
-				"type":         "input_json_delta",
-				"partial_json": string(inputJSON),
-			},
-		},
-	})
-
-	// 3. content_block_stop (server_tool_use)
-	events = append(events, SseEvent{
-		Event: "content_block_stop",
-		Data: map[string]interface{}{
-			"type":  "content_block_stop",
-			"index": startIndex,
-		},
-	})
-
-	// 4. content_block_start (web_search_tool_result)
-	searchContent := make([]map[string]interface{}, 0)
-	if searchResults != nil {
-		for _, r := range searchResults.Results {
-			snippet := ""
-			if r.Snippet != nil {
-				snippet = *r.Snippet
-			}
-			searchContent = append(searchContent, map[string]interface{}{
-				"type":              "web_search_result",
-				"title":             r.Title,
-				"url":               r.URL,
-				"encrypted_content": snippet,
-				"page_age":          nil,
-			})
-		}
-	}
-	events = append(events, SseEvent{
-		Event: "content_block_start",
-		Data: map[string]interface{}{
-			"type":  "content_block_start",
-			"index": startIndex + 1,
-			"content_block": map[string]interface{}{
-				"type":        "web_search_tool_result",
-				"tool_use_id": toolUseID,
-				"content":     searchContent,
-			},
-		},
-	})
-
-	// 5. content_block_stop (web_search_tool_result)
-	events = append(events, SseEvent{
-		Event: "content_block_stop",
-		Data: map[string]interface{}{
-			"type":  "content_block_stop",
-			"index": startIndex + 1,
-		},
-	})
-
-	return events
-}

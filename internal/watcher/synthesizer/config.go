@@ -37,31 +37,8 @@ func (s *ConfigSynthesizer) synthesizeOAICompatFromDedicatedBlocks(ctx *Synthesi
 
 	out := make([]*coreauth.Auth, 0)
 	for _, p := range config.GetDedicatedProviders() {
-		var entries []config.OAICompatProviderConfig
-		switch p.YAMLKey {
-		case "minimax":
-			entries = cfg.MiniMaxKey
-		case "roo":
-			entries = cfg.RooKey
-		case "kilo":
-			entries = cfg.KiloKey
-		case "deepseek":
-			entries = cfg.DeepSeekKey
-		case "groq":
-			entries = cfg.GroqKey
-		case "mistral":
-			entries = cfg.MistralKey
-		case "siliconflow":
-			entries = cfg.SiliconFlowKey
-		case "openrouter":
-			entries = cfg.OpenRouterKey
-		case "together":
-			entries = cfg.TogetherKey
-		case "fireworks":
-			entries = cfg.FireworksKey
-		case "novita":
-			entries = cfg.NovitaKey
-		default:
+		entries := s.getDedicatedProviderEntries(p, cfg)
+		if len(entries) == 0 {
 			continue
 		}
 
