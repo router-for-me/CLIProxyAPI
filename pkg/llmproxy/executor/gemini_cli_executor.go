@@ -951,3 +951,5 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 
 	return nil, fmt.Errorf("no RetryInfo found")
 }
+
+func (e *GeminiCLIExecutor) CloseExecutionSession(sessionID string) {}

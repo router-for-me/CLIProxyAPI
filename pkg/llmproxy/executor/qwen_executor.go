@@ -382,3 +382,5 @@ func qwenCreds(a *cliproxyauth.Auth) (token, baseURL string) {
 	}
 	return
 }
+
+func (e *QwenExecutor) CloseExecutionSession(sessionID string) {}

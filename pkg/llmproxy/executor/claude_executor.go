@@ -1388,3 +1388,5 @@ func injectSystemCacheControl(payload []byte) []byte {
 
 	return payload
 }
+
+func (e *ClaudeExecutor) CloseExecutionSession(sessionID string) {}

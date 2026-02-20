@@ -17,7 +17,7 @@ import (
 
 const (
 	// copilotAPITokenURL is the endpoint for getting Copilot API tokens from GitHub token.
-	copilotAPITokenURL = "https://api.github.com/copilot_internal/v2/token"
+	copilotAPITokenURL = "https://api.github.com/copilot_pkg/llmproxy/v2/token"
 	// copilotAPIEndpoint is the base URL for making API requests.
 	copilotAPIEndpoint = "https://api.githubcopilot.com"
 

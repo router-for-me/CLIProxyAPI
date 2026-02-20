@@ -572,3 +572,5 @@ func preserveReasoningContentInMessages(body []byte) []byte {
 
 	return body
 }
+
+func (e *IFlowExecutor) CloseExecutionSession(sessionID string) {}

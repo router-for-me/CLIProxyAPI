@@ -12,6 +12,10 @@ import (
 	baseauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth"
 )
 
+// CloseAllExecutionSessionsID is a special session ID used to signal that all
+// active execution sessions should be terminated.
+const CloseAllExecutionSessionsID = "*"
+
 // Auth encapsulates the runtime state and metadata associated with a single credential.
 type Auth struct {
 	// ID uniquely identifies the auth record across restarts.

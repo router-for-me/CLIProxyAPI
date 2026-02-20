@@ -168,6 +168,8 @@ func (MyExecutor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipe
 	return &clipexec.StreamResult{Chunks: ch}, nil
 }
 
+func (MyExecutor) CloseExecutionSession(sessionID string) {}
+
 func (MyExecutor) Refresh(ctx context.Context, a *coreauth.Auth) (*coreauth.Auth, error) {
 	return a, nil
 }

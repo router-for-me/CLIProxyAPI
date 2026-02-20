@@ -24,7 +24,7 @@ What provider and model are you using? (e.g. Kiro, Claude, Gemini)
 What LLM Client are you using? (e.g. Roo Code, Claude Code, Cursor, etc.)
 
 **Environment Information**
-- **cliproxyapi++ Version**: (e.g., v6.0.0-plusplus.1)
+- **cliproxyapi++ Version**: (e.g., v6.0.0-++.1)
 - **Deployment Method**: (e.g., Docker, Binary)
 - **OS**: (e.g. macOS, Ubuntu 22.04)
 

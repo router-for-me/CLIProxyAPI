@@ -28,7 +28,7 @@ tmp/*
 pgstore/*
 gitstore/*
 objectstore/*
-internal/cursorstorage/*
+pkg/llmproxy/cursorstorage/*
 auths/*
 !auths/.gitkeep
 

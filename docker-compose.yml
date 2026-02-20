@@ -9,7 +9,7 @@ services:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: cliproxyapi-plusplus
+    container_name: cliproxyapi++
     # env_file:
     #   - .env
     environment:
