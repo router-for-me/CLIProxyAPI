@@ -105,10 +105,6 @@ type Config struct {
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
-	// ClaudeHeaderDefaults configures default header values for Claude API requests.
-	// These are used as fallbacks when the client does not send its own headers.
-	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
-
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
@@ -138,15 +134,6 @@ type Config struct {
 	// This is useful when you want to login with a different account without logging out
 	// from your current session. Default: false.
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
-}
-
-// ClaudeHeaderDefaults configures default header values injected into Claude API requests
-// when the client does not send them. Update these when Claude Code releases a new version.
-type ClaudeHeaderDefaults struct {
-	UserAgent      string `yaml:"user-agent" json:"user-agent"`
-	PackageVersion string `yaml:"package-version" json:"package-version"`
-	RuntimeVersion string `yaml:"runtime-version" json:"runtime-version"`
-	Timeout        string `yaml:"timeout" json:"timeout"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -320,10 +307,6 @@ type CloakConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
-
-	// CacheUserID controls whether Claude user_id values are cached per API key.
-	// When false, a fresh random user_id is generated for every request.
-	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,
@@ -390,9 +373,6 @@ type CodexKey struct {
 	// BaseURL is the base URL for the Codex API endpoint.
 	// If empty, the default Codex API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
-
-	// Websockets enables the Responses API websocket transport for this credential.
-	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
@@ -872,24 +852,22 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		return
 	}
 
-	// Inject channel defaults when the channel is absent in user config.
-	// Presence is checked case-insensitively and includes explicit nil/empty markers.
+	// Inject default Kiro aliases if no user-configured kiro aliases exist
 	if cfg.OAuthModelAlias == nil {
 		cfg.OAuthModelAlias = make(map[string][]OAuthModelAlias)
 	}
-	hasChannel := func(channel string) bool {
+	if _, hasKiro := cfg.OAuthModelAlias["kiro"]; !hasKiro {
+		// Check case-insensitive too
+		found := false
 		for k := range cfg.OAuthModelAlias {
-			if strings.EqualFold(strings.TrimSpace(k), channel) {
-				return true
+			if strings.EqualFold(strings.TrimSpace(k), "kiro") {
+				found = true
+				break
 			}
 		}
-		return false
-	}
-	if !hasChannel("kiro") {
-		cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
-	}
-	if !hasChannel("github-copilot") {
-		cfg.OAuthModelAlias["github-copilot"] = defaultGitHubCopilotAliases()
+		if !found {
+			cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
+		}
 	}
 
 	if len(cfg.OAuthModelAlias) == 0 {
@@ -1060,45 +1038,15 @@ func normalizeModelPrefix(prefix string) string {
 	return trimmed
 }
 
-// PremadeOAICompatSpec defines a premade OpenAI-compatible provider.
-type PremadeOAICompatSpec struct {
-	BaseURL       string
-	EnvVars       []string
-	DefaultModels []OpenAICompatibilityModel
-}
-
-// PremadeOAICompatRegistry maps provider names to their premade specifications.
-var PremadeOAICompatRegistry = map[string]PremadeOAICompatSpec{
-	"zen": {
-		BaseURL: "https://opencode.ai/zen/v1",
-		EnvVars: []string{"ZEN_API_KEY", "OPENCODE_API_KEY", "THGENT_ZEN_API_KEY"},
-		DefaultModels: []OpenAICompatibilityModel{
-			{Name: "glm-5", Alias: "glm-5"},
-			{Name: "glm-5", Alias: "z-ai/glm-5"},
-			{Name: "glm-5", Alias: "gpt-5-mini"},
-			{Name: "glm-5", Alias: "gemini-3-flash"},
-		},
-	},
-	"nim": {
-		BaseURL: "https://integrate.api.nvidia.com/v1",
-		EnvVars: []string{"NIM_API_KEY", "THGENT_NIM_API_KEY", "NVIDIA_API_KEY"},
-		DefaultModels: []OpenAICompatibilityModel{
-			{Name: "z-ai/glm-5", Alias: "z-ai/glm-5"},
-			{Name: "z-ai/glm-5", Alias: "glm-5"},
-			{Name: "z-ai/glm-5", Alias: "step-3.5-flash"},
-		},
-	},
-}
-
 // InjectPremadeFromEnv injects premade providers (zen, nim) if their environment variables are set.
 // This implements Recommendation: Option B from LLM_PROXY_RESEARCH_AUDIT_PLAN.md.
 func (cfg *Config) InjectPremadeFromEnv() {
-	for name, spec := range PremadeOAICompatRegistry {
-		cfg.injectPremadeFromSpec(name, spec)
+	for _, spec := range GetPremadeProviders() {
+		cfg.injectPremadeFromSpec(spec.Name, spec)
 	}
 }
 
-func (cfg *Config) injectPremadeFromSpec(name string, spec PremadeOAICompatSpec) {
+func (cfg *Config) injectPremadeFromSpec(name string, spec ProviderSpec) {
 	// Check if already in config
 	for _, compat := range cfg.OpenAICompatibility {
 		if strings.ToLower(compat.Name) == name {
