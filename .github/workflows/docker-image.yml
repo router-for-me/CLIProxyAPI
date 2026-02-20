@@ -7,8 +7,8 @@ on:
       - v*
 
 env:
-  APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/cli-proxy-api-plus
+  APP_NAME: cliproxyapi-plusplus
+  DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/cliproxyapi-plusplus
 
 jobs:
   docker_amd64:

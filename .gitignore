@@ -10,6 +10,7 @@ coverage_*.out
 # Git cache
 .git-cache/
 
+
 # Configuration
 config.yaml
 .env

@@ -1,8 +1,8 @@
-# CLIProxyAPI Plus
+# cliproxyapi++
 
 [English](README.md) | 中文
 
-这是 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Plus 版本，在原有基础上增加了第三方供应商的支持。
+这是 [cliproxyapi++](https://github.com/KooshaPari/cliproxyapi-plusplus) 的 Plus 版本，在原有基础上增加了第三方供应商的支持。
 
 所有的第三方供应商支持都由第三方社区维护者提供，CLIProxyAPI 不提供技术支持。如需取得支持，请与对应的社区维护者联系。
 
@@ -11,7 +11,7 @@
 ## 与主线版本版本差异
 
 - 新增 GitHub Copilot 支持（OAuth 登录），由[em4go](https://github.com/em4go/CLIProxyAPI/tree/feature/github-copilot-auth)提供
-- 新增 Kiro (AWS CodeWhisperer) 支持 (OAuth 登录), 由[fuko2935](https://github.com/fuko2935/CLIProxyAPI/tree/feature/kiro-integration)、[Ravens2121](https://github.com/Ravens2121/CLIProxyAPIPlus/)提供
+- 新增 Kiro (AWS CodeWhisperer) 支持 (OAuth 登录), 由[fuko2935](https://github.com/fuko2935/CLIProxyAPI/tree/feature/kiro-integration)、[Ravens2121](https://github.com/KooshaPari/cliproxyapi-plusplus/)提供
 
 ## 新增功能 (Plus 增强版)
 
@@ -52,8 +52,8 @@ mkdir -p ~/cli-proxy && cd ~/cli-proxy
 cat > docker-compose.yml << 'EOF'
 services:
   cli-proxy-api:
-    image: eceasy/cli-proxy-api-plus:latest
-    container_name: cli-proxy-api-plus
+    image: KooshaPari/cliproxyapi-plusplus:latest
+    container_name: cliproxyapi-plusplus
     ports:
       - "8317:8317"
     volumes:
@@ -64,7 +64,7 @@ services:
 EOF
 
 # 下载示例配置
-curl -o config.yaml https://raw.githubusercontent.com/router-for-me/CLIProxyAPIPlus/main/config.example.yaml
+curl -o config.yaml https://raw.githubusercontent.com/KooshaPari/cliproxyapi-plusplus/main/config.example.yaml
 
 # 拉取并启动
 docker compose pull && docker compose up -d

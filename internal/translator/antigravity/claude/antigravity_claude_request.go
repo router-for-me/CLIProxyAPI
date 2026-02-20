@@ -231,8 +231,12 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 							} else if functionResponseResult.IsObject() {
 								functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "response.result", functionResponseResult.Raw)
-							} else {
+							} else if functionResponseResult.Raw != "" {
 								functionResponseJSON, _ = sjson.SetRaw(functionResponseJSON, "response.result", functionResponseResult.Raw)
+							} else {
+								// Content field is missing entirely — .Raw is empty which
+								// causes sjson.SetRaw to produce invalid JSON (e.g. "result":}).
+								functionResponseJSON, _ = sjson.Set(functionResponseJSON, "response.result", "")
 							}
 
 							partJSON := `{}`

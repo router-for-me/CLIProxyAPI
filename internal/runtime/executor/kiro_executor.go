@@ -699,7 +699,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 	// Execute with retry on 401/403 and 429 (quota exhausted)
 	// Note: currentOrigin and kiroPayload are built inside executeWithRetry for each endpoint
-	resp, err = e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, body, from, to, reporter, kiroModelID, isAgentic, isChatOnly, tokenKey)
+	resp, err = e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, to, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey)
 	return resp, err
 }
 
@@ -709,7 +709,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 // - CodeWhisperer endpoint (AI_EDITOR origin) uses Kiro IDE quota
 // Also supports multi-endpoint fallback similar to Antigravity implementation.
 // tokenKey is used for rate limiting and cooldown tracking.
-func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, body []byte, from, to sdktranslator.Format, reporter *usageReporter, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (cliproxyexecutor.Response, error) {
+func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from, to sdktranslator.Format, reporter *usageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (cliproxyexecutor.Response, error) {
 	var resp cliproxyexecutor.Response
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
 	rateLimiter := kiroauth.GetGlobalRateLimiter()
@@ -721,11 +721,11 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 		endpointConfig := endpointConfigs[endpointIdx]
 		url := endpointConfig.URL
 		// Use this endpoint's compatible Origin (critical for avoiding 403 errors)
-		currentOrigin := endpointConfig.Origin
+		currentOrigin = endpointConfig.Origin
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
-		kiroPayload, _ := buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
+		kiroPayload, _ = buildKiroPayloadForFormat(body, kiroModelID, profileArn, currentOrigin, isAgentic, isChatOnly, from, opts.Headers)
 
 		log.Debugf("kiro: trying endpoint %d/%d: %s (Name: %s, Origin: %s)",
 			endpointIdx+1, len(endpointConfigs), url, endpointConfig.Name, currentOrigin)
@@ -1053,7 +1053,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 // ExecuteStream handles streaming requests to Kiro API.
 // Supports automatic token refresh on 401/403 errors and quota fallback on 429.
-func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	accessToken, profileArn := kiroCredentials(auth)
 	if accessToken == "" {
 		return nil, fmt.Errorf("kiro: access token not found in auth")
@@ -1110,7 +1110,11 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	// Route to MCP endpoint instead of normal Kiro API
 	if kiroclaude.HasWebSearchTool(req.Payload) {
 		log.Infof("kiro: detected pure web_search request, routing to MCP endpoint")
-		return e.handleWebSearchStream(ctx, auth, req, opts, accessToken, profileArn)
+		streamWebSearch, errWebSearch := e.handleWebSearchStream(ctx, auth, req, opts, accessToken, profileArn)
+		if errWebSearch != nil {
+			return nil, errWebSearch
+		}
+		return &cliproxyexecutor.StreamResult{Chunks: streamWebSearch}, nil
 	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
@@ -1128,7 +1132,11 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Execute stream with retry on 401/403 and 429 (quota exhausted)
 	// Note: currentOrigin and kiroPayload are built inside executeStreamWithRetry for each endpoint
-	return e.executeStreamWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, body, from, reporter, kiroModelID, isAgentic, isChatOnly, tokenKey)
+	streamKiro, errStreamKiro := e.executeStreamWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey)
+	if errStreamKiro != nil {
+		return nil, errStreamKiro
+	}
+	return &cliproxyexecutor.StreamResult{Chunks: streamKiro}, nil
 }
 
 // executeStreamWithRetry performs the streaming HTTP request with automatic retry on auth errors.
@@ -1137,7 +1145,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 // - CodeWhisperer endpoint (AI_EDITOR origin) uses Kiro IDE quota
 // Also supports multi-endpoint fallback similar to Antigravity implementation.
 // tokenKey is used for rate limiting and cooldown tracking.
-func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, body []byte, from sdktranslator.Format, reporter *usageReporter, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from sdktranslator.Format, reporter *usageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (<-chan cliproxyexecutor.StreamChunk, error) {
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
 	rateLimiter := kiroauth.GetGlobalRateLimiter()
 	cooldownMgr := kiroauth.GetGlobalCooldownManager()
@@ -1148,7 +1156,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 		endpointConfig := endpointConfigs[endpointIdx]
 		url := endpointConfig.URL
 		// Use this endpoint's compatible Origin (critical for avoiding 403 errors)
-		currentOrigin := endpointConfig.Origin
+		currentOrigin = endpointConfig.Origin
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
@@ -1501,7 +1509,135 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 // - content: the content to search in
 // - alreadyInCodeBlock: whether we're already inside a code block from previous chunks
 // - alreadyInInlineCode: whether we're already inside inline code from previous chunks
-// determineAgenticMode
+func findRealThinkingEndTag(content string, alreadyInCodeBlock, alreadyInInlineCode bool) int {
+	searchStart := 0
+	for {
+		endIdx := strings.Index(content[searchStart:], kirocommon.ThinkingEndTag)
+		if endIdx < 0 {
+			return -1
+		}
+		endIdx += searchStart // Adjust to absolute position
+
+		textBeforeEnd := content[:endIdx]
+		textAfterEnd := content[endIdx+len(kirocommon.ThinkingEndTag):]
+
+		// Check 1: Is it inside inline code?
+		// Count backticks in current content and add state from previous chunks
+		backtickCount := strings.Count(textBeforeEnd, "`")
+		effectiveInInlineCode := alreadyInInlineCode
+		if backtickCount%2 == 1 {
+			effectiveInInlineCode = !effectiveInInlineCode
+		}
+		if effectiveInInlineCode {
+			log.Debugf("kiro: found </thinking> inside inline code at pos %d, skipping", endIdx)
+			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
+			continue
+		}
+
+		// Check 2: Is it inside a code block?
+		// Count fences in current content and add state from previous chunks
+		fenceCount := strings.Count(textBeforeEnd, "```")
+		altFenceCount := strings.Count(textBeforeEnd, "~~~")
+		effectiveInCodeBlock := alreadyInCodeBlock
+		if fenceCount%2 == 1 || altFenceCount%2 == 1 {
+			effectiveInCodeBlock = !effectiveInCodeBlock
+		}
+		if effectiveInCodeBlock {
+			log.Debugf("kiro: found </thinking> inside code block at pos %d, skipping", endIdx)
+			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
+			continue
+		}
+
+		// Check 3: Real </thinking> tags are usually preceded by newline or at start
+		// and followed by newline or at end. Check the format.
+		charBeforeTag := byte(0)
+		if endIdx > 0 {
+			charBeforeTag = content[endIdx-1]
+		}
+		charAfterTag := byte(0)
+		if len(textAfterEnd) > 0 {
+			charAfterTag = textAfterEnd[0]
+		}
+
+		// Real end tag format: preceded by newline OR end of sentence (. ! ?)
+		// and followed by newline OR end of content
+		isPrecededByNewlineOrSentenceEnd := charBeforeTag == '\n' || charBeforeTag == '.' ||
+			charBeforeTag == '!' || charBeforeTag == '?' || charBeforeTag == 0
+		isFollowedByNewlineOrEnd := charAfterTag == '\n' || charAfterTag == 0
+
+		// If the tag has proper formatting (newline before/after), it's likely real
+		if isPrecededByNewlineOrSentenceEnd && isFollowedByNewlineOrEnd {
+			log.Debugf("kiro: found properly formatted </thinking> at pos %d", endIdx)
+			return endIdx
+		}
+
+		// Check 4: Is the tag preceded by discussion keywords on the same line?
+		lastNewlineIdx := strings.LastIndex(textBeforeEnd, "\n")
+		lineBeforeTag := textBeforeEnd
+		if lastNewlineIdx >= 0 {
+			lineBeforeTag = textBeforeEnd[lastNewlineIdx+1:]
+		}
+		lineBeforeTagLower := strings.ToLower(lineBeforeTag)
+
+		// Discussion patterns - if found, this is likely discussion text
+		discussionPatterns := []string{
+			"标签", "返回", "输出", "包含", "使用", "解析", "转换", "生成", // Chinese
+			"tag", "return", "output", "contain", "use", "parse", "emit", "convert", "generate", // English
+			"<thinking>",    // discussing both tags together
+			"`</thinking>`", // explicitly in inline code
+		}
+		isDiscussion := false
+		for _, pattern := range discussionPatterns {
+			if strings.Contains(lineBeforeTagLower, pattern) {
+				isDiscussion = true
+				break
+			}
+		}
+		if isDiscussion {
+			log.Debugf("kiro: found </thinking> after discussion text at pos %d, skipping", endIdx)
+			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
+			continue
+		}
+
+		// Check 5: Is there text immediately after on the same line?
+		// Real end tags don't have text immediately after on the same line
+		if len(textAfterEnd) > 0 && charAfterTag != '\n' && charAfterTag != 0 {
+			// Find the next newline
+			nextNewline := strings.Index(textAfterEnd, "\n")
+			var textOnSameLine string
+			if nextNewline >= 0 {
+				textOnSameLine = textAfterEnd[:nextNewline]
+			} else {
+				textOnSameLine = textAfterEnd
+			}
+			// If there's non-whitespace text on the same line after the tag, it's discussion
+			if strings.TrimSpace(textOnSameLine) != "" {
+				log.Debugf("kiro: found </thinking> with text after on same line at pos %d, skipping", endIdx)
+				searchStart = endIdx + len(kirocommon.ThinkingEndTag)
+				continue
+			}
+		}
+
+		// Check 6: Is there another <thinking> tag after this </thinking>?
+		if strings.Contains(textAfterEnd, kirocommon.ThinkingStartTag) {
+			nextStartIdx := strings.Index(textAfterEnd, kirocommon.ThinkingStartTag)
+			textBeforeNextStart := textAfterEnd[:nextStartIdx]
+			nextBacktickCount := strings.Count(textBeforeNextStart, "`")
+			nextFenceCount := strings.Count(textBeforeNextStart, "```")
+			nextAltFenceCount := strings.Count(textBeforeNextStart, "~~~")
+
+			// If the next <thinking> is NOT in code, then this </thinking> is discussion text
+			if nextBacktickCount%2 == 0 && nextFenceCount%2 == 0 && nextAltFenceCount%2 == 0 {
+				log.Debugf("kiro: found </thinking> followed by <thinking> at pos %d, likely discussion text, skipping", endIdx)
+				searchStart = endIdx + len(kirocommon.ThinkingEndTag)
+				continue
+			}
+		}
+
+		// This looks like a real end tag
+		return endIdx
+	}
+}
 
 // determineAgenticMode determines if the model is an agentic or chat-only variant.
 // Returns (isAgentic, isChatOnly) based on model name suffixes.
@@ -1518,6 +1654,25 @@ func determineAgenticMode(model string) (isAgentic, isChatOnly bool) {
 // 1. Check auth_method field: "builder-id" or "idc"
 // 2. Check auth_type field: "aws_sso_oidc" (from kiro-cli tokens)
 // 3. Check for client_id + client_secret presence (AWS SSO OIDC signature)
+func getEffectiveProfileArn(auth *cliproxyauth.Auth, profileArn string) string {
+	if auth != nil && auth.Metadata != nil {
+		// Check 1: auth_method field (from CLIProxyAPI tokens)
+		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && (authMethod == "builder-id" || authMethod == "idc") {
+			return "" // AWS SSO OIDC - don't include profileArn
+		}
+		// Check 2: auth_type field (from kiro-cli tokens)
+		if authType, ok := auth.Metadata["auth_type"].(string); ok && authType == "aws_sso_oidc" {
+			return "" // AWS SSO OIDC - don't include profileArn
+		}
+		// Check 3: client_id + client_secret presence (AWS SSO OIDC signature)
+		_, hasClientID := auth.Metadata["client_id"].(string)
+		_, hasClientSecret := auth.Metadata["client_secret"].(string)
+		if hasClientID && hasClientSecret {
+			return "" // AWS SSO OIDC - don't include profileArn
+		}
+	}
+	return profileArn
+}
 
 // getEffectiveProfileArnWithWarning determines if profileArn should be included based on auth method,
 // and logs a warning if profileArn is missing for non-builder-id auth.
@@ -1562,6 +1717,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		// Amazon Q format (amazonq- prefix) - same API as Kiro
 		"amazonq-auto":                       "auto",
 		"amazonq-claude-opus-4-6":            "claude-opus-4.6",
+		"amazonq-claude-sonnet-4-6":          "claude-sonnet-4.6",
 		"amazonq-claude-opus-4-5":            "claude-opus-4.5",
 		"amazonq-claude-sonnet-4-5":          "claude-sonnet-4.5",
 		"amazonq-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
@@ -1570,6 +1726,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
 		// Kiro format (kiro- prefix) - valid model names that should be preserved
 		"kiro-claude-opus-4-6":            "claude-opus-4.6",
+		"kiro-claude-sonnet-4-6":          "claude-sonnet-4.6",
 		"kiro-claude-opus-4-5":            "claude-opus-4.5",
 		"kiro-claude-sonnet-4-5":          "claude-sonnet-4.5",
 		"kiro-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
@@ -1580,6 +1737,8 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		// Native format (no prefix) - used by Kiro IDE directly
 		"claude-opus-4-6":            "claude-opus-4.6",
 		"claude-opus-4.6":            "claude-opus-4.6",
+		"claude-sonnet-4-6":          "claude-sonnet-4.6",
+		"claude-sonnet-4.6":          "claude-sonnet-4.6",
 		"claude-opus-4-5":            "claude-opus-4.5",
 		"claude-opus-4.5":            "claude-opus-4.5",
 		"claude-haiku-4-5":           "claude-haiku-4.5",
@@ -1592,11 +1751,13 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		"auto":                       "auto",
 		// Agentic variants (same backend model IDs, but with special system prompt)
 		"claude-opus-4.6-agentic":        "claude-opus-4.6",
+		"claude-sonnet-4.6-agentic":      "claude-sonnet-4.6",
 		"claude-opus-4.5-agentic":        "claude-opus-4.5",
 		"claude-sonnet-4.5-agentic":      "claude-sonnet-4.5",
 		"claude-sonnet-4-agentic":        "claude-sonnet-4",
 		"claude-haiku-4.5-agentic":       "claude-haiku-4.5",
 		"kiro-claude-opus-4-6-agentic":   "claude-opus-4.6",
+		"kiro-claude-sonnet-4-6-agentic": "claude-sonnet-4.6",
 		"kiro-claude-opus-4-5-agentic":   "claude-opus-4.5",
 		"kiro-claude-sonnet-4-5-agentic": "claude-sonnet-4.5",
 		"kiro-claude-sonnet-4-agentic":   "claude-sonnet-4",
@@ -1622,6 +1783,10 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 			log.Debugf("kiro: unknown Sonnet 3.7 model '%s', mapping to claude-3-7-sonnet-20250219", model)
 			return "claude-3-7-sonnet-20250219"
 		}
+		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
+			log.Debugf("kiro: unknown Sonnet 4.6 model '%s', mapping to claude-sonnet-4.6", model)
+			return "claude-sonnet-4.6"
+		}
 		if strings.Contains(modelLower, "4-5") || strings.Contains(modelLower, "4.5") {
 			log.Debugf("kiro: unknown Sonnet 4.5 model '%s', mapping to claude-sonnet-4.5", model)
 			return "claude-sonnet-4.5"
@@ -1633,6 +1798,10 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 
 	// Check for Opus variants
 	if strings.Contains(modelLower, "opus") {
+		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
+			log.Debugf("kiro: unknown Opus 4.6 model '%s', mapping to claude-opus-4.6", model)
+			return "claude-opus-4.6"
+		}
 		log.Debugf("kiro: unknown Opus model '%s', mapping to claude-opus-4.5", model)
 		return "claude-opus-4.5"
 	}
@@ -2661,6 +2830,66 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			log.Warnf("kiro: streamToChannel received invalidStateEvent: %s, continuing", errMsg)
 			continue
 
+		default:
+			// Check for upstream usage events from Kiro API
+			// Format: {"unit":"credit","unitPlural":"credits","usage":1.458}
+			if unit, ok := event["unit"].(string); ok && unit == "credit" {
+				if usage, ok := event["usage"].(float64); ok {
+					upstreamCreditUsage = usage
+					hasUpstreamUsage = true
+					log.Debugf("kiro: received upstream credit usage: %.4f", upstreamCreditUsage)
+				}
+			}
+			// Format: {"contextUsagePercentage":78.56}
+			if ctxPct, ok := event["contextUsagePercentage"].(float64); ok {
+				upstreamContextPercentage = ctxPct
+				log.Debugf("kiro: received upstream context usage: %.2f%%", upstreamContextPercentage)
+			}
+
+			// Check for token counts in unknown events
+			if inputTokens, ok := event["inputTokens"].(float64); ok {
+				totalUsage.InputTokens = int64(inputTokens)
+				hasUpstreamUsage = true
+				log.Debugf("kiro: streamToChannel found inputTokens in event %s: %d", eventType, totalUsage.InputTokens)
+			}
+			if outputTokens, ok := event["outputTokens"].(float64); ok {
+				totalUsage.OutputTokens = int64(outputTokens)
+				hasUpstreamUsage = true
+				log.Debugf("kiro: streamToChannel found outputTokens in event %s: %d", eventType, totalUsage.OutputTokens)
+			}
+			if totalTokens, ok := event["totalTokens"].(float64); ok {
+				totalUsage.TotalTokens = int64(totalTokens)
+				log.Debugf("kiro: streamToChannel found totalTokens in event %s: %d", eventType, totalUsage.TotalTokens)
+			}
+
+			// Check for usage object in unknown events (OpenAI/Claude format)
+			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+				if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
+					totalUsage.InputTokens = int64(inputTokens)
+					hasUpstreamUsage = true
+				} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
+					totalUsage.InputTokens = int64(inputTokens)
+					hasUpstreamUsage = true
+				}
+				if outputTokens, ok := usageObj["output_tokens"].(float64); ok {
+					totalUsage.OutputTokens = int64(outputTokens)
+					hasUpstreamUsage = true
+				} else if outputTokens, ok := usageObj["completion_tokens"].(float64); ok {
+					totalUsage.OutputTokens = int64(outputTokens)
+					hasUpstreamUsage = true
+				}
+				if totalTokens, ok := usageObj["total_tokens"].(float64); ok {
+					totalUsage.TotalTokens = int64(totalTokens)
+				}
+				log.Debugf("kiro: streamToChannel found usage object in event %s: input=%d, output=%d, total=%d",
+					eventType, totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
+			}
+
+			// Log unknown event types for debugging (to discover new event formats)
+			if eventType != "" {
+				log.Debugf("kiro: streamToChannel unknown event type: %s, payload: %s", eventType, string(payload))
+			}
+
 		case "assistantResponseEvent":
 			var contentDelta string
 			var toolUses []map[string]interface{}
@@ -3313,66 +3542,6 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				}
 				log.Debugf("kiro: streamToChannel found metricsEvent: input=%d, output=%d",
 					totalUsage.InputTokens, totalUsage.OutputTokens)
-			}
-
-		default:
-			// Check for upstream usage events from Kiro API
-			// Format: {"unit":"credit","unitPlural":"credits","usage":1.458}
-			if unit, ok := event["unit"].(string); ok && unit == "credit" {
-				if usage, ok := event["usage"].(float64); ok {
-					upstreamCreditUsage = usage
-					hasUpstreamUsage = true
-					log.Debugf("kiro: received upstream credit usage: %.4f", upstreamCreditUsage)
-				}
-			}
-			// Format: {"contextUsagePercentage":78.56}
-			if ctxPct, ok := event["contextUsagePercentage"].(float64); ok {
-				upstreamContextPercentage = ctxPct
-				log.Debugf("kiro: received upstream context usage: %.2f%%", upstreamContextPercentage)
-			}
-
-			// Check for token counts in unknown events
-			if inputTokens, ok := event["inputTokens"].(float64); ok {
-				totalUsage.InputTokens = int64(inputTokens)
-				hasUpstreamUsage = true
-				log.Debugf("kiro: streamToChannel found inputTokens in event %s: %d", eventType, totalUsage.InputTokens)
-			}
-			if outputTokens, ok := event["outputTokens"].(float64); ok {
-				totalUsage.OutputTokens = int64(outputTokens)
-				hasUpstreamUsage = true
-				log.Debugf("kiro: streamToChannel found outputTokens in event %s: %d", eventType, totalUsage.OutputTokens)
-			}
-			if totalTokens, ok := event["totalTokens"].(float64); ok {
-				totalUsage.TotalTokens = int64(totalTokens)
-				log.Debugf("kiro: streamToChannel found totalTokens in event %s: %d", eventType, totalUsage.TotalTokens)
-			}
-
-			// Check for usage object in unknown events (OpenAI/Claude format)
-			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
-				if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
-					totalUsage.InputTokens = int64(inputTokens)
-					hasUpstreamUsage = true
-				} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
-					totalUsage.InputTokens = int64(inputTokens)
-					hasUpstreamUsage = true
-				}
-				if outputTokens, ok := usageObj["output_tokens"].(float64); ok {
-					totalUsage.OutputTokens = int64(outputTokens)
-					hasUpstreamUsage = true
-				} else if outputTokens, ok := usageObj["completion_tokens"].(float64); ok {
-					totalUsage.OutputTokens = int64(outputTokens)
-					hasUpstreamUsage = true
-				}
-				if totalTokens, ok := usageObj["total_tokens"].(float64); ok {
-					totalUsage.TotalTokens = int64(totalTokens)
-				}
-				log.Debugf("kiro: streamToChannel found usage object in event %s: input=%d, output=%d, total=%d",
-					eventType, totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
-			}
-
-			// Log unknown event types for debugging (to discover new event formats)
-			if eventType != "" {
-				log.Debugf("kiro: streamToChannel unknown event type: %s, payload: %s", eventType, string(payload))
 			}
 		}
 
@@ -4536,7 +4705,7 @@ func (e *KiroExecutor) callKiroAndBuffer(
 
 	kiroStream, err := e.executeStreamWithRetry(
 		ctx, auth, req, opts, accessToken, effectiveProfileArn,
-		body, from, nil, kiroModelID, isAgentic, isChatOnly, tokenKey,
+		nil, body, from, nil, "", kiroModelID, isAgentic, isChatOnly, tokenKey,
 	)
 	if err != nil {
 		return nil, err
@@ -4582,7 +4751,7 @@ func (e *KiroExecutor) callKiroDirectStream(
 
 	stream, streamErr := e.executeStreamWithRetry(
 		ctx, auth, req, opts, accessToken, effectiveProfileArn,
-		body, from, reporter, kiroModelID, isAgentic, isChatOnly, tokenKey,
+		nil, body, from, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey,
 	)
 	return stream, streamErr
 }
@@ -4629,6 +4798,6 @@ func (e *KiroExecutor) executeNonStreamFallback(
 	var err error
 	defer reporter.trackFailure(ctx, &err)
 
-	resp, err := e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, body, from, to, reporter, kiroModelID, isAgentic, isChatOnly, tokenKey)
+	resp, err := e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, to, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey)
 	return resp, err
 }

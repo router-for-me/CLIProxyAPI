@@ -22,9 +22,7 @@ import (
 )
 
 const (
-	qwenUserAgent           = "google-api-nodejs-client/9.15.1"
-	qwenXGoogAPIClient      = "gl-node/22.17.0"
-	qwenClientMetadataValue = "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
+	qwenUserAgent = "QwenCode/0.10.3 (darwin; arm64)"
 )
 
 // QwenExecutor is a stateless executor for Qwen Code using OpenAI-compatible chat completions.
@@ -152,11 +150,11 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out)}
+	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
-func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -238,7 +236,6 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
-	stream = out
 	go func() {
 		defer close(out)
 		defer func() {
@@ -270,7 +267,7 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
 	}()
-	return stream, nil
+	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
 func (e *QwenExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -344,8 +341,18 @@ func applyQwenHeaders(r *http.Request, token string, stream bool) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.Header.Set("User-Agent", qwenUserAgent)
-	r.Header.Set("X-Goog-Api-Client", qwenXGoogAPIClient)
-	r.Header.Set("Client-Metadata", qwenClientMetadataValue)
+	r.Header.Set("X-Dashscope-Useragent", qwenUserAgent)
+	r.Header.Set("X-Stainless-Runtime-Version", "v22.17.0")
+	r.Header.Set("Sec-Fetch-Mode", "cors")
+	r.Header.Set("X-Stainless-Lang", "js")
+	r.Header.Set("X-Stainless-Arch", "arm64")
+	r.Header.Set("X-Stainless-Package-Version", "5.11.0")
+	r.Header.Set("X-Dashscope-Cachecontrol", "enable")
+	r.Header.Set("X-Stainless-Retry-Count", "0")
+	r.Header.Set("X-Stainless-Os", "MacOS")
+	r.Header.Set("X-Dashscope-Authtype", "qwen-oauth")
+	r.Header.Set("X-Stainless-Runtime", "node")
+
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 		return

@@ -851,25 +851,6 @@ func GetRooModels() []*ModelInfo {
 	}
 }
 
-// GetKiloModels returns model definitions for Kilo (Kilo-Org/kilocode).
-// Use dedicated kilo: block in config (token-file or api-key).
-func GetKiloModels() []*ModelInfo {
-	now := int64(1758672000)
-	return []*ModelInfo{
-		{
-			ID:                  "kilo-default",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "kilo",
-			Type:                "kilo",
-			DisplayName:         "Kilo Default",
-			Description:         "Kilo default model via api.kilo.ai",
-			ContextLength:       128000,
-			MaxCompletionTokens: 32768,
-		},
-	}
-}
-
 // GetDeepSeekModels returns static model definitions for DeepSeek.
 func GetDeepSeekModels() []*ModelInfo {
 	now := int64(1738672000)

@@ -13,7 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cursorstorage"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/cursorstorage"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"

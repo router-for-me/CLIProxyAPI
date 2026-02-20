@@ -1,0 +1,22 @@
+# Kilocode (OAuth-based code assistant)
+# Note: Kilocode uses OAuth device flow authentication.
+# Use the CLI command: ./server --kilo-login
+# This will save credentials to the auth directory (default: ~/.cli-proxy-api/)
+# oauth-model-alias:
+#   kilo:
+#     - name: "minimax/minimax-m2.5:free"
+#       alias: "minimax-m2.5"
+#     - name: "z-ai/glm-5:free"
+#       alias: "glm-5"
+# oauth-excluded-models:
+#   kilo:
+#     - "kilo-claude-opus-4-6"  # exclude specific models (exact match)
+#     - "*:free"                # wildcard matching suffix (e.g. all free models)
+
+# OpenAI compatibility providers
+# openai-compatibility:
+#   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
+#     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
+#     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     headers:
+#       X-Custom-Header: "custom-value"
