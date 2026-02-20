@@ -1,30 +1,1000 @@
+# cliproxyapi++ LLM Context (Concise)
+Generated from repository files for agent/dev/user consumption.
+
+## README Highlights
 # cliproxyapi++ 🚀
+[![Go Report Card](https://goreportcard.com/badge/github.com/KooshaPari/cliproxyapi-plusplus)](https://goreportcard.com/report/github.com/KooshaPari/cliproxyapi-plusplus)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker Pulls](https://img.shields.io/docker/pulls/kooshapari/cliproxyapi-plusplus.svg)](https://hub.docker.com/r/kooshapari/cliproxyapi-plusplus)
+[![GitHub Release](https://img.shields.io/github/v/release/KooshaPari/cliproxyapi-plusplus)](https://github.com/KooshaPari/cliproxyapi-plusplus/releases)
+English | [中文](README_CN.md)
+**cliproxyapi++** is the definitive high-performance, security-hardened fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). Designed with a "Defense in Depth" philosophy and a "Library-First" architecture, it provides an OpenAI-compatible interface for proprietary LLMs with enterprise-grade stability.
+---
+## 🏆 Deep Dive: The `++` Advantage
+Why choose **cliproxyapi++** over the mainline? While the mainline focus is on open-source stability, the `++` variant is built for high-scale, production environments where security, automated lifecycle management, and broad provider support are critical.
+Full feature-by-feature change reference:
+- **[Feature Changes in ++](./docs/FEATURE_CHANGES_PLUSPLUS.md)**
+### 📊 Feature Comparison Matrix
+| Feature | Mainline | CLIProxyAPI+ | **cliproxyapi++** |
+| :--- | :---: | :---: | :---: |
+| **Core Proxy Logic** | ✅ | ✅ | ✅ |
+| **Basic Provider Support** | ✅ | ✅ | ✅ |
+| **Standard UI** | ❌ | ✅ | ✅ |
+| **Advanced Auth (Kiro/Copilot)** | ❌ | ⚠️ | ✅ **(Full Support)** |
+| **Background Token Refresh** | ❌ | ❌ | ✅ **(Auto-Refresh)** |
+| **Security Hardening** | Basic | Basic | ✅ **(Enterprise-Grade)** |
+| **Rate Limiting & Cooldown** | ❌ | ❌ | ✅ **(Intelligent)** |
+| **Core Reusability** | `internal/` | `internal/` | ✅ **(`pkg/llmproxy`)** |
+| **CI/CD Pipeline** | Basic | Basic | ✅ **(Signed/Multi-arch)** |
+---
+## 🔍 Technical Differences & Hardening
+### 1. Architectural Evolution: `pkg/llmproxy`
+Unlike the mainline which keeps its core logic in `internal/` (preventing external Go projects from importing it), **cliproxyapi++** has refactored its entire translation and proxying engine into a clean, public `pkg/llmproxy` library.
+*   **Reusability**: Import the proxy logic directly into your own Go applications.
+*   **Decoupling**: Configuration management is strictly separated from execution logic.
+### 2. Enterprise Authentication & Lifecycle
+*   **Full GitHub Copilot Integration**: Not just an API wrapper. `++` includes a full OAuth device flow, per-credential quota tracking, and intelligent session management.
+*   **Kiro (AWS CodeWhisperer) 2.0**: A custom-built web UI (`/v0/oauth/kiro`) for browser-based AWS Builder ID and Identity Center logins.
+*   **Background Token Refresh**: A dedicated worker service monitors tokens and automatically refreshes them 10 minutes before expiration, ensuring zero downtime for your agents.
+### 3. Security Hardening ("Defense in Depth")
+*   **Path Guard**: A custom GitHub Action workflow (`pr-path-guard`) that prevents any unauthorized changes to critical `internal/translator/` logic during PRs.
+*   **Device Fingerprinting**: Generates unique, immutable device identifiers to satisfy strict provider security checks and prevent account flagging.
+*   **Hardened Docker Base**: Built on a specific, audited Alpine 3.22.0 layer with minimal packages, reducing the potential attack surface.
+### 4. High-Scale Operations
+*   **Intelligent Cooldown**: Automated "cooling" mechanism that detects provider-side rate limits and intelligently pauses requests to specific providers while routing others.
+*   **Unified Model Converter**: A sophisticated mapping layer that allows you to request `claude-3-5-sonnet` and have the proxy automatically handle the specific protocol requirements of the target provider (Vertex, AWS, Anthropic, etc.).
+---
+## 🚀 Getting Started
+### Prerequisites
+- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
+- OR [Go 1.26+](https://golang.org/dl/)
+### One-Command Deployment (Docker)
+```bash
+# Setup deployment
+mkdir -p ~/cliproxy && cd ~/cliproxy
+curl -o config.yaml https://raw.githubusercontent.com/KooshaPari/cliproxyapi-plusplus/main/config.example.yaml
+# Create compose file
+cat > docker-compose.yml << 'EOF'
+services:
+cliproxy:
+image: KooshaPari/cliproxyapi-plusplus:latest
+container_name: cliproxyapi++
+ports: ["8317:8317"]
+volumes:
+- ./config.yaml:/CLIProxyAPI/config.yaml
+- ./auths:/root/.cli-proxy-api
+- ./logs:/CLIProxyAPI/logs
+restart: unless-stopped
+EOF
+docker compose up -d
+```
+---
+## 🛠️ Advanced Usage
+### Extended Provider Support
+`cliproxyapi++` supports a massive registry of providers out-of-the-box:
+*   **Direct**: Claude, Gemini, OpenAI, Mistral, Groq, DeepSeek.
+*   **Aggregators**: OpenRouter, Together AI, Fireworks AI, Novita AI, SiliconFlow.
+*   **Proprietary**: Kiro (AWS), GitHub Copilot, Roo Code, Kilo AI, MiniMax.
+### API Specification
+The proxy provides two main API surfaces:
+1.  **OpenAI Interface**: `/v1/chat/completions` and `/v1/models` (Full parity).
+2.  **Management Interface**:
+*   `GET /v0/config`: Inspect current (hot-reloaded) config.
+*   `GET /v0/oauth/kiro`: Interactive Kiro auth UI.
+*   `GET /v0/logs`: Real-time log inspection.
+---
+## 🤝 Contributing
+We maintain strict quality gates to preserve the "hardened" status of the project:
+1.  **Linting**: Must pass `golangci-lint` with zero warnings.
+2.  **Coverage**: All new translator logic MUST include unit tests.
+3.  **Governance**: Changes to core `pkg/` logic require a corresponding Issue discussion.
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
+---
+## 📚 Documentation
+- **[Docsets](./docs/docsets/)** — Role-oriented documentation sets.
+- [Developer (Internal)](./docs/docsets/developer/internal/)
+- [Developer (External)](./docs/docsets/developer/external/)
+- [Technical User](./docs/docsets/user/)
+- [Agent Operator](./docs/docsets/agent/)
+- **[Feature Changes in ++](./docs/FEATURE_CHANGES_PLUSPLUS.md)** — Comprehensive list of `++` differences and impacts.
+- **[Docs README](./docs/README.md)** — Core docs map.
+---
+## 🚢 Docs Deploy
+Local VitePress docs:
+```bash
+cd docs
+npm install
+npm run docs:dev
+npm run docs:build
+```
+GitHub Pages:
+- Workflow: `.github/workflows/vitepress-pages.yml`
+- URL convention: `https://<owner>.github.io/cliproxyapi-plusplus/`
+---
+## 📜 License
+Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
+---
+<p align="center">
+<b>Hardened AI Infrastructure for the Modern Agentic Stack.</b><br>
+Built with ❤️ by the community.
+</p>
 
-> Unified Agent Orchestration, Governance, and Lifecycle Management.
+## Taskfile Tasks
+- GO_FILES
+- default
+- build
+- run
+- test
+- lint
+- tidy
+- docker:build
+- docker:run
+- docker:stop
+- doctor
+- ax:spec
 
-## Overview
-cliproxyapi++ is a high-performance, hardened fork of CLIProxyAPI. It provides an OpenAI-compatible interface for third-party LLM providers (Claude, Gemini, Codex, Kiro, etc.) with integrated auth management and rate limiting.
+## Documentation Index
+- docs/FEATURE_CHANGES_PLUSPLUS.md
+- docs/README.md
+- docs/docsets/agent/index.md
+- docs/docsets/agent/operating-model.md
+- docs/docsets/developer/external/index.md
+- docs/docsets/developer/external/integration-quickstart.md
+- docs/docsets/developer/internal/architecture.md
+- docs/docsets/developer/internal/index.md
+- docs/docsets/index.md
+- docs/docsets/user/index.md
+- docs/docsets/user/quickstart.md
+- docs/features/architecture/DEV.md
+- docs/features/architecture/SPEC.md
+- docs/features/architecture/USER.md
+- docs/features/auth/SPEC.md
+- docs/features/auth/USER.md
+- docs/features/operations/SPEC.md
+- docs/features/operations/USER.md
+- docs/features/providers/SPEC.md
+- docs/features/providers/USER.md
+- docs/features/security/SPEC.md
+- docs/features/security/USER.md
+- docs/index.md
+- docs/sdk-access.md
+- docs/sdk-access_CN.md
+- docs/sdk-advanced.md
+- docs/sdk-advanced_CN.md
+- docs/sdk-usage.md
+- docs/sdk-usage_CN.md
+- docs/sdk-watcher.md
+- docs/sdk-watcher_CN.md
 
-## Key Files
-- `cmd/server/main.go`: Application entry point and flag definitions.
-- `pkg/llmproxy/config/config.go`: Configuration structures and loading logic.
-- `sdk/cliproxy/service.go`: Core service implementation.
-- `sdk/cliproxy/auth/conductor.go`: Authentication management.
-- `config.example.yaml`: Main configuration template.
+## Markdown Headings
+### docs/FEATURE_CHANGES_PLUSPLUS.md
+- # cliproxyapi++ Feature Change Reference (`++` vs baseline)
+- ## 1. Architecture Changes
+- ## 2. Authentication and Identity Changes
+- ## 3. Provider and Model Routing Changes
+- ## 4. Security and Governance Changes
+- ## 5. Operations and Delivery Changes
+- ## 6. API and Compatibility Surface
+- ## 7. Migration Impact Summary
+### docs/README.md
+- # cliproxyapi++ Documentation Index
+- ## 📚 Documentation Structure
+- ## 🚀 Quick Start
+- ## 📖 Feature Documentation
+- ### 1. Library-First Architecture
+- ### 2. Enterprise Authentication
+- ### 3. Security Hardening
+- ### 4. High-Scale Operations
+- ### 5. Provider Registry
+- ## 🔧 API Documentation
+- ### OpenAI-Compatible API
+- ### Management API
+- ### Operations API
+- ## 🛠️ SDK Documentation
+- ### Go SDK
+- ## 🚀 Getting Started
+- ### 1. Installation
+- ### 2. Configuration
+- ### 3. Add Credentials
+- ### 4. Start Service
+- ### 5. Make Request
+- ## 🔍 Troubleshooting
+- ### Common Issues
+- ### Debug Mode
+- ### Get Help
+- ## 📊 Comparison: cliproxyapi++ vs Mainline
+- ## 📝 Contributing
+- ## 🔐 Security
+- ## 📜 License
+- ## 🗺️ Documentation Map
+- ## 🤝 Community
+### docs/docsets/agent/index.md
+- # Agent Operator Docset
+- ## Operator Focus
+### docs/docsets/agent/operating-model.md
+- # Agent Operating Model
+- ## Execution Loop
+### docs/docsets/developer/external/index.md
+- # External Developer Docset
+- ## Start Here
+### docs/docsets/developer/external/integration-quickstart.md
+- # Integration Quickstart
+### docs/docsets/developer/internal/architecture.md
+- # Internal Architecture
+- ## Core Boundaries
+- ## Maintainer Rules
+### docs/docsets/developer/internal/index.md
+- # Internal Developer Docset
+- ## Read First
+### docs/docsets/index.md
+- # Docsets
+- ## Developer
+- ## User
+- ## Agent
+### docs/docsets/user/index.md
+- # Technical User Docset
+- ## Core Paths
+### docs/docsets/user/quickstart.md
+- # Technical User Quickstart
+### docs/features/architecture/DEV.md
+- # Developer Guide: Extending Library-First Architecture
+- ## Contributing to pkg/llmproxy
+- ## Project Structure
+- ## Adding a New Provider
+- ### Step 1: Define Provider Configuration
+- ### Step 2: Implement Translator Interface
+- ### Step 3: Implement Provider Executor
+- ### Step 4: Register Provider
+- ### Step 5: Add Tests
+- ## Custom Authentication Flows
+- ### Implementing OAuth
+- ### Implementing Device Flow
+- ## Performance Optimization
+- ### Connection Pooling
+- ### Rate Limiting Optimization
+- ### Caching Strategy
+- ## Testing Guidelines
+- ### Unit Tests
+- ### Integration Tests
+- ### Contract Tests
+- ## Submitting Changes
+- ## API Stability
+### docs/features/architecture/SPEC.md
+- # Technical Specification: Library-First Architecture (pkg/llmproxy)
+- ## Overview
+- ## Architecture Migration
+- ### Before: Mainline Structure
+- ### After: cliproxyapi++ Structure
+- ## Core Components
+- ### 1. Translation Engine (`pkg/llmproxy/translator`)
+- ### 2. Provider Execution (`pkg/llmproxy/provider`)
+- ### 3. Configuration Management (`pkg/llmproxy/config`)
+- ### 4. Watcher & Synthesis (`pkg/llmproxy/watcher`)
+- ## Data Flow
+- ### Request Processing Flow
+- ### Configuration Reload Flow
+- ### Token Refresh Flow
+- ## Reusability Patterns
+- ### Embedding as Library
+- ### Custom Provider Integration
+- ### Extending Configuration
+- ## Performance Characteristics
+- ### Memory Footprint
+- ### Concurrency Model
+- ### Throughput
+- ## Security Considerations
+- ### Public API Stability
+- ### Input Validation
+- ### Error Propagation
+- ## Migration Guide
+- ### From Mainline internal/
+- ### Function Compatibility
+- ## Testing Strategy
+- ### Unit Tests
+- ### Integration Tests
+- ### Contract Tests
+### docs/features/architecture/USER.md
+- # User Guide: Library-First Architecture
+- ## What is "Library-First"?
+- ## Why Use the Library?
+- ### Benefits Over Standalone CLI
+- ### When to Use Each
+- ## Quick Start: Embedding in Your App
+- ### Step 1: Install the SDK
+- ### Step 2: Basic Embedding
+- ### Step 3: Create Config File
+- ### Step 4: Run Your App
+- # Add your Claude API key
+- # Run your app
+- ## Advanced: Custom Translators
+- ## Advanced: Custom Auth Management
+- ## Advanced: Request Interception
+- ## Advanced: Lifecycle Hooks
+- ## Configuration: Hot Reload
+- # config.yaml
+- ## Configuration: Custom Sources
+- ## Monitoring: Metrics
+- ## Monitoring: Logging
+- ## Troubleshooting
+- ### Service Won't Start
+- ### Config Changes Not Applied
+- ### Custom Translator Not Working
+- ### Performance Issues
+- ## Next Steps
+### docs/features/auth/SPEC.md
+- # Technical Specification: Enterprise Authentication & Lifecycle
+- ## Overview
+- ## Authentication Architecture
+- ### Core Components
+- ## Authentication Flows
+- ### 1. API Key Authentication
+- ### 2. OAuth 2.0 Flow
+- ### 3. Device Authorization Flow
+- ## Provider-Specific Authentication
+- ### GitHub Copilot (Full OAuth Device Flow)
+- ### Kiro (AWS CodeWhisperer)
+- ## Background Token Refresh
+- ### Refresh Worker Architecture
+- ### Refresh Strategies
+- #### OAuth Refresh Token Flow
+- #### Device Flow Re-authorization
+- ## Credential Management
+- ### Multi-Credential Support
+- ### Quota Tracking
+- ### Per-Request Quota Decuction
+- ## Security Considerations
+- ### Token Storage
+- ### Token Validation
+- ### Device Fingerprinting
+- ## Error Handling
+- ### Authentication Errors
+- ### Retry Logic
+- ## Monitoring
+- ### Auth Metrics
+- ### Health Checks
+- ## API Reference
+- ### Management Endpoints
+- #### Get All Auths
+- #### Add Auth
+- #### Delete Auth
+- #### Refresh Auth
+### docs/features/auth/USER.md
+- # User Guide: Enterprise Authentication
+- ## Understanding Authentication in cliproxyapi++
+- ## Quick Start: Adding Credentials
+- ### Method 1: Manual Configuration
+- ### Method 2: Interactive Setup (Web UI)
+- ### Method 3: CLI Commands
+- # Add API key
+- # Add with priority
+- ## Authentication Methods
+- ### API Key Authentication
+- ### OAuth 2.0 Device Flow
+- # Visit web UI
+- # Enter your GitHub credentials
+- # Authorize the application
+- # Done! Token is stored and managed automatically
+- ### Custom Provider Authentication
+- ## Quota Management
+- ### Understanding Quotas
+- ### Setting Quotas
+- # Update quota via API
+- ### Quota Reset
+- ## Automatic Token Refresh
+- ### How It Works
+- ### Configuration
+- ### Monitoring Refresh
+- # Check refresh status
+- ## Multi-Credential Management
+- ### Adding Multiple Credentials
+- # First Claude key
+- # Second Claude key
+- ### Load Balancing Strategies
+- ### Monitoring Credentials
+- # List all credentials
+- ## Credential Rotation
+- ### Automatic Rotation
+- ### Manual Rotation
+- # Remove exhausted credential
+- # Add new credential
+- ## Troubleshooting
+- ### Token Not Refreshing
+- ### Authentication Failed
+- ### Quota Exhausted
+- ### OAuth Flow Stuck
+- ### Credential Not Found
+- ## Best Practices
+- ### Security
+- ### Performance
+- ### Monitoring
+- ## Advanced: Encryption
+- ## API Reference
+- ### Auth Management
+- ## Next Steps
+### docs/features/operations/SPEC.md
+- # Technical Specification: High-Scale Operations
+- ## Overview
+- ## Operations Architecture
+- ### Core Components
+- ## Intelligent Cooldown System
+- ### Rate Limit Detection
+- ### Cooldown Duration
+- ### Automatic Recovery
+- ### Load Redistribution
+- ## Load Balancing Strategies
+- ### Strategy Interface
+- ### Round-Robin Strategy
+- ### Quota-Aware Strategy
+- ### Latency-Based Strategy
+- ### Cost-Based Strategy
+- ## Health Monitoring
+- ### Provider Health Checks
+- ### Health Status
+- ### Self-Healing
+- ## Observability
+- ### Metrics Collection
+- ### Distributed Tracing
+- ### Structured Logging
+- ### Alerting
+- ## Performance Optimization
+- ### Connection Pooling
+- ### Request Batching
+- ### Response Caching
+- ## Disaster Recovery
+- ### Backup and Restore
+- #!/bin/bash
+- # backup.sh
+- # Backup config
+- # Backup auths
+- # Backup logs
+- #!/bin/bash
+- # restore.sh
+- # Extract config
+- # Extract auths
+- # Restart service
+- ### Failover
+- ## API Reference
+- ### Operations Endpoints
+### docs/features/operations/USER.md
+- # User Guide: High-Scale Operations
+- ## Understanding Operations in cliproxyapi++
+- ## Quick Start: Production Deployment
+- ### docker-compose.yml (Production)
+- # Security
+- # Resources
+- # Health check
+- # Ports
+- # Volumes
+- # Restart
+- ## Intelligent Cooldown
+- ### What is Cooldown?
+- ### Configure Cooldown
+- ### Monitor Cooldown Status
+- # Check cooldown status
+- ### Manual Cooldown Control
+- ## Load Balancing
+- ### Choose a Strategy
+- ### Round-Robin (Default)
+- ### Quota-Aware
+- ### Latency-Based
+- ### Cost-Based
+- ### Provider Priority
+- ## Health Monitoring
+- ### Configure Health Checks
+- ### Monitor Provider Health
+- # Check all providers
+- ### Self-Healing
+- ## Observability
+- ### Enable Metrics
+- # Request count
+- # Error count
+- # Token usage
+- # Request latency
+- ### Prometheus Integration
+- ### Grafana Dashboards
+- ### Structured Logging
+- # Follow logs
+- # Filter for errors
+- # Pretty print JSON logs
+- ### Distributed Tracing (Optional)
+- ## Alerting
+- ### Configure Alerts
+- ### Notification Channels
+- ## Performance Optimization
+- ### Connection Pooling
+- ### Request Batching
+- ### Response Caching
+- ## Disaster Recovery
+- ### Backup Configuration
+- #!/bin/bash
+- # backup.sh
+- # Create backup directory
+- # Backup config
+- # Backup auths
+- # Backup logs
+- # Remove old backups (keep last 30)
+- # Run daily at 2 AM
+- ### Restore Configuration
+- #!/bin/bash
+- # restore.sh
+- # Stop service
+- # Extract config
+- # Extract auths
+- # Start service
+- ### Failover Configuration
+- ## Troubleshooting
+- ### High Error Rate
+- ### Provider Always in Cooldown
+- ### High Latency
+- ### Memory Usage High
+- ### Health Checks Failing
+- ## Best Practices
+- ### Deployment
+- ### Monitoring
+- ### Scaling
+- ### Backup
+- ## API Reference
+- ### Operations Endpoints
+- ## Next Steps
+### docs/features/providers/SPEC.md
+- # Technical Specification: Provider Registry & Support
+- ## Overview
+- ## Provider Architecture
+- ### Provider Types
+- ### Provider Interface
+- ### Provider Configuration
+- ## Direct Providers
+- ### Claude (Anthropic)
+- ### Gemini (Google)
+- ### OpenAI
+- ## Aggregator Providers
+- ### OpenRouter
+- ### Together AI
+- ### Fireworks AI
+- ## Proprietary Providers
+- ### Kiro (AWS CodeWhisperer)
+- ### GitHub Copilot
+- ### Roo Code
+- ### Kilo AI
+- ### MiniMax
+- ## Provider Registry
+- ### Registry Interface
+- ### Auto-Registration
+- ## Model Mapping
+- ### OpenAI to Provider Model Mapping
+- ### Custom Model Mappings
+- ## Provider Capabilities
+- ### Capability Detection
+- ### Capability Matrix
+- ## Provider Selection
+- ### Selection Strategies
+- ### Request Routing
+- ## Adding a New Provider
+- ### Step 1: Define Provider
+- ### Step 2: Register Provider
+- ### Step 3: Add Configuration
+- ## API Reference
+- ### Provider Management
+- ### Model Management
+- ### Capability Query
+### docs/features/providers/USER.md
+- # User Guide: Provider Registry
+- ## Understanding Providers in cliproxyapi++
+- ## Quick Start: Using a Provider
+- ### 1. Add Provider Credential
+- # Claude API key
+- # OpenAI API key
+- # Gemini API key
+- ### 2. Configure Provider
+- ### 3. Make Request
+- ## Direct Providers
+- ### Claude (Anthropic)
+- ### Gemini (Google)
+- ### OpenAI
+- ## Aggregator Providers
+- ### OpenRouter
+- # Access Claude through OpenRouter
+- ### Together AI
+- ### Fireworks AI
+- ## Proprietary Providers
+- ### Kiro (AWS CodeWhisperer)
+- ### GitHub Copilot
+- ## Provider Selection
+- ### Automatic Selection
+- ### Model Aliases
+- # Automatically routes to available provider
+- ### Provider Priority
+- ## Model Capabilities
+- ### Check Capabilities
+- # List all models
+- # List models by provider
+- # Get model details
+- ### Capability Filtering
+- # Check streaming support
+- ## Provider Management
+- ### List Providers
+- ### Enable/Disable Provider
+- # Enable
+- # Disable
+- ### Provider Status
+- ## Troubleshooting
+- ### Provider Not Responding
+- ### Model Not Found
+- ### Authentication Failed
+- ### Rate Limit Exceeded
+- ### OAuth Flow Stuck
+- ## Best Practices
+- ### Provider Selection
+- ### Configuration
+- ### Credentials
+- ### Monitoring
+- ## Provider Comparison
+- ## API Reference
+- ### Provider Endpoints
+- ### Model Endpoints
+- ### Capability Endpoints
+- ## Next Steps
+### docs/features/security/SPEC.md
+- # Technical Specification: Security Hardening ("Defense in Depth")
+- ## Overview
+- ## Security Architecture
+- ### Defense Layers
+- ## Layer 1: Code Integrity
+- ### Path Guard CI Enforcement
+- # Only allow changes from trusted maintainers
+- # Ensure core translation logic hasn't been tampered
+- ### Signed Releases
+- # Download release
+- # Download signature
+- # Import GPG key
+- # Verify signature
+- # Verify checksum
+- ### Multi-Arch Builds
+- ## Layer 2: Container Hardening
+- ### Minimal Base Image
+- # Install build dependencies
+- # Build application
+- # Final stage - minimal runtime
+- # Non-root user
+- # Read-only filesystem
+- ### Security Context
+- ### Seccomp Profiles
+- ## Layer 3: Credential Security
+- ### Encrypted Storage
+- ### Secure File Permissions
+- ### Token Refresh Isolation
+- ### Device Fingerprinting
+- ## Layer 4: Network Security
+- ### TLS Enforcement
+- ### Request Validation
+- ### Rate Limiting
+- ### IP Allowlisting
+- ## Layer 5: Operational Security
+- ### Audit Logging
+- ### Secret Scanning
+- #!/bin/bash
+- # Scan for potential secrets
+- ### Dependency Scanning
+- ### Vulnerability Management
+- ## Security Monitoring
+- ### Metrics
+- ### Incident Response
+- ## Compliance
+- ### SOC 2 Readiness
+- ### GDPR Compliance
+- ## Security Checklist
+### docs/features/security/USER.md
+- # User Guide: Security Hardening
+- ## Understanding Security in cliproxyapi++
+- ## Quick Security Checklist
+- # 1. Verify Docker image is signed
+- # 2. Set secure file permissions
+- # 3. Enable TLS
+- # Edit config.yaml to enable TLS (see below)
+- # 4. Enable encryption
+- # Generate encryption key and set in config.yaml
+- # 5. Configure rate limiting
+- # Set appropriate limits in config.yaml
+- ## Container Security
+- ### Hardened Docker Deployment
+- # Security options
+- # Non-root user
+- # Volumes (writable only for these)
+- # Network
+- # Resource limits
+- ### Seccomp Profiles (Advanced)
+- # Save seccomp profile
+- # Use in docker-compose
+- ## TLS Configuration
+- ### Enable HTTPS
+- ### Generate Self-Signed Certificate (Testing)
+- # Generate private key
+- # Generate certificate
+- # Set permissions
+- ### Use Let's Encrypt (Production)
+- # Install certbot
+- # Generate certificate
+- # Copy to tls directory
+- # Set permissions
+- ## Credential Encryption
+- ### Enable Encryption
+- ### Generate Encryption Key
+- # Method 1: Using openssl
+- # Method 2: Using Python
+- # Method 3: Using /dev/urandom
+- ### Environment Variable (Recommended)
+- # Set in environment
+- # Use in docker-compose
+- ### Migrating Existing Credentials
+- # 1. Enable encryption in config.yaml
+- # 2. Restart service
+- # 3. Re-add credentials (they will be encrypted)
+- ## Access Control
+- ### IP Allowlisting
+- ### IP Denylisting
+- ### IP-Based Rate Limiting
+- ## Rate Limiting
+- ### Global Rate Limiting
+- ### Per-Provider Rate Limiting
+- ### Quota-Based Rate Limiting
+- ## Security Headers
+- ### Enable Security Headers
+- ## Audit Logging
+- ### Enable Audit Logging
+- ### View Audit Logs
+- # View all audit events
+- # Filter for auth failures
+- # Filter for security violations
+- # Pretty print JSON logs
+- ### Audit Log Format
+- ## Security Monitoring
+- ### Enable Metrics
+- # HELP cliproxy_auth_failures_total Total authentication failures
+- # TYPE cliproxy_auth_failures_total counter
+- # HELP cliproxy_rate_limit_violations_total Total rate limit violations
+- # TYPE cliproxy_rate_limit_violations_total counter
+- # HELP cliproxy_security_events_total Total security events
+- # TYPE cliproxy_security_events_total counter
+- ### Query Metrics
+- # Get auth failure rate
+- # Get rate limit violations
+- # Get all security events
+- ## Incident Response
+- ### Block Suspicious IP
+- # Add to denylist
+- ### Revoke Credentials
+- # Delete credential
+### docs/index.md
+- # cliproxy++
+- ## Audience Docsets
+- ## Key References
+### docs/sdk-access.md
+- # @sdk/access SDK Reference
+- ## Importing
+- ## Provider Registry
+- ## Manager Lifecycle
+- ## Authenticating Requests
+- ## Built-in `config-api-key` Provider
+- ## Loading Providers from External Go Modules
+- ### Metadata and auditing
+- ## Writing Custom Providers
+- ## Error Semantics
+- ## Integration with cliproxy Service
+- ### Hot reloading
+### docs/sdk-access_CN.md
+- # @sdk/access 开发指引
+- ## 引用方式
+- ## Provider Registry
+- ## 管理器生命周期
+- ## 认证请求
+- ## 内建 `config-api-key` Provider
+- ## 引入外部 Go 模块提供者
+- ### 元数据与审计
+- ## 编写自定义提供者
+- ## 错误语义
+- ## 与 cliproxy 集成
+- ### 动态热更新提供者
+### docs/sdk-advanced.md
+- # SDK Advanced: Executors & Translators
+- ## Concepts
+- ## 1) Implement a Provider Executor
+- ## 2) Register Translators
+- ## 3) Register Models
+- ## Credentials & Transports
+- ## Testing Tips
+### docs/sdk-advanced_CN.md
+- # SDK 高级指南：执行器与翻译器
+- ## 概念
+- ## 1) 实现 Provider 执行器
+- ## 2) 注册翻译器
+- ## 3) 注册模型
+- ## 凭据与传输
+- ## 测试建议
+### docs/sdk-usage.md
+- # CLI Proxy SDK Guide
+- ## Install & Import
+- ## Minimal Embed
+- ## Server Options (middleware, routes, logs)
+- ## Management API (when embedded)
+- ## Provider Metrics
+- ## Using the Core Auth Manager
+- ## Custom Client Sources
+- ## Hooks
+- ## Shutdown
+- ## Notes
+### docs/sdk-usage_CN.md
+- # CLI Proxy SDK 使用指南
+- ## 安装与导入
+- ## 最小可用示例
+- ## 服务器可选项（中间件、路由、日志）
+- ## 管理 API（内嵌时）
+- ## 使用核心鉴权管理器
+- ## 自定义凭据来源
+- ## 启动钩子
+- ## 关闭
+- ## 说明
+### docs/sdk-watcher.md
+- # SDK Watcher Integration
+- ## Update Queue Contract
+- ## Watcher Behaviour
+- ## High-Frequency Change Handling
+- ## Usage Checklist
+### docs/sdk-watcher_CN.md
+- # SDK Watcher集成说明
+- ## 更新队列契约
+- ## Watcher行为
+- ## 高频变更处理
+- ## 接入步骤
+### README.md
+- # cliproxyapi++ 🚀
+- ## 🏆 Deep Dive: The `++` Advantage
+- ### 📊 Feature Comparison Matrix
+- ## 🔍 Technical Differences & Hardening
+- ### 1. Architectural Evolution: `pkg/llmproxy`
+- ### 2. Enterprise Authentication & Lifecycle
+- ### 3. Security Hardening ("Defense in Depth")
+- ### 4. High-Scale Operations
+- ## 🚀 Getting Started
+- ### Prerequisites
+- ### One-Command Deployment (Docker)
+- # Setup deployment
+- # Create compose file
+- ## 🛠️ Advanced Usage
+- ### Extended Provider Support
+- ### API Specification
+- ## 🤝 Contributing
+- ## 📚 Documentation
+- ## 🚢 Docs Deploy
+- ## 📜 License
 
-## Authentication Support
-- Kiro (AWS CodeWhisperer) OAuth & Device Flow
-- GitHub Copilot OAuth
-- Claude, Gemini, DeepSeek, and many others via API keys.
-
-## Deployment
-- Recommended: Docker Compose (`docker-compose.yml`)
-- Binary: `cliproxyapi++`
-
-## Agent Guidelines
-- Use the OpenAI-compatible endpoints: `/v1/chat/completions`, `/v1/models`.
-- Kiro Auth UI: `/v0/oauth/kiro`.
-- Manage configurations in `config.yaml`.
-- Logs are stored in `./logs/`.
-
-For full details, see [llms-full.txt](llms-full.txt).
+## Go Source Index
+- cmd/codegen/main.go
+- cmd/server/main.go
+- examples/custom-provider/main.go
+- examples/http-request/main.go
+- examples/translator/main.go
+- pkg/llmproxy/access/config_access/provider.go
+- pkg/llmproxy/access/config_access/provider_test.go
+- pkg/llmproxy/access/reconcile.go
+- pkg/llmproxy/api/handlers/management/api_tools.go
+- pkg/llmproxy/api/handlers/management/api_tools_cbor_test.go
+- pkg/llmproxy/api/handlers/management/api_tools_test.go
+- pkg/llmproxy/api/handlers/management/auth_files.go
+- pkg/llmproxy/api/handlers/management/config_basic.go
+- pkg/llmproxy/api/handlers/management/config_lists.go
+- pkg/llmproxy/api/handlers/management/handler.go
+- pkg/llmproxy/api/handlers/management/logs.go
+- pkg/llmproxy/api/handlers/management/management_auth_test.go
+- pkg/llmproxy/api/handlers/management/management_basic_test.go
+- pkg/llmproxy/api/handlers/management/management_extra_test.go
+- pkg/llmproxy/api/handlers/management/management_fields_test.go
+- pkg/llmproxy/api/handlers/management/model_definitions.go
+- pkg/llmproxy/api/handlers/management/oauth_callback.go
+- pkg/llmproxy/api/handlers/management/oauth_sessions.go
+- pkg/llmproxy/api/handlers/management/quota.go
+- pkg/llmproxy/api/handlers/management/usage.go
+- pkg/llmproxy/api/handlers/management/vertex_import.go
+- pkg/llmproxy/api/middleware/request_logging.go
+- pkg/llmproxy/api/middleware/request_logging_test.go
+- pkg/llmproxy/api/middleware/response_writer.go
+- pkg/llmproxy/api/middleware/response_writer_test.go
+- pkg/llmproxy/api/modules/amp/amp.go
+- pkg/llmproxy/api/modules/amp/amp_test.go
+- pkg/llmproxy/api/modules/amp/fallback_handlers.go
+- pkg/llmproxy/api/modules/amp/fallback_handlers_test.go
+- pkg/llmproxy/api/modules/amp/gemini_bridge.go
+- pkg/llmproxy/api/modules/amp/gemini_bridge_test.go
+- pkg/llmproxy/api/modules/amp/model_mapping.go
+- pkg/llmproxy/api/modules/amp/model_mapping_test.go
+- pkg/llmproxy/api/modules/amp/proxy.go
+- pkg/llmproxy/api/modules/amp/proxy_test.go
+- pkg/llmproxy/api/modules/amp/response_rewriter.go
+- pkg/llmproxy/api/modules/amp/response_rewriter_test.go
+- pkg/llmproxy/api/modules/amp/routes.go
+- pkg/llmproxy/api/modules/amp/routes_test.go
+- pkg/llmproxy/api/modules/amp/secret.go
+- pkg/llmproxy/api/modules/amp/secret_test.go
+- pkg/llmproxy/api/modules/modules.go
+- pkg/llmproxy/api/responses_websocket.go
+- pkg/llmproxy/api/responses_websocket_test.go
+- pkg/llmproxy/api/server.go
+- pkg/llmproxy/api/server_test.go
+- pkg/llmproxy/auth/antigravity/auth.go
+- pkg/llmproxy/auth/antigravity/auth_test.go
+- pkg/llmproxy/auth/antigravity/constants.go
+- pkg/llmproxy/auth/antigravity/filename.go
+- pkg/llmproxy/auth/claude/anthropic.go
+- pkg/llmproxy/auth/claude/anthropic_auth.go
+- pkg/llmproxy/auth/claude/claude_auth_test.go
+- pkg/llmproxy/auth/claude/errors.go
+- pkg/llmproxy/auth/claude/html_templates.go
+- pkg/llmproxy/auth/claude/oauth_server.go
+- pkg/llmproxy/auth/claude/pkce.go
+- pkg/llmproxy/auth/claude/token.go
+- pkg/llmproxy/auth/claude/utls_transport.go
+- pkg/llmproxy/auth/codex/errors.go
+- pkg/llmproxy/auth/codex/errors_test.go
+- pkg/llmproxy/auth/codex/filename.go
+- pkg/llmproxy/auth/codex/filename_test.go
+- pkg/llmproxy/auth/codex/html_templates.go
+- pkg/llmproxy/auth/codex/jwt_parser.go
+- pkg/llmproxy/auth/codex/jwt_parser_test.go
+- pkg/llmproxy/auth/codex/oauth_server.go
+- pkg/llmproxy/auth/codex/oauth_server_test.go
+- pkg/llmproxy/auth/codex/openai.go
+- pkg/llmproxy/auth/codex/openai_auth.go
+- pkg/llmproxy/auth/codex/openai_auth_test.go
+- pkg/llmproxy/auth/codex/pkce.go
+- pkg/llmproxy/auth/codex/pkce_test.go
+- pkg/llmproxy/auth/codex/token.go
+- pkg/llmproxy/auth/codex/token_test.go
+- pkg/llmproxy/auth/copilot/copilot_auth.go
+- pkg/llmproxy/auth/copilot/copilot_auth_test.go
+- pkg/llmproxy/auth/copilot/copilot_extra_test.go
+- pkg/llmproxy/auth/copilot/errors.go
+- pkg/llmproxy/auth/copilot/errors_test.go
+- pkg/llmproxy/auth/copilot/oauth.go
+- pkg/llmproxy/auth/copilot/token.go
+- pkg/llmproxy/auth/copilot/token_test.go
+- pkg/llmproxy/auth/diff/auth_diff.go
+- pkg/llmproxy/auth/diff/config_diff.go
+- pkg/llmproxy/auth/diff/config_diff_test.go
+- pkg/llmproxy/auth/diff/diff_generated.go
+- pkg/llmproxy/auth/diff/model_hash.go
+- pkg/llmproxy/auth/diff/model_hash_test.go
+- pkg/llmproxy/auth/diff/models_summary.go
+- pkg/llmproxy/auth/diff/oauth_excluded.go
+- pkg/llmproxy/auth/diff/oauth_excluded_test.go
+- pkg/llmproxy/auth/diff/oauth_model_alias.go
+- pkg/llmproxy/auth/diff/openai_compat.go
+- pkg/llmproxy/auth/diff/openai_compat_test.go
+- pkg/llmproxy/auth/empty/token.go
+- pkg/llmproxy/auth/gemini/gemini_auth.go
+- pkg/llmproxy/auth/gemini/gemini_auth_test.go
+- pkg/llmproxy/auth/gemini/gemini_token.go
+- pkg/llmproxy/auth/iflow/cookie_helpers.go
+- pkg/llmproxy/auth/iflow/iflow_auth.go
+- pkg/llmproxy/auth/iflow/iflow_auth_test.go
+- pkg/llmproxy/auth/iflow/iflow_token.go
+- pkg/llmproxy/auth/iflow/oauth_server.go
+- pkg/llmproxy/auth/kilo/kilo_auth.go
+- pkg/llmproxy/auth/kilo/kilo_token.go
+- pkg/llmproxy/auth/kimi/kimi.go
+- pkg/llmproxy/auth/kimi/kimi_test.go
+- pkg/llmproxy/auth/kimi/token.go
+- pkg/llmproxy/auth/kiro/aws.go
+- pkg/llmproxy/auth/kiro/aws_auth.go
+- pkg/llmproxy/auth/kiro/aws_extra_test.go
+- pkg/llmproxy/auth/kiro/aws_test.go
+- pkg/llmproxy/auth/kiro/background_refresh.go
+- pkg/llmproxy/auth/kiro/codewhisperer_client.go
+- pkg/llmproxy/auth/kiro/cooldown.go
+- pkg/llmproxy/auth/kiro/cooldown_test.go
+- pkg/llmproxy/auth/kiro/fingerprint.go
+- pkg/llmproxy/auth/kiro/fingerprint_test.go
+- pkg/llmproxy/auth/kiro/jitter.go
+- pkg/llmproxy/auth/kiro/jitter_test.go
+- pkg/llmproxy/auth/kiro/metrics.go
+- pkg/llmproxy/auth/kiro/metrics_test.go
+- pkg/llmproxy/auth/kiro/oauth.go
+- pkg/llmproxy/auth/kiro/oauth_web.go
