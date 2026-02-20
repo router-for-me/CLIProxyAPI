@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"

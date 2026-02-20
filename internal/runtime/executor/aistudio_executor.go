@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"

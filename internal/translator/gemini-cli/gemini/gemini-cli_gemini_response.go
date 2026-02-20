@@ -10,7 +10,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
