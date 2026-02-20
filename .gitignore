@@ -34,6 +34,15 @@ auths/*
 
 # Documentation
 docs/*
+!docs/index.md
+!docs/package.json
+!docs/FEATURE_CHANGES_PLUSPLUS.md
+!docs/docsets/
+!docs/docsets/**
+!docs/.vitepress/
+docs/.vitepress/*
+!docs/.vitepress/config.ts
+docs/.vitepress/dist/
 AGENTS.md
 CLAUDE.md
 GEMINI.md
