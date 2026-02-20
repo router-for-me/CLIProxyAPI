@@ -1,0 +1,43 @@
+# cliproxyapi++ 🚀 - Full Context
+
+## Project Architecture
+cliproxyapi++ is a Go-based proxy that translates various proprietary AI model APIs into a unified, OpenAI-compatible format. It is designed for high-performance agentic operations and enterprise-grade governance.
+
+### Core Components
+- **Server**: `cmd/server/main.go` - Handles flag parsing, configuration loading, and starting the HTTP server.
+- **SDK**: `sdk/cliproxy/` - Contains the main service logic and authentication provider registry.
+- **LLM Proxy Logic**: `pkg/llmproxy/` - Implements the core translation, authentication, and communication protocols for each provider.
+- **Translators**: `internal/translator/` - Contains specialized logic for mapping between different API formats (e.g., Kiro, Codex, Gemini).
+- **Watcher/Synthesizer**: `internal/watcher/` - Manages configuration synthesis and dynamic updates.
+
+### Configuration (`config.yaml`)
+- `server`: Port and debug settings.
+- `usage-statistics-enabled`: Toggle metrics collection.
+- `disable-cooling`: Toggle intelligent rate-limit cooldown.
+- `incognito-browser`: Kiro auth browser preference.
+- Provider blocks (e.g., `claude`, `gemini`, `codex`): Manage API keys and provider-specific options.
+
+### Authentication & Lifecycle
+- **Unified Token Store**: Supports local files, Postgres, Git, and Object stores for persistent token management.
+- **Background Refresh**: Automatically refreshes provider tokens 10 minutes before expiration.
+- **Rate Limiting**: Integrated per-session and per-project budgeting to prevent abuse.
+
+### API Specification
+- **OpenAI Compatible**:
+  - `GET /v1/models` - List supported models.
+  - `POST /v1/chat/completions` - Execute chat completions with streaming support.
+- **Management API**:
+  - `GET /v0/config` - Retrieve current configuration.
+  - `GET /v0/oauth/kiro` - Browser-based Kiro authentication UI.
+  - `GET /v0/logs` - Retrieve application logs.
+
+### Development & Contributing
+- **Task Runner**: Use `Taskfile.yml` for `build`, `test`, `lint`, and `docker`.
+- **Governance**: `CONTRIBUTING.md` and `SECURITY.md` define contribution paths and security policies.
+- **Hardening**: `pr-path-guard` CI workflow protects core translator logic.
+
+## For Agents & AI Tools
+- When integrating with cliproxyapi++, always use the OpenAI-compatible endpoints where possible.
+- If an authentication flow is required, guide the user to the appropriate `--login` flag or web UI.
+- Use `config.example.yaml` as the template for initial configuration.
+- Check the `logs/` directory for detailed request/response traces if `debug: true`.

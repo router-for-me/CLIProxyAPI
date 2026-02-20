@@ -1,0 +1,30 @@
+# cliproxyapi++ 🚀
+
+> Unified Agent Orchestration, Governance, and Lifecycle Management.
+
+## Overview
+cliproxyapi++ is a high-performance, hardened fork of CLIProxyAPI. It provides an OpenAI-compatible interface for third-party LLM providers (Claude, Gemini, Codex, Kiro, etc.) with integrated auth management and rate limiting.
+
+## Key Files
+- `cmd/server/main.go`: Application entry point and flag definitions.
+- `pkg/llmproxy/config/config.go`: Configuration structures and loading logic.
+- `sdk/cliproxy/service.go`: Core service implementation.
+- `sdk/cliproxy/auth/conductor.go`: Authentication management.
+- `config.example.yaml`: Main configuration template.
+
+## Authentication Support
+- Kiro (AWS CodeWhisperer) OAuth & Device Flow
+- GitHub Copilot OAuth
+- Claude, Gemini, DeepSeek, and many others via API keys.
+
+## Deployment
+- Recommended: Docker Compose (`docker-compose.yml`)
+- Binary: `cliproxyapi++`
+
+## Agent Guidelines
+- Use the OpenAI-compatible endpoints: `/v1/chat/completions`, `/v1/models`.
+- Kiro Auth UI: `/v0/oauth/kiro`.
+- Manage configurations in `config.yaml`.
+- Logs are stored in `./logs/`.
+
+For full details, see [llms-full.txt](llms-full.txt).
