@@ -90,13 +90,50 @@ docker compose up -d
 
 ---
 
-## 🛠️ Advanced Usage
+## 🧭 Provider-First Quickstart
 
-### Extended Provider Support
-`cliproxyapi++` supports a massive registry of providers out-of-the-box:
-*   **Direct**: Claude, Gemini, OpenAI, Mistral, Groq, DeepSeek.
-*   **Aggregators**: OpenRouter, Together AI, Fireworks AI, Novita AI, SiliconFlow.
-*   **Proprietary**: Kiro (AWS), GitHub Copilot, Roo Code, Kilo AI, MiniMax.
+Users care most about provider behavior. This is the fastest safe production baseline:
+
+1. Configure one direct primary provider (latency/reliability).
+2. Configure one aggregator fallback provider (breadth/failover).
+3. Enforce prefixes for workload isolation (`force-model-prefix: true`).
+4. Verify `v1/models` and `v1/metrics/providers` before sending production traffic.
+
+Minimal pattern:
+
+```yaml
+api-keys:
+  - "prod-client-key"
+
+force-model-prefix: true
+
+claude-api-key:
+  - api-key: "sk-ant-..."
+    prefix: "core"
+
+openrouter:
+  - api-key: "sk-or-v1-..."
+    prefix: "fallback"
+```
+
+Validation:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer prod-client-key" | jq '.data[:5]'
+
+curl -sS http://localhost:8317/v1/metrics/providers | jq
+```
+
+---
+
+## 🛠️ Provider and Routing Capabilities
+
+`cliproxyapi++` supports a broad provider registry:
+
+- **Direct**: Claude, Gemini, OpenAI/Codex, Mistral, Groq, DeepSeek.
+- **Aggregators**: OpenRouter, Together AI, Fireworks AI, Novita AI, SiliconFlow.
+- **OAuth / Session**: Kiro, GitHub Copilot, Roo Code, Kilo AI, MiniMax, Cursor.
 
 ### API Specification
 The proxy provides two main API surfaces:
@@ -121,6 +158,11 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
 
 ## 📚 Documentation
 
+- **Provider Docs (new focus):**
+  - [Provider Usage](./docs/provider-usage.md)
+  - [Provider Catalog](./docs/provider-catalog.md)
+  - [Provider Operations Runbook](./docs/provider-operations.md)
+  - [Routing and Models Reference](./docs/routing-reference.md)
 - **[Docsets](./docs/docsets/)** — Role-oriented documentation sets.
   - [Developer (Internal)](./docs/docsets/developer/internal/)
   - [Developer (External)](./docs/docsets/developer/external/)

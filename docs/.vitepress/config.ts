@@ -15,6 +15,7 @@ export default defineConfig({
       { text: "Home", link: "/" },
       { text: "Getting Started", link: "/getting-started" },
       { text: "Providers", link: "/provider-usage" },
+      { text: "Provider Catalog", link: "/provider-catalog" },
       { text: "Reference", link: "/routing-reference" },
       { text: "API", link: "/api/" },
       { text: "Docsets", link: "/docsets/" }
@@ -27,6 +28,8 @@ export default defineConfig({
           { text: "Getting Started", link: "/getting-started" },
           { text: "Install", link: "/install" },
           { text: "Provider Usage", link: "/provider-usage" },
+          { text: "Provider Catalog", link: "/provider-catalog" },
+          { text: "Provider Operations", link: "/provider-operations" },
           { text: "Troubleshooting", link: "/troubleshooting" }
         ]
       },
