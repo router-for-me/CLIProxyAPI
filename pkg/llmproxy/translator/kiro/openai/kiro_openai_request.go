@@ -234,16 +234,16 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
 	// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent
 	// rather than inline <thinking> tags in assistantResponseEvent.
-	// We use a high max_thinking_length to allow extensive reasoning.
+	// Use a conservative thinking budget to reduce latency/cost spikes in long sessions.
 	if thinkingEnabled {
 		thinkingHint := `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>200000</max_thinking_length>`
+<max_thinking_length>16000</max_thinking_length>`
 		if systemPrompt != "" {
 			systemPrompt = thinkingHint + "\n\n" + systemPrompt
 		} else {
 			systemPrompt = thinkingHint
 		}
-		log.Debugf("kiro-openai: injected thinking prompt (official mode)")
+		log.Infof("kiro-openai: injected thinking prompt (official mode), has_tools: %v", len(kiroTools) > 0)
 	}
 
 	// Process messages and build history
@@ -814,6 +814,12 @@ func checkThinkingModeFromOpenAIWithHeaders(openaiBody []byte, headers http.Head
 	return false
 }
 
+// hasThinkingTagInBody checks if the request body already contains thinking configuration tags.
+// This is used to prevent duplicate injection when client (e.g., AMP/Cursor) already includes thinking config.
+func hasThinkingTagInBody(body []byte) bool {
+	bodyStr := string(body)
+	return strings.Contains(bodyStr, "<thinking_mode>") || strings.Contains(bodyStr, "<max_thinking_length>")
+}
 // extractToolChoiceHint extracts tool_choice from OpenAI request and returns a system prompt hint.
 // OpenAI tool_choice values:
 // - "none": Don't use any tools
