@@ -306,7 +306,7 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 const sessionKeyMetadataKey = cliproxyexecutor.SessionKeyMetadataKey
 
 // Pick routes requests with the same session key to the same auth credential.
-// When no session key is present, it falls back to round-robin selection.
+// When no session key is present, it falls back to fill-first selection.
 func (s *StickyRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
@@ -323,29 +323,32 @@ func (s *StickyRoundRobinSelector) Pick(ctx context.Context, provider, model str
 		}
 	}
 
+	// No session key — fall back to fill-first (always pick the first available).
+	if sessionKey == "" {
+		return available[0], nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.sessions == nil {
 		s.sessions = make(map[string]string)
 	}
+
+	// Try to find the sticky auth for this session.
+	if authID, ok := s.sessions[sessionKey]; ok {
+		for _, candidate := range available {
+			if candidate.ID == authID {
+				return candidate, nil
+			}
+		}
+		// Sticky auth is no longer available; fall through to pick a new one.
+	}
+
+	// Round-robin to assign a new auth for this session.
 	if s.cursors == nil {
 		s.cursors = make(map[string]int)
 	}
-
-	// If we have a session key, try to find the sticky auth.
-	if sessionKey != "" {
-		if authID, ok := s.sessions[sessionKey]; ok {
-			for _, candidate := range available {
-				if candidate.ID == authID {
-					return candidate, nil
-				}
-			}
-			// Sticky auth is no longer available; fall through to pick a new one.
-		}
-	}
-
-	// Round-robin fallback.
 	rrKey := provider + ":" + canonicalModelKey(model)
 	limit := s.maxKeys
 	if limit <= 0 {
@@ -362,22 +365,20 @@ func (s *StickyRoundRobinSelector) Pick(ctx context.Context, provider, model str
 	selected := available[index%len(available)]
 
 	// Record the sticky mapping.
-	if sessionKey != "" {
-		// Evict half the entries when the map is full to avoid losing all
-		// stickiness at once while still bounding memory usage.
-		if len(s.sessions) >= limit {
-			evictCount := 0
-			evictTarget := len(s.sessions) / 2
-			for k := range s.sessions {
-				delete(s.sessions, k)
-				evictCount++
-				if evictCount >= evictTarget {
-					break
-				}
+	// Evict half the entries when the map is full to avoid losing all
+	// stickiness at once while still bounding memory usage.
+	if len(s.sessions) >= limit {
+		evictCount := 0
+		evictTarget := len(s.sessions) / 2
+		for k := range s.sessions {
+			delete(s.sessions, k)
+			evictCount++
+			if evictCount >= evictTarget {
+				break
 			}
 		}
-		s.sessions[sessionKey] = selected.ID
 	}
+	s.sessions[sessionKey] = selected.ID
 
 	return selected, nil
 }
