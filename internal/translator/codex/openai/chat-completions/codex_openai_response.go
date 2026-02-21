@@ -86,7 +86,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	// Extract and set usage metadata (token counts).
 	if usageResult := gjson.GetBytes(rawJSON, "response.usage"); usageResult.Exists() {
 		if outputTokensResult := usageResult.Get("output_tokens"); outputTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokensResult.Int())
+			template, _ = sjson.Set(template, "usage.completion_tokens", max(0, outputTokensResult.Int()))
 		}
 		if totalTokensResult := usageResult.Get("total_tokens"); totalTokensResult.Exists() {
 			template, _ = sjson.Set(template, "usage.total_tokens", totalTokensResult.Int())
@@ -262,7 +262,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	// Extract and set usage metadata (token counts).
 	if usageResult := responseResult.Get("usage"); usageResult.Exists() {
 		if outputTokensResult := usageResult.Get("output_tokens"); outputTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokensResult.Int())
+			template, _ = sjson.Set(template, "usage.completion_tokens", max(0, outputTokensResult.Int()))
 		}
 		if totalTokensResult := usageResult.Get("total_tokens"); totalTokensResult.Exists() {
 			template, _ = sjson.Set(template, "usage.total_tokens", totalTokensResult.Int())
