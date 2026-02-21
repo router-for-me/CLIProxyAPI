@@ -310,10 +310,17 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.name", functionName)
 				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.id", callID)
 
-				// Set the raw JSON output directly (preserves string encoding)
+				// Set the function output into the response.
+				// When the output is valid JSON without literal control characters
+				// (newlines, carriage returns inside string values) we embed it as a
+				// raw JSON value so the model sees structured data.  Otherwise we
+				// fall back to sjson.Set which safely escapes the value as a string.
+				// This prevents sjson.SetRaw from corrupting the JSON tree when the
+				// raw value contains literal newlines (common with double-encoded
+				// function outputs whose inner escape sequences were decoded by .Str).
 				if outputRaw != "" && outputRaw != "null" {
 					output := gjson.Parse(outputRaw)
-					if output.Type == gjson.JSON {
+					if output.Type == gjson.JSON && !containsLiteralControlChars(output.Raw) {
 						functionResponse, _ = sjson.SetRaw(functionResponse, "functionResponse.response.result", output.Raw)
 					} else {
 						functionResponse, _ = sjson.Set(functionResponse, "functionResponse.response.result", outputRaw)
@@ -439,4 +446,17 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	result := []byte(out)
 	result = common.AttachDefaultSafetySettings(result, "safetySettings")
 	return result
+}
+
+// containsLiteralControlChars reports whether s contains any ASCII control
+// character (0x00–0x1F) other than horizontal tab (0x09).  Literal newlines
+// and carriage returns inside a JSON value cause sjson.SetRaw to mis-parse
+// string boundaries and corrupt the surrounding JSON tree.
+func containsLiteralControlChars(s string) bool {
+	for _, c := range s {
+		if c < 0x20 && c != '\t' {
+			return true
+		}
+	}
+	return false
 }
