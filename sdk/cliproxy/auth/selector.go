@@ -303,7 +303,7 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
-const sessionKeyMetadataKey = "session_key"
+const sessionKeyMetadataKey = cliproxyexecutor.SessionKeyMetadataKey
 
 // Pick routes requests with the same session key to the same auth credential.
 // When no session key is present, it falls back to round-robin selection.
@@ -349,7 +349,7 @@ func (s *StickyRoundRobinSelector) Pick(ctx context.Context, provider, model str
 	rrKey := provider + ":" + canonicalModelKey(model)
 	limit := s.maxKeys
 	if limit <= 0 {
-		limit = 8192
+		limit = 4096
 	}
 	if _, ok := s.cursors[rrKey]; !ok && len(s.cursors) >= limit {
 		s.cursors = make(map[string]int)
@@ -363,9 +363,18 @@ func (s *StickyRoundRobinSelector) Pick(ctx context.Context, provider, model str
 
 	// Record the sticky mapping.
 	if sessionKey != "" {
-		// Evict oldest entries if map is too large.
+		// Evict half the entries when the map is full to avoid losing all
+		// stickiness at once while still bounding memory usage.
 		if len(s.sessions) >= limit {
-			s.sessions = make(map[string]string)
+			evictCount := 0
+			evictTarget := len(s.sessions) / 2
+			for k := range s.sessions {
+				delete(s.sessions, k)
+				evictCount++
+				if evictCount >= evictTarget {
+					break
+				}
+			}
 		}
 		s.sessions[sessionKey] = selected.ID
 	}

@@ -203,7 +203,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			if sessionKey := strings.TrimSpace(ginCtx.GetHeader("X-Session-Key")); sessionKey != "" {
-				meta["session_key"] = sessionKey
+				meta[coreexecutor.SessionKeyMetadataKey] = sessionKey
 			}
 		}
 	}
