@@ -314,6 +314,10 @@ type CloakConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// CacheUserID controls whether Claude user_id values are cached per API key.
+	// When false, a fresh random user_id is generated for every request.
+	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,

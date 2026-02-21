@@ -164,6 +164,7 @@ nonstream-keepalive-interval: 0
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"
+#       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # These are used as fallbacks when the client does not send its own headers.
