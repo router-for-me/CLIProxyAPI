@@ -562,3 +562,59 @@ func jsonPayload(line []byte) []byte {
 	}
 	return trimmed
 }
+
+// SanityCheckResponse verifies that the upstream response is not empty and contains
+// expected data structures (choices for OpenAI, candidates for Gemini, content for Claude).
+func SanityCheckResponse(data []byte) error {
+	if len(data) == 0 {
+		return statusErr{code: 502, msg: "upstream response is empty"}
+	}
+	if !gjson.ValidBytes(data) {
+		return statusErr{code: 502, msg: "upstream response is not valid JSON"}
+	}
+
+	res := gjson.ParseBytes(data)
+	// OpenAI check
+	if res.Get("choices").Exists() {
+		if len(res.Get("choices").Array()) == 0 {
+			return statusErr{code: 502, msg: "upstream response has empty choices"}
+		}
+		return nil
+	}
+	// Gemini / Antigravity check
+	if res.Get("candidates").Exists() || res.Get("response.candidates").Exists() {
+		candidates := res.Get("candidates")
+		if !candidates.Exists() {
+			candidates = res.Get("response.candidates")
+		}
+		if len(candidates.Array()) == 0 {
+			return statusErr{code: 502, msg: "upstream response has empty candidates"}
+		}
+		return nil
+	}
+	// Claude check
+	if res.Get("content").Exists() {
+		if len(res.Get("content").Array()) == 0 {
+			return statusErr{code: 502, msg: "upstream response has empty content"}
+		}
+		return nil
+	}
+
+	// If it has usage but no choices, it might be a terminal chunk or a metadata-only response.
+	// We allow these for now to be safe, as long as it's valid JSON.
+	if res.Get("usage").Exists() || res.Get("usageMetadata").Exists() || res.Get("response.usageMetadata").Exists() {
+		return nil
+	}
+
+	return statusErr{code: 502, msg: "upstream response is missing expected fields (choices/candidates/content/usage)"}
+}
+
+// SanityCheckStreamChunk is a variant of SanityCheckResponse for SSE chunks.
+// It skips validation for non-data lines and known terminal markers.
+func SanityCheckStreamChunk(line []byte) error {
+	payload := jsonPayload(line)
+	if len(payload) == 0 {
+		return nil // skip non-JSON or empty lines
+	}
+	return SanityCheckResponse(payload)
+}
