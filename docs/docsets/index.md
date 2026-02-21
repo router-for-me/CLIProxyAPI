@@ -1,6 +1,12 @@
 # Docsets
 
-Audience-specific docs for cliproxyapi++.
+Audience-specific tracks for operating and integrating `cliproxyapi++`.
+
+## How To Use This Section
+
+- Start with the track matching your role.
+- Follow linked runbooks before reading deeper feature internals.
+- Use API pages for concrete request/response contracts.
 
 ## Developer
 
@@ -14,3 +20,9 @@ Audience-specific docs for cliproxyapi++.
 ## Agent
 
 - [Agent Operator Docset](./agent/)
+
+## Shared References
+
+- [Getting Started](/getting-started)
+- [API Index](/api/)
+- [Troubleshooting](/troubleshooting)
