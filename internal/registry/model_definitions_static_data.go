@@ -187,7 +187,7 @@ func GetGeminiModels() []*ModelInfo {
 		{
 			ID:                         "gemini-3.1-pro-preview",
 			Object:                     "model",
-			Created:                    1740009600,
+			Created:                    1771459200,
 			OwnedBy:                    "google",
 			Type:                       "gemini",
 			Name:                       "models/gemini-3.1-pro-preview",
@@ -312,7 +312,7 @@ func GetGeminiVertexModels() []*ModelInfo {
 		{
 			ID:                         "gemini-3.1-pro-preview",
 			Object:                     "model",
-			Created:                    1771491385,
+			Created:                    1771459200,
 			OwnedBy:                    "google",
 			Type:                       "gemini",
 			Name:                       "models/gemini-3.1-pro-preview",
@@ -550,7 +550,7 @@ func GetAIStudioModels() []*ModelInfo {
 		{
 			ID:                         "gemini-3.1-pro-preview",
 			Object:                     "model",
-			Created:                    1740009600,
+			Created:                    1771459200,
 			OwnedBy:                    "google",
 			Type:                       "gemini",
 			Name:                       "models/gemini-3.1-pro-preview",
