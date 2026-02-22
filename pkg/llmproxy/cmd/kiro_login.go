@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -97,6 +98,10 @@ func DoKiroAWSLogin(cfg *config.Config, options *LoginOptions) {
 		fmt.Println("1. Make sure you have an AWS Builder ID")
 		fmt.Println("2. Complete the authorization in the browser")
 		fmt.Println("3. If callback fails, try: --kiro-import (after logging in via Kiro IDE)")
+		if isKiroAWSAccessPortalError(err) {
+			fmt.Println("4. AWS access portal sign-in failed. Wait before retrying to avoid account lockouts, or use --kiro-aws-authcode.")
+			fmt.Println("5. If SSO keeps failing, verify IAM Identity Center setup with your administrator.")
+		}
 		return
 	}
 
@@ -114,6 +119,15 @@ func DoKiroAWSLogin(cfg *config.Config, options *LoginOptions) {
 		fmt.Printf("Authenticated as %s\n", record.Label)
 	}
 	fmt.Println("Kiro AWS authentication successful!")
+}
+
+func isKiroAWSAccessPortalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "aws access portal sign in error") ||
+		strings.Contains(lower, "unable to sign you in to the aws access portal")
 }
 
 // DoKiroAWSAuthCodeLogin triggers Kiro authentication with AWS Builder ID using authorization code flow.
