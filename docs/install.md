@@ -89,13 +89,33 @@ process-compose -f examples/process-compose.dev.yaml up
 
 Then edit `config.yaml` or files under `auth-dir`; the running process reloads changes automatically.
 
-Deterministic refresh check:
+Deterministic local refresh sequence:
+
+```bash
+# 1) Confirm process is healthy.
+curl -sS http://localhost:8317/health
+
+# 2) Force watcher-visible change after config edits.
+touch config.yaml
+
+# 3) Verify model inventory reloaded.
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer YOUR_CLIENT_KEY" | jq '.data | length'
+
+# 4) Run one canary request for the changed provider/model.
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_CLIENT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/flash","messages":[{"role":"user","content":"reload check"}],"stream":false}' | jq '.error // .choices[0].finish_reason'
+```
+
+After local refresh, run a dedicated model inventory check:
 
 ```bash
 curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer YOUR_API_KEY" | jq '.data | length'
 ```
 
-After each config/auth edit, re-run the command and confirm expected model-count/name changes before sending live traffic.
+Re-run this command after each config/auth edit and confirm model inventory before sending live traffic.
 
 ## Option D: Go SDK / Embedding
 
