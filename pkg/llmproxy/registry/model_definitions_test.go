@@ -64,4 +64,21 @@ func TestGetGitHubCopilotModels(t *testing.T) {
 	if !foundGPT5 {
 		t.Error("expected gpt-5 model in GitHub Copilot models")
 	}
+
+	for _, m := range models {
+		if m.ContextLength != 128000 {
+			t.Fatalf("expected github-copilot model %q context_length=128000, got %d", m.ID, m.ContextLength)
+		}
+	}
+}
+
+func TestGetAntigravityModelConfig_IncludesOpusAlias(t *testing.T) {
+	cfg := GetAntigravityModelConfig()
+	entry, ok := cfg["gemini-claude-opus-thinking"]
+	if !ok {
+		t.Fatal("expected gemini-claude-opus-thinking alias in antigravity model config")
+	}
+	if entry == nil || entry.Thinking == nil {
+		t.Fatal("expected gemini-claude-opus-thinking to define thinking support")
+	}
 }

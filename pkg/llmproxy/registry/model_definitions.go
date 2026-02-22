@@ -208,7 +208,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 		})
 	}
 
-	return append(models, []*ModelInfo{
+	models = append(models, []*ModelInfo{
 		{
 			ID:                  "gpt-5",
 			Object:              "model",
@@ -491,6 +491,15 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
 		},
 	}...)
+
+	// GitHub Copilot currently exposes a uniform 128K context window across registered models.
+	for _, model := range models {
+		if model != nil {
+			model.ContextLength = 128000
+		}
+	}
+
+	return models
 }
 
 // GetKiroModels returns the Kiro (AWS CodeWhisperer) model definitions
