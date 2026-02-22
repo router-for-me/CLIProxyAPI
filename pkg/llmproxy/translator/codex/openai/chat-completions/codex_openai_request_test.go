@@ -125,3 +125,34 @@ func TestConvertOpenAIRequestToCodex_NormalizesProxyPrefixedAssistantToolCall(t 
 		t.Fatalf("expected function_call name search_docs, got %s", callName)
 	}
 }
+
+func TestConvertOpenAIRequestToCodex_UsesVariantFallbackWhenReasoningEffortMissing(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role": "user", "content": "hello"}],
+		"variant": "high"
+	}`)
+
+	got := ConvertOpenAIRequestToCodex("gpt-4o", input, false)
+	res := gjson.ParseBytes(got)
+
+	if gotEffort := res.Get("reasoning.effort").String(); gotEffort != "high" {
+		t.Fatalf("expected reasoning.effort to use variant fallback high, got %s", gotEffort)
+	}
+}
+
+func TestConvertOpenAIRequestToCodex_UsesReasoningEffortBeforeVariant(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role": "user", "content": "hello"}],
+		"reasoning_effort": "low",
+		"variant": "high"
+	}`)
+
+	got := ConvertOpenAIRequestToCodex("gpt-4o", input, false)
+	res := gjson.ParseBytes(got)
+
+	if gotEffort := res.Get("reasoning.effort").String(); gotEffort != "low" {
+		t.Fatalf("expected reasoning.effort to prefer reasoning_effort low, got %s", gotEffort)
+	}
+}
