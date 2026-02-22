@@ -30,6 +30,10 @@ quota-exceeded:
   switch-preview-model: true
 ```
 
+Notes:
+- `quota-exceeded.switch-project` and `quota-exceeded.switch-preview-model` are the current built-in automatic quota fallback controls.
+- There is no generic per-provider auto-disable/auto-enable scheduler yet; for Gemini keys, use model exclusions/aliases plus these fallback toggles.
+
 ## Model Prefix and Alias Behavior
 
 - A credential/provider prefix (for example `team-a`) can require requests like `team-a/model-name`.
