@@ -19,6 +19,7 @@ This section tracks source-linked execution boards and import artifacts.
 - [Next 35-Item CPB Wave (CPB-0281..0315)](./issue-wave-cpb-0281-0315-2026-02-22.md)
 - [Next 35-Item CPB Wave (CPB-0316..0350)](./issue-wave-cpb-0316-0350-2026-02-22.md)
 - [Next 35-Item CPB Wave (CPB-0351..0385)](./issue-wave-cpb-0351-0385-2026-02-22.md)
+- [Next 35-Item CPB Wave (CPB-0386..0420)](./issue-wave-cpb-0386-0420-2026-02-22.md)
 - [Sprint Planning README](./README.md)
 - [Coder + Adjacent Research Inventory (300 repos)](./coder-org-plus-relative-300-inventory-2026-02-22.md)
 - [AgentAPI/cliproxy Integration Research](./agentapi-cliproxy-integration-research-2026-02-22.md)
