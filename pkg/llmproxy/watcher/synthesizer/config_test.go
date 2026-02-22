@@ -2,6 +2,8 @@ package synthesizer
 
 import (
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -149,5 +151,79 @@ func TestConfigSynthesizer_SynthesizeKiroKeys_UsesRefreshTokenForIDWhenProfileAr
 	}
 	if auths[0].ID == auths[1].ID {
 		t.Fatalf("expected unique auth IDs for distinct refresh tokens, got %q", auths[0].ID)
+	}
+}
+
+func TestConfigSynthesizer_SynthesizeCursorKeys_FromTokenFile(t *testing.T) {
+	s := NewConfigSynthesizer()
+	tokenDir := t.TempDir()
+	tokenPath := filepath.Join(tokenDir, "cursor-token.txt")
+	if err := os.WriteFile(tokenPath, []byte("sk-cursor-test"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			CursorKey: []config.CursorKey{
+				{
+					TokenFile:    tokenPath,
+					CursorAPIURL: "http://127.0.0.1:3010/",
+					ProxyURL:     "http://127.0.0.1:7890",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := s.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize failed: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth entry, got %d", len(auths))
+	}
+
+	got := auths[0]
+	if got.Provider != "cursor" {
+		t.Fatalf("provider = %q, want %q", got.Provider, "cursor")
+	}
+	if got.Attributes["api_key"] != "sk-cursor-test" {
+		t.Fatalf("api_key = %q, want %q", got.Attributes["api_key"], "sk-cursor-test")
+	}
+	if got.Attributes["base_url"] != "http://127.0.0.1:3010/v1" {
+		t.Fatalf("base_url = %q, want %q", got.Attributes["base_url"], "http://127.0.0.1:3010/v1")
+	}
+	if got.ProxyURL != "http://127.0.0.1:7890" {
+		t.Fatalf("proxy_url = %q, want %q", got.ProxyURL, "http://127.0.0.1:7890")
+	}
+}
+
+func TestConfigSynthesizer_SynthesizeCursorKeys_InvalidTokenFileIsSkipped(t *testing.T) {
+	s := NewConfigSynthesizer()
+	tokenDir := t.TempDir()
+	tokenPath := filepath.Join(tokenDir, "cursor-token.txt")
+	if err := os.WriteFile(tokenPath, []byte("invalid-token"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			CursorKey: []config.CursorKey{
+				{
+					TokenFile: tokenPath,
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := s.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize failed: %v", err)
+	}
+	if len(auths) != 0 {
+		t.Fatalf("expected invalid cursor token file to be skipped, got %d auth entries", len(auths))
 	}
 }
