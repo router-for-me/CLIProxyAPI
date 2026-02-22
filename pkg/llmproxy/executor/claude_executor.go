@@ -91,9 +91,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
+	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), "https://api.anthropic.com", baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -234,9 +232,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
+	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), "https://api.anthropic.com", baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -405,9 +401,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
+	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), "https://api.anthropic.com", baseURL)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")

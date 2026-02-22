@@ -179,7 +179,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		}
 		updateGeminiCLITokenMetadata(auth, baseTokenData, tok)
 
-		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, action)
+		url := fmt.Sprintf("%s/%s:%s", resolveOAuthBaseURL(e.cfg, e.Identifier(), codeAssistEndpoint, auth), codeAssistVersion, action)
 		if opts.Alt != "" && action != "countTokens" {
 			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 		}
@@ -322,7 +322,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		}
 		updateGeminiCLITokenMetadata(auth, baseTokenData, tok)
 
-		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, "streamGenerateContent")
+		url := fmt.Sprintf("%s/%s:%s", resolveOAuthBaseURL(e.cfg, e.Identifier(), codeAssistEndpoint, auth), codeAssistVersion, "streamGenerateContent")
 		if opts.Alt == "" {
 			url = url + "?alt=sse"
 		} else {
@@ -550,7 +550,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		}
 		updateGeminiCLITokenMetadata(auth, baseTokenData, tok)
 
-		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, "countTokens")
+		url := fmt.Sprintf("%s/%s:%s", resolveOAuthBaseURL(e.cfg, e.Identifier(), codeAssistEndpoint, auth), codeAssistVersion, "countTokens")
 		if opts.Alt != "" {
 			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 		}
