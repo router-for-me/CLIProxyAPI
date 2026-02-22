@@ -242,6 +242,13 @@ tasks:
     cmds:
       - task: quality:quick:check
 
+  quality:quick:fix:
+    desc: "Auto-fix local quality issues quickly (fmt + readonly quick checks)"
+    deps: [preflight, cache:unlock]
+    cmds:
+      - task: quality:fmt
+      - task: quality:quick:check
+
   quality:quick:check:
     desc: "Fast non-mutating quality checks (fmt check + changed lint + targeted tests)"
     deps: [preflight, cache:unlock]
