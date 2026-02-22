@@ -79,6 +79,7 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: *err})
 		return
 	}
+	rawJSON = sanitizeOpenAIResponsesRequest(rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -110,6 +111,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: *err})
 		return
 	}
+	rawJSON = sanitizeOpenAIResponsesRequest(rawJSON)
 
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
@@ -317,6 +319,19 @@ func readAndValidateOpenAIResponsesJSONRequest(c *gin.Context) ([]byte, *handler
 
 	c.Request.Body = io.NopCloser(bytes.NewReader(rawJSON))
 	return rawJSON, nil
+}
+
+func sanitizeOpenAIResponsesRequest(rawJSON []byte) []byte {
+	// OpenAI Responses SDK clients may send top-level "user" for abuse monitoring.
+	// Downstream providers commonly reject it, so strip it at the boundary.
+	if !gjson.GetBytes(rawJSON, "user").Exists() {
+		return rawJSON
+	}
+	updated, err := sjson.DeleteBytes(rawJSON, "user")
+	if err != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Context, originalResponsesJSON, chatJSON []byte) {

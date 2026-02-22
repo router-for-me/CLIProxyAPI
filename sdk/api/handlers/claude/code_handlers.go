@@ -75,6 +75,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 		})
 		return
 	}
+	rawJSON = sanitizeClaudeRequest(rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -104,6 +105,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 		})
 		return
 	}
+	rawJSON = sanitizeClaudeRequest(rawJSON)
 
 	c.Header("Content-Type", "application/json")
 

@@ -174,7 +174,7 @@ func (m usageTabModel) renderContent() string {
 			tpm = float64(totalTokens) / float64(len(tByH)) / 60.0
 		}
 	}
-	card4 := cardStyle.Copy().BorderForeground(lipgloss.Color("170")).Render(fmt.Sprintf(
+	card4 := cardStyle.BorderForeground(lipgloss.Color("170")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_tpm")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(fmt.Sprintf("%.2f", tpm)),
@@ -353,7 +353,7 @@ func renderBarChart(data map[string]any, maxBarWidth int, barColor lipgloss.Colo
 		if len(label) > labelWidth {
 			label = label[:labelWidth]
 		}
-		sb.WriteString(fmt.Sprintf("  %-*s %s %s\n",
+		fmt.Fprintf(&sb, "  %-*s %s %s\n",
 			labelWidth, label,
 			barStyle.Render(bar),
 			lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%.0f", v)),

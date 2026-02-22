@@ -2,6 +2,7 @@ package responses
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -121,5 +122,47 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Usage(t 
 	}
 	if res.Get("usage.output_tokens_details.reasoning_tokens").Int() != 2 {
 		t.Errorf("expected reasoning_tokens 2, got %d", res.Get("usage.output_tokens_details.reasoning_tokens").Int())
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneMarkerEmitsCompletion(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	chunk := []byte(`{"id":"resp1","created":123,"choices":[{"index":0,"delta":{"content":"hello"}}]}`)
+	_ = ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx, "m1", nil, nil, chunk, &param)
+
+	doneEvents := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx, "m1", nil, nil, []byte("[DONE]"), &param)
+	if len(doneEvents) != 1 {
+		t.Fatalf("expected exactly one event on [DONE], got %d", len(doneEvents))
+	}
+	if !strings.Contains(doneEvents[0], "event: response.completed") {
+		t.Fatalf("expected response.completed event on [DONE], got %q", doneEvents[0])
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneMarkerNoDuplicateCompletion(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	chunk1 := []byte(`{"id":"resp1","created":123,"choices":[{"index":0,"delta":{"content":"hello"}}]}`)
+	_ = ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx, "m1", nil, nil, chunk1, &param)
+
+	finishChunk := []byte(`{"id":"resp1","choices":[{"index":0,"finish_reason":"stop"}]}`)
+	finishEvents := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx, "m1", nil, nil, finishChunk, &param)
+	foundCompleted := false
+	for _, event := range finishEvents {
+		if strings.Contains(event, "event: response.completed") {
+			foundCompleted = true
+			break
+		}
+	}
+	if !foundCompleted {
+		t.Fatalf("expected response.completed on finish_reason chunk")
+	}
+
+	doneEvents := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx, "m1", nil, nil, []byte("[DONE]"), &param)
+	if len(doneEvents) != 0 {
+		t.Fatalf("expected no events on [DONE] after completion already emitted, got %d", len(doneEvents))
 	}
 }

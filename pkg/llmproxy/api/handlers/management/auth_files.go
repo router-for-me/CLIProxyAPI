@@ -740,6 +740,9 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 		}
 		auth.NextRefreshAfter = existing.NextRefreshAfter
+		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+			auth.ModelStates = existing.ModelStates
+		}
 		auth.Runtime = existing.Runtime
 		_, err := h.authManager.Update(ctx, auth)
 		return err
