@@ -296,6 +296,10 @@ func rawToString(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
+	// Keep behavior aligned with legacy gjson String() for null.
+	if string(raw) == "null" {
+		return ""
+	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s
