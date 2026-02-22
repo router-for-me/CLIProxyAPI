@@ -14,6 +14,13 @@ services:
     #   - .env
     environment:
       DEPLOY: ${DEPLOY:-}
+      # Runtime configuration via environment variables (optional, override config.yaml):
+      # CLIPROXY_HOST: Server host (default: "" for all interfaces)
+      # CLIPROXY_PORT: Server port (default: 8317)
+      # CLIPROXY_SECRET_KEY: Management API secret key
+      # CLIPROXY_ALLOW_REMOTE: Allow remote management access (true/false)
+      # CLIPROXY_DEBUG: Enable debug logging (true/false)
+      # CLIPROXY_ROUTING_STRATEGY: Routing strategy (round-robin/fill-first)
     ports:
       - "8317:8317"
       - "8085:8085"

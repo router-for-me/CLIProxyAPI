@@ -3,10 +3,13 @@
 // Claude models use the thinking.budget_tokens format with values in the range
 // 1024-128000. Some Claude models support ZeroAllowed (sonnet-4-5, opus-4-5),
 // while older models do not.
+// Claude Opus 4.6+ also supports output_config.effort as a level-based alternative.
 // See: _bmad-output/planning-artifacts/architecture.md#Epic-6
 package claude
 
 import (
+	"strings"
+
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	"github.com/tidwall/gjson"
@@ -36,7 +39,7 @@ func init() {
 //
 // Apply only processes ModeBudget and ModeNone; other modes are passed through unchanged.
 //
-// Expected output format when enabled:
+// Expected output format when enabled (budget-based):
 //
 //	{
 //	  "thinking": {
@@ -52,6 +55,9 @@ func init() {
 //	    "type": "disabled"
 //	  }
 //	}
+//
+// For Claude Opus 4.6+, output_config.effort may be used instead of budget_tokens.
+// When output_config.effort is present, it takes precedence over thinking.budget_tokens.
 func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
 		return applyCompatibleClaude(body, config)
@@ -62,12 +68,17 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 
 	// Only process ModeBudget and ModeNone; other modes pass through
 	// (caller should use ValidateConfig first to normalize modes)
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone {
+	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeLevel {
 		return body, nil
 	}
 
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		body = []byte(`{}`)
+	}
+
+	// Handle level-based configuration (output_config.effort)
+	if config.Mode == thinking.ModeLevel {
+		return applyLevelBasedConfig(body, config)
 	}
 
 	// Budget is expected to be pre-validated by ValidateConfig (clamped, ZeroAllowed enforced)
@@ -83,6 +94,28 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 
 	// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint)
 	result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
+	return result, nil
+}
+
+// applyLevelBasedConfig applies level-based thinking config using output_config.effort.
+// This is the preferred format for Claude Opus 4.6+ models.
+func applyLevelBasedConfig(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
+	level := string(config.Level)
+	if level == "" || level == "none" {
+		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
+		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		return result, nil
+	}
+
+	// Map level to output_config.effort format
+	effort := strings.ToLower(level)
+
+	// Set output_config.effort for level-based thinking
+	result, _ := sjson.SetBytes(body, "output_config.effort", effort)
+
+	// Also set thinking.type for backward compatibility
+	result, _ = sjson.SetBytes(result, "thinking.type", "enabled")
+
 	return result, nil
 }
 

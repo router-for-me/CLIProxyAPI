@@ -823,6 +823,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// 	}
 	// }
 
+	// Apply environment variable overrides (for Docker deployment convenience)
+	cfg.ApplyEnvOverrides()
+
 	// Return the populated configuration struct.
 	return &cfg, nil
 }
@@ -1240,6 +1243,119 @@ func hashSecret(secret string) (string, error) {
 		return "", err
 	}
 	return string(hashedBytes), nil
+}
+
+// ApplyEnvOverrides applies environment variable overrides to the configuration.
+// This enables Docker deployments with runtime configuration without modifying config.yaml.
+// Environment variables take precedence over config file values.
+func (cfg *Config) ApplyEnvOverrides() {
+	if cfg == nil {
+		return
+	}
+
+	// CLIPROXY_HOST - Server host (default: "" for all interfaces)
+	if val := os.Getenv("CLIPROXY_HOST"); val != "" {
+		cfg.Host = val
+		log.WithField("host", val).Info("Applied CLIPROXY_HOST override")
+	}
+
+	// CLIPROXY_PORT - Server port (default: 8317)
+	if val := os.Getenv("CLIPROXY_PORT"); val != "" {
+		if port, err := parseIntEnvVar(val); err == nil && port > 0 && port <= 65535 {
+			cfg.Port = port
+			log.WithField("port", port).Info("Applied CLIPROXY_PORT override")
+		} else {
+			log.WithField("value", val).Warn("Invalid CLIPROXY_PORT value, ignoring")
+		}
+	}
+
+	// CLIPROXY_SECRET_KEY - Management API secret key
+	if val := os.Getenv("CLIPROXY_SECRET_KEY"); val != "" {
+		// Hash if not already a bcrypt hash
+		if !looksLikeBcrypt(val) {
+			hashed, err := hashSecret(val)
+			if err != nil {
+				log.WithError(err).Warn("Failed to hash CLIPROXY_SECRET_KEY, using as-is")
+				cfg.RemoteManagement.SecretKey = val
+			} else {
+				cfg.RemoteManagement.SecretKey = hashed
+			}
+		} else {
+			cfg.RemoteManagement.SecretKey = val
+		}
+		log.Info("Applied CLIPROXY_SECRET_KEY override")
+	}
+
+	// CLIPROXY_ALLOW_REMOTE - Allow remote management access (true/false)
+	if val := os.Getenv("CLIPROXY_ALLOW_REMOTE"); val != "" {
+		if parsed, err := parseBoolEnvVar(val); err == nil {
+			cfg.RemoteManagement.AllowRemote = parsed
+			log.WithField("allow-remote", parsed).Info("Applied CLIPROXY_ALLOW_REMOTE override")
+		} else {
+			log.WithField("value", val).Warn("Invalid CLIPROXY_ALLOW_REMOTE value, ignoring")
+		}
+	}
+
+	// CLIPROXY_DEBUG - Enable debug logging (true/false)
+	if val := os.Getenv("CLIPROXY_DEBUG"); val != "" {
+		if parsed, err := parseBoolEnvVar(val); err == nil {
+			cfg.Debug = parsed
+			log.WithField("debug", parsed).Info("Applied CLIPROXY_DEBUG override")
+		} else {
+			log.WithField("value", val).Warn("Invalid CLIPROXY_DEBUG value, ignoring")
+		}
+	}
+
+	// CLIPROXY_ROUTING_STRATEGY - Routing strategy (round-robin/fill-first)
+	if val := os.Getenv("CLIPROXY_ROUTING_STRATEGY"); val != "" {
+		normalized := strings.ToLower(strings.TrimSpace(val))
+		if normalized == "round-robin" || normalized == "roundrobin" || normalized == "rr" {
+			cfg.Routing.Strategy = "round-robin"
+			log.Info("Applied CLIPROXY_ROUTING_STRATEGY override: round-robin")
+		} else if normalized == "fill-first" || normalized == "fillfirst" || normalized == "ff" {
+			cfg.Routing.Strategy = "fill-first"
+			log.Info("Applied CLIPROXY_ROUTING_STRATEGY override: fill-first")
+		} else {
+			log.WithField("value", val).Warn("Invalid CLIPROXY_ROUTING_STRATEGY value, ignoring")
+		}
+	}
+
+	// CLIPROXY_API_KEYS - Comma-separated list of API keys
+	if val := os.Getenv("CLIPROXY_API_KEYS"); val != "" {
+		keys := strings.Split(val, ",")
+		cfg.APIKeys = make([]string, 0, len(keys))
+		for _, key := range keys {
+			trimmed := strings.TrimSpace(key)
+			if trimmed != "" {
+				cfg.APIKeys = append(cfg.APIKeys, trimmed)
+			}
+		}
+		if len(cfg.APIKeys) > 0 {
+			log.WithField("count", len(cfg.APIKeys)).Info("Applied CLIPROXY_API_KEYS override")
+		}
+	}
+}
+
+// parseIntEnvVar parses an integer from an environment variable string.
+func parseIntEnvVar(val string) (int, error) {
+	val = strings.TrimSpace(val)
+	var result int
+	_, err := fmt.Sscanf(val, "%d", &result)
+	return result, err
+}
+
+// parseBoolEnvVar parses a boolean from an environment variable string.
+// Accepts: true/false, yes/no, 1/0, on/off (case-insensitive).
+func parseBoolEnvVar(val string) (bool, error) {
+	val = strings.ToLower(strings.TrimSpace(val))
+	switch val {
+	case "true", "yes", "1", "on":
+		return true, nil
+	case "false", "no", "0", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean value: %s", val)
+	}
 }
 
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
