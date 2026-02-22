@@ -5,6 +5,8 @@ pr-test-build.yml|quality-staged-check
 pr-test-build.yml|fmt-check
 pr-test-build.yml|golangci-lint
 pr-test-build.yml|route-lifecycle
+pr-test-build.yml|provider-smoke-matrix
+pr-test-build.yml|provider-smoke-matrix-cheapest
 pr-test-build.yml|test-smoke
 pr-test-build.yml|pre-release-config-compat-smoke
 pr-test-build.yml|distributed-critical-paths

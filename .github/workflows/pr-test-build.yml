@@ -182,7 +182,6 @@ jobs:
 
   provider-smoke-matrix-cheapest:
     name: provider-smoke-matrix-cheapest
-    if: ${{ vars.CLIPROXY_RUN_CHEAPEST_SMOKE == '1' }}
     runs-on: ubuntu-latest
     env:
       CLIPROXY_SMOKE_EXPECT_SUCCESS: "0"
