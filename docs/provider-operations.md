@@ -51,17 +51,38 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Shift traffic to fallback provider prefix.
 - Tighten expensive-model exposure with `excluded-models`.
 
+### Repeated `406` for iFlow
+
+- Run two probes with identical payloads (`stream:false` then `stream:true`).
+- If non-stream succeeds but stream fails, temporarily force non-stream for that model/prefix.
+- Keep a fallback alias ready (`iflow/glm-4.7` or `iflow/minimax-m2.5`) and switch via config reload.
+- Treat sustained `406` as rollback criteria for newly enabled iFlow models.
+
 ### Wrong Provider Selected
 
 - Inspect `force-model-prefix` and model naming in requests.
 - Verify alias collisions across provider blocks.
 - Prefer explicit `prefix/model` calls for sensitive workloads.
 
+### Cache Usage Always `0` on Claude OAuth
+
+- Compare `usage` objects between `/v1/chat/completions` and `/v1/responses` for the same prompt.
+- Confirm the selected model is cache-capable in your entitlement tier.
+- Use total token counters as billing baseline when cache counters are absent.
+- Do not block rollout on cache counters alone unless token totals are also inconsistent.
+
 ### Missing Models in `/v1/models`
 
 - Confirm provider block is enabled and auth loaded.
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
+
+### Port `8317` Becomes Unreachable
+
+- Verify listener state: `lsof -iTCP:8317 -sTCP:LISTEN`.
+- Run local and remote `/health` checks to isolate host-level reachability vs process crash.
+- Ensure service is supervised (`systemd`/container restart policy) with restart-on-failure.
+- Add synthetic health checks so idle/network policy regressions are detected before user traffic impact.
 
 ### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
 
