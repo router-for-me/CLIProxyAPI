@@ -622,6 +622,22 @@ func getTokenKey(auth *cliproxyauth.Auth) string {
 	return accessToken
 }
 
+func formatKiroCooldownError(remaining time.Duration, reason string) error {
+	base := fmt.Sprintf("kiro: token is in cooldown for %v (reason: %s)", remaining, reason)
+	switch reason {
+	case kiroauth.CooldownReasonSuspended:
+		return fmt.Errorf("%s; account appears suspended upstream, re-auth this Kiro entry or switch auth index", base)
+	case kiroauth.CooldownReason429, kiroauth.CooldownReasonQuotaExhausted:
+		return fmt.Errorf("%s; quota/rate-limit cooldown active, tune quota-exceeded.switch-project or quota-exceeded.switch-preview-model", base)
+	default:
+		return errors.New(base)
+	}
+}
+
+func formatKiroSuspendedStatusMessage(respBody []byte) string {
+	return "account suspended by upstream Kiro endpoint: " + string(respBody) + "; re-auth this Kiro entry or use another auth index"
+}
+
 // Execute sends the request to Kiro API and returns the response.
 // Supports automatic token refresh on 401/403 errors.
 func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -640,7 +656,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		remaining := cooldownMgr.GetRemainingCooldown(tokenKey)
 		reason := cooldownMgr.GetCooldownReason(tokenKey)
 		log.Warnf("kiro: token %s is in cooldown (reason: %s), remaining: %v", tokenKey, reason, remaining)
-		return resp, fmt.Errorf("kiro: token is in cooldown for %v (reason: %s)", remaining, reason)
+		return resp, formatKiroCooldownError(remaining, reason)
 	}
 
 	// Wait for rate limiter before proceeding
@@ -935,7 +951,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					rateLimiter.CheckAndMarkSuspended(tokenKey, respBodyStr)
 					cooldownMgr.SetCooldown(tokenKey, kiroauth.LongCooldown, kiroauth.CooldownReasonSuspended)
 					log.Errorf("kiro: account is suspended, token %s set to cooldown for %v", tokenKey, kiroauth.LongCooldown)
-					return resp, statusErr{code: httpResp.StatusCode, msg: "account suspended: " + string(respBody)}
+					return resp, statusErr{code: httpResp.StatusCode, msg: formatKiroSuspendedStatusMessage(respBody)}
 				}
 
 				// Check if this looks like a token-related 403 (some APIs return 403 for expired tokens)
@@ -1071,7 +1087,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		remaining := cooldownMgr.GetRemainingCooldown(tokenKey)
 		reason := cooldownMgr.GetCooldownReason(tokenKey)
 		log.Warnf("kiro: token %s is in cooldown (reason: %s), remaining: %v", tokenKey, reason, remaining)
-		return nil, fmt.Errorf("kiro: token is in cooldown for %v (reason: %s)", remaining, reason)
+		return nil, formatKiroCooldownError(remaining, reason)
 	}
 
 	// Wait for rate limiter before proceeding
@@ -1371,7 +1387,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					rateLimiter.CheckAndMarkSuspended(tokenKey, respBodyStr)
 					cooldownMgr.SetCooldown(tokenKey, kiroauth.LongCooldown, kiroauth.CooldownReasonSuspended)
 					log.Errorf("kiro: stream account is suspended, token %s set to cooldown for %v", tokenKey, kiroauth.LongCooldown)
-					return nil, statusErr{code: httpResp.StatusCode, msg: "account suspended: " + string(respBody)}
+					return nil, statusErr{code: httpResp.StatusCode, msg: formatKiroSuspendedStatusMessage(respBody)}
 				}
 
 				// Check if this looks like a token-related 403 (some APIs return 403 for expired tokens)

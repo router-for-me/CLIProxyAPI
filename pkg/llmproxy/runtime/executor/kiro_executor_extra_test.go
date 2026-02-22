@@ -1,7 +1,11 @@
 package executor
 
 import (
+	"strings"
 	"testing"
+	"time"
+
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
 )
 
 func TestKiroExecutor_MapModelToKiro(t *testing.T) {
@@ -65,5 +69,39 @@ func TestExtractRegionFromProfileARN(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("extractRegionFromProfileARN(%q) = %q, want %q", tt.arn, got, tt.want)
 		}
+	}
+}
+
+func TestFormatKiroCooldownError(t *testing.T) {
+	t.Run("suspended has remediation", func(t *testing.T) {
+		err := formatKiroCooldownError(2*time.Minute, kiroauth.CooldownReasonSuspended)
+		msg := err.Error()
+		if !strings.Contains(msg, "reason: account_suspended") {
+			t.Fatalf("expected cooldown reason in message, got %q", msg)
+		}
+		if !strings.Contains(msg, "re-auth this Kiro entry or switch auth index") {
+			t.Fatalf("expected suspension remediation in message, got %q", msg)
+		}
+	})
+
+	t.Run("quota has routing guidance", func(t *testing.T) {
+		err := formatKiroCooldownError(30*time.Second, kiroauth.CooldownReason429)
+		msg := err.Error()
+		if !strings.Contains(msg, "reason: rate_limit_exceeded") {
+			t.Fatalf("expected cooldown reason in message, got %q", msg)
+		}
+		if !strings.Contains(msg, "quota-exceeded.switch-project") {
+			t.Fatalf("expected quota guidance in message, got %q", msg)
+		}
+	})
+}
+
+func TestFormatKiroSuspendedStatusMessage(t *testing.T) {
+	msg := formatKiroSuspendedStatusMessage([]byte(`{"status":"SUSPENDED"}`))
+	if !strings.Contains(msg, `{"status":"SUSPENDED"}`) {
+		t.Fatalf("expected upstream response body in message, got %q", msg)
+	}
+	if !strings.Contains(msg, "re-auth this Kiro entry or use another auth index") {
+		t.Fatalf("expected remediation text in message, got %q", msg)
 	}
 }
