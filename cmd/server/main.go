@@ -134,6 +134,7 @@ func main() {
 	var oauthCallbackPort int
 	var antigravityLogin bool
 	var kimiLogin bool
+	var cursorLogin bool
 	var kiroLogin bool
 	var kiroGoogleLogin bool
 	var kiroAWSLogin bool
@@ -177,6 +178,7 @@ func main() {
 	flag.BoolVar(&noIncognito, "no-incognito", false, "Force disable incognito mode (uses existing browser session)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
+	flag.BoolVar(&cursorLogin, "cursor-login", false, "Login to Cursor using token-file or zero-action")
 	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro using Google OAuth")
 	flag.BoolVar(&kiroGoogleLogin, "kiro-google-login", false, "Login to Kiro using Google OAuth (same as --kiro-login)")
 	flag.BoolVar(&kiroAWSLogin, "kiro-aws-login", false, "Login to Kiro using AWS Builder ID (device code flow)")
@@ -656,6 +658,8 @@ func main() {
 		cmd.DoKiroAWSAuthCodeLogin(cfg, options)
 	} else if kiroImport {
 		cmd.DoKiroImport(cfg, options)
+	} else if cursorLogin {
+		cmd.DoCursorLogin(cfg, options)
 	} else if rooLogin {
 		cmd.DoRooLogin(cfg, options)
 	} else if minimaxLogin {

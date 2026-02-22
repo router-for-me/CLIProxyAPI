@@ -116,6 +116,7 @@ func setupOptions() []setupOption {
 		{label: "Claude OAuth login", run: DoClaudeLogin},
 		{label: "Codex OAuth login", run: DoCodexLogin},
 		{label: "Kiro OAuth login", run: DoKiroLogin},
+		{label: "Cursor login", run: DoCursorLogin},
 		{label: "GitHub Copilot OAuth login", run: DoGitHubCopilotLogin},
 		{label: "MiniMax API key login", run: DoMinimaxLogin},
 		{label: "Kimi API key/OAuth login", run: DoKimiLogin},
@@ -181,8 +182,8 @@ func printPostCheckSummary(cfg *config.Config) {
 		return
 	}
 	fmt.Printf("  - auth-dir: %s\n", emptyOrUnset(strings.TrimSpace(cfg.AuthDir), "unset"))
-	fmt.Printf("  - configured providers: codex=%d, claude=%d, kiro=%d, openai-compat=%d\n",
-		len(cfg.CodexKey), len(cfg.ClaudeKey), len(cfg.KiroKey), len(cfg.OpenAICompatibility))
+	fmt.Printf("  - configured providers: codex=%d, claude=%d, kiro=%d, cursor=%d, openai-compat=%d\n",
+		len(cfg.CodexKey), len(cfg.ClaudeKey), len(cfg.KiroKey), len(cfg.CursorKey), len(cfg.OpenAICompatibility))
 }
 
 func normalizeSelectionStrings(raw string) []string {

@@ -196,6 +196,34 @@ Kiro IAM login hints:
 - Keep one auth file per account to avoid accidental overwrite during relogin.
 - If you rotate accounts often, run browser login in incognito mode.
 
+## 6a) Cursor (`--cursor-login`)
+
+Cursor onboarding is now CLI-driven:
+
+```bash
+./cliproxy --cursor-login --config ./config.yaml
+```
+
+Interactive behavior:
+
+- `1` (default): write a token file from `cursor-api /build-key` output and set `cursor[].token-file`.
+- `2`: keep token-file empty and store `cursor[].auth-token` for zero-action / token registration.
+
+Example managed block after login:
+
+```yaml
+cursor:
+  - token-file: "~/.cursor/session-token.txt"
+    cursor-api-url: "http://127.0.0.1:3000"
+```
+
+Quick validation:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^cursor/'
+```
+
 ## 7) iFlow
 
 Validation (`glm-4.7`):
