@@ -121,6 +121,25 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"kiro/claude-opus-4-5","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
+Large-payload sanity checks (to catch truncation/write failures early):
+
+```bash
+python - <<'PY'
+print("A"*120000)
+PY > /tmp/kiro-large.txt
+
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d @<(jq -n --rawfile p /tmp/kiro-large.txt '{model:"kiro/claude-opus-4-5",messages:[{role:"user",content:$p}],stream:false}') | jq '.choices[0].finish_reason'
+```
+
+Kiro IAM login hints:
+
+- Prefer AWS login/authcode flows when social login is unstable.
+- Keep one auth file per account to avoid accidental overwrite during relogin.
+- If you rotate accounts often, run browser login in incognito mode.
+
 ## 6) MiniMax
 
 `config.yaml`:
@@ -174,3 +193,9 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 - [Provider Usage](/provider-usage)
 - [Provider Catalog](/provider-catalog)
 - [Provider Operations](/provider-operations)
+
+## Kiro + Copilot Endpoint Compatibility
+
+- For Copilot Codex-family models (for example `gpt-5.1-codex-mini`), prefer `/v1/responses`.
+- `/v1/chat/completions` is still valid for non-Codex Copilot traffic and most non-Copilot providers.
+- If a Codex-family request fails on `/v1/chat/completions`, retry the same request on `/v1/responses` first.

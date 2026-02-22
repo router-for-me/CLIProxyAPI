@@ -35,6 +35,8 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 | Runtime config write errors | Read-only mount or immutable filesystem | `find /CLIProxyAPI -maxdepth 1 -name config.yaml -print` | Use writable mount, re-run with read-only warning, confirm management persistence status |
 | Kiro/OAuth auth loops | Expired or missing token refresh fields | Re-run `cliproxyapi++ auth`/reimport token path | Refresh credentials, run with fresh token file, avoid duplicate token imports |
 | Streaming hangs or truncation | Reverse proxy buffering / payload compatibility issue | Reproduce with `stream: false`, then compare SSE response | Verify reverse-proxy config, compare tool schema compatibility and payload shape |
+| `nextThoughtNeeded` / sequential-thinking field errors | Client sent mixed legacy/new reasoning fields | Compare request body keys (`reasoning_effort`, `reasoning.effort`, old custom fields) | Normalize to one supported format and retry stream + non-stream parity checks |
+| Vision request fails on Copilot/GLM backends | Missing vision content/header propagation or unsupported payload block shape | Verify image block format (`image_url`/`image`) and inspect upstream response body | Use supported image content schema, retry, and confirm provider-specific vision compatibility |
 
 Use this matrix as an issue-entry checklist:
 
@@ -97,6 +99,7 @@ Checks:
 - Confirm model appears in `/v1/models` for current API key.
 - Verify prefix requirements (for example `team-a/model`).
 - Check alias and excluded-model rules in provider config.
+- For Copilot Codex-family models (for example `gpt-5.1-codex-mini`), retry via `/v1/responses`.
 
 ## Streaming Issues (SSE/WebSocket)
 

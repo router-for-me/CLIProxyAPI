@@ -63,6 +63,13 @@ func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
 	}
 }
 
+func validateKiroIncognitoFlags(useIncognito, noIncognito bool) error {
+	if useIncognito && noIncognito {
+		return fmt.Errorf("flags --incognito and --no-incognito are mutually exclusive")
+	}
+	return nil
+}
+
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
@@ -490,6 +497,14 @@ func main() {
 		NoBrowser:    noBrowser,
 		CallbackPort: oauthCallbackPort,
 		ConfigPath:   configFilePath,
+	}
+
+	kiroAuthFlow := kiroLogin || kiroGoogleLogin || kiroAWSLogin || kiroAWSAuthCode
+	if kiroAuthFlow {
+		if err := validateKiroIncognitoFlags(useIncognito, noIncognito); err != nil {
+			log.Error(err)
+			return
+		}
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.
