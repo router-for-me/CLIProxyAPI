@@ -38,6 +38,7 @@ Date: 2026-02-22
     - auto-mode behavior for dynamic-capable vs non-dynamic models (`ModeAuto` midpoint fallback and preservation paths).
   - Remaining: complete route-namespace matrix for command-label translation across orchestrator-facing surfaces beyond `/message`, and status/event replay windows.
 - Integration:
+  - Added: `scripts/provider-smoke-matrix.sh` plus `task test:provider-smoke-matrix` for deterministic smoke checks against `/v1/responses` using provider-qualified aliases.
   - Remaining: end-to-end provider cheapest-path smoke for live process orchestration against every provider auth mode. Unit-level smoke now covers:
     - `/v1/models` namespace behavior for OpenAI-compatible and `claude-cli` User-Agent paths.
     - `/v1/metrics/providers` response shape and metric-field assertions with seeded usage data.

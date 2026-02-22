@@ -327,6 +327,12 @@ tasks:
     cmds:
       - task: quality:ci
       - task: test:smoke
+      - |
+        if [ -n "${CLIPROXY_PROVIDER_SMOKE_CASES:-}" ]; then
+          task test:provider-smoke-matrix
+        else
+          echo "[SKIP] CLIPROXY_PROVIDER_SMOKE_CASES not set; skipping provider smoke matrix."
+        fi
       - task: quality:release-lint
 
   quality:release-lint:
@@ -341,6 +347,14 @@ tasks:
     cmds:
       - |
         go test -run 'TestServer_StartupSmokeEndpoints|TestServer_StartupSmokeEndpoints/GET_v1_models|TestServer_StartupSmokeEndpoints/GET_v1_metrics_providers|TestServer_RoutesNamespaceIsolation|TestServer_ControlPlane_MessageLifecycle|TestServer_ControlPlane_IdempotencyKey_ReplaysResponseAndPreventsDuplicateMessages|TestServer_ControlPlane_IdempotencyKey_DifferentKeysCreateDifferentMessages' ./pkg/llmproxy/api
+
+  test:provider-smoke-matrix:
+    desc: "Run provider smoke matrix against a running proxy (supports provider:model aliases)"
+    deps: [preflight]
+    cmds:
+      - task: cache:unlock
+      - |
+        scripts/provider-smoke-matrix.sh
 
   lint:changed:
     desc: "Run golangci-lint on changed/staged files only"
