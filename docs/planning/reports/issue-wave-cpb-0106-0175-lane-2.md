@@ -1,147 +1,111 @@
 # Issue Wave CPB-0106..0175 Lane 2 Report
 
-
-
 ## Scope
+- Lane: 2
+- Worktree: `cliproxyapi-plusplus-wave-cpb3-2`
+- Target items: `CPB-0116` .. `CPB-0125`
+- Date: 2026-02-22
 
-- Lane: lane-2
-- Worktree: `/Users/kooshapari/temp-PRODVERCEL/485/kush/cliproxyapi-plusplus-wave-cpb3-2`
-- Window: `CPB-0116` to `CPB-0125`
+## Per-Item Triage and Status
 
-## Status Snapshot
+### CPB-0116 - process-compose/HMR refresh workflow for `gpt-5.3-codex-spark` reload determinism
+- Status: `triaged-existing`
+- Triage:
+  - Existing local refresh workflow and watcher-based reload path already documented (`docs/install.md`, `examples/process-compose.dev.yaml`).
+  - Existing operational spark mismatch runbook already present (`docs/provider-operations.md`).
+- Lane action:
+  - No code mutation required in this lane for safe quick win.
 
-- `in_progress`: 10/10 items reviewed
-- `planned`: 10
-- `implemented`: 0
-- `blocked`: 0
+### CPB-0117 - QA scenarios for random `x-anthropic-billing-header` cache misses
+- Status: `implemented`
+- Result:
+  - Added explicit non-stream/stream parity validation commands and rollback threshold guidance in operations runbook.
+- Touched files:
+  - `docs/provider-operations.md`
 
-## Per-Item Status
+### CPB-0118 - Refactor forced-thinking 500 path around ~2m runtime
+- Status: `blocked`
+- Triage:
+  - No deterministic failing fixture in-repo tied to this exact regression path.
+  - Safe refactor without reproducer risks behavior regressions across translator/executor boundaries.
+- Next action:
+  - Add replay fixture + benchmark guardrails (p50/p95) before structural refactor.
 
-### CPB-0116 – Add process-compose/HMR refresh workflow tied to "gpt-5.3-codex-spark error" so local config and runtime can be reloaded deterministically.
-- Status: `planned`
-- Theme: `dev-runtime-refresh`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1593`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0116" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-2` worktree.
+### CPB-0119 - Provider quickstart for quota-visible but request-insufficient path
+- Status: `implemented`
+- Result:
+  - Added iFlow quota/entitlement quickstart section with setup, model inventory, non-stream parity check, stream parity check, and triage guidance.
+- Touched files:
+  - `docs/provider-quickstarts.md`
 
-### CPB-0117 – Add QA scenarios for "[Bug] Claude Code 2.1.37 random cch in x-anthropic-billing-header causes severe prompt-cache miss on third-party upstreams" including stream/non-stream parity and edge-case payloads.
-- Status: `planned`
-- Theme: `thinking-and-reasoning`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1592`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0117" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-2` worktree.
+### CPB-0120 - Standardize metadata and naming conventions across repos
+- Status: `blocked`
+- Triage:
+  - Item explicitly spans both repos; this lane is scoped to a single worktree.
+  - No safe unilateral rename/migration in this repo alone.
+- Next action:
+  - Coordinate cross-repo migration note/changelog with compatibility contract.
 
-### CPB-0118 – Refactor implementation behind "()强制思考会在2m左右时返回500错误" to reduce complexity and isolate transformation boundaries.
-- Status: `planned`
-- Theme: `responses-and-chat-compat`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1591`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0118" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-2` worktree.
+### CPB-0121 - Follow-up for intermittent iFlow GLM-5 `406`
+- Status: `implemented`
+- Result:
+  - Extended iFlow reasoning-preservation model detection to include `glm-5`.
+  - Normalized model IDs by stripping optional provider prefixes (e.g. `iflow/glm-5`) before compatibility checks.
+  - Added targeted regression tests for both `glm-5` and prefixed `iflow/glm-5` cases.
+- Touched files:
+  - `pkg/llmproxy/runtime/executor/iflow_executor.go`
+  - `pkg/llmproxy/runtime/executor/iflow_executor_test.go`
 
-### CPB-0119 – Create/refresh provider quickstart derived from "配额管理可以刷出额度，但是调用的时候提示额度不足" including setup, auth, model select, and sanity-check commands.
-- Status: `planned`
-- Theme: `docs-quickstarts`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1590`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0119" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-2` worktree.
+### CPB-0122 - Harden free-auth-bot sharing scenario with safer defaults
+- Status: `blocked`
+- Triage:
+  - Source issue implies external account-sharing/abuse workflows; no safe local patch contract in this repo.
+  - No deterministic fixture covering intended validation behavior change.
+- Next action:
+  - Define explicit policy-compatible validation contract and add fixtures first.
 
-### CPB-0120 – Standardize metadata and naming conventions touched by "每次更新或者重启 使用统计数据都会清空" across both repos.
-- Status: `planned`
-- Theme: `general-polish`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1589`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0120" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-2` worktree.
+### CPB-0123 - Operationalize Gemini CLI custom headers with observability/alerts/runbook
+- Status: `implemented`
+- Result:
+  - Added operations guardrail section with validation, thresholded alerts, and rollback guidance for custom-header rollouts.
+- Touched files:
+  - `docs/provider-operations.md`
 
-### CPB-0121 – Follow up on "iflow GLM 5 时不时会返回 406" by closing compatibility gaps and preventing regressions in adjacent providers.
-- Status: `planned`
-- Theme: `thinking-and-reasoning`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1588`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0121" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-2` worktree.
+### CPB-0124 - Provider-agnostic pattern for invalid thinking signature across provider switch
+- Status: `blocked`
+- Triage:
+  - Existing translator code already uses shared skip-signature sentinel patterns across Gemini/Claude paths.
+  - No new failing fixture specific to "Gemini CLI -> Claude OAuth mid-conversation" to justify safe behavior mutation.
+- Next action:
+  - Add cross-provider conversation-switch fixture first, then generalize only if gap is reproduced.
 
-### CPB-0122 – Harden "封号了，pro号没了，又找了个免费认证bot分享出来" with clearer validation, safer defaults, and defensive fallbacks.
-- Status: `planned`
-- Theme: `general-polish`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1587`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0122" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-2` worktree.
+### CPB-0125 - DX polish for token-savings CLI proxy ergonomics
+- Status: `blocked`
+- Triage:
+  - No explicit command/UX contract in-repo for the requested ergonomic changes.
+  - Safe changes require product-surface decision (flags/output modes/feedback timing) not encoded in current tests.
+- Next action:
+  - Define CLI UX acceptance matrix, then implement with command-level tests.
 
-### CPB-0123 – Operationalize "gemini-cli 不能自定请求头吗？" with observability, alerting thresholds, and runbook updates.
-- Status: `planned`
-- Theme: `cli-ux-dx`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1586`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0123" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-2` worktree.
+## Validation Commands
 
-### CPB-0124 – Convert "bug: Invalid thinking block signature when switching from Gemini CLI to Claude OAuth mid-conversation" into a provider-agnostic pattern and codify in shared translation utilities.
-- Status: `planned`
-- Theme: `thinking-and-reasoning`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1584`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0124" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-2` worktree.
+- Focused package tests (touched code):
+  - `go test ./pkg/llmproxy/runtime/executor -run 'TestPreserveReasoningContentInMessages|TestIFlowExecutorParseSuffix|TestApplyClaudeHeaders_AnthropicUsesXAPIKeyAndDefaults|TestApplyClaudeHeaders_NonAnthropicUsesBearer' -count=1`
+  - Result: passing.
 
-### CPB-0125 – Add DX polish around "I saved 10M tokens (89%) on my Claude Code sessions with a CLI proxy" through improved command ergonomics and faster feedback loops.
-- Status: `planned`
-- Theme: `thinking-and-reasoning`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1583`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0125" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-2` worktree.
+- Triage evidence commands used:
+  - `rg -n "CPB-0116|...|CPB-0125" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.md`
+  - `sed -n '1040,1188p' docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.md`
+  - `rg -n "gpt-5.3-codex-spark|process-compose|x-anthropic-billing-header|iflow|GLM|thinking signature" pkg cmd docs test`
 
-## Evidence & Commands Run
+## Change Summary
 
-- `rg -n "CPB-0106|CPB-0175" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`
-- No repository code changes were performed in this lane pass; reports only.
-
-## Next Actions
-
-- Move item by item from `planned` to `implemented` only when fixture + tests + code/docs change are committed.
+- Implemented safe quick wins for:
+  - `CPB-0117` (runbook QA parity + rollback guidance)
+  - `CPB-0119` (provider quickstart refresh for quota/entitlement mismatch)
+  - `CPB-0121` (iFlow GLM-5 compatibility + regression tests)
+  - `CPB-0123` (Gemini custom-header operational guardrails)
+- Deferred high-risk or cross-repo items with explicit blockers:
+  - `CPB-0118`, `CPB-0120`, `CPB-0122`, `CPB-0124`, `CPB-0125`
+- Triaged as already covered by existing lane-repo artifacts:
+  - `CPB-0116`
