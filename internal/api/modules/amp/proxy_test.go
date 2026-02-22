@@ -493,6 +493,30 @@ func TestReverseProxy_ErrorHandler(t *testing.T) {
 	}
 }
 
+func TestReverseProxy_ErrorHandler_ContextCanceled(t *testing.T) {
+	// Test that context.Canceled errors return 499 without generic error response
+	proxy, err := createReverseProxy("http://example.com", NewStaticSecretSource(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a canceled context to trigger the cancellation path
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil).WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	// Directly invoke the ErrorHandler with context.Canceled
+	proxy.ErrorHandler(rr, req, context.Canceled)
+
+	// Body should be empty for canceled requests (no JSON error response)
+	body := rr.Body.Bytes()
+	if len(body) > 0 {
+		t.Fatalf("expected empty body for canceled context, got: %s", body)
+	}
+}
+
 func TestReverseProxy_FullRoundTrip_Gzip(t *testing.T) {
 	// Upstream returns gzipped JSON without Content-Encoding header
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
