@@ -279,6 +279,17 @@ tasks:
         fi
 
         go test "${test_packages[@]}"
+      - task: test:provider-smoke-matrix:test
+
+  quality:shellcheck:
+    desc: "Run shellcheck on shell scripts (best-effort, no-op when shellcheck missing)"
+    cmds:
+      - |
+        if ! command -v shellcheck >/dev/null 2>&1; then
+          echo "[WARN] shellcheck not found"
+          exit 0
+        fi
+        shellcheck -x scripts/*.sh
 
   quality:quick:all:
     desc: "Run quality quick locally and in sibling cliproxy/cliproxyapi++ repos"
@@ -319,6 +330,8 @@ tasks:
       - task: quality:fmt:check
       - task: quality:vet
       - task: quality:staticcheck
+      - task: quality:shellcheck
+      - task: test:provider-smoke-matrix:test
       - task: lint:changed
 
   quality:pre-push:
@@ -334,6 +347,12 @@ tasks:
           echo "[SKIP] CLIPROXY_PROVIDER_SMOKE_CASES not set; skipping provider smoke matrix."
         fi
       - task: quality:release-lint
+
+  test:provider-smoke-matrix:test:
+    desc: "Run provider smoke matrix script tests with a fake curl backend"
+    cmds:
+      - |
+        scripts/provider-smoke-matrix-test.sh
 
   quality:release-lint:
     desc: "Validate release-facing config examples and docs snippets"

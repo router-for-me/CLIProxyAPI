@@ -319,6 +319,13 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				fn := t.Get("function")
 				if fn.Exists() && fn.IsObject() {
 					fnRaw := fn.Raw
+					// Sanitize function name for Gemini API requirements
+					if origName := fn.Get("name").String(); origName != "" {
+						sanitizedName := util.SanitizeFunctionName(origName)
+						if sanitizedName != origName {
+							fnRaw, _ = sjson.Set(fnRaw, "name", sanitizedName)
+						}
+					}
 					if fn.Get("parameters").Exists() {
 						renamed, errRename := util.RenameKey(fnRaw, "parameters", "parametersJsonSchema")
 						if errRename != nil {

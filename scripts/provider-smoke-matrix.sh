@@ -5,6 +5,7 @@ BASE_URL="${CLIPROXY_BASE_URL:-http://127.0.0.1:8317}"
 REQUEST_TIMEOUT="${CLIPROXY_SMOKE_TIMEOUT_SECONDS:-5}"
 CASES="${CLIPROXY_PROVIDER_SMOKE_CASES:-}"
 EXPECT_SUCCESS="${CLIPROXY_SMOKE_EXPECT_SUCCESS:-0}"
+SMOKE_CURL_BIN="${CLIPROXY_SMOKE_CURL_BIN:-curl}"
 WAIT_FOR_READY="${CLIPROXY_SMOKE_WAIT_FOR_READY:-0}"
 READY_ATTEMPTS="${CLIPROXY_SMOKE_READY_ATTEMPTS:-60}"
 READY_SLEEP_SECONDS="${CLIPROXY_SMOKE_READY_SLEEP_SECONDS:-1}"
@@ -14,7 +15,7 @@ if [ -z "${CASES}" ]; then
   exit 0
 fi
 
-if ! command -v curl >/dev/null 2>&1; then
+if ! command -v "${SMOKE_CURL_BIN}" >/dev/null 2>&1; then
   echo "[SKIP] curl is required for provider smoke matrix."
   exit 0
 fi
@@ -22,7 +23,7 @@ fi
 if [ "${WAIT_FOR_READY}" = "1" ]; then
   attempt=0
   while [ "${attempt}" -lt "${READY_ATTEMPTS}" ]; do
-    response_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "${REQUEST_TIMEOUT}" "${BASE_URL}/v1/models" || true)"
+    response_code="$("${SMOKE_CURL_BIN}" -sS -o /dev/null -w '%{http_code}' --max-time "${REQUEST_TIMEOUT}" "${BASE_URL}/v1/models" || true)"
     case "${response_code}" in
       200|401|403)
         echo "[OK] proxy ready (GET /v1/models -> ${response_code})"
@@ -62,7 +63,7 @@ for case_pair in "${CASE_LIST[@]}"; do
   http_code="0"
 
   # shellcheck disable=SC2086
-  if ! http_code="$(curl -sS -o "${body_file}" -w '%{http_code}' \
+  if ! http_code="$("${SMOKE_CURL_BIN}" -sS -o "${body_file}" -w '%{http_code}' \
     -X POST \
     -H 'Content-Type: application/json' \
     -d "${payload}" \

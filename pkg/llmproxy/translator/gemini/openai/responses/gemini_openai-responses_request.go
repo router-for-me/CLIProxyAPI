@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -355,7 +356,9 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
 
 				if name := tool.Get("name"); name.Exists() {
-					funcDecl, _ = sjson.Set(funcDecl, "name", name.String())
+					// Sanitize function name for Gemini API requirements
+					sanitizedName := util.SanitizeFunctionName(name.String())
+					funcDecl, _ = sjson.Set(funcDecl, "name", sanitizedName)
 				}
 				if desc := tool.Get("description"); desc.Exists() {
 					funcDecl, _ = sjson.Set(funcDecl, "description", desc.String())
