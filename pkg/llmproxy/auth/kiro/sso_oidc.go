@@ -106,6 +106,34 @@ func getOIDCEndpoint(region string) string {
 	return fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
 }
 
+func buildIDCRefreshPayload(clientID, clientSecret, refreshToken string) map[string]string {
+	return map[string]string{
+		"clientId":      clientID,
+		"clientSecret":  clientSecret,
+		"refreshToken":  refreshToken,
+		"grantType":     "refresh_token",
+		"client_id":     clientID,
+		"client_secret": clientSecret,
+		"refresh_token": refreshToken,
+		"grant_type":    "refresh_token",
+	}
+}
+
+func applyIDCRefreshHeaders(req *http.Request, region string) {
+	if region == "" {
+		region = defaultIDCRegion
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Host", fmt.Sprintf("oidc.%s.amazonaws.com", region))
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("x-amz-user-agent", idcAmzUserAgent)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "*")
+	req.Header.Set("sec-fetch-mode", "cors")
+	req.Header.Set("User-Agent", "node")
+	req.Header.Set("Accept-Encoding", "br, gzip, deflate")
+}
+
 // promptInput prompts the user for input with an optional default value.
 func promptInput(prompt, defaultValue string) string {
 	reader := bufio.NewReader(os.Stdin)
@@ -314,13 +342,7 @@ func (c *SSOOIDCClient) CreateTokenWithRegion(ctx context.Context, clientID, cli
 // RefreshTokenWithRegion refreshes an access token using the refresh token with a specific region.
 func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, clientSecret, refreshToken, region, startURL string) (*KiroTokenData, error) {
 	endpoint := getOIDCEndpoint(region)
-
-	payload := map[string]string{
-		"clientId":     clientID,
-		"clientSecret": clientSecret,
-		"refreshToken": refreshToken,
-		"grantType":    "refresh_token",
-	}
+	payload := buildIDCRefreshPayload(clientID, clientSecret, refreshToken)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -332,17 +354,7 @@ func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, cl
 		return nil, err
 	}
 
-	// Set headers matching kiro2api's IDC token refresh
-	// These headers are required for successful IDC token refresh
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Host", fmt.Sprintf("oidc.%s.amazonaws.com", region))
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("x-amz-user-agent", idcAmzUserAgent)
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "*")
-	req.Header.Set("sec-fetch-mode", "cors")
-	req.Header.Set("User-Agent", "node")
-	req.Header.Set("Accept-Encoding", "br, gzip, deflate")
+	applyIDCRefreshHeaders(req, region)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -693,12 +705,7 @@ func (c *SSOOIDCClient) CreateToken(ctx context.Context, clientID, clientSecret,
 // RefreshToken refreshes an access token using the refresh token.
 // Includes retry logic and improved error handling for better reliability.
 func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret, refreshToken string) (*KiroTokenData, error) {
-	payload := map[string]string{
-		"clientId":     clientID,
-		"clientSecret": clientSecret,
-		"refreshToken": refreshToken,
-		"grantType":    "refresh_token",
-	}
+	payload := buildIDCRefreshPayload(clientID, clientSecret, refreshToken)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -710,12 +717,9 @@ func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret
 		return nil, err
 	}
 
-	// Set headers matching Kiro IDE behavior for better compatibility
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Host", "oidc.us-east-1.amazonaws.com")
-	req.Header.Set("x-amz-user-agent", idcAmzUserAgent)
-	req.Header.Set("User-Agent", "node")
-	req.Header.Set("Accept", "*/*")
+	// Set headers matching Kiro IDE behavior for better compatibility.
+	// Keep these aligned with RefreshTokenWithRegion for Cline-compatible flows.
+	applyIDCRefreshHeaders(req, defaultIDCRegion)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
