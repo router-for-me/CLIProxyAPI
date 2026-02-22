@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestRefreshToken_IncludesGrantTypeAndExtensionHeaders(t *testing.T) {
+func TestRefreshToken_UsesSingleGrantTypeFieldAndExtensionHeaders(t *testing.T) {
 	t.Parallel()
 
 	client := &SSOOIDCClient{
@@ -20,7 +20,6 @@ func TestRefreshToken_IncludesGrantTypeAndExtensionHeaders(t *testing.T) {
 				}
 				bodyStr := string(body)
 				for _, token := range []string{
-					`"grantType":"refresh_token"`,
 					`"grant_type":"refresh_token"`,
 					`"refreshToken":"rt-1"`,
 					`"refresh_token":"rt-1"`,
@@ -28,6 +27,9 @@ func TestRefreshToken_IncludesGrantTypeAndExtensionHeaders(t *testing.T) {
 					if !strings.Contains(bodyStr, token) {
 						t.Fatalf("expected payload to contain %s, got %s", token, bodyStr)
 					}
+				}
+				if strings.Contains(bodyStr, `"grantType":"refresh_token"`) {
+					t.Fatalf("did not expect duplicate grantType field in payload, got %s", bodyStr)
 				}
 
 				for key, want := range map[string]string{
@@ -61,7 +63,7 @@ func TestRefreshToken_IncludesGrantTypeAndExtensionHeaders(t *testing.T) {
 	}
 }
 
-func TestRefreshTokenWithRegion_UsesRegionHostAndGrantType(t *testing.T) {
+func TestRefreshTokenWithRegion_UsesRegionHostAndSingleGrantType(t *testing.T) {
 	t.Parallel()
 
 	client := &SSOOIDCClient{
@@ -72,11 +74,11 @@ func TestRefreshTokenWithRegion_UsesRegionHostAndGrantType(t *testing.T) {
 					t.Fatalf("read body: %v", err)
 				}
 				bodyStr := string(body)
-				if !strings.Contains(bodyStr, `"grantType":"refresh_token"`) {
-					t.Fatalf("expected grantType in payload, got %s", bodyStr)
-				}
 				if !strings.Contains(bodyStr, `"grant_type":"refresh_token"`) {
 					t.Fatalf("expected grant_type in payload, got %s", bodyStr)
+				}
+				if strings.Contains(bodyStr, `"grantType":"refresh_token"`) {
+					t.Fatalf("did not expect duplicate grantType field in payload, got %s", bodyStr)
 				}
 
 				if got := req.Header.Get("Host"); got != "oidc.eu-west-1.amazonaws.com" {
