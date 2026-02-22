@@ -63,9 +63,11 @@ var RequiredFieldsByTool = map[string][]string{
 	"edit_file":          {"path"},
 	"apply_diff":         {"path", "diff"},
 	"str_replace_editor": {"path", "old_str", "new_str"},
-	"Bash":               {"command"},
-	"execute":            {"command"},
-	"run_command":        {"command"},
+	// Ampcode-compatible Bash tool uses "cmd", while other clients commonly use "command".
+	// Accept either key to avoid false truncation detection loops.
+	"Bash":        {"command", "cmd"},
+	"execute":     {"command"},
+	"run_command": {"command"},
 }
 
 // DetectTruncation checks if the tool use input appears to be truncated.
@@ -261,6 +263,12 @@ func findMissingRequiredFields(parsed map[string]interface{}, required []string)
 		if _, exists := parsed[field]; !exists {
 			missing = append(missing, field)
 		}
+	}
+	if len(required) == 2 &&
+		((required[0] == "command" && required[1] == "cmd") ||
+			(required[0] == "cmd" && required[1] == "command")) &&
+		len(missing) == 1 {
+		return nil
 	}
 	return missing
 }
