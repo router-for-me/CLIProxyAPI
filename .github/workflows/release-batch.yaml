@@ -1,0 +1,30 @@
+name: release-batch
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-batch-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-batch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git fetch --force --tags
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ">=1.26.0"
+          cache: true
+      - name: Create and publish next batch release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: go run ./cmd/releasebatch --mode create --target main

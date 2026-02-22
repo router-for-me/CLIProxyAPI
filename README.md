@@ -44,6 +44,7 @@ Full feature-by-feature change reference:
 | **Security hardening** | Basic | Basic | ✅ | Hardened defaults, guardrails, and anti-abuse defaults are expanded in `++`. |
 | **Container image posture** | Basic | Basic | ✅ | `++` uses a production-oriented Docker base and deployment profile. |
 | **Release workflow automation** | ⚠️ | ⚠️ | ✅ | Tagged push triggers GoReleaser, builds binaries, uploads archive artifacts, and refreshes release notes. |
+| **Automated release batching** | ⚠️ | ⚠️ | ✅ | Pushes to `main` run `releasebatch --mode create --target main` to mint the next version batch, publish tag, and publish release notes. |
 | **Version-to-release linting** | ⚠️ | ⚠️ | ✅ | `task quality:release-lint` + CI checks required pre-push/PR. |
 | **Cross-platform artifact coverage** | ⚠️ | ⚠️ | ✅ | Linux, macOS, Windows archives are generated and checksummed. |
 | **Release tag protocol** | ⚠️ | ⚠️ | ✅ | Supports `v<major>.<minor>.<patch>` and `v<major>.<minor>.<patch>-<batch>` workflows used by `releasebatch`. |
