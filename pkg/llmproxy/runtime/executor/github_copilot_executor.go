@@ -866,3 +866,373 @@ func normalizeGitHubCopilotResponsesTools(body []byte) []byte {
 	body, _ = sjson.SetBytes(body, "tool_choice", "auto")
 	return body
 }
+
+func collectTextFromNode(node gjson.Result) string {
+	if !node.Exists() {
+		return ""
+	}
+	if node.Type == gjson.String {
+		return node.String()
+	}
+	if node.IsArray() {
+		var parts []string
+		for _, item := range node.Array() {
+			if item.Type == gjson.String {
+				if text := item.String(); text != "" {
+					parts = append(parts, text)
+				}
+				continue
+			}
+			if text := item.Get("text").String(); text != "" {
+				parts = append(parts, text)
+				continue
+			}
+			if nested := collectTextFromNode(item.Get("content")); nested != "" {
+				parts = append(parts, nested)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	if node.Type == gjson.JSON {
+		if text := node.Get("text").String(); text != "" {
+			return text
+		}
+		if nested := collectTextFromNode(node.Get("content")); nested != "" {
+			return nested
+		}
+		return node.Raw
+	}
+	return node.String()
+}
+
+type githubCopilotResponsesStreamToolState struct {
+	Index int
+	ID    string
+	Name  string
+}
+
+type githubCopilotResponsesStreamState struct {
+	MessageStarted    bool
+	MessageStopSent   bool
+	TextBlockStarted  bool
+	TextBlockIndex    int
+	NextContentIndex  int
+	HasToolUse        bool
+	ReasoningActive   bool
+	ReasoningIndex    int
+	OutputIndexToTool map[int]*githubCopilotResponsesStreamToolState
+	ItemIDToTool      map[string]*githubCopilotResponsesStreamToolState
+}
+
+func translateGitHubCopilotResponsesNonStreamToClaude(data []byte) string {
+	root := gjson.ParseBytes(data)
+	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
+	out, _ = sjson.Set(out, "id", root.Get("id").String())
+	out, _ = sjson.Set(out, "model", root.Get("model").String())
+
+	hasToolUse := false
+	if output := root.Get("output"); output.Exists() && output.IsArray() {
+		for _, item := range output.Array() {
+			switch item.Get("type").String() {
+			case "reasoning":
+				var thinkingText string
+				if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+					var parts []string
+					for _, part := range summary.Array() {
+						if txt := part.Get("text").String(); txt != "" {
+							parts = append(parts, txt)
+						}
+					}
+					thinkingText = strings.Join(parts, "")
+				}
+				if thinkingText == "" {
+					if content := item.Get("content"); content.Exists() && content.IsArray() {
+						var parts []string
+						for _, part := range content.Array() {
+							if txt := part.Get("text").String(); txt != "" {
+								parts = append(parts, txt)
+							}
+						}
+						thinkingText = strings.Join(parts, "")
+					}
+				}
+				if thinkingText != "" {
+					block := `{"type":"thinking","thinking":""}`
+					block, _ = sjson.Set(block, "thinking", thinkingText)
+					out, _ = sjson.SetRaw(out, "content.-1", block)
+				}
+			case "message":
+				if content := item.Get("content"); content.Exists() && content.IsArray() {
+					for _, part := range content.Array() {
+						if part.Get("type").String() != "output_text" {
+							continue
+						}
+						text := part.Get("text").String()
+						if text == "" {
+							continue
+						}
+						block := `{"type":"text","text":""}`
+						block, _ = sjson.Set(block, "text", text)
+						out, _ = sjson.SetRaw(out, "content.-1", block)
+					}
+				}
+			case "function_call":
+				hasToolUse = true
+				toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
+				toolID := item.Get("call_id").String()
+				if toolID == "" {
+					toolID = item.Get("id").String()
+				}
+				toolUse, _ = sjson.Set(toolUse, "id", toolID)
+				toolUse, _ = sjson.Set(toolUse, "name", item.Get("name").String())
+				if args := item.Get("arguments").String(); args != "" && gjson.Valid(args) {
+					argObj := gjson.Parse(args)
+					if argObj.IsObject() {
+						toolUse, _ = sjson.SetRaw(toolUse, "input", argObj.Raw)
+					}
+				}
+				out, _ = sjson.SetRaw(out, "content.-1", toolUse)
+			}
+		}
+	}
+
+	inputTokens := root.Get("usage.input_tokens").Int()
+	outputTokens := root.Get("usage.output_tokens").Int()
+	cachedTokens := root.Get("usage.input_tokens_details.cached_tokens").Int()
+	if cachedTokens > 0 && inputTokens >= cachedTokens {
+		inputTokens -= cachedTokens
+	}
+	out, _ = sjson.Set(out, "usage.input_tokens", inputTokens)
+	out, _ = sjson.Set(out, "usage.output_tokens", outputTokens)
+	if cachedTokens > 0 {
+		out, _ = sjson.Set(out, "usage.cache_read_input_tokens", cachedTokens)
+	}
+	if hasToolUse {
+		out, _ = sjson.Set(out, "stop_reason", "tool_use")
+	} else if sr := root.Get("stop_reason").String(); sr == "max_tokens" || sr == "stop" {
+		out, _ = sjson.Set(out, "stop_reason", sr)
+	} else {
+		out, _ = sjson.Set(out, "stop_reason", "end_turn")
+	}
+	return out
+}
+
+func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) []string {
+	if *param == nil {
+		*param = &githubCopilotResponsesStreamState{
+			TextBlockIndex:    -1,
+			OutputIndexToTool: make(map[int]*githubCopilotResponsesStreamToolState),
+			ItemIDToTool:      make(map[string]*githubCopilotResponsesStreamToolState),
+		}
+	}
+	state := (*param).(*githubCopilotResponsesStreamState)
+
+	if !bytes.HasPrefix(line, dataTag) {
+		return nil
+	}
+	payload := bytes.TrimSpace(line[5:])
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return nil
+	}
+	if !gjson.ValidBytes(payload) {
+		return nil
+	}
+
+	event := gjson.GetBytes(payload, "type").String()
+	results := make([]string, 0, 4)
+	ensureMessageStart := func() {
+		if state.MessageStarted {
+			return
+		}
+		messageStart := `{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`
+		messageStart, _ = sjson.Set(messageStart, "message.id", gjson.GetBytes(payload, "response.id").String())
+		messageStart, _ = sjson.Set(messageStart, "message.model", gjson.GetBytes(payload, "response.model").String())
+		results = append(results, "event: message_start\ndata: "+messageStart+"\n\n")
+		state.MessageStarted = true
+	}
+	startTextBlockIfNeeded := func() {
+		if state.TextBlockStarted {
+			return
+		}
+		if state.TextBlockIndex < 0 {
+			state.TextBlockIndex = state.NextContentIndex
+			state.NextContentIndex++
+		}
+		contentBlockStart := `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
+		contentBlockStart, _ = sjson.Set(contentBlockStart, "index", state.TextBlockIndex)
+		results = append(results, "event: content_block_start\ndata: "+contentBlockStart+"\n\n")
+		state.TextBlockStarted = true
+	}
+	stopTextBlockIfNeeded := func() {
+		if !state.TextBlockStarted {
+			return
+		}
+		contentBlockStop := `{"type":"content_block_stop","index":0}`
+		contentBlockStop, _ = sjson.Set(contentBlockStop, "index", state.TextBlockIndex)
+		results = append(results, "event: content_block_stop\ndata: "+contentBlockStop+"\n\n")
+		state.TextBlockStarted = false
+		state.TextBlockIndex = -1
+	}
+	resolveTool := func(itemID string, outputIndex int) *githubCopilotResponsesStreamToolState {
+		if itemID != "" {
+			if tool, ok := state.ItemIDToTool[itemID]; ok {
+				return tool
+			}
+		}
+		if tool, ok := state.OutputIndexToTool[outputIndex]; ok {
+			if itemID != "" {
+				state.ItemIDToTool[itemID] = tool
+			}
+			return tool
+		}
+		return nil
+	}
+
+	switch event {
+	case "response.created":
+		ensureMessageStart()
+	case "response.output_text.delta":
+		ensureMessageStart()
+		startTextBlockIfNeeded()
+		delta := gjson.GetBytes(payload, "delta").String()
+		if delta != "" {
+			contentDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`
+			contentDelta, _ = sjson.Set(contentDelta, "index", state.TextBlockIndex)
+			contentDelta, _ = sjson.Set(contentDelta, "delta.text", delta)
+			results = append(results, "event: content_block_delta\ndata: "+contentDelta+"\n\n")
+		}
+	case "response.reasoning_summary_part.added":
+		ensureMessageStart()
+		state.ReasoningActive = true
+		state.ReasoningIndex = state.NextContentIndex
+		state.NextContentIndex++
+		thinkingStart := `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
+		thinkingStart, _ = sjson.Set(thinkingStart, "index", state.ReasoningIndex)
+		results = append(results, "event: content_block_start\ndata: "+thinkingStart+"\n\n")
+	case "response.reasoning_summary_text.delta":
+		if state.ReasoningActive {
+			delta := gjson.GetBytes(payload, "delta").String()
+			if delta != "" {
+				thinkingDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`
+				thinkingDelta, _ = sjson.Set(thinkingDelta, "index", state.ReasoningIndex)
+				thinkingDelta, _ = sjson.Set(thinkingDelta, "delta.thinking", delta)
+				results = append(results, "event: content_block_delta\ndata: "+thinkingDelta+"\n\n")
+			}
+		}
+	case "response.reasoning_summary_part.done":
+		if state.ReasoningActive {
+			thinkingStop := `{"type":"content_block_stop","index":0}`
+			thinkingStop, _ = sjson.Set(thinkingStop, "index", state.ReasoningIndex)
+			results = append(results, "event: content_block_stop\ndata: "+thinkingStop+"\n\n")
+			state.ReasoningActive = false
+		}
+	case "response.output_item.added":
+		if gjson.GetBytes(payload, "item.type").String() != "function_call" {
+			break
+		}
+		ensureMessageStart()
+		stopTextBlockIfNeeded()
+		state.HasToolUse = true
+		tool := &githubCopilotResponsesStreamToolState{
+			Index: state.NextContentIndex,
+			ID:    gjson.GetBytes(payload, "item.call_id").String(),
+			Name:  gjson.GetBytes(payload, "item.name").String(),
+		}
+		if tool.ID == "" {
+			tool.ID = gjson.GetBytes(payload, "item.id").String()
+		}
+		state.NextContentIndex++
+		outputIndex := int(gjson.GetBytes(payload, "output_index").Int())
+		state.OutputIndexToTool[outputIndex] = tool
+		if itemID := gjson.GetBytes(payload, "item.id").String(); itemID != "" {
+			state.ItemIDToTool[itemID] = tool
+		}
+		contentBlockStart := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
+		contentBlockStart, _ = sjson.Set(contentBlockStart, "index", tool.Index)
+		contentBlockStart, _ = sjson.Set(contentBlockStart, "content_block.id", tool.ID)
+		contentBlockStart, _ = sjson.Set(contentBlockStart, "content_block.name", tool.Name)
+		results = append(results, "event: content_block_start\ndata: "+contentBlockStart+"\n\n")
+	case "response.output_item.delta":
+		item := gjson.GetBytes(payload, "item")
+		if item.Get("type").String() != "function_call" {
+			break
+		}
+		tool := resolveTool(item.Get("id").String(), int(gjson.GetBytes(payload, "output_index").Int()))
+		if tool == nil {
+			break
+		}
+		partial := gjson.GetBytes(payload, "delta").String()
+		if partial == "" {
+			partial = item.Get("arguments").String()
+		}
+		if partial == "" {
+			break
+		}
+		inputDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
+		inputDelta, _ = sjson.Set(inputDelta, "index", tool.Index)
+		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", partial)
+		results = append(results, "event: content_block_delta\ndata: "+inputDelta+"\n\n")
+	case "response.function_call_arguments.delta":
+		// Copilot sends tool call arguments via this event type (not response.output_item.delta).
+		// Data format: {"delta":"...", "item_id":"...", "output_index":N, ...}
+		itemID := gjson.GetBytes(payload, "item_id").String()
+		outputIndex := int(gjson.GetBytes(payload, "output_index").Int())
+		tool := resolveTool(itemID, outputIndex)
+		if tool == nil {
+			break
+		}
+		partial := gjson.GetBytes(payload, "delta").String()
+		if partial == "" {
+			break
+		}
+		inputDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
+		inputDelta, _ = sjson.Set(inputDelta, "index", tool.Index)
+		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", partial)
+		results = append(results, "event: content_block_delta\ndata: "+inputDelta+"\n\n")
+	case "response.output_item.done":
+		if gjson.GetBytes(payload, "item.type").String() != "function_call" {
+			break
+		}
+		tool := resolveTool(gjson.GetBytes(payload, "item.id").String(), int(gjson.GetBytes(payload, "output_index").Int()))
+		if tool == nil {
+			break
+		}
+		contentBlockStop := `{"type":"content_block_stop","index":0}`
+		contentBlockStop, _ = sjson.Set(contentBlockStop, "index", tool.Index)
+		results = append(results, "event: content_block_stop\ndata: "+contentBlockStop+"\n\n")
+	case "response.completed":
+		ensureMessageStart()
+		stopTextBlockIfNeeded()
+		if !state.MessageStopSent {
+			stopReason := "end_turn"
+			if state.HasToolUse {
+				stopReason = "tool_use"
+			} else if sr := gjson.GetBytes(payload, "response.stop_reason").String(); sr == "max_tokens" || sr == "stop" {
+				stopReason = sr
+			}
+			inputTokens := gjson.GetBytes(payload, "response.usage.input_tokens").Int()
+			outputTokens := gjson.GetBytes(payload, "response.usage.output_tokens").Int()
+			cachedTokens := gjson.GetBytes(payload, "response.usage.input_tokens_details.cached_tokens").Int()
+			if cachedTokens > 0 && inputTokens >= cachedTokens {
+				inputTokens -= cachedTokens
+			}
+			messageDelta := `{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
+			messageDelta, _ = sjson.Set(messageDelta, "delta.stop_reason", stopReason)
+			messageDelta, _ = sjson.Set(messageDelta, "usage.input_tokens", inputTokens)
+			messageDelta, _ = sjson.Set(messageDelta, "usage.output_tokens", outputTokens)
+			if cachedTokens > 0 {
+				messageDelta, _ = sjson.Set(messageDelta, "usage.cache_read_input_tokens", cachedTokens)
+			}
+			results = append(results, "event: message_delta\ndata: "+messageDelta+"\n\n")
+			results = append(results, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			state.MessageStopSent = true
+		}
+	}
+
+	return results
+}
+
+// isHTTPSuccess checks if the status code indicates success (2xx).
+func isHTTPSuccess(statusCode int) bool {
+	return statusCode >= 200 && statusCode < 300
+}

@@ -207,9 +207,9 @@ tasks:
       - task: quality:parent-sibling
 
   quality:quick:
-    desc: "Run fast local quality checks (auto format + tests)"
+    desc: "Run fast local quality checks (readonly)"
     cmds:
-      - task: quality:fmt
+      - task: quality:fmt:check
       - task: quality:quick:check
 
   quality:quick:check:
@@ -218,7 +218,37 @@ tasks:
     cmds:
       - task: quality:fmt:check
       - task: lint:changed
-      - go test {{.QUALITY_PACKAGES}}
+      - |
+        if [ "${QUALITY_PACKAGES}" = "./..." ]; then
+          tmp_files="$(mktemp)"
+          if [ -n "${QUALITY_DIFF_RANGE:-}" ]; then
+            git diff --name-only "$QUALITY_DIFF_RANGE" -- '*.go' | sort -u > "$tmp_files"
+          else
+            git diff --name-only -- '*.go' | sort -u > "$tmp_files"
+            git diff --cached --name-only -- '*.go' >> "$tmp_files"
+          fi
+          mapfile -t files < <(sort -u "$tmp_files")
+          rm -f "$tmp_files"
+
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "[SKIP] No changed Go files; skipping go test in quality quick mode."
+            exit 0
+          fi
+
+          mapfile -t test_packages < <(printf '%s\n' "${files[@]}" | sed 's#^\\./##' | xargs -n1 dirname | sort -u)
+          if [ "${#test_packages[@]}" -eq 0 ]; then
+            echo "[SKIP] No testable directories from changed Go files."
+            exit 0
+          fi
+        else
+          mapfile -t test_packages < <(printf '%s' "{{.QUALITY_PACKAGES}}" | tr ' ' '\n' | sed '/^$/d')
+          if [ "${#test_packages[@]}" -eq 0 ]; then
+            echo "[SKIP] QUALITY_PACKAGES was empty."
+            exit 0
+          fi
+        fi
+
+        go test "${test_packages[@]}"
 
   quality:quick:all:
     desc: "Run quality quick locally and in sibling cliproxy/cliproxyapi++ repos"

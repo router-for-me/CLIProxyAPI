@@ -1487,9 +1487,7 @@ func (s *Server) startSHMSyncLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := usage.SyncToSHM(shmPath); err != nil {
-				// log.Errorf("Failed to sync metrics to SHM: %v", err)
-			}
+			_ = usage.SyncToSHM(shmPath)
 		case <-s.shmStop:
 			return
 		}
