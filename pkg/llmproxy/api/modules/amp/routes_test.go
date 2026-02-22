@@ -173,10 +173,19 @@ func TestRegisterProviderAliases_DedicatedProviderModels(t *testing.T) {
 	m := &AmpModule{}
 	m.registerProviderAliases(r, base, nil)
 
-	tests := []string{"kiro", "cursor"}
-	for _, provider := range tests {
-		t.Run(provider, func(t *testing.T) {
-			path := "/api/provider/" + provider + "/models"
+	tests := []struct {
+		provider      string
+		expectedModel string
+		expectedOwner string
+	}{
+		{provider: "kiro", expectedModel: "kiro-claude-opus-4-6", expectedOwner: "aws"},
+		{provider: "cursor", expectedModel: "default", expectedOwner: "cursor"},
+		{provider: "kilo", expectedModel: "kilo/auto", expectedOwner: "kilo"},
+		{provider: "kimi", expectedModel: "kimi-k2", expectedOwner: "moonshot"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.provider, func(t *testing.T) {
+			path := "/api/provider/" + tc.provider + "/models"
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
@@ -199,8 +208,9 @@ func TestRegisterProviderAliases_DedicatedProviderModels(t *testing.T) {
 				t.Fatalf("expected object=list, got %q", body.Object)
 			}
 			if len(body.Data) == 0 {
-				t.Fatalf("expected non-empty model list for provider %q", provider)
+				t.Fatalf("expected non-empty model list for provider %q", tc.provider)
 			}
+			hasExpectedModel := false
 			for _, model := range body.Data {
 				if model.ID == "" {
 					t.Fatal("expected model id to be populated")
@@ -208,9 +218,18 @@ func TestRegisterProviderAliases_DedicatedProviderModels(t *testing.T) {
 				if model.OwnedBy == "" {
 					t.Fatalf("expected non-empty owned_by for model %q", model.ID)
 				}
-				if provider == "cursor" && model.OwnedBy != "cursor" {
-					t.Fatalf("expected owned_by=%q, got %q for model %q", provider, model.OwnedBy, model.ID)
+				if tc.provider == "cursor" && model.OwnedBy != "cursor" {
+					t.Fatalf("expected owned_by=%q, got %q for model %q", tc.provider, model.OwnedBy, model.ID)
 				}
+				if model.ID == tc.expectedModel {
+					hasExpectedModel = true
+					if model.OwnedBy != tc.expectedOwner {
+						t.Fatalf("expected %q owner=%q, got %q", tc.expectedModel, tc.expectedOwner, model.OwnedBy)
+					}
+				}
+			}
+			if !hasExpectedModel {
+				t.Fatalf("expected model %q in provider %q list", tc.expectedModel, tc.provider)
 			}
 		})
 	}
