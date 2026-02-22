@@ -3,11 +3,42 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
+	log "github.com/sirupsen/logrus"
 )
+
+const kiloInstallHint = "Install: npm install -g @kilocode/cli or see https://kilocode.com/docs/cli"
+
+// RunKiloLoginWithRunner runs Kilo login with the given runner. Returns exit code to pass to os.Exit.
+// Writes success/error messages to stdout/stderr. Used for testability.
+func RunKiloLoginWithRunner(runner NativeCLIRunner, stdout, stderr io.Writer) int {
+	if runner == nil {
+		runner = RunNativeCLILogin
+	}
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	exitCode, err := runner(KiloSpec)
+	if err != nil {
+		log.Errorf("Kilo login failed: %v", err)
+		_, _ = fmt.Fprintf(stderr, "\n%s\n", kiloInstallHint)
+		return 1
+	}
+	if exitCode != 0 {
+		return exitCode
+	}
+	_, _ = fmt.Fprintln(stdout, "Kilo authentication successful!")
+	_, _ = fmt.Fprintln(stdout, "Add a kilo: block to your config with token-file: \"~/.kilo/oauth-token.json\" and base-url: \"https://api.kilocode.com/v1\"")
+	return 0
+}
 
 // DoKiloLogin handles the Kilo device flow using the shared authentication manager.
 // It initiates the device-based authentication process for Kilo AI services and saves

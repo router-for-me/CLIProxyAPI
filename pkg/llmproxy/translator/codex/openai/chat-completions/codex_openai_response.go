@@ -358,12 +358,19 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		}
 	}
 
-	// Extract and set the finish reason based on status
+	// Extract and set the finish reason based on status and presence of tool calls
 	if statusResult := responseResult.Get("status"); statusResult.Exists() {
 		status := statusResult.String()
 		if status == "completed" {
-			template, _ = sjson.Set(template, "choices.0.finish_reason", "stop")
-			template, _ = sjson.Set(template, "choices.0.native_finish_reason", "stop")
+			// Check if there are tool calls to set appropriate finish_reason
+			toolCallsResult := gjson.Get(template, "choices.0.message.tool_calls")
+			if toolCallsResult.IsArray() && len(toolCallsResult.Array()) > 0 {
+				template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
+				template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
+			} else {
+				template, _ = sjson.Set(template, "choices.0.finish_reason", "stop")
+				template, _ = sjson.Set(template, "choices.0.native_finish_reason", "stop")
+			}
 		}
 	}
 

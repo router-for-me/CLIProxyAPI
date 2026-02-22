@@ -17,6 +17,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Test
+        run: go test -short ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
       - name: Build
         run: |
           go build -o test-output ./cmd/server

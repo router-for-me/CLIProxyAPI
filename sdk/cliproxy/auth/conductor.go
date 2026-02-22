@@ -388,13 +388,19 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration) {
 }
 
 // RegisterExecutor registers a provider executor with the manager.
+// If an executor with the same identifier already exists, it is closed
+// using CloseAllExecutionSessionsID before being replaced.
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if executor == nil {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.executors[executor.Identifier()] = executor
+	key := executor.Identifier()
+	if existing, ok := m.executors[key]; ok && existing != nil {
+		existing.CloseExecutionSession(CloseAllExecutionSessionsID)
+	}
+	m.executors[key] = executor
 }
 
 // UnregisterExecutor removes the executor associated with the provider key.
@@ -406,6 +412,19 @@ func (m *Manager) UnregisterExecutor(provider string) {
 	m.mu.Lock()
 	delete(m.executors, provider)
 	m.mu.Unlock()
+}
+
+// Executor retrieves the executor registered for the given provider key.
+// Returns the executor and true if found, or nil and false otherwise.
+func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	exec, ok := m.executors[provider]
+	return exec, ok
 }
 
 // CloseExecutionSession terminates a long-lived execution session by delegating to all registered executors.
