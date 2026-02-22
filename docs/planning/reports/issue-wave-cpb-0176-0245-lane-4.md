@@ -8,15 +8,15 @@
 
 ## Status Snapshot
 
-- `planned`: 10
+- `planned`: 5
 - `implemented`: 0
-- `in_progress`: 0
+- `in_progress`: 5
 - `blocked`: 0
 
 ## Per-Item Status
 
 ### CPB-0206 – Expand docs and examples for "Feature request: Add support for claude opus 4.6" with copy-paste quickstart and troubleshooting section.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `install-and-ops`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1439`
 - Rationale:
@@ -28,7 +28,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0207 – Define non-subprocess integration path related to "Feature request: Add support for perplexity" (Go bindings surface + HTTP fallback contract + version negotiation).
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `integration-api-bindings`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1438`
 - Rationale:
@@ -40,7 +40,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0208 – Refactor implementation behind "iflow kimi-k2.5 无法正常统计消耗的token数，一直是0" to reduce complexity and isolate transformation boundaries.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1437`
 - Rationale:
@@ -52,7 +52,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0209 – Port relevant thegent-managed flow implied by "[BUG] Invalid JSON payload with large requests (~290KB) - truncated body" into first-class cliproxy Go CLI command(s) with interactive setup support.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `go-cli-extraction`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1433`
 - Rationale:
@@ -64,7 +64,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0210 – Standardize metadata and naming conventions touched by "希望支持国产模型如glm kimi minimax 的 proxy" across both repos.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `general-polish`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1432`
 - Rationale:

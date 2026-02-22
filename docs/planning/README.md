@@ -38,3 +38,10 @@
 - `preflight` also validates `task -l`, and if a `Makefile` exists validates `make -n` for build-task sanity.
 - `task` now includes `cache:unlock` in test gates to avoid stale lock contention.
 - CI baseline artifacts are now emitted as both JSON and text for auditability.
+
+## Active task waves
+
+- CPB-0106..0175 documented and tracked in `docs/planning/reports/issue-wave-cpb-0106-0175-*`.
+- CPB-0176..0245 planning wave now initialized with all 70 CPB items distributed across 7 lanes:
+  - `docs/planning/issue-wave-cpb-0176-0245-2026-02-22.md`
+  - `docs/planning/reports/issue-wave-cpb-0176-0245-lane-1.md` through `lane-7.md`

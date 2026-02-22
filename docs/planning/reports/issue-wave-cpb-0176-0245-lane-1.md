@@ -8,15 +8,15 @@
 
 ## Status Snapshot
 
-- `planned`: 10
+- `planned`: 0
 - `implemented`: 0
-- `in_progress`: 0
+- `in_progress`: 10
 - `blocked`: 0
 
 ## Per-Item Status
 
 ### CPB-0176 – Expand docs and examples for "After logging in with iFlowOAuth, most models cannot be used, only non-CLI models can be used." with copy-paste quickstart and troubleshooting section.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `provider-model-registry`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1499`
 - Rationale:
@@ -28,7 +28,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0177 – Add QA scenarios for "为什么我请求了很多次,但是使用统计里仍然显示使用为0呢?" including stream/non-stream parity and edge-case payloads.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `websocket-and-streaming`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1497`
 - Rationale:
@@ -40,7 +40,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0178 – Refactor implementation behind "为什么配额管理里没有claude pro账号的额度?" to reduce complexity and isolate transformation boundaries.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `general-polish`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1496`
 - Rationale:
@@ -52,7 +52,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0179 – Ensure rollout safety for "最近几个版本，好像轮询失效了" via feature flags, staged defaults, and migration notes.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `websocket-and-streaming`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1495`
 - Rationale:
@@ -64,7 +64,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0180 – Standardize metadata and naming conventions touched by "iFlow error" across both repos.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `error-handling-retries`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1494`
 - Rationale:
@@ -76,7 +76,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0181 – Follow up on "Feature request [allow to configure RPM, TPM, RPD, TPD]" by closing compatibility gaps and preventing regressions in adjacent providers.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `provider-model-registry`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1493`
 - Rationale:
@@ -88,7 +88,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0182 – Harden "Antigravity using Ultra plan: Opus 4.6 gets 429 on CLIProxy but runs with Opencode-Auth" with clearer validation, safer defaults, and defensive fallbacks.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1486`
 - Rationale:
@@ -100,7 +100,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0183 – Operationalize "gemini在cherry studio的openai接口无法控制思考长度" with observability, alerting thresholds, and runbook updates.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1484`
 - Rationale:
@@ -112,7 +112,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0184 – Define non-subprocess integration path related to "codex5.3什么时候能获取到啊" (Go bindings surface + HTTP fallback contract + version negotiation).
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `integration-api-bindings`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1482`
 - Rationale:
@@ -124,7 +124,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0185 – Add DX polish around "Amp code doesn't route through CLIProxyAPI" through improved command ergonomics and faster feedback loops.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `provider-model-registry`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1481`
 - Rationale:

@@ -318,6 +318,14 @@ tasks:
       - task: quality:staticcheck
       - task: lint:changed
 
+  quality:pre-push:
+    desc: "Run pre-push quality gates (non-mutating + smoke + release lint)"
+    deps: [preflight, cache:unlock]
+    cmds:
+      - task: quality:ci
+      - task: test:smoke
+      - task: quality:release-lint
+
   quality:release-lint:
     desc: "Validate release-facing config examples and docs snippets"
     cmds:
@@ -383,7 +391,7 @@ tasks:
       - task: quality:staticcheck
       - task: test
 
-  hooks:install:
+  hooks:install:pre-commit:
     desc: "Install local git pre-commit hook for staged gofmt + lint"
     cmds:
       - |
@@ -406,6 +414,44 @@ tasks:
         EOF
         chmod +x .git/hooks/pre-commit
         echo "[OK] Installed .git/hooks/pre-commit"
+
+  hooks:install:pre-push:
+    desc: "Install local git pre-push hook for CI-like quality gates"
+    cmds:
+      - |
+        mkdir -p .git/hooks
+        cat > .git/hooks/pre-push <<'EOF'
+        #!/usr/bin/env sh
+        set -eu
+        if ! command -v go >/dev/null 2>&1; then
+          echo "[WARN] go not found on PATH; skipping pre-push quality checks."
+          exit 0
+        fi
+
+        if ! command -v task >/dev/null 2>&1; then
+          echo "[WARN] task not found on PATH; skipping pre-push quality checks."
+          exit 0
+        fi
+
+        cd "$(git rev-parse --show-toplevel)"
+        task quality:pre-push
+        EOF
+        chmod +x .git/hooks/pre-push
+        echo "[OK] Installed .git/hooks/pre-push"
+
+  hooks:install:
+    desc: "Install local git pre-commit and pre-push hooks"
+    cmds:
+      - task: hooks:install:pre-commit
+      - task: hooks:install:pre-push
+      - |
+        if command -v pre-commit >/dev/null 2>&1; then
+          pre-commit install --hook-type pre-commit || true
+          pre-commit install --hook-type pre-push || true
+          echo "[OK] pre-commit framework hooks installed (if configured)"
+        else
+          echo "[INFO] pre-commit framework not found; Task-managed hooks installed"
+        fi
 
   lint:
     desc: "Run golangci-lint"
