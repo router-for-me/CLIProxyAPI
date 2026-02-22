@@ -149,8 +149,29 @@ run_fail_case() {
   rm -rf "${workdir}"
 }
 
+run_cheapest_case() {
+  local workdir
+  workdir="$(mktemp -d)"
+  local fake_curl="${workdir}/fake-curl.sh"
+  local state="${workdir}/state"
+
+  create_fake_curl "${fake_curl}" "${state}"
+
+  run_matrix_check "cheapest defaults include 6 aliases" 0 \
+    env \
+      STATUS_SEQUENCE="200,200,200,200,200,200" \
+      STATE_FILE="${state}" \
+      CLIPROXY_SMOKE_CURL_BIN="${fake_curl}" \
+      CLIPROXY_SMOKE_WAIT_FOR_READY="1" \
+      CLIPROXY_SMOKE_READY_ATTEMPTS="1" \
+      CLIPROXY_SMOKE_READY_SLEEP_SECONDS="0" \
+      ./scripts/provider-smoke-matrix-cheapest.sh
+
+  rm -rf "${workdir}"
+}
 run_skip_case
 run_pass_case
 run_fail_case
+run_cheapest_case
 
 echo "[OK] provider-smoke-matrix script test suite passed"

@@ -243,10 +243,18 @@ func TestRegisterProviderAliases_DedicatedProviderModelsV1(t *testing.T) {
 	m := &AmpModule{}
 	m.registerProviderAliases(r, base, nil)
 
-	tests := []string{"kiro", "cursor"}
+	tests := []struct {
+		provider      string
+		expectedModel string
+	}{
+		{provider: "kiro", expectedModel: "kiro-claude-opus-4-6"},
+		{provider: "cursor", expectedModel: "default"},
+		{provider: "kilo", expectedModel: "kilo/auto"},
+		{provider: "kimi", expectedModel: "kimi-k2"},
+	}
 	for _, provider := range tests {
-		t.Run(provider, func(t *testing.T) {
-			path := "/api/provider/" + provider + "/v1/models"
+		t.Run(provider.provider, func(t *testing.T) {
+			path := "/api/provider/" + provider.provider + "/v1/models"
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
@@ -269,8 +277,9 @@ func TestRegisterProviderAliases_DedicatedProviderModelsV1(t *testing.T) {
 				t.Fatalf("expected object=list, got %q", body.Object)
 			}
 			if len(body.Data) == 0 {
-				t.Fatalf("expected non-empty model list for provider %q", provider)
+				t.Fatalf("expected non-empty model list for provider %q", provider.provider)
 			}
+			hasExpectedModel := false
 			for _, model := range body.Data {
 				if model.ID == "" {
 					t.Fatal("expected model id to be populated")
@@ -278,6 +287,12 @@ func TestRegisterProviderAliases_DedicatedProviderModelsV1(t *testing.T) {
 				if strings.TrimSpace(model.OwnedBy) == "" {
 					t.Fatalf("expected non-empty owned_by for model %q", model.ID)
 				}
+				if model.ID == provider.expectedModel {
+					hasExpectedModel = true
+				}
+			}
+			if !hasExpectedModel {
+				t.Fatalf("expected model %q in provider %q list", provider.expectedModel, provider.provider)
 			}
 		})
 	}

@@ -375,6 +375,14 @@ tasks:
       - |
         scripts/provider-smoke-matrix.sh
 
+  test:provider-smoke-matrix:cheapest:
+    desc: "Run provider smoke matrix for default cheapest-route aliases"
+    deps: [preflight]
+    cmds:
+      - task: cache:unlock
+      - |
+        scripts/provider-smoke-matrix-cheapest.sh
+
   lint:changed:
     desc: "Run golangci-lint on changed/staged files only"
     cmds:

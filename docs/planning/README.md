@@ -14,6 +14,7 @@
 - `task lint:changed` — Run `golangci-lint` on changed/staged Go files.
 - `task test:smoke` — Startup and control-plane smoke test subset in CI.
 - `task test:provider-smoke-matrix` — Optional provider matrix smoke against `/v1/responses` for configured `CLIPROXY_PROVIDER_SMOKE_CASES`.
+- `task test:provider-smoke-matrix:cheapest` — Provider matrix smoke with built-in cheapest-route aliases.
 - `task quality:pre-push` — Includes `test:smoke` and provider smoke when `CLIPROXY_PROVIDER_SMOKE_CASES` is set.
 - `task quality:vet` — Run `go vet ./...`.
 - `task quality:staticcheck` — Optional staticcheck run (`ENABLE_STATICCHECK=1`).
@@ -34,6 +35,7 @@
 6. `task test:smoke`
 7. Optional:
    - `CLIPROXY_PROVIDER_SMOKE_CASES="openai:gpt-4o-mini,claude:claude-3-5-sonnet-20241022" CLIPROXY_SMOKE_WAIT_FOR_READY=1 task test:provider-smoke-matrix`
+   - `task test:provider-smoke-matrix:cheapest`
    - Add `CLIPROXY_SMOKE_EXPECT_SUCCESS=1` in environments where auth/provider configs are known to return 200.
 8. `task verify:all` before PR handoff.
 
@@ -68,3 +70,6 @@
 - CPB-0421..0455 next execution wave initialized with 35 CPB items distributed across 7 lanes:
   - `docs/planning/issue-wave-cpb-0421-0455-2026-02-22.md`
   - `docs/planning/reports/issue-wave-cpb-0421-0455-lane-1.md` through `lane-7.md`
+- CPB-0456..0490 next execution wave initialized with 35 CPB items distributed across 7 lanes:
+  - `docs/planning/issue-wave-cpb-0456-0490-2026-02-22.md`
+  - `docs/planning/reports/issue-wave-cpb-0456-0490-lane-1.md` through `lane-7.md`

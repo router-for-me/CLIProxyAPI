@@ -39,6 +39,7 @@ Date: 2026-02-22
   - Remaining: complete route-namespace matrix for command-label translation across orchestrator-facing surfaces beyond `/message`, and status/event replay windows.
 - Integration:
   - Added: `scripts/provider-smoke-matrix.sh` plus `task test:provider-smoke-matrix` for deterministic smoke checks against `/v1/responses` using provider-qualified aliases.
+  - Added: `scripts/provider-smoke-matrix-cheapest.sh` and `task test:provider-smoke-matrix:cheapest` with deterministic cheapest-model coverage for six core providers.
   - Remaining: end-to-end provider cheapest-path smoke for live process orchestration against every provider auth mode. Unit-level smoke now covers:
     - `/v1/models` namespace behavior for OpenAI-compatible and `claude-cli` User-Agent paths.
     - `/v1/metrics/providers` response shape and metric-field assertions with seeded usage data.
