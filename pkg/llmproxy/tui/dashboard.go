@@ -169,7 +169,7 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	card2 := cardStyle.Render(fmt.Sprintf(
 		"%s\n%s",
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("76")).Render(fmt.Sprintf("📄 %d", authCount)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s (%d %s)", T("auth_files_label"), activeAuth, T("active_suffix")),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s (%d %s)", T("auth_files_label"), activeAuth, T("active_suffix"))),
 	))
 
 	// Card 3: Total Requests

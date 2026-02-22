@@ -58,3 +58,70 @@ func TestConvertOpenAIRequestToCodex(t *testing.T) {
 		t.Errorf("expected third input item to be function_call, got %s", inputArray2[2].Get("type").String())
 	}
 }
+
+func TestConvertOpenAIRequestToCodex_NormalizesProxyPrefixedToolChoice(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role": "user", "content": "hello"}],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "search_docs",
+					"description": "search",
+					"parameters": {"type": "object"}
+				}
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"function": {"name": "proxy_search_docs"}
+		}
+	}`)
+
+	got := ConvertOpenAIRequestToCodex("gpt-4o", input, false)
+	res := gjson.ParseBytes(got)
+
+	if toolName := res.Get("tools.0.name").String(); toolName != "search_docs" {
+		t.Fatalf("expected tools[0].name search_docs, got %s", toolName)
+	}
+	if choiceName := res.Get("tool_choice.name").String(); choiceName != "search_docs" {
+		t.Fatalf("expected tool_choice.name search_docs, got %s", choiceName)
+	}
+}
+
+func TestConvertOpenAIRequestToCodex_NormalizesProxyPrefixedAssistantToolCall(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{
+				"role": "assistant",
+				"tool_calls": [
+					{
+						"id": "call_1",
+						"type": "function",
+						"function": {"name": "proxy_search_docs", "arguments": "{}"}
+					}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "search_docs",
+					"description": "search",
+					"parameters": {"type": "object"}
+				}
+			}
+		]
+	}`)
+
+	got := ConvertOpenAIRequestToCodex("gpt-4o", input, false)
+	res := gjson.ParseBytes(got)
+
+	if callName := res.Get("input.2.name").String(); callName != "search_docs" {
+		t.Fatalf("expected function_call name search_docs, got %s", callName)
+	}
+}

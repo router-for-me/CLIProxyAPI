@@ -280,3 +280,28 @@ func TestUserFieldDeletion(t *testing.T) {
 		t.Errorf("user field should be deleted, but it was found with value: %s", userField.Raw)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToCodex_RemovesItemReferenceInputItems(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{"type": "item_reference", "id": "msg_123"},
+			{"type": "message", "role": "user", "content": "hello"},
+			{"type": "item_reference", "id": "msg_456"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	input := gjson.Get(outputStr, "input")
+	if !input.IsArray() {
+		t.Fatalf("expected input to be an array")
+	}
+	if got := len(input.Array()); got != 1 {
+		t.Fatalf("expected 1 input item after filtering item_reference, got %d", got)
+	}
+	if itemType := gjson.Get(outputStr, "input.0.type").String(); itemType != "message" {
+		t.Fatalf("expected remaining input[0].type message, got %s", itemType)
+	}
+}
