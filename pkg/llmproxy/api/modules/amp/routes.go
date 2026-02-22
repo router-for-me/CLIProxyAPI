@@ -296,7 +296,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 			claudeCodeHandlers.ClaudeModels(c)
 		case "google":
 			geminiHandlers.GeminiModels(c)
-		case "kiro", "cursor":
+		case "kiro", "cursor", "kilo", "kimi":
 			models := registry.GetStaticModelDefinitionsByChannel(providerName)
 			if models == nil {
 				openaiHandlers.OpenAIModels(c)
