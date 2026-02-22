@@ -76,7 +76,12 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		
 		// Remove proxy tracing headers to avoid upstream detection
 		req.Header.Del("X-Forwarded-For")
+		req.Header.Del("X-Forwarded-Host")
+		req.Header.Del("X-Forwarded-Proto")
+		req.Header.Del("X-Forwarded-Port")
 		req.Header.Del("X-Real-IP")
+		req.Header.Del("Forwarded")
+		req.Header.Del("Via")
 
 		// Remove query-based credentials if they match the authenticated client API key.
 		// This prevents leaking client auth material to the Amp upstream while avoiding

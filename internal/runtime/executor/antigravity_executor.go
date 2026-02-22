@@ -130,7 +130,12 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	httpReq.Close = true
 	httpReq.Header.Del("Accept")
 	httpReq.Header.Del("X-Forwarded-For")
+	httpReq.Header.Del("X-Forwarded-Host")
+	httpReq.Header.Del("X-Forwarded-Proto")
+	httpReq.Header.Del("X-Forwarded-Port")
 	httpReq.Header.Del("X-Real-IP")
+	httpReq.Header.Del("Forwarded")
+	httpReq.Header.Del("Via")
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
@@ -950,7 +955,12 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
 		httpReq.Header.Del("X-Forwarded-For")
+		httpReq.Header.Del("X-Forwarded-Host")
+		httpReq.Header.Del("X-Forwarded-Proto")
+		httpReq.Header.Del("X-Forwarded-Port")
 		httpReq.Header.Del("X-Real-IP")
+		httpReq.Header.Del("Forwarded")
+		httpReq.Header.Del("Via")
 		if host := resolveHost(base); host != "" {
 			httpReq.Host = host
 		}
@@ -1068,7 +1078,12 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
 		httpReq.Header.Del("X-Forwarded-For")
+		httpReq.Header.Del("X-Forwarded-Host")
+		httpReq.Header.Del("X-Forwarded-Proto")
+		httpReq.Header.Del("X-Forwarded-Port")
 		httpReq.Header.Del("X-Real-IP")
+		httpReq.Header.Del("Forwarded")
+		httpReq.Header.Del("Via")
 		if host := resolveHost(baseURL); host != "" {
 			httpReq.Host = host
 		}
@@ -1371,7 +1386,12 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
 	httpReq.Header.Del("X-Forwarded-For")
+	httpReq.Header.Del("X-Forwarded-Host")
+	httpReq.Header.Del("X-Forwarded-Proto")
+	httpReq.Header.Del("X-Forwarded-Port")
 	httpReq.Header.Del("X-Real-IP")
+	httpReq.Header.Del("Forwarded")
+	httpReq.Header.Del("Via")
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
