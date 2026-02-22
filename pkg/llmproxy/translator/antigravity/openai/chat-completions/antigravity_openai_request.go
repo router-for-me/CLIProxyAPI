@@ -82,6 +82,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				responseMods = append(responseMods, "TEXT")
 			case "image":
 				responseMods = append(responseMods, "IMAGE")
+			case "video":
+				responseMods = append(responseMods, "VIDEO")
 			}
 		}
 		if len(responseMods) > 0 {
@@ -97,6 +99,20 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 		if size := imgCfg.Get("image_size"); size.Exists() && size.Type == gjson.String {
 			out, _ = sjson.SetBytes(out, "request.generationConfig.imageConfig.imageSize", size.Str)
+		}
+	}
+	if videoCfg := gjson.GetBytes(rawJSON, "video_config"); videoCfg.Exists() && videoCfg.IsObject() {
+		if duration := videoCfg.Get("duration_seconds"); duration.Exists() && duration.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.videoConfig.durationSeconds", duration.Str)
+		}
+		if ar := videoCfg.Get("aspect_ratio"); ar.Exists() && ar.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.videoConfig.aspectRatio", ar.Str)
+		}
+		if resolution := videoCfg.Get("resolution"); resolution.Exists() && resolution.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.videoConfig.resolution", resolution.Str)
+		}
+		if negativePrompt := videoCfg.Get("negative_prompt"); negativePrompt.Exists() && negativePrompt.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "request.generationConfig.videoConfig.negativePrompt", negativePrompt.Str)
 		}
 	}
 
@@ -269,7 +285,9 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							fIDs = append(fIDs, fid)
 						}
 					}
-					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
+					if hasAntigravityParts(node) {
+						out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
+					}
 
 					// Append a single tool content combining name + response per function
 					toolNode := []byte(`{"role":"user","parts":[]}`)
@@ -297,7 +315,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					if pp > 0 {
 						out, _ = sjson.SetRawBytes(out, "request.contents.-1", toolNode)
 					}
-				} else {
+				} else if hasAntigravityParts(node) {
 					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 				}
 			}
@@ -415,3 +433,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 // itoa converts int to string without strconv import for few usages.
 func itoa(i int) string { return fmt.Sprintf("%d", i) }
+
+func hasAntigravityParts(node []byte) bool {
+	return gjson.GetBytes(node, "parts.#").Int() > 0
+}

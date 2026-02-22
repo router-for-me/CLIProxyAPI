@@ -61,6 +61,17 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
 
+### Tool-Result Image Translation Regressions
+
+- Symptom pattern: tool responses containing image blocks fail after translation between OpenAI-compatible and Claude-style payloads.
+- First checks:
+  - Reproduce with a non-stream request and compare with stream behavior.
+  - Inspect request/response logs for payload-shape mismatches around `tool_result` + image content blocks.
+- Operational response:
+  - Keep one canary scenario that includes image content in tool results.
+  - Alert when canary success rate drops or `4xx` translation errors spike for that scenario.
+  - Route impacted traffic to a known-good provider prefix while triaging translator output.
+
 ## Recommended Production Pattern
 
 1. One direct primary provider for latency-critical traffic.

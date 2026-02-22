@@ -79,6 +79,8 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				responseMods = append(responseMods, "TEXT")
 			case "image":
 				responseMods = append(responseMods, "IMAGE")
+			case "video":
+				responseMods = append(responseMods, "VIDEO")
 			}
 		}
 		if len(responseMods) > 0 {
@@ -94,6 +96,20 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 		if size := imgCfg.Get("image_size"); size.Exists() && size.Type == gjson.String {
 			out, _ = sjson.SetBytes(out, "generationConfig.imageConfig.imageSize", size.Str)
+		}
+	}
+	if videoCfg := gjson.GetBytes(rawJSON, "video_config"); videoCfg.Exists() && videoCfg.IsObject() {
+		if duration := videoCfg.Get("duration_seconds"); duration.Exists() && duration.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "generationConfig.videoConfig.durationSeconds", duration.Str)
+		}
+		if ar := videoCfg.Get("aspect_ratio"); ar.Exists() && ar.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "generationConfig.videoConfig.aspectRatio", ar.Str)
+		}
+		if resolution := videoCfg.Get("resolution"); resolution.Exists() && resolution.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "generationConfig.videoConfig.resolution", resolution.Str)
+		}
+		if negativePrompt := videoCfg.Get("negative_prompt"); negativePrompt.Exists() && negativePrompt.Type == gjson.String {
+			out, _ = sjson.SetBytes(out, "generationConfig.videoConfig.negativePrompt", negativePrompt.Str)
 		}
 	}
 
@@ -211,7 +227,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			} else if role == "assistant" {
 				node := []byte(`{"role":"model","parts":[]}`)
 				p := 0
-				if content.Type == gjson.String {
+				if content.Type == gjson.String && content.String() != "" {
 					// Assistant text -> single model content
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
 					p++
@@ -262,7 +278,9 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							fIDs = append(fIDs, fid)
 						}
 					}
-					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
+					if hasGeminiParts(node) {
+						out, _ = sjson.SetRawBytes(out, "contents.-1", node)
+					}
 
 					// Append a single tool content combining name + response per function
 					toolNode := []byte(`{"role":"user","parts":[]}`)
@@ -281,7 +299,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					if pp > 0 {
 						out, _ = sjson.SetRawBytes(out, "contents.-1", toolNode)
 					}
-				} else {
+				} else if hasGeminiParts(node) {
 					out, _ = sjson.SetRawBytes(out, "contents.-1", node)
 				}
 			}
@@ -403,3 +421,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 
 // itoa converts int to string without strconv import for few usages.
 func itoa(i int) string { return fmt.Sprintf("%d", i) }
+
+func hasGeminiParts(node []byte) bool {
+	return gjson.GetBytes(node, "parts.#").Int() > 0
+}

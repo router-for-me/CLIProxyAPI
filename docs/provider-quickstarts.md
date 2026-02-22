@@ -52,6 +52,19 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"codex/codex-latest","reasoning_effort":"low","messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
+### Codex `/responses/compact` sanity check
+
+Use this when validating codex translator compatibility for compaction payloads:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/responses/compact \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"codex/codex-latest","input":[{"role":"user","content":[{"type":"input_text","text":"compress this session"}]}]}' | jq '{object,usage}'
+```
+
+Expected: `object` is `response.compaction` and `usage` is present.
+
 ## 3) Gemini
 
 `config.yaml`:
