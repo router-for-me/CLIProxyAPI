@@ -17,6 +17,7 @@
 - `task test:smoke` — Startup and control-plane smoke test subset in CI.
 - `task test:provider-smoke-matrix` — Optional provider matrix smoke against `/v1/responses` for configured `CLIPROXY_PROVIDER_SMOKE_CASES`.
 - `task test:provider-smoke-matrix:cheapest` — Provider matrix smoke with built-in cheapest-route aliases.
+- `task test:provider-smoke-matrix:cheapest:all` — Same as cheapest smoke, but runs explicit all-provider cheapest aliases via `CLIPROXY_PROVIDER_SMOKE_ALL_CASES`.
 - `task quality:pre-push` — Includes `test:smoke` and provider smoke when `CLIPROXY_PROVIDER_SMOKE_CASES` is set.
 - `task quality:vet` — Run `go vet ./...`.
 - `task quality:staticcheck` — Optional staticcheck run (`ENABLE_STATICCHECK=1`).
@@ -39,6 +40,7 @@
    - `QUALITY_INCLUDE_SMOKE=1 QUALITY_PACKAGES=\"./pkg/llmproxy/translator/codex/claude\" task quality:quick:check` (fast smoke-capable local path)
    - `CLIPROXY_PROVIDER_SMOKE_CASES="openai:gpt-4o-mini,claude:claude-3-5-sonnet-20241022" CLIPROXY_SMOKE_WAIT_FOR_READY=1 task test:provider-smoke-matrix`
    - `task test:provider-smoke-matrix:cheapest`
+   - `CLIPROXY_PROVIDER_SMOKE_CHEAP_MODE=all CLIPROXY_PROVIDER_SMOKE_ALL_CASES="openai:gpt-4o-mini,claude:claude-3-5-haiku-20241022" task test:provider-smoke-matrix:cheapest`
    - Add `CLIPROXY_SMOKE_EXPECT_SUCCESS=1` in environments where auth/provider configs are known to return 200.
 8. `task verify:all` before PR handoff.
 

@@ -169,9 +169,55 @@ run_cheapest_case() {
 
   rm -rf "${workdir}"
 }
+
+run_cheapest_all_override_case() {
+  local workdir
+  workdir="$(mktemp -d)"
+  local fake_curl="${workdir}/fake-curl.sh"
+  local state="${workdir}/state"
+
+  create_fake_curl "${fake_curl}" "${state}"
+
+  run_matrix_check "all-cheapest override list is honored" 0 \
+    env \
+      CLIPROXY_PROVIDER_SMOKE_CHEAP_MODE="all" \
+      CLIPROXY_PROVIDER_SMOKE_ALL_CASES="openai:gpt-4o-mini" \
+      STATUS_SEQUENCE="200" \
+      STATE_FILE="${state}" \
+      CLIPROXY_SMOKE_CURL_BIN="${fake_curl}" \
+      CLIPROXY_SMOKE_WAIT_FOR_READY="0" \
+      CLIPROXY_SMOKE_TIMEOUT_SECONDS="1" \
+      ./scripts/provider-smoke-matrix-cheapest.sh
+
+  rm -rf "${workdir}"
+}
+
+run_cheapest_all_fallback_case() {
+  local workdir
+  workdir="$(mktemp -d)"
+  local fake_curl="${workdir}/fake-curl.sh"
+  local state="${workdir}/state"
+
+  create_fake_curl "${fake_curl}" "${state}"
+
+  run_matrix_check "all-cheapest mode falls back to default when all-cases missing" 0 \
+    env \
+      CLIPROXY_PROVIDER_SMOKE_CHEAP_MODE="all" \
+      CLIPROXY_PROVIDER_SMOKE_CASES="" \
+      STATUS_SEQUENCE="200,200,200,200,200,200" \
+      STATE_FILE="${state}" \
+      CLIPROXY_SMOKE_CURL_BIN="${fake_curl}" \
+      CLIPROXY_SMOKE_WAIT_FOR_READY="0" \
+      CLIPROXY_SMOKE_TIMEOUT_SECONDS="1" \
+      ./scripts/provider-smoke-matrix-cheapest.sh
+
+  rm -rf "${workdir}"
+}
 run_skip_case
 run_pass_case
 run_fail_case
 run_cheapest_case
+run_cheapest_all_override_case
+run_cheapest_all_fallback_case
 
 echo "[OK] provider-smoke-matrix script test suite passed"

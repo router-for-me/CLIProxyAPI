@@ -400,6 +400,15 @@ tasks:
       - |
         scripts/provider-smoke-matrix-cheapest.sh
 
+  test:provider-smoke-matrix:cheapest:all:
+    desc: "Run provider smoke matrix for all cheapest aliases (explicit all-provider list required)."
+    deps: [preflight]
+    cmds:
+      - task: cache:unlock
+      - |
+        CLIPROXY_PROVIDER_SMOKE_CHEAP_MODE=all \
+        scripts/provider-smoke-matrix-cheapest.sh
+
   lint:changed:
     desc: "Run golangci-lint on changed/staged files only"
     cmds:
