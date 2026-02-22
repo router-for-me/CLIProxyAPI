@@ -355,7 +355,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 				if params := tool.Get("parameters"); params.Exists() {
 					// Convert parameter types from OpenAI format to Gemini format
-					cleaned := params.Raw
+					cleaned := common.SanitizeParametersJSONSchemaForGemini(params.Raw)
 					// Convert type values to uppercase for Gemini
 					paramsResult := gjson.Parse(cleaned)
 					if properties := paramsResult.Get("properties"); properties.Exists() {

@@ -699,7 +699,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 	// Execute with retry on 401/403 and 429 (quota exhausted)
 	// Note: currentOrigin and kiroPayload are built inside executeWithRetry for each endpoint
-	resp, err = e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, body, from, to, reporter, "", isAgentic, isChatOnly, tokenKey)
+	resp, err = e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, body, from, to, reporter, kiroModelID, isAgentic, isChatOnly, tokenKey)
 	return resp, err
 }
 
@@ -1134,7 +1134,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Execute stream with retry on 401/403 and 429 (quota exhausted)
 	// Note: currentOrigin and kiroPayload are built inside executeStreamWithRetry for each endpoint
-	streamKiro, errStreamKiro := e.executeStreamWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey)
+	streamKiro, errStreamKiro := e.executeStreamWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, body, from, reporter, kiroModelID, isAgentic, isChatOnly, tokenKey)
 	if errStreamKiro != nil {
 		return nil, errStreamKiro
 	}
@@ -1148,7 +1148,6 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 // Also supports multi-endpoint fallback similar to Antigravity implementation.
 // tokenKey is used for rate limiting and cooldown tracking.
 func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, body []byte, from sdktranslator.Format, reporter *usageReporter, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (<-chan cliproxyexecutor.StreamChunk, error) {
-	var kiroPayload []byte
 	var currentOrigin string
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
 	rateLimiter := kiroauth.GetGlobalRateLimiter()
@@ -4589,7 +4588,7 @@ func (e *KiroExecutor) callKiroAndBuffer(
 
 	kiroStream, err := e.executeStreamWithRetry(
 		ctx, auth, req, opts, accessToken, effectiveProfileArn,
-		nil, body, from, nil, "", kiroModelID, isAgentic, isChatOnly, tokenKey,
+		body, from, nil, kiroModelID, isAgentic, isChatOnly, tokenKey,
 	)
 	if err != nil {
 		return nil, err
@@ -4635,7 +4634,7 @@ func (e *KiroExecutor) callKiroDirectStream(
 
 	stream, streamErr := e.executeStreamWithRetry(
 		ctx, auth, req, opts, accessToken, effectiveProfileArn,
-		nil, body, from, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey,
+		body, from, reporter, kiroModelID, isAgentic, isChatOnly, tokenKey,
 	)
 	return stream, streamErr
 }
@@ -4682,7 +4681,7 @@ func (e *KiroExecutor) executeNonStreamFallback(
 	var err error
 	defer reporter.trackFailure(ctx, &err)
 
-	resp, err := e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, body, from, to, reporter, "", isAgentic, isChatOnly, tokenKey)
+	resp, err := e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, body, from, to, reporter, kiroModelID, isAgentic, isChatOnly, tokenKey)
 	return resp, err
 }
 

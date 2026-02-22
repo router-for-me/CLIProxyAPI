@@ -89,14 +89,6 @@ func emitCompletionEvents(st *oaiToResponsesState) []string {
 	return []string{emitRespEvent("response.completed", completed)}
 }
 
-func requestWantsUsageChunk(requestRawJSON []byte) bool {
-	if len(requestRawJSON) == 0 {
-		return false
-	}
-	req := gjson.ParseBytes(requestRawJSON)
-	return req.Get("stream_options.include_usage").Bool()
-}
-
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponses converts OpenAI Chat Completions streaming chunks
 // to OpenAI Responses SSE events (response.*).
 func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {

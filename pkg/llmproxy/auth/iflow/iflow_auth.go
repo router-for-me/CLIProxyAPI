@@ -160,6 +160,10 @@ func (ia *IFlowAuth) doTokenRequest(ctx context.Context, req *http.Request) (*IF
 	}
 
 	if tokenResp.AccessToken == "" {
+		var providerErr iFlowAPIKeyResponse
+		if err = json.Unmarshal(body, &providerErr); err == nil && (strings.TrimSpace(providerErr.Code) != "" || strings.TrimSpace(providerErr.Message) != "") {
+			return nil, fmt.Errorf("iflow token: provider rejected token request (code=%s message=%s)", strings.TrimSpace(providerErr.Code), strings.TrimSpace(providerErr.Message))
+		}
 		log.Debug(string(body))
 		return nil, fmt.Errorf("iflow token: missing access token in response")
 	}

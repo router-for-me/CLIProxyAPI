@@ -148,6 +148,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	// input array processing
+	pendingReasoning := ""
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
 			if extractedFromSystem && strings.EqualFold(item.Get("role").String(), "system") {
@@ -164,6 +165,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				var textAggregate strings.Builder
 				var partsJSON []string
 				hasImage := false
+				hasRedactedThinking := false
 				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 					parts.ForEach(func(_, part gjson.Result) bool {
 						ptype := part.Get("type").String()
@@ -216,6 +218,14 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 									hasImage = true
 								}
 							}
+						case "reasoning", "thinking", "reasoning_text", "summary_text":
+							if redacted := redactedThinkingPartFromResult(part); redacted != "" {
+								partsJSON = append(partsJSON, redacted)
+								hasRedactedThinking = true
+								if role == "" {
+									role = "assistant"
+								}
+							}
 						}
 						return true
 					})
@@ -234,10 +244,18 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					}
 				}
 
+				if role == "assistant" && pendingReasoning != "" {
+					partsJSON = append([]string{buildRedactedThinkingPart(pendingReasoning)}, partsJSON...)
+					pendingReasoning = ""
+					hasRedactedThinking = true
+				}
+
 				if len(partsJSON) > 0 {
 					msg := `{"role":"","content":[]}`
 					msg, _ = sjson.Set(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage {
+					// Preserve legacy single-text flattening, but keep structured arrays when
+					// image/thinking content is present.
+					if len(partsJSON) == 1 && !hasImage && !hasRedactedThinking {
 						// Preserve legacy behavior for single text content
 						msg, _ = sjson.Delete(msg, "content")
 						textPart := gjson.Parse(partsJSON[0])
@@ -275,6 +293,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 
 				asst := `{"role":"assistant","content":[]}`
+				if pendingReasoning != "" {
+					asst, _ = sjson.SetRaw(asst, "content.-1", buildRedactedThinkingPart(pendingReasoning))
+					pendingReasoning = ""
+				}
 				asst, _ = sjson.SetRaw(asst, "content.-1", toolUse)
 				out, _ = sjson.SetRaw(out, "messages.-1", asst)
 
@@ -289,9 +311,24 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				usr := `{"role":"user","content":[]}`
 				usr, _ = sjson.SetRaw(usr, "content.-1", toolResult)
 				out, _ = sjson.SetRaw(out, "messages.-1", usr)
+			case "reasoning":
+				// Preserve reasoning history so Claude thinking-enabled requests keep
+				// thinking/redacted_thinking before tool_use blocks.
+				if text := extractResponsesReasoningText(item); text != "" {
+					if pendingReasoning == "" {
+						pendingReasoning = text
+					} else {
+						pendingReasoning = pendingReasoning + "\n\n" + text
+					}
+				}
 			}
 			return true
 		})
+	}
+	if pendingReasoning != "" {
+		asst := `{"role":"assistant","content":[]}`
+		asst, _ = sjson.SetRaw(asst, "content.-1", buildRedactedThinkingPart(pendingReasoning))
+		out, _ = sjson.SetRaw(out, "messages.-1", asst)
 	}
 
 	// tools mapping: parameters -> input_schema
@@ -345,4 +382,72 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	return []byte(out)
+}
+
+func extractResponsesReasoningText(item gjson.Result) string {
+	var parts []string
+
+	appendText := func(v string) {
+		if strings.TrimSpace(v) != "" {
+			parts = append(parts, v)
+		}
+	}
+
+	if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+		summary.ForEach(func(_, s gjson.Result) bool {
+			if text := s.Get("text"); text.Exists() {
+				appendText(text.String())
+			}
+			return true
+		})
+	}
+
+	if content := item.Get("content"); content.Exists() && content.IsArray() {
+		content.ForEach(func(_, part gjson.Result) bool {
+			if txt := extractThinkingLikeText(part); txt != "" {
+				appendText(txt)
+			}
+			return true
+		})
+	}
+
+	if text := item.Get("text"); text.Exists() {
+		appendText(text.String())
+	}
+	if reasoning := item.Get("reasoning"); reasoning.Exists() {
+		appendText(reasoning.String())
+	}
+
+	return strings.Join(parts, "\n\n")
+}
+
+func redactedThinkingPartFromResult(part gjson.Result) string {
+	text := extractThinkingLikeText(part)
+	if text == "" {
+		return ""
+	}
+	return buildRedactedThinkingPart(text)
+}
+
+func extractThinkingLikeText(part gjson.Result) string {
+	if txt := strings.TrimSpace(thinking.GetThinkingText(part)); txt != "" {
+		return txt
+	}
+	if text := part.Get("text"); text.Exists() {
+		if txt := strings.TrimSpace(text.String()); txt != "" {
+			return txt
+		}
+	}
+	if summary := part.Get("summary"); summary.Exists() {
+		if txt := strings.TrimSpace(summary.String()); txt != "" {
+			return txt
+		}
+	}
+	return ""
+}
+
+func buildRedactedThinkingPart(text string) string {
+	part := `{"type":"redacted_thinking","data":""}`
+	part, _ = sjson.Set(part, "data", text)
+	return part
 }

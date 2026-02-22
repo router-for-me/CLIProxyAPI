@@ -112,7 +112,9 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					}
 					return true
 				})
-				out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
+				if len(gjson.Get(contentJSON, "parts").Array()) > 0 {
+					out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
+				}
 			} else if contentsResult.Type == gjson.String {
 				part := `{"text":""}`
 				part, _ = sjson.Set(part, "text", contentsResult.String())
@@ -129,7 +131,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		toolsResult.ForEach(func(_, toolResult gjson.Result) bool {
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
-				inputSchema := inputSchemaResult.Raw
+				inputSchema := common.SanitizeParametersJSONSchemaForGemini(inputSchemaResult.Raw)
 				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
 				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
 				tool, _ = sjson.Delete(tool, "strict")

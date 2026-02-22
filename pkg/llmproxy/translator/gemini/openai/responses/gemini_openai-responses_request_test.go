@@ -53,3 +53,36 @@ func TestConvertOpenAIResponsesRequestToGeminiMapsMaxOutputTokens(t *testing.T) 
 		t.Fatalf("generationConfig.maxOutputTokens = %d, want 123", res.Get("generationConfig.maxOutputTokens").Int())
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToGeminiRemovesUnsupportedSchemaFields(t *testing.T) {
+	input := []byte(`{
+		"model":"gemini-2.0-flash",
+		"input":"hello",
+		"tools":[
+			{
+				"type":"function",
+				"name":"search",
+				"description":"search data",
+				"parameters":{
+					"type":"object",
+					"$id":"urn:search",
+					"properties":{"query":{"type":"string"}},
+					"patternProperties":{"^x-":{"type":"string"}}
+				}
+			}
+		]
+	}`)
+
+	got := ConvertOpenAIResponsesRequestToGemini("gemini-2.0-flash", input, false)
+	res := gjson.ParseBytes(got)
+	schema := res.Get("tools.0.functionDeclarations.0.parametersJsonSchema")
+	if !schema.Exists() {
+		t.Fatalf("expected parametersJsonSchema to exist")
+	}
+	if schema.Get("$id").Exists() {
+		t.Fatalf("expected $id to be removed")
+	}
+	if schema.Get("patternProperties").Exists() {
+		t.Fatalf("expected patternProperties to be removed")
+	}
+}
