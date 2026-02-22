@@ -220,6 +220,49 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
+## 8) iFlow (Quota/Entitlement Sanity Path)
+
+Use this when provider quota pages show available credits but API calls return "insufficient quota" style failures.
+
+`config.yaml`:
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+iflow:
+  - name: "iflow-primary"
+    prefix: "iflow"
+    api-key: "iflow-api-key"
+```
+
+Validation (model inventory first):
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^iflow/'
+```
+
+Non-stream parity check:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/glm-5","stream":false,"messages":[{"role":"user","content":"ping"}]}' | jq
+```
+
+Stream parity check:
+
+```bash
+curl -sS -N -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/glm-5","stream":true,"messages":[{"role":"user","content":"ping"}]}' | head -n 20
+```
+
+If non-stream succeeds but stream fails (or vice versa), treat as compatibility drift and pin traffic to the healthy mode while collecting request IDs and upstream status codes.
+
 ## Related
 
 - [Getting Started](/getting-started)

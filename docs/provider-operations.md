@@ -74,6 +74,29 @@ This runbook is for operators who care about provider uptime, quota health, and 
   - Critical: Spark error ratio > 5% over 10 minutes.
   - Auto-mitigation: fallback alias to `gpt-5.3-codex` when critical threshold is crossed.
 
+### Claude Prompt-Cache Misses from Volatile Billing Header
+
+- Symptom: third-party Anthropic-compatible upstreams show cache miss spikes correlated with `x-anthropic-billing-header` variance.
+- Validation:
+  - Non-stream:
+    - `curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" -H "x-anthropic-billing-header: stable-team-id" -d '{"model":"claude/claude-sonnet-4-6","stream":false,"messages":[{"role":"user","content":"ping"}]}' | jq '.usage'`
+  - Stream:
+    - `curl -sS -N -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" -H "x-anthropic-billing-header: stable-team-id" -d '{"model":"claude/claude-sonnet-4-6","stream":true,"messages":[{"role":"user","content":"ping"}]}' | head -n 30`
+- Action:
+  - Pin a deterministic billing header value per workspace/team.
+  - If cache hit ratio drops > 10% within 15 minutes after header changes, roll back header mutation and re-run parity checks.
+
+### Gemini CLI Custom Header Ops Guardrail
+
+- Symptom: custom header requirements are added for upstream policy/routing, but regressions are only detected after live failures.
+- Validation:
+  - `curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" -d '{"model":"gemini/gemini-2.5-flash","messages":[{"role":"user","content":"ping"}]}' | jq`
+  - Confirm request logs include expected header set (with sensitive values redacted) for Gemini provider requests.
+- Suggested alert thresholds:
+  - Warn: Gemini `4xx` ratio > 2% for 10 minutes after header rollout.
+  - Critical: Gemini `4xx` ratio > 5% for 10 minutes.
+  - Auto-mitigation: revert header rollout and use previous known-good header profile.
+
 ## Recommended Production Pattern
 
 1. One direct primary provider for latency-critical traffic.

@@ -536,10 +536,12 @@ func ensureToolsArray(body []byte) []byte {
 // For GLM-4.6/4.7 and MiniMax M2/M2.1, it is recommended to include the full assistant
 // response (including reasoning_content) in message history for better context continuity.
 func preserveReasoningContentInMessages(body []byte) []byte {
-	model := strings.ToLower(gjson.GetBytes(body, "model").String())
+	model := normalizeIFlowModelID(gjson.GetBytes(body, "model").String())
 
 	// Only apply to models that support thinking with history preservation
-	needsPreservation := strings.HasPrefix(model, "glm-4") || strings.HasPrefix(model, "minimax-m2")
+	needsPreservation := strings.HasPrefix(model, "glm-4") ||
+		strings.HasPrefix(model, "glm-5") ||
+		strings.HasPrefix(model, "minimax-m2")
 
 	if !needsPreservation {
 		return body
@@ -571,4 +573,12 @@ func preserveReasoningContentInMessages(body []byte) []byte {
 	}
 
 	return body
+}
+
+func normalizeIFlowModelID(model string) string {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	if idx := strings.LastIndex(normalized, "/"); idx >= 0 && idx+1 < len(normalized) {
+		normalized = normalized[idx+1:]
+	}
+	return normalized
 }

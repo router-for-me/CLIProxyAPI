@@ -50,6 +50,16 @@ func TestPreserveReasoningContentInMessages(t *testing.T) {
 			[]byte(`{"model":"glm-4","messages":[{"role":"assistant","content":"hi","reasoning_content":"thinking..."}]}`),
 			nil,
 		},
+		{
+			"glm-5 model preserves existing reasoning_content",
+			[]byte(`{"model":"glm-5","messages":[{"role":"assistant","content":"hi","reasoning_content":"thinking..."}]}`),
+			nil,
+		},
+		{
+			"prefixed glm-5 model preserves existing reasoning_content",
+			[]byte(`{"model":"iflow/glm-5","messages":[{"role":"assistant","content":"hi","reasoning_content":"thinking..."}]}`),
+			nil,
+		},
 	}
 
 	for _, tt := range tests {
