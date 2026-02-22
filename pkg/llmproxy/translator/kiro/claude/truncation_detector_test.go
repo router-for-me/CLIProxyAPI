@@ -44,6 +44,13 @@ func TestDetectTruncation(t *testing.T) {
 	if info5.IsTruncated {
 		t.Errorf("expected no truncation, got %v", info5)
 	}
+
+	// 6. Bash cmd alias compatibility (Ampcode)
+	parsed6 := map[string]interface{}{"cmd": "echo hello"}
+	info6 := DetectTruncation("Bash", "c2", `{"cmd":"echo hello"}`, parsed6)
+	if info6.IsTruncated {
+		t.Errorf("expected no truncation for Bash cmd alias, got %v", info6)
+	}
 }
 
 func TestBuildSoftFailureToolResult(t *testing.T) {
