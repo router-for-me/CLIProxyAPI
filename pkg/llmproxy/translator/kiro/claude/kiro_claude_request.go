@@ -518,8 +518,10 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		return kiroTools
 	}
 
-	for _, tool := range tools.Array() {
+	toolsArray := tools.Array()
+	for _, tool := range toolsArray {
 		name := tool.Get("name").String()
+		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
 		description := tool.Get("description").String()
 		inputSchemaResult := tool.Get("input_schema")
 		var inputSchema interface{}
@@ -541,8 +543,15 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 			log.Debugf("kiro: tool '%s' has empty description, using default: %s", name, description)
 		}
 
+		// Claude built-in web_search tools can appear alongside normal tools.
+		// In mixed-tool requests, skip the built-in entry to avoid upstream 400 errors.
+		if strings.HasPrefix(toolType, "web_search") && len(toolsArray) > 1 {
+			log.Infof("kiro: skipping Claude built-in web_search tool in mixed-tool request (type=%s)", toolType)
+			continue
+		}
+
 		// Rename web_search → remote_web_search for Kiro API compatibility
-		if name == "web_search" {
+		if name == "web_search" || strings.HasPrefix(toolType, "web_search") {
 			name = "remote_web_search"
 			// Prefer dynamically fetched description, fall back to hardcoded constant
 			if cached := GetWebSearchDescription(); cached != "" {
