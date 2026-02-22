@@ -72,6 +72,8 @@ func (e *failOnceStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth
 	}
 }
 
+func (e *failOnceStreamExecutor) CloseExecutionSession(sessionID string) {}
+
 func (e *failOnceStreamExecutor) Calls() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -125,6 +127,8 @@ func (e *payloadThenErrorStreamExecutor) HttpRequest(ctx context.Context, auth *
 		HTTPStatus: http.StatusNotImplemented,
 	}
 }
+
+func (e *payloadThenErrorStreamExecutor) CloseExecutionSession(sessionID string) {}
 
 func (e *payloadThenErrorStreamExecutor) Calls() int {
 	e.mu.Lock()
@@ -195,6 +199,8 @@ func (e *authAwareStreamExecutor) HttpRequest(ctx context.Context, auth *coreaut
 		HTTPStatus: http.StatusNotImplemented,
 	}
 }
+
+func (e *authAwareStreamExecutor) CloseExecutionSession(sessionID string) {}
 
 func (e *authAwareStreamExecutor) Calls() int {
 	e.mu.Lock()
