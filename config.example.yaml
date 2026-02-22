@@ -206,8 +206,8 @@ nonstream-keepalive-interval: 0
 
 # Kilo: Free credits or optional API key. Dedicated block for parity.
 #kilo:
-#  - api-key: "sk-..."
-#    base-url: "https://api.kilo.ai/v1"
+#  - api-key: "anonymous" # or "sk-..."
+#    base-url: "https://api.kilo.ai/api/openrouter" # OpenRouter-compatible endpoint
 
 # DeepSeek: High performance, ultra-low cost reasoning models.
 #deepseek:
