@@ -32,16 +32,11 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 | `Error 401` on request | Missing or rotated client API key | `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <key>"` | Update key in `api-keys`, restart, verify no whitespace in config |
 | `403` from provider upstream | License/subscription or permission mismatch | Search logs for `status_code":403` in provider module | Align account entitlement, retry with fallback-capable model, inspect provider docs |
 | `Model not found` / `bad model` | Alias/prefix/model map mismatch | `curl .../v1/models` and compare requested ID | Update alias map, prefix rules, and `excluded-models` |
-| `auth_unavailable: no auth available` (Kiro) | Token file missing/expired or no successful login/import yet | `jq '.access_token, .refresh_token, .auth_method' ~/.aws/sso/cache/kiro-auth-token.json` | Run `--kiro-login` / `--kiro-aws-authcode` / `--kiro-import`, then recheck `/v1/models` |
-| Amazon Q `400 ValidationException` mentioning CLI origin | Incorrect Kiro endpoint/origin selection for current auth mode | Check `preferred-endpoint` and `kiro-preferred-endpoint` config values | Set endpoint explicitly (`codewhisperer` for IDE/social auth, `amazonq` for Builder ID CLI flows), then retry |
-| Cursor provider requests fail before upstream call | `cursor-api` auth/token bootstrap incomplete | Check `cursor-api-url`, `auth-token`, and cursor-api `/tokens/add` status | Set `cursor.auth-token`, confirm cursor-api is reachable, then retry a `cursor/...` model |
 | Runtime config write errors | Read-only mount or immutable filesystem | `find /CLIProxyAPI -maxdepth 1 -name config.yaml -print` | Use writable mount, re-run with read-only warning, confirm management persistence status |
 | Kiro/OAuth auth loops | Expired or missing token refresh fields | Re-run `cliproxyapi++ auth`/reimport token path | Refresh credentials, run with fresh token file, avoid duplicate token imports |
-| `event stream fatal` / broken SSE stream | Upstream event framing/transport interruption | Retry once with `stream: false` to isolate translation vs transport | If non-stream works, keep stream keepalive enabled, capture raw SSE logs, and use non-stream fallback for critical paths |
-| Extended-thinking requests time out | Long reasoning window exceeds ingress/proxy timeout | Compare latency with `stream: false` and inspect reverse-proxy timeout settings | Increase gateway/upstream timeout and tune keepalive (`nonstream-keepalive-interval`, `streaming.keepalive-seconds`) |
 | Streaming hangs or truncation | Reverse proxy buffering / payload compatibility issue | Reproduce with `stream: false`, then compare SSE response | Verify reverse-proxy config, compare tool schema compatibility and payload shape |
-| `nextThoughtNeeded` / sequential-thinking field errors | Client sent mixed legacy/new reasoning fields | Compare request body keys (`reasoning_effort`, `reasoning.effort`, old custom fields) | Normalize to one supported format and retry stream + non-stream parity checks |
-| Vision request fails on Copilot/GLM backends | Missing vision content/header propagation or unsupported payload block shape | Verify image block format (`image_url`/`image`) and inspect upstream response body | Use supported image content schema, retry, and confirm provider-specific vision compatibility |
+| `Cannot use Claude Models in Codex CLI` | Missing oauth alias bridge for Claude model IDs | `curl -sS .../v1/models | jq '.data[].id' | rg 'claude-opus|claude-sonnet|claude-haiku'` | Add/restore `oauth-model-alias` entries (or keep default injection enabled), then reload and re-check `/v1/models` |
+| `/v1/responses/compact` fails or hangs | Wrong endpoint/mode expectations (streaming not supported for compact) | Retry with non-stream `POST /v1/responses/compact` and inspect JSON `object` field | Use compact only in non-stream mode; for streaming flows keep `/v1/responses` or `/v1/chat/completions` |
 
 Use this matrix as an issue-entry checklist:
 
@@ -104,7 +99,6 @@ Checks:
 - Confirm model appears in `/v1/models` for current API key.
 - Verify prefix requirements (for example `team-a/model`).
 - Check alias and excluded-model rules in provider config.
-- For Copilot Codex-family models (for example `gpt-5.1-codex-mini`), retry via `/v1/responses`.
 
 ## Streaming Issues (SSE/WebSocket)
 
@@ -113,13 +107,6 @@ Checks:
 - Confirm reverse proxies do not buffer SSE.
 - For `/v1/responses` websocket scenarios, verify auth headers are forwarded.
 - Increase upstream/request timeout where ingress is aggressive.
-- Keep idle connections alive for long reasoning:
-
-```yaml
-nonstream-keepalive-interval: 10
-streaming:
-  keepalive-seconds: 15
-```
 
 ## Useful Endpoints
 

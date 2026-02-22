@@ -19,26 +19,6 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - There is no dedicated unified "Kiro quota dashboard" endpoint in this repo today.
 - Treat repeated `429` + falling success ratio as quota pressure and rotate capacity accordingly.
 
-## Kiro IAM Operational Runbook
-
-Minimum checks after every Kiro IAM login/import:
-
-1. Confirm auth file is unique per account (avoid shared filename reuse).
-2. Confirm `/v1/models` exposes expected `kiro/*` aliases for the active credential.
-3. Run one canary request and verify no immediate `401/403/429` burst.
-
-Suggested alert thresholds:
-
-- `kiro` provider success ratio < 95% for 10m.
-- `kiro` provider `401/403` ratio > 2% for 5m.
-- `kiro` provider `429` ratio > 5% for 5m.
-
-Immediate response:
-
-1. Verify token metadata freshness in auth file.
-2. Re-login with IAM flow.
-3. Shift traffic to fallback prefix until success ratio recovers.
-
 ## Onboard a New Provider
 
 1. Add provider block in `config.yaml` (`openai-compatibility` preferred for OpenAI-style upstreams).
@@ -81,12 +61,16 @@ Immediate response:
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
 
-### iFlow Model List Drift / Update Failures
+### Tool-Result Image Translation Regressions
 
-- Validate the iFlow credential first (`401/403` indicates auth drift, not model drift).
-- Recheck provider filters (`models`, `excluded-models`) before concluding upstream regression.
-- Use a safe fallback alias set (known-good `glm`/`minimax` entries) while refreshing model mappings.
-- Re-run `/v1/models` and compare before/after counts to confirm recovery.
+- Symptom pattern: tool responses containing image blocks fail after translation between OpenAI-compatible and Claude-style payloads.
+- First checks:
+  - Reproduce with a non-stream request and compare with stream behavior.
+  - Inspect request/response logs for payload-shape mismatches around `tool_result` + image content blocks.
+- Operational response:
+  - Keep one canary scenario that includes image content in tool results.
+  - Alert when canary success rate drops or `4xx` translation errors spike for that scenario.
+  - Route impacted traffic to a known-good provider prefix while triaging translator output.
 
 ## Recommended Production Pattern
 

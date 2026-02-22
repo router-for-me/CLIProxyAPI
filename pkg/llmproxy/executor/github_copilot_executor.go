@@ -537,8 +537,9 @@ func detectVisionContent(body []byte) bool {
 // suffixed model identifiers.
 func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte {
 	baseModel := thinking.ParseSuffix(model).ModelName
-	if baseModel != model {
-		body, _ = sjson.SetBytes(body, "model", baseModel)
+	normalizedModel := strings.ToLower(baseModel)
+	if normalizedModel != model {
+		body, _ = sjson.SetBytes(body, "model", normalizedModel)
 	}
 	return body
 }
