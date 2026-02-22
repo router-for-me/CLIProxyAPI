@@ -15,6 +15,18 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+func readStringMetadata(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := metadata[key].(string); ok {
+			trimmed := strings.TrimSpace(value)
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
 // FileTokenRepository 实现 TokenRepository 接口，基于文件系统存储
 type FileTokenRepository struct {
 	mu      sync.RWMutex
@@ -188,8 +200,7 @@ func (r *FileTokenRepository) readTokenFile(path string) (*Token, error) {
 	}
 
 	// 检查 auth_method (case-insensitive comparison to handle "IdC", "IDC", "idc", etc.)
-	authMethod, _ := metadata["auth_method"].(string)
-	authMethod = strings.ToLower(authMethod)
+	authMethod := strings.ToLower(readStringMetadata(metadata, "auth_method", "authMethod"))
 	if authMethod != "idc" && authMethod != "builder-id" {
 		return nil, nil // 只处理 IDC 和 Builder ID token
 	}
@@ -200,30 +211,16 @@ func (r *FileTokenRepository) readTokenFile(path string) (*Token, error) {
 	}
 
 	// 解析各字段
-	if v, ok := metadata["access_token"].(string); ok {
-		token.AccessToken = v
-	}
-	if v, ok := metadata["refresh_token"].(string); ok {
-		token.RefreshToken = v
-	}
-	if v, ok := metadata["client_id"].(string); ok {
-		token.ClientID = v
-	}
-	if v, ok := metadata["client_secret"].(string); ok {
-		token.ClientSecret = v
-	}
-	if v, ok := metadata["region"].(string); ok {
-		token.Region = v
-	}
-	if v, ok := metadata["start_url"].(string); ok {
-		token.StartURL = v
-	}
-	if v, ok := metadata["provider"].(string); ok {
-		token.Provider = v
-	}
+	token.AccessToken = readStringMetadata(metadata, "access_token", "accessToken")
+	token.RefreshToken = readStringMetadata(metadata, "refresh_token", "refreshToken")
+	token.ClientID = readStringMetadata(metadata, "client_id", "clientId")
+	token.ClientSecret = readStringMetadata(metadata, "client_secret", "clientSecret")
+	token.Region = readStringMetadata(metadata, "region")
+	token.StartURL = readStringMetadata(metadata, "start_url", "startUrl")
+	token.Provider = readStringMetadata(metadata, "provider")
 
 	// 解析时间字段
-	if v, ok := metadata["expires_at"].(string); ok {
+	if v := readStringMetadata(metadata, "expires_at", "expiresAt"); v != "" {
 		if t, err := time.Parse(time.RFC3339, v); err == nil {
 			token.ExpiresAt = t
 		}

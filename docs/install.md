@@ -78,6 +78,17 @@ go build ./cmd/cliproxyapi
 ./cliproxyapi --config ./config.example.yaml
 ```
 
+## Local Dev Refresh Workflow (process-compose)
+
+Use this for deterministic local startup while keeping config/auth reload handled by the built-in watcher.
+
+```bash
+cp config.example.yaml config.yaml
+process-compose -f examples/process-compose.dev.yaml up
+```
+
+Then edit `config.yaml` or files under `auth-dir`; the running process reloads changes automatically.
+
 ## Option D: Go SDK / Embedding
 
 ```bash
@@ -100,6 +111,7 @@ Related SDK docs:
 ## Common Install Failures
 
 - Container starts then exits: invalid config path or parse error.
+- `failed to read config file ... is a directory`: pass a file path (for example `/CLIProxyAPI/config.yaml`), not a directory.
 - `bind: address already in use`: port conflict; change host port mapping.
 - Requests always `401`: missing or incorrect `api-keys` for client auth.
 - Management API unavailable: `remote-management.secret-key` unset.

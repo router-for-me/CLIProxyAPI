@@ -602,8 +602,14 @@ func (s *ConfigSynthesizer) synthesizeKiroKeys(ctx *SynthesisContext) []*coreaut
 			continue
 		}
 
-		// profileArn is optional for AWS Builder ID users
-		id, token := idGen.Next("kiro:token", accessToken, profileArn)
+		// profileArn is optional for AWS Builder ID users. When profileArn is empty,
+		// include refreshToken in the stable ID seed to avoid collisions between
+		// multiple imported Builder ID credentials.
+		idSeed := []string{accessToken, profileArn}
+		if profileArn == "" && refreshToken != "" {
+			idSeed = append(idSeed, refreshToken)
+		}
+		id, token := idGen.Next("kiro:token", idSeed...)
 		attrs := map[string]string{
 			"source":       fmt.Sprintf("config:kiro[%s]", token),
 			"access_token": accessToken,

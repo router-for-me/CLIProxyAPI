@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	chatcompletions "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/claude/openai/chat-completions"
 	"github.com/tidwall/gjson"
 )
 
@@ -294,5 +295,45 @@ func TestExtractClaudeToolChoiceHint(t *testing.T) {
 		} else if !strings.Contains(got, tt.expected) {
 			t.Errorf("extractClaudeToolChoiceHint(%s) = %s, want it to contain %s", tt.body, got, tt.expected)
 		}
+	}
+}
+
+func TestBuildKiroPayload_OpenAICompatIssue145Payload(t *testing.T) {
+	openAIRequest := []byte(`{
+		"model":"kiro-claude-haiku-4-5",
+		"messages":[
+			{"role":"system","content":"Write next reply in a fictional chat."},
+			{"role":"assistant","content":"嗨。今天过得怎么样？"},
+			{"role":"user","content":"你好"}
+		],
+		"max_tokens":2000,
+		"temperature":0.95,
+		"top_p":0.9
+	}`)
+
+	claudeReq := chatcompletions.ConvertOpenAIRequestToClaude("claude-haiku-4.5", openAIRequest, false)
+	payload, _ := BuildKiroPayload(claudeReq, "claude-haiku-4.5", "arn:aws:kiro", "CLI", false, false, nil, nil)
+
+	var parsed KiroPayload
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal payload: %v", err)
+	}
+
+	current := parsed.ConversationState.CurrentMessage.UserInputMessage.Content
+	if strings.TrimSpace(current) == "" {
+		t.Fatal("expected non-empty current message content")
+	}
+	if !strings.Contains(current, "你好") {
+		t.Fatalf("expected current content to include latest user input, got %q", current)
+	}
+	if len(parsed.ConversationState.History) == 0 {
+		t.Fatal("expected non-empty history")
+	}
+	first := parsed.ConversationState.History[0]
+	if first.UserInputMessage == nil {
+		t.Fatal("expected history to start with user message for Kiro compatibility")
+	}
+	if strings.TrimSpace(first.UserInputMessage.Content) == "" {
+		t.Fatal("expected first history user content to be non-empty")
 	}
 }

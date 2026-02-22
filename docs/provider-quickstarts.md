@@ -30,17 +30,6 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"claude/claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
-Sonnet 4.6 compatibility check:
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"claude/claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}]}' | jq
-```
-
-If your existing `claude-sonnet-4-5` route starts failing, switch aliases to `claude-sonnet-4-6` and confirm with `GET /v1/models` before rollout.
-
 ## 2) Codex
 
 `config.yaml`:
@@ -90,6 +79,12 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 
 ## 4) GitHub Copilot
 
+Bootstrap auth (once per account):
+
+```bash
+./cliproxyapi++ --github-copilot-login --config ./config.yaml
+```
+
 `config.yaml`:
 
 ```yaml
@@ -110,16 +105,20 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"copilot-gpt-5","messages":[{"role":"user","content":"help me draft a shell command"}]}' | jq
 ```
 
-Model availability guardrail (plus/team mismatch cases):
+## 5) Kiro
+
+Bootstrap auth (pick one):
 
 ```bash
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'gpt-5.3-codex|gpt-5.3-codex-spark'
+# Google OAuth flow
+./cliproxyapi++ --kiro-login --config ./config.yaml
+
+# AWS Builder ID flow
+./cliproxyapi++ --kiro-aws-authcode --config ./config.yaml
+
+# Import existing IDE token
+./cliproxyapi++ --kiro-import --config ./config.yaml
 ```
-
-Only route traffic to models that appear in `/v1/models`. If `gpt-5.3-codex-spark` is missing for your account tier, use `gpt-5.3-codex`.
-
-## 5) Kiro
 
 `config.yaml`:
 
@@ -141,10 +140,14 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"kiro/claude-opus-4-5","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
-Login behavior:
+If you see `auth_unavailable: no auth available`:
 
-- `kiro` login defaults to incognito/private browser mode for multi-account support.
-- Use `--no-incognito` only when you explicitly want to reuse the current browser session.
+```bash
+ls -l ~/.aws/sso/cache/kiro-auth-token.json
+jq '.access_token, .refresh_token, .profile_arn, .auth_method' ~/.aws/sso/cache/kiro-auth-token.json
+```
+
+Re-run one of the Kiro login/import commands above, then validate again.
 
 ## 6) MiniMax
 
@@ -180,9 +183,6 @@ openai-compatibility:
   - name: "mlx-local"
     prefix: "mlx"
     base-url: "http://127.0.0.1:8000/v1"
-    # Optional: override model-discovery path when upstream is not /v1/models.
-    # Example: /api/coding/paas/v4/models for some Z.ai-compatible gateways.
-    models-endpoint: "/v1/models"
     api-key-entries:
       - api-key: "dummy-key"
 ```
@@ -196,17 +196,26 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
-Multi-account pattern:
+## 8) Cursor (via cursor-api)
+
+`config.yaml`:
 
 ```yaml
-openai-compatibility:
-  - name: "zai-team-a"
-    prefix: "team-a"
-    base-url: "https://api.z.ai"
-    models-endpoint: "/api/coding/paas/v4/models"
-    api-key-entries:
-      - api-key: "sk-team-a-1"
-      - api-key: "sk-team-a-2"
+api-keys:
+  - "demo-client-key"
+
+cursor:
+  - cursor-api-url: "http://127.0.0.1:3000"
+    auth-token: "your-cursor-api-auth-token"
+```
+
+Validation:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"cursor/gpt-5.1-codex","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
 ## Related

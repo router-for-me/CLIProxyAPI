@@ -126,3 +126,28 @@ func TestConfigSynthesizer_SynthesizeMore(t *testing.T) {
 		t.Errorf("missing providers in synthesis: %v", expectedProviders)
 	}
 }
+
+func TestConfigSynthesizer_SynthesizeKiroKeys_UsesRefreshTokenForIDWhenProfileArnMissing(t *testing.T) {
+	s := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			KiroKey: []config.KiroKey{
+				{AccessToken: "shared-access-token", RefreshToken: "refresh-one"},
+				{AccessToken: "shared-access-token", RefreshToken: "refresh-two"},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := s.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize failed: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auth entries, got %d", len(auths))
+	}
+	if auths[0].ID == auths[1].ID {
+		t.Fatalf("expected unique auth IDs for distinct refresh tokens, got %q", auths[0].ID)
+	}
+}
