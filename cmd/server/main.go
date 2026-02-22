@@ -100,20 +100,37 @@ func init() {
 // Kiro defaults to incognito mode for multi-account support.
 // Users can explicitly override with --incognito or --no-incognito flags.
 func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
+	setAuthIncognitoMode(cfg, useIncognito, noIncognito, true)
+}
+
+// setQwenIncognitoMode sets the incognito browser mode for Qwen authentication.
+// Qwen defaults to normal browser mode.
+func setQwenIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
+	setAuthIncognitoMode(cfg, useIncognito, noIncognito, false)
+}
+
+func setAuthIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool, defaultIncognito bool) {
+	if cfg == nil {
+		return
+	}
 	if useIncognito {
 		cfg.IncognitoBrowser = true
 	} else if noIncognito {
 		cfg.IncognitoBrowser = false
 	} else {
-		cfg.IncognitoBrowser = true // Kiro default
+		cfg.IncognitoBrowser = defaultIncognito
 	}
 }
 
-func validateKiroIncognitoFlags(useIncognito, noIncognito bool) error {
+func validateAuthIncognitoFlags(useIncognito, noIncognito bool) error {
 	if useIncognito && noIncognito {
 		return fmt.Errorf("flags --incognito and --no-incognito are mutually exclusive")
 	}
 	return nil
+}
+
+func validateKiroIncognitoFlags(useIncognito, noIncognito bool) error {
+	return validateAuthIncognitoFlags(useIncognito, noIncognito)
 }
 
 // main is the entry point of the application.
@@ -576,9 +593,9 @@ func main() {
 		ConfigPath:   configFilePath,
 	}
 
-	kiroAuthFlow := kiroLogin || kiroGoogleLogin || kiroAWSLogin || kiroAWSAuthCode
-	if kiroAuthFlow {
-		if err := validateKiroIncognitoFlags(useIncognito, noIncognito); err != nil {
+	authenticateWithIncognito := kiroLogin || kiroGoogleLogin || kiroAWSLogin || kiroAWSAuthCode || qwenLogin
+	if authenticateWithIncognito {
+		if err := validateAuthIncognitoFlags(useIncognito, noIncognito); err != nil {
 			log.Error(err)
 			return
 		}
@@ -625,6 +642,7 @@ func main() {
 		// Handle Claude login
 		cmd.DoClaudeLogin(cfg, options)
 	} else if qwenLogin {
+		setQwenIncognitoMode(cfg, useIncognito, noIncognito)
 		cmd.DoQwenLogin(cfg, options)
 	} else if kiloLogin {
 		cmd.DoKiloLogin(cfg, options)

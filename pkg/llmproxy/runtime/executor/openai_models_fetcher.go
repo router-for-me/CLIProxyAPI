@@ -108,6 +108,9 @@ func FetchOpenAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 
 func resolveOpenAIModelsURL(baseURL string, attrs map[string]string) string {
 	if attrs != nil {
+		if modelsEndpoint := strings.TrimSpace(attrs["models_endpoint"]); modelsEndpoint != "" {
+			return modelsEndpoint
+		}
 		if modelsURL := strings.TrimSpace(attrs["models_url"]); modelsURL != "" {
 			return modelsURL
 		}

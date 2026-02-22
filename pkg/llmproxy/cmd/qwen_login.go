@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	log "github.com/sirupsen/logrus"
@@ -23,6 +24,7 @@ func DoQwenLogin(cfg *config.Config, options *LoginOptions) {
 	}
 
 	manager := newAuthManager()
+	browser.SetIncognitoMode(cfg != nil && cfg.IncognitoBrowser)
 
 	promptFn := options.Prompt
 	if promptFn == nil {

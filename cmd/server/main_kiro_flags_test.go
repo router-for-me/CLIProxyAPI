@@ -39,3 +39,22 @@ func TestSetKiroIncognitoMode(t *testing.T) {
 		t.Fatal("expected --incognito to enable incognito")
 	}
 }
+
+func TestSetQwenIncognitoMode(t *testing.T) {
+	cfg := &config.Config{}
+
+	setQwenIncognitoMode(cfg, false, false)
+	if cfg.IncognitoBrowser {
+		t.Fatal("expected default Qwen mode to disable incognito")
+	}
+
+	setQwenIncognitoMode(cfg, false, true)
+	if cfg.IncognitoBrowser {
+		t.Fatal("expected --no-incognito to disable incognito")
+	}
+
+	setQwenIncognitoMode(cfg, true, false)
+	if !cfg.IncognitoBrowser {
+		t.Fatal("expected --incognito to enable incognito")
+	}
+}
