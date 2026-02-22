@@ -986,13 +986,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-		httpReq.Header.Del("X-Forwarded-For")
-		httpReq.Header.Del("X-Forwarded-Host")
-		httpReq.Header.Del("X-Forwarded-Proto")
-		httpReq.Header.Del("X-Forwarded-Port")
-		httpReq.Header.Del("X-Real-IP")
-		httpReq.Header.Del("Forwarded")
-		httpReq.Header.Del("Via")
 		if host := resolveHost(base); host != "" {
 			httpReq.Host = host
 		}
@@ -1109,13 +1102,6 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-		httpReq.Header.Del("X-Forwarded-For")
-		httpReq.Header.Del("X-Forwarded-Host")
-		httpReq.Header.Del("X-Forwarded-Proto")
-		httpReq.Header.Del("X-Forwarded-Port")
-		httpReq.Header.Del("X-Real-IP")
-		httpReq.Header.Del("Forwarded")
-		httpReq.Header.Del("Via")
 		if host := resolveHost(baseURL); host != "" {
 			httpReq.Host = host
 		}
@@ -1248,8 +1234,9 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 		return auth, errReq
 	}
 	httpReq.Header.Set("Host", "oauth2.googleapis.com")
-	httpReq.Header.Set("User-Agent", defaultAntigravityAgent)
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Real Antigravity uses Go's default User-Agent for OAuth token refresh
+	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
@@ -1417,7 +1404,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-	scrubProxyAndFingerprintHeaders(httpReq)
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
