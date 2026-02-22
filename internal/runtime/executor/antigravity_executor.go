@@ -1006,7 +1006,12 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
 	exec := &AntigravityExecutor{cfg: cfg}
 	token, updatedAuth, errToken := exec.ensureAccessToken(ctx, auth)
-	if errToken != nil || token == "" {
+	if errToken != nil {
+		log.Warnf("antigravity executor: fetch models failed for %s: token error: %v", auth.ID, errToken)
+		return nil
+	}
+	if token == "" {
+		log.Warnf("antigravity executor: fetch models failed for %s: got empty token", auth.ID)
 		return nil
 	}
 	if updatedAuth != nil {
@@ -1020,6 +1025,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		modelsURL := baseURL + antigravityModelsPath
 		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, bytes.NewReader([]byte(`{}`)))
 		if errReq != nil {
+			log.Warnf("antigravity executor: fetch models failed for %s: create request error: %v", auth.ID, errReq)
 			return nil
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -1032,12 +1038,14 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
 			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+				log.Warnf("antigravity executor: fetch models failed for %s: context canceled: %v", auth.ID, errDo)
 				return nil
 			}
 			if idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: models request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
 			}
+			log.Warnf("antigravity executor: fetch models failed for %s: request error: %v", auth.ID, errDo)
 			return nil
 		}
 
@@ -1050,6 +1058,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				log.Debugf("antigravity executor: models read error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
 			}
+			log.Warnf("antigravity executor: fetch models failed for %s: read body error: %v", auth.ID, errRead)
 			return nil
 		}
 		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
@@ -1057,11 +1066,13 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				log.Debugf("antigravity executor: models request rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
 			}
+			log.Warnf("antigravity executor: fetch models failed for %s: unexpected status %d, body: %s", auth.ID, httpResp.StatusCode, string(bodyBytes))
 			return nil
 		}
 
 		result := gjson.GetBytes(bodyBytes, "models")
 		if !result.Exists() {
+			log.Warnf("antigravity executor: fetch models failed for %s: no models field in response, body: %s", auth.ID, string(bodyBytes))
 			return nil
 		}
 
