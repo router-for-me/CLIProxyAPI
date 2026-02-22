@@ -215,7 +215,7 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 
 		// Don't log as error for context canceled - it's usually client closing connection
 		if errors.Is(err, context.Canceled) {
-			log.Debugf("amp upstream proxy [%s]: client canceled request for %s %s", errType, req.Method, req.URL.Path)
+			return
 		} else {
 			log.Errorf("amp upstream proxy error [%s] for %s %s: %v", errType, req.Method, req.URL.Path, err)
 		}
