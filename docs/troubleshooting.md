@@ -90,6 +90,28 @@ Checks:
 - Add additional credentials/provider capacity.
 - Reduce concurrency or enable stronger client backoff.
 
+## Provider `403` Fast Path
+
+Use this for repeated `403` on Kiro/Copilot/Antigravity-like channels:
+
+```bash
+# 1) Verify model is exposed to the current key
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer <your-client-key>" | jq '.data[].id' | head -n 20
+
+# 2) Run a minimal non-stream request for the same model
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer <your-client-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<model-id>","messages":[{"role":"user","content":"ping"}],"stream":false}'
+
+# 3) Inspect provider metrics + recent logs for status bursts
+curl -sS http://localhost:8317/v1/metrics/providers \
+  -H "Authorization: Bearer <your-client-key>" | jq
+```
+
+If step (2) fails with `403` while model listing works, treat it as upstream entitlement/channel policy mismatch first, not model registry corruption.
+
 ## Model Not Found / Unsupported Model
 
 Checks:
