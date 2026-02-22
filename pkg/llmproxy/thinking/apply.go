@@ -466,6 +466,15 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 	}
 
+	// Compatibility fallback: some Claude clients send output_config.effort.
+	if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() {
+		value := effort.String()
+		if value == "none" {
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		}
+		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+	}
+
 	// Compatibility fallback: some clients send Claude-style `variant`
 	// instead of OpenAI/Codex `reasoning.effort`.
 	if variant := gjson.GetBytes(body, "variant"); variant.Exists() {

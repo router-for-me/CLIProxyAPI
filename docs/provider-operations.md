@@ -45,24 +45,11 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - For OAuth providers (`kiro`, `cursor`, `minimax`, `roo`), verify token files and refresh path.
 - Confirm client is hitting intended provider prefix.
 
-OAuth observability thresholds (recommended for OAuth/session channels such as `iflow`, `kimi`, `kiro`, and future additions like Grok OAuth):
-
-- Warn: refresh/login failure ratio > 2% over 10 minutes.
-- Critical: refresh/login failure ratio > 5% over 10 minutes.
-- Auto-mitigation: temporarily shift traffic to fallback aliases and require fresh canary before re-enable.
-
 ### Repeated `429`
 
 - Add capacity (extra keys/providers) or reduce concurrency.
 - Shift traffic to fallback provider prefix.
 - Tighten expensive-model exposure with `excluded-models`.
-
-### Repeated `406` for iFlow
-
-- Run two probes with identical payloads (`stream:false` then `stream:true`).
-- If non-stream succeeds but stream fails, temporarily force non-stream for that model/prefix.
-- Keep a fallback alias ready (`iflow/glm-4.7` or `iflow/minimax-m2.5`) and switch via config reload.
-- Treat sustained `406` as rollback criteria for newly enabled iFlow models.
 
 ### Wrong Provider Selected
 
@@ -70,25 +57,44 @@ OAuth observability thresholds (recommended for OAuth/session channels such as `
 - Verify alias collisions across provider blocks.
 - Prefer explicit `prefix/model` calls for sensitive workloads.
 
-### Cache Usage Always `0` on Claude OAuth
-
-- Compare `usage` objects between `/v1/chat/completions` and `/v1/responses` for the same prompt.
-- Confirm the selected model is cache-capable in your entitlement tier.
-- Use total token counters as billing baseline when cache counters are absent.
-- Do not block rollout on cache counters alone unless token totals are also inconsistent.
-
 ### Missing Models in `/v1/models`
 
 - Confirm provider block is enabled and auth loaded.
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
 
-### Port `8317` Becomes Unreachable
+### Cursor Root-Cause Probes
 
-- Verify listener state: `lsof -iTCP:8317 -sTCP:LISTEN`.
-- Run local and remote `/health` checks to isolate host-level reachability vs process crash.
-- Ensure service is supervised (`systemd`/container restart policy) with restart-on-failure.
-- Add synthetic health checks so idle/network policy regressions are detected before user traffic impact.
+- First-pass log probe:
+  - `rg -n "cursor config\\[" /path/to/runtime.log | tail -n 20`
+- Primary failure patterns:
+  - token file unreadable / malformed
+  - missing or mismatched `auth-token` for cursor-api zero-action flow
+  - cursor-api token add failures
+- Safe response:
+  - fix token source and auth wiring first
+  - re-check `/v1/models` includes `cursor/*`
+  - only then adjust aliases/routing
+
+### MCP Tool Search (`ENABLE_TOOL_SEARCH`) 400 Guard
+
+- Before rollout, run both:
+  - one non-stream request with required tool calls
+  - one streaming request with the same tool set
+- Alert trigger:
+  - `MCP not in available tools` > 1% over 10 minutes
+- Mitigation:
+  - pin affected workloads to non-stream path temporarily
+  - validate `mcp__...` tool name normalization and provider tool allowlist
+
+### iFlow Model Deprecation and Alias Safety
+
+- When removing outdated iFlow upstream models:
+  - keep client-facing aliases stable in `oauth-model-alias` during migration
+  - verify no alias resolves to retired upstream IDs
+  - confirm `/v1/models` no longer advertises removed models before deleting compatibility aliases
+- Recommended check:
+  - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'iflow/'`
 
 ### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
 
@@ -100,29 +106,6 @@ OAuth observability thresholds (recommended for OAuth/session channels such as `
   - Warn: Spark error ratio > 2% over 10 minutes.
   - Critical: Spark error ratio > 5% over 10 minutes.
   - Auto-mitigation: fallback alias to `gpt-5.3-codex` when critical threshold is crossed.
-
-### Claude Prompt-Cache Misses from Volatile Billing Header
-
-- Symptom: third-party Anthropic-compatible upstreams show cache miss spikes correlated with `x-anthropic-billing-header` variance.
-- Validation:
-  - Non-stream:
-    - `curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" -H "x-anthropic-billing-header: stable-team-id" -d '{"model":"claude/claude-sonnet-4-6","stream":false,"messages":[{"role":"user","content":"ping"}]}' | jq '.usage'`
-  - Stream:
-    - `curl -sS -N -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" -H "x-anthropic-billing-header: stable-team-id" -d '{"model":"claude/claude-sonnet-4-6","stream":true,"messages":[{"role":"user","content":"ping"}]}' | head -n 30`
-- Action:
-  - Pin a deterministic billing header value per workspace/team.
-  - If cache hit ratio drops > 10% within 15 minutes after header changes, roll back header mutation and re-run parity checks.
-
-### Gemini CLI Custom Header Ops Guardrail
-
-- Symptom: custom header requirements are added for upstream policy/routing, but regressions are only detected after live failures.
-- Validation:
-  - `curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" -d '{"model":"gemini/gemini-2.5-flash","messages":[{"role":"user","content":"ping"}]}' | jq`
-  - Confirm request logs include expected header set (with sensitive values redacted) for Gemini provider requests.
-- Suggested alert thresholds:
-  - Warn: Gemini `4xx` ratio > 2% for 10 minutes after header rollout.
-  - Critical: Gemini `4xx` ratio > 5% for 10 minutes.
-  - Auto-mitigation: revert header rollout and use previous known-good header profile.
 
 ## Recommended Production Pattern
 
