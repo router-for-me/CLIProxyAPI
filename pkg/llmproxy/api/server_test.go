@@ -286,6 +286,7 @@ func TestServer_StartupSmokeEndpoints_UserAgentVariants(t *testing.T) {
 	}{
 		{name: "openai-compatible default", userAgent: "", minEntries: 1},
 		{name: "claude-cli user-agent", userAgent: "claude-cli/1.0", minEntries: 1},
+		{name: "CLAUDE-CLI uppercase user-agent", userAgent: "Claude-CLI/1.0", minEntries: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)

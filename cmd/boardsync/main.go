@@ -517,18 +517,18 @@ func writeBoardMarkdown(path string, board []boardItem, bj boardJSON) error {
 	var buf bytes.Buffer
 	now := time.Now().Format("2006-01-02")
 	buf.WriteString("# CLIProxyAPI Ecosystem 2000-Item Execution Board\n\n")
-	buf.WriteString(fmt.Sprintf("- Generated: %s\n", now))
+	fmt.Fprintf(&buf, "- Generated: %s\n", now)
 	buf.WriteString("- Scope: `router-for-me/CLIProxyAPIPlus` + `router-for-me/CLIProxyAPI` Issues, PRs, Discussions\n")
 	buf.WriteString("- Objective: Implementation-ready backlog (up to 2000), including CLI extraction, bindings/API integration, docs quickstarts, and dev-runtime refresh\n\n")
 	buf.WriteString("## Coverage\n")
 	keys := []string{"generated_items", "sources_total_unique", "issues_plus", "issues_core", "prs_plus", "prs_core", "discussions_plus", "discussions_core"}
 	bj.Stats["generated_items"] = len(board)
 	for _, k := range keys {
-		buf.WriteString(fmt.Sprintf("- %s: %d\n", k, bj.Stats[k]))
+		fmt.Fprintf(&buf, "- %s: %d\n", k, bj.Stats[k])
 	}
 	buf.WriteString("\n## Distribution\n")
 	for _, sec := range []string{"priority", "wave", "effort", "theme"} {
-		buf.WriteString(fmt.Sprintf("### %s\n", cases.Title(language.Und).String(sec)))
+		fmt.Fprintf(&buf, "### %s\n", cases.Title(language.Und).String(sec))
 		type kv struct {
 			K string
 			V int
@@ -544,7 +544,7 @@ func writeBoardMarkdown(path string, board []boardItem, bj boardJSON) error {
 			return arr[i].K < arr[j].K
 		})
 		for _, p := range arr {
-			buf.WriteString(fmt.Sprintf("- %s: %d\n", p.K, p.V))
+			fmt.Fprintf(&buf, "- %s: %d\n", p.K, p.V)
 		}
 		buf.WriteString("\n")
 	}
@@ -555,16 +555,16 @@ func writeBoardMarkdown(path string, board []boardItem, bj boardJSON) error {
 		limit = len(board)
 	}
 	for _, b := range board[:limit] {
-		buf.WriteString(fmt.Sprintf("### [%s] %s\n", b.ID, b.Title))
-		buf.WriteString(fmt.Sprintf("- Priority: %s\n", b.Priority))
-		buf.WriteString(fmt.Sprintf("- Wave: %s\n", b.Wave))
-		buf.WriteString(fmt.Sprintf("- Effort: %s\n", b.Effort))
-		buf.WriteString(fmt.Sprintf("- Theme: %s\n", b.Theme))
-		buf.WriteString(fmt.Sprintf("- Source: %s %s\n", b.SourceRepo, b.SourceRef))
+		fmt.Fprintf(&buf, "### [%s] %s\n", b.ID, b.Title)
+		fmt.Fprintf(&buf, "- Priority: %s\n", b.Priority)
+		fmt.Fprintf(&buf, "- Wave: %s\n", b.Wave)
+		fmt.Fprintf(&buf, "- Effort: %s\n", b.Effort)
+		fmt.Fprintf(&buf, "- Theme: %s\n", b.Theme)
+		fmt.Fprintf(&buf, "- Source: %s %s\n", b.SourceRepo, b.SourceRef)
 		if b.SourceURL != "" {
-			buf.WriteString(fmt.Sprintf("- Source URL: %s\n", b.SourceURL))
+			fmt.Fprintf(&buf, "- Source URL: %s\n", b.SourceURL)
 		}
-		buf.WriteString(fmt.Sprintf("- Implementation note: %s\n\n", b.ImplementationNote))
+		fmt.Fprintf(&buf, "- Implementation note: %s\n\n", b.ImplementationNote)
 	}
 	buf.WriteString("## Full 2000 Items\n")
 	buf.WriteString("- Use the CSV/JSON artifacts for full import and sorting.\n")
