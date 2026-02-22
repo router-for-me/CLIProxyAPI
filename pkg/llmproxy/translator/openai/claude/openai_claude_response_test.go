@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -80,6 +81,27 @@ func TestConvertOpenAIResponseToClaude_StreamingToolCalls(t *testing.T) {
 	// content_block_delta(input_json_delta) + content_block_stop
 	if len(got3) != 2 {
 		t.Errorf("expected 2 events for finish, got %d", len(got3))
+	}
+}
+
+func TestConvertOpenAIResponseToClaude_MessageStartBeforeContentBlock(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"stream": true}`)
+	request := []byte(`{}`)
+	var param any
+
+	chunk := []byte(`data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"reasoning_content":[{"type":"text","text":"think first"}]}}]}`)
+	got := ConvertOpenAIResponseToClaude(ctx, "claude-3-sonnet", originalRequest, request, chunk, &param)
+
+	if len(got) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(got))
+	}
+	if !strings.HasPrefix(got[0], "event: message_start") {
+		t.Fatalf("first event must be message_start, got %q", got[0])
+	}
+
+	if !strings.HasPrefix(got[1], "event: content_block_start") {
+		t.Fatalf("second event must be content_block_start, got %q", got[1])
 	}
 }
 
