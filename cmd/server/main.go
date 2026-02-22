@@ -42,6 +42,52 @@ var (
 	DefaultConfigPath = ""
 )
 
+var configEnvKeys = []string{
+	"CONFIG",
+	"CONFIG_PATH",
+	"CLIPROXY_CONFIG",
+	"CLIPROXY_CONFIG_PATH",
+}
+
+func printConfigCandidates(selected string, candidates []string) {
+	for _, candidate := range candidates {
+		state := "missing"
+		if info, errStat := os.Stat(candidate); errStat == nil {
+			if info.IsDir() {
+				state = "directory"
+			} else {
+				state = "file"
+			}
+		}
+		marker := " "
+		if candidate == selected {
+			marker = "*"
+		}
+		fmt.Printf("%s %s [%s]\n", marker, candidate, state)
+	}
+}
+
+func printConfigFailureHints(configPath string, wd string, isCloudDeploy bool) {
+	selected, candidates := resolveDefaultConfigPathWithCandidates(wd, isCloudDeploy)
+	fmt.Fprintln(os.Stderr, "Config resolution:")
+	fmt.Printf("  selected: %s\n", selected)
+	if strings.TrimSpace(configPath) == "" {
+		fmt.Fprintf(os.Stderr, "  explicit --config: not set\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "  explicit --config: %s\n", configPath)
+	}
+	fmt.Fprintln(os.Stderr, "  env vars (checked in order):")
+	for _, key := range configEnvKeys {
+		fmt.Fprintf(os.Stderr, "    - %s\n", key)
+	}
+	fmt.Fprintln(os.Stderr, "  candidate paths:")
+	printConfigCandidates(selected, candidates)
+	fmt.Fprintf(os.Stderr, "  template: %s\n", filepath.Join(wd, "config.example.yaml"))
+	fmt.Fprintln(os.Stderr, "Action: fix the active path or set a valid config path and re-run with --config.")
+	fmt.Fprintln(os.Stderr, "Optional: run --show-config-paths for a full candidate list.")
+	fmt.Fprintf(os.Stderr, "Validation shortcut: --config-validate --config %s\n", selected)
+}
+
 // init initializes the shared logger setup.
 func init() {
 	logging.SetupBaseLogger()
@@ -161,6 +207,7 @@ func main() {
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
 		_, _ = fmt.Fprintf(out, "Usage of %s\n", os.Args[0])
+		_, _ = fmt.Fprintln(out, "Configuration lookup order: --config, CONFIG/CONFIG_PATH, CLIPROXY_CONFIG/CLIPROXY_CONFIG_PATH, ./config.yaml, ./config/config.yaml, docker mounts.")
 		flag.CommandLine.VisitAll(func(f *flag.Flag) {
 			if f.Name == "password" {
 				return
@@ -295,28 +342,14 @@ func main() {
 		isCloudDeploy = true
 	}
 	if showConfigPaths {
-		if strings.TrimSpace(configPath) != "" {
-			fmt.Printf("* %s [from --config]\n", configPath)
-			return
-		}
 		selected, candidates := resolveDefaultConfigPathWithCandidates(wd, isCloudDeploy)
 		fmt.Println("Config path candidates:")
-		for _, candidate := range candidates {
-			state := "missing"
-			if info, errStat := os.Stat(candidate); errStat == nil {
-				if info.IsDir() {
-					state = "directory"
-				} else {
-					state = "file"
-				}
-			}
-			marker := " "
-			if candidate == selected {
-				marker = "*"
-			}
-			fmt.Printf("%s %s [%s]\n", marker, candidate, state)
+		if strings.TrimSpace(configPath) != "" {
+			fmt.Printf("* %s [from --config]\n", configPath)
 		}
+		printConfigCandidates(selected, candidates)
 		fmt.Printf("Selected: %s\n", selected)
+		fmt.Fprintf(os.Stdout, "Template: %s\n", filepath.Join(wd, "config.example.yaml"))
 		return
 	}
 
@@ -478,6 +511,7 @@ func main() {
 	}
 	if err != nil {
 		log.Errorf("failed to load config: %v", err)
+		printConfigFailureHints(configPath, wd, isCloudDeploy)
 		return
 	}
 	if cfg == nil {
