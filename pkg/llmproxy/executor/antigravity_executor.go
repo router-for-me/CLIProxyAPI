@@ -150,7 +150,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
-	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	baseURLs := antigravityBaseURLFallbackOrder(e.cfg, auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
@@ -292,7 +292,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
-	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	baseURLs := antigravityBaseURLFallbackOrder(e.cfg, auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
@@ -684,7 +684,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
-	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	baseURLs := antigravityBaseURLFallbackOrder(e.cfg, auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
@@ -886,7 +886,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	payload = deleteJSONField(payload, "model")
 	payload = deleteJSONField(payload, "request.safetySettings")
 
-	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	baseURLs := antigravityBaseURLFallbackOrder(e.cfg, auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
 	var authID, authLabel, authType, authValue string
@@ -903,7 +903,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	for idx, baseURL := range baseURLs {
 		base := strings.TrimSuffix(baseURL, "/")
 		if base == "" {
-			base = buildBaseURL(auth)
+			base = buildBaseURL(e.cfg, auth)
 		}
 
 		var requestURL strings.Builder
@@ -1019,7 +1019,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		auth = updatedAuth
 	}
 
-	baseURLs := antigravityBaseURLFallbackOrder(auth)
+	baseURLs := antigravityBaseURLFallbackOrder(cfg, auth)
 	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
 
 	for idx, baseURL := range baseURLs {
@@ -1263,7 +1263,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	base := strings.TrimSuffix(baseURL, "/")
 	if base == "" {
-		base = buildBaseURL(auth)
+		base = buildBaseURL(e.cfg, auth)
 	}
 	path := antigravityGeneratePath
 	if stream {
@@ -1426,8 +1426,8 @@ func int64Value(value any) (int64, bool) {
 	return 0, false
 }
 
-func buildBaseURL(auth *cliproxyauth.Auth) string {
-	if baseURLs := antigravityBaseURLFallbackOrder(auth); len(baseURLs) > 0 {
+func buildBaseURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if baseURLs := antigravityBaseURLFallbackOrder(cfg, auth); len(baseURLs) > 0 {
 		return baseURLs[0]
 	}
 	return antigravityBaseURLDaily
@@ -1540,8 +1540,8 @@ func antigravityWait(ctx context.Context, wait time.Duration) error {
 	}
 }
 
-func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
-	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
+func antigravityBaseURLFallbackOrder(cfg *config.Config, auth *cliproxyauth.Auth) []string {
+	if base := resolveOAuthBaseURLWithOverride(cfg, antigravityAuthType, "", resolveCustomAntigravityBaseURL(auth)); base != "" {
 		return []string{base}
 	}
 	return []string{

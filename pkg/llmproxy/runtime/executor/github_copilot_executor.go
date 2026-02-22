@@ -459,6 +459,7 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
 	if apiToken.Endpoints.API != "" {
 		apiEndpoint = strings.TrimRight(apiToken.Endpoints.API, "/")
 	}
+	apiEndpoint = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), apiEndpoint, authBaseURL(auth))
 
 	// Cache the token with thread-safe access
 	expiresAt := time.Now().Add(githubCopilotTokenCacheTTL)

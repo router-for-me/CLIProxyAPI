@@ -70,9 +70,7 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	token, baseURL := qwenCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://portal.qwen.ai/v1"
-	}
+	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), "https://portal.qwen.ai/v1", baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -161,9 +159,7 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	token, baseURL := qwenCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://portal.qwen.ai/v1"
-	}
+	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), "https://portal.qwen.ai/v1", baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
