@@ -45,6 +45,12 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - For OAuth providers (`kiro`, `cursor`, `minimax`, `roo`), verify token files and refresh path.
 - Confirm client is hitting intended provider prefix.
 
+OAuth observability thresholds (recommended for OAuth/session channels such as `iflow`, `kimi`, `kiro`, and future additions like Grok OAuth):
+
+- Warn: refresh/login failure ratio > 2% over 10 minutes.
+- Critical: refresh/login failure ratio > 5% over 10 minutes.
+- Auto-mitigation: temporarily shift traffic to fallback aliases and require fresh canary before re-enable.
+
 ### Repeated `429`
 
 - Add capacity (extra keys/providers) or reduce concurrency.

@@ -538,8 +538,9 @@ func ensureToolsArray(body []byte) []byte {
 func preserveReasoningContentInMessages(body []byte) []byte {
 	model := strings.ToLower(gjson.GetBytes(body, "model").String())
 
-	// Only apply to models that support thinking with history preservation
-	needsPreservation := strings.HasPrefix(model, "glm-4") || strings.HasPrefix(model, "minimax-m2")
+	// Only apply to models that support thinking with history preservation.
+	// GLM-5 shares the same multi-turn reasoning continuity requirement.
+	needsPreservation := strings.HasPrefix(model, "glm-4") || strings.HasPrefix(model, "glm-5") || strings.HasPrefix(model, "minimax-m2")
 
 	if !needsPreservation {
 		return body

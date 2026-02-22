@@ -71,3 +71,38 @@ func TestCreateTokenStorage(t *testing.T) {
 		t.Errorf("got device %q, want device", ts.DeviceID)
 	}
 }
+
+func TestRefreshToken_EmptyRefreshToken(t *testing.T) {
+	dfc := NewDeviceFlowClientWithDeviceID(nil, "test-device", &http.Client{})
+	_, err := dfc.RefreshToken(context.Background(), "   ")
+	if err == nil {
+		t.Fatalf("expected error for empty refresh token")
+	}
+	if !strings.Contains(err.Error(), "refresh token is empty") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRefreshToken_UnauthorizedRejected(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer ts.Close()
+
+	client := &http.Client{
+		Transport: &rewriteTransport{
+			target: ts.URL,
+			base:   http.DefaultTransport,
+		},
+	}
+
+	dfc := NewDeviceFlowClientWithDeviceID(nil, "test-device", client)
+	_, err := dfc.RefreshToken(context.Background(), "refresh-token")
+	if err == nil {
+		t.Fatalf("expected unauthorized error")
+	}
+	if !strings.Contains(err.Error(), "refresh token rejected") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

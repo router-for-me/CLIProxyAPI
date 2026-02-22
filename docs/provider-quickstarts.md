@@ -101,6 +101,20 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"gemini/flash","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
+Quota/auth rollout safety checks:
+
+```bash
+# Verify the selected model is visible before rollout.
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^gemini/'
+
+# If quota/auth errors appear, canary with a smaller known-good alias first.
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/flash","messages":[{"role":"user","content":"quota canary"}],"stream":false}' | jq '.error // .choices[0].finish_reason'
+```
+
 ## 4) GitHub Copilot
 
 `config.yaml`:
@@ -131,19 +145,6 @@ curl -sS http://localhost:8317/v1/models \
 ```
 
 Only route traffic to models that appear in `/v1/models`. If `gpt-5.3-codex-spark` is missing for your account tier, use `gpt-5.3-codex`.
-
-Team-account fallback probe (`400` on Spark):
-
-```bash
-for m in gpt-5.3-codex-spark gpt-5.3-codex; do
-  echo "== $m =="
-  curl -sS -X POST http://localhost:8317/v1/chat/completions \
-    -H "Authorization: Bearer demo-client-key" \
-    -H "Content-Type: application/json" \
-    -d "{\"model\":\"copilot/$m\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":false}" \
-    | jq '{error,model:(.model // .error.model // "n/a")}'
-done
-```
 
 ## 5) Kiro
 
@@ -208,22 +209,6 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"minimax/abab6.5s","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
-MiniMax-M2.5 via iFlow parity check:
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"iflow/minimax-m2.5","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
-```
-
-```bash
-curl -sS -N -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"iflow/minimax-m2.5","messages":[{"role":"user","content":"ping"}],"stream":true}' | head -n 6
-```
-
 ## 7) OpenAI-Compatible Providers
 
 For local tools like MLX/vLLM-MLX, use `openai-compatibility`:
@@ -249,9 +234,7 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
-## 8) iFlow (Quota/Entitlement Sanity Path)
-
-Use this when provider quota pages show available credits but API calls return "insufficient quota" style failures.
+## 8) Antigravity (OAuth Channel)
 
 `config.yaml`:
 
@@ -259,38 +242,30 @@ Use this when provider quota pages show available credits but API calls return "
 api-keys:
   - "demo-client-key"
 
-iflow:
-  - name: "iflow-primary"
-    prefix: "iflow"
-    api-key: "iflow-api-key"
+oauth-model-alias:
+  antigravity:
+    - name: "claude-sonnet-4-5-thinking"
+      alias: "ag-sonnet-thinking"
 ```
 
-Validation (model inventory first):
+Auth/session verification:
+
+```bash
+curl -sS http://localhost:8317/v0/management/auth-files \
+  -H "Authorization: Bearer YOUR_MANAGEMENT_KEY" | jq '.auths[] | select(.type=="antigravity")'
+```
+
+Model selection + sanity check:
 
 ```bash
 curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^iflow/'
-```
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'antigravity|ag-sonnet-thinking'
 
-Non-stream parity check:
-
-```bash
 curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -H "Authorization: Bearer demo-client-key" \
   -H "Content-Type: application/json" \
-  -d '{"model":"iflow/glm-5","stream":false,"messages":[{"role":"user","content":"ping"}]}' | jq
+  -d '{"model":"ag-sonnet-thinking","messages":[{"role":"user","content":"ping from antigravity"}]}' | jq
 ```
-
-Stream parity check:
-
-```bash
-curl -sS -N -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"iflow/glm-5","stream":true,"messages":[{"role":"user","content":"ping"}]}' | head -n 20
-```
-
-If non-stream succeeds but stream fails (or vice versa), treat as compatibility drift and pin traffic to the healthy mode while collecting request IDs and upstream status codes.
 
 ## Related
 
