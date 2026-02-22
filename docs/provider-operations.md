@@ -13,6 +13,12 @@ This runbook is for operators who care about provider uptime, quota health, and 
 4. Log scan:
    - Verify no sustained bursts of `401`, `403`, or `429`.
 
+## Quota Visibility (`#146` scope)
+
+- Current operational source of truth is `v1/metrics/providers` plus provider auth/token files.
+- There is no dedicated unified "Kiro quota dashboard" endpoint in this repo today.
+- Treat repeated `429` + falling success ratio as quota pressure and rotate capacity accordingly.
+
 ## Onboard a New Provider
 
 1. Add provider block in `config.yaml` (`openai-compatibility` preferred for OpenAI-style upstreams).

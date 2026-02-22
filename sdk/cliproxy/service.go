@@ -596,7 +596,7 @@ func (s *Service) Run(ctx context.Context) error {
 		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
 		normalizeStrategy := func(strategy string) string {
 			switch strategy {
-			case "fill-first", "fillfirst", "ff":
+			case "fill-first", "fill_first", "fillfirst", "ff":
 				return "fill-first"
 			default:
 				return "round-robin"
