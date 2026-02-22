@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-type roundTripperFunc func(*http.Request) (*http.Response, error)
+type refreshRoundTripperFunc func(*http.Request) (*http.Response, error)
 
-func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+func (f refreshRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
@@ -18,7 +18,7 @@ func testClientWithResponse(t *testing.T, status int, body string) *SSOOIDCClien
 	t.Helper()
 	return &SSOOIDCClient{
 		httpClient: &http.Client{
-			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			Transport: refreshRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: status,
 					Header:     make(http.Header),
