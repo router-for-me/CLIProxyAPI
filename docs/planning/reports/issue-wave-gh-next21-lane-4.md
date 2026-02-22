@@ -49,7 +49,7 @@
 - Lane finalized per instruction by proceeding with commit after recording this blocker.
 
 ## Commit Evidence
-- Commit: `<pending>`
+- Commit: `95d539e8`
 
 ## Notes / Remaining Gaps
 - This lane intentionally implements provider-model listing expansion and regression coverage only.
