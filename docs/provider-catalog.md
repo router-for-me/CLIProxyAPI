@@ -41,6 +41,19 @@ openai-compatibility:
       - api-key: "sk-or-v1-..."
 ```
 
+### 3b) Orchids reverse proxy (OpenAI-compatible)
+
+```yaml
+openai-compatibility:
+  - name: "orchids"
+    prefix: "orchids"
+    base-url: "https://<your-orchids-endpoint>/v1"
+    api-key-entries:
+      - api-key: "<orchids-api-key>"
+```
+
+Use this when Orchids is exposed as an OpenAI-shaped `/v1` endpoint and you want prefix-isolated routing (`orchids/<model>`).
+
 ### 4) OAuth/session provider
 
 ```yaml

@@ -28,6 +28,10 @@ Use either header style:
 - `GET /v0/management/auth-files`
 - `GET /v0/management/logs`
 - `POST /v0/management/api-call`
+- `GET /v0/management/quota-exceeded/switch-project`
+- `PUT|PATCH /v0/management/quota-exceeded/switch-project`
+- `GET /v0/management/quota-exceeded/switch-preview-model`
+- `PUT|PATCH /v0/management/quota-exceeded/switch-preview-model`
 
 Note: some management routes are provider/tool-specific and may vary by enabled features.
 
@@ -52,6 +56,28 @@ Tail logs stream/snapshot:
 ```bash
 curl -sS "http://localhost:8317/v0/management/logs?lines=200" \
   -H "Authorization: Bearer <management-key>"
+```
+
+Read current quota fallback toggles:
+
+```bash
+curl -sS http://localhost:8317/v0/management/quota-exceeded/switch-project \
+  -H "Authorization: Bearer <management-key>" | jq
+curl -sS http://localhost:8317/v0/management/quota-exceeded/switch-preview-model \
+  -H "Authorization: Bearer <management-key>" | jq
+```
+
+Update quota fallback toggles:
+
+```bash
+curl -sS -X PUT http://localhost:8317/v0/management/quota-exceeded/switch-project \
+  -H "Authorization: Bearer <management-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"value":true}'
+curl -sS -X PUT http://localhost:8317/v0/management/quota-exceeded/switch-preview-model \
+  -H "Authorization: Bearer <management-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"value":true}'
 ```
 
 ## Failure Modes
