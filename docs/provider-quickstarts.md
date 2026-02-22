@@ -232,3 +232,19 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 - For Copilot Codex-family models (for example `gpt-5.1-codex-mini`), prefer `/v1/responses`.
 - `/v1/chat/completions` is still valid for non-Codex Copilot traffic and most non-Copilot providers.
 - If a Codex-family request fails on `/v1/chat/completions`, retry the same request on `/v1/responses` first.
+
+## Qwen Model Visibility Check
+
+If auth succeeds but clients cannot see expected Qwen models (for example `qwen3.5`), verify in this order:
+
+```bash
+# 1) Confirm models exposed to your client key
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg -i 'qwen|qwen3.5'
+
+# 2) Confirm provider-side model listing from management
+curl -sS http://localhost:8317/v0/management/config \
+  -H "Authorization: Bearer <management-secret>" | jq '.providers[] | select(.provider=="qwen")'
+```
+
+If (1) is empty while auth is valid, check prefix rules and alias mapping first, then restart and re-read `/v1/models`.

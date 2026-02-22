@@ -111,6 +111,28 @@ Checks:
 - For `/v1/responses` websocket scenarios, verify auth headers are forwarded.
 - Increase upstream/request timeout where ingress is aggressive.
 
+### Claude Code Appears Non-Streaming (Chunks arrive all at once)
+
+Use this quick isolate flow:
+
+```bash
+# Compare non-stream vs stream behavior against same model
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_CLIENT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq '.choices[0].message.content'
+
+curl -N -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_CLIENT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}],"stream":true}'
+```
+
+If non-stream succeeds but stream chunks are delayed/batched:
+- check reverse proxy buffering settings first,
+- verify client reads SSE incrementally,
+- confirm no middleware rewrites the event stream response.
+
 ## Useful Endpoints
 
 - `GET /health`
