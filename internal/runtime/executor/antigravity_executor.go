@@ -83,7 +83,14 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	if tr, ok := client.Transport.(*http.Transport); ok {
 		trClone := tr.Clone()
 		trClone.ForceAttemptHTTP2 = false
+		// Also wiping TLSNextProto is good practice
 		trClone.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+		// Crucial: The transport must actively advertise only http/1.1 in the ALPN handshake
+		if trClone.TLSClientConfig == nil {
+			trClone.TLSClientConfig = &tls.Config{}
+		}
+		trClone.TLSClientConfig.NextProtos = []string{"http/1.1"}
+		
 		client.Transport = trClone
 	}
 	return client
@@ -1038,7 +1045,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, cfg, auth, 0)
-
+	
 	for idx, baseURL := range baseURLs {
 		modelsURL := baseURL + antigravityModelsPath
 
@@ -1075,6 +1082,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				log.Debugf("antigravity executor: models request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
 			}
+			log.Errorf("antigravity executor: models request failed: %v", errDo)
 			return nil
 		}
 
@@ -1087,6 +1095,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				log.Debugf("antigravity executor: models read error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
 			}
+			log.Errorf("antigravity executor: models read body failed: %v", errRead)
 			return nil
 		}
 		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
@@ -1094,6 +1103,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				log.Debugf("antigravity executor: models request rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
 			}
+			log.Errorf("antigravity executor: models request error status %d: %s", httpResp.StatusCode, string(bodyBytes))
 			return nil
 		}
 
