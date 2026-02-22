@@ -1,6 +1,7 @@
 package chat_completions
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -84,5 +85,40 @@ func TestConvertOpenAIRequestToGeminiSkipsEmptyAssistantMessage(t *testing.T) {
 	}
 	if res.Get("contents.0.role").String() != "user" || res.Get("contents.1.role").String() != "user" {
 		t.Fatalf("expected only user entries, got %s", res.Get("contents").Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToGeminiHandlesNullableTypeArrays(t *testing.T) {
+	input := []byte(`{
+		"model":"gemini-2.5-pro",
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"write_file",
+					"description":"write file content",
+					"parameters":{
+						"type":"object",
+						"properties":{
+							"path":{"type":"string"},
+							"content":{"type":["string","null"]}
+						},
+						"required":["path"]
+					}
+				}
+			}
+		]
+	}`)
+
+	got := ConvertOpenAIRequestToGemini("gemini-2.5-pro", input, false)
+	res := gjson.ParseBytes(got)
+
+	contentType := res.Get("tools.0.functionDeclarations.0.parametersJsonSchema.properties.content.type")
+	if !contentType.Exists() {
+		t.Fatalf("expected content.type to exist after schema normalization")
+	}
+	if contentType.Type == gjson.String && strings.HasPrefix(contentType.String(), "[") {
+		t.Fatalf("expected content.type not to be stringified type array, got %q", contentType.String())
 	}
 }
