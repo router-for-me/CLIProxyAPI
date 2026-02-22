@@ -338,6 +338,18 @@ nonstream-keepalive-interval: 0
 #    - name: "claude-opus-4-5-thinking"
 #      alias: "gemini-claude-opus-4-5-thinking"
 #   gemini-cli:
+
+# Global OAuth upstream URL overrides (per channel)
+# Overrides default OAuth upstream base URLs for file-backed/OAuth channels.
+# Channel keys are case-insensitive and values should be absolute base URLs.
+# oauth-upstream:
+#   claude: "https://api.anthropic.com"
+#   codex: "https://chatgpt.com/backend-api/codex"
+#   gemini-cli: "https://cloudcode-pa.googleapis.com"
+#   qwen: "https://portal.qwen.ai/v1"
+#   iflow: "https://api.iflow.cn/v1"
+#   github-copilot: "https://api.githubcopilot.com"
+#   antigravity: "https://daily-cloudcode-pa.googleapis.com"
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
 #       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)
