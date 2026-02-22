@@ -50,6 +50,21 @@ openai-compatibility:
       - api-key: "sk-or-v1-xxxx"
 ```
 
+## MLX and vLLM-MLX Pattern
+
+For MLX servers that expose OpenAI-compatible APIs (for example `mlx-openai-server` and `vllm-mlx`), configure them under `openai-compatibility`:
+
+```yaml
+openai-compatibility:
+  - name: "mlx-local"
+    prefix: "mlx"
+    base-url: "http://127.0.0.1:8000/v1"
+    api-key-entries:
+      - api-key: "dummy-or-local-key"
+```
+
+Then request models through the configured prefix (for example `mlx/<model-id>`), same as other OpenAI-compatible providers.
+
 ## Requesting Models
 
 Call standard OpenAI-compatible endpoints:
