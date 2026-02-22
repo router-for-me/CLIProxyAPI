@@ -1,5 +1,5 @@
-// Integration tests for -roo-login and -kilo-login flags.
-// Runs the cliproxyapi++ binary with fake roo/kilo in PATH.
+// Integration tests for native login flags.
+// Runs the cliproxyapi++ binary with fake provider CLIs in PATH.
 package test
 
 import (
@@ -102,5 +102,27 @@ func TestRooLoginFlag_WithoutRoo_ExitsNonZero(t *testing.T) {
 	err := cmd.Run()
 	if err == nil {
 		t.Error("-roo-login without roo in PATH or ~/.local/bin should exit non-zero")
+	}
+}
+
+func TestThegentLoginFlag_WithFakeThegent(t *testing.T) {
+	binary := findOrBuildBinary(t)
+	tmp := t.TempDir()
+	fakeThegent := filepath.Join(tmp, "thegent")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(fakeThegent, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake thegent: %v", err)
+	}
+	origPath := os.Getenv("PATH")
+	defer func() { _ = os.Setenv("PATH", origPath) }()
+	_ = os.Setenv("PATH", tmp+string(filepath.ListSeparator)+origPath)
+
+	cmd := exec.Command(binary, "-thegent-login=codex")
+	cmd.Env = append(os.Environ(), "PATH="+tmp+string(filepath.ListSeparator)+origPath)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	err := cmd.Run()
+	if err != nil {
+		t.Errorf("-thegent-login=codex with fake thegent in PATH: %v", err)
 	}
 }

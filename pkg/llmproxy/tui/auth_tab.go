@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -42,6 +44,10 @@ type authTabModel struct {
 	editField    int             // index into authEditableFields
 	editInput    textinput.Model // text input for editing
 	editFileName string          // name of file being edited
+
+	// Add state
+	adding   bool
+	addInput textinput.Model
 }
 
 type authFilesMsg struct {
@@ -57,11 +63,14 @@ type authActionMsg struct {
 func newAuthTabModel(client *Client) authTabModel {
 	ti := textinput.New()
 	ti.CharLimit = 256
+	addTI := textinput.New()
+	addTI.CharLimit = 1024
 	return authTabModel{
 		client:    client,
 		expanded:  -1,
 		confirm:   -1,
 		editInput: ti,
+		addInput:  addTI,
 	}
 }
 
@@ -104,6 +113,11 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 		return m, m.fetchFiles
 
 	case tea.KeyMsg:
+		// ---- Add mode ----
+		if m.adding {
+			return m.handleAddInput(msg)
+		}
+
 		// ---- Editing mode ----
 		if m.editing {
 			return m.handleEditInput(msg)
@@ -240,6 +254,16 @@ func (m authTabModel) renderContent() string {
 		if m.expanded == i {
 			sb.WriteString(m.renderDetail(f))
 		}
+	}
+
+	if m.adding {
+		sb.WriteString("\n")
+		sb.WriteString(T("auth_add_prompt"))
+		sb.WriteString("\n")
+		sb.WriteString(m.addInput.View())
+		sb.WriteString("\n")
+		sb.WriteString(helpStyle.Render("  " + T("auth_add_help")))
+		sb.WriteString("\n")
 	}
 
 	if m.status != "" {
@@ -392,6 +416,50 @@ func (m authTabModel) handleConfirmInput(msg tea.KeyMsg) (authTabModel, tea.Cmd)
 	return m, nil
 }
 
+func (m *authTabModel) startAdd() tea.Cmd {
+	m.adding = true
+	m.addInput.SetValue("")
+	m.addInput.Focus()
+	m.addInput.Prompt = "  "
+	m.viewport.SetContent(m.renderContent())
+	return textinput.Blink
+}
+
+func (m authTabModel) handleAddInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		inputPath := strings.TrimSpace(m.addInput.Value())
+		m.adding = false
+		m.addInput.Blur()
+		if inputPath == "" {
+			return m, func() tea.Msg {
+				return authActionMsg{err: fmt.Errorf("%s", T("auth_add_path_required"))}
+			}
+		}
+		return m, func() tea.Msg {
+			payload, err := os.ReadFile(inputPath)
+			if err != nil {
+				return authActionMsg{err: err}
+			}
+			name := filepath.Base(inputPath)
+			if err := m.client.UploadAuthFile(name, payload); err != nil {
+				return authActionMsg{err: err}
+			}
+			return authActionMsg{action: fmt.Sprintf(T("uploaded"), name)}
+		}
+	case "esc":
+		m.adding = false
+		m.addInput.Blur()
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.addInput, cmd = m.addInput.Update(msg)
+		m.viewport.SetContent(m.renderContent())
+		return m, cmd
+	}
+}
+
 func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "j", "down":
@@ -420,6 +488,8 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 			m.viewport.SetContent(m.renderContent())
 		}
 		return m, nil
+	case "a", "A":
+		return m, m.startAdd()
 	case "e", "E":
 		if m.cursor < len(m.files) {
 			f := m.files[m.cursor]

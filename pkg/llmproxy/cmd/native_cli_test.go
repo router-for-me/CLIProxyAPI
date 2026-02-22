@@ -135,3 +135,16 @@ func TestKiloSpec(t *testing.T) {
 		t.Errorf("KiloSpec.FallbackNames = %v, want [kilocode]", KiloSpec.FallbackNames)
 	}
 }
+
+func TestThegentSpec(t *testing.T) {
+	spec := ThegentSpec("codex")
+	if spec.Name != "thegent" {
+		t.Errorf("ThegentSpec.Name = %q, want thegent", spec.Name)
+	}
+	if len(spec.Args) != 3 {
+		t.Fatalf("ThegentSpec.Args length = %d, want 3", len(spec.Args))
+	}
+	if spec.Args[0] != "cliproxy" || spec.Args[1] != "login" || spec.Args[2] != "codex" {
+		t.Errorf("ThegentSpec.Args = %v, want [cliproxy login codex]", spec.Args)
+	}
+}

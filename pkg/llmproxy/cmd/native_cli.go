@@ -33,6 +33,16 @@ var (
 	}
 )
 
+// ThegentSpec returns TheGent CLI login spec for a provider.
+// Command shape: thegent cliproxy login <provider>
+func ThegentSpec(provider string) NativeCLISpec {
+	return NativeCLISpec{
+		Name:          "thegent",
+		Args:          []string{"cliproxy", "login", provider},
+		FallbackNames: nil,
+	}
+}
+
 // ResolveNativeCLI returns the absolute path to the native CLI binary, or empty string if not found.
 // Checks PATH and ~/.local/bin.
 func ResolveNativeCLI(spec NativeCLISpec) string {

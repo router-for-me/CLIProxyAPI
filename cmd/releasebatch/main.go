@@ -203,7 +203,11 @@ func createMode(targetBranch string, hotfix bool, dryRun bool) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func(path string) {
+		if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "warning: failed to remove temp release notes file %s: %v\n", path, errRemove)
+		}
+	}(tmpFile.Name())
 	if _, err := tmpFile.WriteString(notes); err != nil {
 		return err
 	}
@@ -270,7 +274,11 @@ func notesMode(tag string, outputPath string, editRelease bool) error {
 			if err != nil {
 				return err
 			}
-			defer os.Remove(tmpFile.Name())
+			defer func(path string) {
+				if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+					fmt.Fprintf(os.Stderr, "warning: failed to remove temp release notes file %s: %v\n", path, errRemove)
+				}
+			}(tmpFile.Name())
 			if _, err := tmpFile.WriteString(notes); err != nil {
 				return err
 			}

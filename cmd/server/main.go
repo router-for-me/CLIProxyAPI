@@ -104,6 +104,7 @@ func main() {
 	var togetherLogin bool
 	var fireworksLogin bool
 	var novitaLogin bool
+	var thegentLogin string
 	var projectID string
 	var vertexImport string
 	var setup bool
@@ -113,6 +114,8 @@ func main() {
 	var standalone bool
 	var noIncognito bool
 	var useIncognito bool
+	var showConfigPaths bool
+	var configValidate bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -144,6 +147,7 @@ func main() {
 	flag.BoolVar(&togetherLogin, "together-login", false, "Login to Together AI using API key (stored in auth-dir)")
 	flag.BoolVar(&fireworksLogin, "fireworks-login", false, "Login to Fireworks AI using API key (stored in auth-dir)")
 	flag.BoolVar(&novitaLogin, "novita-login", false, "Login to Novita AI using API key (stored in auth-dir)")
+	flag.StringVar(&thegentLogin, "thegent-login", "", "Login via TheGent unified flow for a provider (example: --thegent-login=codex)")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.BoolVar(&setup, "setup", false, "Run interactive setup wizard for provider auth and quick checks")
@@ -151,6 +155,8 @@ func main() {
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
+	flag.BoolVar(&showConfigPaths, "show-config-paths", false, "Print config path candidates and exit")
+	flag.BoolVar(&configValidate, "config-validate", false, "Validate configuration strictly and exit")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -287,6 +293,31 @@ func main() {
 	deployEnv := os.Getenv("DEPLOY")
 	if deployEnv == "cloud" {
 		isCloudDeploy = true
+	}
+	if showConfigPaths {
+		if strings.TrimSpace(configPath) != "" {
+			fmt.Printf("* %s [from --config]\n", configPath)
+			return
+		}
+		selected, candidates := resolveDefaultConfigPathWithCandidates(wd, isCloudDeploy)
+		fmt.Println("Config path candidates:")
+		for _, candidate := range candidates {
+			state := "missing"
+			if info, errStat := os.Stat(candidate); errStat == nil {
+				if info.IsDir() {
+					state = "directory"
+				} else {
+					state = "file"
+				}
+			}
+			marker := " "
+			if candidate == selected {
+				marker = "*"
+			}
+			fmt.Printf("%s %s [%s]\n", marker, candidate, state)
+		}
+		fmt.Printf("Selected: %s\n", selected)
+		return
 	}
 
 	// Determine and load the configuration file.
@@ -452,6 +483,14 @@ func main() {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
+	if configValidate {
+		if err := validateConfigFileStrict(configFilePath); err != nil {
+			log.Errorf("config validation failed: %v", err)
+			return
+		}
+		fmt.Printf("Config validation passed: %s\n", configFilePath)
+		return
+	}
 
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
@@ -603,6 +642,8 @@ func main() {
 		cmd.DoFireworksLogin(cfg, options)
 	} else if novitaLogin {
 		cmd.DoNovitaLogin(cfg, options)
+	} else if strings.TrimSpace(thegentLogin) != "" {
+		cmd.DoThegentLogin(cfg, options, thegentLogin)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

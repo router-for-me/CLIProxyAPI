@@ -105,3 +105,30 @@ func TestResolveDefaultConfigPath_NonCloudFallbackToNestedConfigWhenDefaultIsDir
 		t.Fatalf("resolveDefaultConfigPath() = %q, want nested path %q", got, nested)
 	}
 }
+
+func TestResolveDefaultConfigPathWithCandidates_ReturnsCandidates(t *testing.T) {
+	t.Setenv("CONFIG", "")
+	t.Setenv("CONFIG_PATH", "")
+	t.Setenv("CLIPROXY_CONFIG", "")
+	t.Setenv("CLIPROXY_CONFIG_PATH", "")
+
+	wd := t.TempDir()
+	selected, candidates := resolveDefaultConfigPathWithCandidates(wd, false)
+	if selected == "" {
+		t.Fatal("selected path should not be empty")
+	}
+	if len(candidates) == 0 {
+		t.Fatal("candidates should not be empty")
+	}
+	wantFallback := filepath.Join(wd, "config.yaml")
+	foundFallback := false
+	for _, c := range candidates {
+		if c == wantFallback {
+			foundFallback = true
+			break
+		}
+	}
+	if !foundFallback {
+		t.Fatalf("fallback path %q not found in candidates: %v", wantFallback, candidates)
+	}
+}

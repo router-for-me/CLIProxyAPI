@@ -155,6 +155,21 @@ func (c *Client) GetAuthFiles() ([]map[string]any, error) {
 	return extractList(wrapper, "files")
 }
 
+// UploadAuthFile uploads a JSON auth file payload by filename.
+func (c *Client) UploadAuthFile(name string, payload []byte) error {
+	query := url.Values{}
+	query.Set("name", name)
+	path := "/v0/management/auth-files?" + query.Encode()
+	_, code, err := c.doRequest("POST", path, strings.NewReader(string(payload)))
+	if err != nil {
+		return err
+	}
+	if code >= 400 {
+		return fmt.Errorf("upload failed (HTTP %d)", code)
+	}
+	return nil
+}
+
 // DeleteAuthFile deletes a single auth file by name.
 func (c *Client) DeleteAuthFile(name string) error {
 	query := url.Values{}
