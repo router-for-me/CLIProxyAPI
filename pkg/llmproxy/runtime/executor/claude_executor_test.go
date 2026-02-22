@@ -2,8 +2,11 @@ package executor
 
 import (
 	"bytes"
+	"net/http"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -224,5 +227,74 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
 	if got != "web_search" {
 		t.Fatalf("built-in tool_reference should not be prefixed, got %q", got)
+	}
+}
+
+func TestApplyClaudeToolPrefix_ToolResultMissingContentField(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}]}`)
+	out := applyClaudeToolPrefix(input, "proxy_")
+	if got := gjson.GetBytes(out, "messages.0.content.0.tool_use_id").String(); got != "t1" {
+		t.Fatalf("tool_result should remain unchanged when content is missing, got tool_use_id=%q", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.content").String(); got != "" {
+		t.Fatalf("missing content field should remain missing, got %q", got)
+	}
+}
+
+func TestStripClaudeToolPrefixFromResponse_ToolResultMissingContentField(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_result","tool_use_id":"t1"}]}`)
+	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
+	if got := gjson.GetBytes(out, "content.0.tool_use_id").String(); got != "t1" {
+		t.Fatalf("tool_result should remain unchanged when content is missing, got tool_use_id=%q", got)
+	}
+	if got := gjson.GetBytes(out, "content.0.content").String(); got != "" {
+		t.Fatalf("missing content field should remain missing, got %q", got)
+	}
+}
+
+func TestApplyClaudeHeaders_AnthropicUsesXAPIKeyAndDefaults(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-test"}}
+	applyClaudeHeaders(req, auth, "sk-ant-test", true, []string{"extra-beta"}, &config.Config{})
+
+	if got := req.Header.Get("x-api-key"); got != "sk-ant-test" {
+		t.Fatalf("x-api-key = %q, want %q", got, "sk-ant-test")
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization should be empty for Anthropic API-key flow, got %q", got)
+	}
+	if got := req.Header.Get("Accept"); got != "text/event-stream" {
+		t.Fatalf("Accept = %q, want %q", got, "text/event-stream")
+	}
+	betas := req.Header.Get("Anthropic-Beta")
+	for _, want := range []string{"prompt-caching-2024-07-31", "oauth-2025-04-20", "extra-beta"} {
+		if !bytes.Contains([]byte(betas), []byte(want)) {
+			t.Fatalf("Anthropic-Beta missing %q: %q", want, betas)
+		}
+	}
+	if got := req.Header.Get("X-Stainless-Package-Version"); got != "0.74.0" {
+		t.Fatalf("X-Stainless-Package-Version = %q, want %q", got, "0.74.0")
+	}
+}
+
+func TestApplyClaudeHeaders_NonAnthropicUsesBearer(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://gateway.example.com/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "token-123"}}
+	applyClaudeHeaders(req, auth, "token-123", false, nil, &config.Config{})
+
+	if got := req.Header.Get("Authorization"); got != "Bearer token-123" {
+		t.Fatalf("Authorization = %q, want %q", got, "Bearer token-123")
+	}
+	if got := req.Header.Get("x-api-key"); got != "" {
+		t.Fatalf("x-api-key should be empty for non-Anthropic base URL, got %q", got)
+	}
+	if got := req.Header.Get("Accept"); got != "application/json" {
+		t.Fatalf("Accept = %q, want %q", got, "application/json")
 	}
 }

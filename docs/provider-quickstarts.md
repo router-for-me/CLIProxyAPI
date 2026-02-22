@@ -30,6 +30,17 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"claude/claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
+Sonnet 4.6 compatibility check:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude/claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}]}' | jq
+```
+
+If your existing `claude-sonnet-4-5` route starts failing, switch aliases to `claude-sonnet-4-6` and confirm with `GET /v1/models` before rollout.
+
 ## 2) Codex
 
 `config.yaml`:
@@ -98,6 +109,15 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"copilot-gpt-5","messages":[{"role":"user","content":"help me draft a shell command"}]}' | jq
 ```
+
+Model availability guardrail (plus/team mismatch cases):
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'gpt-5.3-codex|gpt-5.3-codex-spark'
+```
+
+Only route traffic to models that appear in `/v1/models`. If `gpt-5.3-codex-spark` is missing for your account tier, use `gpt-5.3-codex`.
 
 ## 5) Kiro
 

@@ -778,6 +778,13 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
+	if pinnedProvider, pinnedModel, ok := util.ResolveProviderPinnedModel(baseModel); ok {
+		if parsed.HasSuffix {
+			return []string{pinnedProvider}, fmt.Sprintf("%s(%s)", pinnedModel, parsed.RawSuffix), nil
+		}
+		return []string{pinnedProvider}, pinnedModel, nil
+	}
+
 	providers = util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
