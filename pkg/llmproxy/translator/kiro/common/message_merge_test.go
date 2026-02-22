@@ -93,6 +93,39 @@ func TestMergeAdjacentMessages_AssistantMergeCombinesMultipleToolCalls(t *testin
 	}
 }
 
+func TestMergeAdjacentMessages_AssistantMergeDeduplicatesToolCallIDs(t *testing.T) {
+	messages := parseMessages(t, `[
+		{
+			"role":"assistant",
+			"content":"first",
+			"tool_calls":[
+				{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}
+			]
+		},
+		{
+			"role":"assistant",
+			"content":"second",
+			"tool_calls":[
+				{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}},
+				{"id":"call_2","type":"function","function":{"name":"Write","arguments":"{}"}}
+			]
+		}
+	]`)
+
+	merged := MergeAdjacentMessages(messages)
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 message after merge, got %d", len(merged))
+	}
+
+	toolCalls := merged[0].Get("tool_calls").Array()
+	if len(toolCalls) != 2 {
+		t.Fatalf("expected duplicate tool_call id to be removed, got %d tool calls", len(toolCalls))
+	}
+	if toolCalls[0].Get("id").String() != "call_1" || toolCalls[1].Get("id").String() != "call_2" {
+		t.Fatalf("unexpected merged tool call ids: %q, %q", toolCalls[0].Get("id").String(), toolCalls[1].Get("id").String())
+	}
+}
+
 func TestMergeAdjacentMessages_ToolMessagesRemainUnmerged(t *testing.T) {
 	messages := parseMessages(t, `[
 		{"role":"tool","tool_call_id":"call_1","content":"r1"},
