@@ -183,6 +183,7 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
   - [Provider Catalog](./docs/provider-catalog.md)
   - [Provider Operations Runbook](./docs/provider-operations.md)
   - [Routing and Models Reference](./docs/routing-reference.md)
+  - [Release Batching Guide](./docs/guides/release-batching.md)
 - **Planning and Delivery Boards:**
   - [Planning Index](./docs/planning/index.md)
   - [2000-Item Execution Board](./docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.md)

@@ -2,9 +2,9 @@ name: goreleaser
 
 on:
   push:
-    # run only against tags
+    # run only against version tags
     tags:
-      - '*'
+      - 'v*'
 
 permissions:
   contents: write
@@ -37,3 +37,12 @@ jobs:
           VERSION: ${{ env.VERSION }}
           COMMIT: ${{ env.COMMIT }}
           BUILD_DATE: ${{ env.BUILD_DATE }}
+      - name: Generate and publish release notes (Go tool)
+        run: |
+          go run ./cmd/releasebatch \
+            --mode notes \
+            --tag "${GITHUB_REF_NAME}" \
+            --out release-notes.md \
+            --edit-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

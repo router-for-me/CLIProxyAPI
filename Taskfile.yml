@@ -35,6 +35,27 @@ tasks:
     cmds:
       - ./{{.BINARY_NAME}} --config config.example.yaml
 
+  release:tool:
+    desc: "Build the Go release batching tool binary"
+    cmds:
+      - mkdir -p bin
+      - go build -o bin/releasebatch ./cmd/releasebatch
+
+  release:dry-run:
+    desc: "Preview next release tag + changelog from main"
+    cmds:
+      - go run ./cmd/releasebatch --mode create --target main --dry-run
+
+  release:batch:
+    desc: "Create/push next patch-batch tag and publish release"
+    cmds:
+      - go run ./cmd/releasebatch --mode create --target main
+
+  release:hotfix:
+    desc: "Create/push same-patch hotfix tag and publish release"
+    cmds:
+      - go run ./cmd/releasebatch --mode create --target main --hotfix
+
   preflight:
     desc: "Fail fast if required tooling is missing"
     cmds:
