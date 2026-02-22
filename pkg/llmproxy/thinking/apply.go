@@ -466,6 +466,27 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 	}
 
+	// Compatibility fallback: some clients send Claude-style `variant`
+	// instead of OpenAI/Codex `reasoning.effort`.
+	if variant := gjson.GetBytes(body, "variant"); variant.Exists() {
+		switch strings.ToLower(strings.TrimSpace(variant.String())) {
+		case "none":
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case "xhigh", "x-high", "x_high":
+			return ThinkingConfig{Mode: ModeLevel, Level: LevelXHigh}
+		case "high":
+			return ThinkingConfig{Mode: ModeLevel, Level: LevelHigh}
+		case "medium":
+			return ThinkingConfig{Mode: ModeLevel, Level: LevelMedium}
+		case "low":
+			return ThinkingConfig{Mode: ModeLevel, Level: LevelLow}
+		case "minimal":
+			return ThinkingConfig{Mode: ModeLevel, Level: LevelMinimal}
+		case "auto":
+			return ThinkingConfig{Mode: ModeLevel, Level: LevelAuto}
+		}
+	}
+
 	return ThinkingConfig{}
 }
 
