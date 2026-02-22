@@ -10,6 +10,7 @@ Use this table when token refresh is failing for OAuth/session-based providers.
 | Refresh appears to run but token stays expired | Inspect auth files + provider-specific auth state | Re-login provider flow to regenerate refresh token |
 | Refresh failures spike after config change | Compare active config and recent deploy diff | Roll back auth/provider block changes, then re-apply safely |
 | Kiro IDC refresh fails with `400/401` repeatedly (`#149` scope) | Confirm `auth_method=idc` token has `client_id`, `client_secret`, `region`, and `refresh_token` | Re-login with `--kiro-aws-authcode` or `--kiro-aws-login`; verify refreshed token file fields before re-enabling traffic |
+| Kiro login account selection seems ignored (`#102` scope) | Check logs for `kiro: using normal browser mode (--no-incognito)` | Remove `--no-incognito` unless reusing an existing session is intended; default incognito mode is required for clean multi-account selection |
 | Manual status appears stale after refresh (`#136` scope) | Compare token file `expires_at` and management refresh response | Trigger refresh endpoint, then reload config/watcher if needed and confirm `expires_at` moved forward |
 
 ## Fast Commands

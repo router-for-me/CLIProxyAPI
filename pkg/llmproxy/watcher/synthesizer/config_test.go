@@ -49,9 +49,10 @@ func TestConfigSynthesizer_SynthesizeOpenAICompat(t *testing.T) {
 		Config: &config.Config{
 			OpenAICompatibility: []config.OpenAICompatibility{
 				{
-					Name:          "provider1",
-					BaseURL:       "http://base",
-					APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "k1"}},
+					Name:           "provider1",
+					BaseURL:        "http://base",
+					ModelsEndpoint: "/api/coding/paas/v4/models",
+					APIKeyEntries:  []config.OpenAICompatibilityAPIKey{{APIKey: "k1"}},
 				},
 			},
 		},
@@ -66,6 +67,9 @@ func TestConfigSynthesizer_SynthesizeOpenAICompat(t *testing.T) {
 
 	if len(auths) != 1 || auths[0].Provider != "provider1" {
 		t.Errorf("expected 1 auth for provider1, got %v", auths)
+	}
+	if got := auths[0].Attributes["models_endpoint"]; got != "/api/coding/paas/v4/models" {
+		t.Fatalf("models_endpoint = %q, want %q", got, "/api/coding/paas/v4/models")
 	}
 }
 

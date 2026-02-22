@@ -274,6 +274,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			providerName = "openai-compatibility"
 		}
 		base := strings.TrimSpace(compat.BaseURL)
+		modelsEndpoint := strings.TrimSpace(compat.ModelsEndpoint)
 
 		// Handle new APIKeyEntries format (preferred)
 		createdEntries := 0
@@ -291,6 +292,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
+			}
+			if modelsEndpoint != "" {
+				attrs["models_endpoint"] = modelsEndpoint
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
@@ -325,6 +329,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
+			}
+			if modelsEndpoint != "" {
+				attrs["models_endpoint"] = modelsEndpoint
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)

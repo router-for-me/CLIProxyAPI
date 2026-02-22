@@ -141,6 +141,11 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"kiro/claude-opus-4-5","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
+Login behavior:
+
+- `kiro` login defaults to incognito/private browser mode for multi-account support.
+- Use `--no-incognito` only when you explicitly want to reuse the current browser session.
+
 ## 6) MiniMax
 
 `config.yaml`:
@@ -175,6 +180,9 @@ openai-compatibility:
   - name: "mlx-local"
     prefix: "mlx"
     base-url: "http://127.0.0.1:8000/v1"
+    # Optional: override model-discovery path when upstream is not /v1/models.
+    # Example: /api/coding/paas/v4/models for some Z.ai-compatible gateways.
+    models-endpoint: "/v1/models"
     api-key-entries:
       - api-key: "dummy-key"
 ```
@@ -186,6 +194,19 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -H "Authorization: Bearer demo-client-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
+```
+
+Multi-account pattern:
+
+```yaml
+openai-compatibility:
+  - name: "zai-team-a"
+    prefix: "team-a"
+    base-url: "https://api.z.ai"
+    models-endpoint: "/api/coding/paas/v4/models"
+    api-key-entries:
+      - api-key: "sk-team-a-1"
+      - api-key: "sk-team-a-2"
 ```
 
 ## Related

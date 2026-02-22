@@ -603,6 +603,10 @@ type OpenAICompatibility struct {
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// ModelsEndpoint overrides the upstream model discovery path.
+	// Defaults to "/v1/models" when omitted.
+	ModelsEndpoint string `yaml:"models-endpoint,omitempty" json:"models-endpoint,omitempty"`
+
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
