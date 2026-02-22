@@ -76,12 +76,20 @@ curl -sS http://localhost:8317/v1/models \
 - Ensure reverse proxies do not buffer event streams.
 - If clients hang, verify ingress/edge idle timeouts.
 
+## Claude Compatibility Notes (`#145` scope)
+
+- Use canonical OpenAI chat payload shape: `messages[].role` + `messages[].content`.
+- Avoid mixing `/v1/responses` payload fields into `/v1/chat/completions` requests in the same call.
+- If you use model aliases for Claude, verify the alias resolves in `GET /v1/models` before testing chat.
+- For conversion debugging, run one non-stream request first, then enable streaming once format parity is confirmed.
+
 ## Common Failure Modes
 
 - `401`: missing/invalid client API key.
 - `404`: wrong path (use `/v1/...` exactly).
 - `429`: upstream provider throttling; add backoff and provider capacity.
 - `400 model_not_found`: alias/prefix/config mismatch.
+- `400` with schema/field errors: payload shape mismatch between OpenAI chat format and provider-specific fields.
 
 ## Related Docs
 

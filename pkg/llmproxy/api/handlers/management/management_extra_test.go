@@ -1,11 +1,13 @@
 package management
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -333,5 +335,17 @@ func TestDeleteAuthFile(t *testing.T) {
 
 	if _, err := os.Stat(authFile); !os.IsNotExist(err) {
 		t.Errorf("file should have been deleted")
+	}
+}
+
+func TestIsReadOnlyConfigWriteError(t *testing.T) {
+	if !isReadOnlyConfigWriteError(&os.PathError{Op: "open", Path: "/tmp/config.yaml", Err: syscall.EROFS}) {
+		t.Fatal("expected EROFS path error to be treated as read-only config write error")
+	}
+	if !isReadOnlyConfigWriteError(errors.New("open /CLIProxyAPI/config.yaml: read-only file system")) {
+		t.Fatal("expected read-only file system message to be treated as read-only config write error")
+	}
+	if isReadOnlyConfigWriteError(errors.New("permission denied")) {
+		t.Fatal("did not expect generic permission error to be treated as read-only config write error")
 	}
 }

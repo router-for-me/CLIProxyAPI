@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -84,5 +85,38 @@ func TestConvertOpenAIResponsesRequestToGeminiRemovesUnsupportedSchemaFields(t *
 	}
 	if schema.Get("patternProperties").Exists() {
 		t.Fatalf("expected patternProperties to be removed")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGeminiHandlesNullableTypeArrays(t *testing.T) {
+	input := []byte(`{
+		"model":"gemini-2.0-flash",
+		"input":"hello",
+		"tools":[
+			{
+				"type":"function",
+				"name":"write_file",
+				"description":"write file content",
+				"parameters":{
+					"type":"object",
+					"properties":{
+						"path":{"type":"string"},
+						"content":{"type":["string","null"]}
+					},
+					"required":["path"]
+				}
+			}
+		]
+	}`)
+
+	got := ConvertOpenAIResponsesRequestToGemini("gemini-2.0-flash", input, false)
+	res := gjson.ParseBytes(got)
+
+	contentType := res.Get("tools.0.functionDeclarations.0.parametersJsonSchema.properties.content.type")
+	if !contentType.Exists() {
+		t.Fatalf("expected content.type to exist after schema normalization")
+	}
+	if contentType.Type == gjson.String && strings.HasPrefix(contentType.String(), "[") {
+		t.Fatalf("expected content.type not to be stringified type array, got %q", contentType.String())
 	}
 }
