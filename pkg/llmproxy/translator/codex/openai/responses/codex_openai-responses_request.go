@@ -17,6 +17,12 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(input))
 	}
 
+	// Preserve compaction fields for context management
+	// These fields are used for conversation context management in the Responses API
+	previousResponseID := gjson.GetBytes(rawJSON, "previous_response_id")
+	promptCacheKey := gjson.GetBytes(rawJSON, "prompt_cache_key")
+	safetyIdentifier := gjson.GetBytes(rawJSON, "safety_identifier")
+
 	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
 	// Map variant -> reasoning.effort when reasoning.effort is not explicitly provided.
@@ -39,6 +45,17 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	// Delete the user field as it is not supported by the Codex upstream.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
+
+	// Restore compaction fields after other transformations
+	if previousResponseID.Exists() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "previous_response_id", previousResponseID.String())
+	}
+	if promptCacheKey.Exists() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", promptCacheKey.String())
+	}
+	if safetyIdentifier.Exists() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "safety_identifier", safetyIdentifier.String())
+	}
 
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
