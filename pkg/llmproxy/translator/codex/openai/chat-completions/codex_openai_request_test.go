@@ -156,3 +156,43 @@ func TestConvertOpenAIRequestToCodex_UsesReasoningEffortBeforeVariant(t *testing
 		t.Fatalf("expected reasoning.effort to prefer reasoning_effort low, got %s", gotEffort)
 	}
 }
+
+func TestConvertOpenAIRequestToCodex_ResponseFormatMapsToTextFormat(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role":"user","content":"Return JSON"}],
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"name": "answer",
+				"strict": true,
+				"schema": {
+					"type": "object",
+					"properties": {
+						"result": {"type":"string"}
+					},
+					"required": ["result"]
+				}
+			}
+		}
+	}`)
+
+	got := ConvertOpenAIRequestToCodex("gpt-4o", input, false)
+	res := gjson.ParseBytes(got)
+
+	if res.Get("response_format").Exists() {
+		t.Fatalf("expected response_format to be removed from codex payload")
+	}
+	if gotType := res.Get("text.format.type").String(); gotType != "json_schema" {
+		t.Fatalf("expected text.format.type json_schema, got %s", gotType)
+	}
+	if gotName := res.Get("text.format.name").String(); gotName != "answer" {
+		t.Fatalf("expected text.format.name answer, got %s", gotName)
+	}
+	if gotStrict := res.Get("text.format.strict").Bool(); !gotStrict {
+		t.Fatalf("expected text.format.strict true")
+	}
+	if !res.Get("text.format.schema").Exists() {
+		t.Fatalf("expected text.format.schema to be present")
+	}
+}

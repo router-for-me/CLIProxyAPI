@@ -787,7 +787,9 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				AuthValue: authValue,
 			})
 
-			httpClient := newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 120*time.Second)
+			// Avoid hard client-side timeout for event-stream responses; let request
+			// context drive cancellation to prevent premature prelude read failures.
+			httpClient := newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 0)
 			httpResp, err := httpClient.Do(httpReq)
 			if err != nil {
 				// Check for context cancellation first - client disconnected, not a server error

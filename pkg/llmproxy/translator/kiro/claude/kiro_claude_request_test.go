@@ -136,6 +136,30 @@ func TestConvertClaudeToolsToKiro(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeToolsToKiro_SkipsBuiltInWebSearchInMixedTools(t *testing.T) {
+	tools := gjson.Parse(`[
+		{
+			"type": "web_search_20250305",
+			"name": "web_search",
+			"max_uses": 8
+		},
+		{
+			"name": "filesystem_read",
+			"description": "Read a file",
+			"input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
+		}
+	]`)
+
+	kiroTools := convertClaudeToolsToKiro(tools)
+	if len(kiroTools) != 1 {
+		t.Fatalf("expected 1 tool after skipping built-in web search, got %d", len(kiroTools))
+	}
+
+	if kiroTools[0].ToolSpecification.Name != "filesystem_read" {
+		t.Fatalf("expected filesystem_read tool, got %s", kiroTools[0].ToolSpecification.Name)
+	}
+}
+
 func TestProcessMessages(t *testing.T) {
 	messages := gjson.Parse(`[
 		{"role": "user", "content": "hello"},
