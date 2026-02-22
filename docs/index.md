@@ -21,7 +21,8 @@
 1. [Getting Started](/getting-started) for first run and first request.
 2. [Install](/install) for Docker, binary, and source options.
 3. [Provider Usage](/provider-usage) for provider strategy and setup patterns.
-4. [Provider Catalog](/provider-catalog) for provider block reference.
+4. [Provider Quickstarts](/provider-quickstarts) for provider-specific 5-minute success paths.
+5. [Provider Catalog](/provider-catalog) for provider block reference.
 5. [Provider Operations](/provider-operations) for on-call runbook and incident workflows.
 6. [Routing and Models Reference](/routing-reference) for model resolution behavior.
 7. [Troubleshooting](/troubleshooting) for common failures and concrete fixes.

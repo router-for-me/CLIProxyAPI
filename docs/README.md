@@ -7,6 +7,7 @@ This docs site is organized by onboarding guides, API reference, and audience-sp
 - [Getting Started](./getting-started.md)
 - [Install](./install.md)
 - [Provider Usage](./provider-usage.md)
+- [Provider Quickstarts](./provider-quickstarts.md)
 - [Provider Catalog](./provider-catalog.md)
 - [Provider Operations](./provider-operations.md)
 - [Routing and Models](./routing-reference.md)

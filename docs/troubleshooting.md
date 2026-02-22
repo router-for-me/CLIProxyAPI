@@ -25,6 +25,25 @@ curl -sS http://localhost:8317/v1/models \
 curl -sS http://localhost:8317/v1/metrics/providers | jq
 ```
 
+## Troubleshooting Matrix
+
+| Symptom | Likely Cause | Immediate Check | Remediation |
+| --- | --- | --- | --- |
+| `Error 401` on request | Missing or rotated client API key | `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <key>"` | Update key in `api-keys`, restart, verify no whitespace in config |
+| `403` from provider upstream | License/subscription or permission mismatch | Search logs for `status_code":403` in provider module | Align account entitlement, retry with fallback-capable model, inspect provider docs |
+| `Model not found` / `bad model` | Alias/prefix/model map mismatch | `curl .../v1/models` and compare requested ID | Update alias map, prefix rules, and `excluded-models` |
+| Runtime config write errors | Read-only mount or immutable filesystem | `find /CLIProxyAPI -maxdepth 1 -name config.yaml -print` | Use writable mount, re-run with read-only warning, confirm management persistence status |
+| Kiro/OAuth auth loops | Expired or missing token refresh fields | Re-run `cliproxyapi++ auth`/reimport token path | Refresh credentials, run with fresh token file, avoid duplicate token imports |
+| Streaming hangs or truncation | Reverse proxy buffering / payload compatibility issue | Reproduce with `stream: false`, then compare SSE response | Verify reverse-proxy config, compare tool schema compatibility and payload shape |
+
+Use this matrix as an issue-entry checklist:
+
+```bash
+for endpoint in health models v1/metrics/providers v0/management/logs; do
+  curl -sS "http://localhost:8317/$endpoint" -H "Authorization: Bearer <your-api-key>" | head -n 3
+done
+```
+
 ## Service Does Not Start
 
 Checks:

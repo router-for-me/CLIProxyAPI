@@ -42,7 +42,7 @@
 - Priority: P1
 - Effort: L
 - Theme: platform-architecture
-- Status: proposed
+- Status: blocked
 - Source: cross-repo synthesis
 - Implementation note: Implement normalized parameter ingestion with strict backward compatibility and explicit telemetry counters.
 
@@ -50,7 +50,7 @@
 - Priority: P1
 - Effort: L
 - Theme: platform-architecture
-- Status: proposed
+- Status: blocked
 - Source: cross-repo synthesis
 - Implementation note: Add regression tests that fail before fix and pass after patch; include fixture updates for cross-provider mapping.
 
@@ -58,7 +58,7 @@
 - Priority: P1
 - Effort: M
 - Theme: install-and-ops
-- Status: proposed
+- Status: blocked
 - Source: cross-repo synthesis
 - Implementation note: Improve user-facing error messages and add deterministic remediation text with command examples.
 
@@ -66,7 +66,7 @@
 - Priority: P1
 - Effort: M
 - Theme: docs-quickstarts
-- Status: proposed
+- Status: done
 - Source: cross-repo synthesis
 - Implementation note: Document behavior in provider quickstart and compatibility matrix with concrete request/response examples.
 
@@ -74,7 +74,7 @@
 - Priority: P1
 - Effort: M
 - Theme: docs-quickstarts
-- Status: proposed
+- Status: done
 - Source: cross-repo synthesis
 - Implementation note: Refactor handler to isolate transformation logic from transport concerns and reduce side effects.
 
