@@ -679,6 +679,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 				return &Config{}, nil
 			}
 		}
+		if errors.Is(err, syscall.EISDIR) {
+			return nil, fmt.Errorf(
+				"failed to read config file: %w (config path %q is a directory; pass a YAML file path such as /CLIProxyAPI/config.yaml)",
+				err,
+				configFile,
+			)
+		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 

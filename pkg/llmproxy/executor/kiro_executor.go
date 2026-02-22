@@ -1521,6 +1521,21 @@ func determineAgenticMode(model string) (isAgentic, isChatOnly bool) {
 	return isAgentic, isChatOnly
 }
 
+func getMetadataString(metadata map[string]any, keys ...string) string {
+	if metadata == nil {
+		return ""
+	}
+	for _, key := range keys {
+		if value, ok := metadata[key].(string); ok {
+			trimmed := strings.TrimSpace(value)
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
 // getEffectiveProfileArn determines if profileArn should be included based on auth method.
 // profileArn is only needed for social auth (Google OAuth), not for AWS SSO OIDC (Builder ID/IDC).
 //
@@ -1543,7 +1558,8 @@ func determineAgenticMode(model string) (isAgentic, isChatOnly bool) {
 func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn string) string {
 	if auth != nil && auth.Metadata != nil {
 		// Check 1: auth_method field (from CLIProxyAPI tokens)
-		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && (authMethod == "builder-id" || authMethod == "idc") {
+		authMethod := strings.ToLower(getMetadataString(auth.Metadata, "auth_method", "authMethod"))
+		if authMethod == "builder-id" || authMethod == "idc" {
 			return "" // AWS SSO OIDC - don't include profileArn
 		}
 		// Check 2: auth_type field (from kiro-cli tokens)
@@ -1551,9 +1567,9 @@ func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn strin
 			return "" // AWS SSO OIDC - don't include profileArn
 		}
 		// Check 3: client_id + client_secret presence (AWS SSO OIDC signature, like kiro-openai-gateway)
-		_, hasClientID := auth.Metadata["client_id"].(string)
-		_, hasClientSecret := auth.Metadata["client_secret"].(string)
-		if hasClientID && hasClientSecret {
+		clientID := getMetadataString(auth.Metadata, "client_id", "clientId")
+		clientSecret := getMetadataString(auth.Metadata, "client_secret", "clientSecret")
+		if clientID != "" && clientSecret != "" {
 			return "" // AWS SSO OIDC - don't include profileArn
 		}
 	}
@@ -3705,24 +3721,12 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	var region, startURL string
 
 	if auth.Metadata != nil {
-		if rt, ok := auth.Metadata["refresh_token"].(string); ok {
-			refreshToken = rt
-		}
-		if cid, ok := auth.Metadata["client_id"].(string); ok {
-			clientID = cid
-		}
-		if cs, ok := auth.Metadata["client_secret"].(string); ok {
-			clientSecret = cs
-		}
-		if am, ok := auth.Metadata["auth_method"].(string); ok {
-			authMethod = am
-		}
-		if r, ok := auth.Metadata["region"].(string); ok {
-			region = r
-		}
-		if su, ok := auth.Metadata["start_url"].(string); ok {
-			startURL = su
-		}
+		refreshToken = getMetadataString(auth.Metadata, "refresh_token", "refreshToken")
+		clientID = getMetadataString(auth.Metadata, "client_id", "clientId")
+		clientSecret = getMetadataString(auth.Metadata, "client_secret", "clientSecret")
+		authMethod = strings.ToLower(getMetadataString(auth.Metadata, "auth_method", "authMethod"))
+		region = getMetadataString(auth.Metadata, "region")
+		startURL = getMetadataString(auth.Metadata, "start_url", "startUrl")
 	}
 
 	if refreshToken == "" {

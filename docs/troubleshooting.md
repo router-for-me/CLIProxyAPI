@@ -34,9 +34,17 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 | `Invalid JSON payload ... tool_result has no content field` | Upstream/client emitted sparse `tool_result` content block shape | Reproduce with one minimal payload and inspect translated request in logs | Upgrade to a build with sparse `tool_result` normalization; as a temporary workaround, send `tool_result.content` as `[]` |
 | `Docker Image Error` on startup/health | Image tag mismatch, stale config mount, or incompatible env defaults | `docker images | head`, `docker logs <container> --tail 200`, `/health` check | Pull/pin a known-good tag, verify mounted `config.yaml`, then compare `stream: true/false` behavior for parity |
 | `Model not found` / `bad model` | Alias/prefix/model map mismatch | `curl .../v1/models` and compare requested ID | Update alias map, prefix rules, and `excluded-models` |
+<<<<<<< HEAD
 | `gpt-5.3-codex-spark` fails for plus/team | Account tier does not expose Spark model even if config lists it | `GET /v1/models` and look for `gpt-5.3-codex-spark` | Route to `gpt-5.3-codex` fallback and alert on repeated Spark 400/404 responses |
+=======
+| `auth_unavailable: no auth available` (Kiro) | Token file missing/expired or no successful login/import yet | `jq '.access_token, .refresh_token, .auth_method' ~/.aws/sso/cache/kiro-auth-token.json` | Run `--kiro-login` / `--kiro-aws-authcode` / `--kiro-import`, then recheck `/v1/models` |
+| Amazon Q `400 ValidationException` mentioning CLI origin | Incorrect Kiro endpoint/origin selection for current auth mode | Check `preferred-endpoint` and `kiro-preferred-endpoint` config values | Set endpoint explicitly (`codewhisperer` for IDE/social auth, `amazonq` for Builder ID CLI flows), then retry |
+| Cursor provider requests fail before upstream call | `cursor-api` auth/token bootstrap incomplete | Check `cursor-api-url`, `auth-token`, and cursor-api `/tokens/add` status | Set `cursor.auth-token`, confirm cursor-api is reachable, then retry a `cursor/...` model |
+>>>>>>> workstream-cpbv2-3
 | Runtime config write errors | Read-only mount or immutable filesystem | `find /CLIProxyAPI -maxdepth 1 -name config.yaml -print` | Use writable mount, re-run with read-only warning, confirm management persistence status |
 | Kiro/OAuth auth loops | Expired or missing token refresh fields | Re-run `cliproxyapi++ auth`/reimport token path | Refresh credentials, run with fresh token file, avoid duplicate token imports |
+| `event stream fatal` / broken SSE stream | Upstream event framing/transport interruption | Retry once with `stream: false` to isolate translation vs transport | If non-stream works, keep stream keepalive enabled, capture raw SSE logs, and use non-stream fallback for critical paths |
+| Extended-thinking requests time out | Long reasoning window exceeds ingress/proxy timeout | Compare latency with `stream: false` and inspect reverse-proxy timeout settings | Increase gateway/upstream timeout and tune keepalive (`nonstream-keepalive-interval`, `streaming.keepalive-seconds`) |
 | Streaming hangs or truncation | Reverse proxy buffering / payload compatibility issue | Reproduce with `stream: false`, then compare SSE response | Verify reverse-proxy config, compare tool schema compatibility and payload shape |
 
 Use this matrix as an issue-entry checklist:
@@ -130,6 +138,13 @@ Checks:
 - Confirm reverse proxies do not buffer SSE.
 - For `/v1/responses` websocket scenarios, verify auth headers are forwarded.
 - Increase upstream/request timeout where ingress is aggressive.
+- Keep idle connections alive for long reasoning:
+
+```yaml
+nonstream-keepalive-interval: 10
+streaming:
+  keepalive-seconds: 15
+```
 
 ## Useful Endpoints
 

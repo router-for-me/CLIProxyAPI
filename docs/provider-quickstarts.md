@@ -90,6 +90,12 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 
 ## 4) GitHub Copilot
 
+Bootstrap auth (once per account):
+
+```bash
+./cliproxyapi++ --github-copilot-login --config ./config.yaml
+```
+
 `config.yaml`:
 
 ```yaml
@@ -121,6 +127,19 @@ Only route traffic to models that appear in `/v1/models`. If `gpt-5.3-codex-spar
 
 ## 5) Kiro
 
+Bootstrap auth (pick one):
+
+```bash
+# Google OAuth flow
+./cliproxyapi++ --kiro-login --config ./config.yaml
+
+# AWS Builder ID flow
+./cliproxyapi++ --kiro-aws-authcode --config ./config.yaml
+
+# Import existing IDE token
+./cliproxyapi++ --kiro-import --config ./config.yaml
+```
+
 `config.yaml`:
 
 ```yaml
@@ -141,10 +160,21 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"kiro/claude-opus-4-5","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
+<<<<<<< HEAD
 Login behavior:
 
 - `kiro` login defaults to incognito/private browser mode for multi-account support.
 - Use `--no-incognito` only when you explicitly want to reuse the current browser session.
+=======
+If you see `auth_unavailable: no auth available`:
+
+```bash
+ls -l ~/.aws/sso/cache/kiro-auth-token.json
+jq '.access_token, .refresh_token, .profile_arn, .auth_method' ~/.aws/sso/cache/kiro-auth-token.json
+```
+
+Re-run one of the Kiro login/import commands above, then validate again.
+>>>>>>> workstream-cpbv2-3
 
 ## 6) MiniMax
 
@@ -196,6 +226,7 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
+<<<<<<< HEAD
 Multi-account pattern:
 
 ```yaml
@@ -207,6 +238,28 @@ openai-compatibility:
     api-key-entries:
       - api-key: "sk-team-a-1"
       - api-key: "sk-team-a-2"
+=======
+## 8) Cursor (via cursor-api)
+
+`config.yaml`:
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+cursor:
+  - cursor-api-url: "http://127.0.0.1:3000"
+    auth-token: "your-cursor-api-auth-token"
+```
+
+Validation:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"cursor/gpt-5.1-codex","messages":[{"role":"user","content":"ping"}]}' | jq
+>>>>>>> workstream-cpbv2-3
 ```
 
 ## Related
