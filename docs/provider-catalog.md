@@ -48,6 +48,14 @@ kiro:
   - token-file: "~/.aws/sso/cache/kiro-auth-token.json"
 ```
 
+### 5) Kilo free-model endpoint (OpenRouter-compatible)
+
+```yaml
+kilo:
+  - api-key: "anonymous"
+    base-url: "https://api.kilo.ai/api/openrouter"
+```
+
 ## Prefixing and Model Scope
 
 - `prefix` isolates traffic per credential/provider (for example `prod/claude-3-5-sonnet`).
