@@ -38,6 +38,24 @@ func TestResolveDefaultConfigPath_PrefersEnvFile(t *testing.T) {
 	}
 }
 
+func TestResolveDefaultConfigPath_PrefersCLIPROXYConfigEnv(t *testing.T) {
+	wd := t.TempDir()
+	envPath := filepath.Join(t.TempDir(), "cliproxy-config.yaml")
+	if err := os.WriteFile(envPath, []byte("port: 8317\n"), 0o644); err != nil {
+		t.Fatalf("write env config: %v", err)
+	}
+
+	t.Setenv("CONFIG", "")
+	t.Setenv("CONFIG_PATH", "")
+	t.Setenv("CLIPROXY_CONFIG", envPath)
+	t.Setenv("CLIPROXY_CONFIG_PATH", "")
+
+	got := resolveDefaultConfigPath(wd, true)
+	if got != envPath {
+		t.Fatalf("resolveDefaultConfigPath() = %q, want CLIPROXY_CONFIG path %q", got, envPath)
+	}
+}
+
 func TestResolveDefaultConfigPath_CloudFallbackToNestedConfig(t *testing.T) {
 	t.Setenv("CONFIG", "")
 	t.Setenv("CONFIG_PATH", "")

@@ -2,6 +2,8 @@ package config
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +50,32 @@ func TestConfig_Validate(t *testing.T) {
 	}
 	if cfg.Port != 8080 {
 		t.Errorf("expected port 8080, got %d", cfg.Port)
+	}
+}
+
+func TestLoadConfigOptional_DirectoryPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	dirPath := filepath.Join(tmpDir, "config-dir")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatalf("failed to create temp config dir: %v", err)
+	}
+
+	_, err := LoadConfigOptional(dirPath, false)
+	if err == nil {
+		t.Fatal("expected error for directory config path when optional=false")
+	}
+	if !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("expected directory error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pass a YAML file path") {
+		t.Fatalf("expected remediation hint in error, got: %v", err)
+	}
+
+	cfg, err := LoadConfigOptional(dirPath, true)
+	if err != nil {
+		t.Fatalf("expected nil error for optional directory config path, got: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config for optional directory config path")
 	}
 }

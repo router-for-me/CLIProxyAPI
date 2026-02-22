@@ -32,8 +32,13 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 | `Error 401` on request | Missing or rotated client API key | `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <key>"` | Update key in `api-keys`, restart, verify no whitespace in config |
 | `403` from provider upstream | License/subscription or permission mismatch | Search logs for `status_code":403` in provider module | Align account entitlement, retry with fallback-capable model, inspect provider docs |
 | `Model not found` / `bad model` | Alias/prefix/model map mismatch | `curl .../v1/models` and compare requested ID | Update alias map, prefix rules, and `excluded-models` |
+| `auth_unavailable: no auth available` (Kiro) | Token file missing/expired or no successful login/import yet | `jq '.access_token, .refresh_token, .auth_method' ~/.aws/sso/cache/kiro-auth-token.json` | Run `--kiro-login` / `--kiro-aws-authcode` / `--kiro-import`, then recheck `/v1/models` |
+| Amazon Q `400 ValidationException` mentioning CLI origin | Incorrect Kiro endpoint/origin selection for current auth mode | Check `preferred-endpoint` and `kiro-preferred-endpoint` config values | Set endpoint explicitly (`codewhisperer` for IDE/social auth, `amazonq` for Builder ID CLI flows), then retry |
+| Cursor provider requests fail before upstream call | `cursor-api` auth/token bootstrap incomplete | Check `cursor-api-url`, `auth-token`, and cursor-api `/tokens/add` status | Set `cursor.auth-token`, confirm cursor-api is reachable, then retry a `cursor/...` model |
 | Runtime config write errors | Read-only mount or immutable filesystem | `find /CLIProxyAPI -maxdepth 1 -name config.yaml -print` | Use writable mount, re-run with read-only warning, confirm management persistence status |
 | Kiro/OAuth auth loops | Expired or missing token refresh fields | Re-run `cliproxyapi++ auth`/reimport token path | Refresh credentials, run with fresh token file, avoid duplicate token imports |
+| `event stream fatal` / broken SSE stream | Upstream event framing/transport interruption | Retry once with `stream: false` to isolate translation vs transport | If non-stream works, keep stream keepalive enabled, capture raw SSE logs, and use non-stream fallback for critical paths |
+| Extended-thinking requests time out | Long reasoning window exceeds ingress/proxy timeout | Compare latency with `stream: false` and inspect reverse-proxy timeout settings | Increase gateway/upstream timeout and tune keepalive (`nonstream-keepalive-interval`, `streaming.keepalive-seconds`) |
 | Streaming hangs or truncation | Reverse proxy buffering / payload compatibility issue | Reproduce with `stream: false`, then compare SSE response | Verify reverse-proxy config, compare tool schema compatibility and payload shape |
 
 Use this matrix as an issue-entry checklist:
@@ -105,6 +110,13 @@ Checks:
 - Confirm reverse proxies do not buffer SSE.
 - For `/v1/responses` websocket scenarios, verify auth headers are forwarded.
 - Increase upstream/request timeout where ingress is aggressive.
+- Keep idle connections alive for long reasoning:
+
+```yaml
+nonstream-keepalive-interval: 10
+streaming:
+  keepalive-seconds: 15
+```
 
 ## Useful Endpoints
 
