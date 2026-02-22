@@ -9,6 +9,8 @@ Use this table when token refresh is failing for OAuth/session-based providers.
 | Manual refresh returns `404` | Check if management routes are enabled | Set `remote-management.secret-key`, restart service |
 | Refresh appears to run but token stays expired | Inspect auth files + provider-specific auth state | Re-login provider flow to regenerate refresh token |
 | Refresh failures spike after config change | Compare active config and recent deploy diff | Roll back auth/provider block changes, then re-apply safely |
+| Kiro IDC refresh fails with `400/401` repeatedly (`#149` scope) | Confirm `auth_method=idc` token has `client_id`, `client_secret`, `region`, and `refresh_token` | Re-login with `--kiro-aws-authcode` or `--kiro-aws-login`; verify refreshed token file fields before re-enabling traffic |
+| Manual status appears stale after refresh (`#136` scope) | Compare token file `expires_at` and management refresh response | Trigger refresh endpoint, then reload config/watcher if needed and confirm `expires_at` moved forward |
 
 ## Fast Commands
 
@@ -20,6 +22,10 @@ curl -sS http://localhost:8317/v0/management/config \
 # Trigger a refresh for one provider
 curl -sS -X POST http://localhost:8317/v0/management/auths/<provider>/refresh \
   -H "Authorization: Bearer <management-key>" | jq
+
+# Kiro specific refresh check (replace file name with your auth file)
+jq '{auth_method, region, expires_at, has_refresh_token:(.refresh_token != "")}' \
+  auths/kiro-*.json
 
 # Inspect auth file summary
 curl -sS http://localhost:8317/v0/management/auth-files \
