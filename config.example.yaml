@@ -160,6 +160,7 @@ nonstream-keepalive-interval: 0
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"
+#       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 
 # Kiro (AWS CodeWhisperer) configuration
 # Note: Kiro API currently only operates in us-east-1 region

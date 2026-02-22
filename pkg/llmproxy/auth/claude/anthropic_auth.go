@@ -20,7 +20,7 @@ import (
 // OAuth configuration constants for Claude/Anthropic
 const (
 	AuthURL     = "https://claude.ai/oauth/authorize"
-	TokenURL    = "https://console.anthropic.com/v1/oauth/token"
+	TokenURL    = "https://api.anthropic.com/v1/oauth/token"
 	ClientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	RedirectURI = "http://localhost:54545/callback"
 )

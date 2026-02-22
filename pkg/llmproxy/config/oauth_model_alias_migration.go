@@ -42,6 +42,21 @@ func defaultKiroAliases() []OAuthModelAlias {
 	}
 }
 
+// defaultGitHubCopilotAliases returns default oauth-model-alias entries that
+// expose Claude hyphen-style IDs for GitHub Copilot Claude models.
+// This keeps compatibility with clients (e.g. Claude Code) that use
+// Anthropic-style model IDs like "claude-opus-4-6".
+func defaultGitHubCopilotAliases() []OAuthModelAlias {
+	return []OAuthModelAlias{
+		{Name: "claude-haiku-4.5", Alias: "claude-haiku-4-5", Fork: true},
+		{Name: "claude-opus-4.1", Alias: "claude-opus-4-1", Fork: true},
+		{Name: "claude-opus-4.5", Alias: "claude-opus-4-5", Fork: true},
+		{Name: "claude-opus-4.6", Alias: "claude-opus-4-6", Fork: true},
+		{Name: "claude-sonnet-4.5", Alias: "claude-sonnet-4-5", Fork: true},
+		{Name: "claude-sonnet-4.6", Alias: "claude-sonnet-4-6", Fork: true},
+	}
+}
+
 // defaultAntigravityAliases returns the default oauth-model-alias configuration
 // for the antigravity channel when neither field exists.
 func defaultAntigravityAliases() []OAuthModelAlias {
