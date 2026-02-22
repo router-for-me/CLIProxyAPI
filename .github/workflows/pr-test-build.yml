@@ -180,6 +180,39 @@ jobs:
           fi
           wait || true
 
+  provider-smoke-matrix-cheapest:
+    name: provider-smoke-matrix-cheapest
+    if: ${{ vars.CLIPROXY_RUN_CHEAPEST_SMOKE == '1' }}
+    runs-on: ubuntu-latest
+    env:
+      CLIPROXY_SMOKE_EXPECT_SUCCESS: "0"
+      CLIPROXY_SMOKE_WAIT_FOR_READY: "1"
+      CLIPROXY_BASE_URL: "http://127.0.0.1:8317"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build cliproxy proxy
+        run: go build -o cliproxyapi++ ./cmd/server
+      - name: Run proxy in background
+        run: |
+          ./cliproxyapi++ --config config.example.yaml > /tmp/cliproxy-smoke.log 2>&1 &
+          echo $! > /tmp/cliproxy-smoke.pid
+          sleep 1
+      - name: Run provider smoke matrix (cheapest aliases)
+        run: ./scripts/provider-smoke-matrix-cheapest.sh
+      - name: Stop proxy
+        if: always()
+        run: |
+          if [ -f /tmp/cliproxy-smoke.pid ]; then
+            kill "$(cat /tmp/cliproxy-smoke.pid)" || true
+          fi
+          wait || true
+
   pre-release-config-compat-smoke:
     name: pre-release-config-compat-smoke
     runs-on: ubuntu-latest

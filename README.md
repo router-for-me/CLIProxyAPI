@@ -43,9 +43,15 @@ Full feature-by-feature change reference:
 | **Library-first composition** | ⚠️ | ⚠️ | ✅ | Proxy core and auth helpers are reusable modules in `++`. |
 | **Security hardening** | Basic | Basic | ✅ | Hardened defaults, guardrails, and anti-abuse defaults are expanded in `++`. |
 | **Container image posture** | Basic | Basic | ✅ | `++` uses a production-oriented Docker base and deployment profile. |
-| **Release workflow automation** | ⚠️ | ⚠️ | ✅ | Tagged release + goreleaser + signed release artifacts path in `++` pipeline. |
+| **Release workflow automation** | ⚠️ | ⚠️ | ✅ | Tagged push triggers GoReleaser, builds binaries, uploads archive artifacts, and refreshes release notes. |
 | **Version-to-release linting** | ⚠️ | ⚠️ | ✅ | `task quality:release-lint` + CI checks required pre-push/PR. |
 | **Cross-platform artifact coverage** | ⚠️ | ⚠️ | ✅ | Linux, macOS, Windows archives are generated and checksummed. |
+| **Release tag protocol** | ⚠️ | ⚠️ | ✅ | Supports `v<major>.<minor>.<patch>` and `v<major>.<minor>.<patch>-<batch>` workflows used by `releasebatch`. |
+| **Release notes generation** | ⚠️ | ⚠️ | ✅ | CI regenerates changelog body from git commit range and updates the GitHub release notes payload. |
+| **Release signing / trust chain** | ⚠️ | ⚠️ | ⚠️ | GoReleaser publishes `checksums.txt`; checksum-only artifacts are currently available, no code-signing certificate integration yet. |
+| **CLI-first provider auth orchestration** | ⚠️ | ⚠️ | ✅ | `--<provider>-login` and `--thegent-login=<provider>` flows plus `--setup` for guided onboarding. |
+| **Provider management ergonomics** | ⚠️ | ⚠️ | ✅ | Management endpoints plus optional TUI expose auth-file lifecycle, status, model mappings, and key rotation controls. |
+| **Config file operation UX** | ⚠️ | ⚠️ | ✅ | `--show-config-paths`, `--config-validate`, and explicit failure hints reduce startup ambiguity. |
 | **Production-readiness target** | Community baseline | Enhanced fork | **Enterprise-grade** | `++` targets long-running agent workloads with stronger ops controls. |
 
 ---

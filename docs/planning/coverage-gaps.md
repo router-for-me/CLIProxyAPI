@@ -40,7 +40,8 @@ Date: 2026-02-22
 - Integration:
   - Added: `scripts/provider-smoke-matrix.sh` plus `task test:provider-smoke-matrix` for deterministic smoke checks against `/v1/responses` using provider-qualified aliases.
   - Added: `scripts/provider-smoke-matrix-cheapest.sh` and `task test:provider-smoke-matrix:cheapest` with deterministic cheapest-model coverage for six core providers.
-  - Remaining: end-to-end provider cheapest-path smoke for live process orchestration against every provider auth mode. Unit-level smoke now covers:
+  - Added: optional CI job `provider-smoke-matrix-cheapest` behind `vars.CLIPROXY_RUN_CHEAPEST_SMOKE=1` for live cheap-path smoke against six defaults.
+  - Remaining: end-to-end provider cheapest-path smoke for all provider auth modes in persistent CI defaults. Unit-level smoke now covers:
     - `/v1/models` namespace behavior for OpenAI-compatible and `claude-cli` User-Agent paths.
     - `/v1/metrics/providers` response shape and metric-field assertions with seeded usage data.
     - control-plane lifecycle endpoints with idempotency replay windows.

@@ -1,6 +1,8 @@
 package cliproxy
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -61,5 +63,68 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 	}
 	if !seenGlobalExcluded {
 		t.Fatal("expected global excluded model to be present when attribute override is set")
+	}
+}
+
+func TestRegisterModelsForAuth_OpenAICompatibilityFetchesModelsWhenConfigMissing(t *testing.T) {
+	modelRegistry := GlobalModelRegistry()
+	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"mlx-1","created":1712345678},{"id":"mlx-2","created":1712345680}]}`))
+	}))
+	defer modelServer.Close()
+
+	service := &Service{
+		cfg: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:    "mlx",
+					BaseURL: modelServer.URL,
+				},
+			},
+		},
+	}
+
+	auth := &coreauth.Auth{
+		ID:       "openai-compat-mlx-1",
+		Provider: "mlx",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url":     modelServer.URL,
+			"api_key":      "test-key",
+			"compat_name":  "mlx",
+			"provider_key": "mlx",
+		},
+	}
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(auth)
+
+	available := modelRegistry.GetAvailableModelsByProvider("mlx")
+	if len(available) == 0 {
+		t.Fatalf("expected dynamically fetched models to be registered")
+	}
+
+	seen := map[string]struct{}{}
+	for _, model := range available {
+		if model != nil {
+			seen[model.ID] = struct{}{}
+		}
+	}
+	for _, want := range []string{"mlx-1", "mlx-2"} {
+		if _, exists := seen[want]; !exists {
+			t.Fatalf("expected model %q to be registered", want)
+		}
 	}
 }

@@ -1010,7 +1010,10 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							UserDefined: true,
 						})
 					}
-					// Register and return
+					// Fall back to runtime discovery when model list is empty.
+					if len(ms) == 0 {
+						ms = executor.FetchOpenAIModels(context.Background(), a, s.cfg, providerKey)
+					}
 					if len(ms) > 0 {
 						if providerKey == "" {
 							providerKey = "openai-compatibility"

@@ -45,6 +45,7 @@
 - `preflight` also validates `task -l`, and if a `Makefile` exists validates `make -n` for build-task sanity.
 - `task` now includes `cache:unlock` in test gates to avoid stale lock contention.
 - CI baseline artifacts are now emitted as both JSON and text for auditability.
+- CI can optionally run cheapest-path provider smoke by setting repository variable `CLIPROXY_RUN_CHEAPEST_SMOKE=1` (runs `scripts/provider-smoke-matrix-cheapest.sh`).
 
 ## Active task waves
 
