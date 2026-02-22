@@ -18,6 +18,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/ratelimit"
 )
 
 const (
@@ -544,6 +546,9 @@ type OAICompatProviderConfig struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// RateLimit defines optional rate limiting configuration for this credential.
+	RateLimit ratelimit.RateLimitConfig `yaml:"rate-limit,omitempty" json:"rate-limit,omitempty"`
 }
 
 // ProviderSpec defines a provider's metadata for codegen and runtime injection.

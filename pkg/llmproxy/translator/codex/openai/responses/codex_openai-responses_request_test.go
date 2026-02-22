@@ -340,3 +340,117 @@ func TestConvertOpenAIResponsesRequestToCodex_UsesReasoningEffortOverVariant(t *
 		t.Fatalf("expected reasoning.effort to prefer explicit reasoning.effort low, got %s", got)
 	}
 }
+
+// TestConvertOpenAIResponsesRequestToCodex_PreservesPreviousResponseID tests that
+// previous_response_id is preserved for context management (GitHub #1667)
+func TestConvertOpenAIResponsesRequestToCodex_PreservesPreviousResponseID(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"previous_response_id": "resp_12345",
+		"input": [
+			{"type": "message", "role": "user", "content": "hello"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "previous_response_id").String(); got != "resp_12345" {
+		t.Errorf("expected previous_response_id to be preserved, got %s", got)
+	}
+}
+
+// TestConvertOpenAIResponsesRequestToCodex_PreservesPromptCacheKey tests that
+// prompt_cache_key is preserved for context management (GitHub #1667)
+func TestConvertOpenAIResponsesRequestToCodex_PreservesPromptCacheKey(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"prompt_cache_key": "cache_abc123",
+		"input": [
+			{"type": "message", "role": "user", "content": "hello"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "prompt_cache_key").String(); got != "cache_abc123" {
+		t.Errorf("expected prompt_cache_key to be preserved, got %s", got)
+	}
+}
+
+// TestConvertOpenAIResponsesRequestToCodex_PreservesSafetyIdentifier tests that
+// safety_identifier is preserved for context management (GitHub #1667)
+func TestConvertOpenAIResponsesRequestToCodex_PreservesSafetyIdentifier(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"safety_identifier": "safety_xyz789",
+		"input": [
+			{"type": "message", "role": "user", "content": "hello"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "safety_identifier").String(); got != "safety_xyz789" {
+		t.Errorf("expected safety_identifier to be preserved, got %s", got)
+	}
+}
+
+// TestConvertOpenAIResponsesRequestToCodex_PreservesAllCompactionFields tests that
+// all compaction fields are preserved together (GitHub #1667)
+func TestConvertOpenAIResponsesRequestToCodex_PreservesAllCompactionFields(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"previous_response_id": "resp_prev123",
+		"prompt_cache_key": "cache_key456",
+		"safety_identifier": "safety_id789",
+		"input": [
+			{"type": "message", "role": "user", "content": "continue our conversation"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "previous_response_id").String(); got != "resp_prev123" {
+		t.Errorf("expected previous_response_id 'resp_prev123', got %s", got)
+	}
+	if got := gjson.Get(outputStr, "prompt_cache_key").String(); got != "cache_key456" {
+		t.Errorf("expected prompt_cache_key 'cache_key456', got %s", got)
+	}
+	if got := gjson.Get(outputStr, "safety_identifier").String(); got != "safety_id789" {
+		t.Errorf("expected safety_identifier 'safety_id789', got %s", got)
+	}
+}
+
+// TestConvertOpenAIResponsesRequestToCodex_NoCompactionFieldsWhenAbsent tests backward compatibility
+// - the translator should work without compaction fields (GitHub #1667)
+func TestConvertOpenAIResponsesRequestToCodex_NoCompactionFieldsWhenAbsent(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{"type": "message", "role": "user", "content": "hello"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	// Ensure no compaction fields are added when not present
+	if gjson.Get(outputStr, "previous_response_id").Exists() {
+		t.Error("previous_response_id should not exist when not provided")
+	}
+	if gjson.Get(outputStr, "prompt_cache_key").Exists() {
+		t.Error("prompt_cache_key should not exist when not provided")
+	}
+	if gjson.Get(outputStr, "safety_identifier").Exists() {
+		t.Error("safety_identifier should not exist when not provided")
+	}
+
+	// Ensure other fields are still set correctly
+	if !gjson.Get(outputStr, "stream").Bool() {
+		t.Error("stream should be true")
+	}
+}
