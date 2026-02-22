@@ -28,7 +28,17 @@ func FetchOpenAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 		return nil
 	}
 	baseURL = strings.TrimSuffix(baseURL, "/")
-	modelsURL := baseURL + "/v1/models"
+	modelsPath := strings.TrimSpace(auth.Attributes["models_endpoint"])
+	if modelsPath == "" {
+		modelsPath = "/v1/models"
+	}
+	modelsURL := modelsPath
+	if !strings.HasPrefix(modelsPath, "http://") && !strings.HasPrefix(modelsPath, "https://") {
+		if !strings.HasPrefix(modelsPath, "/") {
+			modelsPath = "/" + modelsPath
+		}
+		modelsURL = baseURL + modelsPath
+	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, openAIModelsFetchTimeout)
 	defer cancel()

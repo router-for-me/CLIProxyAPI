@@ -254,6 +254,7 @@ nonstream-keepalive-interval: 0
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     models-endpoint: "/v1/models" # optional: override model-discovery path (e.g. "/api/coding/paas/v4/models")
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
