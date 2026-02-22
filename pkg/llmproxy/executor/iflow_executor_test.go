@@ -46,6 +46,11 @@ func TestPreserveReasoningContentInMessages(t *testing.T) {
 			nil,
 		},
 		{
+			"glm-5 model with empty messages",
+			[]byte(`{"model":"glm-5","messages":[]}`),
+			nil,
+		},
+		{
 			"glm model preserves existing reasoning_content",
 			[]byte(`{"model":"glm-4","messages":[{"role":"assistant","content":"hi","reasoning_content":"thinking..."}]}`),
 			nil,

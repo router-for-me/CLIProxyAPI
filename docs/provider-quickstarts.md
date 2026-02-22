@@ -101,6 +101,20 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"gemini/flash","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
+Quota/auth rollout safety checks:
+
+```bash
+# Verify the selected model is visible before rollout.
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^gemini/'
+
+# If quota/auth errors appear, canary with a smaller known-good alias first.
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/flash","messages":[{"role":"user","content":"quota canary"}],"stream":false}' | jq '.error // .choices[0].finish_reason'
+```
+
 ## 4) GitHub Copilot
 
 `config.yaml`:
@@ -218,6 +232,39 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -H "Authorization: Bearer demo-client-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
+```
+
+## 8) Antigravity (OAuth Channel)
+
+`config.yaml`:
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+oauth-model-alias:
+  antigravity:
+    - name: "claude-sonnet-4-5-thinking"
+      alias: "ag-sonnet-thinking"
+```
+
+Auth/session verification:
+
+```bash
+curl -sS http://localhost:8317/v0/management/auth-files \
+  -H "Authorization: Bearer YOUR_MANAGEMENT_KEY" | jq '.auths[] | select(.type=="antigravity")'
+```
+
+Model selection + sanity check:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'antigravity|ag-sonnet-thinking'
+
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"ag-sonnet-thinking","messages":[{"role":"user","content":"ping from antigravity"}]}' | jq
 ```
 
 ## Related

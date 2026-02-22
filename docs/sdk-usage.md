@@ -55,6 +55,7 @@ Practical capability negotiation:
 - Probe `/health` first.
 - Probe `/v1/models` with the intended client key.
 - If management is enabled in your deployment, probe `/v0/management/config` for config-shape compatibility.
+- Capture runtime version/build metadata from `/health` when available and gate advanced features on known-compatible versions.
 
 This keeps integration non-subprocess by default while preserving an HTTP fallback path for remote workers.
 
