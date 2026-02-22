@@ -123,6 +123,8 @@ func TestCheckAndMarkSuspended_Suspended(t *testing.T) {
 		"Rate limit exceeded",
 		"Too many requests",
 		"Quota exceeded for today",
+		"Qwen Free allocated quota exceeded",
+		"Quota exhausted for current project",
 	}
 
 	for i, msg := range testCases {

@@ -101,7 +101,30 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"gemini/flash","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
-## 4) GitHub Copilot
+## 4) Antigravity (Gemini-backed Claude aliases)
+
+`config.yaml` (alias bridge only; keep your existing Antigravity auth setup):
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+oauth-model-alias:
+  antigravity:
+    - name: "claude-opus-4-6-thinking"
+      alias: "gemini-claude-opus-4-6-thinking"
+```
+
+Validation:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'gemini-claude-opus-4-6-thinking|claude-opus-4-6-thinking'
+```
+
+If the alias is missing, add it first before debugging upstream `502 unknown provider for model ...` failures.
+
+## 5) GitHub Copilot
 
 `config.yaml`:
 
@@ -132,7 +155,7 @@ curl -sS http://localhost:8317/v1/models \
 
 Only route traffic to models that appear in `/v1/models`. If `gpt-5.3-codex-spark` is missing for your account tier, use `gpt-5.3-codex`.
 
-## 5) Kiro
+## 6) Kiro
 
 `config.yaml`:
 
@@ -173,7 +196,20 @@ Kiro IAM login hints:
 - Keep one auth file per account to avoid accidental overwrite during relogin.
 - If you rotate accounts often, run browser login in incognito mode.
 
-## 6) MiniMax
+## 7) iFlow
+
+Validation (`glm-4.7`):
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/glm-4.7","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
+```
+
+If you see `406`, verify model exposure in `/v1/models`, retry non-stream, and then compare headers/payload shape against known-good requests.
+
+## 8) MiniMax
 
 `config.yaml`:
 
@@ -195,7 +231,7 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"minimax/abab6.5s","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
-## 7) OpenAI-Compatible Providers
+## 9) OpenAI-Compatible Providers
 
 For local tools like MLX/vLLM-MLX, use `openai-compatibility`:
 

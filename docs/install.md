@@ -89,6 +89,14 @@ process-compose -f examples/process-compose.dev.yaml up
 
 Then edit `config.yaml` or files under `auth-dir`; the running process reloads changes automatically.
 
+Deterministic refresh check:
+
+```bash
+curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer YOUR_API_KEY" | jq '.data | length'
+```
+
+After each config/auth edit, re-run the command and confirm expected model-count/name changes before sending live traffic.
+
 ## Option D: Go SDK / Embedding
 
 ```bash

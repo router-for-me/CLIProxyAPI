@@ -14,6 +14,8 @@ This runbook is for operators who care about provider uptime, quota health, and 
    - Verify no sustained bursts of `401`, `403`, or `429`.
 5. Spark eligibility check (Copilot/Codex):
    - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'gpt-5.3-codex|gpt-5.3-codex-spark'`
+6. Antigravity alias continuity check:
+   - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'gemini-claude-opus-4-6-thinking|claude-opus-4-6-thinking'`
 
 ## Quota Visibility (`#146` scope)
 
@@ -50,6 +52,7 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Add capacity (extra keys/providers) or reduce concurrency.
 - Shift traffic to fallback provider prefix.
 - Tighten expensive-model exposure with `excluded-models`.
+- For `Qwen Free allocated quota exceeded`, switch credential/project immediately and reduce burst concurrency.
 
 ### Wrong Provider Selected
 
@@ -62,6 +65,23 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Confirm provider block is enabled and auth loaded.
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
+
+### `502 unknown provider for model ...`
+
+- Primary check:
+  - Ensure requested model appears in `/v1/models` for the same client key.
+  - Verify `oauth-model-alias` entries are still present after config edits/reloads.
+- Common fix path:
+  - Re-add missing alias bridge entries (for example Antigravity Claude thinking aliases).
+  - Reload config and re-run model inventory before retrying requests.
+
+### iFlow `glm-4.7` returns `406`
+
+- Immediate checks:
+  - Reproduce with `stream: false` and capture full upstream body.
+  - Verify exact model ID and alias route in `/v1/models`.
+- Mitigation:
+  - Route temporarily to a known-good fallback alias while normalizing request shape.
 
 ### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
 
