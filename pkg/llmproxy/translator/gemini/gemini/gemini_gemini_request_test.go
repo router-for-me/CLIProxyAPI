@@ -38,3 +38,26 @@ func TestConvertGeminiRequestToGemini(t *testing.T) {
 		t.Errorf("expected second role model, got %s", contents[1].Get("role").String())
 	}
 }
+
+func TestConvertGeminiRequestToGemini_SanitizesThoughtSignatureOnModelParts(t *testing.T) {
+	input := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"thoughtSignature": "\\claude#abc"},
+					{"functionCall": {"name": "tool", "args": {}}}
+				]
+			}
+		]
+	}`)
+
+	got := ConvertGeminiRequestToGemini("model", input, false)
+	res := gjson.ParseBytes(got)
+
+	for i, part := range res.Get("contents.0.parts").Array() {
+		if part.Get("thoughtSignature").String() != "skip_thought_signature_validator" {
+			t.Fatalf("part[%d] thoughtSignature not sanitized: %s", i, part.Get("thoughtSignature").String())
+		}
+	}
+}
