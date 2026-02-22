@@ -16,12 +16,25 @@
 - Added regression tests in `pkg/llmproxy/translator/codex/openai/chat-completions/codex_openai_request_test.go`
   - `TestConvertOpenAIRequestToCodex_UsesVariantFallbackWhenReasoningEffortMissing`
   - `TestConvertOpenAIRequestToCodex_UsesReasoningEffortBeforeVariant`
+- Implemented `#253`/`#251` support path in `pkg/llmproxy/thinking/apply.go`
+  - Added `variant` fallback parsing for Codex thinking extraction (`thinking` compatibility path) when `reasoning.effort` is absent.
+- Added regression coverage in `pkg/llmproxy/thinking/apply_codex_variant_test.go`
+  - `TestExtractCodexConfig_PrefersReasoningEffortOverVariant`
+  - `TestExtractCodexConfig_VariantFallback`
+- Implemented `#258` in responses path in `pkg/llmproxy/translator/codex/openai/responses/codex_openai-responses_request.go`
+  - Added `variant` fallback when `reasoning.effort` is absent.
+- Added regression coverage in `pkg/llmproxy/translator/codex/openai/responses/codex_openai-responses_request_test.go`
+  - `TestConvertOpenAIResponsesRequestToCodex_UsesVariantAsReasoningEffortFallback`
+  - `TestConvertOpenAIResponsesRequestToCodex_UsesReasoningEffortOverVariant`
 
 ## Not yet completed
-- #254, #253, #251, #246 remain queued for next execution pass.
+- #254, #246 remain queued for next execution pass (lack of actionable implementation details in repo/issue text).
 
 ## Validation
 - `go test ./pkg/llmproxy/translator/codex/openai/chat-completions`
+- `go test ./pkg/llmproxy/translator/codex/openai/responses`
+- `go test ./pkg/llmproxy/thinking`
 
 ## Risk / open points
-- Need confirmation of `variant` enum acceptance on Codex upstream; current implementation passes through raw lower-cased string and only defaults to `"medium"` when empty/non-provided.
+- #254 may require provider registration/model mapping work outside current extracted evidence.
+- #246 requires issue-level spec for whether `grantType` is expected in body fields vs headers in a specific auth flow.
