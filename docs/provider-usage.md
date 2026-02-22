@@ -131,6 +131,13 @@ If a model is missing, verify provider block, credential validity, and prefix co
 - Unexpected provider choice: model prefix mismatch or alias overlap.
 - Provider appears unhealthy: inspect operations endpoints and logs.
 
+## Provider Quickstarts
+
+Prefer the 5-minute reference flows in:
+
+- [Provider Quickstarts](/provider-quickstarts)
+- [Provider Catalog](/provider-catalog)
+
 ## Related Docs
 
 - [Provider Catalog](/provider-catalog)
