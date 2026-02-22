@@ -200,7 +200,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								funcCall, _ = sjson.Set(funcCall, "type", "function_call")
 								funcCall, _ = sjson.Set(funcCall, "call_id", tc.Get("id").String())
 								{
-									name := tc.Get("function.name").String()
+									name := normalizeToolNameAgainstMap(tc.Get("function.name").String(), originalToolNameMap)
 									if short, ok := originalToolNameMap[name]; ok {
 										name = short
 									} else {
@@ -284,7 +284,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				fn := t.Get("function")
 				if fn.Exists() {
 					if v := fn.Get("name"); v.Exists() {
-						name := v.String()
+						name := normalizeToolNameAgainstMap(v.String(), originalToolNameMap)
 						if short, ok := originalToolNameMap[name]; ok {
 							name = short
 						} else {
@@ -317,7 +317,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		case tc.IsObject():
 			tcType := tc.Get("type").String()
 			if tcType == "function" {
-				name := tc.Get("function.name").String()
+				name := normalizeToolNameAgainstMap(tc.Get("function.name").String(), originalToolNameMap)
 				if name != "" {
 					if short, ok := originalToolNameMap[name]; ok {
 						name = short
@@ -418,4 +418,23 @@ func buildShortNameMap(names []string) map[string]string {
 		m[n] = uniq
 	}
 	return m
+}
+
+func normalizeToolNameAgainstMap(name string, m map[string]string) string {
+	if name == "" {
+		return name
+	}
+	if _, ok := m[name]; ok {
+		return name
+	}
+
+	const proxyPrefix = "proxy_"
+	if strings.HasPrefix(name, proxyPrefix) {
+		trimmed := strings.TrimPrefix(name, proxyPrefix)
+		if _, ok := m[trimmed]; ok {
+			return trimmed
+		}
+	}
+
+	return name
 }

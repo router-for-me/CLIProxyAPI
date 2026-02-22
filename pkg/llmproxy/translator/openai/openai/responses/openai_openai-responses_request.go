@@ -17,7 +17,7 @@ import (
 // 3. Input array to messages array transformation
 // 4. Tool definitions and tool choice conversion
 // 5. Function calls and function results handling
-// 6. Generation parameters mapping (max_tokens, reasoning, etc.)
+// 6. Generation parameters mapping (max_completion_tokens, reasoning, etc.)
 //
 // Parameters:
 //   - modelName: The name of the model to use for the request
@@ -41,7 +41,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Map generation parameters from responses format to chat completions format
 	if maxTokens := root.Get("max_output_tokens"); maxTokens.Exists() {
-		out, _ = sjson.Set(out, "max_tokens", maxTokens.Int())
+		out, _ = sjson.Set(out, "max_completion_tokens", maxTokens.Int())
 	}
 
 	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Exists() {

@@ -32,6 +32,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
+	rawJSON = removeItemReferences(rawJSON)
 
 	return rawJSON
 }
@@ -57,4 +58,31 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 	}
 
 	return result
+}
+
+func removeItemReferences(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+
+	filtered := make([]string, 0, len(inputResult.Array()))
+	for _, item := range inputResult.Array() {
+		if item.Get("type").String() == "item_reference" {
+			continue
+		}
+		filtered = append(filtered, item.Raw)
+	}
+
+	if len(filtered) == len(inputResult.Array()) {
+		return rawJSON
+	}
+
+	result := "[]"
+	for _, itemRaw := range filtered {
+		result, _ = sjson.SetRaw(result, "-1", itemRaw)
+	}
+
+	out, _ := sjson.SetRawBytes(rawJSON, "input", []byte(result))
+	return out
 }

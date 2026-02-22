@@ -32,8 +32,11 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions(t *testing.T) {
 		t.Errorf("expected stream true, got %v", res.Get("stream").Bool())
 	}
 
-	if res.Get("max_tokens").Int() != 100 {
-		t.Errorf("expected max_tokens 100, got %d", res.Get("max_tokens").Int())
+	if res.Get("max_completion_tokens").Int() != 100 {
+		t.Errorf("expected max_completion_tokens 100, got %d", res.Get("max_completion_tokens").Int())
+	}
+	if res.Get("max_tokens").Exists() {
+		t.Errorf("max_tokens must not be present for OpenAI chat completions: %s", res.Get("max_tokens").Raw)
 	}
 
 	messages := res.Get("messages").Array()
@@ -65,8 +68,11 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions(t *testing.T) {
 	got2 := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("m1", input2, false)
 	res2 := gjson.ParseBytes(got2)
 
-	if res2.Get("max_tokens").Int() != 100 {
-		t.Errorf("expected max_tokens 100, got %d", res2.Get("max_tokens").Int())
+	if res2.Get("max_completion_tokens").Int() != 100 {
+		t.Errorf("expected max_completion_tokens 100, got %d", res2.Get("max_completion_tokens").Int())
+	}
+	if res2.Get("max_tokens").Exists() {
+		t.Errorf("max_tokens must not be present for OpenAI chat completions: %s", res2.Get("max_tokens").Raw)
 	}
 
 	if res2.Get("reasoning_effort").String() != "high" {

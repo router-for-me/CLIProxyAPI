@@ -45,6 +45,8 @@ type oaiToResponsesState struct {
 	TotalTokens      int64
 	ReasoningTokens  int64
 	UsageSeen        bool
+	CompletionSent   bool
+	StopSeen         bool
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -55,7 +57,7 @@ func emitRespEvent(event string, payload string) string {
 }
 
 func emitCompletionEvents(st *oaiToResponsesState) []string {
-	if st == nil {
+	if st == nil || st.CompletionSent {
 		return []string{}
 	}
 
@@ -83,7 +85,16 @@ func emitCompletionEvents(st *oaiToResponsesState) []string {
 		completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
 	}
 
+	st.CompletionSent = true
 	return []string{emitRespEvent("response.completed", completed)}
+}
+
+func requestWantsUsageChunk(requestRawJSON []byte) bool {
+	if len(requestRawJSON) == 0 {
+		return false
+	}
+	req := gjson.ParseBytes(requestRawJSON)
+	return req.Get("stream_options.include_usage").Bool()
 }
 
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponses converts OpenAI Chat Completions streaming chunks
@@ -181,6 +192,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.TotalTokens = 0
 		st.ReasoningTokens = 0
 		st.UsageSeen = false
+		st.CompletionSent = false
+		st.StopSeen = false
 		// response.created
 		created := `{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`
 		created, _ = sjson.Set(created, "sequence_number", nextSeq())
@@ -385,6 +398,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			// finish_reason triggers finalization, including text done/content done/item done,
 			// reasoning done/part.done, function args done/item done, and completed
 			if fr := choice.Get("finish_reason"); fr.Exists() && fr.String() != "" {
+				st.StopSeen = true
 				// Emit message done events for all indices that started a message
 				if len(st.MsgItemAdded) > 0 {
 					// sort indices for deterministic order
@@ -625,6 +639,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
 				}
 				out = append(out, emitRespEvent("response.completed", completed))
+				st.CompletionSent = true
 			}
 
 			return true
