@@ -8,15 +8,15 @@
 
 ## Status Snapshot
 
-- `planned`: 10
+- `planned`: 0
 - `implemented`: 0
-- `in_progress`: 0
+- `in_progress`: 10
 - `blocked`: 0
 
 ## Per-Item Status
 
 ### CPB-0216 – Expand docs and examples for "Add Container Tags / Project Scoping for Memory Organization" with copy-paste quickstart and troubleshooting section.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `provider-model-registry`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1420`
 - Rationale:
@@ -28,7 +28,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0217 – Add QA scenarios for "Add LangChain/LangGraph Integration for Memory System" including stream/non-stream parity and edge-case payloads.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `error-handling-retries`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1419`
 - Rationale:
@@ -40,7 +40,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0218 – Refactor implementation behind "Security Review: Apply Lessons from Supermemory Security Findings" to reduce complexity and isolate transformation boundaries.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1418`
 - Rationale:
@@ -52,7 +52,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0219 – Ensure rollout safety for "Add Webhook Support for Document Lifecycle Events" via feature flags, staged defaults, and migration notes.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `install-and-ops`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1417`
 - Rationale:
@@ -64,7 +64,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0220 – Standardize metadata and naming conventions touched by "Create OpenAI-Compatible Memory Tools Wrapper" across both repos.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `general-polish`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1416`
 - Rationale:
@@ -76,7 +76,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0221 – Create/refresh provider quickstart derived from "Add Google Drive Connector for Memory Ingestion" including setup, auth, model select, and sanity-check commands.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `docs-quickstarts`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1415`
 - Rationale:
@@ -88,7 +88,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0222 – Harden "Add Document Processor for PDF and URL Content Extraction" with clearer validation, safer defaults, and defensive fallbacks.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `provider-model-registry`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1414`
 - Rationale:
@@ -100,7 +100,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0223 – Operationalize "Add Notion Connector for Memory Ingestion" with observability, alerting thresholds, and runbook updates.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `error-handling-retries`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1413`
 - Rationale:
@@ -112,7 +112,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0224 – Convert "Add Strict Schema Mode for OpenAI Function Calling" into a provider-agnostic pattern and codify in shared translation utilities.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `error-handling-retries`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1412`
 - Rationale:
@@ -124,7 +124,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0225 – Add DX polish around "Add Conversation Tracking Support for Chat History" through improved command ergonomics and faster feedback loops.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `provider-model-registry`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1411`
 - Rationale:

@@ -8,15 +8,15 @@
 
 ## Status Snapshot
 
-- `planned`: 10
+- `planned`: 5
 - `implemented`: 0
-- `in_progress`: 0
+- `in_progress`: 5
 - `blocked`: 0
 
 ## Per-Item Status
 
 ### CPB-0236 – Expand docs and examples for "反代反重力请求gemini-3-pro-image-preview接口报错" with copy-paste quickstart and troubleshooting section.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `provider-model-registry`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1393`
 - Rationale:
@@ -28,7 +28,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0237 – Add QA scenarios for "[Feature Request] Implement automatic account rotation on VALIDATION_REQUIRED errors" including stream/non-stream parity and edge-case payloads.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `responses-and-chat-compat`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1392`
 - Rationale:
@@ -40,7 +40,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0238 – Create/refresh provider quickstart derived from "[antigravity] 500 Internal error and 403 Verification Required for multiple accounts" including setup, auth, model select, and sanity-check commands.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `docs-quickstarts`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1389`
 - Rationale:
@@ -52,7 +52,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0239 – Ensure rollout safety for "Antigravity的配额管理,账号没有订阅资格了,还是在显示模型额度" via feature flags, staged defaults, and migration notes.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `general-polish`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1388`
 - Rationale:
@@ -64,7 +64,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0240 – Standardize metadata and naming conventions touched by "大佬，可以加一个apikey的过期时间不" across both repos.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `general-polish`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1387`
 - Rationale:

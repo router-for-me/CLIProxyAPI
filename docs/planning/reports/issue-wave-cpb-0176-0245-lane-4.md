@@ -8,9 +8,9 @@
 
 ## Status Snapshot
 
-- `planned`: 5
+- `planned`: 0
 - `implemented`: 0
-- `in_progress`: 5
+- `in_progress`: 10
 - `blocked`: 0
 
 ## Per-Item Status
@@ -76,7 +76,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0211 – Follow up on "关闭某个认证文件后没有持久化处理" by closing compatibility gaps and preventing regressions in adjacent providers.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `general-polish`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1431`
 - Rationale:
@@ -88,7 +88,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0212 – Harden "[v6.7.47] 接入智谱 Plan 计划后请求报错" with clearer validation, safer defaults, and defensive fallbacks.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `responses-and-chat-compat`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1430`
 - Rationale:
@@ -100,7 +100,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0213 – Operationalize "大佬能不能把使用统计数据持久化？" with observability, alerting thresholds, and runbook updates.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `general-polish`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1427`
 - Rationale:
@@ -112,7 +112,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0214 – Convert "[BUG] 使用 Google 官方 Python SDK时思考设置无法生效" into a provider-agnostic pattern and codify in shared translation utilities.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1426`
 - Rationale:
@@ -124,7 +124,7 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0215 – Add DX polish around "bug: Claude → Gemini translation fails due to unsupported JSON Schema fields ($id, patternProperties)" through improved command ergonomics and faster feedback loops.
-- Status: `planned`
+- Status: `in_progress`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1424`
 - Rationale:

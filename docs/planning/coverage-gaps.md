@@ -17,7 +17,7 @@ Date: 2026-02-22
 - `go test ./sdk/api/handlers -run 'TestRequestExecutionMetadata'`
 - `/.github/scripts/check-distributed-critical-paths.sh`
 - `QUALITY_PACKAGES='./pkg/llmproxy/api ./sdk/api/handlers/openai' task quality:quick:check`
-- `task quality:quick:all` currently still needs sibling compatibility validation when golangci-lint is missing/heterogeneous across siblings.
+- `task quality:quick:all` now runs with a configurable sibling target (`QUALITY_PARENT_TASK`) and defaults to quick checks in tandem by default; follow-up remains for missing sibling lint binaries.
 
 ## Gap Matrix
 

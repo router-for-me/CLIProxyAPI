@@ -8,6 +8,7 @@ vars:
   DOCKER_IMAGE: kooshapari/cliproxyapi-plusplus
   TEST_REPORT_DIR: target
   QUALITY_PACKAGES: '{{default "./..." .QUALITY_PACKAGES}}'
+  QUALITY_PARENT_TASK: '{{default "quality" .QUALITY_PARENT_TASK}}'
   GO_FILES:
     sh: find . -name "*.go" | grep -v "vendor"
 
@@ -208,12 +209,12 @@ tasks:
                 continue
               fi
               FOUND=1
-              if task -C "$d" --list-all 2>/dev/null | rg -q '(^|[[:space:]])quality([[:space:]]|$)'; then
-                echo "[RUN] $base -> task quality"
-                QUALITY_WITH_PARENT_CLIPROXY=0 task -C "$d" quality
+              if task -C "$d" --list-all 2>/dev/null | awk '{print $1}' | rg -qx "{{.QUALITY_PARENT_TASK}}"; then
+                echo "[RUN] $base -> task {{.QUALITY_PARENT_TASK}}"
+                QUALITY_WITH_PARENT_CLIPROXY=0 QUALITY_PARENT_TASK="{{.QUALITY_PARENT_TASK}}" task -C "$d" "{{.QUALITY_PARENT_TASK}}"
                 RAN=1
               else
-                echo "[SKIP] $base (no quality task)"
+                echo "[SKIP] $base (missing sibling task: {{.QUALITY_PARENT_TASK}})"
               fi
               ;;
           esac
@@ -237,8 +238,8 @@ tasks:
 
   quality:quick:
     desc: "Run fast local quality checks (readonly)"
+    deps: [preflight, cache:unlock]
     cmds:
-      - task: quality:fmt:check
       - task: quality:quick:check
 
   quality:quick:check:
@@ -281,6 +282,8 @@ tasks:
 
   quality:quick:all:
     desc: "Run quality quick locally and in sibling cliproxy/cliproxyapi++ repos"
+    vars:
+      QUALITY_PARENT_TASK: quality:quick
     cmds:
       - task: quality:quick
       - task: quality:parent-sibling
