@@ -3,6 +3,9 @@ package openai
 import (
 	"encoding/json"
 	"testing"
+
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/kiro/common"
+	"github.com/tidwall/gjson"
 )
 
 // TestToolResultsAttachedToCurrentMessage verifies that tool results from "tool" role messages
@@ -382,5 +385,43 @@ func TestAssistantEndsConversation(t *testing.T) {
 	// When assistant is last, a "Continue" user message should be created
 	if payload.ConversationState.CurrentMessage.UserInputMessage.Content == "" {
 		t.Error("Expected a 'Continue' message to be created when assistant is last")
+	}
+}
+
+func TestBuildAssistantMessageFromOpenAI_DefaultContentWhenEmptyWithoutTools(t *testing.T) {
+	msg := gjson.Parse(`{"role":"assistant","content":"   "}`)
+	got := buildAssistantMessageFromOpenAI(msg)
+
+	if got.Content != kirocommon.DefaultAssistantContent {
+		t.Fatalf("expected default assistant content %q, got %q", kirocommon.DefaultAssistantContent, got.Content)
+	}
+	if len(got.ToolUses) != 0 {
+		t.Fatalf("expected no tool uses, got %d", len(got.ToolUses))
+	}
+}
+
+func TestBuildAssistantMessageFromOpenAI_DefaultContentWhenOnlyToolCalls(t *testing.T) {
+	msg := gjson.Parse(`{
+		"role":"assistant",
+		"content":"",
+		"tool_calls":[
+			{
+				"id":"call_1",
+				"type":"function",
+				"function":{"name":"Read","arguments":"{\"path\":\"/tmp/a.txt\"}"}
+			}
+		]
+	}`)
+
+	got := buildAssistantMessageFromOpenAI(msg)
+
+	if got.Content != kirocommon.DefaultAssistantContentWithTools {
+		t.Fatalf("expected default assistant tool content %q, got %q", kirocommon.DefaultAssistantContentWithTools, got.Content)
+	}
+	if len(got.ToolUses) != 1 {
+		t.Fatalf("expected one tool use, got %d", len(got.ToolUses))
+	}
+	if got.ToolUses[0].Name != "Read" {
+		t.Fatalf("expected tool name %q, got %q", "Read", got.ToolUses[0].Name)
 	}
 }

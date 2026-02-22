@@ -78,3 +78,32 @@ func TestConvertClaudeRequestToGeminiSkipsMetadataOnlyMessageBlocks(t *testing.T
 		t.Fatalf("expected text content to be preserved")
 	}
 }
+
+func TestConvertClaudeRequestToGemini_SanitizesToolUseThoughtSignature(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{
+				"role":"assistant",
+				"content":[
+					{
+						"type":"tool_use",
+						"id":"toolu_01",
+						"name":"lookup",
+						"input":{"q":"hello"}
+					}
+				]
+			}
+		]
+	}`)
+
+	got := ConvertClaudeRequestToGemini("gemini-2.5-pro", input, false)
+	res := gjson.ParseBytes(got)
+
+	part := res.Get("contents.0.parts.0")
+	if !part.Get("functionCall").Exists() {
+		t.Fatalf("expected tool_use to map to functionCall")
+	}
+	if part.Get("thoughtSignature").String() != geminiClaudeThoughtSignature {
+		t.Fatalf("expected thoughtSignature %q, got %q", geminiClaudeThoughtSignature, part.Get("thoughtSignature").String())
+	}
+}
