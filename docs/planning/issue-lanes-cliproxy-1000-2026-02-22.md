@@ -1,10 +1,11 @@
-# CLIProxyAPI Issue Lanes (CPB-0001..CPB-0030)
+# CLIProxyAPI Issue Lanes (CPB-0001..CPB-0035)
 
 ## Context
 - Consolidated baseline: `main` (no stashes, no extra local branches)
 - Source: `docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.md`
 - Status convention: `proposed` -> `in_progress` when started, `done` when merged
-- Owner split: 6 child agents + you
+- Owner split: 6 child agents + you (7 total lanes, 5 items each)
+- Execution mode: worktree-based lanes, no stash/branch detours
 
 ## Lane 1 — You
 - CPB-0001
@@ -58,3 +59,4 @@
 ## Notes
 - Keep this artifact in sync when ownership changes.
 - Use `docs/planning/board-workflow.md` for required status and source mapping fields.
+- Child-agent cap was reached at spawn time; assignments are staged on worktrees and ready for you/next wave dispatch.

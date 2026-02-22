@@ -697,11 +697,11 @@ func GenerateWebSearchEvents(
 // generateSearchSummary generates a text summary of search results
 func generateSearchSummary(query string, results *WebSearchResults) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Here are the search results for \"%s\":\n\n", query))
+	fmt.Fprintf(&sb, "Here are the search results for \"%s\":\n\n", query)
 
 	if results != nil && len(results.Results) > 0 {
 		for i, r := range results.Results {
-			sb.WriteString(fmt.Sprintf("%d. **%s**\n", i+1, r.Title))
+			fmt.Fprintf(&sb, "%d. **%s**\n", i+1, r.Title)
 			if r.Snippet != nil {
 				snippet := *r.Snippet
 				if len(snippet) > 200 {
@@ -709,7 +709,7 @@ func generateSearchSummary(query string, results *WebSearchResults) string {
 				}
 				fmt.Fprintf(&sb, "   %s\n", snippet)
 			}
-			sb.WriteString(fmt.Sprintf("   Source: %s\n\n", r.URL))
+			fmt.Fprintf(&sb, "   Source: %s\n\n", r.URL)
 		}
 	} else {
 		sb.WriteString("No results found.\n")
