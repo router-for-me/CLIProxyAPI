@@ -17,6 +17,7 @@ var antigravityModelConversionTable = map[string]string{
 	"gemini-claude-sonnet-4-5":                "claude-sonnet-4-5",
 	"gemini-claude-sonnet-4-5-thinking":       "claude-sonnet-4-5-thinking",
 	"gemini-claude-opus-4-5-thinking":         "claude-opus-4-5-thinking",
+	"gemini-claude-opus-thinking":             "claude-opus-4-6-thinking",
 	"gemini-claude-opus-4-6-thinking":         "claude-opus-4-6-thinking",
 }
 
@@ -68,6 +69,7 @@ func defaultAntigravityAliases() []OAuthModelAlias {
 		{Name: "claude-sonnet-4-5", Alias: "gemini-claude-sonnet-4-5"},
 		{Name: "claude-sonnet-4-5-thinking", Alias: "gemini-claude-sonnet-4-5-thinking"},
 		{Name: "claude-opus-4-5-thinking", Alias: "gemini-claude-opus-4-5-thinking"},
+		{Name: "claude-opus-4-6-thinking", Alias: "gemini-claude-opus-thinking"},
 		{Name: "claude-opus-4-6-thinking", Alias: "gemini-claude-opus-4-6-thinking"},
 	}
 }
@@ -163,15 +165,18 @@ func migrateFromOldField(configFile string, root *yaml.Node, rootMap *yaml.Node,
 
 	// For antigravity channel, supplement missing default aliases
 	if antigravityEntries, exists := newAliases["antigravity"]; exists {
-		// Build a set of already configured model names (upstream names)
-		configuredModels := make(map[string]bool, len(antigravityEntries))
+		// Build a set of already configured (name, alias) pairs.
+		// A single upstream model may intentionally expose multiple aliases.
+		configuredPairs := make(map[string]bool, len(antigravityEntries))
 		for _, entry := range antigravityEntries {
-			configuredModels[entry.Name] = true
+			key := entry.Name + "\x00" + entry.Alias
+			configuredPairs[key] = true
 		}
 
 		// Add missing default aliases
 		for _, defaultAlias := range defaultAntigravityAliases() {
-			if !configuredModels[defaultAlias.Name] {
+			key := defaultAlias.Name + "\x00" + defaultAlias.Alias
+			if !configuredPairs[key] {
 				antigravityEntries = append(antigravityEntries, defaultAlias)
 			}
 		}

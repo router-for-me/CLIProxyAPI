@@ -92,6 +92,8 @@ func TestMigrateOAuthModelAlias_ConvertsAntigravityModels(t *testing.T) {
       alias: "computer-use"
     - name: "gemini-3-pro-preview"
       alias: "g3p"
+    - name: "gemini-claude-opus-thinking"
+      alias: "opus-thinking"
 `
 	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -114,6 +116,9 @@ func TestMigrateOAuthModelAlias_ConvertsAntigravityModels(t *testing.T) {
 	if !strings.Contains(content, "gemini-3-pro-high") {
 		t.Fatal("expected gemini-3-pro-preview to be converted to gemini-3-pro-high")
 	}
+	if !strings.Contains(content, "claude-opus-4-6-thinking") {
+		t.Fatal("expected gemini-claude-opus-thinking to be converted to claude-opus-4-6-thinking")
+	}
 
 	// Verify missing default aliases were supplemented
 	if !strings.Contains(content, "gemini-3-pro-image") {
@@ -133,6 +138,9 @@ func TestMigrateOAuthModelAlias_ConvertsAntigravityModels(t *testing.T) {
 	}
 	if !strings.Contains(content, "claude-opus-4-6-thinking") {
 		t.Fatal("expected missing default alias claude-opus-4-6-thinking to be added")
+	}
+	if !strings.Contains(content, "gemini-claude-opus-thinking") {
+		t.Fatal("expected default alias gemini-claude-opus-thinking to be added")
 	}
 }
 
