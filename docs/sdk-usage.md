@@ -43,6 +43,21 @@ if err := svc.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 
 The service manages config/auth watching, background token refresh, and graceful shutdown. Cancel the context to stop it.
 
+## Integration Contract (In-Process First, HTTP Fallback)
+
+Recommended order for external integrations:
+
+1. Use `sdk/cliproxy` in-process when you control the runtime.
+2. Fall back to HTTP (`/v1/*`) when process boundaries require network calls.
+
+Practical capability negotiation:
+
+- Probe `/health` first.
+- Probe `/v1/models` with the intended client key.
+- If management is enabled in your deployment, probe `/v0/management/config` for config-shape compatibility.
+
+This keeps integration non-subprocess by default while preserving an HTTP fallback path for remote workers.
+
 ## Server Options (middleware, routes, logs)
 
 The server accepts options via `WithServerOptions`:

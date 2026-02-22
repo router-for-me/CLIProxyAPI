@@ -21,17 +21,28 @@ Full feature-by-feature change reference:
 
 ### 📊 Feature Comparison Matrix
 
-| Feature | Mainline | CLIProxyAPI+ | **cliproxyapi++** |
-| :--- | :---: | :---: | :---: |
-| **Core Proxy Logic** | ✅ | ✅ | ✅ |
-| **Basic Provider Support** | ✅ | ✅ | ✅ |
-| **Standard UI** | ❌ | ✅ | ✅ |
-| **Advanced Auth (Kiro/Copilot)** | ❌ | ⚠️ | ✅ **(Full Support)** |
-| **Background Token Refresh** | ❌ | ❌ | ✅ **(Auto-Refresh)** |
-| **Security Hardening** | Basic | Basic | ✅ **(Enterprise-Grade)** |
-| **Rate Limiting & Cooldown** | ❌ | ❌ | ✅ **(Intelligent)** |
-| **Core Reusability** | `internal/` | `internal/` | ✅ **(`pkg/llmproxy`)** |
-| **CI/CD Pipeline** | Basic | Basic | ✅ **(Signed/Multi-arch)** |
+| Capability | Mainline | CLIProxyAPI+ | **cliproxyapi++** | Granular Notes |
+| :--- | :---: | :---: | :---: | :--- |
+| **OpenAI-compatible proxy endpoints** | ✅ | ✅ | ✅ | `chat/completions`, `responses`, `models` surfaces available. |
+| **Provider registry breadth** | ✅ | ✅ | ✅ | Direct + aggregator providers supported in all variants, with broader operational polish in `++`. |
+| **Model aliasing / mapping layer** | ⚠️ | ✅ | ✅ | `++` emphasizes unified mapping behavior across heterogeneous upstreams. |
+| **Management API (`/v0/*`)** | ⚠️ | ✅ | ✅ | Operational controls and inspection endpoints available in `+` and `++`. |
+| **Web management UI** | ❌ | ✅ | ✅ | `++` keeps UI while hardening operational/auth flows behind it. |
+| **Kiro web OAuth flow** | ❌ | ⚠️ | ✅ | `++` includes dedicated `/v0/oauth/kiro` browser-based login surface. |
+| **GitHub Copilot OAuth/device auth depth** | ❌ | ⚠️ | ✅ | `++` adds full lifecycle handling and richer session semantics. |
+| **Advanced multi-provider auth set** | ❌ | ⚠️ | ✅ | Kiro/Copilot/Roo/Kilo/MiniMax/Cursor auth paths integrated in `++`. |
+| **Background token refresh worker** | ❌ | ❌ | ✅ | Auto-refresh before expiry to reduce auth-related downtime. |
+| **Credential lifecycle visibility** | ❌ | ⚠️ | ✅ | `++` provides richer auth file/account surfaces for operations. |
+| **Quota-aware provider handling** | ❌ | ⚠️ | ✅ | `++` includes cooldown and provider-state driven routing behavior. |
+| **Rate limiting + intelligent cooldown** | ❌ | ❌ | ✅ | Provider-level cooling/rotation behavior aimed at production resilience. |
+| **Failure isolation / route continuity** | ⚠️ | ⚠️ | ✅ | `++` biases toward continuing service via provider-aware routing controls. |
+| **Core code importability** | ❌ | ❌ | ✅ | Mainline/+ keep `internal/`; `++` exposes reusable `pkg/llmproxy`. |
+| **Library-first architecture** | ⚠️ | ⚠️ | ✅ | Translation/proxy logic packaged for embedding into other Go services. |
+| **Security controls (path guard, hardened base, fingerprinting)** | Basic | Basic | ✅ | Defense-in-depth additions for CI governance and runtime posture. |
+| **Container supply-chain posture** | Basic | Basic | ✅ | Hardened Docker base plus signed/multi-arch release workflow. |
+| **CI quality gates (strict lint/test/governance)** | Basic | Basic | ✅ | Expanded automation and stricter release validation in `++`. |
+| **Operational observability surfaces** | ⚠️ | ✅ | ✅ | Logs, usage, provider metrics and management views strengthened in `++`. |
+| **Production-readiness target** | Community baseline | Enhanced fork | **Enterprise-grade** | `++` is tuned for long-running agent-heavy deployments. |
 
 ---
 

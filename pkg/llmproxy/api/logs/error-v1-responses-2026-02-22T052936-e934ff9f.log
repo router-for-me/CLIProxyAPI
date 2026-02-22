@@ -1,0 +1,23 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /v1/responses
+Method: POST
+Timestamp: 2026-02-22T05:29:36.59312-07:00
+
+=== HEADERS ===
+
+=== REQUEST BODY ===
+{}
+
+=== API RESPONSE ===
+Timestamp: 2026-02-22T05:29:36.593448-07:00
+{"error":{"message":"unknown provider for model","type":"server_error","code":"internal_server_error"}}
+
+=== RESPONSE ===
+Status: 502
+Content-Type: application/json
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: *
+
+{"error":{"message":"unknown provider for model","type":"server_error","code":"internal_server_error"}}

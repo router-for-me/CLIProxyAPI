@@ -16,6 +16,12 @@ This page covers provider strategy and high-signal setup patterns. For full bloc
 - Aggregators: OpenRouter, Together AI, Fireworks AI, Novita AI, SiliconFlow.
 - Proprietary/OAuth flows: Kiro, GitHub Copilot, Roo Code, Kilo AI, MiniMax.
 
+## Naming and Metadata Conventions
+
+- Use canonical provider keys in config and ops docs (`github-copilot`, `antigravity`, `claude`, `codex`).
+- Keep user-facing aliases stable and provider-agnostic where possible (for example `claude-sonnet-4-6`), and map upstream-specific names through `oauth-model-alias`.
+- For GitHub Copilot, treat it as a distinct provider channel (`github-copilot`), not a generic "microsoft account" channel. Account eligibility still depends on Copilot plan entitlements.
+
 ## Provider-First Architecture
 
 `cliproxyapi++` keeps one client-facing API (`/v1/*`) and pushes provider complexity into configuration:
