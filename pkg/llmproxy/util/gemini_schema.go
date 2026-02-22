@@ -47,13 +47,78 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 	jsonStr = removeUnsupportedKeywords(jsonStr)
 	if !addPlaceholder {
 		// Gemini schema cleanup: remove nullable/title and placeholder-only fields.
-		jsonStr = removeKeywords(jsonStr, []string{"nullable", "title"})
+		// Process nullable first to update required array before removing the keyword.
+		jsonStr = processNullableKeyword(jsonStr)
+		jsonStr = removeKeywords(jsonStr, []string{"title"})
 		jsonStr = removePlaceholderFields(jsonStr)
 	}
 	jsonStr = cleanupRequiredFields(jsonStr)
 	// Phase 4: Add placeholder for empty object schemas (Claude VALIDATED mode requirement)
 	if addPlaceholder {
 		jsonStr = addEmptySchemaPlaceholder(jsonStr)
+	}
+
+	return jsonStr
+}
+
+// processNullableKeyword processes the "nullable" keyword and updates required arrays.
+// When nullable: true is found on a property, that property is removed from the parent's
+// required array since nullable properties are optional.
+func processNullableKeyword(jsonStr string) string {
+	paths := findPaths(jsonStr, "nullable")
+	nullableFields := make(map[string][]string)
+
+	for _, p := range paths {
+		val := gjson.Get(jsonStr, p)
+		if !val.Exists() || val.Type != gjson.True {
+			continue
+		}
+
+		// Determine if this is a property with nullable: true
+		parts := splitGJSONPath(p)
+		if len(parts) >= 3 && parts[len(parts)-3] == "properties" {
+			fieldNameEscaped := parts[len(parts)-2]
+			fieldName := unescapeGJSONPathKey(fieldNameEscaped)
+			objectPath := strings.Join(parts[:len(parts)-3], ".")
+
+			nullableFields[objectPath] = append(nullableFields[objectPath], fieldName)
+
+			// Add hint to description
+			propPath := joinPath(objectPath, "properties."+fieldNameEscaped)
+			jsonStr = appendHint(jsonStr, propPath, "(nullable)")
+		}
+	}
+
+	// Update required arrays to remove nullable fields
+	for objectPath, fields := range nullableFields {
+		reqPath := joinPath(objectPath, "required")
+		req := gjson.Get(jsonStr, reqPath)
+		if !req.IsArray() {
+			continue
+		}
+
+		var filtered []string
+		for _, r := range req.Array() {
+			if !contains(fields, r.String()) {
+				filtered = append(filtered, r.String())
+			}
+		}
+
+		if len(filtered) == 0 {
+			jsonStr, _ = sjson.Delete(jsonStr, reqPath)
+		} else {
+			jsonStr, _ = sjson.Set(jsonStr, reqPath, filtered)
+		}
+	}
+
+	// Remove all nullable keywords
+	deletePaths := make([]string, 0)
+	for _, p := range paths {
+		deletePaths = append(deletePaths, p)
+	}
+	sortByDepth(deletePaths)
+	for _, p := range deletePaths {
+		jsonStr, _ = sjson.Delete(jsonStr, p)
 	}
 
 	return jsonStr
