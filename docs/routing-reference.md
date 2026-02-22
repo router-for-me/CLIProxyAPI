@@ -16,6 +16,11 @@ This page explains how `cliproxyapi++` selects credentials/providers and resolve
 5. Upstream request is translated and executed.
 6. Response is normalized back to OpenAI-compatible JSON/SSE.
 
+Endpoint behavior note:
+
+- For Copilot Codex-family models (`*codex*`, including `gpt-5.1-codex-mini`), route through `/v1/responses`.
+- For non-Codex Copilot and most other providers, `/v1/chat/completions` remains the default path.
+
 ## Routing Controls in `config.yaml`
 
 ```yaml
@@ -74,6 +79,7 @@ Use these signals with logs to confirm if retries, throttling, or auth issues ar
 - Wrong provider selected: prefix overlap or non-explicit model name.
 - High latency spikes: provider degraded; add retries or alternate providers.
 - Repeated `429`: insufficient credential pool for traffic profile.
+- `400` on Codex model via chat endpoint: retry with `/v1/responses` and verify resolved model is Codex-family.
 
 ## Related Docs
 

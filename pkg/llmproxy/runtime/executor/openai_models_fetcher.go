@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -27,8 +29,7 @@ func FetchOpenAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 	if baseURL == "" || apiKey == "" {
 		return nil
 	}
-	baseURL = strings.TrimSuffix(baseURL, "/")
-	modelsURL := baseURL + "/v1/models"
+	modelsURL := resolveOpenAIModelsURL(baseURL, auth.Attributes)
 
 	reqCtx, cancel := context.WithTimeout(ctx, openAIModelsFetchTimeout)
 	defer cancel()
@@ -103,4 +104,44 @@ func FetchOpenAIModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config
 		return nil
 	}
 	return models
+}
+
+func resolveOpenAIModelsURL(baseURL string, attrs map[string]string) string {
+	if attrs != nil {
+		if modelsURL := strings.TrimSpace(attrs["models_url"]); modelsURL != "" {
+			return modelsURL
+		}
+	}
+
+	trimmedBaseURL := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if trimmedBaseURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(trimmedBaseURL)
+	if err != nil {
+		return trimmedBaseURL + "/v1/models"
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		return trimmedBaseURL + "/v1/models"
+	}
+
+	segment := path.Base(parsed.Path)
+	if isVersionSegment(segment) {
+		return trimmedBaseURL + "/models"
+	}
+
+	return trimmedBaseURL + "/v1/models"
+}
+
+func isVersionSegment(segment string) bool {
+	if len(segment) < 2 || segment[0] != 'v' {
+		return false
+	}
+	for i := 1; i < len(segment); i++ {
+		if segment[i] < '0' || segment[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
