@@ -63,6 +63,39 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
 
+### Cursor Root-Cause Probes
+
+- First-pass log probe:
+  - `rg -n "cursor config\\[" /path/to/runtime.log | tail -n 20`
+- Primary failure patterns:
+  - token file unreadable / malformed
+  - missing or mismatched `auth-token` for cursor-api zero-action flow
+  - cursor-api token add failures
+- Safe response:
+  - fix token source and auth wiring first
+  - re-check `/v1/models` includes `cursor/*`
+  - only then adjust aliases/routing
+
+### MCP Tool Search (`ENABLE_TOOL_SEARCH`) 400 Guard
+
+- Before rollout, run both:
+  - one non-stream request with required tool calls
+  - one streaming request with the same tool set
+- Alert trigger:
+  - `MCP not in available tools` > 1% over 10 minutes
+- Mitigation:
+  - pin affected workloads to non-stream path temporarily
+  - validate `mcp__...` tool name normalization and provider tool allowlist
+
+### iFlow Model Deprecation and Alias Safety
+
+- When removing outdated iFlow upstream models:
+  - keep client-facing aliases stable in `oauth-model-alias` during migration
+  - verify no alias resolves to retired upstream IDs
+  - confirm `/v1/models` no longer advertises removed models before deleting compatibility aliases
+- Recommended check:
+  - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'iflow/'`
+
 ### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
 
 - Symptom: plus/team users get `400/404 model_not_found` for `gpt-5.3-codex-spark`.

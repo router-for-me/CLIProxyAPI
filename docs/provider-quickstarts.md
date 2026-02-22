@@ -220,6 +220,57 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
+## 8) Antigravity Claude Thinking (`INVALID_ARGUMENT` Guard)
+
+Use this when validating `claude-opus-4-6(-thinking)` requests that previously returned `status=INVALID_ARGUMENT`.
+
+Validation:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"antigravity/claude-opus-4-6-thinking","reasoning_effort":"medium","messages":[{"role":"user","content":"summarize this in 3 bullets"}]}' | jq
+```
+
+Expected:
+
+- Request succeeds without upstream `INVALID_ARGUMENT`.
+- If you inspect translated payload logs, thinking/tool parts should carry safe signature placeholders where required.
+
+## 9) Claude Code Tool Search (`ENABLE_TOOL_SEARCH`) Sanity Check
+
+Use this to catch MCP tool-availability regressions early.
+
+Validation (non-stream):
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude/claude-opus-4-6","messages":[{"role":"user","content":"list project files"}],"tools":[{"type":"function","function":{"name":"mcp__local__list_dir","description":"list directory","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}],"tool_choice":"required","stream":false}' | jq
+```
+
+If you get `MCP not in available tools`:
+
+- Verify tool name normalization (`mcp__...` prefixes) and model/tool compatibility in `/v1/models`.
+- Re-run with `stream:false` and compare with streaming path to isolate parity bugs.
+
+## 10) Cursor Root-Cause Quick Check
+
+When Cursor requests fail unexpectedly, start with token source and cursor-api wiring:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^cursor/'
+```
+
+If no Cursor models appear:
+
+- Confirm `cursor[].token-file` is readable and contains expected token format.
+- Confirm `cursor[].auth-token` matches cursor-api `AUTH_TOKEN` for zero-action flow.
+- Check runtime warnings for `cursor config[...]` lines before changing model aliases.
+
 ## Related
 
 - [Getting Started](/getting-started)

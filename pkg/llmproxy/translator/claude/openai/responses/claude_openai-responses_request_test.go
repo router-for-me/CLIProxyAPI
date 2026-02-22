@@ -176,3 +176,38 @@ func TestConvertOpenAIResponsesRequestToClaude_SanitizesThinkingSignature(t *tes
 		t.Fatal("redacted_thinking must not carry signature")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_UsesOutputConfigEffortFallback(t *testing.T) {
+	input := []byte(`{
+		"model":"claude-opus-4-6",
+		"output_config":{"effort":"medium"},
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]
+	}`)
+
+	got := ConvertOpenAIResponsesRequestToClaude("claude-opus-4-6", input, false)
+	res := gjson.ParseBytes(got)
+	if res.Get("thinking.type").String() != "enabled" {
+		t.Fatalf("thinking.type = %q, want enabled", res.Get("thinking.type").String())
+	}
+	if res.Get("thinking.budget_tokens").Int() != 8192 {
+		t.Fatalf("thinking.budget_tokens = %d, want 8192", res.Get("thinking.budget_tokens").Int())
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_PrefersReasoningEffortOverOutputConfig(t *testing.T) {
+	input := []byte(`{
+		"model":"claude-opus-4-6",
+		"reasoning":{"effort":"none"},
+		"output_config":{"effort":"high"},
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]
+	}`)
+
+	got := ConvertOpenAIResponsesRequestToClaude("claude-opus-4-6", input, false)
+	res := gjson.ParseBytes(got)
+	if res.Get("thinking.type").String() != "disabled" {
+		t.Fatalf("thinking.type = %q, want disabled", res.Get("thinking.type").String())
+	}
+	if res.Get("thinking.budget_tokens").Exists() {
+		t.Fatalf("thinking.budget_tokens should be absent when thinking disabled, got %d", res.Get("thinking.budget_tokens").Int())
+	}
+}
