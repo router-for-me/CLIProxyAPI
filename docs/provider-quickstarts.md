@@ -101,30 +101,7 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"gemini/flash","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
-## 4) Antigravity (Gemini-backed Claude aliases)
-
-`config.yaml` (alias bridge only; keep your existing Antigravity auth setup):
-
-```yaml
-api-keys:
-  - "demo-client-key"
-
-oauth-model-alias:
-  antigravity:
-    - name: "claude-opus-4-6-thinking"
-      alias: "gemini-claude-opus-4-6-thinking"
-```
-
-Validation:
-
-```bash
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'gemini-claude-opus-4-6-thinking|claude-opus-4-6-thinking'
-```
-
-If the alias is missing, add it first before debugging upstream `502 unknown provider for model ...` failures.
-
-## 5) GitHub Copilot
+## 4) GitHub Copilot
 
 `config.yaml`:
 
@@ -155,7 +132,7 @@ curl -sS http://localhost:8317/v1/models \
 
 Only route traffic to models that appear in `/v1/models`. If `gpt-5.3-codex-spark` is missing for your account tier, use `gpt-5.3-codex`.
 
-## 6) Kiro
+## 5) Kiro
 
 `config.yaml`:
 
@@ -196,48 +173,7 @@ Kiro IAM login hints:
 - Keep one auth file per account to avoid accidental overwrite during relogin.
 - If you rotate accounts often, run browser login in incognito mode.
 
-## 6a) Cursor (`--cursor-login`)
-
-Cursor onboarding is now CLI-driven:
-
-```bash
-./cliproxy --cursor-login --config ./config.yaml
-```
-
-Interactive behavior:
-
-- `1` (default): write a token file from `cursor-api /build-key` output and set `cursor[].token-file`.
-- `2`: keep token-file empty and store `cursor[].auth-token` for zero-action / token registration.
-
-Example managed block after login:
-
-```yaml
-cursor:
-  - token-file: "~/.cursor/session-token.txt"
-    cursor-api-url: "http://127.0.0.1:3000"
-```
-
-Quick validation:
-
-```bash
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^cursor/'
-```
-
-## 7) iFlow
-
-Validation (`glm-4.7`):
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"iflow/glm-4.7","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
-```
-
-If you see `406`, verify model exposure in `/v1/models`, retry non-stream, and then compare headers/payload shape against known-good requests.
-
-## 8) MiniMax
+## 6) MiniMax
 
 `config.yaml`:
 
@@ -259,7 +195,7 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"minimax/abab6.5s","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
-## 9) OpenAI-Compatible Providers
+## 7) OpenAI-Compatible Providers
 
 For local tools like MLX/vLLM-MLX, use `openai-compatibility`:
 
@@ -284,27 +220,9 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
-## 8) Antigravity Claude Thinking (`INVALID_ARGUMENT` Guard)
+## 8) iFlow (Quota/Entitlement Sanity Path)
 
-Use this when validating `claude-opus-4-6(-thinking)` requests that previously returned `status=INVALID_ARGUMENT`.
-
-Validation:
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"antigravity/claude-opus-4-6-thinking","reasoning_effort":"medium","messages":[{"role":"user","content":"summarize this in 3 bullets"}]}' | jq
-```
-
-Expected:
-
-- Request succeeds without upstream `INVALID_ARGUMENT`.
-- If you inspect translated payload logs, thinking/tool parts should carry safe signature placeholders where required.
-
-## 9a) Claude Code Stream/Variant Parity (`variant` + `stream`)
-
-This section is a direct fix-path for Claude Code + OpenWork-style payloads.
+Use this when provider quota pages show available credits but API calls return "insufficient quota" style failures.
 
 `config.yaml`:
 
@@ -312,74 +230,38 @@ This section is a direct fix-path for Claude Code + OpenWork-style payloads.
 api-keys:
   - "demo-client-key"
 
-codex-api-key:
-  - api-key: "codex-key"
-    prefix: "openwork"
+iflow:
+  - name: "iflow-primary"
+    prefix: "iflow"
+    api-key: "iflow-api-key"
 ```
 
-Variant-only request baseline (repro should not regress when `stream: false`):
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.3-codex","variant":"high","messages":[{"role":"user","content":"ow-issue258-variant-only-check"}],"stream":false}' | jq '.choices[0].message.content'
-```
-
-Streaming parity check:
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.3-codex","variant":"high","messages":[{"role":"user","content":"ow-issue258-variant-only-check"}],"stream":true}' | head -n 40
-```
-
-Checks:
-
-- Confirm same request succeeds with/without `stream`.
-- Compare first 5 SSE chunks for ordering and final `[DONE]`.
-- If streaming collapses into a single burst, compare with `/v1/models` and validate proxy logs around `apply.go` thinking config.
-- Keep `reasoning` and tool payloads minimal while validating parity.
-
-Expected:
-
-- Variant-only requests stay stable in both modes.
-- Streaming responses should arrive incrementally, not one-shot at completion.
-- If variant-only handling is inconsistent, capture request body and response body in logs before adjusting model aliasing/variant fallback.
-
-## 9b) Claude Code Tool Search (`ENABLE_TOOL_SEARCH`) Sanity Check
-
-Use this to catch MCP tool-availability regressions early.
-
-Validation (non-stream):
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"claude/claude-opus-4-6","messages":[{"role":"user","content":"list project files"}],"tools":[{"type":"function","function":{"name":"mcp__local__list_dir","description":"list directory","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}],"tool_choice":"required","stream":false}' | jq
-```
-
-If you get `MCP not in available tools`:
-
-- Verify tool name normalization (`mcp__...` prefixes) and model/tool compatibility in `/v1/models`.
-- Re-run with `stream:false` and compare with streaming path to isolate parity bugs.
-
-## 10) Cursor Root-Cause Quick Check
-
-When Cursor requests fail unexpectedly, start with token source and cursor-api wiring:
+Validation (model inventory first):
 
 ```bash
 curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^cursor/'
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^iflow/'
 ```
 
-If no Cursor models appear:
+Non-stream parity check:
 
-- Confirm `cursor[].token-file` is readable and contains expected token format.
-- Confirm `cursor[].auth-token` matches cursor-api `AUTH_TOKEN` for zero-action flow.
-- Check runtime warnings for `cursor config[...]` lines before changing model aliases.
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/glm-5","stream":false,"messages":[{"role":"user","content":"ping"}]}' | jq
+```
+
+Stream parity check:
+
+```bash
+curl -sS -N -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/glm-5","stream":true,"messages":[{"role":"user","content":"ping"}]}' | head -n 20
+```
+
+If non-stream succeeds but stream fails (or vice versa), treat as compatibility drift and pin traffic to the healthy mode while collecting request IDs and upstream status codes.
 
 ## Related
 
