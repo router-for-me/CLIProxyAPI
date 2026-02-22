@@ -19,6 +19,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -878,6 +879,84 @@ type CopilotUsageResponse struct {
 	QuotaSnapshots        QuotaSnapshots `json:"quota_snapshots"`
 }
 
+type kiroUsageChecker interface {
+	CheckUsageByAccessToken(ctx context.Context, accessToken, profileArn string) (*kiroauth.UsageQuotaResponse, error)
+}
+
+type kiroQuotaResponse struct {
+	AuthIndex       string                       `json:"auth_index,omitempty"`
+	ProfileARN      string                       `json:"profile_arn"`
+	RemainingQuota  float64                      `json:"remaining_quota"`
+	UsagePercentage float64                      `json:"usage_percentage"`
+	QuotaExhausted  bool                         `json:"quota_exhausted"`
+	Usage           *kiroauth.UsageQuotaResponse `json:"usage"`
+}
+
+// GetKiroQuota fetches Kiro quota information from CodeWhisperer usage API.
+//
+// Endpoint:
+//
+//	GET /v0/management/kiro-quota
+//
+// Query Parameters (optional):
+//   - auth_index: The credential "auth_index" from GET /v0/management/auth-files.
+//     If omitted, uses the first available Kiro credential.
+func (h *Handler) GetKiroQuota(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "management config unavailable"})
+		return
+	}
+	h.getKiroQuotaWithChecker(c, kiroauth.NewUsageChecker(h.cfg))
+}
+
+func (h *Handler) getKiroQuotaWithChecker(c *gin.Context, checker kiroUsageChecker) {
+	authIndex := strings.TrimSpace(c.Query("auth_index"))
+	if authIndex == "" {
+		authIndex = strings.TrimSpace(c.Query("authIndex"))
+	}
+	if authIndex == "" {
+		authIndex = strings.TrimSpace(c.Query("AuthIndex"))
+	}
+
+	auth := h.findKiroAuth(authIndex)
+	if auth == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no kiro credential found"})
+		return
+	}
+
+	token, tokenErr := h.resolveTokenForAuth(c.Request.Context(), auth)
+	if tokenErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to resolve kiro token"})
+		return
+	}
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kiro token not found"})
+		return
+	}
+
+	profileARN := profileARNForAuth(auth)
+	if profileARN == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kiro profile arn not found"})
+		return
+	}
+
+	usage, err := checker.CheckUsageByAccessToken(c.Request.Context(), token, profileARN)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "kiro quota request failed", "detail": err.Error()})
+		return
+	}
+
+	auth.EnsureIndex()
+	c.JSON(http.StatusOK, kiroQuotaResponse{
+		AuthIndex:       auth.Index,
+		ProfileARN:      profileARN,
+		RemainingQuota:  kiroauth.GetRemainingQuota(usage),
+		UsagePercentage: kiroauth.GetUsagePercentage(usage),
+		QuotaExhausted:  kiroauth.IsQuotaExhausted(usage),
+		Usage:           usage,
+	})
+}
+
 // GetCopilotQuota fetches GitHub Copilot quota information from the /copilot_pkg/llmproxy/user endpoint.
 //
 // Endpoint:
@@ -1006,6 +1085,73 @@ func (h *Handler) findCopilotAuth(authIndex string) *coreauth.Auth {
 	}
 
 	return firstCopilot
+}
+
+// findKiroAuth locates a Kiro credential by auth_index or returns the first available one.
+func (h *Handler) findKiroAuth(authIndex string) *coreauth.Auth {
+	if h == nil || h.authManager == nil {
+		return nil
+	}
+
+	auths := h.authManager.List()
+	var firstKiro *coreauth.Auth
+
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(auth.Provider)) != "kiro" {
+			continue
+		}
+
+		if firstKiro == nil {
+			firstKiro = auth
+		}
+
+		if authIndex != "" {
+			auth.EnsureIndex()
+			if auth.Index == authIndex {
+				return auth
+			}
+		}
+	}
+
+	return firstKiro
+}
+
+func profileARNForAuth(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+
+	if v := strings.TrimSpace(auth.Attributes["profile_arn"]); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(auth.Attributes["profileArn"]); v != "" {
+		return v
+	}
+
+	metadata := auth.Metadata
+	if len(metadata) == 0 {
+		return ""
+	}
+	if v := stringValue(metadata, "profile_arn"); v != "" {
+		return v
+	}
+	if v := stringValue(metadata, "profileArn"); v != "" {
+		return v
+	}
+
+	if tokenRaw, ok := metadata["token"].(map[string]any); ok {
+		if v := stringValue(tokenRaw, "profile_arn"); v != "" {
+			return v
+		}
+		if v := stringValue(tokenRaw, "profileArn"); v != "" {
+			return v
+		}
+	}
+
+	return ""
 }
 
 // enrichCopilotTokenResponse fetches quota information and adds it to the Copilot token response body

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -169,5 +171,135 @@ func TestResolveTokenForAuth_Antigravity_SkipsRefreshWhenTokenValid(t *testing.T
 	}
 	if callCount != 0 {
 		t.Fatalf("expected no refresh calls, got %d", callCount)
+	}
+}
+
+type fakeKiroUsageChecker struct {
+	usage *kiroauth.UsageQuotaResponse
+	err   error
+}
+
+func (f fakeKiroUsageChecker) CheckUsageByAccessToken(_ context.Context, _, _ string) (*kiroauth.UsageQuotaResponse, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.usage, nil
+}
+
+func TestFindKiroAuth_ByIndexAndFallback(t *testing.T) {
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	h := &Handler{authManager: manager}
+
+	other := &coreauth.Auth{ID: "other.json", FileName: "other.json", Provider: "copilot"}
+	kiroA := &coreauth.Auth{ID: "kiro-a.json", FileName: "kiro-a.json", Provider: "kiro"}
+	kiroB := &coreauth.Auth{ID: "kiro-b.json", FileName: "kiro-b.json", Provider: "kiro"}
+	for _, auth := range []*coreauth.Auth{other, kiroA, kiroB} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth: %v", err)
+		}
+	}
+	kiroA.EnsureIndex()
+
+	foundByIndex := h.findKiroAuth(kiroA.Index)
+	if foundByIndex == nil || foundByIndex.ID != kiroA.ID {
+		t.Fatalf("findKiroAuth(index) returned %#v, want %q", foundByIndex, kiroA.ID)
+	}
+
+	foundFallback := h.findKiroAuth("")
+	if foundFallback == nil || foundFallback.Provider != "kiro" {
+		t.Fatalf("findKiroAuth fallback returned %#v, want kiro provider", foundFallback)
+	}
+}
+
+func TestGetKiroQuotaWithChecker_Success(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "kiro-1.json",
+		FileName: "kiro-1.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"access_token": "token-1",
+			"profile_arn":  "arn:aws:codewhisperer:us-east-1:123:profile/test",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	auth.EnsureIndex()
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota?auth_index="+url.QueryEscape(auth.Index), nil)
+
+	h := &Handler{authManager: manager}
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{
+		usage: &kiroauth.UsageQuotaResponse{
+			UsageBreakdownList: []kiroauth.UsageBreakdownExtended{
+				{
+					ResourceType:              "AGENTIC_REQUEST",
+					UsageLimitWithPrecision:   100,
+					CurrentUsageWithPrecision: 25,
+				},
+			},
+		},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got["profile_arn"] != "arn:aws:codewhisperer:us-east-1:123:profile/test" {
+		t.Fatalf("profile_arn = %v", got["profile_arn"])
+	}
+	if got["remaining_quota"] != 75.0 {
+		t.Fatalf("remaining_quota = %v, want 75", got["remaining_quota"])
+	}
+	if got["usage_percentage"] != 25.0 {
+		t.Fatalf("usage_percentage = %v, want 25", got["usage_percentage"])
+	}
+	if got["quota_exhausted"] != false {
+		t.Fatalf("quota_exhausted = %v, want false", got["quota_exhausted"])
+	}
+}
+
+func TestGetKiroQuotaWithChecker_MissingProfileARN(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "kiro-no-profile.json",
+		FileName: "kiro-no-profile.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"access_token": "token-1",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota", nil)
+
+	h := &Handler{authManager: manager}
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{
+		usage: &kiroauth.UsageQuotaResponse{},
+	})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "profile arn not found") {
+		t.Fatalf("unexpected response body: %s", rec.Body.String())
 	}
 }
