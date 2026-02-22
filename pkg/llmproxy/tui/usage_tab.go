@@ -357,7 +357,7 @@ func renderBarChart(data map[string]any, maxBarWidth int, barColor lipgloss.Colo
 			labelWidth, label,
 			barStyle.Render(bar),
 			lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%.0f", v)),
-		))
+		)
 	}
 
 	return sb.String()

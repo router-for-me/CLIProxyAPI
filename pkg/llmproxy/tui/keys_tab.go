@@ -392,7 +392,7 @@ func renderProviderKeys(sb *strings.Builder, title string, keys []map[string]any
 		if baseURL != "" {
 			info += " → " + baseURL
 		}
-		fmt.Fprintf(&sb, "  %d. %s\n", i+1, info)
+		fmt.Fprintf(sb, "  %d. %s\n", i+1, info)
 	}
 	sb.WriteString("\n")
 }
