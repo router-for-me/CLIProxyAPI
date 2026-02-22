@@ -18,7 +18,12 @@ This runbook is for operators who care about provider uptime, quota health, and 
 ## Quota Visibility (`#146` scope)
 
 - Current operational source of truth is `v1/metrics/providers` plus provider auth/token files.
-- There is no dedicated unified "Kiro quota dashboard" endpoint in this repo today.
+- Kiro quota can be queried directly via management API:
+  - List auth records and capture a Kiro `auth_index`:
+    - `curl -sS http://localhost:8317/v0/management/auth-files -H "Authorization: Bearer <management-key>" | jq`
+  - Query Kiro quota:
+    - `curl -sS "http://localhost:8317/v0/management/kiro-quota?auth_index=<AUTH_INDEX>" -H "Authorization: Bearer <management-key>" | jq`
+  - If `auth_index` is omitted, API falls back to the first available Kiro credential.
 - Treat repeated `429` + falling success ratio as quota pressure and rotate capacity accordingly.
 
 ## Onboard a New Provider
