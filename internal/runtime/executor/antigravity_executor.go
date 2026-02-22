@@ -73,25 +73,45 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
 }
 
+// antigravityTransport is a singleton HTTP/1.1 transport shared by all Antigravity requests.
+// It is initialized once via antigravityTransportOnce to avoid leaking a new connection pool
+// (and the goroutines managing it) on every request.
+var (
+	antigravityTransport     *http.Transport
+	antigravityTransportOnce sync.Once
+)
+
+// initAntigravityTransport creates the shared HTTP/1.1 transport exactly once.
+func initAntigravityTransport() {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	antigravityTransport = base.Clone()
+	antigravityTransport.ForceAttemptHTTP2 = false
+	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade
+	antigravityTransport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+	// Crucial: actively advertise only HTTP/1.1 in the ALPN handshake
+	if antigravityTransport.TLSClientConfig == nil {
+		antigravityTransport.TLSClientConfig = &tls.Config{}
+	}
+	antigravityTransport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+}
+
 // newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
 // enforcing HTTP/1.1 by disabling HTTP/2 to perfectly mimic Node.js https defaults.
+// The underlying Transport is a singleton to avoid leaking connection pools.
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	antigravityTransportOnce.Do(initAntigravityTransport)
+
 	client := newProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	// If the proxy helper didn't set a custom transport (e.g. SOCKS5), use
+	// the shared HTTP/1.1 transport. Custom proxy transports are left as-is
+	// because they already carry their own dialer configuration.
 	if client.Transport == nil {
-		client.Transport = http.DefaultTransport
-	}
-	if tr, ok := client.Transport.(*http.Transport); ok {
-		trClone := tr.Clone()
-		trClone.ForceAttemptHTTP2 = false
-		// Also wiping TLSNextProto is good practice
-		trClone.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
-		// Crucial: The transport must actively advertise only http/1.1 in the ALPN handshake
-		if trClone.TLSClientConfig == nil {
-			trClone.TLSClientConfig = &tls.Config{}
-		}
-		trClone.TLSClientConfig.NextProtos = []string{"http/1.1"}
-		
-		client.Transport = trClone
+		client.Transport = antigravityTransport
+	} else if _, isDefault := client.Transport.(*http.Transport); isDefault {
+		client.Transport = antigravityTransport
 	}
 	return client
 }
