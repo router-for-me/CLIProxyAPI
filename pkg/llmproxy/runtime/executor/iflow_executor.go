@@ -82,9 +82,7 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		err = fmt.Errorf("iflow executor: missing api key")
 		return resp, err
 	}
-	if baseURL == "" {
-		baseURL = iflowauth.DefaultAPIBaseURL
-	}
+	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), iflowauth.DefaultAPIBaseURL, baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -185,9 +183,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		err = fmt.Errorf("iflow executor: missing api key")
 		return nil, err
 	}
-	if baseURL == "" {
-		baseURL = iflowauth.DefaultAPIBaseURL
-	}
+	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), iflowauth.DefaultAPIBaseURL, baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)

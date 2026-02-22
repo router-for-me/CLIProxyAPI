@@ -132,6 +132,11 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// OAuthUpstream defines per-channel upstream base URL overrides for OAuth/file-backed auth channels.
+	// Keys are channel identifiers (e.g., gemini-cli, claude, codex, qwen, iflow, github-copilot, antigravity).
+	// Values must be absolute base URLs (scheme + host), and are normalized by trimming trailing slashes.
+	OAuthUpstream map[string]string `yaml:"oauth-upstream,omitempty" json:"oauth-upstream,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -797,6 +802,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
+	// Normalize OAuth upstream URL override map.
+	cfg.SanitizeOAuthUpstream()
+
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
@@ -942,6 +950,44 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+// SanitizeOAuthUpstream normalizes OAuth upstream URL override keys/values.
+// It trims whitespace, lowercases channel names, drops empty keys/values, and
+// strips trailing slashes from URLs.
+func (cfg *Config) SanitizeOAuthUpstream() {
+	if cfg == nil {
+		return
+	}
+	if len(cfg.OAuthUpstream) == 0 {
+		return
+	}
+	out := make(map[string]string, len(cfg.OAuthUpstream))
+	for rawChannel, rawURL := range cfg.OAuthUpstream {
+		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if channel == "" {
+			continue
+		}
+		baseURL := strings.TrimSpace(rawURL)
+		if baseURL == "" {
+			continue
+		}
+		out[channel] = strings.TrimRight(baseURL, "/")
+	}
+	cfg.OAuthUpstream = out
+}
+
+// OAuthUpstreamURL resolves the configured OAuth upstream override for a channel.
+// Returns empty string when no override exists.
+func (cfg *Config) OAuthUpstreamURL(channel string) string {
+	if cfg == nil || len(cfg.OAuthUpstream) == 0 {
+		return ""
+	}
+	key := strings.ToLower(strings.TrimSpace(channel))
+	if key == "" {
+		return ""
+	}
+	return strings.TrimSpace(cfg.OAuthUpstream[key])
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
