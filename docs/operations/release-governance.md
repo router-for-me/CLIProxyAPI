@@ -20,6 +20,7 @@ Complete this section for any change that can alter provider behavior, auth sema
 - [ ] `routing-reference.md` updated when model selection/routing semantics changed.
 - [ ] `provider-operations.md` updated with new mitigation/fallback/monitoring actions.
 - [ ] Feature flags/defaults migration documented for staged rollout (including fallback model aliases).
+- [ ] Per-OAuth-account proxy behavior changes documented with strict/fail-closed defaults and rollback plan.
 - [ ] Backward compatibility impact documented (prefix rules, alias behavior, auth expectations).
 - [ ] `/v1/models` and `/v1/metrics/providers` validation evidence captured for release notes.
 - [ ] Any breaking behavior flagged in changelog under the correct scope (`auth`, `routing`, `docs`, `security`).

@@ -14,6 +14,8 @@ This runbook is for operators who care about provider uptime, quota health, and 
    - Verify no sustained bursts of `401`, `403`, or `429`.
 5. Spark eligibility check (Copilot/Codex):
    - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'gpt-5.3-codex|gpt-5.3-codex-spark'`
+6. Antigravity alias continuity check:
+   - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'gemini-claude-opus-4-6-thinking|claude-opus-4-6-thinking'`
 
 ## Quota Visibility (`#146` scope)
 
@@ -50,6 +52,7 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Add capacity (extra keys/providers) or reduce concurrency.
 - Shift traffic to fallback provider prefix.
 - Tighten expensive-model exposure with `excluded-models`.
+- For `Qwen Free allocated quota exceeded`, switch credential/project immediately and reduce burst concurrency.
 
 ### Wrong Provider Selected
 
@@ -63,38 +66,22 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
 
-### Cursor Root-Cause Probes
+### `502 unknown provider for model ...`
 
-- First-pass log probe:
-  - `rg -n "cursor config\\[" /path/to/runtime.log | tail -n 20`
-- Primary failure patterns:
-  - token file unreadable / malformed
-  - missing or mismatched `auth-token` for cursor-api zero-action flow
-  - cursor-api token add failures
-- Safe response:
-  - fix token source and auth wiring first
-  - re-check `/v1/models` includes `cursor/*`
-  - only then adjust aliases/routing
+- Primary check:
+  - Ensure requested model appears in `/v1/models` for the same client key.
+  - Verify `oauth-model-alias` entries are still present after config edits/reloads.
+- Common fix path:
+  - Re-add missing alias bridge entries (for example Antigravity Claude thinking aliases).
+  - Reload config and re-run model inventory before retrying requests.
 
-### MCP Tool Search (`ENABLE_TOOL_SEARCH`) 400 Guard
+### iFlow `glm-4.7` returns `406`
 
-- Before rollout, run both:
-  - one non-stream request with required tool calls
-  - one streaming request with the same tool set
-- Alert trigger:
-  - `MCP not in available tools` > 1% over 10 minutes
+- Immediate checks:
+  - Reproduce with `stream: false` and capture full upstream body.
+  - Verify exact model ID and alias route in `/v1/models`.
 - Mitigation:
-  - pin affected workloads to non-stream path temporarily
-  - validate `mcp__...` tool name normalization and provider tool allowlist
-
-### iFlow Model Deprecation and Alias Safety
-
-- When removing outdated iFlow upstream models:
-  - keep client-facing aliases stable in `oauth-model-alias` during migration
-  - verify no alias resolves to retired upstream IDs
-  - confirm `/v1/models` no longer advertises removed models before deleting compatibility aliases
-- Recommended check:
-  - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'iflow/'`
+  - Route temporarily to a known-good fallback alias while normalizing request shape.
 
 ### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
 

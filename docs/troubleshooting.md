@@ -31,59 +31,25 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 | --- | --- | --- | --- |
 | `Error 401` on request | Missing or rotated client API key | `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer API_KEY"` | Update key in `api-keys`, restart, verify no whitespace in config |
 | `403` from provider upstream | License/subscription or permission mismatch | Search logs for `status_code":403` in provider module | Align account entitlement, retry with fallback-capable model, inspect provider docs |
-| Repeated upstream `403` with ambiguous provider labels | Non-canonical provider key/alias naming across config/docs | Compare request model prefix + `oauth-model-alias` channel against canonical keys (`github-copilot`, `antigravity`, `iflow`, `kimi`) | Normalize names to canonical provider keys, then reload and re-check `/v1/models` inventory |
 | `Invalid JSON payload ... tool_result has no content field` | Upstream/client emitted sparse `tool_result` content block shape | Reproduce with one minimal payload and inspect translated request in logs | Upgrade to a build with sparse `tool_result` normalization; as a temporary workaround, send `tool_result.content` as `[]` |
-| iFlow `GLM-5` occasionally returns empty answer | Stream/non-stream payload parity drift or stale reasoning context in history | Retry same prompt with `stream:false` and compare emitted chunks/choices | Validate parity in both modes, keep assistant history intact, and avoid mixed legacy/new reasoning fields in one request |
 | `Docker Image Error` on startup/health | Image tag mismatch, stale config mount, or incompatible env defaults | `docker images | head`, `docker logs CONTAINER_NAME --tail 200`, `/health` check | Pull/pin a known-good tag, verify mounted `config.yaml`, then compare `stream: true/false` behavior for parity |
 | `Model not found` / `bad model` | Alias/prefix/model map mismatch | `curl .../v1/models` and compare requested ID | Update alias map, prefix rules, and `excluded-models` |
+| `request body too large` / payload near `280KB` fails | Upstream body limit reached for selected route/model | Replay with same request using smaller prompt (`<200KB`) and inspect response code/body | Split long context into chunks, move large artifacts to files/URLs, and retry with reduced inline payload size |
+| `502 unknown provider for model gemini-claude-opus-4-6-thinking` | Missing `oauth-model-alias` bridge for Antigravity thinking model IDs | `curl -sS .../v1/models | jq -r '.data[].id' | rg 'gemini-claude-opus-4-6-thinking|claude-opus-4-6-thinking'` | Add/restore `oauth-model-alias.antigravity` mappings, reload config, and verify `/v1/models` before retry |
 | `gpt-5.3-codex-spark` fails for plus/team | Account tier does not expose Spark model even if config lists it | `GET /v1/models` and look for `gpt-5.3-codex-spark` | Route to `gpt-5.3-codex` fallback and alert on repeated Spark 400/404 responses |
-| `iflow` requests repeatedly return `406` | Upstream model-level rejection, stale auth/session metadata, or stream-shape mismatch | Retry same payload with `stream:false` and compare status/body | Gate rollout with non-stream canary first, then stream; keep fallback model alias ready (`iflow/glm-4.7` or `iflow/minimax-m2.5`) |
-| `Reasoning Error` / invalid effort-level failures | Request carries unsupported `reasoning_effort`/`reasoning.effort` for selected model | Retry with `reasoning_effort: "low"` and inspect error payload + model ID | Use model-supported levels only; for unknown compatibility set `reasoning_effort` to `auto` or omit field |
-| Claude OAuth cache usage always `0` | Upstream does not emit cache counters for selected model or request path | Compare `usage` fields for same prompt on `/v1/chat/completions` and `/v1/responses` | Treat missing cache counters as observational gap; verify routing and usage totals before assuming billing drift |
-| Port `8317` becomes unreachable until SSH/login activity | Host/network idle policy, process supervision gap, or stale listener | `lsof -iTCP:8317 -sTCP:LISTEN` and `/health` from local + remote shell | Add external health check + autorestart, and pin service under process manager with restart-on-failure |
+| `iflow` `glm-4.7` returns `406` | Request format/headers do not match IFlow acceptance rules for that model | Retry once with non-stream mode and capture response body + headers | Pin to known-working alias for `glm-4.7`, normalize request format, and keep fallback model route available |
 | Runtime config write errors | Read-only mount or immutable filesystem | `find /CLIProxyAPI -maxdepth 1 -name config.yaml -print` | Use writable mount, re-run with read-only warning, confirm management persistence status |
 | Kiro/OAuth auth loops | Expired or missing token refresh fields | Re-run `cliproxyapi++ auth`/reimport token path | Refresh credentials, run with fresh token file, avoid duplicate token imports |
-| `iflow executor: token refresh failed` | Refresh token expired/revoked or refresh metadata incomplete | Inspect auth metadata (`refresh_token`, `expired`, `last_refresh`) and trigger management refresh endpoint | Re-auth affected provider, then run one management refresh + one canary chat request before restoring traffic |
 | Streaming hangs or truncation | Reverse proxy buffering / payload compatibility issue | Reproduce with `stream: false`, then compare SSE response | Verify reverse-proxy config, compare tool schema compatibility and payload shape |
-| Local `gemini3` runs keep failing after config edits | Runtime not reloaded deterministically in local dev | Check whether `process-compose` profile is running and watcher sees file changes | Use `process-compose -f examples/process-compose.dev.yaml up`, then force a config timestamp bump and re-run `/health` + canary request |
 | `Cannot use Claude Models in Codex CLI` | Missing oauth alias bridge for Claude model IDs | `curl -sS .../v1/models | jq '.data[].id' | rg 'claude-opus|claude-sonnet|claude-haiku'` | Add/restore `oauth-model-alias` entries (or keep default injection enabled), then reload and re-check `/v1/models` |
+| `Qwen Free allocated quota exceeded` | Current Qwen credential/project exhausted | Check current quota behavior and provider error ratio in logs/metrics | Switch to alternate credential/project, enable quota-exceeded fallback toggles, and retry with reduced concurrency |
 | `/v1/responses/compact` fails or hangs | Wrong endpoint/mode expectations (streaming not supported for compact) | Retry with non-stream `POST /v1/responses/compact` and inspect JSON `object` field | Use compact only in non-stream mode; for streaming flows keep `/v1/responses` or `/v1/chat/completions` |
-| `[Claude code] ENABLE_TOOL_SEARCH` returns `MCP not in available tools` (`400`) | Tool name normalization mismatch or provider rejecting unavailable MCP tools | Reproduce once with `stream:false` and once with `stream:true`; inspect translated `tools[].name` | Keep `mcp__...` naming consistent, verify tool is present for the selected model, and gate rollout with stream/non-stream parity checks |
-| Antigravity `status=INVALID_ARGUMENT` for `claude-opus-4-6(-thinking)` | Upstream request shape mismatch in thinking/tool blocks | Replay one minimal request with `reasoning_effort:"medium"` and inspect logs around translator output | Use current compatibility aliases, keep thinking config explicit, and verify signature placeholder rewrite in translated payload |
-| `cursor` route fails after config change (`401`/`404`/empty models) | Token-file unreadable, cursor-api auth mismatch, or stale alias assumptions | Check startup/runtime warnings for `cursor config[...]` and verify `/v1/models` includes `cursor/*` IDs | Fix token-file path/permissions, align `auth-token` with cursor-api `AUTH_TOKEN`, reload, then re-validate model inventory |
-| Custom alias returns `404` (`iflow`/OAuth channels) | Alias points to removed upstream model or stale mapping | Compare request model with `/v1/models` and `oauth-model-alias` entries | Remove deprecated aliases, migrate to active model IDs, and keep compatibility alias bridges for existing clients during rollout |
 
 Use this matrix as an issue-entry checklist:
 
 ```bash
 for endpoint in health models v1/metrics/providers v0/management/logs; do
   curl -sS "http://localhost:8317/$endpoint" -H "Authorization: Bearer YOUR_API_KEY" | head -n 3
-done
-```
-
-## Invalid Auth File Cleanup Checks
-
-Use this when auth files are stale/corrupt and you need a safe cleanup pass before rollout:
-
-```bash
-AUTH_DIR="${AUTH_DIR:-./auths}"
-find "$AUTH_DIR" -maxdepth 1 -type f -name '*.json' -print
-```
-
-```bash
-# Validate JSON files and list broken ones
-find "$AUTH_DIR" -maxdepth 1 -type f -name '*.json' -print0 \
-  | xargs -0 -I{} sh -c 'jq empty "{}" >/dev/null 2>&1 || echo "invalid-json: {}"'
-```
-
-```bash
-# Stream/non-stream parity probe after cleanup
-for mode in false true; do
-  curl -sS -X POST http://localhost:8317/v1/chat/completions \
-    -H "Authorization: Bearer YOUR_CLIENT_KEY" \
-    -H "Content-Type: application/json" \
-    -d "{\"model\":\"iflow/minimax-m2.5\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":$mode}" \
-    | head -n 5
 done
 ```
 
