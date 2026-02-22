@@ -127,7 +127,6 @@ func buildIDCRefreshPayload(clientID, clientSecret, refreshToken string) map[str
 		"clientId":      clientID,
 		"clientSecret":  clientSecret,
 		"refreshToken":  refreshToken,
-		"grantType":     "refresh_token",
 		"client_id":     clientID,
 		"client_secret": clientSecret,
 		"refresh_token": refreshToken,
