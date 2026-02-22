@@ -15,11 +15,11 @@ curl -sS http://localhost:8317/health
 
 # 2) Is API key auth configured correctly?
 curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer <your-client-key>"
+  -H "Authorization: Bearer YOUR_CLIENT_KEY"
 
 # 3) What models are actually exposed?
 curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer <your-client-key>" | jq '.data[].id' | head
+  -H "Authorization: Bearer YOUR_CLIENT_KEY" | jq '.data[].id' | head
 
 # 4) Any provider-side stress?
 curl -sS http://localhost:8317/v1/metrics/providers | jq
@@ -29,7 +29,7 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 
 | Symptom | Likely Cause | Immediate Check | Remediation |
 | --- | --- | --- | --- |
-| `Error 401` on request | Missing or rotated client API key | `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <key>"` | Update key in `api-keys`, restart, verify no whitespace in config |
+| `Error 401` on request | Missing or rotated client API key | `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer API_KEY"` | Update key in `api-keys`, restart, verify no whitespace in config |
 | `403` from provider upstream | License/subscription or permission mismatch | Search logs for `status_code":403` in provider module | Align account entitlement, retry with fallback-capable model, inspect provider docs |
 | `Invalid JSON payload ... tool_result has no content field` | Upstream/client emitted sparse `tool_result` content block shape | Reproduce with one minimal payload and inspect translated request in logs | Upgrade to a build with sparse `tool_result` normalization; as a temporary workaround, send `tool_result.content` as `[]` |
 | `Docker Image Error` on startup/health | Image tag mismatch, stale config mount, or incompatible env defaults | `docker images | head`, `docker logs <container> --tail 200`, `/health` check | Pull/pin a known-good tag, verify mounted `config.yaml`, then compare `stream: true/false` behavior for parity |
@@ -45,7 +45,7 @@ Use this matrix as an issue-entry checklist:
 
 ```bash
 for endpoint in health models v1/metrics/providers v0/management/logs; do
-  curl -sS "http://localhost:8317/$endpoint" -H "Authorization: Bearer <your-api-key>" | head -n 3
+  curl -sS "http://localhost:8317/$endpoint" -H "Authorization: Bearer YOUR_API_KEY" | head -n 3
 done
 ```
 
@@ -68,7 +68,7 @@ lsof -iTCP:8317 -sTCP:LISTEN
 
 Checks:
 
-- Send `Authorization: Bearer <api-key>`.
+- Send `Authorization: Bearer API_KEY`.
 - Confirm key exists in `api-keys` list in `config.yaml`.
 - Remove leading/trailing spaces in key value.
 
