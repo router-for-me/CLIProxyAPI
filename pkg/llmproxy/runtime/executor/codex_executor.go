@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -114,6 +115,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
+	body = normalizeCodexToolSchemas(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -216,6 +218,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
+	body = normalizeCodexToolSchemas(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -309,6 +312,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
+	body = normalizeCodexToolSchemas(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -588,6 +592,160 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func normalizeCodexToolSchemas(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return body
+	}
+
+	toolsValue, exists := root["tools"]
+	if !exists {
+		return body
+	}
+	tools, ok := toolsValue.([]any)
+	if !ok {
+		return body
+	}
+
+	changed := false
+	for i := range tools {
+		tool, ok := tools[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		parametersValue, exists := tool["parameters"]
+		if !exists {
+			continue
+		}
+
+		switch parameters := parametersValue.(type) {
+		case map[string]any:
+			if normalizeJSONSchemaArrays(parameters) {
+				changed = true
+			}
+		case string:
+			trimmed := strings.TrimSpace(parameters)
+			if trimmed == "" {
+				continue
+			}
+			var schema map[string]any
+			if err := json.Unmarshal([]byte(trimmed), &schema); err != nil {
+				continue
+			}
+			if !normalizeJSONSchemaArrays(schema) {
+				continue
+			}
+			normalizedSchema, err := json.Marshal(schema)
+			if err != nil {
+				continue
+			}
+			tool["parameters"] = string(normalizedSchema)
+			changed = true
+		}
+	}
+
+	if !changed {
+		return body
+	}
+	normalizedBody, err := json.Marshal(root)
+	if err != nil {
+		return body
+	}
+	return normalizedBody
+}
+
+func normalizeJSONSchemaArrays(schema map[string]any) bool {
+	if schema == nil {
+		return false
+	}
+
+	changed := false
+	if schemaTypeHasArray(schema["type"]) {
+		if _, exists := schema["items"]; !exists {
+			schema["items"] = map[string]any{}
+			changed = true
+		}
+	}
+
+	if itemsSchema, ok := schema["items"].(map[string]any); ok {
+		if normalizeJSONSchemaArrays(itemsSchema) {
+			changed = true
+		}
+	}
+	if itemsArray, ok := schema["items"].([]any); ok {
+		for i := range itemsArray {
+			itemSchema, ok := itemsArray[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			if normalizeJSONSchemaArrays(itemSchema) {
+				changed = true
+			}
+		}
+	}
+
+	if props, ok := schema["properties"].(map[string]any); ok {
+		for _, prop := range props {
+			propSchema, ok := prop.(map[string]any)
+			if !ok {
+				continue
+			}
+			if normalizeJSONSchemaArrays(propSchema) {
+				changed = true
+			}
+		}
+	}
+
+	if additionalProperties, ok := schema["additionalProperties"].(map[string]any); ok {
+		if normalizeJSONSchemaArrays(additionalProperties) {
+			changed = true
+		}
+	}
+
+	for _, key := range []string{"anyOf", "oneOf", "allOf", "prefixItems"} {
+		nodes, ok := schema[key].([]any)
+		if !ok {
+			continue
+		}
+		for i := range nodes {
+			node, ok := nodes[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			if normalizeJSONSchemaArrays(node) {
+				changed = true
+			}
+		}
+	}
+
+	return changed
+}
+
+func schemaTypeHasArray(typeValue any) bool {
+	switch typeNode := typeValue.(type) {
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typeNode), "array")
+	case []any:
+		for i := range typeNode {
+			typeName, ok := typeNode[i].(string)
+			if ok && strings.EqualFold(strings.TrimSpace(typeName), "array") {
+				return true
+			}
+		}
+	case []string:
+		for i := range typeNode {
+			if strings.EqualFold(strings.TrimSpace(typeNode[i]), "array") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {
