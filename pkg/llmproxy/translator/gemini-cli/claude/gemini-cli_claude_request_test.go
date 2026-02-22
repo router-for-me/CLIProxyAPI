@@ -26,3 +26,32 @@ func TestConvertClaudeRequestToCLI(t *testing.T) {
 		t.Errorf("expected 1 content item, got %d", len(contents))
 	}
 }
+
+func TestConvertClaudeRequestToCLI_SanitizesToolUseThoughtSignature(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{
+				"role":"assistant",
+				"content":[
+					{
+						"type":"tool_use",
+						"id":"toolu_01",
+						"name":"lookup",
+						"input":{"q":"hello"}
+					}
+				]
+			}
+		]
+	}`)
+
+	got := ConvertClaudeRequestToCLI("gemini-2.5-pro", input, false)
+	res := gjson.ParseBytes(got)
+
+	part := res.Get("request.contents.0.parts.0")
+	if !part.Get("functionCall").Exists() {
+		t.Fatalf("expected tool_use to map to functionCall")
+	}
+	if part.Get("thoughtSignature").String() != geminiCLIClaudeThoughtSignature {
+		t.Fatalf("expected thoughtSignature %q, got %q", geminiCLIClaudeThoughtSignature, part.Get("thoughtSignature").String())
+	}
+}
