@@ -442,9 +442,6 @@ func (s *PostgresStore) syncAuthFromDatabase(ctx context.Context) error {
 	}
 	defer func() { _ = rows.Close() }()
 
-	if err = os.RemoveAll(s.authDir); err != nil {
-		return fmt.Errorf("postgres store: reset auth directory: %w", err)
-	}
 	if err = os.MkdirAll(s.authDir, 0o700); err != nil {
 		return fmt.Errorf("postgres store: recreate auth directory: %w", err)
 	}
@@ -460,6 +457,9 @@ func (s *PostgresStore) syncAuthFromDatabase(ctx context.Context) error {
 		path, errPath := s.absoluteAuthPath(id)
 		if errPath != nil {
 			log.WithError(errPath).Warnf("postgres store: skipping auth %s outside spool", id)
+			continue
+		}
+		if info, errInfo := os.Stat(path); errInfo == nil && info.IsDir() {
 			continue
 		}
 		if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

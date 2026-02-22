@@ -1,8 +1,8 @@
 package api
 
 import (
-	"errors"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"

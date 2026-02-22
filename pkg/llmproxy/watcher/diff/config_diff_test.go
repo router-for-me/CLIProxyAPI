@@ -1,27 +1,27 @@
 package diff
 
 import (
-	"testing"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"testing"
 )
 
 func TestBuildConfigChangeDetails(t *testing.T) {
 	oldCfg := &config.Config{
-		Port: 8080,
-		Debug: false,
+		Port:      8080,
+		Debug:     false,
 		ClaudeKey: []config.ClaudeKey{{APIKey: "k1"}},
 	}
 	newCfg := &config.Config{
-		Port: 9090,
-		Debug: true,
+		Port:      9090,
+		Debug:     true,
 		ClaudeKey: []config.ClaudeKey{{APIKey: "k1"}, {APIKey: "k2"}},
 	}
-	
+
 	changes := BuildConfigChangeDetails(oldCfg, newCfg)
 	if len(changes) != 3 {
 		t.Errorf("expected 3 changes, got %d: %v", len(changes), changes)
 	}
-	
+
 	// Test unknown proxy URL
 	u := formatProxyURL("http://user:pass@host:1234")
 	if u != "http://host:1234" {

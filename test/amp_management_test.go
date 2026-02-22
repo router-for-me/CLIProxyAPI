@@ -271,7 +271,7 @@ func TestDeleteAmpUpstreamAPIKeys_ClearsAll(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
-	if resp["upstream-api-keys"] != nil && len(resp["upstream-api-keys"]) != 0 {
+	if len(resp["upstream-api-keys"]) != 0 {
 		t.Fatalf("expected cleared list, got %#v", resp["upstream-api-keys"])
 	}
 }

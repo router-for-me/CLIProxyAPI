@@ -11,12 +11,12 @@ func TestConvertOpenAIResponseToClaude(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"stream": true}`)
 	request := []byte(`{}`)
-	
+
 	// Test streaming chunk with content
 	chunk := []byte(`data: {"id": "chatcmpl-123", "model": "gpt-4o", "created": 1677652288, "choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": null}]}`)
 	var param any
 	got := ConvertOpenAIResponseToClaude(ctx, "claude-3-sonnet", originalRequest, request, chunk, &param)
-	
+
 	if len(got) != 3 { // message_start + content_block_start + content_block_delta
 		t.Errorf("expected 3 events, got %d", len(got))
 	}
@@ -87,7 +87,7 @@ func TestConvertOpenAIResponseToClaudeNonStream(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"stream": false}`)
 	request := []byte(`{}`)
-	
+
 	// Test non-streaming response with reasoning and content
 	response := []byte(`{
 		"id": "chatcmpl-123",
@@ -106,23 +106,23 @@ func TestConvertOpenAIResponseToClaudeNonStream(t *testing.T) {
 			"completion_tokens": 20
 		}
 	}`)
-	
+
 	got := ConvertOpenAIResponseToClaudeNonStream(ctx, "claude-3-sonnet", originalRequest, request, response, nil)
 	res := gjson.Parse(got)
-	
+
 	if res.Get("id").String() != "chatcmpl-123" {
 		t.Errorf("expected id chatcmpl-123, got %s", res.Get("id").String())
 	}
-	
+
 	content := res.Get("content").Array()
 	if len(content) != 2 {
 		t.Errorf("expected 2 content blocks, got %d", len(content))
 	}
-	
+
 	if content[0].Get("type").String() != "thinking" {
 		t.Errorf("expected first block type thinking, got %s", content[0].Get("type").String())
 	}
-	
+
 	if content[1].Get("type").String() != "text" {
 		t.Errorf("expected second block type text, got %s", content[1].Get("type").String())
 	}
@@ -132,7 +132,7 @@ func TestConvertOpenAIResponseToClaude_ToolCalls(t *testing.T) {
 	ctx := context.Background()
 	originalRequest := []byte(`{"stream": false}`)
 	request := []byte(`{}`)
-	
+
 	response := []byte(`{
 		"id": "chatcmpl-123",
 		"choices": [{
@@ -150,19 +150,19 @@ func TestConvertOpenAIResponseToClaude_ToolCalls(t *testing.T) {
 			"finish_reason": "tool_calls"
 		}]
 	}`)
-	
+
 	got := ConvertOpenAIResponseToClaudeNonStream(ctx, "claude-3-sonnet", originalRequest, request, response, nil)
 	res := gjson.Parse(got)
-	
+
 	content := res.Get("content").Array()
 	if len(content) != 1 {
 		t.Fatalf("expected 1 content block, got %d", len(content))
 	}
-	
+
 	if content[0].Get("type").String() != "tool_use" {
 		t.Errorf("expected tool_use block, got %s", content[0].Get("type").String())
 	}
-	
+
 	if content[0].Get("name").String() != "my_tool" {
 		t.Errorf("expected tool name my_tool, got %s", content[0].Get("name").String())
 	}

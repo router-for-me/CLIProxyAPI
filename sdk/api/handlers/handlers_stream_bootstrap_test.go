@@ -58,6 +58,8 @@ func (e *failOnceStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Aut
 	return auth, nil
 }
 
+func (e *failOnceStreamExecutor) CloseExecutionSession(sessionID string) {}
+
 func (e *failOnceStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
 }
@@ -109,6 +111,8 @@ func (e *payloadThenErrorStreamExecutor) ExecuteStream(context.Context, *coreaut
 func (e *payloadThenErrorStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	return auth, nil
 }
+
+func (e *payloadThenErrorStreamExecutor) CloseExecutionSession(sessionID string) {}
 
 func (e *payloadThenErrorStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
@@ -177,6 +181,8 @@ func (e *authAwareStreamExecutor) ExecuteStream(ctx context.Context, auth *corea
 func (e *authAwareStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	return auth, nil
 }
+
+func (e *authAwareStreamExecutor) CloseExecutionSession(sessionID string) {}
 
 func (e *authAwareStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}

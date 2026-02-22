@@ -13,7 +13,7 @@ func TestSetLogLevel(t *testing.T) {
 	cfg := &config.Config{Debug: true}
 	SetLogLevel(cfg)
 	// No easy way to assert without global state check, but ensures no panic
-	
+
 	cfg.Debug = false
 	SetLogLevel(cfg)
 }

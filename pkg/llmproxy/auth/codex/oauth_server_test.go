@@ -16,7 +16,7 @@ func TestOAuthServer(t *testing.T) {
 	if err := server.Start(); err != nil {
 		t.Fatalf("failed to start server: %v", err)
 	}
-	defer server.Stop(context.Background())
+	defer func() { _ = server.Stop(context.Background()) }()
 
 	if !server.IsRunning() {
 		t.Error("expected server to be running")
@@ -32,7 +32,7 @@ func TestOAuthServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("callback request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 OK after redirect, got %d", resp.StatusCode)
@@ -53,14 +53,14 @@ func TestOAuthServer_Errors(t *testing.T) {
 	if err := server.Start(); err != nil {
 		t.Fatalf("failed to start server: %v", err)
 	}
-	defer server.Stop(context.Background())
+	defer func() { _ = server.Stop(context.Background()) }()
 
 	// Test error callback
 	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/auth/callback?error=access_denied", port))
 	if err != nil {
 		t.Fatalf("callback request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 Bad Request, got %d", resp.StatusCode)
@@ -72,14 +72,14 @@ func TestOAuthServer_Errors(t *testing.T) {
 	}
 
 	// Test missing code
-	http.Get(fmt.Sprintf("http://localhost:%d/auth/callback?state=xyz", port))
+	_, _ = http.Get(fmt.Sprintf("http://localhost:%d/auth/callback?state=xyz", port))
 	result, _ = server.WaitForCallback(1 * time.Second)
 	if result.Error != "no_code" {
 		t.Errorf("expected error no_code, got %s", result.Error)
 	}
 
 	// Test missing state
-	http.Get(fmt.Sprintf("http://localhost:%d/auth/callback?code=abc", port))
+	_, _ = http.Get(fmt.Sprintf("http://localhost:%d/auth/callback?code=abc", port))
 	result, _ = server.WaitForCallback(1 * time.Second)
 	if result.Error != "no_state" {
 		t.Errorf("expected error no_state, got %s", result.Error)
@@ -98,7 +98,7 @@ func TestOAuthServer_PortInUse(t *testing.T) {
 	if err := server1.Start(); err != nil {
 		t.Fatalf("failed to start server1: %v", err)
 	}
-	defer server1.Stop(context.Background())
+	defer func() { _ = server1.Stop(context.Background()) }()
 
 	server2 := NewOAuthServer(port)
 	if err := server2.Start(); err == nil || !strings.Contains(err.Error(), "already in use") {

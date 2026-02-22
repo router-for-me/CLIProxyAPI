@@ -10,14 +10,14 @@ import (
 func TestConvertCodexResponseToOpenAI(t *testing.T) {
 	ctx := context.Background()
 	var param any
-	
+
 	// response.created
 	raw := []byte(`data: {"type": "response.created", "response": {"id": "resp_123", "created_at": 1629141600, "model": "gpt-4o"}}`)
 	got := ConvertCodexResponseToOpenAI(ctx, "gpt-4o", nil, nil, raw, &param)
 	if len(got) != 0 {
 		t.Errorf("expected 0 chunks for response.created, got %d", len(got))
 	}
-	
+
 	// response.output_text.delta
 	raw = []byte(`data: {"type": "response.output_text.delta", "delta": "hello"}`)
 	got = ConvertCodexResponseToOpenAI(ctx, "gpt-4o", nil, nil, raw, &param)
@@ -65,7 +65,7 @@ func TestConvertCodexResponseToOpenAINonStream(t *testing.T) {
 		"usage": {"input_tokens": 10, "output_tokens": 5},
 		"status": "completed"
 	}}`)
-	
+
 	got := ConvertCodexResponseToOpenAINonStream(context.Background(), "gpt-4o", nil, nil, raw, nil)
 	res := gjson.Parse(got)
 	if res.Get("id").String() != "resp_123" {
@@ -105,10 +105,10 @@ func TestConvertCodexResponseToOpenAINonStream_Full(t *testing.T) {
 			"output_tokens_details": {"reasoning_tokens": 2}
 		}
 	}}`)
-	
+
 	got := ConvertCodexResponseToOpenAINonStream(context.Background(), "gpt-4o", nil, nil, raw, nil)
 	res := gjson.Parse(got)
-	
+
 	if res.Get("choices.0.message.reasoning_content").String() != "thought" {
 		t.Errorf("expected reasoning_content thought, got %s", res.Get("choices.0.message.reasoning_content").String())
 	}

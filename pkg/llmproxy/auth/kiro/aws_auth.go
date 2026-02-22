@@ -23,11 +23,11 @@ const (
 	// Note: This is different from the Amazon Q streaming endpoint (q.us-east-1.amazonaws.com)
 	// used in kiro_executor.go for GenerateAssistantResponse. Both endpoints are correct
 	// for their respective API operations.
-	awsKiroEndpoint     = "https://codewhisperer.us-east-1.amazonaws.com"
-	defaultTokenFile    = "~/.aws/sso/cache/kiro-auth-token.json"
-	targetGetUsage      = "AmazonCodeWhispererService.GetUsageLimits"
-	targetListModels    = "AmazonCodeWhispererService.ListAvailableModels"
-	targetGenerateChat  = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
+	awsKiroEndpoint    = "https://codewhisperer.us-east-1.amazonaws.com"
+	defaultTokenFile   = "~/.aws/sso/cache/kiro-auth-token.json"
+	targetGetUsage     = "AmazonCodeWhispererService.GetUsageLimits"
+	targetListModels   = "AmazonCodeWhispererService.ListAvailableModels"
+	targetGenerateChat = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
 )
 
 // KiroAuth handles AWS CodeWhisperer authentication and API communication.

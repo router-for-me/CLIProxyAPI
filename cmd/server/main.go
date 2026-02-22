@@ -663,15 +663,15 @@ func main() {
 				}
 			}
 		} else {
-      // Start the main proxy service
-      managementasset.StartAutoUpdater(context.Background(), configFilePath)
+			// Start the main proxy service
+			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 
-      if cfg.AuthDir != "" {
-        kiro.InitializeAndStart(cfg.AuthDir, cfg)
-        defer kiro.StopGlobalRefreshManager()
-      }
+			if cfg.AuthDir != "" {
+				kiro.InitializeAndStart(cfg.AuthDir, cfg)
+				defer kiro.StopGlobalRefreshManager()
+			}
 
-      cmd.StartService(cfg, configFilePath, password)
+			cmd.StartService(cfg, configFilePath, password)
 		}
 	}
 }

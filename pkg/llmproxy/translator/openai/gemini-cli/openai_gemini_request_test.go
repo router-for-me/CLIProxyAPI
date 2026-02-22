@@ -42,7 +42,7 @@ func TestConvertGeminiCLIRequestToOpenAI(t *testing.T) {
 	messages := res.Get("messages").Array()
 	// systemInstruction should become a system message in ConvertGeminiRequestToOpenAI (if it supports it)
 	// Actually, ConvertGeminiRequestToOpenAI should handle system_instruction if it exists in the raw JSON after translation here.
-	
+
 	// Let's see if we have 2 messages (system + user)
 	if len(messages) < 1 {
 		t.Errorf("expected at least 1 message, got %d", len(messages))

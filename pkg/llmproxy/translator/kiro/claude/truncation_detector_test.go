@@ -1,8 +1,8 @@
 package claude
 
 import (
-	"testing"
 	"strings"
+	"testing"
 )
 
 func TestDetectTruncation(t *testing.T) {

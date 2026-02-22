@@ -1,8 +1,8 @@
 package claude
 
 import (
-	"testing"
 	"strings"
+	"testing"
 )
 
 func TestHasWebSearchTool(t *testing.T) {
@@ -68,7 +68,7 @@ func TestGenerateWebSearchEvents(t *testing.T) {
 	if len(events) < 11 {
 		t.Errorf("expected at least 11 events, got %d", len(events))
 	}
-	
+
 	foundMessageStart := false
 	for _, e := range events {
 		if e.Event == "message_start" {

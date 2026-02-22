@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/diff"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 

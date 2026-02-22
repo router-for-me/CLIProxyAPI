@@ -86,6 +86,42 @@ type codexWebsocketRead struct {
 	err     error
 }
 
+// enqueueCodexWebsocketRead attempts to send a read result to the channel.
+// If the channel is full and a done signal is sent, it returns without enqueuing.
+// If the channel is full and we have an error, it prioritizes the error by draining and re-sending.
+func enqueueCodexWebsocketRead(ch chan codexWebsocketRead, done <-chan struct{}, read codexWebsocketRead) {
+	if ch == nil {
+		return
+	}
+
+	// Try to send without blocking first
+	select {
+	case <-done:
+		return
+	case ch <- read:
+		return
+	default:
+	}
+
+	// Channel full and done signal not yet sent; check done again
+	select {
+	case <-done:
+		return
+	default:
+	}
+
+	// If we have an error, prioritize it by draining the stale message
+	if read.err != nil {
+		select {
+		case <-done:
+			return
+		case <-ch:
+			// Drained stale message, now send the error
+			ch <- read
+		}
+	}
+}
+
 func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
 	if s == nil {
 		return
@@ -1015,36 +1051,6 @@ func closeHTTPResponseBody(resp *http.Response, logPrefix string) {
 	if errClose := resp.Body.Close(); errClose != nil {
 		log.Errorf("%s: %v", logPrefix, errClose)
 	}
-}
-
-func closeOnContextDone(ctx context.Context, conn *websocket.Conn) chan struct{} {
-	done := make(chan struct{})
-	if ctx == nil || conn == nil {
-		return done
-	}
-	go func() {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			_ = conn.Close()
-		}
-	}()
-	return done
-}
-
-func cancelReadOnContextDone(ctx context.Context, conn *websocket.Conn) chan struct{} {
-	done := make(chan struct{})
-	if ctx == nil || conn == nil {
-		return done
-	}
-	go func() {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			_ = conn.SetReadDeadline(time.Now())
-		}
-	}()
-	return done
 }
 
 func executionSessionIDFromOptions(opts cliproxyexecutor.Options) string {

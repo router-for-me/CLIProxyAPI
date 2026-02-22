@@ -39,6 +39,9 @@ func (e *compactCaptureExecutor) Refresh(ctx context.Context, auth *coreauth.Aut
 	return auth, nil
 }
 
+func (e *compactCaptureExecutor) CloseExecutionSession(sessionID string) {
+}
+
 func (e *compactCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, errors.New("not implemented")
 }

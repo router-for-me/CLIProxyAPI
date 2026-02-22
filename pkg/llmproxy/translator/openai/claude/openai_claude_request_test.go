@@ -42,7 +42,7 @@ func TestConvertClaudeRequestToOpenAI(t *testing.T) {
 	if messages[1].Get("role").String() != "user" {
 		t.Errorf("expected second message role user, got %s", messages[1].Get("role").String())
 	}
-	
+
 	// Check thinking conversion
 	if res.Get("reasoning_effort").String() == "" {
 		t.Error("expected reasoning_effort to be set")

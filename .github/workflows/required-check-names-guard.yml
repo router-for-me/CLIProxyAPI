@@ -1,0 +1,51 @@
+name: required-check-names-guard
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-required-check-names:
+    name: verify-required-check-names
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify required check names exist
+        run: |
+          set -euo pipefail
+          manifest=".github/required-checks.txt"
+          if [ ! -f "${manifest}" ]; then
+            echo "Missing manifest: ${manifest}"
+            exit 1
+          fi
+
+          missing=0
+          while IFS='|' read -r workflow_file job_name; do
+            [ -z "${workflow_file}" ] && continue
+            case "${workflow_file}" in
+              \#*) continue ;;
+            esac
+
+            workflow_path=".github/workflows/${workflow_file}"
+            if [ ! -f "${workflow_path}" ]; then
+              echo "Missing workflow file: ${workflow_path}"
+              missing=1
+              continue
+            fi
+
+            escaped_job_name="$(printf '%s' "${job_name}" | sed 's/[][(){}.^$*+?|\\/]/\\&/g')"
+            if ! grep -Eq "^[[:space:]]+name:[[:space:]]*[\"']?${escaped_job_name}[\"']?[[:space:]]*$" "${workflow_path}"; then
+              echo "Missing required check name '${job_name}' in ${workflow_path}"
+              missing=1
+            fi
+          done < "${manifest}"
+
+          if [ "${missing}" -ne 0 ]; then
+            echo "Required check name guard failed."
+            exit 1
+          fi

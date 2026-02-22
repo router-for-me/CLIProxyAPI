@@ -11,28 +11,28 @@ import (
 func TestConvertClaudeResponseToOpenAIResponses(t *testing.T) {
 	ctx := context.Background()
 	var param any
-	
+
 	// Message start
 	raw := []byte(`data: {"type": "message_start", "message": {"id": "msg_123", "role": "assistant", "model": "claude-3"}}`)
 	got := ConvertClaudeResponseToOpenAIResponses(ctx, "gpt-4o", nil, nil, raw, &param)
 	if len(got) != 2 {
 		t.Errorf("expected 2 chunks, got %d", len(got))
 	}
-	
+
 	// Content block start (text)
 	raw = []byte(`data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}`)
 	got = ConvertClaudeResponseToOpenAIResponses(ctx, "gpt-4o", nil, nil, raw, &param)
 	if len(got) != 2 {
 		t.Errorf("expected 2 chunks, got %d", len(got))
 	}
-	
+
 	// Content delta
 	raw = []byte(`data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello"}}`)
 	got = ConvertClaudeResponseToOpenAIResponses(ctx, "gpt-4o", nil, nil, raw, &param)
 	if len(got) != 1 {
 		t.Errorf("expected 1 chunk, got %d", len(got))
 	}
-	
+
 	// Message stop
 	raw = []byte(`data: {"type": "message_stop"}`)
 	got = ConvertClaudeResponseToOpenAIResponses(ctx, "gpt-4o", nil, []byte(`{"model": "gpt-4o"}`), raw, &param)
@@ -51,7 +51,7 @@ data: {"type": "content_block_start", "index": 0, "content_block": {"type": "tex
 data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello "}}
 data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "world"}}
 data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 10, "output_tokens": 5}}`)
-	
+
 	got := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "gpt-4o", nil, nil, raw, nil)
 	res := gjson.Parse(got)
 	if res.Get("status").String() != "completed" {

@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/diff"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/synthesizer"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"gopkg.in/yaml.v3"

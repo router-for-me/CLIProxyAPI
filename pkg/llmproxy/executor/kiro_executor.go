@@ -1509,135 +1509,6 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 // - content: the content to search in
 // - alreadyInCodeBlock: whether we're already inside a code block from previous chunks
 // - alreadyInInlineCode: whether we're already inside inline code from previous chunks
-func findRealThinkingEndTag(content string, alreadyInCodeBlock, alreadyInInlineCode bool) int {
-	searchStart := 0
-	for {
-		endIdx := strings.Index(content[searchStart:], kirocommon.ThinkingEndTag)
-		if endIdx < 0 {
-			return -1
-		}
-		endIdx += searchStart // Adjust to absolute position
-
-		textBeforeEnd := content[:endIdx]
-		textAfterEnd := content[endIdx+len(kirocommon.ThinkingEndTag):]
-
-		// Check 1: Is it inside inline code?
-		// Count backticks in current content and add state from previous chunks
-		backtickCount := strings.Count(textBeforeEnd, "`")
-		effectiveInInlineCode := alreadyInInlineCode
-		if backtickCount%2 == 1 {
-			effectiveInInlineCode = !effectiveInInlineCode
-		}
-		if effectiveInInlineCode {
-			log.Debugf("kiro: found </thinking> inside inline code at pos %d, skipping", endIdx)
-			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
-			continue
-		}
-
-		// Check 2: Is it inside a code block?
-		// Count fences in current content and add state from previous chunks
-		fenceCount := strings.Count(textBeforeEnd, "```")
-		altFenceCount := strings.Count(textBeforeEnd, "~~~")
-		effectiveInCodeBlock := alreadyInCodeBlock
-		if fenceCount%2 == 1 || altFenceCount%2 == 1 {
-			effectiveInCodeBlock = !effectiveInCodeBlock
-		}
-		if effectiveInCodeBlock {
-			log.Debugf("kiro: found </thinking> inside code block at pos %d, skipping", endIdx)
-			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
-			continue
-		}
-
-		// Check 3: Real </thinking> tags are usually preceded by newline or at start
-		// and followed by newline or at end. Check the format.
-		charBeforeTag := byte(0)
-		if endIdx > 0 {
-			charBeforeTag = content[endIdx-1]
-		}
-		charAfterTag := byte(0)
-		if len(textAfterEnd) > 0 {
-			charAfterTag = textAfterEnd[0]
-		}
-
-		// Real end tag format: preceded by newline OR end of sentence (. ! ?)
-		// and followed by newline OR end of content
-		isPrecededByNewlineOrSentenceEnd := charBeforeTag == '\n' || charBeforeTag == '.' ||
-			charBeforeTag == '!' || charBeforeTag == '?' || charBeforeTag == 0
-		isFollowedByNewlineOrEnd := charAfterTag == '\n' || charAfterTag == 0
-
-		// If the tag has proper formatting (newline before/after), it's likely real
-		if isPrecededByNewlineOrSentenceEnd && isFollowedByNewlineOrEnd {
-			log.Debugf("kiro: found properly formatted </thinking> at pos %d", endIdx)
-			return endIdx
-		}
-
-		// Check 4: Is the tag preceded by discussion keywords on the same line?
-		lastNewlineIdx := strings.LastIndex(textBeforeEnd, "\n")
-		lineBeforeTag := textBeforeEnd
-		if lastNewlineIdx >= 0 {
-			lineBeforeTag = textBeforeEnd[lastNewlineIdx+1:]
-		}
-		lineBeforeTagLower := strings.ToLower(lineBeforeTag)
-
-		// Discussion patterns - if found, this is likely discussion text
-		discussionPatterns := []string{
-			"标签", "返回", "输出", "包含", "使用", "解析", "转换", "生成", // Chinese
-			"tag", "return", "output", "contain", "use", "parse", "emit", "convert", "generate", // English
-			"<thinking>",    // discussing both tags together
-			"`</thinking>`", // explicitly in inline code
-		}
-		isDiscussion := false
-		for _, pattern := range discussionPatterns {
-			if strings.Contains(lineBeforeTagLower, pattern) {
-				isDiscussion = true
-				break
-			}
-		}
-		if isDiscussion {
-			log.Debugf("kiro: found </thinking> after discussion text at pos %d, skipping", endIdx)
-			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
-			continue
-		}
-
-		// Check 5: Is there text immediately after on the same line?
-		// Real end tags don't have text immediately after on the same line
-		if len(textAfterEnd) > 0 && charAfterTag != '\n' && charAfterTag != 0 {
-			// Find the next newline
-			nextNewline := strings.Index(textAfterEnd, "\n")
-			var textOnSameLine string
-			if nextNewline >= 0 {
-				textOnSameLine = textAfterEnd[:nextNewline]
-			} else {
-				textOnSameLine = textAfterEnd
-			}
-			// If there's non-whitespace text on the same line after the tag, it's discussion
-			if strings.TrimSpace(textOnSameLine) != "" {
-				log.Debugf("kiro: found </thinking> with text after on same line at pos %d, skipping", endIdx)
-				searchStart = endIdx + len(kirocommon.ThinkingEndTag)
-				continue
-			}
-		}
-
-		// Check 6: Is there another <thinking> tag after this </thinking>?
-		if strings.Contains(textAfterEnd, kirocommon.ThinkingStartTag) {
-			nextStartIdx := strings.Index(textAfterEnd, kirocommon.ThinkingStartTag)
-			textBeforeNextStart := textAfterEnd[:nextStartIdx]
-			nextBacktickCount := strings.Count(textBeforeNextStart, "`")
-			nextFenceCount := strings.Count(textBeforeNextStart, "```")
-			nextAltFenceCount := strings.Count(textBeforeNextStart, "~~~")
-
-			// If the next <thinking> is NOT in code, then this </thinking> is discussion text
-			if nextBacktickCount%2 == 0 && nextFenceCount%2 == 0 && nextAltFenceCount%2 == 0 {
-				log.Debugf("kiro: found </thinking> followed by <thinking> at pos %d, likely discussion text, skipping", endIdx)
-				searchStart = endIdx + len(kirocommon.ThinkingEndTag)
-				continue
-			}
-		}
-
-		// This looks like a real end tag
-		return endIdx
-	}
-}
 
 // determineAgenticMode determines if the model is an agentic or chat-only variant.
 // Returns (isAgentic, isChatOnly) based on model name suffixes.
@@ -1654,25 +1525,6 @@ func determineAgenticMode(model string) (isAgentic, isChatOnly bool) {
 // 1. Check auth_method field: "builder-id" or "idc"
 // 2. Check auth_type field: "aws_sso_oidc" (from kiro-cli tokens)
 // 3. Check for client_id + client_secret presence (AWS SSO OIDC signature)
-func getEffectiveProfileArn(auth *cliproxyauth.Auth, profileArn string) string {
-	if auth != nil && auth.Metadata != nil {
-		// Check 1: auth_method field (from CLIProxyAPI tokens)
-		if authMethod, ok := auth.Metadata["auth_method"].(string); ok && (authMethod == "builder-id" || authMethod == "idc") {
-			return "" // AWS SSO OIDC - don't include profileArn
-		}
-		// Check 2: auth_type field (from kiro-cli tokens)
-		if authType, ok := auth.Metadata["auth_type"].(string); ok && authType == "aws_sso_oidc" {
-			return "" // AWS SSO OIDC - don't include profileArn
-		}
-		// Check 3: client_id + client_secret presence (AWS SSO OIDC signature)
-		_, hasClientID := auth.Metadata["client_id"].(string)
-		_, hasClientSecret := auth.Metadata["client_secret"].(string)
-		if hasClientID && hasClientSecret {
-			return "" // AWS SSO OIDC - don't include profileArn
-		}
-	}
-	return profileArn
-}
 
 // getEffectiveProfileArnWithWarning determines if profileArn should be included based on auth method,
 // and logs a warning if profileArn is missing for non-builder-id auth.
@@ -4197,7 +4049,7 @@ func fetchToolDescription(ctx context.Context, mcpEndpoint, authToken string, ht
 		log.Warnf("kiro/websearch: tools/list request failed: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -4328,7 +4180,7 @@ func (h *webSearchHandler) callMcpAPI(request *kiroclaude.McpRequest) (*kiroclau
 		}
 
 		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("failed to read MCP response: %w", err)
 			continue // read error → retry

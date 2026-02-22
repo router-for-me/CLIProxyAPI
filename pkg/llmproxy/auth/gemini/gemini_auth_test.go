@@ -16,24 +16,24 @@ import (
 
 func TestGetAuthenticatedClient_ExistingToken(t *testing.T) {
 	auth := NewGeminiAuth()
-	
+
 	// Valid token that hasn't expired
 	token := &oauth2.Token{
 		AccessToken:  "valid-access",
 		RefreshToken: "valid-refresh",
 		Expiry:       time.Now().Add(1 * time.Hour),
 	}
-	
+
 	ts := &GeminiTokenStorage{
 		Token: token,
 	}
-	
+
 	cfg := &config.Config{}
 	client, err := auth.GetAuthenticatedClient(context.Background(), ts, cfg, nil)
 	if err != nil {
 		t.Fatalf("GetAuthenticatedClient failed: %v", err)
 	}
-	
+
 	if client == nil {
 		t.Fatal("expected non-nil client")
 	}
@@ -42,25 +42,25 @@ func TestGetAuthenticatedClient_ExistingToken(t *testing.T) {
 func TestGeminiTokenStorage_SaveAndLoad(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "gemini-token.json")
-	
+
 	ts := &GeminiTokenStorage{
 		Token:     "raw-token-data",
 		ProjectID: "test-project",
 		Email:     "test@example.com",
 		Type:      "gemini",
 	}
-	
+
 	err := ts.SaveTokenToFile(path)
 	if err != nil {
 		t.Fatalf("SaveTokenToFile failed: %v", err)
 	}
-	
+
 	// Load it back
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
-	
+
 	if len(data) == 0 {
 		t.Fatal("saved file is empty")
 	}
@@ -69,7 +69,7 @@ func TestGeminiTokenStorage_SaveAndLoad(t *testing.T) {
 func TestGeminiAuth_CreateTokenStorage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/oauth2/v1/userinfo" {
-			fmt.Fprint(w, `{"email":"test@example.com"}`)
+			_, _ = fmt.Fprint(w, `{"email":"test@example.com"}`)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -90,9 +90,9 @@ func TestGeminiAuth_CreateTokenStorage(t *testing.T) {
 		mockReq, _ := http.NewRequest(req.Method, server.URL+"/oauth2/v1/userinfo", req.Body)
 		return http.DefaultClient.Do(mockReq)
 	})
-	
+
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: transport})
-	
+
 	ts, err := auth.createTokenStorage(ctx, conf, token, "project-123")
 	if err != nil {
 		t.Fatalf("createTokenStorage failed: %v", err)
@@ -110,7 +110,7 @@ func TestGetAuthenticatedClient_Proxy(t *testing.T) {
 	}
 	cfg := &config.Config{}
 	cfg.ProxyURL = "http://proxy.com:8080"
-	
+
 	client, err := auth.GetAuthenticatedClient(context.Background(), ts, cfg, nil)
 	if err != nil {
 		t.Fatalf("GetAuthenticatedClient failed: %v", err)
@@ -118,7 +118,7 @@ func TestGetAuthenticatedClient_Proxy(t *testing.T) {
 	if client == nil {
 		t.Fatal("client is nil")
 	}
-	
+
 	// Check SOCKS5 proxy
 	cfg.ProxyURL = "socks5://user:pass@socks5.com:1080"
 	_, _ = auth.GetAuthenticatedClient(context.Background(), ts, cfg, nil)

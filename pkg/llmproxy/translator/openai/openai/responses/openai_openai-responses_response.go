@@ -54,6 +54,38 @@ func emitRespEvent(event string, payload string) string {
 	return fmt.Sprintf("event: %s\ndata: %s", event, payload)
 }
 
+func emitCompletionEvents(st *oaiToResponsesState) []string {
+	if st == nil {
+		return []string{}
+	}
+
+	nextSeq := func() int {
+		st.Seq++
+		return st.Seq
+	}
+
+	completed := `{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`
+	completed, _ = sjson.Set(completed, "sequence_number", nextSeq())
+	completed, _ = sjson.Set(completed, "response.id", st.ResponseID)
+	completed, _ = sjson.Set(completed, "response.created_at", st.Created)
+
+	if st.UsageSeen {
+		completed, _ = sjson.Set(completed, "response.usage.input_tokens", st.PromptTokens)
+		completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
+		completed, _ = sjson.Set(completed, "response.usage.output_tokens", st.CompletionTokens)
+		if st.ReasoningTokens > 0 {
+			completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", st.ReasoningTokens)
+		}
+		total := st.TotalTokens
+		if total == 0 {
+			total = st.PromptTokens + st.CompletionTokens
+		}
+		completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
+	}
+
+	return []string{emitRespEvent("response.completed", completed)}
+}
+
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponses converts OpenAI Chat Completions streaming chunks
 // to OpenAI Responses SSE events (response.*).
 func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
@@ -82,7 +114,8 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		return []string{}
 	}
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		return []string{}
+		// GitHub #1085: Emit completion events on [DONE] marker instead of returning empty
+		return emitCompletionEvents(st)
 	}
 
 	root := gjson.ParseBytes(rawJSON)

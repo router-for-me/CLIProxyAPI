@@ -6,6 +6,8 @@ version: '3'
 vars:
   BINARY_NAME: cliproxyapi++
   DOCKER_IMAGE: kooshapari/cliproxyapi-plusplus
+  TEST_REPORT_DIR: target
+  QUALITY_PACKAGES: '{{default "./..." .QUALITY_PACKAGES}}'
   GO_FILES:
     sh: find . -name "*.go" | grep -v "vendor"
 
@@ -33,11 +35,318 @@ tasks:
     cmds:
       - ./{{.BINARY_NAME}} --config config.example.yaml
 
+  preflight:
+    desc: "Fail fast if required tooling is missing"
+    cmds:
+      - |
+        command -v go >/dev/null 2>&1 || { echo "[FAIL] go is required"; exit 1; }
+        command -v task >/dev/null 2>&1 || { echo "[FAIL] task is required"; exit 1; }
+        command -v git >/dev/null 2>&1 || { echo "[FAIL] git is required"; exit 1; }
+        go version >/dev/null
+        echo "[OK] preflight checks passed"
+
+  cache:unlock:
+    desc: "Clear stale Go module lock files that can block parallel test workers"
+    cmds:
+      - |
+        modcache="$(go env GOMODCACHE)"
+        if [ -z "$modcache" ]; then
+          echo "[SKIP] GOMODCACHE unavailable"
+          exit 0
+        fi
+        find "$modcache" -type f -name '*.lock' -delete 2>/dev/null || true
+        echo "[OK] Removed stale lock files from: $modcache"
+
+  test:unit:
+    desc: "Run unit-tagged tests only"
+    deps: [preflight, cache:unlock]
+    cmds:
+      - go test -tags unit ./... {{.CLI_ARGS}}
+
+  test:integration:
+    desc: "Run integration-tagged tests only"
+    deps: [preflight, cache:unlock]
+    cmds:
+      - go test -tags integration ./... {{.CLI_ARGS}}
+
+  test:baseline:
+    desc: "Run full test suite and persist JSON baseline artifacts"
+    cmds:
+      - mkdir -p {{.TEST_REPORT_DIR}}
+      - go test -json ./... > "{{.TEST_REPORT_DIR}}/test-baseline.json"
+
   # -- Testing & Quality --
   test:
     desc: "Run all Go tests"
+    deps: [preflight, cache:unlock]
     cmds:
       - go test -v ./...
+
+  quality:fmt:
+    desc: "Auto format Go source files with gofmt"
+    cmds:
+      - |
+        mapfile -t go_files < <(find . -name "*.go" -type f -not -path "./vendor/*")
+        if [ "${#go_files[@]}" -eq 0 ]; then
+          echo "[SKIP] No Go files found for formatting."
+          exit 0
+        fi
+        gofmt -w "${go_files[@]}"
+        echo "[OK] Formatted ${#go_files[@]} Go files."
+
+  quality:fmt:check:
+    desc: "Check Go formatting"
+    cmds:
+      - |
+        mapfile -t go_files < <(find . -name "*.go" -type f -not -path "./vendor/*")
+        if [ "${#go_files[@]}" -eq 0 ]; then
+          echo "[SKIP] No Go files found for formatting check."
+          exit 0
+        fi
+        unformatted="$(gofmt -l "${go_files[@]}")"
+        if [ -n "${unformatted}" ]; then
+          echo "Unformatted Go files:"
+          echo "${unformatted}"
+          exit 1
+        fi
+        echo "[OK] Go formatting is clean."
+
+  quality:fmt-staged:
+    desc: "Format and lint staged files only"
+    cmds:
+      - |
+        mapfile -t go_files < <(git diff --cached --name-only -- '*.go')
+        if [ "${#go_files[@]}" -eq 0 ]; then
+          echo "[SKIP] No staged Go files to format/lint."
+          exit 0
+        fi
+        gofmt -w "${go_files[@]}"
+        if ! command -v golangci-lint >/dev/null 2>&1; then
+          echo "[WARN] golangci-lint not found; skipping lint on staged files."
+          exit 0
+        fi
+        golangci-lint run --new-from-rev=HEAD --verbose
+        echo "[OK] Staged gofmt + lint complete."
+
+  quality:fmt-staged:check:
+    desc: "Check formatting and lint staged/diff files only"
+    cmds:
+      - |
+        if [ -n "${QUALITY_DIFF_RANGE:-}" ]; then
+          mapfile -t go_files < <(git diff --name-only "$QUALITY_DIFF_RANGE" -- '*.go' | sort -u)
+        else
+          mapfile -t go_files < <(git diff --cached --name-only -- '*.go')
+        fi
+        if [ "${#go_files[@]}" -eq 0 ]; then
+          echo "[SKIP] No staged or diff Go files to check."
+          exit 0
+        fi
+        unformatted="$(gofmt -l "${go_files[@]}")"
+        if [ -n "${unformatted}" ]; then
+          echo "Unformatted Go files:"
+          echo "${unformatted}"
+          exit 1
+        fi
+        if ! command -v golangci-lint >/dev/null 2>&1; then
+          echo "[WARN] golangci-lint not found; skipping lint on changed files."
+          exit 0
+        fi
+        golangci-lint run "${go_files[@]}"
+        echo "[OK] Format + lint check complete for staged/diff Go files."
+
+  quality:parent-sibling:
+    desc: "Optionally run sibling cliproxy project quality gates when in a monorepo"
+    cmds:
+      - |
+        if [ "${QUALITY_WITH_PARENT_CLIPROXY:-1}" = "0" ]; then
+          echo "[SKIP] quality:parent-sibling (QUALITY_WITH_PARENT_CLIPROXY=0)"
+          exit 0
+        fi
+
+        ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+        PARENT="$(dirname "$ROOT")"
+        CURRENT="$(basename "$ROOT")"
+        FOUND=0
+        RAN=0
+
+        for d in "$PARENT"/*; do
+          [ -d "$d" ] || continue
+          base="$(basename "$d")"
+          [ "$base" = "$CURRENT" ] && continue
+          case "$base" in
+            *cliproxy*|*cliproxyapi*)
+              if [ ! -f "$d/Taskfile.yml" ]; then
+                continue
+              fi
+              FOUND=1
+              if task -C "$d" --list-all 2>/dev/null | rg -q '(^|[[:space:]])quality([[:space:]]|$)'; then
+                echo "[RUN] $base -> task quality"
+                QUALITY_WITH_PARENT_CLIPROXY=0 task -C "$d" quality
+                RAN=1
+              else
+                echo "[SKIP] $base (no quality task)"
+              fi
+              ;;
+          esac
+        done
+
+        if [ "$FOUND" -eq 0 ]; then
+          echo "[SKIP] No sibling cliproxy taskfiles found in parent: $PARENT"
+        elif [ "$RAN" -eq 0 ]; then
+          echo "[SKIP] No sibling cliproxy project had a runnable quality task"
+        fi
+
+  quality:
+    desc: "Run full strict project quality checks (fmt, test, lint)"
+    cmds:
+      - task: quality:fmt
+      - task: quality:fmt:check
+      - go vet ./...
+      - task: lint
+      - task: test
+      - task: quality:parent-sibling
+
+  quality:quick:
+    desc: "Run fast local quality checks (auto format + tests)"
+    cmds:
+      - task: quality:fmt
+      - task: quality:quick:check
+
+  quality:quick:check:
+    desc: "Fast non-mutating quality checks (fmt check + changed lint + targeted tests)"
+    deps: [preflight, cache:unlock]
+    cmds:
+      - task: quality:fmt:check
+      - task: lint:changed
+      - go test {{.QUALITY_PACKAGES}}
+
+  quality:quick:all:
+    desc: "Run quality quick locally and in sibling cliproxy/cliproxyapi++ repos"
+    cmds:
+      - task: quality:quick
+      - task: quality:parent-sibling
+
+  quality:vet:
+    desc: "Run go vet for all packages"
+    cmds:
+      - go vet ./...
+
+  quality:staticcheck:
+    desc: "Run staticcheck (opt-in)"
+    cmds:
+      - |
+        if [ "${ENABLE_STATICCHECK:-0}" != "1" ]; then
+          echo "[SKIP] ENABLE_STATICCHECK=1 to run staticcheck"
+          exit 0
+        fi
+        if ! command -v staticcheck >/dev/null 2>&1; then
+          echo "[WARN] staticcheck not found"
+          exit 0
+        fi
+        staticcheck ./...
+
+  quality:ci:
+    desc: "Run non-mutating PR quality gates"
+    cmds:
+      - |
+        if [ -n "${QUALITY_DIFF_RANGE:-}" ]; then
+          echo "[INFO] quality:ci with QUALITY_DIFF_RANGE=$QUALITY_DIFF_RANGE"
+        else
+          echo "[INFO] quality:ci without QUALITY_DIFF_RANGE; lint defaults to working tree/staged diffs"
+        fi
+      - task: quality:fmt:check
+      - task: quality:vet
+      - task: quality:staticcheck
+      - task: lint:changed
+
+  quality:release-lint:
+    desc: "Validate release-facing config examples and docs snippets"
+    cmds:
+      - task: preflight
+      - ./.github/scripts/release-lint.sh
+
+  test:smoke:
+    desc: "Run smoke tests for startup and control-plane surfaces"
+    deps: [preflight, cache:unlock]
+    cmds:
+      - |
+        go test -run 'TestServer_StartupSmokeEndpoints|TestServer_StartupSmokeEndpoints/GET_v1_models|TestServer_StartupSmokeEndpoints/GET_v1_metrics_providers|TestServer_RoutesNamespaceIsolation|TestServer_ControlPlane_MessageLifecycle|TestServer_ControlPlane_IdempotencyKey_ReplaysResponseAndPreventsDuplicateMessages|TestServer_ControlPlane_IdempotencyKey_DifferentKeysCreateDifferentMessages' ./pkg/llmproxy/api
+
+  lint:changed:
+    desc: "Run golangci-lint on changed/staged files only"
+    cmds:
+      - |
+        tmp_files="$(mktemp)"
+        if [ -n "${QUALITY_DIFF_RANGE:-}" ]; then
+          git diff --name-only "$QUALITY_DIFF_RANGE" -- '*.go' | sort -u > "$tmp_files"
+        else
+          git diff --name-only -- '*.go' | sort -u > "$tmp_files"
+          git diff --cached --name-only -- '*.go' | sort -u >> "$tmp_files"
+        fi
+        mapfile -t files < <(sort -u "$tmp_files")
+        rm -f "$tmp_files"
+        if [ "${#files[@]}" -eq 0 ]; then
+          echo "[SKIP] No changed or staged Go files found."
+          exit 0
+        fi
+        if ! command -v golangci-lint >/dev/null 2>&1; then
+          echo "[WARN] golangci-lint not found; skipping lint on changed files."
+          exit 0
+        fi
+        mapfile -t changed_dirs < <(printf '%s\n' "${files[@]}" | sed 's#^\\./##' | xargs -n1 dirname | sort -u)
+        failed=0
+        for dir in "${changed_dirs[@]}"; do
+          if [ "$dir" = "." ]; then
+            dir="."
+          fi
+          if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+            continue
+          fi
+          golangci-lint run "$dir" || failed=1
+        done
+        if [ "$failed" -ne 0 ]; then
+          exit 1
+        fi
+        if [ "${#changed_dirs[@]}" -eq 0 ]; then
+          echo "[SKIP] No changed directories resolved."
+          exit 0
+        fi
+        echo "[OK] linted changed directories: ${changed_dirs[*]}"
+
+  verify:all:
+    desc: "Run quality quick checks and static analysis"
+    cmds:
+      - task: quality:fmt:check
+      - task: test:smoke
+      - task: lint:changed
+      - task: quality:release-lint
+      - task: quality:vet
+      - task: quality:staticcheck
+      - task: test
+
+  hooks:install:
+    desc: "Install local git pre-commit hook for staged gofmt + lint"
+    cmds:
+      - |
+        mkdir -p .git/hooks
+        cat > .git/hooks/pre-commit <<'EOF'
+        #!/usr/bin/env sh
+        set -eu
+        if ! command -v go >/dev/null 2>&1; then
+          echo "[WARN] go not found on PATH; skipping pre-commit quality checks."
+          exit 0
+        fi
+
+        if ! command -v task >/dev/null 2>&1; then
+          echo "[WARN] task not found on PATH; skipping pre-commit quality checks."
+          exit 0
+        fi
+
+        cd "$(git rev-parse --show-toplevel)"
+        task quality:fmt-staged
+        EOF
+        chmod +x .git/hooks/pre-commit
+        echo "[OK] Installed .git/hooks/pre-commit"
 
   lint:
     desc: "Run golangci-lint"
@@ -86,3 +395,8 @@ tasks:
     cmds:
       - echo "Checking for llms.txt..."
       - if [ ! -f llms.txt ]; then echo "⚠️ llms.txt missing"; else echo "✅ llms.txt present"; fi
+
+  board:sync:
+    desc: "Sync GitHub sources and regenerate planning board/import artifacts (Go tool)"
+    cmds:
+      - go run ./cmd/boardsync

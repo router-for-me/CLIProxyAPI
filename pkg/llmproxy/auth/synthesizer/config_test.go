@@ -1,9 +1,9 @@
 package synthesizer
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"testing"
 	"time"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 )
 
 func TestConfigSynthesizer_Synthesize(t *testing.T) {
@@ -13,19 +13,19 @@ func TestConfigSynthesizer_Synthesize(t *testing.T) {
 			ClaudeKey: []config.ClaudeKey{{APIKey: "k1", Prefix: "p1"}},
 			GeminiKey: []config.GeminiKey{{APIKey: "g1"}},
 		},
-		Now: time.Now(),
+		Now:         time.Now(),
 		IDGenerator: NewStableIDGenerator(),
 	}
-	
+
 	auths, err := s.Synthesize(ctx)
 	if err != nil {
 		t.Fatalf("Synthesize failed: %v", err)
 	}
-	
+
 	if len(auths) != 2 {
 		t.Errorf("expected 2 auth entries, got %d", len(auths))
 	}
-	
+
 	foundClaude := false
 	for _, a := range auths {
 		if a.Provider == "claude" {
@@ -49,21 +49,21 @@ func TestConfigSynthesizer_SynthesizeOpenAICompat(t *testing.T) {
 		Config: &config.Config{
 			OpenAICompatibility: []config.OpenAICompatibility{
 				{
-					Name: "provider1",
-					BaseURL: "http://base",
+					Name:          "provider1",
+					BaseURL:       "http://base",
 					APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "k1"}},
 				},
 			},
 		},
-		Now: time.Now(),
+		Now:         time.Now(),
 		IDGenerator: NewStableIDGenerator(),
 	}
-	
+
 	auths, err := s.Synthesize(ctx)
 	if err != nil {
 		t.Fatalf("Synthesize failed: %v", err)
 	}
-	
+
 	if len(auths) != 1 || auths[0].Provider != "provider1" {
 		t.Errorf("expected 1 auth for provider1, got %v", auths)
 	}
@@ -89,7 +89,7 @@ func TestConfigSynthesizer_SynthesizeMore(t *testing.T) {
 			},
 			VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "vx1", BaseURL: "http://vx"}},
 		},
-		Now: time.Now(),
+		Now:         time.Now(),
 		IDGenerator: NewStableIDGenerator(),
 	}
 

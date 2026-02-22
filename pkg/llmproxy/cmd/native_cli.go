@@ -21,14 +21,14 @@ type NativeCLISpec struct {
 var (
 	// RooSpec defines Roo Code native CLI: roo auth login.
 	RooSpec = NativeCLISpec{
-		Name:   "roo",
-		Args:   []string{"auth", "login"},
+		Name:          "roo",
+		Args:          []string{"auth", "login"},
 		FallbackNames: nil,
 	}
 	// KiloSpec defines Kilo native CLI: kilo auth or kilocode auth.
 	KiloSpec = NativeCLISpec{
-		Name:   "kilo",
-		Args:   []string{"auth"},
+		Name:          "kilo",
+		Args:          []string{"auth"},
 		FallbackNames: []string{"kilocode"},
 	}
 )

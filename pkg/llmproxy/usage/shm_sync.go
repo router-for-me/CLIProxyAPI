@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	MaxProviders      = 32
-	ProviderSlotSize  = 128
-	ProviderOffset    = 256 * 256
-	ShmSize           = ProviderOffset + (MaxProviders * ProviderSlotSize) + 8192
+	MaxProviders     = 32
+	ProviderSlotSize = 128
+	ProviderOffset   = 256 * 256
+	ShmSize          = ProviderOffset + (MaxProviders * ProviderSlotSize) + 8192
 )
 
 // SyncToSHM writes the current provider metrics to the shared memory mesh.
@@ -25,7 +25,7 @@ func SyncToSHM(shmPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open SHM: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Ensure file is large enough
 	info, err := f.Stat()
@@ -42,7 +42,7 @@ func SyncToSHM(shmPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to mmap: %w", err)
 	}
-	defer m.Unmap()
+	defer func() { _ = m.Unmap() }()
 
 	now := float64(time.Now().UnixNano()) / 1e9
 
@@ -50,7 +50,7 @@ func SyncToSHM(shmPath string) error {
 		if name == "" {
 			continue
 		}
-		
+
 		nameBytes := make([]byte, 32)
 		copy(nameBytes, name)
 

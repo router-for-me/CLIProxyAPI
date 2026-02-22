@@ -1,15 +1,62 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
 
-const kiloInstallHint = "Install: pnpm add -g @kilocode/cli or see https://github.com/Kilo-Org/kilocode"
+const kiloInstallHint = "Install: https://www.kiloai.com/download"
+
+// DoKiloLogin handles the Kilo device flow using the shared authentication manager.
+// It initiates the device-based authentication process for Kilo AI services and saves
+// the authentication tokens to the configured auth directory.
+//
+// Parameters:
+//   - cfg: The application configuration
+//   - options: Login options including browser behavior and prompts
+func DoKiloLogin(cfg *config.Config, options *LoginOptions) {
+	if options == nil {
+		options = &LoginOptions{}
+	}
+
+	manager := newAuthManager()
+
+	promptFn := options.Prompt
+	if promptFn == nil {
+		promptFn = func(prompt string) (string, error) {
+			fmt.Print(prompt)
+			var value string
+			_, _ = fmt.Scanln(&value)
+			return strings.TrimSpace(value), nil
+		}
+	}
+
+	authOpts := &sdkAuth.LoginOptions{
+		NoBrowser:    options.NoBrowser,
+		CallbackPort: options.CallbackPort,
+		Metadata:     map[string]string{},
+		Prompt:       promptFn,
+	}
+
+	_, savedPath, err := manager.Login(context.Background(), "kilo", cfg, authOpts)
+	if err != nil {
+		fmt.Printf("Kilo authentication failed: %v\n", err)
+		return
+	}
+
+	if savedPath != "" {
+		fmt.Printf("Authentication saved to %s\n", savedPath)
+	}
+
+	fmt.Println("Kilo authentication successful!")
+}
 
 // RunKiloLoginWithRunner runs Kilo login with the given runner. Returns exit code to pass to os.Exit.
 // Writes success/error messages to stdout/stderr. Used for testability.
@@ -33,18 +80,6 @@ func RunKiloLoginWithRunner(runner NativeCLIRunner, stdout, stderr io.Writer) in
 		return exitCode
 	}
 	_, _ = fmt.Fprintln(stdout, "Kilo authentication successful!")
-	_, _ = fmt.Fprintln(stdout, "Add a kilo: block to your config with token-file and base-url: \"https://api.kilo.ai/v1\"")
+	_, _ = fmt.Fprintln(stdout, "Add a kilo: block to your config with token-file: \"~/.kilo/oauth-token.json\" and base-url: \"https://api.kiloai.com/v1\"")
 	return 0
-}
-
-// DoKiloLogin runs the Kilo native CLI (kilo auth or kilocode auth) for authentication.
-// Kilo stores tokens in its own location; add a kilo: block to config with token-file pointing to that location.
-//
-// Parameters:
-//   - cfg: The application configuration (used for auth-dir context; kilo uses its own paths)
-//   - options: Login options (unused for native CLI; kept for API consistency)
-func DoKiloLogin(cfg *config.Config, options *LoginOptions) {
-	_ = cfg
-	_ = options
-	os.Exit(RunKiloLoginWithRunner(RunNativeCLILogin, nil, nil))
 }

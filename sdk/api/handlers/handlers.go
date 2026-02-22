@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"context"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
@@ -22,7 +23,6 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
-	"context"
 )
 
 // ErrorResponse represents a standard error response format for the API.

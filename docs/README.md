@@ -36,6 +36,13 @@ This docs site is organized by onboarding guides, API reference, and audience-sp
 - [Technical User](./docsets/user/index.md)
 - [Agent Operator](./docsets/agent/index.md)
 
+## Planning and Boards
+
+- [Planning Index](./planning/index.md)
+- [Board Workflow](./planning/board-workflow.md)
+- [2000-Item Execution Board](./planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.md)
+- [GitHub Project Import CSV](./planning/GITHUB_PROJECT_IMPORT_CLIPROXYAPI_2000_2026-02-22.csv)
+
 ## Canonical Project Docs
 
 - [Root README](https://github.com/KooshaPari/cliproxyapi-plusplus/blob/main/README.md)

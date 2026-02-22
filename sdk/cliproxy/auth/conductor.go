@@ -16,8 +16,8 @@ import (
 
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
@@ -394,7 +394,29 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.executors[executor.Identifier()] = executor
+	provider := strings.ToLower(strings.TrimSpace(executor.Identifier()))
+	if provider == "" {
+		return
+	}
+	if existing, ok := m.executors[provider]; ok && existing != nil && existing != executor {
+		existing.CloseExecutionSession(CloseAllExecutionSessionsID)
+	}
+	m.executors[provider] = executor
+}
+
+// Executor returns a registered executor for the provider key (case-insensitive).
+func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
+	if m == nil {
+		return nil, false
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	exec, ok := m.executors[provider]
+	return exec, ok
 }
 
 // UnregisterExecutor removes the executor associated with the provider key.
@@ -599,6 +621,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
+		m.recordSelectedAuth(opts, auth)
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
@@ -654,6 +677,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
+		m.recordSelectedAuth(opts, auth)
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
@@ -709,6 +733,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, errPick
 		}
+		m.recordSelectedAuth(opts, auth)
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
@@ -1624,6 +1649,20 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	pinnedAuthID := pinnedAuthIDFromOptions(opts)
+	if pinnedAuthID != "" {
+		filtered := make([]*Auth, 0, len(candidates))
+		for _, candidate := range candidates {
+			if strings.EqualFold(strings.TrimSpace(candidate.ID), pinnedAuthID) {
+				filtered = append(filtered, candidate)
+			}
+		}
+		if len(filtered) == 0 {
+			m.mu.RUnlock()
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: "pinned auth unavailable"}
+		}
+		candidates = filtered
+	}
 	selected, errPick := m.selector.Pick(ctx, "mixed", model, opts, candidates)
 	if errPick != nil {
 		m.mu.RUnlock()
@@ -1650,6 +1689,41 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		m.mu.Unlock()
 	}
 	return authCopy, executor, providerKey, nil
+}
+
+func pinnedAuthIDFromOptions(opts cliproxyexecutor.Options) string {
+	raw, ok := opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey]
+	if !ok {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
+}
+
+func (m *Manager) recordSelectedAuth(opts cliproxyexecutor.Options, auth *Auth) {
+	if auth == nil || auth.ID == "" {
+		return
+	}
+	authID := auth.ID
+	if opts.Metadata == nil {
+		opts.Metadata = map[string]any{}
+	}
+	opts.Metadata[cliproxyexecutor.SelectedAuthMetadataKey] = authID
+	raw, ok := opts.Metadata[cliproxyexecutor.SelectedAuthCallbackMetadataKey]
+	if !ok {
+		return
+	}
+	callback, ok := raw.(func(string))
+	if !ok || callback == nil {
+		return
+	}
+	callback(authID)
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
@@ -2013,9 +2087,17 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.executors[provider]
+	executor, exists := m.executors[provider]
+	if !exists {
+		return nil
+	}
+	return executor
 }
 
 // roundTripperContextKey is an unexported context key type to avoid collisions.

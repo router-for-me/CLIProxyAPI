@@ -1,0 +1,20 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /message
+Method: POST
+Timestamp: 2026-02-22T03:41:05.154589-07:00
+
+=== HEADERS ===
+Content-Type: application/json
+
+=== REQUEST BODY ===
+{"message":"x","capability":"pause"}
+
+=== RESPONSE ===
+Status: 501
+Access-Control-Allow-Headers: *
+Access-Control-Allow-Origin: *
+Content-Type: application/json; charset=utf-8
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+
+{"capability":"pause","error":"unsupported capability","instructions":"Use message-only payload, or ask with supported capability labels (continue/resume).","session_id":"cp_1_5633b598-f45b-41fd-9ae7-0d096c4917c8","status":"failed"}

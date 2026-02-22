@@ -13,6 +13,8 @@ For engineers integrating `cliproxyapi++` into external services or products.
 2. [OpenAI-Compatible API](/api/openai-compatible)
 3. [Provider Usage](/provider-usage)
 4. [Routing and Models Reference](/routing-reference)
+5. [Planning Boards](/planning/)
+6. [Board Workflow](/planning/board-workflow)
 
 ## Design Guidelines
 
@@ -23,3 +25,5 @@ For engineers integrating `cliproxyapi++` into external services or products.
 ## Change Awareness
 
 - [Feature Change Reference](../../../FEATURE_CHANGES_PLUSPLUS.md)
+- [2000-Item Execution Board](../../../planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.md)
+- [GitHub Project Import CSV](../../../planning/GITHUB_PROJECT_IMPORT_CLIPROXYAPI_2000_2026-02-22.csv)

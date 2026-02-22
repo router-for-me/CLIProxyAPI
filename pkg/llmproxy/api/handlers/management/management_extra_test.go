@@ -16,8 +16,8 @@ import (
 )
 
 func TestNewHandler(t *testing.T) {
-	os.Setenv("MANAGEMENT_PASSWORD", "testpass")
-	defer os.Unsetenv("MANAGEMENT_PASSWORD")
+	_ = os.Setenv("MANAGEMENT_PASSWORD", "testpass")
+	defer func() { _ = os.Unsetenv("MANAGEMENT_PASSWORD") }()
 	cfg := &config.Config{}
 	h := NewHandler(cfg, "config.yaml", nil)
 	if h.envSecret != "testpass" {
@@ -54,7 +54,7 @@ func TestHandler_Setters(t *testing.T) {
 	}
 
 	tmpDir, _ := os.MkdirTemp("", "logtest")
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 	h.SetLogDirectory(tmpDir)
 	if !filepath.IsAbs(h.logDir) {
 		t.Errorf("SetLogDirectory should result in absolute path")
@@ -156,7 +156,7 @@ func TestPurgeStaleAttempts(t *testing.T) {
 func TestUpdateFields(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tmpFile, _ := os.CreateTemp("", "config*.yaml")
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 	_ = os.WriteFile(tmpFile.Name(), []byte("{}"), 0644)
 
 	cfg := &config.Config{}
@@ -197,11 +197,11 @@ func TestGetUsage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	stats := usage.GetRequestStatistics()
 	h := &Handler{usageStats: stats}
-	
+
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	h.GetUsageStatistics(c)
-	
+
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
@@ -227,12 +227,12 @@ func TestGetUsage(t *testing.T) {
 func TestGetModels(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := &Handler{}
-	
+
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest("GET", "/?channel=codex", nil)
 	h.GetStaticModelDefinitions(c)
-	
+
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d, body: %s", w.Code, w.Body.String())
 	}
@@ -242,11 +242,11 @@ func TestGetQuota(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{}
 	h := &Handler{cfg: cfg}
-	
+
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	h.GetSwitchProject(c)
-	
+
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
@@ -255,15 +255,15 @@ func TestGetQuota(t *testing.T) {
 func TestGetConfigYAML(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tmpFile, _ := os.CreateTemp("", "config*.yaml")
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 	_ = os.WriteFile(tmpFile.Name(), []byte("test: true"), 0644)
-	
+
 	h := &Handler{configFilePath: tmpFile.Name()}
-	
+
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	h.GetConfigYAML(c)
-	
+
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
@@ -275,18 +275,18 @@ func TestGetConfigYAML(t *testing.T) {
 func TestPutConfigYAML(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tmpDir, _ := os.MkdirTemp("", "configtest")
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 	tmpFile := filepath.Join(tmpDir, "config.yaml")
 	_ = os.WriteFile(tmpFile, []byte("debug: false"), 0644)
-	
+
 	h := &Handler{configFilePath: tmpFile, cfg: &config.Config{}}
-	
+
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest("PUT", "/", strings.NewReader("debug: true"))
-	
+
 	h.PutConfigYAML(c)
-	
+
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d, body: %s", w.Code, w.Body.String())
 	}
@@ -295,17 +295,17 @@ func TestPutConfigYAML(t *testing.T) {
 func TestGetLogs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tmpDir, _ := os.MkdirTemp("", "logtest")
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 	logFile := filepath.Join(tmpDir, "main.log")
 	_ = os.WriteFile(logFile, []byte("test log"), 0644)
-	
+
 	cfg := &config.Config{LoggingToFile: true}
 	h := &Handler{logDir: tmpDir, cfg: cfg, authManager: coreauth.NewManager(nil, nil, nil)}
-	
+
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	h.GetLogs(c)
-	
+
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d, body: %s", w.Code, w.Body.String())
 	}
@@ -314,23 +314,23 @@ func TestGetLogs(t *testing.T) {
 func TestDeleteAuthFile(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tmpDir, _ := os.MkdirTemp("", "authtest")
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 	authFile := filepath.Join(tmpDir, "testauth.json")
 	_ = os.WriteFile(authFile, []byte("{}"), 0644)
-	
+
 	cfg := &config.Config{AuthDir: tmpDir}
 	h := &Handler{cfg: cfg, authManager: coreauth.NewManager(nil, nil, nil)}
-	
+
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest("DELETE", "/?name=testauth.json", nil)
-	
+
 	h.DeleteAuthFile(c)
-	
+
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d, body: %s", w.Code, w.Body.String())
 	}
-	
+
 	if _, err := os.Stat(authFile); !os.IsNotExist(err) {
 		t.Errorf("file should have been deleted")
 	}

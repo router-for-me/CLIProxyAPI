@@ -13,15 +13,15 @@ import (
 
 func TestListAuthFiles(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	
+
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
 	_ = os.MkdirAll(authDir, 0755)
-	
+
 	// Create a dummy auth file
 	authFile := filepath.Join(authDir, "test.json")
 	_ = os.WriteFile(authFile, []byte(`{"access_token": "abc"}`), 0644)
-	
+
 	cfg := &config.Config{AuthDir: authDir}
 	h, _, cleanup := setupTestHandler(cfg)
 	defer cleanup()
@@ -33,7 +33,7 @@ func TestListAuthFiles(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("ListAuthFiles failed: %d, body: %s", w.Code, w.Body.String())
 	}
-	
+
 	var resp struct {
 		Files []any `json:"files"`
 	}

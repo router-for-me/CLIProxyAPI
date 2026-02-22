@@ -60,7 +60,7 @@ func TestHumanLikeDelay(t *testing.T) {
 func TestExponentialBackoffWithJitter(t *testing.T) {
 	base := 1 * time.Second
 	max := 10 * time.Second
-	
+
 	d := ExponentialBackoffWithJitter(0, base, max)
 	if d < 700*time.Millisecond || d > 1300*time.Millisecond {
 		t.Errorf("attempt 0 failed: %v", d)

@@ -216,16 +216,16 @@ func TestBuildUserMessageStruct_SoftLimit(t *testing.T) {
 			{"type": "tool_result", "tool_use_id": "call_1", "is_error": true, "content": "SOFT_LIMIT_REACHED error"}
 		]
 	}`)
-	
+
 	_, results := BuildUserMessageStruct(msg, "model", "CLI")
 	if len(results) != 1 {
 		t.Fatalf("expected 1 tool result, got %d", len(results))
 	}
-	
+
 	if results[0].Status != "success" {
 		t.Errorf("expected status success for soft limit error, got %s", results[0].Status)
 	}
-	
+
 	if !strings.Contains(results[0].Content[0].Text, "SOFT_LIMIT_REACHED") {
 		t.Errorf("expected content to contain SOFT_LIMIT_REACHED, got %s", results[0].Content[0].Text)
 	}
@@ -238,7 +238,7 @@ func TestBuildAssistantMessageStruct(t *testing.T) {
 	if res1.Content != "hello" {
 		t.Errorf("expected content hello, got %s", res1.Content)
 	}
-	
+
 	// Array content with tool use
 	msg2 := gjson.Parse(`{"role": "assistant", "content": [{"type": "text", "text": "using tool"}, {"type": "tool_use", "id": "c1", "name": "f1", "input": {"x": 1}}]}`)
 	res2 := BuildAssistantMessageStruct(msg2)
@@ -248,7 +248,7 @@ func TestBuildAssistantMessageStruct(t *testing.T) {
 	if len(res2.ToolUses) != 1 || res2.ToolUses[0].Name != "f1" {
 		t.Errorf("expected tool call f1, got %v", res2.ToolUses)
 	}
-	
+
 	// Empty content with tool use
 	msg3 := gjson.Parse(`{"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": "f1", "input": {"x": 1}}]}`)
 	res3 := BuildAssistantMessageStruct(msg3)

@@ -1,0 +1,14 @@
+# workflow_file|job_name
+pr-test-build.yml|go-ci
+pr-test-build.yml|quality-ci
+pr-test-build.yml|quality-staged-check
+pr-test-build.yml|fmt-check
+pr-test-build.yml|golangci-lint
+pr-test-build.yml|route-lifecycle
+pr-test-build.yml|test-smoke
+pr-test-build.yml|pre-release-config-compat-smoke
+pr-test-build.yml|distributed-critical-paths
+pr-test-build.yml|changelog-scope-classifier
+pr-test-build.yml|docs-build
+pr-test-build.yml|ci-summary
+pr-path-guard.yml|ensure-no-translator-changes

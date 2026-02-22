@@ -37,7 +37,7 @@ var (
 		"1.0.20", "1.0.21", "1.0.22", "1.0.23",
 		"1.0.24", "1.0.25", "1.0.26", "1.0.27",
 	}
-	osTypes = []string{"darwin", "windows", "linux"}
+	osTypes    = []string{"darwin", "windows", "linux"}
 	osVersions = map[string][]string{
 		"darwin":  {"14.0", "14.1", "14.2", "14.3", "14.4", "14.5", "15.0", "15.1"},
 		"windows": {"10.0.19041", "10.0.19042", "10.0.19043", "10.0.19044", "10.0.22621", "10.0.22631"},
@@ -67,9 +67,9 @@ var (
 		"1366x768", "1440x900", "1680x1050",
 		"2560x1600", "3440x1440",
 	}
-	colorDepths          = []int{24, 32}
+	colorDepths           = []int{24, 32}
 	hardwareConcurrencies = []int{4, 6, 8, 10, 12, 16, 20, 24, 32}
-	timezoneOffsets      = []int{-480, -420, -360, -300, -240, 0, 60, 120, 480, 540}
+	timezoneOffsets       = []int{-480, -420, -360, -300, -240, 0, 60, 120, 480, 540}
 )
 
 // NewFingerprintManager 创建指纹管理器
