@@ -283,6 +283,54 @@ func TestRegisterProviderAliases_DedicatedProviderModelsV1(t *testing.T) {
 	}
 }
 
+func TestRegisterProviderAliases_DedicatedProviderModelsV1(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	base := &handlers.BaseAPIHandler{}
+	m := &AmpModule{}
+	m.registerProviderAliases(r, base, nil)
+
+	tests := []string{"kiro", "cursor"}
+	for _, provider := range tests {
+		t.Run(provider, func(t *testing.T) {
+			path := "/api/provider/" + provider + "/v1/models"
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", w.Code)
+			}
+
+			var body struct {
+				Object string `json:"object"`
+				Data   []struct {
+					ID      string `json:"id"`
+					OwnedBy string `json:"owned_by"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("invalid json response: %v", err)
+			}
+			if body.Object != "list" {
+				t.Fatalf("expected object=list, got %q", body.Object)
+			}
+			if len(body.Data) == 0 {
+				t.Fatalf("expected non-empty model list for provider %q", provider)
+			}
+			for _, model := range body.Data {
+				if model.ID == "" {
+					t.Fatal("expected model id to be populated")
+				}
+				if strings.TrimSpace(model.OwnedBy) == "" {
+					t.Fatalf("expected non-empty owned_by for model %q", model.ID)
+				}
+			}
+		})
+	}
+}
+
 func TestRegisterProviderAliases_V1Routes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
