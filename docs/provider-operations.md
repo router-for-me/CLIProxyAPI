@@ -12,14 +12,32 @@ This runbook is for operators who care about provider uptime, quota health, and 
    - `curl -sS http://localhost:8317/v1/metrics/providers | jq`
 4. Log scan:
    - Verify no sustained bursts of `401`, `403`, or `429`.
-5. Spark eligibility check (Copilot/Codex):
-   - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'gpt-5.3-codex|gpt-5.3-codex-spark'`
 
 ## Quota Visibility (`#146` scope)
 
 - Current operational source of truth is `v1/metrics/providers` plus provider auth/token files.
 - There is no dedicated unified "Kiro quota dashboard" endpoint in this repo today.
 - Treat repeated `429` + falling success ratio as quota pressure and rotate capacity accordingly.
+
+## Kiro IAM Operational Runbook
+
+Minimum checks after every Kiro IAM login/import:
+
+1. Confirm auth file is unique per account (avoid shared filename reuse).
+2. Confirm `/v1/models` exposes expected `kiro/*` aliases for the active credential.
+3. Run one canary request and verify no immediate `401/403/429` burst.
+
+Suggested alert thresholds:
+
+- `kiro` provider success ratio < 95% for 10m.
+- `kiro` provider `401/403` ratio > 2% for 5m.
+- `kiro` provider `429` ratio > 5% for 5m.
+
+Immediate response:
+
+1. Verify token metadata freshness in auth file.
+2. Re-login with IAM flow.
+3. Shift traffic to fallback prefix until success ratio recovers.
 
 ## Onboard a New Provider
 
@@ -63,16 +81,12 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
 
-### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
+### iFlow Model List Drift / Update Failures
 
-- Symptom: plus/team users get `400/404 model_not_found` for `gpt-5.3-codex-spark`.
-- Immediate action:
-  - Confirm presence in `GET /v1/models` for the exact client API key.
-  - If absent, route workloads to `gpt-5.3-codex` and keep Spark disabled for that segment.
-- Suggested alert thresholds:
-  - Warn: Spark error ratio > 2% over 10 minutes.
-  - Critical: Spark error ratio > 5% over 10 minutes.
-  - Auto-mitigation: fallback alias to `gpt-5.3-codex` when critical threshold is crossed.
+- Validate the iFlow credential first (`401/403` indicates auth drift, not model drift).
+- Recheck provider filters (`models`, `excluded-models`) before concluding upstream regression.
+- Use a safe fallback alias set (known-good `glm`/`minimax` entries) while refreshing model mappings.
+- Re-run `/v1/models` and compare before/after counts to confirm recovery.
 
 ## Recommended Production Pattern
 

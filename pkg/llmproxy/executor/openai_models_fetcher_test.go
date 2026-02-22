@@ -10,51 +10,63 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-func TestFetchOpenAIModels_UsesDefaultModelsPath(t *testing.T) {
-	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
-	}))
-	defer srv.Close()
-
-	auth := &cliproxyauth.Auth{
-		Attributes: map[string]string{
-			"base_url": srv.URL,
-			"api_key":  "k",
+func TestResolveOpenAIModelsURL(t *testing.T) {
+	testCases := []struct {
+		name    string
+		baseURL string
+		attrs   map[string]string
+		want    string
+	}{
+		{
+			name:    "RootBaseURLUsesV1Models",
+			baseURL: "https://api.openai.com",
+			want:    "https://api.openai.com/v1/models",
+		},
+		{
+			name:    "VersionedBaseURLUsesModels",
+			baseURL: "https://api.z.ai/api/coding/paas/v4",
+			want:    "https://api.z.ai/api/coding/paas/v4/models",
+		},
+		{
+			name:    "ModelsURLOverrideWins",
+			baseURL: "https://api.z.ai/api/coding/paas/v4",
+			attrs: map[string]string{
+				"models_url": "https://custom.example.com/models",
+			},
+			want: "https://custom.example.com/models",
 		},
 	}
 
-	models := FetchOpenAIModels(context.Background(), auth, &config.Config{}, "openai-compatibility")
-	if len(models) != 1 || models[0].ID != "m1" {
-		t.Fatalf("unexpected models result: %#v", models)
-	}
-	if gotPath != "/v1/models" {
-		t.Fatalf("path = %q, want %q", gotPath, "/v1/models")
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveOpenAIModelsURL(tc.baseURL, tc.attrs)
+			if got != tc.want {
+				t.Fatalf("resolveOpenAIModelsURL(%q) = %q, want %q", tc.baseURL, got, tc.want)
+			}
+		})
 	}
 }
 
-func TestFetchOpenAIModels_UsesCustomModelsPath(t *testing.T) {
+func TestFetchOpenAIModels_UsesVersionedPath(t *testing.T) {
 	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		_, _ = w.Write([]byte(`{"data":[{"id":"glm-4.5"}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"z-ai-model"}]}`))
 	}))
-	defer srv.Close()
+	defer server.Close()
 
 	auth := &cliproxyauth.Auth{
 		Attributes: map[string]string{
-			"base_url":        srv.URL,
-			"api_key":         "k",
-			"models_endpoint": "/api/coding/paas/v4/models",
+			"base_url": server.URL + "/api/coding/paas/v4",
+			"api_key":  "test-key",
 		},
 	}
 
 	models := FetchOpenAIModels(context.Background(), auth, &config.Config{}, "openai-compatibility")
-	if len(models) != 1 || models[0].ID != "glm-4.5" {
-		t.Fatalf("unexpected models result: %#v", models)
+	if len(models) != 1 {
+		t.Fatalf("expected one model, got %d", len(models))
 	}
 	if gotPath != "/api/coding/paas/v4/models" {
-		t.Fatalf("path = %q, want %q", gotPath, "/api/coding/paas/v4/models")
+		t.Fatalf("got path %q, want %q", gotPath, "/api/coding/paas/v4/models")
 	}
 }
