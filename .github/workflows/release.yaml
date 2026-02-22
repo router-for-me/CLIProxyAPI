@@ -4,7 +4,8 @@ on:
   push:
     # run only against version tags
     tags:
-      - 'v*'
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+      - 'v[0-9]*.[0-9]*.[0-9]*-[0-9]*'
 
 permissions:
   contents: write
@@ -30,7 +31,7 @@ jobs:
       - uses: goreleaser/goreleaser-action@v4
         with:
           distribution: goreleaser
-          version: latest
+          version: v2
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
