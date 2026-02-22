@@ -15,7 +15,8 @@ This section tracks source-linked execution boards and import artifacts.
 ## Sprint & Audit Artifacts
 
 - [70-Item Sprint Plan](./issue-wave-gh-35-2026-02-22.md)
-- [Next 35-Item CPB Wave](./issue-wave-cpb-0246-0280-2026-02-22.md)
+- [Next 35-Item CPB Wave (CPB-0246..0280)](./issue-wave-cpb-0246-0280-2026-02-22.md)
+- [Next 35-Item CPB Wave (CPB-0281..0315)](./issue-wave-cpb-0281-0315-2026-02-22.md)
 - [Sprint Planning README](./README.md)
 - [Coder + Adjacent Research Inventory (300 repos)](./coder-org-plus-relative-300-inventory-2026-02-22.md)
 - [AgentAPI/cliproxy Integration Research](./agentapi-cliproxy-integration-research-2026-02-22.md)
