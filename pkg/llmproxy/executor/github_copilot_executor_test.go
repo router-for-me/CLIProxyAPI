@@ -37,6 +37,11 @@ func TestGitHubCopilotNormalizeModel_StripsSuffix(t *testing.T) {
 			model:     "gemini-2.5-pro(8192)",
 			wantModel: "gemini-2.5-pro",
 		},
+		{
+			name:      "uppercase model normalized",
+			model:     "GPT-5.1-Codex-Max",
+			wantModel: "gpt-5.1-codex-max",
+		},
 	}
 
 	e := &GitHubCopilotExecutor{}
