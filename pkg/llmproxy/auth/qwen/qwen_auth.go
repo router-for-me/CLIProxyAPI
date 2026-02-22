@@ -20,9 +20,10 @@ import (
 
 const (
 	// QwenOAuthDeviceCodeEndpoint is the URL for initiating the OAuth 2.0 device authorization flow.
-	QwenOAuthDeviceCodeEndpoint = "https://chat.qwen.ai/api/v1/oauth2/device/code"
+	// Updated endpoints per Qwen Code docs - GitHub #1658
+	QwenOAuthDeviceCodeEndpoint = "https://oauth.qwen.ai/oauth/device/code"
 	// QwenOAuthTokenEndpoint is the URL for exchanging device codes or refresh tokens for access tokens.
-	QwenOAuthTokenEndpoint = "https://chat.qwen.ai/api/v1/oauth2/token"
+	QwenOAuthTokenEndpoint = "https://oauth.qwen.ai/oauth/token"
 	// QwenOAuthClientID is the client identifier for the Qwen OAuth 2.0 application.
 	QwenOAuthClientID = "f0304373b74a44d2b584a3fb70ca9e56"
 	// QwenOAuthScope defines the permissions requested by the application.

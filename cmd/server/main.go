@@ -106,6 +106,7 @@ func main() {
 	var novitaLogin bool
 	var projectID string
 	var vertexImport string
+	var setup bool
 	var configPath string
 	var password string
 	var tuiMode bool
@@ -145,6 +146,7 @@ func main() {
 	flag.BoolVar(&novitaLogin, "novita-login", false, "Login to Novita AI using API key (stored in auth-dir)")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
+	flag.BoolVar(&setup, "setup", false, "Run interactive setup wizard for provider auth and quick checks")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
@@ -523,7 +525,13 @@ func main() {
 
 	// Handle different command modes based on the provided flags.
 
-	if vertexImport != "" {
+	if setup {
+		// Run interactive setup wizard before service start or any dedicated login flow.
+		cmd.DoSetupWizard(cfg, &cmd.SetupOptions{
+			ConfigPath: configFilePath,
+		})
+		return
+	} else if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport)
 	} else if login {
