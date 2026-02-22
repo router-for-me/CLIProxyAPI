@@ -275,17 +275,17 @@ func ReplaceWebSearchToolDescription(body []byte) ([]byte, error) {
 // for injection into the system prompt.
 func FormatSearchContextPrompt(query string, results *WebSearchResults) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("[Web Search Results for \"%s\"]\n", query))
+	fmt.Fprintf(&sb, "[Web Search Results for \"%s\"]\n", query)
 
 	if results != nil && len(results.Results) > 0 {
 		for i, r := range results.Results {
-			sb.WriteString(fmt.Sprintf("%d. %s - %s\n", i+1, r.Title, r.URL))
+			fmt.Fprintf(&sb, "%d. %s - %s\n", i+1, r.Title, r.URL)
 			if r.Snippet != nil && *r.Snippet != "" {
 				snippet := *r.Snippet
 				if len(snippet) > 500 {
 					snippet = snippet[:500] + "..."
 				}
-				sb.WriteString(fmt.Sprintf("   %s\n", snippet))
+				fmt.Fprintf(&sb, "   %s\n", snippet)
 			}
 		}
 	} else {
@@ -707,7 +707,7 @@ func generateSearchSummary(query string, results *WebSearchResults) string {
 				if len(snippet) > 200 {
 					snippet = snippet[:200] + "..."
 				}
-				sb.WriteString(fmt.Sprintf("   %s\n", snippet))
+				fmt.Fprintf(&sb, "   %s\n", snippet)
 			}
 			sb.WriteString(fmt.Sprintf("   Source: %s\n\n", r.URL))
 		}
