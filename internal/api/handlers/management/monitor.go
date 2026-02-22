@@ -1578,3 +1578,93 @@ func (h *Handler) GetMonitorServiceHealth(c *gin.Context) {
 		"success_rate":      calcRate(totalSuccess, total),
 	})
 }
+
+// GetMonitorKeyStats returns per-source and per-auth-index success/failure stats
+// with 10-minute time blocks over a 200-minute sliding window.
+func (h *Handler) GetMonitorKeyStats(c *gin.Context) {
+	const (
+		blockCount      = 20
+		blockDurationMs = 600000 // 10 minutes
+		blockDuration   = 10 * time.Minute
+		windowDuration  = blockCount * blockDuration // 200 minutes
+	)
+
+	now := time.Now()
+	windowStart := now.Add(-windowDuration)
+
+	type blockStats struct {
+		Success int64 `json:"success"`
+		Failure int64 `json:"failure"`
+	}
+
+	type keyStats struct {
+		Success int64        `json:"success"`
+		Failure int64        `json:"failure"`
+		Blocks  []blockStats `json:"blocks"`
+	}
+
+	bySource := make(map[string]*keyStats)
+	byAuthIndex := make(map[string]*keyStats)
+
+	ensureEntry := func(m map[string]*keyStats, key string) *keyStats {
+		if s, ok := m[key]; ok {
+			return s
+		}
+		s := &keyStats{Blocks: make([]blockStats, blockCount)}
+		m[key] = s
+		return s
+	}
+
+	visitSnapshotRecords(h.usageSnapshot(), func(record monitorRecord) {
+		if record.Timestamp.Before(windowStart) || record.Timestamp.After(now) {
+			return
+		}
+		idx := int(record.Timestamp.Sub(windowStart) / blockDuration)
+		if idx >= blockCount {
+			idx = blockCount - 1
+		}
+
+		source := record.Source
+		if source == "" {
+			source = "unknown"
+		}
+		srcStats := ensureEntry(bySource, source)
+
+		authIdx := record.AuthIndex
+		if authIdx == "" {
+			authIdx = "unknown"
+		}
+		aiStats := ensureEntry(byAuthIndex, authIdx)
+
+		if record.Failed {
+			srcStats.Failure++
+			srcStats.Blocks[idx].Failure++
+			aiStats.Failure++
+			aiStats.Blocks[idx].Failure++
+		} else {
+			srcStats.Success++
+			srcStats.Blocks[idx].Success++
+			aiStats.Success++
+			aiStats.Blocks[idx].Success++
+		}
+	})
+
+	sourceResp := make(map[string]keyStats, len(bySource))
+	for k, v := range bySource {
+		sourceResp[k] = *v
+	}
+	authResp := make(map[string]keyStats, len(byAuthIndex))
+	for k, v := range byAuthIndex {
+		authResp[k] = *v
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"by_source":     sourceResp,
+		"by_auth_index": authResp,
+		"block_config": gin.H{
+			"count":           blockCount,
+			"duration_ms":     blockDurationMs,
+			"window_start_ms": windowStart.UnixMilli(),
+		},
+	})
+}
