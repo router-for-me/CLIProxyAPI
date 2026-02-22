@@ -22,9 +22,11 @@ func resolveDefaultConfigPath(wd string, isCloudDeploy bool) string {
 	addEnvCandidate("CLIPROXY_CONFIG_PATH")
 
 	candidates = append(candidates, fallback)
+	// If config.yaml is mounted as a directory (common Docker mis-mount),
+	// prefer the nested config/config.yaml path before failing on the directory.
+	candidates = append(candidates, filepath.Join(wd, "config", "config.yaml"))
 	if isCloudDeploy {
 		candidates = append(candidates,
-			filepath.Join(wd, "config", "config.yaml"),
 			"/CLIProxyAPI/config.yaml",
 			"/CLIProxyAPI/config/config.yaml",
 			"/config/config.yaml",

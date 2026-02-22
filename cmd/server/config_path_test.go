@@ -80,3 +80,28 @@ func TestResolveDefaultConfigPath_CloudFallbackToNestedConfig(t *testing.T) {
 		t.Fatalf("resolveDefaultConfigPath() = %q, want nested path %q", got, nested)
 	}
 }
+
+func TestResolveDefaultConfigPath_NonCloudFallbackToNestedConfigWhenDefaultIsDir(t *testing.T) {
+	t.Setenv("CONFIG", "")
+	t.Setenv("CONFIG_PATH", "")
+	t.Setenv("CLIPROXY_CONFIG", "")
+	t.Setenv("CLIPROXY_CONFIG_PATH", "")
+
+	wd := t.TempDir()
+	configPathAsDir := filepath.Join(wd, "config.yaml")
+	if err := os.MkdirAll(configPathAsDir, 0o755); err != nil {
+		t.Fatalf("mkdir config.yaml dir: %v", err)
+	}
+	nested := filepath.Join(wd, "config", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(nested), 0o755); err != nil {
+		t.Fatalf("mkdir nested parent: %v", err)
+	}
+	if err := os.WriteFile(nested, []byte("port: 8317\n"), 0o644); err != nil {
+		t.Fatalf("write nested config: %v", err)
+	}
+
+	got := resolveDefaultConfigPath(wd, false)
+	if got != nested {
+		t.Fatalf("resolveDefaultConfigPath() = %q, want nested path %q", got, nested)
+	}
+}
