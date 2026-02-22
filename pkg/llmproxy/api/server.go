@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/access"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/api/middleware"
@@ -149,6 +151,7 @@ type Server struct {
 	wsRoutes      map[string]struct{}
 	wsAuthChanged func(bool, bool)
 	wsAuthEnabled atomic.Bool
+	routesSetup   atomic.Bool
 
 	// management handler
 	mgmt *managementHandlers.Handler
@@ -162,7 +165,14 @@ type Server struct {
 	managementRoutesEnabled atomic.Bool
 
 	// envManagementSecret indicates whether MANAGEMENT_PASSWORD is configured.
-	envManagementSecret bool
+	envManagementSecret        bool
+	controlPlaneIDSeq          uint64
+	controlPlaneSessions       map[string]*controlPlaneSession
+	controlPlaneSessionsMu     sync.RWMutex
+	controlPlaneIdempMu        sync.RWMutex
+	controlPlaneIdempCache     map[string]*controlPlaneMessageRequestResult
+	controlPlaneSessionHistory map[string][]controlPlaneSession
+	controlPlaneSessionMirror  map[string]*controlPlaneSession
 
 	localPassword string
 
@@ -238,17 +248,21 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create server instance
 	s := &Server{
-		engine:              engine,
-		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
-		cfg:                 cfg,
-		accessManager:       accessManager,
-		requestLogger:       requestLogger,
-		loggerToggle:        toggle,
-		configFilePath:      configFilePath,
-		currentPath:         wd,
-		envManagementSecret: envManagementSecret,
-		wsRoutes:            make(map[string]struct{}),
-		shmStop:             make(chan struct{}, 1),
+		engine:                     engine,
+		handlers:                   handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
+		cfg:                        cfg,
+		accessManager:              accessManager,
+		requestLogger:              requestLogger,
+		loggerToggle:               toggle,
+		configFilePath:             configFilePath,
+		currentPath:                wd,
+		envManagementSecret:        envManagementSecret,
+		wsRoutes:                   make(map[string]struct{}),
+		shmStop:                    make(chan struct{}, 1),
+		controlPlaneSessions:       make(map[string]*controlPlaneSession),
+		controlPlaneSessionHistory: make(map[string][]controlPlaneSession),
+		controlPlaneSessionMirror:  make(map[string]*controlPlaneSession),
+		controlPlaneIdempCache:     make(map[string]*controlPlaneMessageRequestResult),
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -317,9 +331,213 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	return s
 }
 
+type controlPlaneMessage struct {
+	SessionID  string `json:"session_id"`
+	MessageID  string `json:"message_id"`
+	Role       string `json:"role"`
+	Content    string `json:"content"`
+	Capability string `json:"capability,omitempty"`
+}
+
+type controlPlaneSession struct {
+	SessionID   string                `json:"session_id"`
+	Status      string                `json:"status"`
+	Messages    []controlPlaneMessage `json:"messages"`
+	CreatedAt   time.Time             `json:"created_at"`
+	UpdatedAt   time.Time             `json:"updated_at"`
+	HasMessages bool                  `json:"has_messages"`
+}
+
+type controlPlaneMessageRequest struct {
+	SessionID  string `json:"session_id"`
+	Message    string `json:"message"`
+	Capability string `json:"capability"`
+}
+
+type controlPlaneMessageRequestResult struct {
+	SessionID    string `json:"session_id"`
+	Status       string `json:"status"`
+	MessageID    string `json:"message_id"`
+	ReceivedAt   string `json:"received_at"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+	MessageCount int    `json:"message_count"`
+}
+
+func (s *Server) controlPlaneSession(sessionID string) *controlPlaneSession {
+	if s == nil {
+		return nil
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	s.controlPlaneSessionsMu.RLock()
+	defer s.controlPlaneSessionsMu.RUnlock()
+	stored := s.controlPlaneSessions[sessionID]
+	if stored == nil {
+		stored = s.controlPlaneSessionMirror[sessionID]
+	}
+	if stored == nil {
+		return nil
+	}
+	sessionCopy := *stored
+	sessionCopy.Messages = append(sessionCopy.Messages[:0], stored.Messages...)
+	return &sessionCopy
+}
+
+func cloneControlPlaneMessage(msg *controlPlaneMessage) controlPlaneMessage {
+	if msg == nil {
+		return controlPlaneMessage{}
+	}
+	return *msg
+}
+
+func cloneControlPlaneMessages(msgs []controlPlaneMessage) []controlPlaneMessage {
+	if len(msgs) == 0 {
+		return nil
+	}
+	out := make([]controlPlaneMessage, len(msgs))
+	for i := range msgs {
+		out[i] = cloneControlPlaneMessage(&msgs[i])
+	}
+	return out
+}
+
+func cloneControlPlaneSession(session *controlPlaneSession) *controlPlaneSession {
+	if session == nil {
+		return nil
+	}
+	sessionCopy := *session
+	sessionCopy.Messages = cloneControlPlaneMessages(session.Messages)
+	return &sessionCopy
+}
+
+func (s *Server) normalizeControlPlaneSessionID(sessionID string) string {
+	return strings.TrimSpace(sessionID)
+}
+
+func (s *Server) upsertControlPlaneSessionLocked(sessionID string, now time.Time) (*controlPlaneSession, bool) {
+	if s == nil {
+		return nil, false
+	}
+	if s.controlPlaneSessions == nil {
+		s.controlPlaneSessions = make(map[string]*controlPlaneSession)
+	}
+	if s.controlPlaneSessionMirror == nil {
+		s.controlPlaneSessionMirror = make(map[string]*controlPlaneSession)
+	}
+
+	session, ok := s.controlPlaneSessions[sessionID]
+	if !ok {
+		session = &controlPlaneSession{
+			SessionID: sessionID,
+			Status:    "running",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		s.controlPlaneSessions[sessionID] = session
+		s.controlPlaneSessionMirror[sessionID] = cloneControlPlaneSession(session)
+		return session, false
+	}
+	session.Status = "running"
+	session.UpdatedAt = now
+	session.HasMessages = true
+	s.controlPlaneSessionMirror[sessionID] = cloneControlPlaneSession(session)
+	return session, true
+}
+
+func (s *Server) recordControlPlaneSessionConflictLocked(sessionID string, current *controlPlaneSession) {
+	if s == nil || strings.TrimSpace(sessionID) == "" || current == nil {
+		return
+	}
+	if s.controlPlaneSessionHistory == nil {
+		s.controlPlaneSessionHistory = make(map[string][]controlPlaneSession)
+	}
+	existing := cloneControlPlaneSession(current)
+	if existing == nil {
+		return
+	}
+	s.controlPlaneSessionHistory[sessionID] = append(s.controlPlaneSessionHistory[sessionID], *existing)
+}
+
+func (s *Server) appendControlPlaneMessageToSession(sessionID, content string, now time.Time) (*controlPlaneSession, string) {
+	if s == nil {
+		return nil, ""
+	}
+	sessionID = s.normalizeControlPlaneSessionID(sessionID)
+	if sessionID == "" {
+		return nil, ""
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	s.controlPlaneSessionsMu.Lock()
+	defer s.controlPlaneSessionsMu.Unlock()
+	session, existed := s.upsertControlPlaneSessionLocked(sessionID, now)
+	if session == nil {
+		return nil, ""
+	}
+	if existed {
+		s.recordControlPlaneSessionConflictLocked(sessionID, session)
+	}
+
+	nextMessages := append(cloneControlPlaneMessages(session.Messages), controlPlaneMessage{
+		SessionID: sessionID,
+		MessageID: fmt.Sprintf("msg_%s", uuid.NewString()),
+		Role:      "user",
+		Content:   content,
+	})
+	session.Messages = nextMessages
+	session.UpdatedAt = now
+	session.HasMessages = true
+	session.Status = "done"
+	s.controlPlaneSessionMirror[sessionID] = cloneControlPlaneSession(session)
+	messageID := nextMessages[len(nextMessages)-1].MessageID
+	return session, messageID
+}
+
+func (s *Server) nextControlPlaneSessionID() string {
+	next := atomic.AddUint64(&s.controlPlaneIDSeq, 1)
+	return fmt.Sprintf("cp_%d_%s", next, uuid.NewString())
+}
+
+func normalizeControlPlaneCapability(v string) (string, bool) {
+	clean := strings.ToLower(strings.TrimSpace(v))
+	switch clean {
+	case "":
+		return "", true
+	case "continue", "resume":
+		return clean, true
+	case "ask", "exec", "max":
+		return "continue", true
+	default:
+		return clean, false
+	}
+}
+
+func buildControlPlaneMessageRequestResult(sessionID, status, messageID, receivedAt, createdAt, updatedAt string, messageCount int) *controlPlaneMessageRequestResult {
+	return &controlPlaneMessageRequestResult{
+		SessionID:    sessionID,
+		Status:       status,
+		MessageID:    messageID,
+		ReceivedAt:   receivedAt,
+		CreatedAt:    createdAt,
+		UpdatedAt:    updatedAt,
+		MessageCount: messageCount,
+	}
+}
+
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
+	if s == nil || s.engine == nil {
+		return
+	}
+	if !s.routesSetup.CompareAndSwap(false, true) {
+		return
+	}
+
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
@@ -336,13 +554,10 @@ func (s *Server) setupRoutes() {
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
-		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 	}
-
-	// WebSocket endpoint for /v1/responses (Codex streaming)
-	s.AttachWebsocketRoute("/v1/responses", ResponsesWebSocketHandler())
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
@@ -364,6 +579,154 @@ func (s *Server) setupRoutes() {
 				"GET /v1/metrics/providers",
 			},
 		})
+	})
+
+	s.engine.POST("/message", func(c *gin.Context) {
+		var req controlPlaneMessageRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid message payload", "detail": err.Error()})
+			return
+		}
+		var ok bool
+		req.Capability, ok = normalizeControlPlaneCapability(req.Capability)
+		if !ok {
+			c.JSON(http.StatusNotImplemented, gin.H{
+				"error":        "unsupported capability",
+				"capability":   req.Capability,
+				"session_id":   req.SessionID,
+				"status":       "failed",
+				"instructions": "Use capability labels continue, resume, ask, exec, or max.",
+			})
+			return
+		}
+		req.SessionID = strings.TrimSpace(req.SessionID)
+		req.Message = strings.TrimSpace(req.Message)
+		if req.SessionID == "" {
+			req.SessionID = s.nextControlPlaneSessionID()
+		}
+		if req.Message == "" && req.Capability == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "message or capability required"})
+			return
+		}
+		idempotencyKey := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+		if idempotencyKey != "" {
+			s.controlPlaneIdempMu.RLock()
+			cached := s.controlPlaneIdempCache[idempotencyKey]
+			s.controlPlaneIdempMu.RUnlock()
+			if cached != nil {
+				c.JSON(http.StatusAccepted, gin.H{
+					"session_id":    cached.SessionID,
+					"status":        cached.Status,
+					"message_id":    cached.MessageID,
+					"received_at":   cached.ReceivedAt,
+					"created_at":    cached.CreatedAt,
+					"updated_at":    cached.UpdatedAt,
+					"message_count": cached.MessageCount,
+					"result": gin.H{
+						"status":  "queued",
+						"message": "control-plane compatibility shell active; model execution path not yet wired",
+					},
+					"events_url": fmt.Sprintf("/events?session_id=%s", cached.SessionID),
+				})
+				return
+			}
+		}
+		now := time.Now().UTC()
+		session, messageID := s.appendControlPlaneMessageToSession(req.SessionID, req.Message, now)
+		if session == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to append control-plane message"})
+			return
+		}
+		createdAt := session.CreatedAt.Format(time.RFC3339Nano)
+		updatedAt := session.UpdatedAt.Format(time.RFC3339Nano)
+		if idempotencyKey != "" {
+			response := buildControlPlaneMessageRequestResult(
+				req.SessionID,
+				session.Status,
+				messageID,
+				now.Format(time.RFC3339Nano),
+				createdAt,
+				updatedAt,
+				len(session.Messages),
+			)
+			s.controlPlaneIdempMu.Lock()
+			s.controlPlaneIdempCache[idempotencyKey] = response
+			s.controlPlaneIdempMu.Unlock()
+		}
+		c.JSON(http.StatusAccepted, gin.H{
+			"session_id":    req.SessionID,
+			"status":        session.Status,
+			"message_id":    messageID,
+			"received_at":   now.Format(time.RFC3339Nano),
+			"created_at":    createdAt,
+			"updated_at":    updatedAt,
+			"message_count": len(session.Messages),
+			"result": gin.H{
+				"status":  "queued",
+				"message": "control-plane compatibility shell active; model execution path not yet wired",
+			},
+			"events_url": fmt.Sprintf("/events?session_id=%s", req.SessionID),
+		})
+	})
+	s.engine.GET("/messages", func(c *gin.Context) {
+		sessionID := strings.TrimSpace(c.Query("session_id"))
+		if sessionID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "session_id query parameter is required"})
+			return
+		}
+		session := s.controlPlaneSession(sessionID)
+		if session == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found", "session_id": sessionID})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"session_id": sessionID,
+			"messages":   session.Messages,
+		})
+	})
+	s.engine.GET("/status", func(c *gin.Context) {
+		sessionID := strings.TrimSpace(c.Query("session_id"))
+		if sessionID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "session_id query parameter is required"})
+			return
+		}
+		session := s.controlPlaneSession(sessionID)
+		if session == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found", "session_id": sessionID})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"session_id":    sessionID,
+			"status":        session.Status,
+			"message_count": len(session.Messages),
+			"updated_at":    session.UpdatedAt.Format(time.RFC3339Nano),
+		})
+	})
+	s.engine.GET("/events", func(c *gin.Context) {
+		sessionID := strings.TrimSpace(c.Query("session_id"))
+		if sessionID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "session_id query parameter is required"})
+			return
+		}
+		session := s.controlPlaneSession(sessionID)
+		if session == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found", "session_id": sessionID})
+			return
+		}
+		payload, _ := json.Marshal(gin.H{
+			"session_id": sessionID,
+			"status":     session.Status,
+			"updated_at": session.UpdatedAt.Format(time.RFC3339Nano),
+		})
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Writer.WriteHeader(http.StatusOK)
+		_, _ = c.Writer.Write([]byte("event: status\n"))
+		_, _ = c.Writer.Write([]byte("data: "))
+		_, _ = c.Writer.Write(payload)
+		_, _ = c.Writer.Write([]byte("\n\n"))
+		c.Writer.Flush()
 	})
 
 	// Provider metrics for OpenRouter-style routing (thegent cost/throughput/latency)
@@ -482,6 +845,10 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 		trimmed = "/" + trimmed
 	}
 	s.wsRouteMu.Lock()
+	if s.hasRoute(trimmed) {
+		s.wsRouteMu.Unlock()
+		return
+	}
 	if _, exists := s.wsRoutes[trimmed]; exists {
 		s.wsRouteMu.Unlock()
 		return
@@ -503,6 +870,15 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	}
 
 	s.engine.GET(trimmed, conditionalAuth, finalHandler)
+}
+
+func (s *Server) hasRoute(path string) bool {
+	for _, route := range s.engine.Routes() {
+		if route.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) registerManagementRoutes() {

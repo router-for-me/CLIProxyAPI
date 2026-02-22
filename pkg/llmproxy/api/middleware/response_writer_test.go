@@ -31,28 +31,28 @@ func TestResponseWriterWrapper_Basic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	gw := gin.CreateTestContextOnly(w, gin.Default())
-	
+
 	logger := &mockLogger{enabled: true}
 	reqInfo := &RequestInfo{
 		URL:    "/test",
 		Method: "GET",
 		Body:   []byte("req body"),
 	}
-	
+
 	wrapper := NewResponseWriterWrapper(gw.Writer, logger, reqInfo)
-	
+
 	// Test Write
 	n, err := wrapper.Write([]byte("hello"))
 	if err != nil || n != 5 {
 		t.Errorf("Write failed: n=%d, err=%v", n, err)
 	}
-	
+
 	// Test WriteHeader
 	wrapper.WriteHeader(http.StatusAccepted)
 	if wrapper.statusCode != http.StatusAccepted {
 		t.Errorf("expected status 202, got %d", wrapper.statusCode)
 	}
-	
+
 	// Test Finalize
 	err = wrapper.Finalize(gw)
 	if err != nil {
@@ -66,15 +66,15 @@ func TestResponseWriterWrapper_DetectStreaming(t *testing.T) {
 			Body: []byte(`{"stream": true}`),
 		},
 	}
-	
+
 	if !wrapper.detectStreaming("text/event-stream") {
 		t.Error("expected true for text/event-stream")
 	}
-	
+
 	if wrapper.detectStreaming("application/json") {
 		t.Error("expected false for application/json even with stream:true in body (per logic)")
 	}
-	
+
 	wrapper.requestInfo.Body = []byte(`{}`)
 	if wrapper.detectStreaming("") {
 		t.Error("expected false for empty content type and no stream hint")

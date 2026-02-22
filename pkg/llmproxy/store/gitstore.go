@@ -769,3 +769,30 @@ func deepEqualJSON(a, b any) bool {
 		return false
 	}
 }
+
+// openOrInitRepositoryAfterEmptyClone opens or initializes a git repository at the given directory.
+// If a .git directory already exists (e.g., from a failed clone), it archives it with a
+// timestamped backup name before initializing a new repository.
+func openOrInitRepositoryAfterEmptyClone(repoDir string) (*git.Repository, error) {
+	gitDir := filepath.Join(repoDir, ".git")
+
+	// If .git exists, archive it
+	if _, err := os.Stat(gitDir); err == nil {
+		// .git exists, archive it
+		timestamp := time.Now().Format("20060102-150405")
+		backupName := fmt.Sprintf(".git.bootstrap-backup-%s", timestamp)
+		backupPath := filepath.Join(repoDir, backupName)
+		if errRename := os.Rename(gitDir, backupPath); errRename != nil {
+			return nil, fmt.Errorf("archive existing .git directory: %w", errRename)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		// Unexpected error
+		return nil, fmt.Errorf("stat .git directory: %w", err)
+	}
+	// Now .git does not exist, initialize a fresh repository
+	repo, errInit := git.PlainInit(repoDir, false)
+	if errInit != nil {
+		return nil, fmt.Errorf("initialize repository: %w", errInit)
+	}
+	return repo, nil
+}

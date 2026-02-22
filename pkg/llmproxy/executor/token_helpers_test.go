@@ -6,7 +6,7 @@ import (
 
 func TestTokenizerForModel(t *testing.T) {
 	cases := []struct {
-		model string
+		model   string
 		wantAdj float64
 	}{
 		{"gpt-4", 1.0},
@@ -59,7 +59,7 @@ func TestEstimateImageTokens(t *testing.T) {
 		want int
 	}{
 		{0, 0, 1000},
-		{100, 100, 85}, // 10000/750 = 13.3 -> min 85
+		{100, 100, 85},     // 10000/750 = 13.3 -> min 85
 		{1000, 1000, 1333}, // 1000000/750 = 1333
 		{2000, 2000, 1590}, // max 1590
 	}

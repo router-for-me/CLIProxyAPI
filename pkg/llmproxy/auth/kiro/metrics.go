@@ -24,10 +24,10 @@ type TokenScorer struct {
 	metrics map[string]*TokenMetrics
 
 	// Scoring weights
-	successRateWeight    float64
-	quotaWeight          float64
-	latencyWeight        float64
-	lastUsedWeight       float64
+	successRateWeight     float64
+	quotaWeight           float64
+	latencyWeight         float64
+	lastUsedWeight        float64
 	failPenaltyMultiplier float64
 }
 

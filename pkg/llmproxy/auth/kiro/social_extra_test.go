@@ -18,7 +18,7 @@ func TestSocialAuthClient_CreateToken(t *testing.T) {
 			ProfileArn:   "arn",
 			ExpiresIn:    3600,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -58,7 +58,7 @@ func TestSocialAuthClient_BuildLoginURL(t *testing.T) {
 func TestSocialAuthClient_WebCallbackServer(t *testing.T) {
 	client := &SocialAuthClient{}
 	expectedState := "xyz"
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -76,7 +76,7 @@ func TestSocialAuthClient_WebCallbackServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("callback request failed: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	select {
 	case result := <-resultChan:
@@ -86,20 +86,20 @@ func TestSocialAuthClient_WebCallbackServer(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for callback")
 	}
-	
+
 	// Test state mismatch
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
 	redirectURI2, resultChan2, _ := client.startWebCallbackServer(ctx2, "good")
-	
+
 	// Give server a moment to start
 	time.Sleep(500 * time.Millisecond)
 
 	resp2, err := http.Get(redirectURI2 + "?code=abc&state=bad")
 	if err == nil {
-		resp2.Body.Close()
+		_ = resp2.Body.Close()
 	}
-	
+
 	select {
 	case result2 := <-resultChan2:
 		if result2.Error != "state mismatch" {

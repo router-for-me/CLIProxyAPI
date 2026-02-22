@@ -14,8 +14,8 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/api"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/wsrelay"
@@ -368,6 +368,10 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 }
 
 func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
+	s.ensureExecutorsForAuthWithMode(a, false)
+}
+
+func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, force bool) {
 	if s == nil || a == nil {
 		return
 	}
@@ -376,6 +380,15 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 	// and must not override active provider executors (such as iFlow OAuth accounts).
 	if a.Disabled {
 		return
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
+	if providerKey == "" {
+		providerKey = "openai-compatibility"
+	}
+	if !force {
+		if _, exists := s.coreManager.Executor(providerKey); exists {
+			return
+		}
 	}
 	if compatProviderKey, _, isCompat := openAICompatInfoFromAuth(a); isCompat {
 		if compatProviderKey == "" {

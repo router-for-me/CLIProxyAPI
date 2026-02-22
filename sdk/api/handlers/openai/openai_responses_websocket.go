@@ -33,6 +33,11 @@ const (
 	wsPayloadLogMaxSize  = 2048
 )
 
+// contextKey is a custom type for context keys to avoid string collisions.
+type contextKey string
+
+const ginContextKey contextKey = "gin"
+
 var responsesWebsocketUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -84,8 +89,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			appendWebsocketEvent(&wsBodyLog, "disconnect", []byte(errReadMessage.Error()))
 			if websocket.IsCloseError(errReadMessage, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
 				log.Infof("responses websocket: client disconnected id=%s error=%v", passthroughSessionID, errReadMessage)
-			} else {
-				// log.Warnf("responses websocket: read message failed id=%s error=%v", passthroughSessionID, errReadMessage)
 			}
 			return
 		}
@@ -118,7 +121,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			allowIncrementalInputWithPreviousResponseID,
 		)
 		if errMsg != nil {
-			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+			h.LoggingAPIResponseError(context.WithValue(context.Background(), ginContextKey, c), errMsg)
 			markAPIResponseTimestamp(c)
 			errorPayload, errWrite := writeResponsesWebsocketError(conn, errMsg)
 			appendWebsocketEvent(&wsBodyLog, "response", errorPayload)
@@ -402,7 +405,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				continue
 			}
 			if errMsg != nil {
-				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+				h.LoggingAPIResponseError(context.WithValue(context.Background(), ginContextKey, c), errMsg)
 				markAPIResponseTimestamp(c)
 				errorPayload, errWrite := writeResponsesWebsocketError(conn, errMsg)
 				appendWebsocketEvent(wsBodyLog, "response", errorPayload)
@@ -437,7 +440,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
 					}
-					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+					h.LoggingAPIResponseError(context.WithValue(context.Background(), ginContextKey, c), errMsg)
 					markAPIResponseTimestamp(c)
 					errorPayload, errWrite := writeResponsesWebsocketError(conn, errMsg)
 					appendWebsocketEvent(wsBodyLog, "response", errorPayload)

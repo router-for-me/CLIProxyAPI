@@ -74,10 +74,10 @@ func NewSSOOIDCClient(cfg *config.Config) *SSOOIDCClient {
 
 // RegisterClientResponse from AWS SSO OIDC.
 type RegisterClientResponse struct {
-	ClientID                string `json:"clientId"`
-	ClientSecret            string `json:"clientSecret"`
-	ClientIDIssuedAt        int64  `json:"clientIdIssuedAt"`
-	ClientSecretExpiresAt   int64  `json:"clientSecretExpiresAt"`
+	ClientID              string `json:"clientId"`
+	ClientSecret          string `json:"clientSecret"`
+	ClientIDIssuedAt      int64  `json:"clientIdIssuedAt"`
+	ClientSecretExpiresAt int64  `json:"clientSecretExpiresAt"`
 }
 
 // StartDeviceAuthResponse from AWS SSO OIDC.
@@ -859,15 +859,15 @@ func (c *SSOOIDCClient) LoginWithBuilderID(ctx context.Context) (*KiroTokenData,
 				Email:        email,
 				Region:       defaultIDCRegion,
 			}, nil
-			}
-			}
+		}
+	}
 
-			// Close browser on timeout for better UX
-			if err := browser.CloseBrowser(); err != nil {
-			log.Debugf("Failed to close browser on timeout: %v", err)
-			}
-			return nil, fmt.Errorf("authorization timed out")
-			}
+	// Close browser on timeout for better UX
+	if err := browser.CloseBrowser(); err != nil {
+		log.Debugf("Failed to close browser on timeout: %v", err)
+	}
+	return nil, fmt.Errorf("authorization timed out")
+}
 
 // FetchUserEmail retrieves the user's email from AWS SSO OIDC userinfo endpoint.
 // Falls back to JWT parsing if userinfo fails.

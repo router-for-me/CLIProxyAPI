@@ -12,7 +12,7 @@ func TestCodexTokenStorage_SaveTokenToFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	authFilePath := filepath.Join(tempDir, "token.json")
 
@@ -50,7 +50,7 @@ func TestCodexTokenStorage_SaveTokenToFile(t *testing.T) {
 func TestSaveTokenToFile_MkdirFail(t *testing.T) {
 	// Use a path that's impossible to create (like a file as a directory)
 	tempFile, _ := os.CreateTemp("", "mkdir_fail")
-	defer os.Remove(tempFile.Name())
+	defer func() { _ = os.Remove(tempFile.Name()) }()
 
 	authFilePath := filepath.Join(tempFile.Name(), "token.json")
 	ts := &CodexTokenStorage{}

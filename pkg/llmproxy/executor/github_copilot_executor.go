@@ -1232,9 +1232,6 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) []st
 	return results
 }
 
-// isHTTPSuccess checks if the status code indicates success (2xx).
 func isHTTPSuccess(statusCode int) bool {
 	return statusCode >= 200 && statusCode < 300
 }
-
-func (e *GitHubCopilotExecutor) CloseExecutionSession(sessionID string) {}

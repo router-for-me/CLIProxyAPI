@@ -64,7 +64,7 @@ func (k *KiloAuth) InitiateDeviceFlow(ctx context.Context) (*DeviceAuthResponse,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to initiate device flow: status %d", resp.StatusCode)
@@ -91,7 +91,7 @@ func (k *KiloAuth) PollForToken(ctx context.Context, code string) (*DeviceStatus
 			if err != nil {
 				return nil, err
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			var data DeviceStatusResponse
 			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
@@ -124,7 +124,7 @@ func (k *KiloAuth) GetProfile(ctx context.Context, token string) (*Profile, erro
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to get profile: status %d", resp.StatusCode)
@@ -154,7 +154,7 @@ func (k *KiloAuth) GetDefaults(ctx context.Context, token, orgID string) (*Defau
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to get defaults: status %d", resp.StatusCode)

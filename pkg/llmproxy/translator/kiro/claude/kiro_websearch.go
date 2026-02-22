@@ -721,4 +721,3 @@ func generateSearchSummary(query string, results *WebSearchResults) string {
 
 	return sb.String()
 }
-

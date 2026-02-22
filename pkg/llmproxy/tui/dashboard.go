@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -295,37 +294,6 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 
 func formatKV(key, value string) string {
 	return fmt.Sprintf("  %s %s\n", labelStyle.Render(key+":"), valueStyle.Render(value))
-}
-
-func getString(m map[string]any, key string) string {
-	if v, ok := m[key]; ok {
-		if s, ok := v.(string); ok {
-			return s
-		}
-	}
-	return ""
-}
-
-func getFloat(m map[string]any, key string) float64 {
-	if v, ok := m[key]; ok {
-		switch n := v.(type) {
-		case float64:
-			return n
-		case json.Number:
-			f, _ := n.Float64()
-			return f
-		}
-	}
-	return 0
-}
-
-func getBool(m map[string]any, key string) bool {
-	if v, ok := m[key]; ok {
-		if b, ok := v.(bool); ok {
-			return b
-		}
-	}
-	return false
 }
 
 func boolEmoji(b bool) string {

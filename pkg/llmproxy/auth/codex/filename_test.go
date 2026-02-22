@@ -6,11 +6,11 @@ import (
 
 func TestCredentialFileName(t *testing.T) {
 	cases := []struct {
-		email    string
-		plan     string
-		hashID   string
-		prefix   bool
-		want     string
+		email  string
+		plan   string
+		hashID string
+		prefix bool
+		want   string
 	}{
 		{"test@example.com", "", "", false, "-test@example.com.json"},
 		{"test@example.com", "", "", true, "codex-test@example.com.json"},

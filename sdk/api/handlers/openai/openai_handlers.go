@@ -14,7 +14,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
+	constant "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	codexconverter "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/codex/openai/chat-completions"
@@ -46,7 +46,7 @@ func NewOpenAIAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIAPIHandler
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *OpenAIAPIHandler) HandlerType() string {
-	return OpenAI
+	return constant.OpenAI
 }
 
 // Models returns the OpenAI-compatible model metadata supported by this handler.
@@ -535,7 +535,7 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponseViaResponses(c *gin.Context
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, constant.OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -645,7 +645,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponseViaResponses(c *gin.Context, r
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, constant.OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
 	var param any
 
 	setSSEHeaders := func() {

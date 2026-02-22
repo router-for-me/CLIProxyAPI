@@ -40,20 +40,20 @@ func TestConvertOpenAIRequestToCodex(t *testing.T) {
 		"tools": [{"type": "function", "function": {"name": "f1", "description": "d1", "parameters": {"type": "object"}}}],
 		"reasoning_effort": "high"
 	}`)
-	
+
 	got2 := ConvertOpenAIRequestToCodex("gpt-4o", input2, false)
 	res2 := gjson.ParseBytes(got2)
-	
+
 	if res2.Get("reasoning.effort").String() != "high" {
 		t.Errorf("expected reasoning.effort high, got %s", res2.Get("reasoning.effort").String())
 	}
-	
+
 	inputArray2 := res2.Get("input").Array()
 	// user message + assistant message (empty content) + function_call message
 	if len(inputArray2) != 3 {
 		t.Fatalf("expected 3 input items, got %d", len(inputArray2))
 	}
-	
+
 	if inputArray2[2].Get("type").String() != "function_call" {
 		t.Errorf("expected third input item to be function_call, got %s", inputArray2[2].Get("type").String())
 	}

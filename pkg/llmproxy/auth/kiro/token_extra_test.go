@@ -43,8 +43,8 @@ func TestLoadFromFile_Errors(t *testing.T) {
 	}
 
 	tempFile, _ := os.CreateTemp("", "invalid-json")
-	defer os.Remove(tempFile.Name())
-	os.WriteFile(tempFile.Name(), []byte("invalid"), 0600)
+	defer func() { _ = os.Remove(tempFile.Name()) }()
+	_ = os.WriteFile(tempFile.Name(), []byte("invalid"), 0600)
 
 	_, err = LoadFromFile(tempFile.Name())
 	if err == nil {

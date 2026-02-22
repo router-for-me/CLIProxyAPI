@@ -188,6 +188,20 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				template, _ = sjson.SetRaw(template, "tools.-1", `{"type":"web_search"}`)
 				continue
 			}
+			// Special handling: Codex sends "custom" type tools (e.g., apply_patch with Lark grammar)
+			// These have "format" instead of "input_schema" and cannot be directly translated.
+			// Convert to minimal valid function schema to avoid 400 errors (GitHub #1671).
+			if toolResult.Get("type").String() == "custom" {
+				toolName := toolResult.Get("name").String()
+				toolDesc := toolResult.Get("description").String()
+				if toolName == "" {
+					toolName = "custom_tool"
+				}
+				minimalTool := fmt.Sprintf(`{"type":"function","name":"%s","description":"%s","parameters":{"type":"object","properties":{}}}`,
+					toolName, toolDesc)
+				template, _ = sjson.SetRaw(template, "tools.-1", minimalTool)
+				continue
+			}
 			tool := toolResult.Raw
 			tool, _ = sjson.Set(tool, "type", "function")
 			// Apply shortened name if needed

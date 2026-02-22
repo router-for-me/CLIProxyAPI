@@ -26,7 +26,7 @@ func ReadAccessToken() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to open cursor database: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	var value string
 	err = db.QueryRow("SELECT value FROM ItemTable WHERE key = ?", "cursor.accessToken").Scan(&value)

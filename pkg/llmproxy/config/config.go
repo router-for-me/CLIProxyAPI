@@ -2,6 +2,7 @@
 // It handles loading and parsing YAML configuration files, and provides structured
 // access to application settings including server port, authentication directory,
 // debug settings, proxy configuration, and API keys.
+//
 //go:generate go run ../../cmd/codegen/main.go
 package config
 
@@ -1894,7 +1895,6 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 		// Scalars keep their existing style to preserve quoting
 	}
 }
-
 
 func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {
 	if root == nil || root.Kind != yaml.MappingNode {

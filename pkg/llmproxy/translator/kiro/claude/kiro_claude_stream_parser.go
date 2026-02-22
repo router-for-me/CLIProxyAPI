@@ -7,18 +7,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// sseEvent represents a Server-Sent Event
-type sseEvent struct {
-	Event string
-	Data  interface{}
-}
-
-// ToSSEString converts the event to SSE wire format
-func (e *sseEvent) ToSSEString() string {
-	dataBytes, _ := json.Marshal(e.Data)
-	return "event: " + e.Event + "\ndata: " + string(dataBytes) + "\n\n"
-}
-
 // AdjustStreamIndices adjusts content block indices in SSE event data by adding an offset.
 // It also suppresses duplicate message_start events (returns shouldForward=false).
 // This is used to combine search indicator events (indices 0,1) with Kiro model response events.

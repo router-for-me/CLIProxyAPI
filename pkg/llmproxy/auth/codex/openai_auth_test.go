@@ -75,13 +75,13 @@ func TestCodexAuth_ExchangeCodeForTokens(t *testing.T) {
 			TokenType:    "Bearer",
 			ExpiresIn:    3600,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
 	// Override TokenURL for testing if it was possible, but it's a constant.
 	// Since I can't override the constant, I'll need to use a real CodexAuth but with a mocked httpClient that redirects to my server.
-	
+
 	mockClient := &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			// Redirect all requests to the test server
@@ -128,7 +128,7 @@ func TestCodexAuth_RefreshTokens(t *testing.T) {
 			TokenType:    "Bearer",
 			ExpiresIn:    3600,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -185,7 +185,7 @@ func TestCodexAuth_RefreshTokensWithRetry(t *testing.T) {
 			AccessToken: "retry_access",
 			ExpiresIn:   3600,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 

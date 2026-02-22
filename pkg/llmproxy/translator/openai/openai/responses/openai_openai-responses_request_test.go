@@ -61,32 +61,32 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions(t *testing.T) {
 		"max_output_tokens": 100,
 		"reasoning": {"effort": "high"}
 	}`)
-	
+
 	got2 := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("m1", input2, false)
 	res2 := gjson.ParseBytes(got2)
-	
+
 	if res2.Get("max_tokens").Int() != 100 {
 		t.Errorf("expected max_tokens 100, got %d", res2.Get("max_tokens").Int())
 	}
-	
+
 	if res2.Get("reasoning_effort").String() != "high" {
 		t.Errorf("expected reasoning_effort high, got %s", res2.Get("reasoning_effort").String())
 	}
-	
+
 	messages2 := res2.Get("messages").Array()
 	// sys + user + assistant(tool_call) + tool(result)
 	if len(messages2) != 4 {
 		t.Fatalf("expected 4 messages, got %d", len(messages2))
 	}
-	
+
 	if messages2[2].Get("role").String() != "assistant" || !messages2[2].Get("tool_calls").Exists() {
 		t.Error("expected third message to be assistant with tool_calls")
 	}
-	
+
 	if messages2[3].Get("role").String() != "tool" || messages2[3].Get("content").String() != "ok" {
 		t.Error("expected fourth message to be tool with content ok")
 	}
-	
+
 	if len(res2.Get("tools").Array()) != 1 {
 		t.Errorf("expected 1 tool, got %d", len(res2.Get("tools").Array()))
 	}
@@ -102,7 +102,7 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions(t *testing.T) {
 	}`)
 	got3 := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-4o", input3, false)
 	res3 := gjson.ParseBytes(got3)
-	
+
 	messages3 := res3.Get("messages").Array()
 	if len(messages3) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(messages3))

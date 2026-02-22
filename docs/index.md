@@ -25,6 +25,7 @@
 5. [Provider Operations](/provider-operations) for on-call runbook and incident workflows.
 6. [Routing and Models Reference](/routing-reference) for model resolution behavior.
 7. [Troubleshooting](/troubleshooting) for common failures and concrete fixes.
+8. [Planning Boards](/planning/) for source-linked execution tracking and import-ready board artifacts.
 
 ## API Surfaces
 
@@ -37,6 +38,7 @@
 
 - [Docsets](/docsets/) for user, developer, and agent-focused guidance.
 - [Feature Guides](/features/) for deeper behavior and implementation notes.
+- [Planning Boards](/planning/) for source-to-solution mapping across issues, PRs, discussions, and external requests.
 
 ## Fast Verification Commands
 

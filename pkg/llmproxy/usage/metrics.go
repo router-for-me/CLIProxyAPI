@@ -7,15 +7,15 @@ import (
 
 // ProviderMetrics holds per-provider metrics for routing decisions.
 type ProviderMetrics struct {
-	RequestCount  int64   `json:"request_count"`
-	SuccessCount  int64   `json:"success_count"`
-	FailureCount  int64   `json:"failure_count"`
-	TotalTokens   int64   `json:"total_tokens"`
-	SuccessRate   float64 `json:"success_rate"`
-	CostPer1kIn   float64 `json:"cost_per_1k_input,omitempty"`
-	CostPer1kOut  float64 `json:"cost_per_1k_output,omitempty"`
-	LatencyP50Ms  int     `json:"latency_p50_ms,omitempty"`
-	LatencyP95Ms  int     `json:"latency_p95_ms,omitempty"`
+	RequestCount int64   `json:"request_count"`
+	SuccessCount int64   `json:"success_count"`
+	FailureCount int64   `json:"failure_count"`
+	TotalTokens  int64   `json:"total_tokens"`
+	SuccessRate  float64 `json:"success_rate"`
+	CostPer1kIn  float64 `json:"cost_per_1k_input,omitempty"`
+	CostPer1kOut float64 `json:"cost_per_1k_output,omitempty"`
+	LatencyP50Ms int     `json:"latency_p50_ms,omitempty"`
+	LatencyP95Ms int     `json:"latency_p95_ms,omitempty"`
 }
 
 // Known providers for routing (thegent model→provider mapping).
@@ -60,13 +60,13 @@ func GetProviderMetrics() map[string]ProviderMetrics {
 			cost = 0.5
 		}
 		result[provider] = ProviderMetrics{
-			RequestCount:  apiSnap.TotalRequests,
-			SuccessCount:  success,
-			FailureCount:  failures,
-			TotalTokens:   apiSnap.TotalTokens,
-			SuccessRate:   sr,
-			CostPer1kIn:   cost / 2,
-			CostPer1kOut:  cost,
+			RequestCount: apiSnap.TotalRequests,
+			SuccessCount: success,
+			FailureCount: failures,
+			TotalTokens:  apiSnap.TotalTokens,
+			SuccessRate:  sr,
+			CostPer1kIn:  cost / 2,
+			CostPer1kOut: cost,
 		}
 	}
 	return result

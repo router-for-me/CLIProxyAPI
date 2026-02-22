@@ -44,14 +44,56 @@ func TestFallbackCost(t *testing.T) {
 	}
 }
 
+func TestGetProviderMetrics_FiltersKnownProviders(t *testing.T) {
+	stats := GetRequestStatistics()
+	ctx := context.Background()
+
+	record := coreusage.Record{
+		Provider: "openrouter",
+		APIKey:   "openrouter-analytics",
+		Model:    "gpt-4o",
+		Detail: coreusage.Detail{
+			TotalTokens: 12,
+		},
+	}
+	stats.Record(ctx, record)
+
+	unknown := coreusage.Record{
+		Provider: "mystery-provider",
+		APIKey:   "mystery-provider",
+		Model:    "mystery-model",
+		Detail: coreusage.Detail{
+			TotalTokens: 12,
+		},
+	}
+	stats.Record(ctx, unknown)
+
+	metrics := GetProviderMetrics()
+	if _, ok := metrics["openrouter"]; !ok {
+		t.Fatal("expected openrouter in provider metrics")
+	}
+	if _, ok := metrics["mystery-provider"]; ok {
+		t.Fatal("unknown provider should not be present in provider metrics")
+	}
+}
+
+func TestGetProviderMetrics_StableRateBounds(t *testing.T) {
+	metrics := GetProviderMetrics()
+	for provider, stat := range metrics {
+		if stat.SuccessRate < 0 || stat.SuccessRate > 1 {
+			t.Fatalf("provider=%s success_rate out of [0,1]: %f", provider, stat.SuccessRate)
+		}
+	}
+}
+
 func TestGetProviderMetrics_WithUsage(t *testing.T) {
 	stats := GetRequestStatistics()
 	ctx := context.Background()
-	
+
 	// Use a known provider like 'claude'
 	record := coreusage.Record{
 		Provider: "claude",
-		APIKey:   "claude", 
+		APIKey:   "claude",
 		Model:    "claude-3-sonnet",
 		Detail: coreusage.Detail{
 			TotalTokens: 1000,
@@ -63,19 +105,19 @@ func TestGetProviderMetrics_WithUsage(t *testing.T) {
 	// Add a failure
 	failRecord := coreusage.Record{
 		Provider: "claude",
-		APIKey:   "claude", 
+		APIKey:   "claude",
 		Model:    "claude-3-sonnet",
-		Failed: true,
+		Failed:   true,
 	}
 	stats.Record(ctx, failRecord)
-	
+
 	metrics := GetProviderMetrics()
 	m, ok := metrics["claude"]
 	if !ok {
 		t.Errorf("claude metrics not found")
 		return
 	}
-	
+
 	if m.RequestCount < 2 {
 		t.Errorf("expected at least 2 requests, got %d", m.RequestCount)
 	}
@@ -92,16 +134,16 @@ func TestLoggerPlugin(t *testing.T) {
 	if plugin == nil {
 		t.Fatal("NewLoggerPlugin returned nil")
 	}
-	
+
 	ctx := context.Background()
 	record := coreusage.Record{Model: "test"}
-	
+
 	SetStatisticsEnabled(false)
 	if StatisticsEnabled() {
 		t.Error("expected statistics disabled")
 	}
 	plugin.HandleUsage(ctx, record)
-	
+
 	SetStatisticsEnabled(true)
 	if !StatisticsEnabled() {
 		t.Error("expected statistics enabled")
@@ -111,7 +153,7 @@ func TestLoggerPlugin(t *testing.T) {
 
 func TestRequestStatistics_MergeSnapshot(t *testing.T) {
 	s := NewRequestStatistics()
-	
+
 	snap := StatisticsSnapshot{
 		APIs: map[string]APISnapshot{
 			"api1": {
@@ -120,8 +162,8 @@ func TestRequestStatistics_MergeSnapshot(t *testing.T) {
 						Details: []RequestDetail{
 							{
 								Timestamp: time.Now(),
-								Tokens: TokenStats{InputTokens: 10, OutputTokens: 5},
-								Failed: false,
+								Tokens:    TokenStats{InputTokens: 10, OutputTokens: 5},
+								Failed:    false,
 							},
 						},
 					},
@@ -129,12 +171,12 @@ func TestRequestStatistics_MergeSnapshot(t *testing.T) {
 			},
 		},
 	}
-	
+
 	res := s.MergeSnapshot(snap)
 	if res.Added != 1 {
 		t.Errorf("expected 1 added, got %d", res.Added)
 	}
-	
+
 	// Test deduplication
 	res2 := s.MergeSnapshot(snap)
 	if res2.Skipped != 1 {
@@ -146,10 +188,10 @@ func TestRequestStatistics_Snapshot(t *testing.T) {
 	s := NewRequestStatistics()
 	s.Record(context.Background(), coreusage.Record{
 		APIKey: "api1",
-		Model: "m1",
+		Model:  "m1",
 		Detail: coreusage.Detail{InputTokens: 10},
 	})
-	
+
 	snap := s.Snapshot()
 	if snap.TotalRequests != 1 {
 		t.Errorf("expected 1 total request, got %d", snap.TotalRequests)

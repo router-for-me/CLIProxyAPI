@@ -26,3 +26,5 @@ Audience-specific tracks for operating and integrating `cliproxyapi++`.
 - [Getting Started](/getting-started)
 - [API Index](/api/)
 - [Troubleshooting](/troubleshooting)
+- [Planning Boards](/planning/)
+- [Board Workflow](/planning/board-workflow)

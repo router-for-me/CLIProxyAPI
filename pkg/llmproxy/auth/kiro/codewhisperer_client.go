@@ -28,11 +28,11 @@ type CodeWhispererClient struct {
 
 // UsageLimitsResponse represents the getUsageLimits API response.
 type UsageLimitsResponse struct {
-	DaysUntilReset     *int                `json:"daysUntilReset,omitempty"`
-	NextDateReset      *float64            `json:"nextDateReset,omitempty"`
-	UserInfo           *UserInfo           `json:"userInfo,omitempty"`
-	SubscriptionInfo   *SubscriptionInfo   `json:"subscriptionInfo,omitempty"`
-	UsageBreakdownList []UsageBreakdown    `json:"usageBreakdownList,omitempty"`
+	DaysUntilReset     *int              `json:"daysUntilReset,omitempty"`
+	NextDateReset      *float64          `json:"nextDateReset,omitempty"`
+	UserInfo           *UserInfo         `json:"userInfo,omitempty"`
+	SubscriptionInfo   *SubscriptionInfo `json:"subscriptionInfo,omitempty"`
+	UsageBreakdownList []UsageBreakdown  `json:"usageBreakdownList,omitempty"`
 }
 
 // UserInfo contains user information from the API.
@@ -49,13 +49,13 @@ type SubscriptionInfo struct {
 
 // UsageBreakdown contains usage details.
 type UsageBreakdown struct {
-	UsageLimit                 *int     `json:"usageLimit,omitempty"`
-	CurrentUsage               *int     `json:"currentUsage,omitempty"`
-	UsageLimitWithPrecision    *float64 `json:"usageLimitWithPrecision,omitempty"`
-	CurrentUsageWithPrecision  *float64 `json:"currentUsageWithPrecision,omitempty"`
-	NextDateReset              *float64 `json:"nextDateReset,omitempty"`
-	DisplayName                string   `json:"displayName,omitempty"`
-	ResourceType               string   `json:"resourceType,omitempty"`
+	UsageLimit                *int     `json:"usageLimit,omitempty"`
+	CurrentUsage              *int     `json:"currentUsage,omitempty"`
+	UsageLimitWithPrecision   *float64 `json:"usageLimitWithPrecision,omitempty"`
+	CurrentUsageWithPrecision *float64 `json:"currentUsageWithPrecision,omitempty"`
+	NextDateReset             *float64 `json:"nextDateReset,omitempty"`
+	DisplayName               string   `json:"displayName,omitempty"`
+	ResourceType              string   `json:"resourceType,omitempty"`
 }
 
 // NewCodeWhispererClient creates a new CodeWhisperer client.

@@ -35,34 +35,34 @@ const (
 )
 
 type webAuthSession struct {
-	stateID          string
-	deviceCode       string
-	userCode         string
-	authURL          string
-	verificationURI  string
-	expiresIn        int
-	interval         int
-	status           authSessionStatus
-	startedAt        time.Time
-	completedAt      time.Time
-	expiresAt        time.Time
-	error            string
-	tokenData        *KiroTokenData
-	ssoClient        *SSOOIDCClient
-	clientID         string
-	clientSecret     string
-	region           string
-	cancelFunc       context.CancelFunc
-	authMethod       string // "google", "github", "builder-id", "idc"
-	startURL         string // Used for IDC
-	codeVerifier     string // Used for social auth PKCE
+	stateID         string
+	deviceCode      string
+	userCode        string
+	authURL         string
+	verificationURI string
+	expiresIn       int
+	interval        int
+	status          authSessionStatus
+	startedAt       time.Time
+	completedAt     time.Time
+	expiresAt       time.Time
+	error           string
+	tokenData       *KiroTokenData
+	ssoClient       *SSOOIDCClient
+	clientID        string
+	clientSecret    string
+	region          string
+	cancelFunc      context.CancelFunc
+	authMethod      string // "google", "github", "builder-id", "idc"
+	startURL        string // Used for IDC
+	codeVerifier    string // Used for social auth PKCE
 }
 
 type OAuthWebHandler struct {
-	cfg              *config.Config
-	sessions         map[string]*webAuthSession
-	mu               sync.RWMutex
-	onTokenObtained  func(*KiroTokenData)
+	cfg             *config.Config
+	sessions        map[string]*webAuthSession
+	mu              sync.RWMutex
+	onTokenObtained func(*KiroTokenData)
 }
 
 func NewOAuthWebHandler(cfg *config.Config) *OAuthWebHandler {
@@ -103,7 +103,7 @@ func (h *OAuthWebHandler) handleSelect(c *gin.Context) {
 
 func (h *OAuthWebHandler) handleStart(c *gin.Context) {
 	method := c.Query("method")
-	
+
 	if method == "" {
 		c.Redirect(http.StatusFound, "/v0/oauth/kiro")
 		return
@@ -319,18 +319,18 @@ func (h *OAuthWebHandler) pollForToken(ctx context.Context, session *webAuthSess
 			email := FetchUserEmailWithFallback(ctx, h.cfg, tokenResp.AccessToken)
 
 			tokenData := &KiroTokenData{
-					AccessToken:  tokenResp.AccessToken,
-					RefreshToken: tokenResp.RefreshToken,
-					ProfileArn:   profileArn,
-					ExpiresAt:    expiresAt.Format(time.RFC3339),
-					AuthMethod:   session.authMethod,
-					Provider:     "AWS",
-					ClientID:     session.clientID,
-					ClientSecret: session.clientSecret,
-					Email:        email,
-					Region:       session.region,
-					StartURL:     session.startURL,
-				}
+				AccessToken:  tokenResp.AccessToken,
+				RefreshToken: tokenResp.RefreshToken,
+				ProfileArn:   profileArn,
+				ExpiresAt:    expiresAt.Format(time.RFC3339),
+				AuthMethod:   session.authMethod,
+				Provider:     "AWS",
+				ClientID:     session.clientID,
+				ClientSecret: session.clientSecret,
+				Email:        email,
+				Region:       session.region,
+				StartURL:     session.startURL,
+			}
 
 			h.mu.Lock()
 			session.status = statusSuccess
@@ -384,7 +384,7 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *KiroTokenData) {
 	fileName := GenerateTokenFileName(tokenData)
 
 	authFilePath := filepath.Join(authDir, fileName)
-	
+
 	// Convert to storage format and save
 	storage := &KiroTokenStorage{
 		Type:         "kiro",
@@ -401,12 +401,12 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *KiroTokenData) {
 		StartURL:     tokenData.StartURL,
 		Email:        tokenData.Email,
 	}
-	
+
 	if err := storage.SaveTokenToFile(authFilePath); err != nil {
 		log.Errorf("OAuth Web: failed to save token to file: %v", err)
 		return
 	}
-	
+
 	log.Infof("OAuth Web: token saved to %s", authFilePath)
 }
 

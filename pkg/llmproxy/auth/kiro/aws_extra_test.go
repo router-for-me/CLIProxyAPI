@@ -25,10 +25,10 @@ func TestNewKiroAuth(t *testing.T) {
 func TestKiroAuth_LoadTokenFromFile(t *testing.T) {
 	tempDir := t.TempDir()
 	tokenPath := filepath.Join(tempDir, "token.json")
-	
+
 	tokenData := KiroTokenData{AccessToken: "abc"}
 	data, _ := json.Marshal(tokenData)
-	os.WriteFile(tokenPath, data, 0600)
+	_ = os.WriteFile(tokenPath, data, 0600)
 
 	auth := &KiroAuth{}
 	loaded, err := auth.LoadTokenFromFile(tokenPath)
@@ -45,7 +45,7 @@ func TestKiroAuth_LoadTokenFromFile(t *testing.T) {
 
 func TestKiroAuth_IsTokenExpired(t *testing.T) {
 	auth := &KiroAuth{}
-	
+
 	if !auth.IsTokenExpired(&KiroTokenData{ExpiresAt: ""}) {
 		t.Error("empty ExpiresAt should be expired")
 	}
@@ -74,7 +74,7 @@ func TestKiroAuth_GetUsageLimits(t *testing.T) {
 			"usageBreakdownList": [{"currentUsageWithPrecision": 10.5, "usageLimitWithPrecision": 100.0}],
 			"nextDateReset": 123456789
 		}`
-		fmt.Fprint(w, resp)
+		_, _ = fmt.Fprint(w, resp)
 	}))
 	defer server.Close()
 
@@ -105,7 +105,7 @@ func TestKiroAuth_ListAvailableModels(t *testing.T) {
 				}
 			]
 		}`
-		fmt.Fprint(w, resp)
+		_, _ = fmt.Fprint(w, resp)
 	}))
 	defer server.Close()
 

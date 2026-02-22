@@ -26,9 +26,9 @@ const (
 )
 
 var (
-	jitterRand     *rand.Rand
-	jitterRandOnce sync.Once
-	jitterMu       sync.Mutex
+	jitterRand      *rand.Rand
+	jitterRandOnce  sync.Once
+	jitterMu        sync.Mutex
 	lastRequestTime time.Time
 )
 

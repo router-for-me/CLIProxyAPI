@@ -11,7 +11,7 @@ import (
 func TestConvertCodexResponseToClaude(t *testing.T) {
 	ctx := context.Background()
 	var param any
-	
+
 	// response.created
 	raw := []byte(`data: {"type": "response.created", "response": {"id": "resp_123", "model": "gpt-4o"}}`)
 	got := ConvertCodexResponseToClaude(ctx, "claude-3", nil, nil, raw, &param)
@@ -21,7 +21,7 @@ func TestConvertCodexResponseToClaude(t *testing.T) {
 	if !strings.Contains(got[0], `"id":"resp_123"`) {
 		t.Errorf("unexpected output: %s", got[0])
 	}
-	
+
 	// response.output_text.delta
 	raw = []byte(`data: {"type": "response.output_text.delta", "delta": "hello"}`)
 	got = ConvertCodexResponseToClaude(ctx, "claude-3", nil, nil, raw, &param)
@@ -44,7 +44,7 @@ func TestConvertCodexResponseToClaudeNonStream(t *testing.T) {
 		],
 		"usage": {"input_tokens": 10, "output_tokens": 5}
 	}}`)
-	
+
 	got := ConvertCodexResponseToClaudeNonStream(context.Background(), "claude-3", nil, nil, raw, nil)
 	res := gjson.Parse(got)
 	if res.Get("id").String() != "resp_123" {

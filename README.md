@@ -151,6 +151,15 @@ We maintain strict quality gates to preserve the "hardened" status of the projec
 1.  **Linting**: Must pass `golangci-lint` with zero warnings.
 2.  **Coverage**: All new translator logic MUST include unit tests.
 3.  **Governance**: Changes to core `pkg/` logic require a corresponding Issue discussion.
+4.  **Daily QOL flow**:
+   - `task quality:fmt` to auto-format all Go files.
+   - `task quality:quick` for a fast local loop (format + selected tests; set `QUALITY_PACKAGES` to scope).
+   - `QUALITY_PACKAGES='./pkg/...' task quality:quick` for package-scoped smoke.
+   - `task quality:fmt-staged` for staged file format + lint before commit.
+   - `task quality:ci` for PR-scope non-mutating checks (fmt/vet/staticcheck/lint diff).
+   - `task test:smoke` for startup + control-plane smoke.
+   - `task verify:all` for a single-command local audit (fmt/lint/vet/quality + tests).
+   - `task hooks:install` to register the pre-commit hook.
 
 See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
 
@@ -163,11 +172,18 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
   - [Provider Catalog](./docs/provider-catalog.md)
   - [Provider Operations Runbook](./docs/provider-operations.md)
   - [Routing and Models Reference](./docs/routing-reference.md)
+- **Planning and Delivery Boards:**
+  - [Planning Index](./docs/planning/index.md)
+  - [2000-Item Execution Board](./docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.md)
+  - [GitHub Project Import CSV](./docs/planning/GITHUB_PROJECT_IMPORT_CLIPROXYAPI_2000_2026-02-22.csv)
+  - [Board Workflow (source -> solution mapping)](./docs/planning/board-workflow.md)
 - **[Docsets](./docs/docsets/)** — Role-oriented documentation sets.
   - [Developer (Internal)](./docs/docsets/developer/internal/)
   - [Developer (External)](./docs/docsets/developer/external/)
   - [Technical User](./docs/docsets/user/)
   - [Agent Operator](./docs/docsets/agent/)
+- **Research**: [AgentAPI + cliproxyapi++ tandem and alternatives](./docs/planning/agentapi-cliproxy-integration-research-2026-02-22.md)
+- **Research (300 repo sweep)**: [coder org + 97 adjacent repos](./docs/planning/coder-org-plus-relative-300-inventory-2026-02-22.md)
 - **[Feature Changes in ++](./docs/FEATURE_CHANGES_PLUSPLUS.md)** — Comprehensive list of `++` differences and impacts.
 - **[Docs README](./docs/README.md)** — Core docs map.
 

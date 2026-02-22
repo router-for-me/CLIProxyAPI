@@ -7,7 +7,7 @@ import (
 
 func TestConfigWrappers(t *testing.T) {
 	tmpFile, _ := os.CreateTemp("", "config*.yaml")
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 	_, _ = tmpFile.Write([]byte("{}"))
 	_ = tmpFile.Close()
 

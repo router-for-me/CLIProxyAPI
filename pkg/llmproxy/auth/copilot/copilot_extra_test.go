@@ -25,11 +25,11 @@ func TestCopilotAuth_ValidateToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.Header.Get("Authorization"), "goodtoken") {
 			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"message":"Bad credentials"}`)
+			_, _ = fmt.Fprint(w, `{"message":"Bad credentials"}`)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"login":"testuser"}`)
+		_, _ = fmt.Fprint(w, `{"login":"testuser"}`)
 	}))
 	defer server.Close()
 
@@ -93,7 +93,7 @@ func TestDeviceFlowClient_RequestDeviceCode(t *testing.T) {
 			ExpiresIn:       900,
 			Interval:        5,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -121,10 +121,10 @@ func TestDeviceFlowClient_PollForToken(t *testing.T) {
 		attempt++
 		w.Header().Set("Content-Type", "application/json")
 		if attempt == 1 {
-			fmt.Fprint(w, `{"error":"authorization_pending"}`)
+			_, _ = fmt.Fprint(w, `{"error":"authorization_pending"}`)
 			return
 		}
-		fmt.Fprint(w, `{"access_token":"token123"}`)
+		_, _ = fmt.Fprint(w, `{"access_token":"token123"}`)
 	}))
 	defer server.Close()
 
@@ -158,10 +158,10 @@ func TestCopilotAuth_LoadAndValidateToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.Header.Get("Authorization"), "expired") {
-			fmt.Fprint(w, `{"token":"new","expires_at":1}`) // expired
+			_, _ = fmt.Fprint(w, `{"token":"new","expires_at":1}`)
 			return
 		}
-		fmt.Fprint(w, `{"token":"new","expires_at":0}`) // never expires
+		_, _ = fmt.Fprint(w, `{"token":"new","expires_at":0}`)
 	}))
 	defer server.Close()
 
@@ -202,7 +202,7 @@ func TestCopilotAuth_GetAPIEndpoint(t *testing.T) {
 
 func TestCopilotAuth_StartDeviceFlow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(DeviceCodeResponse{DeviceCode: "dc"})
+		_ = json.NewEncoder(w).Encode(DeviceCodeResponse{DeviceCode: "dc"})
 	}))
 	defer server.Close()
 
@@ -225,10 +225,10 @@ func TestCopilotAuth_WaitForAuthorization(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/user" {
-			fmt.Fprint(w, `{"login":"testuser"}`)
+			_, _ = fmt.Fprint(w, `{"login":"testuser"}`)
 			return
 		}
-		fmt.Fprint(w, `{"access_token":"token123"}`)
+		_, _ = fmt.Fprint(w, `{"access_token":"token123"}`)
 	}))
 	defer server.Close()
 
@@ -240,7 +240,7 @@ func TestCopilotAuth_WaitForAuthorization(t *testing.T) {
 	}
 	// We need to override the hardcoded URLs in DeviceFlowClient for this test to work without rewriteTransport
 	// but DeviceFlowClient uses constants. So we MUST use rewriteTransport logic or similar.
-	
+
 	mockTransport := &rewriteTransportOverride{
 		target: server.URL,
 	}

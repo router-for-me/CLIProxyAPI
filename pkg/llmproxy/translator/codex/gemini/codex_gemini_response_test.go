@@ -10,7 +10,7 @@ import (
 func TestConvertCodexResponseToGemini(t *testing.T) {
 	ctx := context.Background()
 	var param any
-	
+
 	// response.created
 	raw := []byte(`data: {"type": "response.created", "response": {"id": "resp_123", "model": "gpt-4o"}}`)
 	got := ConvertCodexResponseToGemini(ctx, "gemini-1.5-pro", nil, nil, raw, &param)
@@ -21,7 +21,7 @@ func TestConvertCodexResponseToGemini(t *testing.T) {
 	if res.Get("responseId").String() != "resp_123" {
 		t.Errorf("unexpected output: %s", got[0])
 	}
-	
+
 	// response.output_text.delta
 	raw = []byte(`data: {"type": "response.output_text.delta", "delta": "hello"}`)
 	got = ConvertCodexResponseToGemini(ctx, "gemini-1.5-pro", nil, nil, raw, &param)
@@ -45,7 +45,7 @@ func TestConvertCodexResponseToGeminiNonStream(t *testing.T) {
 		],
 		"usage": {"input_tokens": 10, "output_tokens": 5}
 	}}`)
-	
+
 	got := ConvertCodexResponseToGeminiNonStream(context.Background(), "gemini-1.5-pro", nil, nil, raw, nil)
 	res := gjson.Parse(got)
 	if res.Get("responseId").String() != "resp_123" {

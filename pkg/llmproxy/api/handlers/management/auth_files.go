@@ -2876,7 +2876,7 @@ func (h *Handler) RequestKiloToken(c *gin.Context) {
 			Metadata: map[string]any{
 				"email":           status.UserEmail,
 				"organization_id": orgID,
-				"model":          defaults.Model,
+				"model":           defaults.Model,
 			},
 		}
 
