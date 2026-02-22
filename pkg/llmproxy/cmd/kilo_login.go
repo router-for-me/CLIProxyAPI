@@ -1,14 +1,11 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -22,40 +19,10 @@ const kiloInstallHint = "Install: https://www.kiloai.com/download"
 //   - cfg: The application configuration
 //   - options: Login options including browser behavior and prompts
 func DoKiloLogin(cfg *config.Config, options *LoginOptions) {
-	if options == nil {
-		options = &LoginOptions{}
+	exitCode := RunKiloLoginWithRunner(RunNativeCLILogin, os.Stdout, os.Stderr)
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
-
-	manager := newAuthManager()
-
-	promptFn := options.Prompt
-	if promptFn == nil {
-		promptFn = func(prompt string) (string, error) {
-			fmt.Print(prompt)
-			var value string
-			_, _ = fmt.Scanln(&value)
-			return strings.TrimSpace(value), nil
-		}
-	}
-
-	authOpts := &sdkAuth.LoginOptions{
-		NoBrowser:    options.NoBrowser,
-		CallbackPort: options.CallbackPort,
-		Metadata:     map[string]string{},
-		Prompt:       promptFn,
-	}
-
-	_, savedPath, err := manager.Login(context.Background(), "kilo", cfg, authOpts)
-	if err != nil {
-		fmt.Printf("Kilo authentication failed: %v\n", err)
-		return
-	}
-
-	if savedPath != "" {
-		fmt.Printf("Authentication saved to %s\n", savedPath)
-	}
-
-	fmt.Println("Kilo authentication successful!")
 }
 
 // RunKiloLoginWithRunner runs Kilo login with the given runner. Returns exit code to pass to os.Exit.

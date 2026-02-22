@@ -53,8 +53,6 @@ func (e *compactCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *h
 	return nil, errors.New("not implemented")
 }
 
-func (e *compactCaptureExecutor) CloseExecutionSession(sessionID string) {}
-
 func TestOpenAIResponsesCompactRejectsStream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	executor := &compactCaptureExecutor{}
