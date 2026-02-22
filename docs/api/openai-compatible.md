@@ -83,6 +83,28 @@ curl -sS http://localhost:8317/v1/models \
 - If you use model aliases for Claude, verify the alias resolves in `GET /v1/models` before testing chat.
 - For conversion debugging, run one non-stream request first, then enable streaming once format parity is confirmed.
 
+### Claude OpenAI-Compat Sanity Flow
+
+Use this order to isolate conversion issues quickly:
+
+1. `GET /v1/models` and confirm the target Claude model ID/alias is present.
+2. Send one minimal **non-stream** chat request.
+3. Repeat with `stream: true` and compare first response chunk + finish reason.
+4. If a tool-enabled request fails, retry without tools to separate translation from tool-schema problems.
+
+Minimal non-stream probe:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer dev-local-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet",
+    "messages": [{"role":"user","content":"reply with ok"}],
+    "stream": false
+  }' | jq
+```
+
 ## Common Failure Modes
 
 - `401`: missing/invalid client API key.
