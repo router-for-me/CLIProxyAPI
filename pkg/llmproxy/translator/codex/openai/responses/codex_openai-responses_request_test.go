@@ -305,3 +305,38 @@ func TestConvertOpenAIResponsesRequestToCodex_RemovesItemReferenceInputItems(t *
 		t.Fatalf("expected remaining input[0].type message, got %s", itemType)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToCodex_UsesVariantAsReasoningEffortFallback(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"variant": "high",
+		"input": [
+			{"type": "message", "role": "user", "content": "hello"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("expected reasoning.effort=high fallback, got %s", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_UsesReasoningEffortOverVariant(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"reasoning": {"effort": "low"},
+		"variant": "high",
+		"input": [
+			{"type": "message", "role": "user", "content": "hello"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "reasoning.effort").String(); got != "low" {
+		t.Fatalf("expected reasoning.effort to prefer explicit reasoning.effort low, got %s", got)
+	}
+}
