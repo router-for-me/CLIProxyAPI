@@ -1,7 +1,7 @@
 package tui
 
 // i18n provides a simple internationalization system for the TUI.
-// Supported locales: "zh" (Chinese, default), "en" (English).
+// Supported locales: "zh" (Chinese), "en" (English), "fa" (Farsi).
 
 var currentLocale = "en"
 
@@ -17,12 +17,15 @@ func CurrentLocale() string {
 	return currentLocale
 }
 
-// ToggleLocale switches between zh and en.
+// ToggleLocale rotates through en -> zh -> fa.
 func ToggleLocale() {
-	if currentLocale == "zh" {
-		currentLocale = "en"
-	} else {
+	switch currentLocale {
+	case "en":
 		currentLocale = "zh"
+	case "zh":
+		currentLocale = "fa"
+	default:
+		currentLocale = "en"
 	}
 }
 
@@ -45,6 +48,7 @@ func T(key string) string {
 var locales = map[string]map[string]string{
 	"zh": zhStrings,
 	"en": enStrings,
+	"fa": faStrings,
 }
 
 // ──────────────────────────────────────────
@@ -52,13 +56,18 @@ var locales = map[string]map[string]string{
 // ──────────────────────────────────────────
 var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "使用统计", "日志"}
 var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
+var faTabNames = []string{"داشبورد", "پیکربندی", "فایل\u200cهای احراز هویت", "کلیدهای API", "OAuth", "کاربرد", "لاگ\u200cها"}
 
 // TabNames returns tab names in the current locale.
 func TabNames() []string {
-	if currentLocale == "zh" {
+	switch currentLocale {
+	case "zh":
 		return zhTabNames
+	case "fa":
+		return faTabNames
+	default:
+		return enTabNames
 	}
-	return enTabNames
 }
 
 var zhStrings = map[string]string{
@@ -361,4 +370,155 @@ var enStrings = map[string]string{
 	"logs_lines":       "Lines",
 	"logs_help":        " [a] Auto-scroll • [c] Clear • [1] All [2] info+ [3] warn+ [4] error • [↑↓] Scroll",
 	"logs_waiting":     "  Waiting for log output...",
+}
+
+var faStrings = map[string]string{
+	// ── Common ──
+	"loading":      "در حال بارگذاری...",
+	"refresh":      "بازخوانی",
+	"save":         "ذخیره",
+	"cancel":       "لغو",
+	"confirm":      "تایید",
+	"yes":          "بله",
+	"no":           "خیر",
+	"error":        "خطا",
+	"success":      "موفق",
+	"navigate":     "جابجایی",
+	"scroll":       "پیمایش",
+	"enter_save":   "Enter: ذخیره",
+	"esc_cancel":   "Esc: لغو",
+	"enter_submit": "Enter: ارسال",
+	"press_r":      "[r] بازخوانی",
+	"press_scroll": "[↑↓] پیمایش",
+	"not_set":      "(تنظیم نشده)",
+	"error_prefix": "⚠ خطا: ",
+
+	// ── Status bar ──
+	"status_left":                 " CLIProxyAPI پنل مدیریت",
+	"status_right":                "Tab/Shift+Tab: جابجایی • L: زبان • q/Ctrl+C: خروج ",
+	"initializing_tui":            "در حال راه\u200cاندازی...",
+	"auth_gate_title":             "🔐 اتصال به API مدیریت",
+	"auth_gate_help":              " رمز عبور مدیریت را وارد کرده و Enter بزنید",
+	"auth_gate_password":          "رمز عبور",
+	"auth_gate_enter":             " Enter: اتصال • q/Ctrl+C: خروج • L: زبان",
+	"auth_gate_connecting":        "در حال اتصال...",
+	"auth_gate_connect_fail":      "اتصال ناموفق: %s",
+	"auth_gate_password_required": "رمز عبور الزامی است",
+
+	// ── Dashboard ──
+	"dashboard_title":  "📊 داشبورد",
+	"dashboard_help":   " [r] بازخوانی • [↑↓] پیمایش",
+	"connected":        "● متصل",
+	"mgmt_keys":        "کلیدهای مدیریت",
+	"auth_files_label": "فایل\u200cهای احراز هویت",
+	"active_suffix":    "فعال",
+	"total_requests":   "درخواست\u200cها",
+	"success_label":    "موفق",
+	"failure_label":    "ناموفق",
+	"total_tokens":     "مجموع توکن\u200cها",
+	"current_config":   "پیکربندی فعلی",
+	"debug_mode":       "حالت اشکال\u200cزدایی",
+	"usage_stats":      "آمار مصرف",
+	"log_to_file":      "ثبت لاگ در فایل",
+	"retry_count":      "تعداد تلاش مجدد",
+	"proxy_url":        "نشانی پروکسی",
+	"routing_strategy": "استراتژی مسیریابی",
+	"model_stats":      "آمار مدل\u200cها",
+	"model":            "مدل",
+	"requests":         "درخواست\u200cها",
+	"tokens":           "توکن\u200cها",
+	"bool_yes":         "بله ✓",
+	"bool_no":          "خیر",
+
+	// ── Config ──
+	"config_title":      "⚙ پیکربندی",
+	"config_help1":      "  [↑↓/jk] جابجایی • [Enter/Space] ویرایش • [r] بازخوانی",
+	"config_help2":      "  بولی: Enter برای تغییر • متن/عدد: Enter برای ورود، Enter برای تایید، Esc برای لغو",
+	"updated_ok":        "✓ با موفقیت به\u200cروزرسانی شد",
+	"no_config":         "  پیکربندی بارگذاری نشده است",
+	"invalid_int":       "عدد صحیح نامعتبر",
+	"section_server":    "سرور",
+	"section_logging":   "لاگ و آمار",
+	"section_quota":     "مدیریت عبور از سهمیه",
+	"section_routing":   "مسیریابی",
+	"section_websocket": "وب\u200cسوکت",
+	"section_ampcode":   "AMP Code",
+	"section_other":     "سایر",
+
+	// ── Auth Files ──
+	"auth_title":      "🔑 فایل\u200cهای احراز هویت",
+	"auth_help1":      " [↑↓/jk] جابجایی • [Enter] بازکردن • [e] فعال/غیرفعال • [d] حذف • [r] بازخوانی",
+	"auth_help2":      " [1] ویرایش prefix • [2] ویرایش proxy_url • [3] ویرایش priority",
+	"no_auth_files":   "  فایل احراز هویت یافت نشد",
+	"confirm_delete":  "⚠ حذف %s؟ [y/n]",
+	"deleted":         "%s حذف شد",
+	"enabled":         "فعال شد",
+	"disabled":        "غیرفعال شد",
+	"updated_field":   "%s برای %s به\u200cروزرسانی شد",
+	"status_active":   "فعال",
+	"status_disabled": "غیرفعال",
+
+	// ── API Keys ──
+	"keys_title":         "🔐 کلیدهای API",
+	"keys_help":          " [↑↓/jk] جابجایی • [a] افزودن • [e] ویرایش • [d] حذف • [c] کپی • [r] بازخوانی",
+	"no_keys":            "  کلید API وجود ندارد. [a] را بزنید",
+	"access_keys":        "کلیدهای دسترسی API",
+	"confirm_delete_key": "⚠ حذف %s؟ [y/n]",
+	"key_added":          "کلید API اضافه شد",
+	"key_updated":        "کلید API به\u200cروزرسانی شد",
+	"key_deleted":        "کلید API حذف شد",
+	"copied":             "✓ در کلیپ\u200cبورد کپی شد",
+	"copy_failed":        "✗ کپی ناموفق بود",
+	"new_key_prompt":     "  کلید جدید: ",
+	"edit_key_prompt":    "  ویرایش کلید: ",
+	"enter_add":          "    Enter: افزودن • Esc: لغو",
+	"enter_save_esc":     "    Enter: ذخیره • Esc: لغو",
+
+	// ── OAuth ──
+	"oauth_title":        "🔐 ورود OAuth",
+	"oauth_select":       "  ارائه\u200cدهنده را انتخاب کرده و [Enter] را برای شروع بزنید:",
+	"oauth_help":         "  [↑↓/jk] جابجایی • [Enter] ورود • [Esc] پاک\u200cکردن وضعیت",
+	"oauth_initiating":   "⏳ شروع ورود %s...",
+	"oauth_success":      "احراز هویت موفق بود! تب Auth Files را بازخوانی کنید.",
+	"oauth_completed":    "فرایند احراز هویت کامل شد.",
+	"oauth_failed":       "احراز هویت ناموفق بود",
+	"oauth_timeout":      "مهلت OAuth تمام شد (5 دقیقه)",
+	"oauth_press_esc":    "  [Esc] برای لغو",
+	"oauth_auth_url":     "  نشانی مجوز:",
+	"oauth_remote_hint":  "  حالت مرورگر راه\u200cدور: لینک بالا را باز کنید و بعد از احراز هویت، URL بازگشت را وارد کنید.",
+	"oauth_callback_url": "  URL بازگشت:",
+	"oauth_press_c":      "  [c] برای وارد کردن URL بازگشت • [Esc] برای بازگشت",
+	"oauth_submitting":   "⏳ در حال ارسال بازگشت...",
+	"oauth_submit_ok":    "✓ بازگشت ارسال شد، در انتظار پردازش...",
+	"oauth_submit_fail":  "✗ ارسال بازگشت ناموفق بود",
+	"oauth_waiting":      "  در انتظار احراز هویت...",
+
+	// ── Usage ──
+	"usage_title":         "📈 آمار مصرف",
+	"usage_help":          " [r] بازخوانی • [↑↓] پیمایش",
+	"usage_no_data":       "  داده مصرف موجود نیست",
+	"usage_total_reqs":    "مجموع درخواست\u200cها",
+	"usage_total_tokens":  "مجموع توکن\u200cها",
+	"usage_success":       "موفق",
+	"usage_failure":       "ناموفق",
+	"usage_total_token_l": "مجموع توکن\u200cها",
+	"usage_rpm":           "RPM",
+	"usage_tpm":           "TPM",
+	"usage_req_by_hour":   "درخواست\u200cها بر اساس ساعت",
+	"usage_tok_by_hour":   "مصرف توکن بر اساس ساعت",
+	"usage_req_by_day":    "درخواست\u200cها بر اساس روز",
+	"usage_api_detail":    "آمار جزئی API",
+	"usage_input":         "ورودی",
+	"usage_output":        "خروجی",
+	"usage_cached":        "کش\u200cشده",
+	"usage_reasoning":     "استدلال",
+
+	// ── Logs ──
+	"logs_title":       "📋 لاگ\u200cها",
+	"logs_auto_scroll": "● پیمایش خودکار",
+	"logs_paused":      "○ متوقف",
+	"logs_filter":      "فیلتر",
+	"logs_lines":       "خطوط",
+	"logs_help":        " [a] پیمایش خودکار • [c] پاکسازی • [1] همه [2] info+ [3] warn+ [4] error • [↑↓] پیمایش",
+	"logs_waiting":     "  در انتظار خروجی لاگ...",
 }
