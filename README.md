@@ -23,26 +23,30 @@ Full feature-by-feature change reference:
 
 | Capability | Mainline | CLIProxyAPI+ | **cliproxyapi++** | Granular Notes |
 | :--- | :---: | :---: | :---: | :--- |
-| **OpenAI-compatible proxy endpoints** | ✅ | ✅ | ✅ | `chat/completions`, `responses`, `models` surfaces available. |
-| **Provider registry breadth** | ✅ | ✅ | ✅ | Direct + aggregator providers supported in all variants, with broader operational polish in `++`. |
-| **Model aliasing / mapping layer** | ⚠️ | ✅ | ✅ | `++` emphasizes unified mapping behavior across heterogeneous upstreams. |
-| **Management API (`/v0/*`)** | ⚠️ | ✅ | ✅ | Operational controls and inspection endpoints available in `+` and `++`. |
-| **Web management UI** | ❌ | ✅ | ✅ | `++` keeps UI while hardening operational/auth flows behind it. |
-| **Kiro web OAuth flow** | ❌ | ⚠️ | ✅ | `++` includes dedicated `/v0/oauth/kiro` browser-based login surface. |
-| **GitHub Copilot OAuth/device auth depth** | ❌ | ⚠️ | ✅ | `++` adds full lifecycle handling and richer session semantics. |
-| **Advanced multi-provider auth set** | ❌ | ⚠️ | ✅ | Kiro/Copilot/Roo/Kilo/MiniMax/Cursor auth paths integrated in `++`. |
-| **Background token refresh worker** | ❌ | ❌ | ✅ | Auto-refresh before expiry to reduce auth-related downtime. |
-| **Credential lifecycle visibility** | ❌ | ⚠️ | ✅ | `++` provides richer auth file/account surfaces for operations. |
-| **Quota-aware provider handling** | ❌ | ⚠️ | ✅ | `++` includes cooldown and provider-state driven routing behavior. |
-| **Rate limiting + intelligent cooldown** | ❌ | ❌ | ✅ | Provider-level cooling/rotation behavior aimed at production resilience. |
-| **Failure isolation / route continuity** | ⚠️ | ⚠️ | ✅ | `++` biases toward continuing service via provider-aware routing controls. |
-| **Core code importability** | ❌ | ❌ | ✅ | Mainline/+ keep `internal/`; `++` exposes reusable `pkg/llmproxy`. |
-| **Library-first architecture** | ⚠️ | ⚠️ | ✅ | Translation/proxy logic packaged for embedding into other Go services. |
-| **Security controls (path guard, hardened base, fingerprinting)** | Basic | Basic | ✅ | Defense-in-depth additions for CI governance and runtime posture. |
-| **Container supply-chain posture** | Basic | Basic | ✅ | Hardened Docker base plus signed/multi-arch release workflow. |
-| **CI quality gates (strict lint/test/governance)** | Basic | Basic | ✅ | Expanded automation and stricter release validation in `++`. |
-| **Operational observability surfaces** | ⚠️ | ✅ | ✅ | Logs, usage, provider metrics and management views strengthened in `++`. |
-| **Production-readiness target** | Community baseline | Enhanced fork | **Enterprise-grade** | `++` is tuned for long-running agent-heavy deployments. |
+| **OpenAI-compatible `chat/completions`** | ✅ | ✅ | ✅ | Full request/response surface parity remains present in all variants. |
+| **OpenAI-compatible `models` listing** | ✅ | ✅ | ✅ | Endpoint behavior is feature-compatible across variants. |
+| **Advanced provider routing table** | ⚠️ | ✅ | ✅ | Route policy and fallback behavior is centralized and tunable in `++`. |
+| **Prefix/model mapping rules** | ⚠️ | ✅ | ✅ | `++` enforces stricter provider/model translation for operational control. |
+| **Streaming behavior (`stream=true`)** | ⚠️ | ⚠️ | ✅ | Streaming paths hardened for lower drop-off under token pressure in `++`. |
+| **Management API (`/v0/*`)** | ⚠️ | ✅ | ✅ | `++` keeps operational endpoints and control APIs in the service plane. |
+| **TUI auth management surface** | ❌ | ✅ | ✅ | Provider list, detail view, and account-level actions available in `+` and `++`. |
+| **Auth add/upload flow (TUI + API)** | ❌ | ⚠️ | ✅ | New `a` and file-upload handler path in `++` supports add/import workflows. |
+| **TheGent login integration** | ❌ | ⚠️ | ✅ | `--thegent-login` dispatch uses TheGent-compatible flow in `++`. |
+| **Roo / Kilo / Copilot / Kiro parity** | ⚠️ | ⚠️ | ✅ | `++` includes explicit dedicated flows and richer lifecycle recovery. |
+| **Background token refresh worker** | ❌ | ❌ | ✅ | Auto-refresh job handles expiry churn before request-time failure. |
+| **Token lifecycle visibility** | ❌ | ⚠️ | ✅ | `++` exposes stronger token metadata and status checks in management. |
+| **Cooldown / rate governance** | ❌ | ⚠️ | ✅ | `++` applies provider state-aware cooldown and retry discipline. |
+| **Provider failover continuity** | ⚠️ | ⚠️ | ✅ | Route redirection favors healthy upstreams during transient faults. |
+| **Config path discovery** | ⚠️ | ⚠️ | ✅ | `++` surfaces env-driven, mount-aware candidate resolution and explicit hints. |
+| **Strict config validation mode** | ⚠️ | ⚠️ | ✅ | `--config-validate` runs strict YAML schema + runtime validation path. |
+| **Core code importability** | ❌ | ❌ | ✅ | `++` exposes `pkg/llmproxy` for external package consumption. |
+| **Library-first composition** | ⚠️ | ⚠️ | ✅ | Proxy core and auth helpers are reusable modules in `++`. |
+| **Security hardening** | Basic | Basic | ✅ | Hardened defaults, guardrails, and anti-abuse defaults are expanded in `++`. |
+| **Container image posture** | Basic | Basic | ✅ | `++` uses a production-oriented Docker base and deployment profile. |
+| **Release workflow automation** | ⚠️ | ⚠️ | ✅ | Tagged release + goreleaser + signed release artifacts path in `++` pipeline. |
+| **Version-to-release linting** | ⚠️ | ⚠️ | ✅ | `task quality:release-lint` + CI checks required pre-push/PR. |
+| **Cross-platform artifact coverage** | ⚠️ | ⚠️ | ✅ | Linux, macOS, Windows archives are generated and checksummed. |
+| **Production-readiness target** | Community baseline | Enhanced fork | **Enterprise-grade** | `++` targets long-running agent workloads with stronger ops controls. |
 
 ---
 

@@ -13,14 +13,15 @@ import (
 	"strings"
 )
 
-var tagPattern = regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)-(\d+)$`)
+var tagPattern = regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)(?:-(\d+))?$`)
 
 type versionTag struct {
-	Raw   string
-	Major int
-	Minor int
-	Patch int
-	Batch int
+	Raw      string
+	Major    int
+	Minor    int
+	Patch    int
+	Batch    int
+	HasBatch bool
 }
 
 func parseVersionTag(raw string) (versionTag, bool) {
@@ -40,16 +41,23 @@ func parseVersionTag(raw string) (versionTag, bool) {
 	if err != nil {
 		return versionTag{}, false
 	}
-	batch, err := strconv.Atoi(matches[4])
-	if err != nil {
-		return versionTag{}, false
+	batch := -1
+	hasBatch := false
+	if matches[4] != "" {
+		parsed, err := strconv.Atoi(matches[4])
+		if err != nil {
+			return versionTag{}, false
+		}
+		batch = parsed
+		hasBatch = true
 	}
 	return versionTag{
-		Raw:   raw,
-		Major: major,
-		Minor: minor,
-		Patch: patch,
-		Batch: batch,
+		Raw:      raw,
+		Major:    major,
+		Minor:    minor,
+		Patch:    patch,
+		Batch:    batch,
+		HasBatch: hasBatch,
 	}, true
 }
 
