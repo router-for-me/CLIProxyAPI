@@ -83,6 +83,27 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		req.Header.Del("Forwarded")
 		req.Header.Del("Via")
 
+		// Remove client identity headers that reveal third-party clients
+		req.Header.Del("X-Title")
+		req.Header.Del("X-Stainless-Lang")
+		req.Header.Del("X-Stainless-Package-Version")
+		req.Header.Del("X-Stainless-Os")
+		req.Header.Del("X-Stainless-Arch")
+		req.Header.Del("X-Stainless-Runtime")
+		req.Header.Del("X-Stainless-Runtime-Version")
+		req.Header.Del("Http-Referer")
+		req.Header.Del("Referer")
+
+		// Remove browser / Chromium fingerprint headers
+		req.Header.Del("Sec-Ch-Ua")
+		req.Header.Del("Sec-Ch-Ua-Mobile")
+		req.Header.Del("Sec-Ch-Ua-Platform")
+		req.Header.Del("Sec-Fetch-Mode")
+		req.Header.Del("Sec-Fetch-Site")
+		req.Header.Del("Sec-Fetch-Dest")
+		req.Header.Del("Priority")
+		req.Header.Del("Accept-Encoding")
+
 		// Remove query-based credentials if they match the authenticated client API key.
 		// This prevents leaking client auth material to the Amp upstream while avoiding
 		// breaking unrelated upstream query parameters.
