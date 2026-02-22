@@ -79,12 +79,6 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 
 ## 4) GitHub Copilot
 
-Bootstrap auth (once per account):
-
-```bash
-./cliproxyapi++ --github-copilot-login --config ./config.yaml
-```
-
 `config.yaml`:
 
 ```yaml
@@ -107,19 +101,6 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 
 ## 5) Kiro
 
-Bootstrap auth (pick one):
-
-```bash
-# Google OAuth flow
-./cliproxyapi++ --kiro-login --config ./config.yaml
-
-# AWS Builder ID flow
-./cliproxyapi++ --kiro-aws-authcode --config ./config.yaml
-
-# Import existing IDE token
-./cliproxyapi++ --kiro-import --config ./config.yaml
-```
-
 `config.yaml`:
 
 ```yaml
@@ -140,14 +121,24 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"kiro/claude-opus-4-5","messages":[{"role":"user","content":"ping"}]}' | jq
 ```
 
-If you see `auth_unavailable: no auth available`:
+Large-payload sanity checks (to catch truncation/write failures early):
 
 ```bash
-ls -l ~/.aws/sso/cache/kiro-auth-token.json
-jq '.access_token, .refresh_token, .profile_arn, .auth_method' ~/.aws/sso/cache/kiro-auth-token.json
+python - <<'PY'
+print("A"*120000)
+PY > /tmp/kiro-large.txt
+
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d @<(jq -n --rawfile p /tmp/kiro-large.txt '{model:"kiro/claude-opus-4-5",messages:[{role:"user",content:$p}],stream:false}') | jq '.choices[0].finish_reason'
 ```
 
-Re-run one of the Kiro login/import commands above, then validate again.
+Kiro IAM login hints:
+
+- Prefer AWS login/authcode flows when social login is unstable.
+- Keep one auth file per account to avoid accidental overwrite during relogin.
+- If you rotate accounts often, run browser login in incognito mode.
 
 ## 6) MiniMax
 
@@ -196,31 +187,15 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
-## 8) Cursor (via cursor-api)
-
-`config.yaml`:
-
-```yaml
-api-keys:
-  - "demo-client-key"
-
-cursor:
-  - cursor-api-url: "http://127.0.0.1:3000"
-    auth-token: "your-cursor-api-auth-token"
-```
-
-Validation:
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"cursor/gpt-5.1-codex","messages":[{"role":"user","content":"ping"}]}' | jq
-```
-
 ## Related
 
 - [Getting Started](/getting-started)
 - [Provider Usage](/provider-usage)
 - [Provider Catalog](/provider-catalog)
 - [Provider Operations](/provider-operations)
+
+## Kiro + Copilot Endpoint Compatibility
+
+- For Copilot Codex-family models (for example `gpt-5.1-codex-mini`), prefer `/v1/responses`.
+- `/v1/chat/completions` is still valid for non-Codex Copilot traffic and most non-Copilot providers.
+- If a Codex-family request fails on `/v1/chat/completions`, retry the same request on `/v1/responses` first.

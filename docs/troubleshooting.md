@@ -40,6 +40,8 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 | `event stream fatal` / broken SSE stream | Upstream event framing/transport interruption | Retry once with `stream: false` to isolate translation vs transport | If non-stream works, keep stream keepalive enabled, capture raw SSE logs, and use non-stream fallback for critical paths |
 | Extended-thinking requests time out | Long reasoning window exceeds ingress/proxy timeout | Compare latency with `stream: false` and inspect reverse-proxy timeout settings | Increase gateway/upstream timeout and tune keepalive (`nonstream-keepalive-interval`, `streaming.keepalive-seconds`) |
 | Streaming hangs or truncation | Reverse proxy buffering / payload compatibility issue | Reproduce with `stream: false`, then compare SSE response | Verify reverse-proxy config, compare tool schema compatibility and payload shape |
+| `nextThoughtNeeded` / sequential-thinking field errors | Client sent mixed legacy/new reasoning fields | Compare request body keys (`reasoning_effort`, `reasoning.effort`, old custom fields) | Normalize to one supported format and retry stream + non-stream parity checks |
+| Vision request fails on Copilot/GLM backends | Missing vision content/header propagation or unsupported payload block shape | Verify image block format (`image_url`/`image`) and inspect upstream response body | Use supported image content schema, retry, and confirm provider-specific vision compatibility |
 
 Use this matrix as an issue-entry checklist:
 
@@ -102,6 +104,7 @@ Checks:
 - Confirm model appears in `/v1/models` for current API key.
 - Verify prefix requirements (for example `team-a/model`).
 - Check alias and excluded-model rules in provider config.
+- For Copilot Codex-family models (for example `gpt-5.1-codex-mini`), retry via `/v1/responses`.
 
 ## Streaming Issues (SSE/WebSocket)
 
