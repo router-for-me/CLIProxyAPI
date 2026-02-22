@@ -90,6 +90,9 @@ type KiroModel struct {
 // KiroIDETokenFile is the default path to Kiro IDE's token file
 const KiroIDETokenFile = ".aws/sso/cache/kiro-auth-token.json"
 
+// KiroIDETokenLegacyFile is the legacy path used by older Kiro builds/docs.
+const KiroIDETokenLegacyFile = ".kiro/kiro-auth-token.json"
+
 // Default retry configuration for file reading
 const (
 	defaultTokenReadMaxAttempts = 10                    // Maximum retry attempts
@@ -180,15 +183,14 @@ func LoadKiroIDEToken() (*KiroTokenData, error) {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	tokenPath := filepath.Join(homeDir, KiroIDETokenFile)
-	data, err := os.ReadFile(tokenPath)
+	data, tokenPath, err := readKiroIDETokenFile(homeDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read Kiro IDE token file (%s): %w", tokenPath, err)
+		return nil, err
 	}
 
-	var token KiroTokenData
-	if err := json.Unmarshal(data, &token); err != nil {
-		return nil, fmt.Errorf("failed to parse Kiro IDE token: %w", err)
+	token, err := parseKiroTokenData(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Kiro IDE token (%s): %w", tokenPath, err)
 	}
 
 	if token.AccessToken == "" {
@@ -201,13 +203,92 @@ func LoadKiroIDEToken() (*KiroTokenData, error) {
 	// For Enterprise Kiro IDE (IDC auth), load clientId and clientSecret from device registration
 	// The device registration file is located at ~/.aws/sso/cache/{clientIdHash}.json
 	if token.ClientIDHash != "" && token.ClientID == "" {
-		if err := loadDeviceRegistration(homeDir, token.ClientIDHash, &token); err != nil {
+		if err := loadDeviceRegistration(homeDir, token.ClientIDHash, token); err != nil {
 			// Log warning but don't fail - token might still work for some operations
 			fmt.Printf("warning: failed to load device registration for clientIdHash %s: %v\n", token.ClientIDHash, err)
 		}
 	}
 
-	return &token, nil
+	return token, nil
+}
+
+func readKiroIDETokenFile(homeDir string) ([]byte, string, error) {
+	candidates := []string{
+		filepath.Join(homeDir, KiroIDETokenFile),
+		filepath.Join(homeDir, KiroIDETokenLegacyFile),
+	}
+
+	var errs []string
+	for _, tokenPath := range candidates {
+		data, err := os.ReadFile(tokenPath)
+		if err == nil {
+			return data, tokenPath, nil
+		}
+		if os.IsNotExist(err) {
+			errs = append(errs, fmt.Sprintf("%s (not found)", tokenPath))
+			continue
+		}
+		return nil, "", fmt.Errorf("failed to read Kiro IDE token file (%s): %w", tokenPath, err)
+	}
+	return nil, "", fmt.Errorf("failed to read Kiro IDE token file; checked: %s", strings.Join(errs, ", "))
+}
+
+type kiroTokenDataWire struct {
+	AccessToken       string `json:"accessToken"`
+	AccessTokenLegacy string `json:"access_token"`
+	RefreshToken      string `json:"refreshToken"`
+	RefreshTokenOld   string `json:"refresh_token"`
+	ProfileArn        string `json:"profileArn"`
+	ProfileArnOld     string `json:"profile_arn"`
+	ExpiresAt         string `json:"expiresAt"`
+	ExpiresAtOld      string `json:"expires_at"`
+	AuthMethod        string `json:"authMethod"`
+	AuthMethodOld     string `json:"auth_method"`
+	Provider          string `json:"provider"`
+	ClientID          string `json:"clientId"`
+	ClientIDOld       string `json:"client_id"`
+	ClientSecret      string `json:"clientSecret"`
+	ClientSecretOld   string `json:"client_secret"`
+	ClientIDHash      string `json:"clientIdHash"`
+	ClientIDHashOld   string `json:"client_id_hash"`
+	Email             string `json:"email"`
+	StartURL          string `json:"startUrl"`
+	StartURLOld       string `json:"start_url"`
+	Region            string `json:"region"`
+}
+
+func parseKiroTokenData(data []byte) (*KiroTokenData, error) {
+	var wire kiroTokenDataWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return nil, err
+	}
+
+	token := &KiroTokenData{
+		AccessToken:  firstNonEmpty(wire.AccessToken, wire.AccessTokenLegacy),
+		RefreshToken: firstNonEmpty(wire.RefreshToken, wire.RefreshTokenOld),
+		ProfileArn:   firstNonEmpty(wire.ProfileArn, wire.ProfileArnOld),
+		ExpiresAt:    firstNonEmpty(wire.ExpiresAt, wire.ExpiresAtOld),
+		AuthMethod:   firstNonEmpty(wire.AuthMethod, wire.AuthMethodOld),
+		Provider:     strings.TrimSpace(wire.Provider),
+		ClientID:     firstNonEmpty(wire.ClientID, wire.ClientIDOld),
+		ClientSecret: firstNonEmpty(wire.ClientSecret, wire.ClientSecretOld),
+		ClientIDHash: firstNonEmpty(wire.ClientIDHash, wire.ClientIDHashOld),
+		Email:        strings.TrimSpace(wire.Email),
+		StartURL:     firstNonEmpty(wire.StartURL, wire.StartURLOld),
+		Region:       strings.TrimSpace(wire.Region),
+	}
+
+	return token, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // loadDeviceRegistration loads clientId and clientSecret from the device registration file.
@@ -269,8 +350,8 @@ func LoadKiroTokenFromPath(tokenPath string) (*KiroTokenData, error) {
 		return nil, fmt.Errorf("failed to read token file (%s): %w", tokenPath, err)
 	}
 
-	var token KiroTokenData
-	if err := json.Unmarshal(data, &token); err != nil {
+	token, err := parseKiroTokenData(data)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse token file: %w", err)
 	}
 
@@ -283,13 +364,13 @@ func LoadKiroTokenFromPath(tokenPath string) (*KiroTokenData, error) {
 
 	// For Enterprise Kiro IDE (IDC auth), load clientId and clientSecret from device registration
 	if token.ClientIDHash != "" && token.ClientID == "" {
-		if err := loadDeviceRegistration(homeDir, token.ClientIDHash, &token); err != nil {
+		if err := loadDeviceRegistration(homeDir, token.ClientIDHash, token); err != nil {
 			// Log warning but don't fail - token might still work for some operations
 			fmt.Printf("warning: failed to load device registration for clientIdHash %s: %v\n", token.ClientIDHash, err)
 		}
 	}
 
-	return &token, nil
+	return token, nil
 }
 
 // ListKiroTokenFiles lists all Kiro token files in the cache directory.

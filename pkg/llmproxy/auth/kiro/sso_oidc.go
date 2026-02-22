@@ -357,12 +357,19 @@ func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, cl
 
 	if resp.StatusCode != http.StatusOK {
 		log.Warnf("IDC token refresh failed (status %d): %s", resp.StatusCode, string(respBody))
-		return nil, fmt.Errorf("token refresh failed (status %d)", resp.StatusCode)
+		return nil, formatTokenRefreshError(resp.StatusCode, respBody)
 	}
 
 	var result CreateTokenResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(result.AccessToken) == "" {
+		return nil, fmt.Errorf("token refresh failed: missing access token in response")
+	}
+	if strings.TrimSpace(result.RefreshToken) == "" {
+		// Some providers do not rotate refresh tokens on every refresh.
+		result.RefreshToken = refreshToken
 	}
 
 	expiresAt := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
@@ -723,12 +730,19 @@ func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret
 
 	if resp.StatusCode != http.StatusOK {
 		log.Warnf("token refresh failed (status %d): %s", resp.StatusCode, string(respBody))
-		return nil, fmt.Errorf("token refresh failed (status %d): %s", resp.StatusCode, string(respBody))
+		return nil, formatTokenRefreshError(resp.StatusCode, respBody)
 	}
 
 	var result CreateTokenResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(result.AccessToken) == "" {
+		return nil, fmt.Errorf("token refresh failed: missing access token in response")
+	}
+	if strings.TrimSpace(result.RefreshToken) == "" {
+		// Some providers do not rotate refresh tokens on every refresh.
+		result.RefreshToken = refreshToken
 	}
 
 	expiresAt := time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
@@ -743,6 +757,14 @@ func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret
 		ClientSecret: clientSecret,
 		Region:       defaultIDCRegion,
 	}, nil
+}
+
+func formatTokenRefreshError(status int, body []byte) error {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return fmt.Errorf("token refresh failed (status %d)", status)
+	}
+	return fmt.Errorf("token refresh failed (status %d): %s", status, trimmed)
 }
 
 // LoginWithBuilderID performs the full device code flow for AWS Builder ID.

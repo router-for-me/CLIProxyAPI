@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
@@ -295,6 +296,35 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 			claudeCodeHandlers.ClaudeModels(c)
 		case "google":
 			geminiHandlers.GeminiModels(c)
+		case "kiro", "cursor":
+			models := registry.GetStaticModelDefinitionsByChannel(providerName)
+			if models == nil {
+				openaiHandlers.OpenAIModels(c)
+				return
+			}
+			filteredModels := make([]map[string]any, 0, len(models))
+			for _, model := range models {
+				if model == nil || model.ID == "" {
+					continue
+				}
+				filteredModel := map[string]any{
+					"id":     model.ID,
+					"object": "model",
+				}
+				if model.Created != 0 {
+					filteredModel["created"] = model.Created
+				}
+				ownedBy := model.OwnedBy
+				if strings.TrimSpace(ownedBy) == "" {
+					ownedBy = providerName
+				}
+				filteredModel["owned_by"] = ownedBy
+				filteredModels = append(filteredModels, filteredModel)
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"object": "list",
+				"data":   filteredModels,
+			})
 		default:
 			// Default to OpenAI-compatible (works for openai, groq, cerebras, etc.)
 			openaiHandlers.OpenAIModels(c)
