@@ -56,3 +56,6 @@
 - CPB-0281..0315 next execution wave initialized with 35 CPB items distributed across 7 lanes:
   - `docs/planning/issue-wave-cpb-0281-0315-2026-02-22.md`
   - `docs/planning/reports/issue-wave-cpb-0281-0315-lane-1.md` through `lane-7.md`
+- CPB-0316..0350 next execution wave initialized with 35 CPB items distributed across 7 lanes:
+  - `docs/planning/issue-wave-cpb-0316-0350-2026-02-22.md`
+  - `docs/planning/reports/issue-wave-cpb-0316-0350-lane-1.md` through `lane-7.md`
