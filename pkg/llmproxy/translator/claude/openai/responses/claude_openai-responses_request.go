@@ -138,6 +138,15 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 	}
 
+	// input can be a raw string for compatibility with OpenAI Responses API.
+	if instructionsText == "" {
+		if input := root.Get("input"); input.Exists() && input.Type == gjson.String {
+			msg := `{"role":"user","content":""}`
+			msg, _ = sjson.Set(msg, "content", input.String())
+			out, _ = sjson.SetRaw(out, "messages.-1", msg)
+		}
+	}
+
 	// input array processing
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {

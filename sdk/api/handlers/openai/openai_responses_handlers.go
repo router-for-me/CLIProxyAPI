@@ -10,7 +10,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	constant "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
@@ -71,15 +74,9 @@ func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
-	rawJSON, err := c.GetRawData()
-	// If data retrieval fails, return a 400 Bad Request error.
+	rawJSON, err := readAndValidateOpenAIResponsesJSONRequest(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", err),
-				Type:    "invalid_request_error",
-			},
-		})
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: *err})
 		return
 	}
 
@@ -108,14 +105,9 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 }
 
 func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
-	rawJSON, err := c.GetRawData()
+	rawJSON, err := readAndValidateOpenAIResponsesJSONRequest(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", err),
-				Type:    "invalid_request_error",
-			},
-		})
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: *err})
 		return
 	}
 
@@ -283,6 +275,48 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		}
 	}
+}
+
+func readAndValidateOpenAIResponsesJSONRequest(c *gin.Context) ([]byte, *handlers.ErrorDetail) {
+	rawJSON, err := c.GetRawData()
+	if err != nil {
+		return nil, &handlers.ErrorDetail{
+			Message: fmt.Sprintf("Invalid request: %v", err),
+			Type:    "invalid_request_error",
+		}
+	}
+
+	if len(strings.TrimSpace(string(rawJSON))) == 0 {
+		return nil, &handlers.ErrorDetail{
+			Message: "Invalid request: expected JSON body",
+			Type:    "invalid_request_error",
+		}
+	}
+
+	if !gjson.ValidBytes(rawJSON) {
+		return nil, &handlers.ErrorDetail{
+			Message: "Invalid request: malformed JSON body",
+			Type:    "invalid_request_error",
+		}
+	}
+
+	contentType := strings.TrimSpace(c.GetHeader("Content-Type"))
+	if contentType != "" {
+		mediaType, _, parseErr := mime.ParseMediaType(contentType)
+		if parseErr != nil {
+			mediaType = strings.Split(contentType, ";")[0]
+		}
+		mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+		if mediaType != "" && mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json") {
+			return nil, &handlers.ErrorDetail{
+				Message: "Invalid request: Content-Type must be application/json",
+				Type:    "invalid_request_error",
+			}
+		}
+	}
+
+	c.Request.Body = io.NopCloser(bytes.NewReader(rawJSON))
+	return rawJSON, nil
 }
 
 func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Context, originalResponsesJSON, chatJSON []byte) {

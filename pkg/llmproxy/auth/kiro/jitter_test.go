@@ -29,8 +29,9 @@ func TestJitterDelay(t *testing.T) {
 		}
 	}
 
-	if JitterDelay(base, -1) == 0 {
-		// Wait, JitterDelay returns 0 if result < 0, but here jitterPercent -1 means default
+	d := JitterDelay(base, -1)
+	if d < 0 {
+		t.Errorf("jitterPercent -1 should use default, got %v", d)
 	}
 }
 
@@ -51,9 +52,7 @@ func TestHumanLikeDelay(t *testing.T) {
 	// Rapid consecutive
 	d2 := HumanLikeDelay()
 	if d2 < ShortDelayMin || d2 > ShortDelayMax {
-		// This might fail if the test runs slowly, but usually it's fast enough.
-		// Actually, HumanLikeDelay sets lastRequestTime = now.
-		// So the second call will have a very small timeSinceLastRequest.
+		t.Errorf("rapid consecutive delay %v out of range [%v, %v]", d2, ShortDelayMin, ShortDelayMax)
 	}
 }
 

@@ -70,11 +70,14 @@ jobs:
         run: |
           mkdir -p target
           go test -json ./... > target/test-baseline.json
+          go test ./... > target/test-baseline.txt
       - name: Upload baseline artifact
         uses: actions/upload-artifact@v4
         with:
           name: go-test-baseline
-          path: target/test-baseline.json
+          path: |
+            target/test-baseline.json
+            target/test-baseline.txt
           if-no-files-found: error
 
   fmt-check:

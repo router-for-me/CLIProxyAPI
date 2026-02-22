@@ -138,7 +138,7 @@ func (m usageTabModel) renderContent() string {
 		Height(3)
 
 	// Total Requests
-	card1 := cardStyle.Copy().BorderForeground(lipgloss.Color("111")).Render(fmt.Sprintf(
+	card1 := cardStyle.BorderForeground(lipgloss.Color("111")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_total_reqs")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")).Render(fmt.Sprintf("%d", totalReqs)),
@@ -146,7 +146,7 @@ func (m usageTabModel) renderContent() string {
 	))
 
 	// Total Tokens
-	card2 := cardStyle.Copy().BorderForeground(lipgloss.Color("214")).Render(fmt.Sprintf(
+	card2 := cardStyle.BorderForeground(lipgloss.Color("214")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_total_tokens")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(formatLargeNumber(totalTokens)),
@@ -160,7 +160,7 @@ func (m usageTabModel) renderContent() string {
 			rpm = float64(totalReqs) / float64(len(rByH)) / 60.0
 		}
 	}
-	card3 := cardStyle.Copy().BorderForeground(lipgloss.Color("76")).Render(fmt.Sprintf(
+	card3 := cardStyle.BorderForeground(lipgloss.Color("76")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_rpm")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("76")).Render(fmt.Sprintf("%.2f", rpm)),

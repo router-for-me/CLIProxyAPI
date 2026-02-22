@@ -5,6 +5,15 @@ import (
 	"strings"
 )
 
+func normalizeProvider(apiKey string) string {
+	key := strings.ToLower(strings.TrimSpace(apiKey))
+	if key == "" {
+		return key
+	}
+	parts := strings.Split(key, "-")
+	return strings.TrimSpace(parts[0])
+}
+
 // ProviderMetrics holds per-provider metrics for routing decisions.
 type ProviderMetrics struct {
 	RequestCount int64   `json:"request_count"`
@@ -35,7 +44,7 @@ func GetProviderMetrics() map[string]ProviderMetrics {
 	snap := GetRequestStatistics().Snapshot()
 	result := make(map[string]ProviderMetrics)
 	for apiKey, apiSnap := range snap.APIs {
-		provider := strings.ToLower(strings.TrimSpace(apiKey))
+		provider := normalizeProvider(apiKey)
 		if _, ok := knownProviders[provider]; !ok {
 			continue
 		}

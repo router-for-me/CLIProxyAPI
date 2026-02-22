@@ -32,6 +32,8 @@ import (
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
+	case "openai":
+		return GetOpenAIModels()
 	case "claude":
 		return GetClaudeModels()
 	case "gemini":

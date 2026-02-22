@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -526,7 +528,7 @@ func writeBoardMarkdown(path string, board []boardItem, bj boardJSON) error {
 	}
 	buf.WriteString("\n## Distribution\n")
 	for _, sec := range []string{"priority", "wave", "effort", "theme"} {
-		buf.WriteString(fmt.Sprintf("### %s\n", strings.Title(sec)))
+		buf.WriteString(fmt.Sprintf("### %s\n", cases.Title(language.Und).String(sec)))
 		type kv struct {
 			K string
 			V int

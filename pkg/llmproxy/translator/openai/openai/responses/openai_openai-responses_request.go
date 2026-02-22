@@ -207,7 +207,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.Set(out, "tool_choice", toolChoice.String())
+		switch toolChoice.Type {
+		case gjson.JSON:
+			out, _ = sjson.SetRaw(out, "tool_choice", toolChoice.Raw)
+		default:
+			out, _ = sjson.Set(out, "tool_choice", toolChoice.Value())
+		}
 	}
 
 	return []byte(out)
