@@ -144,14 +144,26 @@ func createMergedMessage(role string, content string, toolCalls []interface{}) s
 // mergeToolCalls combines tool_calls from two assistant messages while preserving order.
 func mergeToolCalls(tc1, tc2 gjson.Result) []interface{} {
 	var merged []interface{}
+	seenIDs := map[string]struct{}{}
 
 	if tc1.IsArray() {
 		for _, tc := range tc1.Array() {
+			id := tc.Get("id").String()
+			if id != "" {
+				seenIDs[id] = struct{}{}
+			}
 			merged = append(merged, tc.Value())
 		}
 	}
 	if tc2.IsArray() {
 		for _, tc := range tc2.Array() {
+			id := tc.Get("id").String()
+			if id != "" {
+				if _, exists := seenIDs[id]; exists {
+					continue
+				}
+				seenIDs[id] = struct{}{}
+			}
 			merged = append(merged, tc.Value())
 		}
 	}
