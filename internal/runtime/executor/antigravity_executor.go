@@ -136,6 +136,8 @@ func (e *AntigravityExecutor) PrepareRequest(req *http.Request, auth *cliproxyau
 }
 
 // HttpRequest injects Antigravity credentials into the request and executes it.
+// It uses a whitelist approach: all incoming headers are stripped and only
+// the minimum set required by the Antigravity protocol is explicitly set.
 func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("antigravity executor: request is nil")
@@ -144,12 +146,28 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 		ctx = req.Context()
 	}
 	httpReq := req.WithContext(ctx)
+
+	// --- Whitelist: save only the headers we need from the original request ---
+	contentType := httpReq.Header.Get("Content-Type")
+
+	// Wipe ALL incoming headers
+	for k := range httpReq.Header {
+		delete(httpReq.Header, k)
+	}
+
+	// --- Set only the headers Antigravity actually sends ---
+	if contentType != "" {
+		httpReq.Header.Set("Content-Type", contentType)
+	}
+	// Content-Length is managed automatically by Go's http.Client from the Body
+	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Close = true // sends Connection: close
+
+	// Inject Authorization: Bearer <token>
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpReq.Close = true
-	httpReq.Header.Del("Accept")
-	scrubProxyAndFingerprintHeaders(httpReq)
+
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
