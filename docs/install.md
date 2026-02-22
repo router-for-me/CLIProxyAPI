@@ -31,6 +31,28 @@ Validate:
 curl -sS http://localhost:8317/health
 ```
 
+ARM64 note (`#147` scope):
+
+- Prefer Docker image manifests that include `linux/arm64`.
+- If your host pulls the wrong image variant, force the platform explicitly:
+
+```bash
+docker run --platform linux/arm64 -d --name cliproxyapi-plusplus \
+  -p 8317:8317 \
+  -v "$PWD/config.yaml:/CLIProxyAPI/config.yaml" \
+  -v "$PWD/auths:/root/.cli-proxy-api" \
+  -v "$PWD/logs:/CLIProxyAPI/logs" \
+  KooshaPari/cliproxyapi-plusplus:latest
+```
+
+- Verify architecture inside the running container:
+
+```bash
+docker exec cliproxyapi-plusplus uname -m
+```
+
+Expected output for ARM hosts: `aarch64`.
+
 ## Option B: Standalone Binary
 
 Releases:
