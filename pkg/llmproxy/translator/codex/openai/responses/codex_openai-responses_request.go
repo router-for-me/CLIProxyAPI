@@ -2,6 +2,7 @@ package responses
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -18,6 +19,15 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
+	// Map variant -> reasoning.effort when reasoning.effort is not explicitly provided.
+	if !gjson.GetBytes(rawJSON, "reasoning.effort").Exists() {
+		if variant := gjson.GetBytes(rawJSON, "variant"); variant.Exists() {
+			effort := strings.ToLower(strings.TrimSpace(variant.String()))
+			if effort != "" {
+				rawJSON, _ = sjson.SetBytes(rawJSON, "reasoning.effort", effort)
+			}
+		}
+	}
 	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
