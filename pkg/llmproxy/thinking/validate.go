@@ -66,7 +66,7 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 			}
 			budget, ok := ConvertLevelToBudget(string(config.Level))
 			if !ok {
-				return nil, NewThinkingError(ErrUnknownLevel, fmt.Sprintf("unknown level: %s", config.Level))
+				return nil, NewThinkingErrorWithModel(ErrUnknownLevel, fmt.Sprintf("unknown level %q for model %q", config.Level, model), model)
 			}
 			config.Mode = ModeBudget
 			config.Budget = budget
@@ -77,7 +77,11 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		if config.Mode == ModeBudget {
 			level, ok := ConvertBudgetToLevel(config.Budget)
 			if !ok {
-				return nil, NewThinkingError(ErrUnknownLevel, fmt.Sprintf("budget %d cannot be converted to a valid level", config.Budget))
+				return nil, NewThinkingErrorWithModel(
+					ErrUnknownLevel,
+					fmt.Sprintf("budget %d cannot be converted to a valid level for model %q", config.Budget, model),
+					model,
+				)
 			}
 			// When converting Budget -> Level for level-only models, clamp the derived standard level
 			// to the nearest supported level. Special values (none/auto) are preserved.
@@ -112,8 +116,13 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 				// User explicitly specified an unsupported level - return error
 				// (budget-derived levels may be clamped based on source format)
 				validLevels := normalizeLevels(support.Levels)
-				message := fmt.Sprintf("level %q not supported, valid levels: %s", strings.ToLower(string(config.Level)), strings.Join(validLevels, ", "))
-				return nil, NewThinkingError(ErrLevelNotSupported, message)
+				message := fmt.Sprintf(
+					"level %q not supported for model %q, valid levels: %s",
+					strings.ToLower(string(config.Level)),
+					model,
+					strings.Join(validLevels, ", "),
+				)
+				return nil, NewThinkingErrorWithModel(ErrLevelNotSupported, message, model)
 			}
 		}
 	}
@@ -122,8 +131,8 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		min, max := support.Min, support.Max
 		if min != 0 || max != 0 {
 			if config.Budget < min || config.Budget > max || (config.Budget == 0 && !support.ZeroAllowed) {
-				message := fmt.Sprintf("budget %d out of range [%d,%d]", config.Budget, min, max)
-				return nil, NewThinkingError(ErrBudgetOutOfRange, message)
+				message := fmt.Sprintf("budget %d out of range [%d,%d] for model %q", config.Budget, min, max, model)
+				return nil, NewThinkingErrorWithModel(ErrBudgetOutOfRange, message, model)
 			}
 		}
 	}

@@ -132,6 +132,19 @@ curl -sS http://localhost:8317/v1/models \
 
 Only route traffic to models that appear in `/v1/models`. If `gpt-5.3-codex-spark` is missing for your account tier, use `gpt-5.3-codex`.
 
+Team-account fallback probe (`400` on Spark):
+
+```bash
+for m in gpt-5.3-codex-spark gpt-5.3-codex; do
+  echo "== $m =="
+  curl -sS -X POST http://localhost:8317/v1/chat/completions \
+    -H "Authorization: Bearer demo-client-key" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"copilot/$m\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":false}" \
+    | jq '{error,model:(.model // .error.model // "n/a")}'
+done
+```
+
 ## 5) Kiro
 
 `config.yaml`:
@@ -193,6 +206,22 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -H "Authorization: Bearer demo-client-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"minimax/abab6.5s","messages":[{"role":"user","content":"ping"}]}' | jq
+```
+
+MiniMax-M2.5 via iFlow parity check:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/minimax-m2.5","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
+```
+
+```bash
+curl -sS -N -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/minimax-m2.5","messages":[{"role":"user","content":"ping"}],"stream":true}' | head -n 6
 ```
 
 ## 7) OpenAI-Compatible Providers

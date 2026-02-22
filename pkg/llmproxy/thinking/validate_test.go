@@ -273,3 +273,27 @@ func TestValidateConfig_ModeAutoPreservedWhenDynamicAllowed(t *testing.T) {
 		t.Fatalf("Budget=%d, want=-1", got.Budget)
 	}
 }
+
+func TestValidateConfig_ErrorIncludesModelContext(t *testing.T) {
+	modelInfo := &registry.ModelInfo{
+		ID: "ctx-model",
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"low", "high"},
+		},
+	}
+
+	_, err := ValidateConfig(ThinkingConfig{Mode: ModeLevel, Level: LevelXHigh}, modelInfo, "openai", "openai", false)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	thinkingErr, ok := err.(*ThinkingError)
+	if !ok {
+		t.Fatalf("expected ThinkingError, got %T %v", err, err)
+	}
+	if thinkingErr.Code != ErrLevelNotSupported {
+		t.Fatalf("error code=%s, want=%s", thinkingErr.Code, ErrLevelNotSupported)
+	}
+	if thinkingErr.Model != "ctx-model" {
+		t.Fatalf("error model=%q, want=%q", thinkingErr.Model, "ctx-model")
+	}
+}

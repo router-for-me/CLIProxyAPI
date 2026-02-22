@@ -35,6 +35,10 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 | `Docker Image Error` on startup/health | Image tag mismatch, stale config mount, or incompatible env defaults | `docker images | head`, `docker logs CONTAINER_NAME --tail 200`, `/health` check | Pull/pin a known-good tag, verify mounted `config.yaml`, then compare `stream: true/false` behavior for parity |
 | `Model not found` / `bad model` | Alias/prefix/model map mismatch | `curl .../v1/models` and compare requested ID | Update alias map, prefix rules, and `excluded-models` |
 | `gpt-5.3-codex-spark` fails for plus/team | Account tier does not expose Spark model even if config lists it | `GET /v1/models` and look for `gpt-5.3-codex-spark` | Route to `gpt-5.3-codex` fallback and alert on repeated Spark 400/404 responses |
+| `iflow` requests repeatedly return `406` | Upstream model-level rejection, stale auth/session metadata, or stream-shape mismatch | Retry same payload with `stream:false` and compare status/body | Gate rollout with non-stream canary first, then stream; keep fallback model alias ready (`iflow/glm-4.7` or `iflow/minimax-m2.5`) |
+| `Reasoning Error` / invalid effort-level failures | Request carries unsupported `reasoning_effort`/`reasoning.effort` for selected model | Retry with `reasoning_effort: "low"` and inspect error payload + model ID | Use model-supported levels only; for unknown compatibility set `reasoning_effort` to `auto` or omit field |
+| Claude OAuth cache usage always `0` | Upstream does not emit cache counters for selected model or request path | Compare `usage` fields for same prompt on `/v1/chat/completions` and `/v1/responses` | Treat missing cache counters as observational gap; verify routing and usage totals before assuming billing drift |
+| Port `8317` becomes unreachable until SSH/login activity | Host/network idle policy, process supervision gap, or stale listener | `lsof -iTCP:8317 -sTCP:LISTEN` and `/health` from local + remote shell | Add external health check + autorestart, and pin service under process manager with restart-on-failure |
 | Runtime config write errors | Read-only mount or immutable filesystem | `find /CLIProxyAPI -maxdepth 1 -name config.yaml -print` | Use writable mount, re-run with read-only warning, confirm management persistence status |
 | Kiro/OAuth auth loops | Expired or missing token refresh fields | Re-run `cliproxyapi++ auth`/reimport token path | Refresh credentials, run with fresh token file, avoid duplicate token imports |
 | Streaming hangs or truncation | Reverse proxy buffering / payload compatibility issue | Reproduce with `stream: false`, then compare SSE response | Verify reverse-proxy config, compare tool schema compatibility and payload shape |
@@ -46,6 +50,32 @@ Use this matrix as an issue-entry checklist:
 ```bash
 for endpoint in health models v1/metrics/providers v0/management/logs; do
   curl -sS "http://localhost:8317/$endpoint" -H "Authorization: Bearer YOUR_API_KEY" | head -n 3
+done
+```
+
+## Invalid Auth File Cleanup Checks
+
+Use this when auth files are stale/corrupt and you need a safe cleanup pass before rollout:
+
+```bash
+AUTH_DIR="${AUTH_DIR:-./auths}"
+find "$AUTH_DIR" -maxdepth 1 -type f -name '*.json' -print
+```
+
+```bash
+# Validate JSON files and list broken ones
+find "$AUTH_DIR" -maxdepth 1 -type f -name '*.json' -print0 \
+  | xargs -0 -I{} sh -c 'jq empty "{}" >/dev/null 2>&1 || echo "invalid-json: {}"'
+```
+
+```bash
+# Stream/non-stream parity probe after cleanup
+for mode in false true; do
+  curl -sS -X POST http://localhost:8317/v1/chat/completions \
+    -H "Authorization: Bearer YOUR_CLIENT_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"iflow/minimax-m2.5\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":$mode}" \
+    | head -n 5
 done
 ```
 
