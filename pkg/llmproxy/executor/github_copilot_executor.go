@@ -867,44 +867,6 @@ func normalizeGitHubCopilotResponsesTools(body []byte) []byte {
 	return body
 }
 
-func collectTextFromNode(node gjson.Result) string {
-	if !node.Exists() {
-		return ""
-	}
-	if node.Type == gjson.String {
-		return node.String()
-	}
-	if node.IsArray() {
-		var parts []string
-		for _, item := range node.Array() {
-			if item.Type == gjson.String {
-				if text := item.String(); text != "" {
-					parts = append(parts, text)
-				}
-				continue
-			}
-			if text := item.Get("text").String(); text != "" {
-				parts = append(parts, text)
-				continue
-			}
-			if nested := collectTextFromNode(item.Get("content")); nested != "" {
-				parts = append(parts, nested)
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	if node.Type == gjson.JSON {
-		if text := node.Get("text").String(); text != "" {
-			return text
-		}
-		if nested := collectTextFromNode(node.Get("content")); nested != "" {
-			return nested
-		}
-		return node.Raw
-	}
-	return node.String()
-}
-
 type githubCopilotResponsesStreamToolState struct {
 	Index int
 	ID    string

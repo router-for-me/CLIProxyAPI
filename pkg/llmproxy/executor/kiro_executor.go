@@ -709,8 +709,10 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 // - CodeWhisperer endpoint (AI_EDITOR origin) uses Kiro IDE quota
 // Also supports multi-endpoint fallback similar to Antigravity implementation.
 // tokenKey is used for rate limiting and cooldown tracking.
-func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from, to sdktranslator.Format, reporter *usageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (cliproxyexecutor.Response, error) {
+func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, body []byte, from, to sdktranslator.Format, reporter *usageReporter, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (cliproxyexecutor.Response, error) {
 	var resp cliproxyexecutor.Response
+	var kiroPayload []byte
+	var currentOrigin string
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
 	rateLimiter := kiroauth.GetGlobalRateLimiter()
 	cooldownMgr := kiroauth.GetGlobalCooldownManager()
@@ -1145,7 +1147,9 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 // - CodeWhisperer endpoint (AI_EDITOR origin) uses Kiro IDE quota
 // Also supports multi-endpoint fallback similar to Antigravity implementation.
 // tokenKey is used for rate limiting and cooldown tracking.
-func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from sdktranslator.Format, reporter *usageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, body []byte, from sdktranslator.Format, reporter *usageReporter, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (<-chan cliproxyexecutor.StreamChunk, error) {
+	var kiroPayload []byte
+	var currentOrigin string
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
 	rateLimiter := kiroauth.GetGlobalRateLimiter()
 	cooldownMgr := kiroauth.GetGlobalCooldownManager()
@@ -2683,66 +2687,6 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			log.Warnf("kiro: streamToChannel received invalidStateEvent: %s, continuing", errMsg)
 			continue
 
-		default:
-			// Check for upstream usage events from Kiro API
-			// Format: {"unit":"credit","unitPlural":"credits","usage":1.458}
-			if unit, ok := event["unit"].(string); ok && unit == "credit" {
-				if usage, ok := event["usage"].(float64); ok {
-					upstreamCreditUsage = usage
-					hasUpstreamUsage = true
-					log.Debugf("kiro: received upstream credit usage: %.4f", upstreamCreditUsage)
-				}
-			}
-			// Format: {"contextUsagePercentage":78.56}
-			if ctxPct, ok := event["contextUsagePercentage"].(float64); ok {
-				upstreamContextPercentage = ctxPct
-				log.Debugf("kiro: received upstream context usage: %.2f%%", upstreamContextPercentage)
-			}
-
-			// Check for token counts in unknown events
-			if inputTokens, ok := event["inputTokens"].(float64); ok {
-				totalUsage.InputTokens = int64(inputTokens)
-				hasUpstreamUsage = true
-				log.Debugf("kiro: streamToChannel found inputTokens in event %s: %d", eventType, totalUsage.InputTokens)
-			}
-			if outputTokens, ok := event["outputTokens"].(float64); ok {
-				totalUsage.OutputTokens = int64(outputTokens)
-				hasUpstreamUsage = true
-				log.Debugf("kiro: streamToChannel found outputTokens in event %s: %d", eventType, totalUsage.OutputTokens)
-			}
-			if totalTokens, ok := event["totalTokens"].(float64); ok {
-				totalUsage.TotalTokens = int64(totalTokens)
-				log.Debugf("kiro: streamToChannel found totalTokens in event %s: %d", eventType, totalUsage.TotalTokens)
-			}
-
-			// Check for usage object in unknown events (OpenAI/Claude format)
-			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
-				if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
-					totalUsage.InputTokens = int64(inputTokens)
-					hasUpstreamUsage = true
-				} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
-					totalUsage.InputTokens = int64(inputTokens)
-					hasUpstreamUsage = true
-				}
-				if outputTokens, ok := usageObj["output_tokens"].(float64); ok {
-					totalUsage.OutputTokens = int64(outputTokens)
-					hasUpstreamUsage = true
-				} else if outputTokens, ok := usageObj["completion_tokens"].(float64); ok {
-					totalUsage.OutputTokens = int64(outputTokens)
-					hasUpstreamUsage = true
-				}
-				if totalTokens, ok := usageObj["total_tokens"].(float64); ok {
-					totalUsage.TotalTokens = int64(totalTokens)
-				}
-				log.Debugf("kiro: streamToChannel found usage object in event %s: input=%d, output=%d, total=%d",
-					eventType, totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
-			}
-
-			// Log unknown event types for debugging (to discover new event formats)
-			if eventType != "" {
-				log.Debugf("kiro: streamToChannel unknown event type: %s, payload: %s", eventType, string(payload))
-			}
-
 		case "assistantResponseEvent":
 			var contentDelta string
 			var toolUses []map[string]interface{}
@@ -3421,7 +3365,68 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				}
 				log.Debugf("kiro: streamToChannel found metricsEvent: input=%d, output=%d",
 					totalUsage.InputTokens, totalUsage.OutputTokens)
+
 			}
+		default:
+			// Check for upstream usage events from Kiro API
+			// Format: {"unit":"credit","unitPlural":"credits","usage":1.458}
+			if unit, ok := event["unit"].(string); ok && unit == "credit" {
+				if usage, ok := event["usage"].(float64); ok {
+					upstreamCreditUsage = usage
+					hasUpstreamUsage = true
+					log.Debugf("kiro: received upstream credit usage: %.4f", upstreamCreditUsage)
+				}
+			}
+			// Format: {"contextUsagePercentage":78.56}
+			if ctxPct, ok := event["contextUsagePercentage"].(float64); ok {
+				upstreamContextPercentage = ctxPct
+				log.Debugf("kiro: received upstream context usage: %.2f%%", upstreamContextPercentage)
+			}
+
+			// Check for token counts in unknown events
+			if inputTokens, ok := event["inputTokens"].(float64); ok {
+				totalUsage.InputTokens = int64(inputTokens)
+				hasUpstreamUsage = true
+				log.Debugf("kiro: streamToChannel found inputTokens in event %s: %d", eventType, totalUsage.InputTokens)
+			}
+			if outputTokens, ok := event["outputTokens"].(float64); ok {
+				totalUsage.OutputTokens = int64(outputTokens)
+				hasUpstreamUsage = true
+				log.Debugf("kiro: streamToChannel found outputTokens in event %s: %d", eventType, totalUsage.OutputTokens)
+			}
+			if totalTokens, ok := event["totalTokens"].(float64); ok {
+				totalUsage.TotalTokens = int64(totalTokens)
+				log.Debugf("kiro: streamToChannel found totalTokens in event %s: %d", eventType, totalUsage.TotalTokens)
+			}
+
+			// Check for usage object in unknown events (OpenAI/Claude format)
+			if usageObj, ok := event["usage"].(map[string]interface{}); ok {
+				if inputTokens, ok := usageObj["input_tokens"].(float64); ok {
+					totalUsage.InputTokens = int64(inputTokens)
+					hasUpstreamUsage = true
+				} else if inputTokens, ok := usageObj["prompt_tokens"].(float64); ok {
+					totalUsage.InputTokens = int64(inputTokens)
+					hasUpstreamUsage = true
+				}
+				if outputTokens, ok := usageObj["output_tokens"].(float64); ok {
+					totalUsage.OutputTokens = int64(outputTokens)
+					hasUpstreamUsage = true
+				} else if outputTokens, ok := usageObj["completion_tokens"].(float64); ok {
+					totalUsage.OutputTokens = int64(outputTokens)
+					hasUpstreamUsage = true
+				}
+				if totalTokens, ok := usageObj["total_tokens"].(float64); ok {
+					totalUsage.TotalTokens = int64(totalTokens)
+				}
+				log.Debugf("kiro: streamToChannel found usage object in event %s: input=%d, output=%d, total=%d",
+					eventType, totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.TotalTokens)
+			}
+
+			// Log unknown event types for debugging (to discover new event formats)
+			if eventType != "" {
+				log.Debugf("kiro: streamToChannel unknown event type: %s, payload: %s", eventType, string(payload))
+			}
+
 		}
 
 		// Check nested usage event
@@ -4409,7 +4414,7 @@ func (e *KiroExecutor) handleWebSearchStream(
 			kiroChunks, kiroErr := e.callKiroAndBuffer(ctx, auth, modifiedReq, opts, accessToken, profileArn)
 			if kiroErr != nil {
 				log.Warnf("kiro/websearch: Kiro API failed at iteration %d: %v", iteration+1, kiroErr)
-				wsErr = fmt.Errorf("Kiro API failed at iteration %d: %w", iteration+1, kiroErr)
+				wsErr = fmt.Errorf("kiro API failed at iteration %d: %w", iteration+1, kiroErr)
 				e.sendFallbackText(ctx, out, contentBlockIndex, currentQuery, searchResults)
 				return
 			}

@@ -751,6 +751,15 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 		}
 	}
 
+	if len(models) == 0 && strings.EqualFold(handlerType, "openai") {
+		for _, model := range GetStaticModelDefinitionsByChannel("openai") {
+			modelMap := r.convertModelToMap(model, handlerType)
+			if modelMap != nil {
+				models = append(models, modelMap)
+			}
+		}
+	}
+
 	return models
 }
 

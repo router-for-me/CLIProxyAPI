@@ -17,6 +17,7 @@
 - `task quality:staticcheck` — Optional staticcheck run (`ENABLE_STATICCHECK=1`).
 - `task quality:release-lint` — Validate release-facing config examples and docs snippets.
 - `task test:unit` / `task test:integration` — Tag-filtered package tests.
+- `task test:baseline` — Run `go test` with JSON and plain-text baseline output (`target/test-baseline.json` and `target/test-baseline.txt`).
 - `task test` — Full test suite.
 - `task verify:all` — Unified local audit entrypoint (`fmt:check`, `test:smoke`, `lint:changed`, `release-lint`, `vet`, `staticcheck`, `test`).
 - `task hooks:install` — Install local pre-commit checks.
@@ -34,4 +35,6 @@
 ## CI alignment notes
 
 - `preflight` is shared by all test/quality tasks and fails fast on missing `go`, `task`, or `git`.
+- `preflight` also validates `task -l`, and if a `Makefile` exists validates `make -n` for build-task sanity.
 - `task` now includes `cache:unlock` in test gates to avoid stale lock contention.
+- CI baseline artifacts are now emitted as both JSON and text for auditability.

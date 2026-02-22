@@ -14,6 +14,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/tidwall/gjson"
 )
 
 type compactCaptureExecutor struct {
@@ -119,5 +120,69 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIResponsesRejectsTextPlainContentType(t *testing.T) {
+	testHandlersForResponses(t, http.MethodPost, "/v1/responses", "text/plain", "hello")
+}
+
+func TestOpenAIResponsesRejectsMultipartContentType(t *testing.T) {
+	testHandlersForResponses(t, http.MethodPost, "/v1/responses", "multipart/form-data", `{"model":"test-model","input":"hello"}`)
+}
+
+func TestOpenAIResponsesRejectsMalformedJSON(t *testing.T) {
+	testHandlersForResponses(t, http.MethodPost, "/v1/responses", "application/json", "{bad")
+}
+
+func TestOpenAIResponsesRejectsEmptyBody(t *testing.T) {
+	testHandlersForResponses(t, http.MethodPost, "/v1/responses", "application/json", "")
+}
+
+func TestOpenAIResponsesCompactRejectsTextPlainContentType(t *testing.T) {
+	testHandlersForResponses(t, http.MethodPost, "/v1/responses/compact", "text/plain", `{"model":"test-model","input":"hello"}`)
+}
+
+func TestOpenAIResponsesCompactRejectsMalformedJSON(t *testing.T) {
+	testHandlersForResponses(t, http.MethodPost, "/v1/responses/compact", "application/json", "{bad")
+}
+
+func testHandlersForResponses(t *testing.T, method, path, contentType, body string) {
+	t.Helper()
+
+	executor := &compactCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-3", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	if strings.HasSuffix(path, "/compact") {
+		router.POST(path, h.Compact)
+	} else {
+		router.POST(path, h.Responses)
+	}
+
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", contentType)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusBadRequest)
+	}
+
+	errType := gjson.GetBytes(resp.Body.Bytes(), "error.type").String()
+	if errType != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want %q", errType, "invalid_request_error")
 	}
 }

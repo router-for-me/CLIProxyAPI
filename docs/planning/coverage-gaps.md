@@ -29,8 +29,13 @@ Date: 2026-02-22
   - Added command-label translation tests for `/message` aliases (`ask`, `exec`, `max`, `continue`, `resume`).
   - Added `/message` idempotency replay test that asserts duplicate key reuse and no duplicate in-memory message append.
   - Added idempotency negative test for different `Idempotency-Key` values and in-flight message-copy isolation for `/messages`.
-    - Added task-level quality gates (`quality:ci`, `lint:changed` with PR ranges, `test:smoke`) and workflow/required-check wiring for CI pre-merge gates.
-    - Added `quality:release-lint` and required-check `quality-staged-check` in CI; added docs/code snippet parse coverage for release lint.
+  - Added task-level quality gates (`quality:ci`, `lint:changed` with PR ranges, `test:smoke`) and workflow/required-check wiring for CI pre-merge gates.
+  - Added `quality:release-lint` and required-check `quality-staged-check` in CI; added docs/code snippet parse coverage for release lint.
+  - Added thinking validation coverage for level rebound and budget boundary clamping in `pkg/llmproxy/thinking/validate_test.go`:
+    - unsupported/rebound level handling and deterministic clamping to supported levels,
+    - min/max/zero/negative budget normalization for non-strict suffix-paths,
+    - explicit strict out-of-range rejection (`ErrBudgetOutOfRange`) when same-provider budget requests are too high.
+    - auto-mode behavior for dynamic-capable vs non-dynamic models (`ModeAuto` midpoint fallback and preservation paths).
   - Remaining: complete route-namespace matrix for command-label translation across orchestrator-facing surfaces beyond `/message`, and status/event replay windows.
 - Integration:
   - Remaining: end-to-end provider cheapest-path smoke for live process orchestration against every provider auth mode. Unit-level smoke now covers:

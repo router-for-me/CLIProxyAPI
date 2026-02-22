@@ -139,7 +139,7 @@ func AnalyzeBufferedStream(chunks [][]byte) BufferedStreamResult {
 
 	// Track tool use state across chunks
 	var currentToolName string
-	var currentToolIndex int = -1
+	var currentToolIndex = -1
 	var toolInputBuilder strings.Builder
 
 	for _, chunk := range chunks {

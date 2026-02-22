@@ -41,7 +41,7 @@ func TestManager_Authenticate(t *testing.T) {
 	m.SetProviders([]Provider{p1, p2})
 
 	// Test success
-	res, err = m.Authenticate(context.Background(), nil)
+	_, err = m.Authenticate(context.Background(), nil)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestManager_Authenticate(t *testing.T) {
 	p2.auth = func(ctx context.Context, r *http.Request) (*Result, *AuthError) {
 		return nil, NewInvalidCredentialError()
 	}
-	res, err = m.Authenticate(context.Background(), nil)
+	_, err = m.Authenticate(context.Background(), nil)
 	if err == nil || err.Code != AuthErrorCodeInvalidCredential {
 		t.Errorf("expected invalid credential error, got %v", err)
 	}
@@ -62,7 +62,7 @@ func TestManager_Authenticate(t *testing.T) {
 	p2.auth = func(ctx context.Context, r *http.Request) (*Result, *AuthError) {
 		return nil, NewNoCredentialsError()
 	}
-	res, err = m.Authenticate(context.Background(), nil)
+	_, err = m.Authenticate(context.Background(), nil)
 	if err == nil || err.Code != AuthErrorCodeNoCredentials {
 		t.Errorf("expected no credentials error, got %v", err)
 	}

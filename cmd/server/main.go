@@ -562,8 +562,6 @@ func main() {
 		cmd.DoKiroImport(cfg, options)
 	} else if rooLogin {
 		cmd.DoRooLogin(cfg, options)
-	} else if kiloLogin {
-		cmd.DoKiloLogin(cfg, options)
 	} else if minimaxLogin {
 		cmd.DoMinimaxLogin(cfg, options)
 	} else if deepseekLogin {

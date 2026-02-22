@@ -190,7 +190,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// It is forwarded as execution metadata; when absent we generate a UUID.
 	key := ""
 	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if ginCtx := contextGin(ctx); ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 		}
 	}
@@ -209,6 +209,27 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
 	return meta
+}
+
+type ginContextLookupKey string
+
+const ginContextLookupKeyToken ginContextLookupKey = "gin"
+
+func contextGin(ctx context.Context) *gin.Context {
+	if ctx == nil {
+		return nil
+	}
+	if ginCtxRaw := ctx.Value(ginContextLookupKeyToken); ginCtxRaw != nil {
+		if ginCtx, ok := ginCtxRaw.(*gin.Context); ok {
+			return ginCtx
+		}
+	}
+	if ginCtxRaw := ctx.Value("gin"); ginCtxRaw != nil {
+		if ginCtx, ok := ginCtxRaw.(*gin.Context); ok {
+			return ginCtx
+		}
+	}
+	return nil
 }
 
 func pinnedAuthIDFromContext(ctx context.Context) string {
@@ -857,7 +878,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
 	if h.Cfg.RequestLog {
-		if ginContext, ok := ctx.Value("gin").(*gin.Context); ok {
+		if ginContext := contextGin(ctx); ginContext != nil {
 			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
 				if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
 					slicesAPIResponseError = append(slicesAPIResponseError, err)

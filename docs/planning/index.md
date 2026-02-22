@@ -18,6 +18,13 @@ This section tracks source-linked execution boards and import artifacts.
 - [Sprint Planning README](./README.md)
 - [Coder + Adjacent Research Inventory (300 repos)](./coder-org-plus-relative-300-inventory-2026-02-22.md)
 - [AgentAPI/cliproxy Integration Research](./agentapi-cliproxy-integration-research-2026-02-22.md)
+- [Coverage Gaps Register](./coverage-gaps.md)
+
+## Evidence Section
+
+- [Sprint Baseline Commands](./README.md)
+- [CI Baseline Artifact](../.github/workflows/pr-test-build.yml#L69)
+- [Quality Baseline Task](../Taskfile.yml#L72)
 
 ## GitHub Project Import
 

@@ -42,6 +42,13 @@ tasks:
         command -v go >/dev/null 2>&1 || { echo "[FAIL] go is required"; exit 1; }
         command -v task >/dev/null 2>&1 || { echo "[FAIL] task is required"; exit 1; }
         command -v git >/dev/null 2>&1 || { echo "[FAIL] git is required"; exit 1; }
+        if [ -f Makefile ]; then
+          command -v make >/dev/null 2>&1 || { echo "[FAIL] make is required for Makefile-based checks"; exit 1; }
+          make -n >/dev/null 2>&1 || { echo "[FAIL] make -n failed; check Makefile syntax/targets"; exit 1; }
+        else
+          echo "[INFO] Makefile not present; skipping make checks"
+        fi
+        task -l >/dev/null 2>&1 || { echo "[FAIL] task -l failed"; exit 1; }
         go version >/dev/null
         echo "[OK] preflight checks passed"
 
@@ -70,10 +77,11 @@ tasks:
       - go test -tags integration ./... {{.CLI_ARGS}}
 
   test:baseline:
-    desc: "Run full test suite and persist JSON baseline artifacts"
+    desc: "Run full test suite and persist JSON + text baseline artifacts"
     cmds:
       - mkdir -p {{.TEST_REPORT_DIR}}
       - go test -json ./... > "{{.TEST_REPORT_DIR}}/test-baseline.json"
+      - go test ./... > "{{.TEST_REPORT_DIR}}/test-baseline.txt"
 
   # -- Testing & Quality --
   test:

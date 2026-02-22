@@ -127,3 +127,29 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions(t *testing.T) {
 		t.Errorf("expected content hello, got %s", res4.Get("messages.0.content").String())
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsToolChoice(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],
+		"tool_choice": {"type":"function","function":{"name":"weather"}}
+	}`)
+
+	got := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-4o", input, false)
+	res := gjson.ParseBytes(got)
+
+	toolChoice := res.Get("tool_choice")
+	if !toolChoice.Exists() {
+		t.Fatalf("expected tool_choice")
+	}
+	if toolChoice.Get("type").String() != "function" {
+		t.Fatalf("tool_choice.type = %s, want function", toolChoice.Get("type").String())
+	}
+	if toolChoice.Get("function.name").String() != "weather" {
+		t.Fatalf("tool_choice.function.name = %s, want weather", toolChoice.Get("function.name").String())
+	}
+
+	if res.Get("tool_choice").Type != gjson.JSON {
+		t.Fatalf("tool_choice should be object, got %s", res.Get("tool_choice").Type.String())
+	}
+}

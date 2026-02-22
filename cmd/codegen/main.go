@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/format"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"text/template"
 )
 
@@ -172,7 +173,7 @@ func main() {
 					return p.GoName
 				}
 			}
-			return strings.Title(name)
+			return cases.Title(language.Und).String(name)
 		},
 	}
 

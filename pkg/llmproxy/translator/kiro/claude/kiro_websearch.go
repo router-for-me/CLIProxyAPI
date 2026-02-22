@@ -168,9 +168,7 @@ func ExtractSearchQuery(body []byte) string {
 
 	// Remove prefix "Perform a web search for the query: "
 	const prefix = "Perform a web search for the query: "
-	if strings.HasPrefix(text, prefix) {
-		text = text[len(prefix):]
-	}
+	text = strings.TrimPrefix(text, prefix)
 
 	return strings.TrimSpace(text)
 }

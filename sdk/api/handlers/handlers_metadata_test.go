@@ -10,10 +10,6 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
-type testContextKey string
-
-const ginContextKeyTest testContextKey = "gin"
-
 func requestContextWithHeader(t *testing.T, idempotencyKey string) context.Context {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
@@ -23,7 +19,7 @@ func requestContextWithHeader(t *testing.T, idempotencyKey string) context.Conte
 
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ginCtx.Request = req
-	return context.WithValue(context.Background(), ginContextKeyTest, ginCtx)
+	return context.WithValue(context.Background(), ginContextLookupKeyToken, ginCtx)
 }
 
 func TestRequestExecutionMetadata_GeneratesIdempotencyKey(t *testing.T) {
