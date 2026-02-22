@@ -12,6 +12,8 @@ This runbook is for operators who care about provider uptime, quota health, and 
    - `curl -sS http://localhost:8317/v1/metrics/providers | jq`
 4. Log scan:
    - Verify no sustained bursts of `401`, `403`, or `429`.
+5. Spark eligibility check (Copilot/Codex):
+   - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'gpt-5.3-codex|gpt-5.3-codex-spark'`
 
 ## Quota Visibility (`#146` scope)
 
@@ -71,6 +73,17 @@ This runbook is for operators who care about provider uptime, quota health, and 
   - Keep one canary scenario that includes image content in tool results.
   - Alert when canary success rate drops or `4xx` translation errors spike for that scenario.
   - Route impacted traffic to a known-good provider prefix while triaging translator output.
+
+### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
+
+- Symptom: plus/team users get `400/404 model_not_found` for `gpt-5.3-codex-spark`.
+- Immediate action:
+  - Confirm presence in `GET /v1/models` for the exact client API key.
+  - If absent, route workloads to `gpt-5.3-codex` and keep Spark disabled for that segment.
+- Suggested alert thresholds:
+  - Warn: Spark error ratio > 2% over 10 minutes.
+  - Critical: Spark error ratio > 5% over 10 minutes.
+  - Auto-mitigation: fallback alias to `gpt-5.3-codex` when critical threshold is crossed.
 
 ## Recommended Production Pattern
 

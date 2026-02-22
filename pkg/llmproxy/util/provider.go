@@ -35,6 +35,10 @@ func GetProviderName(modelName string) []string {
 		return nil
 	}
 
+	if pinnedProvider, _, pinned := ResolveProviderPinnedModel(modelName); pinned {
+		return []string{pinnedProvider}
+	}
+
 	providers := make([]string, 0, 4)
 	seen := make(map[string]struct{})
 
@@ -58,6 +62,36 @@ func GetProviderName(modelName string) []string {
 	}
 
 	return providers
+}
+
+// ResolveProviderPinnedModel checks whether modelName is a provider-pinned alias
+// in the form "<provider>/<model>" and verifies that provider currently serves
+// the target model in the global registry.
+//
+// Returns:
+//   - provider: normalized provider prefix
+//   - baseModel: model without provider prefix
+//   - ok: true when prefix is valid and provider serves baseModel
+func ResolveProviderPinnedModel(modelName string) (provider string, baseModel string, ok bool) {
+	modelName = strings.TrimSpace(modelName)
+	parts := strings.SplitN(modelName, "/", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+
+	provider = strings.ToLower(strings.TrimSpace(parts[0]))
+	baseModel = strings.TrimSpace(parts[1])
+	if provider == "" || baseModel == "" {
+		return "", "", false
+	}
+
+	for _, candidate := range registry.GetGlobalRegistry().GetModelProviders(baseModel) {
+		if strings.EqualFold(candidate, provider) {
+			return provider, baseModel, true
+		}
+	}
+
+	return "", "", false
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
