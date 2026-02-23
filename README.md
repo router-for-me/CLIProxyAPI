@@ -7,7 +7,21 @@
 
 English | [中文](README_CN.md)
 
-**cliproxyapi++** is a fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) focused on operational controls, auth lifecycle handling, and reusable proxy components. It provides an OpenAI-compatible interface for proprietary LLMs and follows a defense-in-depth and library-first architecture.
+**cliproxyapi++** is a fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) focused on OpenAI-compatible proxying, provider auth lifecycle handling, and reusable Go packages.
+
+### What This Repo Ships
+
+- Go server binary (released via GitHub Releases / Goreleaser)
+- Docker images (published from tag workflows)
+- Embeddable Go packages under `pkg/llmproxy` and `sdk/*`
+- Operator docs for provider setup, routing, and troubleshooting
+
+### What This Repo Does Not Ship
+
+- Official Python SDK package
+- Official TypeScript SDK package
+- OpenCode/Zen binaries or hosted control plane
+- Generic "all providers included" credentials; provider login/config is still required
 
 ---
 
@@ -64,8 +78,23 @@ Unlike the mainline which keeps its core logic in `internal/` (preventing extern
 *   **Hardened Docker Base**: Built on a specific, audited Alpine 3.22.0 layer with minimal packages, reducing the potential attack surface.
 
 ### 4. Operations
-*   **Cooldown**: Automated mechanism that detects provider-side rate limits and pauses requests to specific providers while routing others.
-*   **Unified model converter**: Mapping layer that translates requested models (for example `claude-3-5-sonnet`) to provider-specific requirements (Vertex, AWS, Anthropic, etc.).
+*   **Cooldown**: Detects provider-side rate limits and cools specific routes while keeping other routes active.
+*   **Model converter**: Translates requested model IDs to provider-specific IDs based on configured mappings.
+
+---
+
+## 📦 Release and Packaging
+
+Release channels in this repo today:
+
+- **GitHub Releases** (workflow: `.github/workflows/release.yaml`, Goreleaser-driven)
+- **Docker Hub images** (workflow: `.github/workflows/docker-image.yml`, amd64/arm64 + multi-arch manifest)
+
+Packaging notes:
+
+- Primary client/developer integration surface is **Go modules** (`go get github.com/router-for-me/CLIProxyAPI/v6/...`).
+- No first-party Python or TypeScript package publish workflow is defined in this repository.
+- No GitHub Packages publishing workflow is defined for runtime artifacts in this repository.
 
 ---
 
@@ -146,6 +175,11 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 - **Aggregators**: OpenRouter, Together AI, Fireworks AI, Novita AI, SiliconFlow.
 - **OAuth / Session**: Kiro, GitHub Copilot, Roo Code, Kilo AI, MiniMax, Cursor.
 
+Provider clarity:
+
+- **GLM** is available via configured provider routes (see `docs/provider-quickstarts.md` for `iflow/glm-*` examples).
+- **OpenCode/Zen** are external client/harness ecosystems that can call this proxy through OpenAI-compatible endpoints; they are not embedded provider backends in this repo.
+
 ### API Specification
 The proxy provides two main API surfaces:
 1.  **OpenAI Interface**: `/v1/chat/completions` and `/v1/models` (Full parity).
@@ -186,8 +220,10 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
 - **Provider Docs (new focus):**
   - [Provider Usage](./docs/provider-usage.md)
   - [Provider Catalog](./docs/provider-catalog.md)
+  - [Provider Quickstarts (includes GLM route examples)](./docs/provider-quickstarts.md)
   - [Provider Operations Runbook](./docs/provider-operations.md)
   - [Routing and Models Reference](./docs/routing-reference.md)
+  - [Troubleshooting](./docs/troubleshooting.md)
 - **Planning and Delivery Boards:**
   - [Planning Index](./docs/planning/index.md)
   - [2000-Item Execution Board](./docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.md)
