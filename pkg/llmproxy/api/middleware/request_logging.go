@@ -154,7 +154,11 @@ func sanitizeRequestHeaders(headers http.Header) map[string][]string {
 			sanitized[key] = []string{"[redacted]"}
 			continue
 		}
-		sanitized[key] = values
+		sanitizedValues := make([]string, len(values))
+		for i, value := range values {
+			sanitizedValues[i] = util.MaskSensitiveHeaderValue(key, value)
+		}
+		sanitized[key] = sanitizedValues
 	}
 	return sanitized
 }
