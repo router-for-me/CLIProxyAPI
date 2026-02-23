@@ -2,37 +2,57 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
+
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-func TestObjectTokenStoreResolveDeletePathRejectsEscapeInputs(t *testing.T) {
+func TestObjectResolveAuthPathRejectsTraversalFromAttributes(t *testing.T) {
 	t.Parallel()
 
-	store := &ObjectTokenStore{authDir: t.TempDir()}
-	absolute := filepath.Join(t.TempDir(), "outside.json")
-	cases := []string{
-		"../outside.json",
-		absolute,
+	store := &ObjectTokenStore{authDir: filepath.Join(t.TempDir(), "auths")}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"path": "../escape.json"},
 	}
-	for _, id := range cases {
-		if _, err := store.resolveDeletePath(id); err == nil {
-			t.Fatalf("expected id %q to be rejected", id)
-		}
+	if _, err := store.resolveAuthPath(auth); err == nil {
+		t.Fatalf("expected traversal path rejection")
 	}
 }
 
-func TestObjectTokenStoreResolveDeletePathReturnsManagedJSONPath(t *testing.T) {
+func TestObjectResolveAuthPathRejectsAbsoluteOutsideAuthDir(t *testing.T) {
 	t.Parallel()
 
-	authDir := t.TempDir()
+	root := t.TempDir()
+	store := &ObjectTokenStore{authDir: filepath.Join(root, "auths")}
+	outside := filepath.Join(root, "..", "outside.json")
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"path": outside},
+	}
+	if _, err := store.resolveAuthPath(auth); err == nil {
+		t.Fatalf("expected outside absolute path rejection")
+	}
+}
+
+func TestObjectResolveDeletePathConstrainsToAuthDir(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auths")
 	store := &ObjectTokenStore{authDir: authDir}
 
-	got, err := store.resolveDeletePath("nested/provider")
+	got, err := store.resolveDeletePath("team/provider")
 	if err != nil {
 		t.Fatalf("resolve delete path: %v", err)
 	}
-	want := filepath.Join(authDir, "nested", "provider.json")
-	if got != want {
-		t.Fatalf("resolve delete path mismatch: got %q want %q", got, want)
+	if !strings.HasSuffix(got, filepath.Join("team", "provider.json")) {
+		t.Fatalf("expected .json suffix, got %s", got)
+	}
+	rel, err := filepath.Rel(authDir, got)
+	if err != nil {
+		t.Fatalf("relative path: %v", err)
+	}
+	if strings.HasPrefix(rel, "..") || rel == "." {
+		t.Fatalf("path escaped auth directory: %s", got)
 	}
 }
