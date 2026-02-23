@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -139,5 +140,41 @@ func TestWriteWSError(t *testing.T) {
 	got := string(msg)
 	if got != `{"error":"boom"}` {
 		t.Fatalf("got %q, want %q", got, `{"error":"boom"}`)
+	}
+}
+
+func TestWriteWSError_JSONEscapesMessage(t *testing.T) {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+		writeWSError(conn, errors.New(`boom "quoted"`))
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("failed to read message: %v", err)
+	}
+
+	var payload map[string]string
+	if err := json.Unmarshal(msg, &payload); err != nil {
+		t.Fatalf("expected valid JSON payload, got %q (%v)", string(msg), err)
+	}
+	if payload["error"] != `boom "quoted"` {
+		t.Fatalf("error = %q, want %q", payload["error"], `boom "quoted"`)
 	}
 }
