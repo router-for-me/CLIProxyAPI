@@ -1218,3 +1218,6 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) []st
 func isHTTPSuccess(statusCode int) bool {
 	return statusCode >= 200 && statusCode < 300
 }
+
+// CloseExecutionSession implements ProviderExecutor.
+func (e *GitHubCopilotExecutor) CloseExecutionSession(sessionID string) {}
