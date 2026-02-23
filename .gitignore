@@ -55,3 +55,4 @@ _bmad-output/*
 *.bak
 server
 server
+cli-proxy-api-plus-integration-test
