@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -117,6 +118,40 @@ func validateIDCRegion(region string) (string, error) {
 		return "", fmt.Errorf("invalid region %q", region)
 	}
 	return region, nil
+}
+
+func validateStartURL(startURL string) error {
+	trimmed := strings.TrimSpace(startURL)
+	if trimmed == "" {
+		return fmt.Errorf("start URL is required")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return err
+	}
+	if !parsed.IsAbs() {
+		return fmt.Errorf("start URL must be absolute")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("start URL must not include user info")
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme != "https" {
+		return fmt.Errorf("unsupported start URL scheme")
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return fmt.Errorf("start URL host is required")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return fmt.Errorf("start URL host is not allowed")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("start URL host is not allowed")
+		}
+	}
+	return nil
 }
 
 func buildIDCRefreshPayload(clientID, clientSecret, refreshToken string) map[string]string {
@@ -250,6 +285,9 @@ func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region str
 func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, clientID, clientSecret, startURL, region string) (*StartDeviceAuthResponse, error) {
 	validatedRegion, err := validateIDCRegion(region)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateStartURL(startURL); err != nil {
 		return nil, err
 	}
 	endpoint := getOIDCEndpoint(validatedRegion)

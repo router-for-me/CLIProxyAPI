@@ -1,7 +1,9 @@
 package management
 
 import (
+	"bytes"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -365,6 +367,40 @@ func TestUploadAuthFileRejectsTraversalName(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest("POST", "/?name=..\\evil.json", strings.NewReader("{}"))
+
+	h.UploadAuthFile(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUploadAuthFileRejectsTraversalMultipartName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	h := &Handler{
+		cfg:         &config.Config{AuthDir: tmpDir},
+		authManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	partWriter, err := writer.CreateFormFile("file", "../escape.json")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err = partWriter.Write([]byte("{}")); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	c.Request = req
 
 	h.UploadAuthFile(c)
 

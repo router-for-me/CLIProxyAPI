@@ -213,6 +213,9 @@ func validateCallbackForwarderTarget(targetBase string) (*url.URL, error) {
 	if !parsed.IsAbs() {
 		return nil, fmt.Errorf("target must be absolute")
 	}
+	if parsed.User != nil {
+		return nil, fmt.Errorf("target must not include user info")
+	}
 	scheme := strings.ToLower(parsed.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("target scheme %q is not allowed", parsed.Scheme)
@@ -608,11 +611,10 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			c.JSON(400, gin.H{"error": "file must be .json"})
 			return
 		}
-		dst := filepath.Join(h.cfg.AuthDir, name)
-		if !filepath.IsAbs(dst) {
-			if abs, errAbs := filepath.Abs(dst); errAbs == nil {
-				dst = abs
-			}
+		dst, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid name"})
+			return
 		}
 		if errSave := c.SaveUploadedFile(file, dst); errSave != nil {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to save file: %v", errSave)})
@@ -683,11 +685,10 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			if !strings.HasSuffix(strings.ToLower(name), ".json") {
 				continue
 			}
-			full := filepath.Join(h.cfg.AuthDir, name)
-			if !filepath.IsAbs(full) {
-				if abs, errAbs := filepath.Abs(full); errAbs == nil {
-					full = abs
-				}
+			full, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
+			if err != nil {
+				log.WithError(err).Warnf("invalid auth file name while deleting all auth files: %s", name)
+				continue
 			}
 			if err = os.Remove(full); err == nil {
 				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
