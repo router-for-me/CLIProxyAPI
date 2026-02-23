@@ -8,7 +8,6 @@ vars:
   DOCKER_IMAGE: kooshapari/cliproxyapi-plusplus
   TEST_REPORT_DIR: target
   QUALITY_PACKAGES: '{{default "./..." .QUALITY_PACKAGES}}'
-  QUALITY_PARENT_TASK: '{{default "quality" .QUALITY_PARENT_TASK}}'
   GO_FILES:
     sh: find . -name "*.go" | grep -v "vendor"
 
@@ -35,27 +34,6 @@ tasks:
     deps: [build]
     cmds:
       - ./{{.BINARY_NAME}} --config config.example.yaml
-
-  release:tool:
-    desc: "Build the Go release batching tool binary"
-    cmds:
-      - mkdir -p bin
-      - go build -o bin/releasebatch ./cmd/releasebatch
-
-  release:dry-run:
-    desc: "Preview next release tag + changelog from main"
-    cmds:
-      - go run ./cmd/releasebatch --mode create --target main --dry-run
-
-  release:batch:
-    desc: "Create/push next patch-batch tag and publish release"
-    cmds:
-      - go run ./cmd/releasebatch --mode create --target main
-
-  release:hotfix:
-    desc: "Create/push same-patch hotfix tag and publish release"
-    cmds:
-      - go run ./cmd/releasebatch --mode create --target main --hotfix
 
   preflight:
     desc: "Fail fast if required tooling is missing"
@@ -209,12 +187,12 @@ tasks:
                 continue
               fi
               FOUND=1
-              if task -C "$d" --list-all 2>/dev/null | awk '{print $1}' | rg -qx "{{.QUALITY_PARENT_TASK}}"; then
-                echo "[RUN] $base -> task {{.QUALITY_PARENT_TASK}}"
-                QUALITY_WITH_PARENT_CLIPROXY=0 QUALITY_PARENT_TASK="{{.QUALITY_PARENT_TASK}}" task -C "$d" "{{.QUALITY_PARENT_TASK}}"
+              if task -C "$d" --list-all 2>/dev/null | rg -q '(^|[[:space:]])quality([[:space:]]|$)'; then
+                echo "[RUN] $base -> task quality"
+                QUALITY_WITH_PARENT_CLIPROXY=0 task -C "$d" quality
                 RAN=1
               else
-                echo "[SKIP] $base (missing sibling task: {{.QUALITY_PARENT_TASK}})"
+                echo "[SKIP] $base (no quality task)"
               fi
               ;;
           esac
@@ -237,16 +215,17 @@ tasks:
       - task: quality:parent-sibling
 
   quality:quick:
-    desc: "Run fast local quality checks (readonly, no provider smoke)"
-    deps: [preflight, cache:unlock]
+    desc: "Run fast local quality checks (readonly)"
     cmds:
+      - task: quality:fmt:check
       - task: quality:quick:check
 
   quality:quick:fix:
-    desc: "Auto-fix local quality issues quickly (fmt + quick checks)"
+    desc: "Run local quick quality fix flow (auto-format + staged lint + quick checks)"
     deps: [preflight, cache:unlock]
     cmds:
       - task: quality:fmt
+      - task: quality:fmt-staged
       - task: quality:quick:check
 
   quality:quick:check:
@@ -286,17 +265,7 @@ tasks:
         fi
 
         go test "${test_packages[@]}"
-        if [ "${QUALITY_INCLUDE_SMOKE:-0}" = "1" ]; then
-          task test:provider-smoke-matrix:test
-        fi
-
-  quality:quick:smoke:
-    desc: "Run quick checks including provider smoke matrix"
-    deps: [preflight, cache:unlock]
-    env:
-      QUALITY_INCLUDE_SMOKE: "1"
-    cmds:
-      - task: quality:quick:check
+      - task: test:provider-smoke-matrix:test
 
   quality:shellcheck:
     desc: "Run shellcheck on shell scripts (best-effort, no-op when shellcheck missing)"
@@ -310,8 +279,6 @@ tasks:
 
   quality:quick:all:
     desc: "Run quality quick locally and in sibling cliproxy/cliproxyapi++ repos"
-    vars:
-      QUALITY_PARENT_TASK: quality:quick
     cmds:
       - task: quality:quick
       - task: quality:parent-sibling
@@ -348,22 +315,7 @@ tasks:
       - task: quality:vet
       - task: quality:staticcheck
       - task: quality:shellcheck
-      - task: test:provider-smoke-matrix:test
       - task: lint:changed
-
-  quality:pre-push:
-    desc: "Run pre-push quality gates (non-mutating + smoke + release lint)"
-    deps: [preflight, cache:unlock]
-    cmds:
-      - task: quality:ci
-      - task: test:smoke
-      - |
-        if [ -n "${CLIPROXY_PROVIDER_SMOKE_CASES:-}" ]; then
-          task test:provider-smoke-matrix
-        else
-          echo "[SKIP] CLIPROXY_PROVIDER_SMOKE_CASES not set; skipping provider smoke matrix."
-        fi
-      - task: quality:release-lint
 
   test:provider-smoke-matrix:test:
     desc: "Run provider smoke matrix script tests with a fake curl backend"
@@ -383,31 +335,6 @@ tasks:
     cmds:
       - |
         go test -run 'TestServer_StartupSmokeEndpoints|TestServer_StartupSmokeEndpoints/GET_v1_models|TestServer_StartupSmokeEndpoints/GET_v1_metrics_providers|TestServer_RoutesNamespaceIsolation|TestServer_ControlPlane_MessageLifecycle|TestServer_ControlPlane_IdempotencyKey_ReplaysResponseAndPreventsDuplicateMessages|TestServer_ControlPlane_IdempotencyKey_DifferentKeysCreateDifferentMessages' ./pkg/llmproxy/api
-
-  test:provider-smoke-matrix:
-    desc: "Run provider smoke matrix against a running proxy (supports provider:model aliases)"
-    deps: [preflight]
-    cmds:
-      - task: cache:unlock
-      - |
-        scripts/provider-smoke-matrix.sh
-
-  test:provider-smoke-matrix:cheapest:
-    desc: "Run provider smoke matrix for default cheapest-route aliases"
-    deps: [preflight]
-    cmds:
-      - task: cache:unlock
-      - |
-        scripts/provider-smoke-matrix-cheapest.sh
-
-  test:provider-smoke-matrix:cheapest:all:
-    desc: "Run provider smoke matrix for all cheapest aliases (explicit all-provider list required)."
-    deps: [preflight]
-    cmds:
-      - task: cache:unlock
-      - |
-        CLIPROXY_PROVIDER_SMOKE_CHEAP_MODE=all \
-        scripts/provider-smoke-matrix-cheapest.sh
 
   lint:changed:
     desc: "Run golangci-lint on changed/staged files only"
@@ -461,7 +388,7 @@ tasks:
       - task: quality:staticcheck
       - task: test
 
-  hooks:install:pre-commit:
+  hooks:install:
     desc: "Install local git pre-commit hook for staged gofmt + lint"
     cmds:
       - |
@@ -484,44 +411,6 @@ tasks:
         EOF
         chmod +x .git/hooks/pre-commit
         echo "[OK] Installed .git/hooks/pre-commit"
-
-  hooks:install:pre-push:
-    desc: "Install local git pre-push hook for CI-like quality gates"
-    cmds:
-      - |
-        mkdir -p .git/hooks
-        cat > .git/hooks/pre-push <<'EOF'
-        #!/usr/bin/env sh
-        set -eu
-        if ! command -v go >/dev/null 2>&1; then
-          echo "[WARN] go not found on PATH; skipping pre-push quality checks."
-          exit 0
-        fi
-
-        if ! command -v task >/dev/null 2>&1; then
-          echo "[WARN] task not found on PATH; skipping pre-push quality checks."
-          exit 0
-        fi
-
-        cd "$(git rev-parse --show-toplevel)"
-        task quality:pre-push
-        EOF
-        chmod +x .git/hooks/pre-push
-        echo "[OK] Installed .git/hooks/pre-push"
-
-  hooks:install:
-    desc: "Install local git pre-commit and pre-push hooks"
-    cmds:
-      - task: hooks:install:pre-commit
-      - task: hooks:install:pre-push
-      - |
-        if command -v pre-commit >/dev/null 2>&1; then
-          pre-commit install --hook-type pre-commit || true
-          pre-commit install --hook-type pre-push || true
-          echo "[OK] pre-commit framework hooks installed (if configured)"
-        else
-          echo "[INFO] pre-commit framework not found; Task-managed hooks installed"
-        fi
 
   lint:
     desc: "Run golangci-lint"

@@ -21,39 +21,28 @@ Full feature-by-feature change reference:
 
 ### 📊 Feature Comparison Matrix
 
-| Capability Area | Mainline | CLIProxyAPI+ | **cliproxyapi++** | Granular Notes |
+| Capability | Mainline | CLIProxyAPI+ | **cliproxyapi++** | Granular Notes |
 | :--- | :---: | :---: | :---: | :--- |
-| OpenAI API surface: `/v0/*` management | ⚠️ | ✅ | ✅ | Includes config and provider introspection in `++` with stronger diagnostics. |
-| OpenAI API surface: `/v1/models` | ✅ | ✅ | ✅ | Model IDs, aliases, exclusions, and provider prefix filtering stay feature-compatible across variants. |
-| OpenAI API surface: `/v1/chat/completions` (non-stream) | ✅ | ✅ | ✅ | Non-stream compatibility is stable for core request/response fields and role/tool blocks. |
-| OpenAI API surface: `/v1/chat/completions` (streaming) | ⚠️ | ⚠️ | ✅ | Stream translation is production-hardened in `++` to reduce truncation and ordering regressions. |
-| OpenAI API surface: `/v1/responses` (stream + non-stream) | ⚠️ | ⚠️ | ✅ | `++` keeps responses mode parity with broader provider adapters and codex-specific behavior. |
-| OpenAI API surface: `/v1/responses/compact` | ⚠️ | ⚠️ | ⚠️ | Compact mode remains unsupported for some providers; behavior should be treated as best-effort until explicit compatibility tests complete. |
-| Thinking/Reasoning field support (`reasoning_effort`, `reasoning_summary`) | ⚠️ | ⚠️ | ✅ | `++` supports richer reasoning propagation and stricter request normalization than baseline forks. |
-| Codex/OpenWork variant field compatibility (`variant` only payloads) | ⚠️ | ⚠️ | ⚠️ | Open item in CPB-0106; doc + test parity work is in progress for variant-only request behavior. |
-| Tool use request contracts | ⚠️ | ⚠️ | ✅ | Function/tool call request and result translation is standardized to reduce provider-side schema rejection. |
-| Tool schema compatibility (`null` unions, typed arrays) | ⚠️ | ⚠️ | ⚠️ | Partial in upstream audit; this is a known follow-up item for strict schema parity. |
-| Streaming tool-call delta health checks | ⚠️ | ⚠️ | ✅ | `++` requires stream/non-stream parity checks in runbooks and translator edges to keep tool deltas consistent. |
-| OpenAI-compatible proxy core architecture | ⚠️ | ⚠️ | ✅ | `++` uses `pkg/llmproxy` for external import and cleaner boundaries. |
-| Core route table and fallback policy | ⚠️ | ✅ | ✅ | Centralized route selection allows provider-aware fallback behavior in `++`. |
-| Prefix-based model routing | ⚠️ | ✅ | ✅ | Prefix isolation and `force-model-prefix` controls enforce explicit tenant/workload boundaries. |
-| Provider model aliasing (stable IDs) | ⚠️ | ✅ | ✅ | `++` explicitly supports alias maps with validation and clearer model inventory behavior. |
-| OAuth/CLI login orchestration | ⚠️ | ⚠️ | ✅ | `--thegent-login`, `--cursor-login`, `--kiro-login`, and `--github-copilot-login` are available in `++`. |
-| Session/token refresh lifecycle | ❌ | ❌ | ✅ | Refresh jobs are explicit and centralized; expiry is proactively handled in service logic. |
-| Token and auth metadata visibility | ❌ | ⚠️ | ✅ | Runtime and management views include provider credential state for fast triage. |
-| Cooldown and retry governance | ❌ | ⚠️ | ✅ | Cooldown windows and per-provider throttling reduce blast radius under 429 and transient failures. |
-| Provider failover continuity | ⚠️ | ⚠️ | ✅ | Route health and fallback behavior keep traffic moving when an upstream degrades. |
-| Config discovery from env + explicit hints | ⚠️ | ⚠️ | ✅ | `++` resolves common config locations and surfaces actionable startup hints. |
-| Strict config validation mode | ⚠️ | ⚠️ | ✅ | `--config-validate` fails fast on schema/runtime incompatibilities before serving traffic. |
-| Management UI/API ergonomics | ⚠️ | ⚠️ | ✅ | Unified auth-add/import, status, log, and model-management flows are aligned for operators. |
-| Runtime hardening | Basic | Basic | ✅ | Hardening paths include structured startup checks, defensive request routing, and stricter behavior in release-grade modes. |
-| Supply chain packaging (docker + binary) | Basic | Basic | ✅ | `++` publishes container images and platform binaries through CI release pipeline. |
-| Cross-platform release target (linux/mac/win) | ⚠️ | ⚠️ | ✅ | GoReleaser matrix includes Linux/macOS/Windows packaging in each release batch. |
-| Release tag protocol and automation | ⚠️ | ⚠️ | ✅ | `main` pushes and manual `releasebatch` flows generate `v<semver>-<batch>` tags and notes updates. |
-| Release artifact signing | ⚠️ | ⚠️ | ⚠️ | No certificate-backed signing chain is committed at this time. |
-| CI quality gates pre-push | ⚠️ | ⚠️ | ✅ | `task quality`, `quality:ci`, and release-lint checks enforce stricter merge and release boundaries. |
-| Build + test automation for release batches | ⚠️ | ⚠️ | ✅ | batch/hotfix mode, checks, and changelog generation are codified in `.github/workflows`. |
-| Long-lived operator readiness | Community baseline | Enhanced fork | **Enterprise-grade** | Operational runbooks and controls are designed for high-throughput agent environments. |
+| **OpenAI-compatible proxy endpoints** | ✅ | ✅ | ✅ | `chat/completions`, `responses`, `models` surfaces available. |
+| **Provider registry breadth** | ✅ | ✅ | ✅ | Direct + aggregator providers supported in all variants, with broader operational polish in `++`. |
+| **Model aliasing / mapping layer** | ⚠️ | ✅ | ✅ | `++` emphasizes unified mapping behavior across heterogeneous upstreams. |
+| **Management API (`/v0/*`)** | ⚠️ | ✅ | ✅ | Operational controls and inspection endpoints available in `+` and `++`. |
+| **Web management UI** | ❌ | ✅ | ✅ | `++` keeps UI while hardening operational/auth flows behind it. |
+| **Kiro web OAuth flow** | ❌ | ⚠️ | ✅ | `++` includes dedicated `/v0/oauth/kiro` browser-based login surface. |
+| **GitHub Copilot OAuth/device auth depth** | ❌ | ⚠️ | ✅ | `++` adds full lifecycle handling and richer session semantics. |
+| **Advanced multi-provider auth set** | ❌ | ⚠️ | ✅ | Kiro/Copilot/Roo/Kilo/MiniMax/Cursor auth paths integrated in `++`. |
+| **Background token refresh worker** | ❌ | ❌ | ✅ | Auto-refresh before expiry to reduce auth-related downtime. |
+| **Credential lifecycle visibility** | ❌ | ⚠️ | ✅ | `++` provides richer auth file/account surfaces for operations. |
+| **Quota-aware provider handling** | ❌ | ⚠️ | ✅ | `++` includes cooldown and provider-state driven routing behavior. |
+| **Rate limiting + intelligent cooldown** | ❌ | ❌ | ✅ | Provider-level cooling/rotation behavior aimed at production resilience. |
+| **Failure isolation / route continuity** | ⚠️ | ⚠️ | ✅ | `++` biases toward continuing service via provider-aware routing controls. |
+| **Core code importability** | ❌ | ❌ | ✅ | Mainline/+ keep `internal/`; `++` exposes reusable `pkg/llmproxy`. |
+| **Library-first architecture** | ⚠️ | ⚠️ | ✅ | Translation/proxy logic packaged for embedding into other Go services. |
+| **Security controls (path guard, hardened base, fingerprinting)** | Basic | Basic | ✅ | Defense-in-depth additions for CI governance and runtime posture. |
+| **Container supply-chain posture** | Basic | Basic | ✅ | Hardened Docker base plus signed/multi-arch release workflow. |
+| **CI quality gates (strict lint/test/governance)** | Basic | Basic | ✅ | Expanded automation and stricter release validation in `++`. |
+| **Operational observability surfaces** | ⚠️ | ✅ | ✅ | Logs, usage, provider metrics and management views strengthened in `++`. |
+| **Production-readiness target** | Community baseline | Enhanced fork | **Enterprise-grade** | `++` is tuned for long-running agent-heavy deployments. |
 
 ---
 
@@ -176,6 +165,7 @@ We maintain strict quality gates to preserve the "hardened" status of the projec
 4.  **Daily QOL flow**:
    - `task quality:fmt` to auto-format all Go files.
    - `task quality:quick` for a fast local loop (format + selected tests; set `QUALITY_PACKAGES` to scope).
+   - `task quality:quick:fix` for an auto-fix quick loop (format all + staged format/lint + quick checks).
    - `QUALITY_PACKAGES='./pkg/...' task quality:quick` for package-scoped smoke.
    - `task quality:fmt-staged` for staged file format + lint before commit.
    - `task quality:ci` for PR-scope non-mutating checks (fmt/vet/staticcheck/lint diff).
@@ -194,7 +184,6 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
   - [Provider Catalog](./docs/provider-catalog.md)
   - [Provider Operations Runbook](./docs/provider-operations.md)
   - [Routing and Models Reference](./docs/routing-reference.md)
-  - [Release Batching Guide](./docs/guides/release-batching.md)
 - **Planning and Delivery Boards:**
   - [Planning Index](./docs/planning/index.md)
   - [2000-Item Execution Board](./docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.md)

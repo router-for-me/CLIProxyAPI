@@ -158,11 +158,23 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	}
 
 	if !hasThinkingConfig(config) {
-		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    modelInfo.ID,
-		}).Debug("thinking: no config found, passthrough |")
-		return body, nil
+		// Force thinking for thinking models even without explicit config
+		// Models with "thinking" in their name should have thinking enabled by default
+		if isForcedThinkingModel(modelInfo.ID, model) {
+			config = ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    modelInfo.ID,
+				"mode":     config.Mode,
+				"forced":   true,
+			}).Debug("thinking: forced thinking for thinking model |")
+		} else {
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    modelInfo.ID,
+			}).Debug("thinking: no config found, passthrough |")
+			return body, nil
+		}
 	}
 
 	// 5. Validate and normalize configuration
@@ -344,11 +356,27 @@ func hasThinkingConfig(config ThinkingConfig) bool {
 // Claude API format:
 //   - thinking.type: "enabled" or "disabled"
 //   - thinking.budget_tokens: integer (-1=auto, 0=disabled, >0=budget)
+//   - output_config.effort: "low", "medium", "high" (Claude Opus 4.6+)
 //
 // Priority: thinking.type="disabled" takes precedence over budget_tokens.
+// output_config.effort is checked first as it's the newer format.
 // When type="enabled" without budget_tokens, returns ModeAuto to indicate
 // the user wants thinking enabled but didn't specify a budget.
 func extractClaudeConfig(body []byte) ThinkingConfig {
+	// Check output_config.effort first (newer format for Claude Opus 4.6+)
+	if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() {
+		value := strings.ToLower(strings.TrimSpace(effort.String()))
+		switch value {
+		case "none", "":
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case "auto":
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+		default:
+			// Treat as level (low, medium, high)
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -466,15 +494,6 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 	}
 
-	// Compatibility fallback: some Claude clients send output_config.effort.
-	if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() {
-		value := effort.String()
-		if value == "none" {
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		}
-		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
-	}
-
 	// Compatibility fallback: some clients send Claude-style `variant`
 	// instead of OpenAI/Codex `reasoning.effort`.
 	if variant := gjson.GetBytes(body, "variant"); variant.Exists() {
@@ -528,4 +547,12 @@ func extractIFlowConfig(body []byte) ThinkingConfig {
 	}
 
 	return ThinkingConfig{}
+}
+
+// isForcedThinkingModel checks if a model should have thinking forced on.
+// Models with "thinking" in their name (like claude-opus-4-6-thinking) should
+// have thinking enabled by default even without explicit budget.
+func isForcedThinkingModel(modelID, fullModelName string) bool {
+	return strings.Contains(strings.ToLower(modelID), "thinking") ||
+		strings.Contains(strings.ToLower(fullModelName), "thinking")
 }
