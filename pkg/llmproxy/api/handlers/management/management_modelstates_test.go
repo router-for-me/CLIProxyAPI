@@ -2,6 +2,8 @@ package management
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -54,5 +56,23 @@ func TestRegisterAuthFromFilePreservesModelStates(t *testing.T) {
 	}
 	if _, ok = updated.ModelStates["iflow/deepseek-v3.1"]; !ok {
 		t.Fatalf("expected specific model state to be preserved")
+	}
+}
+
+func TestRegisterAuthFromFileRejectsPathOutsideAuthDir(t *testing.T) {
+	authDir := t.TempDir()
+	outsidePath := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outsidePath, []byte(`{"type":"iflow"}`), 0o600); err != nil {
+		t.Fatalf("write outside auth file: %v", err)
+	}
+
+	h := &Handler{
+		cfg:         &config.Config{AuthDir: authDir},
+		authManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	err := h.registerAuthFromFile(context.Background(), outsidePath, nil)
+	if err == nil {
+		t.Fatal("expected error for auth path outside auth directory")
 	}
 }

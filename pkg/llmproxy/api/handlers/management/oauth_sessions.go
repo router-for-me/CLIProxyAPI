@@ -251,10 +251,30 @@ type oauthCallbackFilePayload struct {
 	Error string `json:"error"`
 }
 
-func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string) (string, error) {
-	if strings.TrimSpace(authDir) == "" {
+func sanitizeOAuthCallbackPath(authDir, fileName string) (string, error) {
+	trimmedAuthDir := strings.TrimSpace(authDir)
+	if trimmedAuthDir == "" {
 		return "", fmt.Errorf("auth dir is empty")
 	}
+	if fileName != filepath.Base(fileName) || strings.Contains(fileName, string(os.PathSeparator)) {
+		return "", fmt.Errorf("invalid oauth callback file name")
+	}
+	cleanAuthDir, err := filepath.Abs(filepath.Clean(trimmedAuthDir))
+	if err != nil {
+		return "", fmt.Errorf("resolve auth dir: %w", err)
+	}
+	filePath := filepath.Join(cleanAuthDir, fileName)
+	relPath, err := filepath.Rel(cleanAuthDir, filePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve oauth callback file path: %w", err)
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("invalid oauth callback file path")
+	}
+	return filePath, nil
+}
+
+func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string) (string, error) {
 	canonicalProvider, err := NormalizeOAuthProvider(provider)
 	if err != nil {
 		return "", err
@@ -264,7 +284,13 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 	}
 
 	fileName := fmt.Sprintf(".oauth-%s-%s.oauth", canonicalProvider, state)
-	filePath := filepath.Join(authDir, fileName)
+	filePath, err := sanitizeOAuthCallbackPath(authDir, fileName)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
+		return "", fmt.Errorf("create oauth callback dir: %w", err)
+	}
 	payload := oauthCallbackFilePayload{
 		Code:  strings.TrimSpace(code),
 		State: strings.TrimSpace(state),
