@@ -40,11 +40,11 @@ type KiroTokenStorage struct {
 
 // SaveTokenToFile persists the token storage to the specified file path.
 func (s *KiroTokenStorage) SaveTokenToFile(authFilePath string) error {
-	path, err := validateTokenPath(authFilePath)
+	cleanPath, err := cleanTokenPath(authFilePath, "kiro token")
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
+	dir := filepath.Dir(cleanPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
@@ -54,29 +54,27 @@ func (s *KiroTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to marshal token storage: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(cleanPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write token file: %w", err)
 	}
 
 	return nil
 }
 
-func validateTokenPath(authFilePath string) (string, error) {
-	trimmed := strings.TrimSpace(authFilePath)
+func cleanTokenPath(path, scope string) (string, error) {
+	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
-		return "", fmt.Errorf("failed to write token file: auth file path is empty")
+		return "", fmt.Errorf("%s: auth file path is empty", scope)
 	}
-	segments := strings.Split(filepath.ToSlash(trimmed), "/")
-	for _, segment := range segments {
-		if segment == ".." {
-			return "", fmt.Errorf("failed to write token file: auth file path traversal is not allowed")
-		}
+	clean := filepath.Clean(filepath.FromSlash(trimmed))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%s: auth file path is invalid", scope)
 	}
-	clean := filepath.Clean(trimmed)
-	if clean == "." {
-		return "", fmt.Errorf("failed to write token file: auth file path is invalid")
+	abs, err := filepath.Abs(clean)
+	if err != nil {
+		return "", fmt.Errorf("%s: resolve auth file path: %w", scope, err)
 	}
-	return clean, nil
+	return filepath.Clean(abs), nil
 }
 
 // LoadFromFile loads token storage from the specified file path.

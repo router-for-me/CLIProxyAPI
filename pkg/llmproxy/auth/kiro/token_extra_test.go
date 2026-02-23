@@ -3,6 +3,7 @@ package kiro
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -52,14 +53,15 @@ func TestLoadFromFile_Errors(t *testing.T) {
 	}
 }
 
-func TestKiroTokenStorage_SaveTokenToFile_RejectsTraversalPath(t *testing.T) {
-	ts := &KiroTokenStorage{
-		Type:        "kiro",
-		AccessToken: "access",
-	}
+func TestKiroTokenStorageSaveTokenToFileRejectsTraversalPath(t *testing.T) {
+	t.Parallel()
 
+	ts := &KiroTokenStorage{Type: "kiro", AccessToken: "token"}
 	err := ts.SaveTokenToFile("../kiro-token.json")
 	if err == nil {
-		t.Fatal("expected traversal path to be rejected")
+		t.Fatal("expected error for traversal path")
+	}
+	if !strings.Contains(err.Error(), "auth file path is invalid") {
+		t.Fatalf("expected invalid path error, got %v", err)
 	}
 }
