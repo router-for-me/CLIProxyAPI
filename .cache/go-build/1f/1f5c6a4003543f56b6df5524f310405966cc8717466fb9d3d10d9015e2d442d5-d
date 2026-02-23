@@ -1,8 +1,0 @@
-./amp.go
-./fallback_handlers.go
-./gemini_bridge.go
-./model_mapping.go
-./proxy.go
-./response_rewriter.go
-./routes.go
-./secret.go

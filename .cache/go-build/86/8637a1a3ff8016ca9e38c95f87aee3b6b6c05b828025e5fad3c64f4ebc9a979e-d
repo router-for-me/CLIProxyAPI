@@ -1,6 +1,0 @@
-./chacha8.go
-./exp.go
-./normal.go
-./pcg.go
-./rand.go
-./zipf.go

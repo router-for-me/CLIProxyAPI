@@ -1,4 +1,0 @@
-./chacha_arm64.go
-./chacha_generic.go
-./xor.go
-./chacha_arm64.s

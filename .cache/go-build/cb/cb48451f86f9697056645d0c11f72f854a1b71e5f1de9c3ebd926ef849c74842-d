@@ -1,5 +1,0 @@
-./gin_logger.go
-./global_logger.go
-./log_dir_cleaner.go
-./request_logger.go
-./requestid.go

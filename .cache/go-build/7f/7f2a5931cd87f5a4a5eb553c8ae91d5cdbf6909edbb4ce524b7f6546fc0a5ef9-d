@@ -1,9 +1,0 @@
-./claude_model.go
-./gemini_schema.go
-./header_helpers.go
-./image.go
-./provider.go
-./proxy.go
-./ssh_helper.go
-./translator.go
-./util.go

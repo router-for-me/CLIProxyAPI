@@ -1,8 +1,0 @@
-./decode.go
-./doc.go
-./errors.go
-./localtime.go
-./marshaler.go
-./strict.go
-./types.go
-./unmarshaler.go

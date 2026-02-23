@@ -1,8 +1,0 @@
-./kilo_models.go
-./kiro_model_converter.go
-./model_definitions.go
-./model_definitions_static_data.go
-./model_registry.go
-./pareto_router.go
-./pareto_types.go
-./task_classifier.go

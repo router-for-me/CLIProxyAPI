@@ -1,7 +1,0 @@
-./aws.go
-./basecredentials.go
-./executablecredsource.go
-./filecredsource.go
-./header.go
-./programmaticrefreshcredsource.go
-./urlcredsource.go

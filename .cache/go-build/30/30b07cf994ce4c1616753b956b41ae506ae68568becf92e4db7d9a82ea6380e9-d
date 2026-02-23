@@ -1,4 +1,0 @@
-./xxhash.go
-./xxhash_asm.go
-./xxhash_safe.go
-./xxhash_arm64.s

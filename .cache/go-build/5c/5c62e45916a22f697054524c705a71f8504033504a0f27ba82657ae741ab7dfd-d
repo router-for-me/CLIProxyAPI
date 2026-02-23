@@ -1,5 +1,0 @@
-./encode.go
-./hpack.go
-./huffman.go
-./static_table.go
-./tables.go

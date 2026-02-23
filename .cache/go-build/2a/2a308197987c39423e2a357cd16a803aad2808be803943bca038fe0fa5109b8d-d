@@ -1,7 +1,0 @@
-./appengine.go
-./default.go
-./doc.go
-./error.go
-./google.go
-./jwt.go
-./sdk.go

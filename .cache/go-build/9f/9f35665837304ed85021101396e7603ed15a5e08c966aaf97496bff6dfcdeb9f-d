@@ -1,7 +1,0 @@
-./kind.go
-./machine.go
-./options.go
-./parsing_mode.go
-./scim.go
-./urn.go
-./urn8141.go

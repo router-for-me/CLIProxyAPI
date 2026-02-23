@@ -1,7 +1,0 @@
-./annotation.go
-./batch.go
-./encoding.go
-./flightrecorder.go
-./recorder.go
-./subscribe.go
-./trace.go

@@ -1,8 +1,0 @@
-./charclass.go
-./code.go
-./escape.go
-./parser.go
-./prefix.go
-./replacerdata.go
-./tree.go
-./writer.go

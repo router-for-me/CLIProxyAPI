@@ -1,9 +1,0 @@
-./apply.go
-./convert.go
-./errors.go
-./log_redaction.go
-./strip.go
-./suffix.go
-./text.go
-./types.go
-./validate.go
