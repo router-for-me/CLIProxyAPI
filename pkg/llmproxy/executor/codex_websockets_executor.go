@@ -5,17 +5,7 @@ package executor
 import (
 	"bytes"
 	"context"
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-	"crypto/hmac"
 	"crypto/sha256"
-=======
->>>>>>> archive/pr-234-head-20260223
-=======
->>>>>>> chore/cliproxyctl-minimal2
-=======
->>>>>>> ci-compile-fix
 	"fmt"
 	"io"
 	"net"
@@ -410,15 +400,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 }
 
 func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
-<<<<<<< HEAD
-<<<<<<<< HEAD:pkg/llmproxy/executor/codex_websockets_executor.go
 	log.Debug("Executing Codex Websockets stream request")
-========
-	log.Debug("executing codex websockets stream request")
->>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/codex_websockets_executor.go
-=======
-	log.Debug("Executing Codex Websockets stream request")
->>>>>>> archive/pr-234-head-20260223
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1314,29 +1296,11 @@ func (e *CodexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 }
 
 func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
-<<<<<<< HEAD
-<<<<<<<< HEAD:pkg/llmproxy/executor/codex_websockets_executor.go
 	log.Infof("codex websockets: upstream connected session=%s auth=%s endpoint=%s", sanitizeCodexSessionID(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogEndpoint(wsURL))
-========
-	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogURL(wsURL))
->>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/codex_websockets_executor.go
-=======
-	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogURL(wsURL))
->>>>>>> archive/pr-234-head-20260223
 }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 func logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason string, err error) {
-=======
-func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
->>>>>>> chore/cliproxyctl-minimal2
-=======
-func logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason string, err error) {
->>>>>>> ci-compile-fix
 	if err != nil {
-<<<<<<< HEAD
-<<<<<<<< HEAD:pkg/llmproxy/executor/codex_websockets_executor.go
 		log.Infof("codex websockets: upstream disconnected session=%s auth=%s endpoint=%s reason=%s err=%v", sanitizeCodexSessionID(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogEndpoint(wsURL), strings.TrimSpace(reason), err)
 		return
 	}
@@ -1344,22 +1308,7 @@ func logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason string, err 
 }
 
 func sanitizeCodexWebsocketLogField(raw string) string {
-	return util.RedactAPIKey(strings.TrimSpace(raw))
-========
-=======
->>>>>>> archive/pr-234-head-20260223
-		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s err=%v", strings.TrimSpace(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogURL(wsURL), strings.TrimSpace(reason), err)
-		return
-	}
-	log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s", strings.TrimSpace(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogURL(wsURL), strings.TrimSpace(reason))
-}
-
-func sanitizeCodexWebsocketLogField(raw string) string {
 	return util.HideAPIKey(strings.TrimSpace(raw))
-<<<<<<< HEAD
->>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/codex_websockets_executor.go
-=======
->>>>>>> archive/pr-234-head-20260223
 }
 
 func sanitizeCodexWebsocketLogURL(raw string) string {
@@ -1375,8 +1324,6 @@ func sanitizeCodexWebsocketLogURL(raw string) string {
 	parsed.Fragment = ""
 	parsed.RawQuery = util.MaskSensitiveQuery(parsed.RawQuery)
 	return parsed.String()
-<<<<<<< HEAD
-<<<<<<<< HEAD:pkg/llmproxy/executor/codex_websockets_executor.go
 }
 
 func sanitizeCodexWebsocketLogEndpoint(raw string) string {
@@ -1396,13 +1343,8 @@ func sanitizeCodexSessionID(raw string) string {
 	if trimmed == "" {
 		return ""
 	}
-	mac := hmac.New(sha256.New, []byte("cliproxy-codex-session-v1"))
-	mac.Write([]byte(trimmed))
-	return fmt.Sprintf("sess_%x", mac.Sum(nil)[:6])
-========
->>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/codex_websockets_executor.go
-=======
->>>>>>> archive/pr-234-head-20260223
+	sum := sha256.Sum256([]byte(trimmed))
+	return fmt.Sprintf("sess_%x", sum[:6])
 }
 
 // CodexAutoExecutor routes Codex requests to the websocket transport only when:
