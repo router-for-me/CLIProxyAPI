@@ -28,7 +28,7 @@ func DoAntigravityLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:       promptFn,
 	}
 
-	record, savedPath, err := manager.Login(context.Background(), "antigravity", cfg, authOpts)
+	record, savedPath, err := manager.Login(context.Background(), "antigravity", castToInternalConfig(cfg), authOpts)
 	if err != nil {
 		log.Errorf("Antigravity authentication failed: %v", err)
 		return

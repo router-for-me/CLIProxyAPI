@@ -38,7 +38,7 @@ func DoClaudeLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:       promptFn,
 	}
 
-	_, savedPath, err := manager.Login(context.Background(), "claude", cfg, authOpts)
+	_, savedPath, err := manager.Login(context.Background(), "claude", castToInternalConfig(cfg), authOpts)
 	if err != nil {
 		if authErr, ok := errors.AsType[*claude.AuthenticationError](err); ok {
 			log.Error(claude.GetUserFriendlyMessage(authErr))
