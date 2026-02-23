@@ -740,6 +740,9 @@ func parseToolArgumentsToMap(toolArgs string) map[string]interface{} {
 
 	var raw interface{}
 	if err := json.Unmarshal([]byte(trimmed), &raw); err == nil {
+		if raw == nil {
+			return map[string]interface{}{}
+		}
 		return map[string]interface{}{"value": raw}
 	}
 

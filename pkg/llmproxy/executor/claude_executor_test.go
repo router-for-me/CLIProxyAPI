@@ -149,6 +149,20 @@ func TestApplyClaudeToolPrefix_ToolChoiceBuiltin(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_ToolChoiceFunctionName(t *testing.T) {
+	body := []byte(`{
+		"tools": [
+			{"name": "Read"}
+		],
+		"tool_choice": {"type": "function", "function": {"name": "Read"}}
+	}`)
+	out := applyClaudeToolPrefix(body, "proxy_")
+
+	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "proxy_Read" {
+		t.Fatalf("tool_choice.function.name = %q, want %q", got, "proxy_Read")
+	}
+}
+
 func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")

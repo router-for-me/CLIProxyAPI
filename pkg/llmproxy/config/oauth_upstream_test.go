@@ -8,6 +8,8 @@ func TestSanitizeOAuthUpstream_NormalizesKeysAndValues(t *testing.T) {
 			" Claude ":          " https://api.anthropic.com/ ",
 			"gemini_cli":        "https://cloudcode-pa.googleapis.com///",
 			" GitHub  Copilot ": "https://api.githubcopilot.com/",
+			"iflow/oauth":       "https://iflow.example.com/",
+			"kiro.idc":          "https://kiro.example.com/",
 			"":                  "https://ignored.example.com",
 			"cursor":            "   ",
 		},
@@ -24,6 +26,12 @@ func TestSanitizeOAuthUpstream_NormalizesKeysAndValues(t *testing.T) {
 	if got := cfg.OAuthUpstream["github-copilot"]; got != "https://api.githubcopilot.com" {
 		t.Fatalf("expected normalized github-copilot URL, got %q", got)
 	}
+	if got := cfg.OAuthUpstream["iflow-oauth"]; got != "https://iflow.example.com" {
+		t.Fatalf("expected slash-normalized iflow-oauth URL, got %q", got)
+	}
+	if got := cfg.OAuthUpstream["kiro-idc"]; got != "https://kiro.example.com" {
+		t.Fatalf("expected dot-normalized kiro-idc URL, got %q", got)
+	}
 	if _, ok := cfg.OAuthUpstream[""]; ok {
 		t.Fatal("did not expect empty channel key to survive sanitization")
 	}
@@ -37,6 +45,7 @@ func TestOAuthUpstreamURL_LowercasesChannelLookup(t *testing.T) {
 		OAuthUpstream: map[string]string{
 			"claude":         "https://custom-claude.example.com",
 			"github-copilot": "https://custom-copilot.example.com",
+			"iflow-oauth":    "https://iflow.example.com",
 		},
 	}
 
@@ -45,6 +54,9 @@ func TestOAuthUpstreamURL_LowercasesChannelLookup(t *testing.T) {
 	}
 	if got := cfg.OAuthUpstreamURL("github_copilot"); got != "https://custom-copilot.example.com" {
 		t.Fatalf("expected underscore channel lookup normalization, got %q", got)
+	}
+	if got := cfg.OAuthUpstreamURL("iflow/oauth"); got != "https://iflow.example.com" {
+		t.Fatalf("expected slash lookup normalization, got %q", got)
 	}
 	if got := cfg.OAuthUpstreamURL("codex"); got != "" {
 		t.Fatalf("expected missing channel to return empty string, got %q", got)

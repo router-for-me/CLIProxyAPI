@@ -11,6 +11,7 @@ import (
 func TestKiroRefresh_IDCMissingClientCredentialsReturnsActionableError(t *testing.T) {
 	a := NewKiroAuthenticator()
 	auth := &coreauth.Auth{
+		ID:       "kiro-idc-test.json",
 		Provider: "kiro",
 		Metadata: map[string]interface{}{
 			"refresh_token": "rtok",
@@ -28,5 +29,8 @@ func TestKiroRefresh_IDCMissingClientCredentialsReturnsActionableError(t *testin
 	}
 	if !strings.Contains(msg, "--kiro-aws-login") {
 		t.Fatalf("expected remediation hint in message, got %q", msg)
+	}
+	if !strings.Contains(msg, "kiro-idc-test.json") {
+		t.Fatalf("expected auth id context in message, got %q", msg)
 	}
 }

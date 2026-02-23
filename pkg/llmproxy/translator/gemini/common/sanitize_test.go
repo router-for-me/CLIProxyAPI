@@ -48,3 +48,31 @@ func TestNormalizeOpenAIFunctionSchemaForGemini_EmptySchemaDefaults(t *testing.T
 		t.Fatalf("did not expect additionalProperties for non-strict schema")
 	}
 }
+
+func TestNormalizeOpenAIFunctionSchemaForGemini_CleansNullableAndTypeArrays(t *testing.T) {
+	params := gjson.Parse(`{
+		"type":"object",
+		"properties":{
+			"query":{"type":"string"},
+			"limit":{"type":["integer","null"],"nullable":true}
+		},
+		"required":["query","limit"]
+	}`)
+
+	got := NormalizeOpenAIFunctionSchemaForGemini(params, false)
+	res := gjson.Parse(got)
+
+	if res.Get("properties.limit.nullable").Exists() {
+		t.Fatalf("expected nullable to be removed from limit schema")
+	}
+	if res.Get("properties.limit.type").IsArray() {
+		t.Fatalf("expected limit.type array to be flattened, got %s", res.Get("properties.limit.type").Raw)
+	}
+
+	required := res.Get("required").Array()
+	for _, field := range required {
+		if field.String() == "limit" {
+			t.Fatalf("expected nullable field limit to be removed from required list")
+		}
+	}
+}

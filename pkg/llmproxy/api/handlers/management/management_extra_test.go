@@ -345,6 +345,12 @@ func TestIsReadOnlyConfigWriteError(t *testing.T) {
 	if !isReadOnlyConfigWriteError(errors.New("open /CLIProxyAPI/config.yaml: read-only file system")) {
 		t.Fatal("expected read-only file system message to be treated as read-only config write error")
 	}
+	if !isReadOnlyConfigWriteError(errors.New("open /CLIProxyAPI/config.yaml: read-only filesystem")) {
+		t.Fatal("expected read-only filesystem variant to be treated as read-only config write error")
+	}
+	if !isReadOnlyConfigWriteError(errors.New("open /CLIProxyAPI/config.yaml: read only file system")) {
+		t.Fatal("expected read only file system variant to be treated as read-only config write error")
+	}
 	if isReadOnlyConfigWriteError(errors.New("permission denied")) {
 		t.Fatal("did not expect generic permission error to be treated as read-only config write error")
 	}

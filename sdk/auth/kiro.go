@@ -363,7 +363,7 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 	// IDC tokens require registered client credentials for refresh. Falling back to
 	// the social OAuth refresh endpoint for IDC tokens is incorrect and causes opaque failures.
 	if authMethod == "idc" && (clientID == "" || clientSecret == "") {
-		return nil, fmt.Errorf("token refresh failed: missing idc client credentials (client_id/client_secret); re-login with --kiro-aws-login/--kiro-aws-authcode or re-import Kiro IDE token with device registration cache present")
+		return nil, fmt.Errorf("token refresh failed: missing idc client credentials (auth=%s, client_id/client_secret); re-login with --kiro-aws-login/--kiro-aws-authcode or re-import Kiro IDE token with device registration cache present", auth.ID)
 	}
 
 	// Use SSO OIDC refresh for AWS Builder ID or IDC, otherwise use Kiro's OAuth refresh endpoint

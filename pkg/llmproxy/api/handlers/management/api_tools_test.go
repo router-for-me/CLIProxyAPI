@@ -351,6 +351,46 @@ func TestGetKiroQuotaWithChecker_IndexAliasLookup(t *testing.T) {
 	}
 }
 
+func TestGetKiroQuotaWithChecker_AuthIDAliasLookup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "kiro-auth-id-alias.json",
+		FileName: "kiro-auth-id-alias.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"access_token": "token-1",
+			"profile_arn":  "arn:aws:codewhisperer:us-east-1:123:profile/test",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota?auth_id="+url.QueryEscape(auth.ID), nil)
+
+	h := &Handler{authManager: manager}
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{
+		usage: &kiroauth.UsageQuotaResponse{
+			UsageBreakdownList: []kiroauth.UsageBreakdownExtended{
+				{
+					ResourceType:              "AGENTIC_REQUEST",
+					UsageLimitWithPrecision:   100,
+					CurrentUsageWithPrecision: 10,
+				},
+			},
+		},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
 func TestGetKiroQuotaWithChecker_MissingCredentialIncludesRequestedIndex(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := &Handler{}

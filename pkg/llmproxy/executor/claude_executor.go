@@ -819,10 +819,16 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 		})
 	}
 
-	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
+	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
+	if toolChoiceType == "tool" || toolChoiceType == "function" {
 		name := gjson.GetBytes(body, "tool_choice.name").String()
 		if name != "" && !strings.HasPrefix(name, prefix) && !builtinTools[name] {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", prefix+name)
+		}
+
+		functionName := gjson.GetBytes(body, "tool_choice.function.name").String()
+		if functionName != "" && !strings.HasPrefix(functionName, prefix) && !builtinTools[functionName] {
+			body, _ = sjson.SetBytes(body, "tool_choice.function.name", prefix+functionName)
 		}
 	}
 

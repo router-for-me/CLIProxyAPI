@@ -1083,6 +1083,8 @@ func normalizeOAuthUpstreamChannel(channel string) string {
 	}
 	key = strings.ReplaceAll(key, "_", "-")
 	key = strings.ReplaceAll(key, " ", "-")
+	key = strings.ReplaceAll(key, ".", "-")
+	key = strings.ReplaceAll(key, "/", "-")
 	key = strings.Trim(key, "-")
 	key = strings.Join(strings.FieldsFunc(key, func(r rune) bool { return r == '-' }), "-")
 	return key

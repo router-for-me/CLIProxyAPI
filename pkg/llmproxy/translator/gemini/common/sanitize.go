@@ -24,7 +24,8 @@ func deleteJSONKeys(raw string, keys ...string) string {
 
 // SanitizeParametersJSONSchemaForGemini removes JSON Schema fields that Gemini rejects.
 func SanitizeParametersJSONSchemaForGemini(raw string) string {
-	return deleteJSONKeys(raw, "$id", "patternProperties")
+	withoutUnsupportedKeywords := deleteJSONKeys(raw, "$id", "patternProperties")
+	return util.CleanJSONSchemaForGemini(withoutUnsupportedKeywords)
 }
 
 // SanitizeToolSearchForGemini removes ToolSearch fields unsupported by Gemini.

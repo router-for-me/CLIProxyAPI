@@ -910,7 +910,7 @@ func (h *Handler) GetKiroQuota(c *gin.Context) {
 }
 
 func (h *Handler) getKiroQuotaWithChecker(c *gin.Context, checker kiroUsageChecker) {
-	authIndex := firstNonEmptyQuery(c, "auth_index", "authIndex", "AuthIndex", "index")
+	authIndex := firstNonEmptyQuery(c, "auth_index", "authIndex", "AuthIndex", "index", "auth_id", "auth-id")
 
 	auth := h.findKiroAuth(authIndex)
 	if auth == nil {
@@ -1108,7 +1108,7 @@ func (h *Handler) findKiroAuth(authIndex string) *coreauth.Auth {
 
 		if authIndex != "" {
 			auth.EnsureIndex()
-			if auth.Index == authIndex {
+			if auth.Index == authIndex || auth.ID == authIndex || auth.FileName == authIndex {
 				return auth
 			}
 		}
