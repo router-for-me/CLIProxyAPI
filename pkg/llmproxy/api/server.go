@@ -356,6 +356,10 @@ func (s *Server) setupRoutes() {
 		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
 	}
 
+	// Routing endpoint for thegent Pareto model selection
+	routingHandler := managementHandlers.NewRoutingSelectHandler()
+	s.engine.POST("/v1/routing/select", routingHandler.POSTRoutingSelect)
+
 	// Root endpoint
 	s.engine.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -365,6 +369,7 @@ func (s *Server) setupRoutes() {
 				"POST /v1/completions",
 				"GET /v1/models",
 				"GET /v1/metrics/providers",
+				"POST /v1/routing/select",
 			},
 		})
 	})
