@@ -51,3 +51,15 @@ func TestLoadFromFile_Errors(t *testing.T) {
 		t.Error("expected error for invalid JSON")
 	}
 }
+
+func TestKiroTokenStorage_SaveTokenToFile_RejectsTraversalPath(t *testing.T) {
+	ts := &KiroTokenStorage{
+		Type:        "kiro",
+		AccessToken: "access",
+	}
+
+	err := ts.SaveTokenToFile("../kiro-token.json")
+	if err == nil {
+		t.Fatal("expected traversal path to be rejected")
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 	log "github.com/sirupsen/logrus"
@@ -44,11 +45,15 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 	}
 	// Ensure we tag the file with the provider type.
 	s.Type = "vertex"
+	path, err := validateCredentialFilePath(authFilePath)
+	if err != nil {
+		return err
+	}
 
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("vertex credential: create directory failed: %w", err)
 	}
-	f, err := os.Create(authFilePath)
+	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("vertex credential: create file failed: %w", err)
 	}
@@ -63,4 +68,22 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("vertex credential: encode failed: %w", err)
 	}
 	return nil
+}
+
+func validateCredentialFilePath(authFilePath string) (string, error) {
+	trimmed := strings.TrimSpace(authFilePath)
+	if trimmed == "" {
+		return "", fmt.Errorf("vertex credential: auth file path is empty")
+	}
+	segments := strings.Split(filepath.ToSlash(trimmed), "/")
+	for _, segment := range segments {
+		if segment == ".." {
+			return "", fmt.Errorf("vertex credential: auth file path traversal is not allowed")
+		}
+	}
+	clean := filepath.Clean(trimmed)
+	if clean == "." {
+		return "", fmt.Errorf("vertex credential: auth file path is invalid")
+	}
+	return clean, nil
 }
