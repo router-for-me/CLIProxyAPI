@@ -17,6 +17,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const maxInt = int(^uint(0) >> 1)
+
 // cachedToolDescription stores the dynamically-fetched web_search tool description.
 // Written by the executor via SetWebSearchDescription, read by the translator
 // when building the remote_web_search tool for Kiro API requests.
@@ -411,7 +413,11 @@ func InjectSearchIndicatorsInResponse(responsePayload []byte, searches []SearchI
 	existingContent, _ := resp["content"].([]interface{})
 
 	// Build new content: search indicators first, then existing content
-	newContent := make([]interface{}, 0, len(searches)*2+len(existingContent))
+	capacity, err := checkedSearchContentCapacity(len(searches), len(existingContent))
+	if err != nil {
+		return responsePayload, err
+	}
+	newContent := make([]interface{}, 0, capacity)
 
 	for _, s := range searches {
 		// server_tool_use block
@@ -457,6 +463,16 @@ func InjectSearchIndicatorsInResponse(responsePayload []byte, searches []SearchI
 
 	log.Infof("kiro/websearch: injected %d search indicator(s) into non-stream response", len(searches))
 	return result, nil
+}
+
+func checkedSearchContentCapacity(searchCount, existingCount int) (int, error) {
+	if searchCount < 0 || existingCount < 0 {
+		return 0, fmt.Errorf("invalid negative content sizes: searches=%d existing=%d", searchCount, existingCount)
+	}
+	if searchCount > (maxInt-existingCount)/2 {
+		return 0, fmt.Errorf("search indicator content capacity overflow: searches=%d existing=%d", searchCount, existingCount)
+	}
+	return searchCount*2 + existingCount, nil
 }
 
 // SearchIndicator holds the data for one search operation to inject into a response.
