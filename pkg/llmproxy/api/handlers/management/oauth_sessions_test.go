@@ -49,3 +49,17 @@ func TestSanitizeOAuthCallbackPath_RejectsInjectedFileName(t *testing.T) {
 		t.Fatal("expected error for injected callback file name")
 	}
 }
+
+func TestSanitizeOAuthCallbackPath_RejectsWindowsTraversalName(t *testing.T) {
+	_, err := sanitizeOAuthCallbackPath(t.TempDir(), `..\\escape.oauth`)
+	if err == nil {
+		t.Fatal("expected error for windows-style traversal")
+	}
+}
+
+func TestSanitizeOAuthCallbackPath_RejectsEmptyFileName(t *testing.T) {
+	_, err := sanitizeOAuthCallbackPath(t.TempDir(), "")
+	if err == nil {
+		t.Fatal("expected error for empty callback file name")
+	}
+}

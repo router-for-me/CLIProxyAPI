@@ -606,14 +606,14 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	if file, err := c.FormFile("file"); err == nil && file != nil {
-		name := filepath.Base(file.Filename)
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			c.JSON(400, gin.H{"error": "file must be .json"})
-			return
-		}
+		name := strings.TrimSpace(file.Filename)
 		dst, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
 		if err != nil {
-			c.JSON(400, gin.H{"error": "invalid name"})
+			c.JSON(400, gin.H{"error": "invalid auth file name"})
+			return
+		}
+		if !strings.HasSuffix(strings.ToLower(filepath.Base(dst)), ".json") {
+			c.JSON(400, gin.H{"error": "file must be .json"})
 			return
 		}
 		if errSave := c.SaveUploadedFile(file, dst); errSave != nil {
@@ -761,6 +761,9 @@ func (h *Handler) resolveAuthPath(path string) (string, error) {
 	cleanAuthDir, err := filepath.Abs(filepath.Clean(authDir))
 	if err != nil {
 		return "", fmt.Errorf("resolve auth dir: %w", err)
+	}
+	if resolvedDir, err := filepath.EvalSymlinks(cleanAuthDir); err == nil {
+		cleanAuthDir = resolvedDir
 	}
 	cleanPath := filepath.Clean(path)
 	absPath := cleanPath

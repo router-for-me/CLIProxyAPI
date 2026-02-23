@@ -256,12 +256,15 @@ func sanitizeOAuthCallbackPath(authDir, fileName string) (string, error) {
 	if trimmedAuthDir == "" {
 		return "", fmt.Errorf("auth dir is empty")
 	}
-	if fileName != filepath.Base(fileName) || strings.Contains(fileName, string(os.PathSeparator)) {
+	if fileName != filepath.Base(fileName) || strings.ContainsAny(fileName, `/\`) {
 		return "", fmt.Errorf("invalid oauth callback file name")
 	}
 	cleanAuthDir, err := filepath.Abs(filepath.Clean(trimmedAuthDir))
 	if err != nil {
 		return "", fmt.Errorf("resolve auth dir: %w", err)
+	}
+	if resolvedDir, err := filepath.EvalSymlinks(cleanAuthDir); err == nil {
+		cleanAuthDir = resolvedDir
 	}
 	filePath := filepath.Join(cleanAuthDir, fileName)
 	relPath, err := filepath.Rel(cleanAuthDir, filePath)
