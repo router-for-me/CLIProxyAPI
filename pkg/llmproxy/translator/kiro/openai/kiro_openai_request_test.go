@@ -3,6 +3,9 @@ package openai
 import (
 	"encoding/json"
 	"testing"
+
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/kiro/common"
+	"github.com/tidwall/gjson"
 )
 
 // TestToolResultsAttachedToCurrentMessage verifies that tool results from "tool" role messages
@@ -266,6 +269,29 @@ func TestToolResultsAtEndOfConversation(t *testing.T) {
 	}
 }
 
+func TestNormalizeOrigin_MapsKnownLegacyOrigins(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "kiro cli legacy", in: "KIRO_CLI", want: "CLI"},
+		{name: "amazon q alias", in: "AMAZON_Q", want: "CLI"},
+		{name: "kiro ide legacy", in: "KIRO_IDE", want: "AI_EDITOR"},
+		{name: "kiro ai editor legacy", in: "KIRO_AI_EDITOR", want: "AI_EDITOR"},
+		{name: "passthrough", in: "CUSTOM_ORIGIN", want: "CUSTOM_ORIGIN"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeOrigin(tc.in)
+			if got != tc.want {
+				t.Fatalf("normalizeOrigin(%q)=%q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestToolResultsFollowedByAssistant verifies handling when tool results are followed
 // by an assistant message (no intermediate user message).
 // This is the pattern from LiteLLM translation of Anthropic format where:
@@ -382,6 +408,71 @@ func TestAssistantEndsConversation(t *testing.T) {
 	// When assistant is last, a "Continue" user message should be created
 	if payload.ConversationState.CurrentMessage.UserInputMessage.Content == "" {
 		t.Error("Expected a 'Continue' message to be created when assistant is last")
+	}
+}
+
+func TestBuildAssistantMessageFromOpenAI_DefaultContentWhenEmptyWithoutTools(t *testing.T) {
+	msg := gjson.Parse(`{"role":"assistant","content":"   "}`)
+	got := buildAssistantMessageFromOpenAI(msg)
+
+	if got.Content != kirocommon.DefaultAssistantContent {
+		t.Fatalf("expected default assistant content %q, got %q", kirocommon.DefaultAssistantContent, got.Content)
+	}
+	if len(got.ToolUses) != 0 {
+		t.Fatalf("expected no tool uses, got %d", len(got.ToolUses))
+	}
+}
+
+func TestBuildAssistantMessageFromOpenAI_DefaultContentWhenOnlyToolCalls(t *testing.T) {
+	msg := gjson.Parse(`{
+		"role":"assistant",
+		"content":"",
+		"tool_calls":[
+			{
+				"id":"call_1",
+				"type":"function",
+				"function":{"name":"Read","arguments":"{\"path\":\"/tmp/a.txt\"}"}
+			}
+		]
+	}`)
+
+	got := buildAssistantMessageFromOpenAI(msg)
+
+	if got.Content != kirocommon.DefaultAssistantContentWithTools {
+		t.Fatalf("expected default assistant tool content %q, got %q", kirocommon.DefaultAssistantContentWithTools, got.Content)
+	}
+	if len(got.ToolUses) != 1 {
+		t.Fatalf("expected one tool use, got %d", len(got.ToolUses))
+	}
+	if got.ToolUses[0].Name != "Read" {
+		t.Fatalf("expected tool name %q, got %q", "Read", got.ToolUses[0].Name)
+	}
+}
+
+func TestBuildAssistantMessageFromOpenAI_PreservesNonObjectToolArguments(t *testing.T) {
+	msg := gjson.Parse(`{
+		"role":"assistant",
+		"content":"",
+		"tool_calls":[
+			{"id":"call_array","type":"function","function":{"name":"Search","arguments":"[\"a\",\"b\"]"}},
+			{"id":"call_null","type":"function","function":{"name":"LookupNull","arguments":"null"}},
+			{"id":"call_raw","type":"function","function":{"name":"Lookup","arguments":"not-json"}}
+		]
+	}`)
+
+	got := buildAssistantMessageFromOpenAI(msg)
+	if len(got.ToolUses) != 3 {
+		t.Fatalf("expected three tool uses, got %d", len(got.ToolUses))
+	}
+
+	if arr, ok := got.ToolUses[0].Input["value"].([]interface{}); !ok || len(arr) != 2 {
+		t.Fatalf("expected array arguments to be preserved under value, got %#v", got.ToolUses[0].Input)
+	}
+	if len(got.ToolUses[1].Input) != 0 {
+		t.Fatalf("expected null tool arguments to map to empty object, got %#v", got.ToolUses[1].Input)
+	}
+	if raw := got.ToolUses[2].Input["raw"]; raw != "not-json" {
+		t.Fatalf("expected raw argument fallback, got %#v", got.ToolUses[2].Input)
 	}
 }
 

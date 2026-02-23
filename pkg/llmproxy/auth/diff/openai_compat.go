@@ -177,5 +177,5 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return strings.Join(parts, "|")
+	return hashString(strings.Join(parts, "|"))
 }

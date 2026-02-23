@@ -1,26 +1,16 @@
-// Package auth provides authentication helpers for CLIProxy.
-// oauth_types.go defines types for OAuth token management.
+// Package auth — OAuth token types for provider authentication.
 package auth
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
-// Token holds an OAuth access/refresh token pair with an expiration time.
+// Token represents an OAuth access/refresh token pair.
 type Token struct {
-	AccessToken  string
-	RefreshToken string
-	ExpiresAt    time.Time
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
-// IsExpired returns true when the token's expiry has passed.
-func (t *Token) IsExpired() bool {
-	return time.Now().After(t.ExpiresAt)
-}
-
-// OAuthProvider is the interface implemented by concrete OAuth providers.
-// RefreshToken exchanges a refresh token for a new access token.
+// OAuthProvider can refresh expired tokens.
 type OAuthProvider interface {
-	RefreshToken(ctx context.Context, refreshToken string) (string, error)
+	RefreshToken(refreshToken string) (string, error)
 }

@@ -127,7 +127,11 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-	requestSuffix := thinking.ParseSuffix(req.Model)
+
+	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return resp, err
+	}
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := payloadRequestedModel(opts, req.Model)
@@ -159,10 +163,6 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
-		payload, err = applyGeminiThinkingForAttempt(payload, requestSuffix, attemptModel, from.String(), to.String(), e.Identifier())
-		if err != nil {
-			return resp, err
-		}
 		if action == "countTokens" {
 			payload = deleteJSONField(payload, "project")
 			payload = deleteJSONField(payload, "model")
@@ -281,7 +281,11 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	requestSuffix := thinking.ParseSuffix(req.Model)
+
+	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return nil, err
+	}
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := payloadRequestedModel(opts, req.Model)
@@ -307,10 +311,6 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
-		payload, err = applyGeminiThinkingForAttempt(payload, requestSuffix, attemptModel, from.String(), to.String(), e.Identifier())
-		if err != nil {
-			return nil, err
-		}
 		payload = setJSONField(payload, "project", projectID)
 		payload = setJSONField(payload, "model", attemptModel)
 
@@ -509,13 +509,11 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
-	requestSuffix := thinking.ParseSuffix(req.Model)
 
 	models := cliPreviewFallbackOrder(baseModel)
 	if len(models) == 0 || models[0] != baseModel {
 		models = append([]string{baseModel}, models...)
 	}
-	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
 	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
@@ -530,9 +528,12 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	var lastStatus int
 	var lastBody []byte
 
-	for _, attemptModel := range models {
-		payload := append([]byte(nil), basePayload...)
-		payload, err = applyGeminiThinkingForAttempt(payload, requestSuffix, attemptModel, from.String(), to.String(), e.Identifier())
+	// The loop variable attemptModel is only used as the concrete model id sent to the upstream
+	// Gemini CLI endpoint when iterating fallback variants.
+	for range models {
+		payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+
+		payload, err = thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
 		if err != nil {
 			return cliproxyexecutor.Response{}, err
 		}
@@ -799,6 +800,19 @@ func geminiCLIClientMetadata() string {
 	return "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
 }
 
+// normalizeGeminiCLIModel normalizes Gemini CLI model names.
+// Maps gemini-3.* versions to their gemini-2.5-* equivalents.
+func normalizeGeminiCLIModel(model string) string {
+	switch model {
+	case "gemini-3-pro", "gemini-3.1-pro":
+		return "gemini-2.5-pro"
+	case "gemini-3-flash", "gemini-3.1-flash":
+		return "gemini-2.5-flash"
+	default:
+		return model
+	}
+}
+
 // cliPreviewFallbackOrder returns preview model candidates for a base model.
 func cliPreviewFallbackOrder(model string) []string {
 	switch model {
@@ -895,14 +909,6 @@ func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 		}
 	}
 	return err
-}
-
-func applyGeminiThinkingForAttempt(body []byte, requestSuffix thinking.SuffixResult, attemptModel, fromFormat, toFormat, provider string) ([]byte, error) {
-	modelWithSuffix := attemptModel
-	if requestSuffix.HasSuffix {
-		modelWithSuffix = attemptModel + "(" + requestSuffix.RawSuffix + ")"
-	}
-	return thinking.ApplyThinking(body, modelWithSuffix, fromFormat, toFormat, provider)
 }
 
 // parseRetryDelay extracts the retry delay from a Google API 429 error response.

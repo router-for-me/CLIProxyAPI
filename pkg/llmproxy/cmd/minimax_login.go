@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -45,9 +46,20 @@ func DoMinimaxLogin(cfg *config.Config, options *LoginOptions) {
 		return
 	}
 
-	authDir, err := ensureAuthDir(strings.TrimSpace(cfg.AuthDir), "MiniMax")
-	if err != nil {
-		log.Errorf("MiniMax: %v", err)
+	authDir := strings.TrimSpace(cfg.AuthDir)
+	if authDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			log.Errorf("MiniMax: cannot resolve home dir: %v", err)
+			return
+		}
+		authDir = filepath.Join(home, ".cli-proxy-api")
+	} else if resolved, err := util.ResolveAuthDir(authDir); err == nil && resolved != "" {
+		authDir = resolved
+	}
+
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		log.Errorf("MiniMax: failed to create auth dir %s: %v", authDir, err)
 		return
 	}
 
@@ -65,7 +77,15 @@ func DoMinimaxLogin(cfg *config.Config, options *LoginOptions) {
 
 	// Use token-file (same primitive as OAuth providers); do not store raw key in config.
 	// Prefer portable ~ path when under default auth-dir for consistency with config.example.
-	tokenFileRef := authDirTokenFileRef(authDir, minimaxAuthFileName)
+	tokenFileRef := tokenPath
+	if home, err := os.UserHomeDir(); err == nil {
+		defaultAuth := filepath.Join(home, ".cli-proxy-api")
+		if tokenPath == filepath.Join(defaultAuth, minimaxAuthFileName) {
+			tokenFileRef = "~/.cli-proxy-api/" + minimaxAuthFileName
+		} else if rel, err := filepath.Rel(home, tokenPath); err == nil && !strings.HasPrefix(rel, "..") {
+			tokenFileRef = "~/" + filepath.ToSlash(rel)
+		}
+	}
 
 	entry := config.MiniMaxKey{
 		TokenFile: tokenFileRef,

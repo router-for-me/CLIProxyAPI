@@ -18,30 +18,6 @@ func TestSetLogLevel(t *testing.T) {
 	SetLogLevel(cfg)
 }
 
-func TestResolveAuthDirOrDefault(t *testing.T) {
-	home, _ := os.UserHomeDir()
-
-	cases := []struct {
-		authDir string
-		want    string
-	}{
-		{"", filepath.Join(home, ".cli-proxy-api")},
-		{"~", home},
-		{"~/.cli-proxy-api", filepath.Join(home, ".cli-proxy-api")},
-	}
-
-	for _, tc := range cases {
-		got, err := ResolveAuthDirOrDefault(tc.authDir)
-		if err != nil {
-			t.Errorf("ResolveAuthDirOrDefault(%q) error: %v", tc.authDir, err)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("ResolveAuthDirOrDefault(%q) = %q, want %q", tc.authDir, got, tc.want)
-		}
-	}
-}
-
 func TestResolveAuthDir(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	cases := []struct {

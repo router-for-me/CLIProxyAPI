@@ -862,3 +862,5 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	}
 	return
 }
+
+func (e *CodexExecutor) CloseExecutionSession(sessionID string) {}

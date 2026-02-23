@@ -119,7 +119,6 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	if modelInfo.Thinking == nil {
 		config := extractThinkingConfig(body, providerFormat)
 		if hasThinkingConfig(config) {
-			// nolint:gosec // false positive: logging model name, not secret
 			log.WithFields(log.Fields{
 				"model":    baseModel,
 				"provider": providerFormat,
@@ -158,7 +157,6 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 				"forced":   true,
 			}).Debug("thinking: forced thinking for thinking model |")
 		} else {
-			// nolint:gosec // false positive: logging model name, not secret
 			log.WithFields(log.Fields{
 				"provider": providerFormat,
 				"model":    modelInfo.ID,

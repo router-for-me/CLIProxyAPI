@@ -28,7 +28,7 @@ func DoGitHubCopilotLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:    options.Prompt,
 	}
 
-	record, savedPath, err := manager.Login(context.Background(), "github-copilot", castToInternalConfig(cfg), authOpts)
+	record, savedPath, err := manager.Login(context.Background(), "github-copilot", cfg, authOpts)
 	if err != nil {
 		log.Errorf("GitHub Copilot authentication failed: %v", err)
 		return

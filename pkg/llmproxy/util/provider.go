@@ -131,14 +131,10 @@ func IsOpenAICompatibilityAlias(modelName string, cfg *config.Config) bool {
 	if cfg == nil {
 		return false
 	}
-	modelName = normalizeOpenAICompatibilityAlias(modelName)
-	if modelName == "" {
-		return false
-	}
 
 	for _, compat := range cfg.OpenAICompatibility {
 		for _, model := range compat.Models {
-			if strings.EqualFold(strings.TrimSpace(model.Alias), modelName) || strings.EqualFold(strings.TrimSpace(model.Name), modelName) {
+			if model.Alias == modelName {
 				return true
 			}
 		}
@@ -160,30 +156,15 @@ func GetOpenAICompatibilityConfig(alias string, cfg *config.Config) (*config.Ope
 	if cfg == nil {
 		return nil, nil
 	}
-	alias = normalizeOpenAICompatibilityAlias(alias)
-	if alias == "" {
-		return nil, nil
-	}
 
 	for _, compat := range cfg.OpenAICompatibility {
 		for _, model := range compat.Models {
-			if strings.EqualFold(strings.TrimSpace(model.Alias), alias) || strings.EqualFold(strings.TrimSpace(model.Name), alias) {
+			if model.Alias == alias {
 				return &compat, &model
 			}
 		}
 	}
 	return nil, nil
-}
-
-func normalizeOpenAICompatibilityAlias(modelName string) string {
-	modelName = strings.TrimSpace(modelName)
-	if modelName == "" {
-		return ""
-	}
-	if _, baseModel, ok := ResolveProviderPinnedModel(modelName); ok {
-		return baseModel
-	}
-	return modelName
 }
 
 // InArray checks if a string exists in a slice of strings.
@@ -221,16 +202,6 @@ func HideAPIKey(apiKey string) string {
 		return apiKey[:1] + "..." + apiKey[len(apiKey)-1:]
 	}
 	return apiKey
-}
-
-// RedactAPIKey completely redacts an API key for secure logging.
-// Unlike HideAPIKey which shows partial characters, this returns "[REDACTED]"
-// to satisfy strict security scanning requirements.
-func RedactAPIKey(apiKey string) string {
-	if apiKey == "" {
-		return ""
-	}
-	return "[REDACTED]"
 }
 
 // maskAuthorizationHeader masks the Authorization header value while preserving the auth type prefix.

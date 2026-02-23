@@ -19,7 +19,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )

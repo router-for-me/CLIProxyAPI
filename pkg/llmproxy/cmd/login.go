@@ -75,7 +75,7 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 	}
 
 	authenticator := sdkAuth.NewGeminiAuthenticator()
-	record, errLogin := authenticator.Login(ctx, castToInternalConfig(cfg), loginOpts)
+	record, errLogin := authenticator.Login(ctx, cfg, loginOpts)
 	if errLogin != nil {
 		log.Errorf("Gemini authentication failed: %v", errLogin)
 		return

@@ -480,34 +480,31 @@ func (s *GitTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error)
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
-	baseDir := strings.TrimSpace(s.baseDirSnapshot())
-	candidate := ""
-
 	if auth.Attributes != nil {
-		candidate = strings.TrimSpace(auth.Attributes["path"])
-	}
-	if candidate == "" {
-		candidate = strings.TrimSpace(auth.FileName)
-	}
-	if candidate == "" {
-		if auth.ID == "" {
-			return "", fmt.Errorf("auth filestore: missing id")
+		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
+			return p, nil
 		}
-		candidate = strings.TrimSpace(auth.ID)
 	}
-	if candidate == "" {
-		return "", fmt.Errorf("auth filestore: missing path")
-	}
-	if !filepath.IsAbs(candidate) {
-		if baseDir == "" {
-			return "", fmt.Errorf("auth filestore: directory not configured")
+	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+		if filepath.IsAbs(fileName) {
+			return fileName, nil
 		}
-		candidate = filepath.Join(baseDir, candidate)
+		if dir := s.baseDirSnapshot(); dir != "" {
+			return filepath.Join(dir, fileName), nil
+		}
+		return fileName, nil
 	}
-	if baseDir == "" {
+	if auth.ID == "" {
+		return "", fmt.Errorf("auth filestore: missing id")
+	}
+	if filepath.IsAbs(auth.ID) {
+		return auth.ID, nil
+	}
+	dir := s.baseDirSnapshot()
+	if dir == "" {
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
-	return ensurePathWithinDir(candidate, baseDir, "auth filestore")
+	return filepath.Join(dir, auth.ID), nil
 }
 
 func (s *GitTokenStore) labelFor(metadata map[string]any) string {

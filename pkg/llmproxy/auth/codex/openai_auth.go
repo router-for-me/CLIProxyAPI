@@ -19,29 +19,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-type refreshError struct {
-	status  int
-	message string
-}
-
-func (e *refreshError) Error() string {
-	if e == nil || e.message == "" {
-		return ""
-	}
-	return e.message
-}
-
-func (e *refreshError) StatusCode() int {
-	if e == nil {
-		return 0
-	}
-	return e.status
-}
-
-func newRefreshError(statusCode int, message string) *refreshError {
-	return &refreshError{status: statusCode, message: message}
-}
-
 // OAuth configuration constants for OpenAI Codex
 const (
 	AuthURL     = "https://auth.openai.com/oauth/authorize"
@@ -215,7 +192,7 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, newRefreshError(resp.StatusCode, fmt.Sprintf("token refresh failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
+		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var tokenResp struct {
@@ -292,10 +269,6 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 
 		lastErr = err
 		log.Warnf("Token refresh attempt %d failed: %v", attempt+1, err)
-	}
-
-	if statusErr, ok := lastErr.(interface{ StatusCode() int }); ok && statusErr.StatusCode() != 0 {
-		return nil, lastErr
 	}
 
 	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)

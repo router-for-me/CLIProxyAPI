@@ -1,27 +1,19 @@
-// Package registry provides model definitions and lookup helpers for various AI providers.
-// task_classifier.go classifies tasks by complexity based on token counts.
+// Package registry — task complexity classifier for routing.
 //
-// Ported from thegent/src/thegent/routing/task_router.py (TaskClassifier class).
+// Categorizes tasks into FAST/NORMAL/COMPLEX/HIGH_COMPLEX based on token counts.
+// Ported from thegent/routing/task_router.py TaskClassifier.
 package registry
 
 import "context"
 
-// TaskClassificationRequest carries token counts and optional metadata for classification.
+// TaskClassificationRequest holds the inputs for task classification.
 type TaskClassificationRequest struct {
-	TokensIn  int
-	TokensOut int
-	Metadata  map[string]string
+	TokensIn  int               `json:"tokens_in"`
+	TokensOut int               `json:"tokens_out"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
-// TaskClassifier categorises tasks into complexity tiers.
-// Tiers map to separate Pareto frontiers (cheap/fast models for FAST,
-// high-quality models for HIGH_COMPLEX).
-//
-// Boundaries (total tokens):
-//   - FAST:         < 500
-//   - NORMAL:       500 – 4 999
-//   - COMPLEX:      5 000 – 49 999
-//   - HIGH_COMPLEX: ≥ 50 000
+// TaskClassifier categorizes tasks by complexity based on token counts.
 type TaskClassifier struct{}
 
 // NewTaskClassifier returns a new TaskClassifier.
@@ -29,15 +21,16 @@ func NewTaskClassifier() *TaskClassifier {
 	return &TaskClassifier{}
 }
 
-// Classify returns the complexity category for a task based on total token count.
+// Classify returns the complexity category for the given task.
 func (tc *TaskClassifier) Classify(_ context.Context, req *TaskClassificationRequest) (string, error) {
-	total := req.TokensIn + req.TokensOut
+	totalTokens := req.TokensIn + req.TokensOut
+
 	switch {
-	case total < 500:
+	case totalTokens < 500:
 		return "FAST", nil
-	case total < 5000:
+	case totalTokens < 5000:
 		return "NORMAL", nil
-	case total < 50000:
+	case totalTokens < 50000:
 		return "COMPLEX", nil
 	default:
 		return "HIGH_COMPLEX", nil

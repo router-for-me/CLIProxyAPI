@@ -11,13 +11,7 @@ func normalizeProvider(apiKey string) string {
 		return key
 	}
 	parts := strings.Split(key, "-")
-	provider := strings.TrimSpace(parts[0])
-	switch provider {
-	case "droid", "droidcli":
-		return "gemini"
-	default:
-		return provider
-	}
+	return strings.TrimSpace(parts[0])
 }
 
 // ProviderMetrics holds per-provider metrics for routing decisions.

@@ -205,7 +205,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_UsesOrig
 		"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}
 	}`)
 
-	response := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.TODO(), "", original, request, raw, nil)
+	response := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(nil, "", original, request, raw, nil)
 
 	if got := gjson.Get(response, "instructions").String(); got != "original instructions" {
 		t.Fatalf("response.instructions expected original value, got %q", got)
@@ -233,7 +233,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FallsBac
 		"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}
 	}`)
 
-	response := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.TODO(), "", nil, request, raw, nil)
+	response := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(nil, "", nil, request, raw, nil)
 
 	if got := gjson.Get(response, "instructions").String(); got != "request-only instructions" {
 		t.Fatalf("response.instructions expected request value, got %q", got)
@@ -273,11 +273,11 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_UsesOriginalReque
 		"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]
 	}`)
 
-	output := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.TODO(), "", original, request, first, &state)
+	output := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(nil, "", original, request, first, &state)
 	if len(output) == 0 {
 		t.Fatal("expected first stream chunk to emit events")
 	}
-	output = ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.TODO(), "", original, request, second, &state)
+	output = ConvertOpenAIChatCompletionsResponseToOpenAIResponses(nil, "", original, request, second, &state)
 	completedData := findCompletedData(output)
 	if completedData == "" {
 		t.Fatal("expected response.completed event on final chunk")

@@ -22,9 +22,8 @@ var (
 
 // ConvertCodexResponseToClaudeParams holds parameters for response conversion.
 type ConvertCodexResponseToClaudeParams struct {
-	HasToolCall               bool
-	BlockIndex                int
-	HasReceivedArgumentsDelta bool
+	HasToolCall bool
+	BlockIndex  int
 }
 
 // ConvertCodexResponseToClaude performs sophisticated streaming response format conversion.

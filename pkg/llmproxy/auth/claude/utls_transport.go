@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	tls "github.com/refraction-networking/utls"
-	pkgconfig "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
@@ -29,7 +29,7 @@ type utlsRoundTripper struct {
 }
 
 // newUtlsRoundTripper creates a new utls-based round tripper with optional proxy support
-func newUtlsRoundTripper(cfg *pkgconfig.SDKConfig) *utlsRoundTripper {
+func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if cfg != nil && cfg.ProxyURL != "" {
 		proxyURL, err := url.Parse(cfg.ProxyURL)
@@ -158,7 +158,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 // NewAnthropicHttpClient creates an HTTP client that bypasses TLS fingerprinting
 // for Anthropic domains by using utls with Firefox fingerprint.
 // It accepts optional SDK configuration for proxy settings.
-func NewAnthropicHttpClient(cfg *pkgconfig.SDKConfig) *http.Client {
+func NewAnthropicHttpClient(cfg *config.SDKConfig) *http.Client {
 	return &http.Client{
 		Transport: newUtlsRoundTripper(cfg),
 	}

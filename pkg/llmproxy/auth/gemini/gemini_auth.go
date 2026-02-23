@@ -7,6 +7,7 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -230,6 +231,7 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config,
 	if opts != nil && opts.CallbackPort > 0 {
 		callbackPort = opts.CallbackPort
 	}
+	callbackURL := fmt.Sprintf("http://localhost:%d/oauth2callback", callbackPort)
 
 	// Use a channel to pass the authorization code from the HTTP handler to the main function.
 	codeChan := make(chan string, 1)
@@ -237,6 +239,9 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config,
 
 	// Create a new HTTP server with its own multiplexer.
 	mux := http.NewServeMux()
+	server := &http.Server{Addr: fmt.Sprintf(":%d", callbackPort), Handler: mux}
+	config.RedirectURL = callbackURL
+
 	mux.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
 		if err := r.URL.Query().Get("error"); err != "" {
 			_, _ = fmt.Fprintf(w, "Authentication failed: %s", err)
@@ -262,19 +267,9 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config,
 		}
 	})
 
-	listener, actualPort, err := startOAuthCallbackListener(callbackPort)
-	if err != nil {
-		return nil, err
-	}
-	callbackPort = actualPort
-	callbackURL := fmt.Sprintf("http://localhost:%d/oauth2callback", callbackPort)
-	config.RedirectURL = callbackURL
-
-	server := &http.Server{Handler: mux}
-
 	// Start the server in a goroutine.
 	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			log.Errorf("ListenAndServe(): %v", err)
 			select {
 			case errChan <- err:
@@ -391,24 +386,4 @@ waitForCallback:
 
 	fmt.Println("Authentication successful.")
 	return token, nil
-}
-
-func startOAuthCallbackListener(preferredPort int) (net.Listener, int, error) {
-	address := fmt.Sprintf("localhost:%d", preferredPort)
-	listener, err := net.Listen("tcp", address)
-	if err == nil {
-		return listener, preferredPort, nil
-	}
-	log.Warnf("Gemini OAuth callback port %d busy, falling back to an ephemeral port: %v", preferredPort, err)
-
-	listener, err = net.Listen("tcp", "localhost:0")
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to start callback server: %w", err)
-	}
-
-	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
-		return listener, tcpAddr.Port, nil
-	}
-
-	return listener, preferredPort, nil
 }

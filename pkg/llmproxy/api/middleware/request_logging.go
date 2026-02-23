@@ -155,7 +155,11 @@ func sanitizeRequestHeaders(headers http.Header) map[string][]string {
 			sanitized[key] = []string{"[redacted]"}
 			continue
 		}
-		sanitized[key] = values
+		sanitizedValues := make([]string, len(values))
+		for i, value := range values {
+			sanitizedValues[i] = util.MaskSensitiveHeaderValue(key, value)
+		}
+		sanitized[key] = sanitizedValues
 	}
 	return sanitized
 }
@@ -220,7 +224,9 @@ func sanitizeJSONPayloadValue(value any) any {
 func isSensitivePayloadKey(key string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(key))
 	normalized = strings.ReplaceAll(normalized, "-", "_")
-	normalized = strings.TrimPrefix(normalized, "x_")
+	if strings.HasPrefix(normalized, "x_") {
+		normalized = strings.TrimPrefix(normalized, "x_")
+	}
 
 	if normalized == "authorization" || normalized == "token" || normalized == "secret" || normalized == "password" {
 		return true

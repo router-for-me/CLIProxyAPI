@@ -238,14 +238,7 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 		data.Set("device_code", deviceCode)
 		data.Set("code_verifier", codeVerifier)
 
-		req, err := http.NewRequest(http.MethodPost, QwenOAuthTokenEndpoint, strings.NewReader(data.Encode()))
-		if err != nil {
-			return nil, fmt.Errorf("failed to create token request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := qa.httpClient.Do(req)
+		resp, err := http.PostForm(QwenOAuthTokenEndpoint, data)
 		if err != nil {
 			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
 			time.Sleep(pollInterval)

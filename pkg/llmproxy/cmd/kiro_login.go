@@ -39,7 +39,7 @@ func DoKiroGoogleLogin(cfg *config.Config, options *LoginOptions) {
 
 	// Use KiroAuthenticator with Google login
 	authenticator := sdkAuth.NewKiroAuthenticator()
-	record, err := authenticator.LoginWithGoogle(context.Background(), castToInternalConfig(cfg), &sdkAuth.LoginOptions{
+	record, err := authenticator.LoginWithGoogle(context.Background(), cfg, &sdkAuth.LoginOptions{
 		NoBrowser: options.NoBrowser,
 		Metadata:  map[string]string{},
 		Prompt:    options.Prompt,
@@ -54,7 +54,7 @@ func DoKiroGoogleLogin(cfg *config.Config, options *LoginOptions) {
 	}
 
 	// Save the auth record
-	savedPath, err := manager.SaveAuth(record, castToInternalConfig(cfg))
+	savedPath, err := manager.SaveAuth(record, cfg)
 	if err != nil {
 		log.Errorf("Failed to save auth: %v", err)
 		return
@@ -87,7 +87,7 @@ func DoKiroAWSLogin(cfg *config.Config, options *LoginOptions) {
 
 	// Use KiroAuthenticator with AWS Builder ID login (device code flow)
 	authenticator := sdkAuth.NewKiroAuthenticator()
-	record, err := authenticator.Login(context.Background(), castToInternalConfig(cfg), &sdkAuth.LoginOptions{
+	record, err := authenticator.Login(context.Background(), cfg, &sdkAuth.LoginOptions{
 		NoBrowser: options.NoBrowser,
 		Metadata:  map[string]string{},
 		Prompt:    options.Prompt,
@@ -106,7 +106,7 @@ func DoKiroAWSLogin(cfg *config.Config, options *LoginOptions) {
 	}
 
 	// Save the auth record
-	savedPath, err := manager.SaveAuth(record, castToInternalConfig(cfg))
+	savedPath, err := manager.SaveAuth(record, cfg)
 	if err != nil {
 		log.Errorf("Failed to save auth: %v", err)
 		return
@@ -148,7 +148,7 @@ func DoKiroAWSAuthCodeLogin(cfg *config.Config, options *LoginOptions) {
 
 	// Use KiroAuthenticator with AWS Builder ID login (authorization code flow)
 	authenticator := sdkAuth.NewKiroAuthenticator()
-	record, err := authenticator.LoginWithAuthCode(context.Background(), castToInternalConfig(cfg), &sdkAuth.LoginOptions{
+	record, err := authenticator.LoginWithAuthCode(context.Background(), cfg, &sdkAuth.LoginOptions{
 		NoBrowser: options.NoBrowser,
 		Metadata:  map[string]string{},
 		Prompt:    options.Prompt,
@@ -163,7 +163,7 @@ func DoKiroAWSAuthCodeLogin(cfg *config.Config, options *LoginOptions) {
 	}
 
 	// Save the auth record
-	savedPath, err := manager.SaveAuth(record, castToInternalConfig(cfg))
+	savedPath, err := manager.SaveAuth(record, cfg)
 	if err != nil {
 		log.Errorf("Failed to save auth: %v", err)
 		return
@@ -190,7 +190,7 @@ func DoKiroImport(cfg *config.Config, options *LoginOptions) {
 
 	// Use ImportFromKiroIDE instead of Login
 	authenticator := sdkAuth.NewKiroAuthenticator()
-	record, err := authenticator.ImportFromKiroIDE(context.Background(), castToInternalConfig(cfg))
+	record, err := authenticator.ImportFromKiroIDE(context.Background(), cfg)
 	if err != nil {
 		log.Errorf("Kiro token import failed: %v", err)
 		fmt.Println("\nMake sure you have logged in to Kiro IDE first:")
@@ -202,7 +202,7 @@ func DoKiroImport(cfg *config.Config, options *LoginOptions) {
 	}
 
 	// Save the imported auth record
-	savedPath, err := manager.SaveAuth(record, castToInternalConfig(cfg))
+	savedPath, err := manager.SaveAuth(record, cfg)
 	if err != nil {
 		log.Errorf("Failed to save auth: %v", err)
 		return

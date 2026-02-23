@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 )
 
 type setupOption struct {
@@ -34,7 +33,7 @@ func DoSetupWizard(cfg *config.Config, options *SetupOptions) {
 	authDir := strings.TrimSpace(cfg.AuthDir)
 	fmt.Println("Welcome to cliproxy setup.")
 	fmt.Printf("Config file: %s\n", emptyOrUnset(options.ConfigPath, "(default)"))
-	fmt.Printf("Auth directory: %s\n", emptyOrUnset(authDir, util.DefaultAuthDir))
+	fmt.Printf("Auth directory: %s\n", emptyOrUnset(authDir, "~/.cli-proxy-api"))
 
 	fmt.Println("")
 	printProfileSummary(cfg)

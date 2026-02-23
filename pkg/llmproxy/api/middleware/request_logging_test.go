@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,7 +83,8 @@ func TestRequestLoggingMiddleware(t *testing.T) {
 		})
 
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{"test":true}`)))
+		reqBody := []byte(`{"api_key":"sk-live-abc","access_token":"secret-token","messages":[{"content":"hi","access_token":"nested-token"}],"nested":{"Authorization":"token-header"}}`)
+		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(reqBody))
 		req.Header.Set("Authorization", "Bearer secret")
 		req.Header.Set("X-Api-Key", "super-secret")
 		router.ServeHTTP(w, req)
@@ -91,6 +93,15 @@ func TestRequestLoggingMiddleware(t *testing.T) {
 		}
 		if got := logger.headers["Authorization"]; len(got) != 1 || got[0] != "[redacted]" {
 			t.Fatalf("authorization header should be redacted, got %#v", got)
+		}
+		if strings.Contains(string(logger.body), "sk-live-abc") {
+			t.Fatalf("request body should redact sensitive values, got %q", logger.body)
+		}
+		if strings.Contains(string(logger.body), "secret-token") || strings.Contains(string(logger.body), "nested-token") {
+			t.Fatalf("request body should redact nested sensitive values, got %q", logger.body)
+		}
+		if !strings.Contains(string(logger.body), "[REDACTED]") {
+			t.Fatalf("expected redacted marker in request body, got %q", logger.body)
 		}
 	})
 }

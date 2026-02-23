@@ -5,6 +5,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net"
@@ -1295,19 +1296,19 @@ func (e *CodexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 }
 
 func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
-	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogURL(wsURL))
+	log.Infof("codex websockets: upstream connected session=%s auth=%s endpoint=%s", sanitizeCodexSessionID(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogEndpoint(wsURL))
 }
 
 func logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason string, err error) {
 	if err != nil {
-		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s err=%v", strings.TrimSpace(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogURL(wsURL), strings.TrimSpace(reason), err)
+		log.Infof("codex websockets: upstream disconnected session=%s auth=%s endpoint=%s reason=%s err=%v", sanitizeCodexSessionID(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogEndpoint(wsURL), strings.TrimSpace(reason), err)
 		return
 	}
-	log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s", strings.TrimSpace(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogURL(wsURL), strings.TrimSpace(reason))
+	log.Infof("codex websockets: upstream disconnected session=%s auth=%s endpoint=%s reason=%s", sanitizeCodexSessionID(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogEndpoint(wsURL), strings.TrimSpace(reason))
 }
 
 func sanitizeCodexWebsocketLogField(raw string) string {
-	return util.RedactAPIKey(strings.TrimSpace(raw))
+	return util.HideAPIKey(strings.TrimSpace(raw))
 }
 
 func sanitizeCodexWebsocketLogURL(raw string) string {
@@ -1323,6 +1324,27 @@ func sanitizeCodexWebsocketLogURL(raw string) string {
 	parsed.Fragment = ""
 	parsed.RawQuery = util.MaskSensitiveQuery(parsed.RawQuery)
 	return parsed.String()
+}
+
+func sanitizeCodexWebsocketLogEndpoint(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" {
+		return "redacted-endpoint"
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+func sanitizeCodexSessionID(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return fmt.Sprintf("sess_%x", sum[:6])
 }
 
 // CodexAutoExecutor routes Codex requests to the websocket transport only when:

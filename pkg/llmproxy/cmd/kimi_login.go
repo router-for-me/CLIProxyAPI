@@ -28,7 +28,7 @@ func DoKimiLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:    options.Prompt,
 	}
 
-	record, savedPath, err := manager.Login(context.Background(), "kimi", castToInternalConfig(cfg), authOpts)
+	record, savedPath, err := manager.Login(context.Background(), "kimi", cfg, authOpts)
 	if err != nil {
 		log.Errorf("Kimi authentication failed: %v", err)
 		return

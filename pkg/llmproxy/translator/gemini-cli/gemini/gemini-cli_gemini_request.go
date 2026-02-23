@@ -8,7 +8,7 @@ package gemini
 import (
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"

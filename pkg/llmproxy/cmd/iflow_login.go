@@ -30,7 +30,7 @@ func DoIFlowLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:       promptFn,
 	}
 
-	_, savedPath, err := manager.Login(context.Background(), "iflow", castToInternalConfig(cfg), authOpts)
+	_, savedPath, err := manager.Login(context.Background(), "iflow", cfg, authOpts)
 	if err != nil {
 		if emailErr, ok := errors.AsType[*sdkAuth.EmailRequiredError](err); ok {
 			log.Error(emailErr.Error())

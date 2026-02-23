@@ -55,7 +55,7 @@ func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:       promptFn,
 	}
 
-	_, savedPath, err := manager.Login(context.Background(), "codex", castToInternalConfig(cfg), authOpts)
+	_, savedPath, err := manager.Login(context.Background(), "codex", cfg, authOpts)
 	if err != nil {
 		if authErr, ok := errors.AsType[*codex.AuthenticationError](err); ok {
 			log.Error(codex.GetUserFriendlyMessage(authErr))

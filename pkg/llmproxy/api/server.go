@@ -1051,7 +1051,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 
 	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
-	// nolint:gosec // false positive: these are integer counts, not actual API keys
 	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
 		total,
 		authEntries,

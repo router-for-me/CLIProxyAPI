@@ -3,74 +3,59 @@ package registry
 import (
 	"context"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
-
-// @trace FR-ROUTING-004
 
 func TestTaskClassifierCategorizesFast(t *testing.T) {
 	tc := NewTaskClassifier()
-
-	req := &TaskClassificationRequest{
-		TokensIn:  250,
-		TokensOut: 100,
-		Metadata:  map[string]string{"category": "quick_lookup"},
-	}
-
+	req := &TaskClassificationRequest{TokensIn: 250, TokensOut: 100}
 	category, err := tc.Classify(context.Background(), req)
-
-	require.NoError(t, err)
-	assert.Equal(t, "FAST", category)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if category != "FAST" {
+		t.Errorf("expected FAST, got %s", category)
+	}
 }
 
 func TestTaskClassifierCategorizesNormal(t *testing.T) {
 	tc := NewTaskClassifier()
-
-	req := &TaskClassificationRequest{
-		TokensIn:  2500,
-		TokensOut: 500,
-	}
-
+	req := &TaskClassificationRequest{TokensIn: 2500, TokensOut: 500}
 	category, err := tc.Classify(context.Background(), req)
-
-	require.NoError(t, err)
-	assert.Equal(t, "NORMAL", category)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if category != "NORMAL" {
+		t.Errorf("expected NORMAL, got %s", category)
+	}
 }
 
 func TestTaskClassifierCategorizesComplex(t *testing.T) {
 	tc := NewTaskClassifier()
-
-	req := &TaskClassificationRequest{
-		TokensIn:  25000,
-		TokensOut: 5000,
-	}
-
+	req := &TaskClassificationRequest{TokensIn: 25000, TokensOut: 5000}
 	category, err := tc.Classify(context.Background(), req)
-
-	require.NoError(t, err)
-	assert.Equal(t, "COMPLEX", category)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if category != "COMPLEX" {
+		t.Errorf("expected COMPLEX, got %s", category)
+	}
 }
 
 func TestTaskClassifierCategorizesHighComplex(t *testing.T) {
 	tc := NewTaskClassifier()
-
-	req := &TaskClassificationRequest{
-		TokensIn: 100000,
-	}
-
+	req := &TaskClassificationRequest{TokensIn: 100000}
 	category, err := tc.Classify(context.Background(), req)
-
-	require.NoError(t, err)
-	assert.Equal(t, "HIGH_COMPLEX", category)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if category != "HIGH_COMPLEX" {
+		t.Errorf("expected HIGH_COMPLEX, got %s", category)
+	}
 }
 
 func TestTaskClassifierBoundaries(t *testing.T) {
 	tc := NewTaskClassifier()
-	ctx := context.Background()
-
-	cases := []struct {
+	tests := []struct {
 		tokensIn  int
 		tokensOut int
 		expected  string
@@ -83,12 +68,14 @@ func TestTaskClassifierBoundaries(t *testing.T) {
 		{50000, 0, "HIGH_COMPLEX"},
 	}
 
-	for _, tc2 := range cases {
-		got, err := tc.Classify(ctx, &TaskClassificationRequest{
-			TokensIn:  tc2.tokensIn,
-			TokensOut: tc2.tokensOut,
-		})
-		require.NoError(t, err)
-		assert.Equal(t, tc2.expected, got, "tokensIn=%d tokensOut=%d", tc2.tokensIn, tc2.tokensOut)
+	for _, tt := range tests {
+		req := &TaskClassificationRequest{TokensIn: tt.tokensIn, TokensOut: tt.tokensOut}
+		got, err := tc.Classify(context.Background(), req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != tt.expected {
+			t.Errorf("Classify(tokens=%d) = %s, want %s", tt.tokensIn+tt.tokensOut, got, tt.expected)
+		}
 	}
 }
