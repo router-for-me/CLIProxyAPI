@@ -1293,7 +1293,7 @@ func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
 	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL))
 }
 
-func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
+func logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason string, err error) {
 	if err != nil {
 		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s err=%v", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL), strings.TrimSpace(reason), err)
 		return

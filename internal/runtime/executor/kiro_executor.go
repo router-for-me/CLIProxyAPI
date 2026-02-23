@@ -1791,9 +1791,6 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 			log.Debugf("kiro: unknown Sonnet 4.5 model '%s', mapping to claude-sonnet-4.5", model)
 			return "claude-sonnet-4.5"
 		}
-		// Default to Sonnet 4
-		log.Debugf("kiro: unknown Sonnet model '%s', mapping to claude-sonnet-4", model)
-		return "claude-sonnet-4"
 	}
 
 	// Check for Opus variants
