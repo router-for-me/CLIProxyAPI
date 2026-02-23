@@ -887,6 +887,53 @@ Expected:
 - Tool schema is accepted without `tools.0.custom.input_schema: Field required`.
 - If failure persists, lower `thinking.budget_tokens` and re-check `/v1/models` for thinking-capable alias.
 
+## Antigravity parity + model mapping (`CPB-0743`, `CPB-0744`)
+
+Use this when Antigravity traffic is inconsistent between CLI tooling and API clients.
+
+1) Validate CLI coverage matrix:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^antigravity/'
+```
+
+2) Run CLI parity request for a model you expect to work:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"antigravity/gpt-5","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq '.id,.model,.choices[0].message.content'
+```
+
+3) Add or update Amp model mappings for deterministic fallback:
+
+```yaml
+ampcode:
+  force-model-mappings: true
+  model-mappings:
+    - from: "claude-opus-4-5-thinking"
+      to: "gemini-claude-opus-4-5-thinking"
+      params:
+        custom_model: "iflow/tab"
+        enable_search: true
+```
+
+4) Confirm params are injected and preserved:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-opus-4-5-thinking","messages":[{"role":"user","content":"mapping probe"}],"stream":false}' | jq
+```
+
+Expected:
+- `/v1/models` includes expected Antigravity IDs.
+- Mapping request succeeds even if source model has no local providers.
+- Injected params appear in debug/trace payloads (or equivalent internal request logs) when verbose/request logging is enabled.
+
 ## Gemini OpenAI-compat parser probe (`CPB-0748`)
 
 Use this quick probe when clients fail parsing Gemini responses due to non-standard fields:
