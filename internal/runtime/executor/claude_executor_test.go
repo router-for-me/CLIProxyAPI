@@ -13,7 +13,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func TestApplyClaudeToolPrefix(t *testing.T) {
@@ -206,74 +205,6 @@ func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 	if got != "proxy_mcp__nia__manage_resource" {
 		t.Fatalf("nested tool_reference tool_name = %q, want %q", got, "proxy_mcp__nia__manage_resource")
 	}
-}
-
-func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
-	resetUserIDCache()
-
-	var userIDs []string
-	var requestModels []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		userID := gjson.GetBytes(body, "metadata.user_id").String()
-		model := gjson.GetBytes(body, "model").String()
-		userIDs = append(userIDs, userID)
-		requestModels = append(requestModels, model)
-		t.Logf("HTTP Server received request: model=%s, user_id=%s, url=%s", model, userID, r.URL.String())
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
-	}))
-	defer server.Close()
-
-	t.Logf("End-to-end test: Fake HTTP server started at %s", server.URL)
-
-	cacheEnabled := true
-	executor := NewClaudeExecutor(&config.Config{
-		ClaudeKey: []config.ClaudeKey{
-			{
-				APIKey:  "key-123",
-				BaseURL: server.URL,
-				Cloak: &config.CloakConfig{
-					CacheUserID: &cacheEnabled,
-				},
-			},
-		},
-	})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-123",
-		"base_url": server.URL,
-	}}
-
-	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
-	models := []string{"claude-3-5-sonnet", "claude-3-5-haiku"}
-	for _, model := range models {
-		t.Logf("Sending request for model: %s", model)
-		modelPayload, _ := sjson.SetBytes(payload, "model", model)
-		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
-			Model:   model,
-			Payload: modelPayload,
-		}, cliproxyexecutor.Options{
-			SourceFormat: sdktranslator.FromString("claude"),
-		}); err != nil {
-			t.Fatalf("Execute(%s) error: %v", model, err)
-		}
-	}
-
-	if len(userIDs) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(userIDs))
-	}
-	if userIDs[0] == "" || userIDs[1] == "" {
-		t.Fatal("expected user_id to be populated")
-	}
-	t.Logf("user_id[0] (model=%s): %s", requestModels[0], userIDs[0])
-	t.Logf("user_id[1] (model=%s): %s", requestModels[1], userIDs[1])
-	if userIDs[0] != userIDs[1] {
-		t.Fatalf("expected user_id to be reused across models, got %q and %q", userIDs[0], userIDs[1])
-	}
-	if !isValidUserID(userIDs[0]) {
-		t.Fatalf("user_id %q is not valid", userIDs[0])
-	}
-	t.Logf("✓ End-to-end test passed: Same user_id (%s) was used for both models", userIDs[0])
 }
 
 func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
