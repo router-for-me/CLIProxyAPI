@@ -40,3 +40,10 @@ func TestCopilotTokenStorage_SaveTokenToFile(t *testing.T) {
 		t.Errorf("expected type github-copilot, got %s", tsLoaded.Type)
 	}
 }
+
+func TestCopilotTokenStorage_SaveTokenToFileRejectsTraversalPath(t *testing.T) {
+	ts := &CopilotTokenStorage{}
+	if err := ts.SaveTokenToFile("/tmp/../copilot-escape.json"); err == nil {
+		t.Fatal("expected traversal path to be rejected")
+	}
+}

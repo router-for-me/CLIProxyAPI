@@ -510,8 +510,8 @@ func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
 
 // Download single auth file by name
 func (h *Handler) DownloadAuthFile(c *gin.Context) {
-	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	name := strings.TrimSpace(c.Query("name"))
+	if name == "" {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
@@ -519,7 +519,11 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "name must end with .json"})
 		return
 	}
-	full := filepath.Join(h.cfg.AuthDir, name)
+	full, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid name"})
+		return
+	}
 	data, err := os.ReadFile(full)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -569,7 +573,8 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	name = strings.TrimSpace(name)
+	if name == "" {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
@@ -582,11 +587,10 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
-	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
-	if !filepath.IsAbs(dst) {
-		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
-			dst = abs
-		}
+	dst, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid name"})
+		return
 	}
 	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to write file: %v", errWrite)})
@@ -639,16 +643,15 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
 		return
 	}
-	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	name := strings.TrimSpace(c.Query("name"))
+	if name == "" {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
-	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
-	if !filepath.IsAbs(full) {
-		if abs, errAbs := filepath.Abs(full); errAbs == nil {
-			full = abs
-		}
+	full, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid name"})
+		return
 	}
 	if err := os.Remove(full); err != nil {
 		if os.IsNotExist(err) {
