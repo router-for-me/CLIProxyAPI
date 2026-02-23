@@ -54,3 +54,42 @@ func TestConvertCodexResponseToClaudeNonStream(t *testing.T) {
 		t.Errorf("unexpected content: %s", got)
 	}
 }
+
+func TestConvertCodexResponseToClaude_FunctionCallArgumentsDone(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	raw := []byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"x\":1}","output_index":0}`)
+	got := ConvertCodexResponseToClaude(ctx, "gpt-5.3-codex", nil, nil, raw, &param)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(got))
+	}
+	if !strings.Contains(got[0], `"content_block_delta"`) {
+		t.Fatalf("expected content_block_delta event, got %q", got[0])
+	}
+	if !strings.Contains(got[0], `"input_json_delta"`) {
+		t.Fatalf("expected input_json_delta event, got %q", got[0])
+	}
+	if !strings.Contains(got[0], `\"x\":1`) {
+		t.Fatalf("expected arguments payload, got %q", got[0])
+	}
+}
+
+func TestConvertCodexResponseToClaude_DeduplicatesFunctionCallArgumentsDoneWhenDeltaReceived(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	doneRaw := []byte(`data: {"type":"response.function_call_arguments.done","arguments":"{\"x\":1}","output_index":0}`)
+
+	// Send delta first to set HasReceivedArgumentsDelta=true.
+	deltaRaw := []byte(`data: {"type":"response.function_call_arguments.delta","delta":"{\"x\":","output_index":0}`)
+	gotDelta := ConvertCodexResponseToClaude(ctx, "gpt-5.3-codex", nil, nil, deltaRaw, &param)
+	if len(gotDelta) != 1 {
+		t.Fatalf("expected 1 chunk for delta, got %d", len(gotDelta))
+	}
+
+	gotDone := ConvertCodexResponseToClaude(ctx, "gpt-5.3-codex", nil, nil, doneRaw, &param)
+	if len(gotDone) != 1 || gotDone[0] != "" {
+		t.Fatalf("expected empty chunk for done event when delta already received, got len=%d, chunk=%q", len(gotDone), gotDone)
+	}
+}

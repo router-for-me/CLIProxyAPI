@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -339,4 +340,71 @@ func TestConvertOpenAIResponsesRequestToCodex_UsesReasoningEffortOverVariant(t *
 	if got := gjson.Get(outputStr, "reasoning.effort").String(); got != "low" {
 		t.Fatalf("expected reasoning.effort to prefer explicit reasoning.effort low, got %s", got)
 	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesToolChoiceFunctionProxyPrefix(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"tools": [
+			{
+				"type": "function",
+				"function": {"name": "send_email", "description": "send email", "parameters": {}}
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"function": {"name": "proxy_send_email"}
+		},
+		"input": [{"type":"message","role":"user","content":"send email"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if gjson.Get(outputStr, "tool_choice.function.name").String() != "send_email" {
+		t.Fatalf("expected tool_choice.function.name to normalize to send_email, got %q", gjson.Get(outputStr, "tool_choice.function.name").String())
+	}
+	if gjson.Get(outputStr, "tools.0.function.name").String() != "send_email" {
+		t.Fatalf("expected tools.0.function.name to normalize to send_email, got %q", gjson.Get(outputStr, "tools.0.function.name").String())
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesToolsAndChoiceIndependently(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"tools": [
+			{
+				"type": "function",
+				"function": {"name": "` + longName(0) + `", "description": "x", "parameters": {}}
+			},
+			{
+				"type": "function",
+				"function": {"name": "` + longName(1) + `", "description": "y", "parameters": {}}
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"function": {"name": "proxy_` + longName(1) + `"}
+		},
+		"input": [{"type":"message","role":"user","content":"run"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	t1 := gjson.Get(outputStr, "tools.0.function.name").String()
+	t2 := gjson.Get(outputStr, "tools.1.function.name").String()
+	tc := gjson.Get(outputStr, "tool_choice.function.name").String()
+
+	if t1 == "" || t2 == "" || tc == "" {
+		t.Fatalf("expected normalized names, got tool1=%q tool2=%q tool_choice=%q", t1, t2, tc)
+	}
+	if len(t1) > 64 || len(t2) > 64 || len(tc) > 64 {
+		t.Fatalf("expected all normalized names <=64, got len(tool1)=%d len(tool2)=%d len(tool_choice)=%d", len(t1), len(t2), len(tc))
+	}
+}
+
+func longName(i int) string {
+	base := "proxy_mcp__very_long_prefix_segment_for_tool_normalization_"
+	return base + strings.Repeat("x", 80) + string(rune('a'+i))
 }

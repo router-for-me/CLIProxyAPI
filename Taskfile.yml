@@ -237,13 +237,13 @@ tasks:
       - task: quality:parent-sibling
 
   quality:quick:
-    desc: "Run fast local quality checks (readonly)"
+    desc: "Run fast local quality checks (readonly, no provider smoke)"
     deps: [preflight, cache:unlock]
     cmds:
       - task: quality:quick:check
 
   quality:quick:fix:
-    desc: "Auto-fix local quality issues quickly (fmt + readonly quick checks)"
+    desc: "Auto-fix local quality issues quickly (fmt + quick checks)"
     deps: [preflight, cache:unlock]
     cmds:
       - task: quality:fmt
@@ -286,7 +286,17 @@ tasks:
         fi
 
         go test "${test_packages[@]}"
-      - task: test:provider-smoke-matrix:test
+        if [ "${QUALITY_INCLUDE_SMOKE:-0}" = "1" ]; then
+          task test:provider-smoke-matrix:test
+        fi
+
+  quality:quick:smoke:
+    desc: "Run quick checks including provider smoke matrix"
+    deps: [preflight, cache:unlock]
+    env:
+      QUALITY_INCLUDE_SMOKE: "1"
+    cmds:
+      - task: quality:quick:check
 
   quality:shellcheck:
     desc: "Run shellcheck on shell scripts (best-effort, no-op when shellcheck missing)"
