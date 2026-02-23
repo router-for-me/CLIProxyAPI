@@ -5,6 +5,7 @@ package registry
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sort"
 	"strings"
@@ -661,7 +662,7 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 	registration.SuspendedClients[clientID] = reason
 	registration.LastUpdated = time.Now()
 	if reason != "" {
-		log.Debugf("Suspended client %s for model %s (reason provided)", clientID, modelID)
+		log.Debugf("Suspended client %s for model %s (reason provided)", logSafeRegistryID(clientID), logSafeRegistryID(modelID))
 	} else {
 		log.Debug("Suspended client for model")
 	}
@@ -688,6 +689,15 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	delete(registration.SuspendedClients, clientID)
 	registration.LastUpdated = time.Now()
 	log.Debug("Resumed suspended client for model")
+}
+
+func logSafeRegistryID(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return fmt.Sprintf("id_%x", sum[:6])
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.
