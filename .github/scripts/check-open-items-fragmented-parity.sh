@@ -2,57 +2,42 @@
 set -euo pipefail
 
 report="${REPORT_PATH:-docs/reports/fragemented/OPEN_ITEMS_VALIDATION_2026-02-22.md}"
-issue_id="${ISSUE_ID:-258}"
 if [[ ! -f "$report" ]]; then
   echo "[FAIL] Missing report: $report"
   exit 1
 fi
 
-section="$(
-  awk -v issue_id="$issue_id" '
-    BEGIN {
-      in_target = 0
-      target = "^- (Issue|PR) #" issue_id "([[:space:]]|$)"
-      boundary = "^- (Issue|PR) #[0-9]+([[:space:]]|$)"
-    }
-    $0 ~ target {
-      in_target = 1
-      print
-      next
-    }
-    in_target && $0 ~ boundary {
+section="$(awk '
+  BEGIN { in_issue=0 }
+  /^- Issue #258/ { in_issue=1 }
+  in_issue {
+    if ($0 ~ /^- (Issue|PR) #[0-9]+/ && $0 !~ /^- Issue #258/) {
       exit
     }
-    in_target {
-      print
-    }
-  ' "$report"
-)"
+    print
+  }
+' "$report")"
+
 if [[ -z "$section" ]]; then
-  echo "[FAIL] $report missing Issue #$issue_id section."
+  echo "[FAIL] $report missing Issue #258 section."
   exit 1
 fi
 
-status_line="$(
-  printf '%s\n' "$section" \
-    | rg -i -m1 '^\s*-\s*(#status|status)\s*:\s*.+$' \
-    || true
-)"
+status_line="$(echo "$section" | awk 'BEGIN{IGNORECASE=1} /- (Status|State):/{print; exit}')"
 if [[ -z "$status_line" ]]; then
-  echo "[FAIL] $report missing explicit status mapping for #$issue_id (expected '- Status:' or '- #status:')."
+  echo "[FAIL] $report missing explicit status line for #258 (expected '- Status:' or '- State:')."
   exit 1
 fi
 
-status_value="$(printf '%s\n' "$status_line" \
-  | sed -E 's/^\s*-\s*(#status|status)\s*:\s*//I' \
-  | tr '[:upper:]' '[:lower:]')"
-if printf '%s\n' "$status_value" | rg -q '\b(partial|partially|blocked|pending|todo|not implemented)\b'; then
-  echo "[FAIL] $report status for #$issue_id is not implemented: $status_value"
+status_lower="$(echo "$status_line" | tr '[:upper:]' '[:lower:]')"
+
+if echo "$status_lower" | rg -q "\b(partial|partially|not implemented|todo|to-do|pending|wip|in progress|open|blocked|backlog)\b"; then
+  echo "[FAIL] $report has non-implemented status for #258: $status_line"
   exit 1
 fi
 
-if ! printf '%s\n' "$status_value" | rg -q '\b(implemented|done|fixed|resolved|complete|completed)\b'; then
-  echo "[FAIL] $report status for #$issue_id is not recognized as implemented: $status_value"
+if ! echo "$status_lower" | rg -q "\b(implemented|resolved|complete|completed|closed|done|fixed|landed|shipped)\b"; then
+  echo "[FAIL] $report has unrecognized completion status for #258: $status_line"
   exit 1
 fi
 
