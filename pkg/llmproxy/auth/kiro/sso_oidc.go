@@ -53,7 +53,7 @@ const (
 var (
 	ErrAuthorizationPending = errors.New("authorization_pending")
 	ErrSlowDown             = errors.New("slow_down")
-	oidcRegionPattern       = regexp.MustCompile(`^[a-z0-9-]+$`)
+	awsRegionPattern        = regexp.MustCompile(`^[a-z]{2}(?:-[a-z0-9]+)+-\d+$`)
 )
 
 // SSOOIDCClient handles AWS SSO OIDC authentication.
@@ -106,6 +106,17 @@ func getOIDCEndpoint(region string) string {
 		region = defaultIDCRegion
 	}
 	return fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
+}
+
+func validateIDCRegion(region string) (string, error) {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		return defaultIDCRegion, nil
+	}
+	if !awsRegionPattern.MatchString(region) {
+		return "", fmt.Errorf("invalid region %q", region)
+	}
+	return region, nil
 }
 
 func buildIDCRefreshPayload(clientID, clientSecret, refreshToken string) map[string]string {
@@ -186,7 +197,11 @@ func promptSelect(prompt string, options []string) int {
 
 // RegisterClientWithRegion registers a new OIDC client with AWS using a specific region.
 func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region string) (*RegisterClientResponse, error) {
-	endpoint := getOIDCEndpoint(region)
+	validatedRegion, err := validateIDCRegion(region)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := getOIDCEndpoint(validatedRegion)
 
 	payload := map[string]interface{}{
 		"clientName": "Kiro IDE",
@@ -233,7 +248,11 @@ func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region str
 
 // StartDeviceAuthorizationWithIDC starts the device authorization flow for IDC.
 func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, clientID, clientSecret, startURL, region string) (*StartDeviceAuthResponse, error) {
-	endpoint := getOIDCEndpoint(region)
+	validatedRegion, err := validateIDCRegion(region)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := getOIDCEndpoint(validatedRegion)
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -279,11 +298,7 @@ func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, cli
 
 // CreateTokenWithRegion polls for the access token after user authorization using a specific region.
 func (c *SSOOIDCClient) CreateTokenWithRegion(ctx context.Context, clientID, clientSecret, deviceCode, region string) (*CreateTokenResponse, error) {
-	normalizedRegion, errRegion := normalizeOIDCRegion(region)
-	if errRegion != nil {
-		return nil, errRegion
-	}
-	endpoint := getOIDCEndpoint(normalizedRegion)
+	endpoint := getOIDCEndpoint(region)
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -343,17 +358,6 @@ func (c *SSOOIDCClient) CreateTokenWithRegion(ctx context.Context, clientID, cli
 	}
 
 	return &result, nil
-}
-
-func normalizeOIDCRegion(region string) (string, error) {
-	trimmed := strings.TrimSpace(region)
-	if trimmed == "" {
-		return defaultIDCRegion, nil
-	}
-	if !oidcRegionPattern.MatchString(trimmed) {
-		return "", fmt.Errorf("invalid OIDC region %q", region)
-	}
-	return trimmed, nil
 }
 
 // RefreshTokenWithRegion refreshes an access token using the refresh token with a specific region.

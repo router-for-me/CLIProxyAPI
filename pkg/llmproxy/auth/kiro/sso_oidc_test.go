@@ -8,12 +8,6 @@ import (
 	"testing"
 )
 
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
 func TestRefreshToken_IncludesGrantTypeAndExtensionHeaders(t *testing.T) {
 	t.Parallel()
 
@@ -107,27 +101,38 @@ func TestRefreshTokenWithRegion_UsesRegionHostAndGrantType(t *testing.T) {
 	}
 }
 
-func TestCreateTokenWithRegion_RejectsInvalidRegion(t *testing.T) {
+func TestRegisterClientWithRegion_RejectsInvalidRegion(t *testing.T) {
 	t.Parallel()
 
-	var called bool
 	client := &SSOOIDCClient{
 		httpClient: &http.Client{
 			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-				called = true
+				t.Fatalf("unexpected outbound request: %s", req.URL.String())
 				return nil, nil
 			}),
 		},
 	}
 
-	_, err := client.CreateTokenWithRegion(context.Background(), "cid", "secret", "device", "us-east-1/../../169.254.169.254")
+	_, err := client.RegisterClientWithRegion(context.Background(), "us-east-1\nmalicious")
 	if err == nil {
-		t.Fatal("expected invalid region error")
+		t.Fatalf("expected invalid region error")
 	}
-	if !strings.Contains(err.Error(), "invalid OIDC region") {
-		t.Fatalf("unexpected error: %v", err)
+}
+
+func TestStartDeviceAuthorizationWithIDC_RejectsInvalidRegion(t *testing.T) {
+	t.Parallel()
+
+	client := &SSOOIDCClient{
+		httpClient: &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				t.Fatalf("unexpected outbound request: %s", req.URL.String())
+				return nil, nil
+			}),
+		},
 	}
-	if called {
-		t.Fatal("unexpected HTTP call with invalid region")
+
+	_, err := client.StartDeviceAuthorizationWithIDC(context.Background(), "cid", "secret", "https://view.awsapps.com/start", "../../etc/passwd")
+	if err == nil {
+		t.Fatalf("expected invalid region error")
 	}
 }
