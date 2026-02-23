@@ -212,6 +212,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		created, _ = sjson.Set(created, "sequence_number", nextSeq())
 		created, _ = sjson.Set(created, "response.id", st.ResponseID)
 		created, _ = sjson.Set(created, "response.created_at", st.CreatedAt)
+		created, _ = sjson.Set(created, "response.model", modelName)
 		out = append(out, emitEvent("response.created", created))
 
 		inprog := `{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress"}}`
@@ -529,30 +530,35 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			completed, _ = sjson.SetRaw(completed, "response.output", gjson.Get(outputsWrapper, "arr").Raw)
 		}
 
-		// usage mapping
+		input := int64(0)
+		cached := int64(0)
+		output := int64(0)
+		reasoning := int64(0)
+		total := int64(0)
 		if um := root.Get("usageMetadata"); um.Exists() {
 			// input tokens = prompt + thoughts
-			input := um.Get("promptTokenCount").Int() + um.Get("thoughtsTokenCount").Int()
-			completed, _ = sjson.Set(completed, "response.usage.input_tokens", input)
+			input = um.Get("promptTokenCount").Int() + um.Get("thoughtsTokenCount").Int()
 			// cached token details: align with OpenAI "cached_tokens" semantics.
-			completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", um.Get("cachedContentTokenCount").Int())
+			cached = um.Get("cachedContentTokenCount").Int()
 			// output tokens
 			if v := um.Get("candidatesTokenCount"); v.Exists() {
-				completed, _ = sjson.Set(completed, "response.usage.output_tokens", v.Int())
-			} else {
-				completed, _ = sjson.Set(completed, "response.usage.output_tokens", 0)
+				output = v.Int()
 			}
 			if v := um.Get("thoughtsTokenCount"); v.Exists() {
-				completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", v.Int())
-			} else {
-				completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", 0)
+				reasoning = v.Int()
 			}
 			if v := um.Get("totalTokenCount"); v.Exists() {
-				completed, _ = sjson.Set(completed, "response.usage.total_tokens", v.Int())
+				total = v.Int()
 			} else {
-				completed, _ = sjson.Set(completed, "response.usage.total_tokens", 0)
+				total = input + output
 			}
 		}
+
+		completed, _ = sjson.Set(completed, "response.usage.input_tokens", input)
+		completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", cached)
+		completed, _ = sjson.Set(completed, "response.usage.output_tokens", output)
+		completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoning)
+		completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
 
 		out = append(out, emitEvent("response.completed", completed))
 	}
