@@ -117,15 +117,12 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	if IsUserDefinedModel(modelInfo) {
 		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult)
 	}
-	if modelInfo.Thinking == nil {
-		config := extractThinkingConfig(body, providerFormat)
-		if hasThinkingConfig(config) {
-			log.WithFields(log.Fields{
-				"model":    baseModel,
-				"provider": providerFormat,
-			}).Debug("thinking: model does not support thinking, stripping config |")
-			return StripThinkingConfig(body, providerFormat), nil
-		}
+		if modelInfo.Thinking == nil {
+			config := extractThinkingConfig(body, providerFormat)
+			if hasThinkingConfig(config) {
+				log.Debug("thinking: model does not support thinking, stripping config |")
+				return StripThinkingConfig(body, providerFormat), nil
+			}
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
 			"model":    baseModel,
@@ -180,11 +177,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	// 5. Validate and normalize configuration
 	validated, err := ValidateConfig(config, modelInfo, fromFormat, providerFormat, suffixResult.HasSuffix)
 	if err != nil {
-		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    modelInfo.ID,
-			"error":    err.Error(),
-		}).Warn("thinking: validation failed |")
+		log.Warn("thinking: validation failed |")
 		// Return original body on validation failure (defensive programming).
 		// This ensures callers who ignore the error won't receive nil body.
 		// The upstream service will decide how to handle the unmodified request.
