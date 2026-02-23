@@ -924,6 +924,78 @@ go test ./pkg/llmproxy/translator/antigravity/claude -run 'TestConvertClaudeRequ
 
 Expected: empty `functionResponse` content is not propagated as invalid JSON, and malformed tool args retain the `functionCall` block instead of dropping the tool interaction.
 
+## Dynamic model provider quick probe (`CPB-0796`)
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | head -n 40
+
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"provider probe"}],"stream":false}' | jq
+```
+
+Expected: selected provider/model is visible in logs and response is OpenAI-compatible.
+
+## Auth not using proxy path (`CPB-0799`)
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq '.data|length'
+
+cliproxyctl login --provider gemini --json --config ./config.yaml | jq '{ok,details}'
+```
+
+Expected: login output and runtime both resolve the same `auth-dir`; avoid mixed config paths between shells/containers.
+
+## Gemini 3 Pro no response in Roo (`CPB-0802`, `CPB-0811`)
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'gemini-3-pro-preview|gemini-3-pro'
+
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3-pro-preview","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
+```
+
+Expected: model is present in `/v1/models` before Roo-side routing; if missing, refresh auth inventory first.
+
+## Gemini thinking budget normalization (`CPB-0806`)
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3-pro-preview","messages":[{"role":"user","content":"thinking budget check"}],"reasoning":{"effort":"high"},"stream":false}' | jq
+```
+
+Expected: translator normalizes thinking budget fields and returns stable non-stream response shape.
+
+## Scoped `auto` model routing (`CPB-0826`)
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto:gemini","messages":[{"role":"user","content":"scoped auto"}],"stream":false}' | jq
+```
+
+Expected: scoped provider hint is honored and final routed model appears in response metadata/logs.
+
+## `candidate_count` rollout guard (`CPB-0829`)
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"multi candidate check"}],"candidate_count":2,"stream":false}' | jq
+```
+
+Expected: if multi-candidate fanout is unsupported in current provider path, service responds with deterministic guidance instead of silent single-candidate fallback.
+
 ## Antigravity thinking-block + tool schema guardrails (`CPB-0731`, `CPB-0735`, `CPB-0742`, `CPB-0746`)
 
 Use this when Claude/Antigravity returns `400` with `thinking` or `input_schema` complaints.
@@ -1036,3 +1108,106 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 ```
 
 Expected: translated request preserves `text.format.schema` and response remains JSON-compatible.
+
+## Wave Batch 2 quick probes (`CPB-0783..CPB-0808`)
+
+Use this block to close the next 20-item execution set with deterministic checks.
+
+### Dev refresh + Roo alias + stream parity (`CPB-0783`, `CPB-0784`, `CPB-0785`, `CPB-0787`)
+
+```bash
+cliproxyctl dev --json | jq '{mode,config_path,hints}'
+curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer demo-client-key" | jq '.data[].id' | rg -n "roo|roocode|roo-code"
+curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"roo/auto","messages":[{"role":"user","content":"T.match probe"}],"stream":false}' | jq '.choices[0].message.content,.error'
+curl -N -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"roo/auto","messages":[{"role":"user","content":"stream parity probe"}],"stream":true}'
+```
+
+Expected: `dev` output includes refresh guidance, Roo aliases resolve to one provider identity, and stream/non-stream parity stays consistent.
+
+### Antigravity stream + rollout flag + Sonnet mapping (`CPB-0788`, `CPB-0789`, `CPB-0790`)
+
+```bash
+curl -N -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"antigravity/claude-sonnet-4-5-thinking","messages":[{"role":"user","content":"request isolation probe"}],"stream":true}'
+cliproxyctl doctor --json | jq '.config.feature_flags,.models,.warnings'
+curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer demo-client-key" | jq '.data[] | select(.id|test("gemini-claude-sonnet-4-5")) | {id,owned_by,description}'
+```
+
+Expected: no cross-request leakage in stream translation, feature-flag state is explicit, and Sonnet 4.5 model metadata is consistent.
+
+### Reasoning/cache/compose checks (`CPB-0791`, `CPB-0792`, `CPB-0793`)
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"reasoning normalization probe"}],"reasoning":{"effort":"x-high"},"stream":false}' | jq '{model,usage,error}'
+curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"cache token probe"}],"stream":false}' | jq '{usage,error}'
+docker compose ps
+curl -sS http://localhost:8317/health | jq
+```
+
+Expected: reasoning normalization is accepted, cache token fields are coherent, and docker-compose startup failures are visible via service state + health checks.
+
+### Proxy/auth/usage checks (`CPB-0794`, `CPB-0795`, `CPB-0797`)
+
+```bash
+cliproxyctl doctor --json | jq '.auth,.routing,.warnings'
+curl -sS http://localhost:8317/v0/management/auth-files -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.[] | select(.type=="aistudio") | {name,type,disabled}'
+curl -sS -X PATCH http://localhost:8317/v0/management/auth-files/status -H "X-Management-Secret: ${MANAGEMENT_SECRET}" -H "Content-Type: application/json" -d '{"name":"aistudio-default","enabled":true}' | jq
+curl -sS -X POST http://localhost:8317/v1/responses -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","input":[{"role":"user","content":"usage parity probe"}],"stream":false}' | jq '.usage,.error'
+```
+
+Expected: per-provider proxy/auth behavior is inspectable, AI Studio auth toggle is controllable, and usage/token metadata is present in non-stream probes.
+
+### Setup/manual callback/huggingface checks (`CPB-0798`, `CPB-0800`, `CPB-0803`)
+
+```bash
+cliproxyctl setup --help | rg -n "cursor|antigravity|manual|callback"
+cliproxyctl login --provider openai --manual-callback
+curl -sS http://localhost:8317/v0/management/logs -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.entries[]? | select((.provider // "")=="huggingface" or (.message // "" | test("huggingface"; "i")))'
+curl -sS http://localhost:8317/v0/management/usage -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.providers.huggingface // .'
+```
+
+Expected: setup/login surfaces include manual callback support, and huggingface failures are visible in management logs/usage.
+
+### Codex/Gemini integration parity (`CPB-0804`, `CPB-0805`, `CPB-0807`, `CPB-0808`)
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/responses -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"codex/codex-latest","input":[{"role":"user","content":"codex responses path probe"}],"stream":false}' | jq '{id,model,output,error}'
+curl -N -X POST http://localhost:8317/v1/responses -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-3-pro-preview","input":[{"role":"user","content":"stream parity check"}],"stream":true}'
+curl -sS -X POST http://localhost:8317/v1/responses -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-3-pro-preview","input":[{"role":"user","content":"non-stream parity check"}],"stream":false}' | jq '{usage,error}'
+```
+
+Expected: codex responses path remains provider-agnostic, Gemini 3 Pro preview stream/non-stream are both healthy, and cache-sensitive paths remain deterministic.
+
+## Wave Batch 3 quick probes (`CPB-0809..CPB-0830` remaining 17)
+
+### Rollout flags + metadata normalization (`CPB-0809`, `CPB-0810`, `CPB-0818`, `CPB-0819`, `CPB-0820`, `CPB-0830`)
+
+```bash
+cliproxyctl doctor --json | jq '{feature_flags,models,warnings}'
+curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer demo-client-key" | jq '.data[] | select(.id|test("gpt-5|copilot|gemini-claude-sonnet-4-5")) | {id,owned_by,description}'
+curl -sS -X POST http://localhost:8317/v1/responses/compact -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","input":[{"role":"user","content":"compact contract probe"}]}' | jq '{id,output,error}'
+```
+
+Expected: rollout flags are visible, model metadata stays canonical, and `/responses/compact` behavior is deterministic under staged toggles.
+
+### Dev/HMR + OAuth provider flows (`CPB-0812`, `CPB-0816`, `CPB-0817`, `CPB-0821`)
+
+```bash
+docker compose -f docker-compose.yml config
+docker compose -f examples/process-compose.yaml config
+cliproxyctl login --provider gemini
+cliproxyctl login --provider droid-cli
+curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer demo-client-key" | jq '.data[].id' | rg -n "gemini|droid|claude"
+```
+
+Expected: compose-based refresh workflow is valid, Gemini OAuth flow is documented/reproducible, and droid provider alias resolves to a supported login path.
+
+### Management sync + auth controls + observability (`CPB-0813`, `CPB-0822`, `CPB-0823`, `CPB-0824`, `CPB-0825`, `CPB-0827`, `CPB-0828`)
+
+```bash
+curl -sS http://localhost:8317/v0/management/auth-files -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.[] | {name,type,disabled}'
+curl -sS -X PATCH http://localhost:8317/v0/management/auth-files/status -H "X-Management-Secret: ${MANAGEMENT_SECRET}" -H "Content-Type: application/json" -d '{"name":"aistudio-default","enabled":true}' | jq
+curl -sS http://localhost:8317/v0/management/logs -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.entries[]? | select((.provider // "")|test("kimi|nanobanana|aistudio|management";"i"))'
+curl -sS http://localhost:8317/v0/management/usage -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.providers'
+```
+
+Expected: management ban/auth/sync events are inspectable, AI Studio and non-subprocess integration controls are visible, and provider-specific observability signals are queryable.

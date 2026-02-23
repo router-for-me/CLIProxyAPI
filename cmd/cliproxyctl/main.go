@@ -593,7 +593,7 @@ func ensureConfigFile(configPath string) error {
 		return nil
 	}
 	configDir := filepath.Dir(configPath)
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
 	if err := ensureDirectoryWritable(configDir); err != nil {

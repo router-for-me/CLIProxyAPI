@@ -46,6 +46,9 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 | `codex5.3` availability unclear across environments | Integration path mismatch (in-process SDK vs remote HTTP fallback) | Probe `/health` then `/v1/models`, verify `gpt-5.3-codex` exposure | Use in-process `sdk/cliproxy` when local runtime is controlled; fall back to `/v1/*` only when process boundaries require HTTP |
 | Amp requests bypass CLIProxyAPI | Amp process missing `OPENAI_API_BASE`/`OPENAI_API_KEY` or stale shell env | Run direct canary to `http://127.0.0.1:8317/v1/chat/completions` with same credentials | Export env in the same process/shell that launches Amp, then verify proxy logs show Amp traffic |
 | `auth-dir` mode is too permissive (`0755`/`0777`) | OAuth/API key login writes fail fast due insecure permissions | `ls -ld ~/.cli-proxy-api` or `ls -ld <configured auth-dir>` | Run `chmod 700` on the configured auth directory, then retry the login/refresh command |
+| Login succeeds but runtime still says provider unavailable | Login and runtime are reading different `auth-dir` paths (container path vs local path mismatch) | Print effective config path + `auth-dir` in both login shell and runtime process (`cliproxyctl doctor --json`) | Align both processes to one config and one `auth-dir`; avoid duplicate configs in different working directories |
+| Gemini 3 Pro / Roo shows no response | Model is missing from current auth inventory or stream path dropped before translator dispatch | Check `/v1/models` for `gemini-3-pro-preview` and run one non-stream canary | Refresh auth inventory, re-login if needed, and only enable Roo stream mode after non-stream canary passes |
+| `candidate_count` > 1 returns only one answer | Provider path does not support multi-candidate fanout yet | Re-run with `candidate_count: 1` and compare logs/request payload | Treat multi-candidate as gated rollout: document unsupported path, keep deterministic single-candidate behavior, and avoid silent fanout assumptions |
 | Runtime config write errors | Read-only mount or immutable filesystem | `find /CLIProxyAPI -maxdepth 1 -name config.yaml -print` | Use writable mount, re-run with read-only warning, confirm management persistence status |
 | Kiro/OAuth auth loops | Expired or missing token refresh fields | Re-run `cliproxyapi++ auth`/reimport token path | Refresh credentials, run with fresh token file, avoid duplicate token imports |
 | Streaming hangs or truncation | Reverse proxy buffering / payload compatibility issue | Reproduce with `stream: false`, then compare SSE response | Verify reverse-proxy config, compare tool schema compatibility and payload shape |
@@ -205,6 +208,39 @@ If non-stream succeeds but stream chunks are delayed/batched:
 - check reverse proxy buffering settings first,
 - verify client reads SSE incrementally,
 - confirm no middleware rewrites the event stream response.
+
+## Wave Batch 2 triage matrix (`CPB-0783..CPB-0808`)
+
+| Symptom | Likely cause | Quick check | Action |
+|---|---|---|---|
+| Dev cycle regresses after Gemini tool changes (`CPB-0783`) | stale process-compose/HMR state | `cliproxyctl dev --json` + `docker compose ps` | restart process-compose and rerun non-stream canary |
+| RooCode fails with `T.match` (`CPB-0784`, `CPB-0785`) | provider alias mismatch (`roocode`/`roo-code`) | `GET /v1/models` and search Roo IDs | normalize aliases to canonical `roo` mapping and retry |
+| Channel toggle works on non-stream only (`CPB-0787`) | stream bootstrap path misses toggle | compare stream vs non-stream same prompt | align bootstrap settings and re-run parity probe |
+| Antigravity stream returns stale chunks (`CPB-0788`) | request-scoped translator state leak | run two back-to-back stream requests | reset per-request stream state and verify isolation |
+| Sonnet 4.5 rollout confusion (`CPB-0789`, `CPB-0790`) | feature flag/metadata mismatch | `cliproxyctl doctor --json` + `/v1/models` metadata | align flag gating + static registry metadata |
+| Reasoning/cache metrics inconsistent (`CPB-0791`, `CPB-0792`, `CPB-0797`) | reasoning normalization or usage mapping drift | check `usage` for stream/non-stream | normalize reasoning, keep usage metadata parity |
+| Docker compose startup error (`CPB-0793`) | service boot failure before bind | `docker compose ps` + `/health` | inspect startup logs, fix bind/config, restart |
+| AI Studio auth status unclear (`CPB-0795`) | auth-file toggle not visible/used | `GET/PATCH /v0/management/auth-files` | enable target auth file and re-run provider login |
+| Setup/login callback breaks (`CPB-0798`, `CPB-0800`) | callback mode mismatch/manual callback unset | inspect `cliproxyctl setup/login --help` | use `--manual-callback` and verify one stable auth-dir |
+| Huggingface provider errors not actionable (`CPB-0803`) | logs/usage missing provider tags | `GET /v0/management/logs` + `/usage` | add/provider-filter tags and alert routing |
+| Codex/Gemini parity drifts (`CPB-0804`, `CPB-0805`, `CPB-0807`, `CPB-0808`) | provider-specific response path divergence | compare `/v1/responses` stream/non-stream | keep translation hooks shared and cache path deterministic |
+
+## Wave Batch 3 triage matrix (`CPB-0809..CPB-0830` remaining 17)
+
+| Symptom | Likely cause | Quick check | Action |
+|---|---|---|---|
+| Antigravity rollout is inconsistent (`CPB-0809`) | feature flag state differs by environment | `cliproxyctl doctor --json` | enforce staged flag defaults and migration notes |
+| Copilot CLI mapping mismatch (`CPB-0810`) | registry metadata naming drift | `/v1/models` and match copilot IDs | normalize registry names and docs wording |
+| HMR/refresh flow flaky (`CPB-0812`) | compose/process watcher drift | `docker compose ... config` | align compose watch/restart workflow |
+| Remote management ban feels silent (`CPB-0813`) | ban counter/log signal missing | `GET /v0/management/logs` + usage stats | add/monitor ban telemetry and remediation runbook |
+| Gemini OAuth guidance unclear (`CPB-0816`, `CPB-0817`) | login flow and docs out of sync | `cliproxyctl login --provider gemini` | keep CLI flow and quickstart steps aligned |
+| Droid CLI says unknown provider (`CPB-0821`) | alias normalization missing | `cliproxyctl login --provider droid-cli` | normalize alias to Gemini-compatible provider path |
+| Auth file sync misses fresh token (`CPB-0822`) | reload logic ignores newest credential | check management auth state + runtime logs | use validated sync path with metadata checks |
+| Kimi K2 thinking failures hard to triage (`CPB-0823`) | provider-specific logs/alerts absent | filter management logs for `kimi` | add tagged logs and alert thresholds |
+| Nano Banana translator path unstable (`CPB-0824`) | translator mapping not centralized | probe `nanobanana` model via `/v1/models` | consolidate translator alias/format helpers |
+| AI Studio runtime behavior drifts (`CPB-0825`, `CPB-0827`) | executor side-effects and WSS path gaps | compare stream/non-stream + WSS probes | split helper layers and gate WSS rollout with tests |
+| Gemini image integration routing uncertain (`CPB-0828`) | subprocess vs HTTP fallback path ambiguity | inspect management routes + logs | expose explicit non-subprocess + fallback controls |
+| GPT metadata migration risk (`CPB-0818`, `CPB-0819`, `CPB-0820`, `CPB-0830`) | model-version naming/contract drift | inspect `/v1/models` + compact endpoint | centralize normalization and document migration path |
 
 ## Useful Endpoints
 
