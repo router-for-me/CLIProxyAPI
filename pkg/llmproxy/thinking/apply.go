@@ -344,11 +344,27 @@ func hasThinkingConfig(config ThinkingConfig) bool {
 // Claude API format:
 //   - thinking.type: "enabled" or "disabled"
 //   - thinking.budget_tokens: integer (-1=auto, 0=disabled, >0=budget)
+//   - output_config.effort: "low", "medium", "high" (Claude Opus 4.6+)
 //
 // Priority: thinking.type="disabled" takes precedence over budget_tokens.
+// output_config.effort is checked first as it's the newer format.
 // When type="enabled" without budget_tokens, returns ModeAuto to indicate
 // the user wants thinking enabled but didn't specify a budget.
 func extractClaudeConfig(body []byte) ThinkingConfig {
+	// Check output_config.effort first (newer format for Claude Opus 4.6+)
+	if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() {
+		value := strings.ToLower(strings.TrimSpace(effort.String()))
+		switch value {
+		case "none", "":
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case "auto":
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+		default:
+			// Treat as level (low, medium, high)
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -459,15 +475,6 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 func extractCodexConfig(body []byte) ThinkingConfig {
 	// Check reasoning.effort (Codex / OpenAI Responses API format)
 	if effort := gjson.GetBytes(body, "reasoning.effort"); effort.Exists() {
-		value := effort.String()
-		if value == "none" {
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		}
-		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
-	}
-
-	// Compatibility fallback: some Claude clients send output_config.effort.
-	if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() {
 		value := effort.String()
 		if value == "none" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}

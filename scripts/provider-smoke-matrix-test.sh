@@ -26,6 +26,7 @@ run_matrix_check() {
 create_fake_curl() {
   local output_path="$1"
   local state_file="$2"
+  local status_sequence="$3"
 
   cat >"${output_path}" <<'EOF'
 #!/usr/bin/env bash
@@ -94,7 +95,7 @@ run_skip_case() {
   local fake_curl="${workdir}/fake-curl.sh"
   local state="${workdir}/state"
 
-  create_fake_curl "${fake_curl}" "${state}"
+  create_fake_curl "${fake_curl}" "${state}" "200,200,200"
 
   run_matrix_check "empty cases are skipped" 0 \
     env \
@@ -112,7 +113,7 @@ run_pass_case() {
   local fake_curl="${workdir}/fake-curl.sh"
   local state="${workdir}/state"
 
-  create_fake_curl "${fake_curl}" "${state}"
+  create_fake_curl "${fake_curl}" "${state}" "200,200"
 
   run_matrix_check "successful responses complete without failure" 0 \
     env \
@@ -134,7 +135,7 @@ run_fail_case() {
   local fake_curl="${workdir}/fake-curl.sh"
   local state="${workdir}/state"
 
-  create_fake_curl "${fake_curl}" "${state}"
+  create_fake_curl "${fake_curl}" "${state}" "500"
 
   run_matrix_check "non-2xx responses fail when EXPECT_SUCCESS=0" 1 \
     env \
@@ -149,29 +150,8 @@ run_fail_case() {
   rm -rf "${workdir}"
 }
 
-run_cheapest_case() {
-  local workdir
-  workdir="$(mktemp -d)"
-  local fake_curl="${workdir}/fake-curl.sh"
-  local state="${workdir}/state"
-
-  create_fake_curl "${fake_curl}" "${state}"
-
-  run_matrix_check "cheapest defaults include 6 aliases" 0 \
-    env \
-      STATUS_SEQUENCE="200,200,200,200,200,200" \
-      STATE_FILE="${state}" \
-      CLIPROXY_SMOKE_CURL_BIN="${fake_curl}" \
-      CLIPROXY_SMOKE_WAIT_FOR_READY="1" \
-      CLIPROXY_SMOKE_READY_ATTEMPTS="1" \
-      CLIPROXY_SMOKE_READY_SLEEP_SECONDS="0" \
-      ./scripts/provider-smoke-matrix-cheapest.sh
-
-  rm -rf "${workdir}"
-}
 run_skip_case
 run_pass_case
 run_fail_case
-run_cheapest_case
 
 echo "[OK] provider-smoke-matrix script test suite passed"

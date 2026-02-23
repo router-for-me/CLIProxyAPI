@@ -200,8 +200,6 @@ func (rl *RateLimiter) CheckAndMarkSuspended(tokenKey string, errorMsg string) b
 		"rate limit exceeded",
 		"too many requests",
 		"quota exceeded",
-		"allocated quota exceeded",
-		"quota exhausted",
 	}
 
 	lowerMsg := strings.ToLower(errorMsg)

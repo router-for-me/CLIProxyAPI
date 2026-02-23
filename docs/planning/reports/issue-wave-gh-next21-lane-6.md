@@ -32,15 +32,15 @@
   - `pkg/llmproxy/translator/kiro/openai/kiro_openai_request_test.go`
 
 ### #179 OpenAI-MLX-Server and vLLM-MLX support
-- Status: `done`
+- Status: `partial (validated docs-level support; no runtime delta in this lane)`
 - Validation evidence:
-  - Added runtime fallback registration for OpenAI-compatible providers with empty `models` arrays (`registerModelsForAuth`).
-  - Added regression coverage for discovery + registration in `sdk/cliproxy/service_excluded_models_test.go`.
-  - Documentation includes OpenAI-compatible setup pattern for MLX/vLLM-MLX and prefixed model usage.
+  - Documentation already includes OpenAI-compatible setup pattern for MLX/vLLM-MLX and prefixed model usage.
+  - No failing runtime behavior reproduced in focused translator tests.
 - Evidence paths:
   - `docs/provider-usage.md`
   - `docs/provider-quickstarts.md`
-  - `sdk/cliproxy/service_excluded_models_test.go`
+- Remaining gap:
+  - Full net-new provider runtime integration is broader than a low-risk lane patch; current supported path remains OpenAI-compatible routing.
 
 ## Test Evidence
 
@@ -66,6 +66,4 @@ Attempted:
 - `pkg/llmproxy/translator/gemini/claude/gemini_claude_request_test.go`
 - `pkg/llmproxy/translator/gemini-cli/claude/gemini-cli_claude_request_test.go`
 - `pkg/llmproxy/translator/kiro/openai/kiro_openai_request_test.go`
-- `sdk/cliproxy/service_excluded_models_test.go`
-- `sdk/cliproxy/service.go`
 - `docs/planning/reports/issue-wave-gh-next21-lane-6.md`

@@ -11,24 +11,6 @@ func TestExtractCodexConfig_PrefersReasoningEffortOverVariant(t *testing.T) {
 	}
 }
 
-func TestExtractCodexConfig_PrefersReasoningEffortOverOutputConfig(t *testing.T) {
-	body := []byte(`{"reasoning":{"effort":"high"},"output_config":{"effort":"low"}}`)
-	cfg := extractCodexConfig(body)
-
-	if cfg.Mode != ModeLevel || cfg.Level != LevelHigh {
-		t.Fatalf("unexpected config: %+v", cfg)
-	}
-}
-
-func TestExtractCodexConfig_OutputConfigFallback(t *testing.T) {
-	body := []byte(`{"output_config":{"effort":"medium"}}`)
-	cfg := extractCodexConfig(body)
-
-	if cfg.Mode != ModeLevel || cfg.Level != LevelMedium {
-		t.Fatalf("unexpected config: %+v", cfg)
-	}
-}
-
 func TestExtractCodexConfig_VariantFallback(t *testing.T) {
 	tests := []struct {
 		name string

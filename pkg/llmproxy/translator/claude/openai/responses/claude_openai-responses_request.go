@@ -53,13 +53,8 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	root := gjson.ParseBytes(rawJSON)
 
 	// Convert OpenAI Responses reasoning.effort to Claude thinking config.
-	thinkingEffort := root.Get("reasoning.effort")
-	if !thinkingEffort.Exists() {
-		// Compatibility fallback for Claude-style clients.
-		thinkingEffort = root.Get("output_config.effort")
-	}
-	if thinkingEffort.Exists() {
-		effort := strings.ToLower(strings.TrimSpace(thinkingEffort.String()))
+	if v := root.Get("reasoning.effort"); v.Exists() {
+		effort := strings.ToLower(strings.TrimSpace(v.String()))
 		if effort != "" {
 			budget, ok := thinking.ConvertLevelToBudget(effort)
 			if ok {

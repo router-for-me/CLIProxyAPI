@@ -14,8 +14,6 @@ This runbook is for operators who care about provider uptime, quota health, and 
    - Verify no sustained bursts of `401`, `403`, or `429`.
 5. Spark eligibility check (Copilot/Codex):
    - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'gpt-5.3-codex|gpt-5.3-codex-spark'`
-6. Antigravity alias continuity check:
-   - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'gemini-claude-opus-4-6-thinking|claude-opus-4-6-thinking'`
 
 ## Quota Visibility (`#146` scope)
 
@@ -57,7 +55,6 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Add capacity (extra keys/providers) or reduce concurrency.
 - Shift traffic to fallback provider prefix.
 - Tighten expensive-model exposure with `excluded-models`.
-- For `Qwen Free allocated quota exceeded`, switch credential/project immediately and reduce burst concurrency.
 
 ### Wrong Provider Selected
 
@@ -71,22 +68,16 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
 
-### `502 unknown provider for model ...`
+### Tool-Result Image Translation Regressions
 
-- Primary check:
-  - Ensure requested model appears in `/v1/models` for the same client key.
-  - Verify `oauth-model-alias` entries are still present after config edits/reloads.
-- Common fix path:
-  - Re-add missing alias bridge entries (for example Antigravity Claude thinking aliases).
-  - Reload config and re-run model inventory before retrying requests.
-
-### iFlow `glm-4.7` returns `406`
-
-- Immediate checks:
-  - Reproduce with `stream: false` and capture full upstream body.
-  - Verify exact model ID and alias route in `/v1/models`.
-- Mitigation:
-  - Route temporarily to a known-good fallback alias while normalizing request shape.
+- Symptom pattern: tool responses containing image blocks fail after translation between OpenAI-compatible and Claude-style payloads.
+- First checks:
+  - Reproduce with a non-stream request and compare with stream behavior.
+  - Inspect request/response logs for payload-shape mismatches around `tool_result` + image content blocks.
+- Operational response:
+  - Keep one canary scenario that includes image content in tool results.
+  - Alert when canary success rate drops or `4xx` translation errors spike for that scenario.
+  - Route impacted traffic to a known-good provider prefix while triaging translator output.
 
 ### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
 

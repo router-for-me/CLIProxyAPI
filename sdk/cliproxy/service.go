@@ -1,4 +1,4 @@
-// Package cliproxy provides the core service implementation for cliproxyapi++.
+// Package cliproxy provides the core service implementation for the CLI Proxy API.
 // It includes service lifecycle management, authentication handling, file watching,
 // and integration with various AI service providers through a unified interface.
 package cliproxy
@@ -1010,10 +1010,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							UserDefined: true,
 						})
 					}
-					// Fall back to runtime discovery when model list is empty.
-					if len(ms) == 0 {
-						ms = executor.FetchOpenAIModels(context.Background(), a, s.cfg, providerKey)
-					}
+					// Register and return
 					if len(ms) > 0 {
 						if providerKey == "" {
 							providerKey = "openai-compatibility"

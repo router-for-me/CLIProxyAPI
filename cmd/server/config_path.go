@@ -7,11 +7,6 @@ import (
 )
 
 func resolveDefaultConfigPath(wd string, isCloudDeploy bool) string {
-	selected, _ := resolveDefaultConfigPathWithCandidates(wd, isCloudDeploy)
-	return selected
-}
-
-func resolveDefaultConfigPathWithCandidates(wd string, isCloudDeploy bool) (string, []string) {
 	fallback := filepath.Join(wd, "config.yaml")
 	candidates := make([]string, 0, 12)
 
@@ -42,10 +37,10 @@ func resolveDefaultConfigPathWithCandidates(wd string, isCloudDeploy bool) (stri
 
 	for _, candidate := range candidates {
 		if isReadableConfigFile(candidate) {
-			return candidate, candidates
+			return candidate
 		}
 	}
-	return fallback, candidates
+	return fallback
 }
 
 func isReadableConfigFile(path string) bool {

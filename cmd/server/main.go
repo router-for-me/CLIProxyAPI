@@ -42,52 +42,6 @@ var (
 	DefaultConfigPath = ""
 )
 
-var configEnvKeys = []string{
-	"CONFIG",
-	"CONFIG_PATH",
-	"CLIPROXY_CONFIG",
-	"CLIPROXY_CONFIG_PATH",
-}
-
-func printConfigCandidates(selected string, candidates []string) {
-	for _, candidate := range candidates {
-		state := "missing"
-		if info, errStat := os.Stat(candidate); errStat == nil {
-			if info.IsDir() {
-				state = "directory"
-			} else {
-				state = "file"
-			}
-		}
-		marker := " "
-		if candidate == selected {
-			marker = "*"
-		}
-		fmt.Printf("%s %s [%s]\n", marker, candidate, state)
-	}
-}
-
-func printConfigFailureHints(configPath string, wd string, isCloudDeploy bool) {
-	selected, candidates := resolveDefaultConfigPathWithCandidates(wd, isCloudDeploy)
-	fmt.Fprintln(os.Stderr, "Config resolution:")
-	fmt.Printf("  selected: %s\n", selected)
-	if strings.TrimSpace(configPath) == "" {
-		fmt.Fprintf(os.Stderr, "  explicit --config: not set\n")
-	} else {
-		fmt.Fprintf(os.Stderr, "  explicit --config: %s\n", configPath)
-	}
-	fmt.Fprintln(os.Stderr, "  env vars (checked in order):")
-	for _, key := range configEnvKeys {
-		fmt.Fprintf(os.Stderr, "    - %s\n", key)
-	}
-	fmt.Fprintln(os.Stderr, "  candidate paths:")
-	printConfigCandidates(selected, candidates)
-	fmt.Fprintf(os.Stderr, "  template: %s\n", filepath.Join(wd, "config.example.yaml"))
-	fmt.Fprintln(os.Stderr, "Action: fix the active path or set a valid config path and re-run with --config.")
-	fmt.Fprintln(os.Stderr, "Optional: run --show-config-paths for a full candidate list.")
-	fmt.Fprintf(os.Stderr, "Validation shortcut: --config-validate --config %s\n", selected)
-}
-
 // init initializes the shared logger setup.
 func init() {
 	logging.SetupBaseLogger()
@@ -100,37 +54,20 @@ func init() {
 // Kiro defaults to incognito mode for multi-account support.
 // Users can explicitly override with --incognito or --no-incognito flags.
 func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
-	setAuthIncognitoMode(cfg, useIncognito, noIncognito, true)
-}
-
-// setQwenIncognitoMode sets the incognito browser mode for Qwen authentication.
-// Qwen defaults to normal browser mode.
-func setQwenIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
-	setAuthIncognitoMode(cfg, useIncognito, noIncognito, false)
-}
-
-func setAuthIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool, defaultIncognito bool) {
-	if cfg == nil {
-		return
-	}
 	if useIncognito {
 		cfg.IncognitoBrowser = true
 	} else if noIncognito {
 		cfg.IncognitoBrowser = false
 	} else {
-		cfg.IncognitoBrowser = defaultIncognito
+		cfg.IncognitoBrowser = true // Kiro default
 	}
 }
 
-func validateAuthIncognitoFlags(useIncognito, noIncognito bool) error {
+func validateKiroIncognitoFlags(useIncognito, noIncognito bool) error {
 	if useIncognito && noIncognito {
 		return fmt.Errorf("flags --incognito and --no-incognito are mutually exclusive")
 	}
 	return nil
-}
-
-func validateKiroIncognitoFlags(useIncognito, noIncognito bool) error {
-	return validateAuthIncognitoFlags(useIncognito, noIncognito)
 }
 
 // main is the entry point of the application.
@@ -151,7 +88,6 @@ func main() {
 	var oauthCallbackPort int
 	var antigravityLogin bool
 	var kimiLogin bool
-	var cursorLogin bool
 	var kiroLogin bool
 	var kiroGoogleLogin bool
 	var kiroAWSLogin bool
@@ -168,18 +104,14 @@ func main() {
 	var togetherLogin bool
 	var fireworksLogin bool
 	var novitaLogin bool
-	var thegentLogin string
 	var projectID string
 	var vertexImport string
-	var setup bool
 	var configPath string
 	var password string
 	var tuiMode bool
 	var standalone bool
 	var noIncognito bool
 	var useIncognito bool
-	var showConfigPaths bool
-	var configValidate bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -195,7 +127,6 @@ func main() {
 	flag.BoolVar(&noIncognito, "no-incognito", false, "Force disable incognito mode (uses existing browser session)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
-	flag.BoolVar(&cursorLogin, "cursor-login", false, "Login to Cursor using token-file or zero-action")
 	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro using Google OAuth")
 	flag.BoolVar(&kiroGoogleLogin, "kiro-google-login", false, "Login to Kiro using Google OAuth (same as --kiro-login)")
 	flag.BoolVar(&kiroAWSLogin, "kiro-aws-login", false, "Login to Kiro using AWS Builder ID (device code flow)")
@@ -212,21 +143,16 @@ func main() {
 	flag.BoolVar(&togetherLogin, "together-login", false, "Login to Together AI using API key (stored in auth-dir)")
 	flag.BoolVar(&fireworksLogin, "fireworks-login", false, "Login to Fireworks AI using API key (stored in auth-dir)")
 	flag.BoolVar(&novitaLogin, "novita-login", false, "Login to Novita AI using API key (stored in auth-dir)")
-	flag.StringVar(&thegentLogin, "thegent-login", "", "Login via TheGent unified flow for a provider (example: --thegent-login=codex)")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
-	flag.BoolVar(&setup, "setup", false, "Run interactive setup wizard for provider auth and quick checks")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
-	flag.BoolVar(&showConfigPaths, "show-config-paths", false, "Print config path candidates and exit")
-	flag.BoolVar(&configValidate, "config-validate", false, "Validate configuration strictly and exit")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
 		_, _ = fmt.Fprintf(out, "Usage of %s\n", os.Args[0])
-		_, _ = fmt.Fprintln(out, "Configuration lookup order: --config, CONFIG/CONFIG_PATH, CLIPROXY_CONFIG/CLIPROXY_CONFIG_PATH, ./config.yaml, ./config/config.yaml, docker mounts.")
 		flag.CommandLine.VisitAll(func(f *flag.Flag) {
 			if f.Name == "password" {
 				return
@@ -359,17 +285,6 @@ func main() {
 	deployEnv := os.Getenv("DEPLOY")
 	if deployEnv == "cloud" {
 		isCloudDeploy = true
-	}
-	if showConfigPaths {
-		selected, candidates := resolveDefaultConfigPathWithCandidates(wd, isCloudDeploy)
-		fmt.Println("Config path candidates:")
-		if strings.TrimSpace(configPath) != "" {
-			fmt.Printf("* %s [from --config]\n", configPath)
-		}
-		printConfigCandidates(selected, candidates)
-		fmt.Printf("Selected: %s\n", selected)
-		fmt.Fprintf(os.Stdout, "Template: %s\n", filepath.Join(wd, "config.example.yaml"))
-		return
 	}
 
 	// Determine and load the configuration file.
@@ -530,19 +445,10 @@ func main() {
 	}
 	if err != nil {
 		log.Errorf("failed to load config: %v", err)
-		printConfigFailureHints(configPath, wd, isCloudDeploy)
 		return
 	}
 	if cfg == nil {
 		cfg = &config.Config{}
-	}
-	if configValidate {
-		if err := validateConfigFileStrict(configFilePath); err != nil {
-			log.Errorf("config validation failed: %v", err)
-			return
-		}
-		fmt.Printf("Config validation passed: %s\n", configFilePath)
-		return
 	}
 
 	// In cloud deploy mode, check if we have a valid configuration
@@ -593,9 +499,9 @@ func main() {
 		ConfigPath:   configFilePath,
 	}
 
-	authenticateWithIncognito := kiroLogin || kiroGoogleLogin || kiroAWSLogin || kiroAWSAuthCode || qwenLogin
-	if authenticateWithIncognito {
-		if err := validateAuthIncognitoFlags(useIncognito, noIncognito); err != nil {
+	kiroAuthFlow := kiroLogin || kiroGoogleLogin || kiroAWSLogin || kiroAWSAuthCode
+	if kiroAuthFlow {
+		if err := validateKiroIncognitoFlags(useIncognito, noIncognito); err != nil {
 			log.Error(err)
 			return
 		}
@@ -617,13 +523,7 @@ func main() {
 
 	// Handle different command modes based on the provided flags.
 
-	if setup {
-		// Run interactive setup wizard before service start or any dedicated login flow.
-		cmd.DoSetupWizard(cfg, &cmd.SetupOptions{
-			ConfigPath: configFilePath,
-		})
-		return
-	} else if vertexImport != "" {
+	if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport)
 	} else if login {
@@ -642,7 +542,6 @@ func main() {
 		// Handle Claude login
 		cmd.DoClaudeLogin(cfg, options)
 	} else if qwenLogin {
-		setQwenIncognitoMode(cfg, useIncognito, noIncognito)
 		cmd.DoQwenLogin(cfg, options)
 	} else if kiloLogin {
 		cmd.DoKiloLogin(cfg, options)
@@ -676,8 +575,6 @@ func main() {
 		cmd.DoKiroAWSAuthCodeLogin(cfg, options)
 	} else if kiroImport {
 		cmd.DoKiroImport(cfg, options)
-	} else if cursorLogin {
-		cmd.DoCursorLogin(cfg, options)
 	} else if rooLogin {
 		cmd.DoRooLogin(cfg, options)
 	} else if minimaxLogin {
@@ -698,8 +595,6 @@ func main() {
 		cmd.DoFireworksLogin(cfg, options)
 	} else if novitaLogin {
 		cmd.DoNovitaLogin(cfg, options)
-	} else if strings.TrimSpace(thegentLogin) != "" {
-		cmd.DoThegentLogin(cfg, options, thegentLogin)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

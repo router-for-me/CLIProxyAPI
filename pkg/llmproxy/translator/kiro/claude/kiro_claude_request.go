@@ -243,11 +243,13 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// Process messages and build history
 	history, currentUserMsg, currentToolResults := processMessages(messages, modelID, origin)
 
-	// Build content with system prompt.
-	// Keep thinking tags on subsequent turns so multi-turn Claude sessions
-	// continue to emit reasoning events.
+	// Build content with system prompt (only on first turn to avoid re-injection)
 	if currentUserMsg != nil {
-		currentUserMsg.Content = buildFinalContent(currentUserMsg.Content, systemPrompt, currentToolResults)
+		effectiveSystemPrompt := systemPrompt
+		if len(history) > 0 {
+			effectiveSystemPrompt = "" // Don't re-inject on subsequent turns
+		}
+		currentUserMsg.Content = buildFinalContent(currentUserMsg.Content, effectiveSystemPrompt, currentToolResults)
 
 		// Deduplicate currentToolResults
 		currentToolResults = deduplicateToolResults(currentToolResults)
@@ -464,15 +466,6 @@ func IsThinkingEnabledWithHeaders(body []byte, headers http.Header) bool {
 			log.Debugf("kiro: thinking mode enabled via model name hint: %s", model)
 			return true
 		}
-	}
-
-	// Check model name directly for thinking hints.
-	// This enables thinking variants even when clients don't send explicit thinking fields.
-	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
-	modelLower := strings.ToLower(model)
-	if strings.Contains(modelLower, "thinking") || strings.Contains(modelLower, "-reason") {
-		log.Debugf("kiro: thinking mode enabled via model name hint: %s", model)
-		return true
 	}
 
 	log.Debugf("kiro: IsThinkingEnabled returning false (no thinking mode detected)")

@@ -17,7 +17,7 @@ Date: 2026-02-22
 - `go test ./sdk/api/handlers -run 'TestRequestExecutionMetadata'`
 - `/.github/scripts/check-distributed-critical-paths.sh`
 - `QUALITY_PACKAGES='./pkg/llmproxy/api ./sdk/api/handlers/openai' task quality:quick:check`
-- `task quality:quick:all` now runs with a configurable sibling target (`QUALITY_PARENT_TASK`) and defaults to quick checks in tandem by default; follow-up remains for missing sibling lint binaries.
+- `task quality:quick:all` currently still needs sibling compatibility validation when golangci-lint is missing/heterogeneous across siblings.
 
 ## Gap Matrix
 
@@ -38,10 +38,7 @@ Date: 2026-02-22
     - auto-mode behavior for dynamic-capable vs non-dynamic models (`ModeAuto` midpoint fallback and preservation paths).
   - Remaining: complete route-namespace matrix for command-label translation across orchestrator-facing surfaces beyond `/message`, and status/event replay windows.
 - Integration:
-  - Added: `scripts/provider-smoke-matrix.sh` plus `task test:provider-smoke-matrix` for deterministic smoke checks against `/v1/responses` using provider-qualified aliases.
-  - Added: `scripts/provider-smoke-matrix-cheapest.sh` and `task test:provider-smoke-matrix:cheapest` with deterministic cheapest-model coverage for six core providers.
-  - Added: optional CI job `provider-smoke-matrix-cheapest` behind `vars.CLIPROXY_RUN_CHEAPEST_SMOKE=1` for live cheap-path smoke against six defaults.
-  - Remaining: end-to-end provider cheapest-path smoke for all provider auth modes in persistent CI defaults. Unit-level smoke now covers:
+  - Remaining: end-to-end provider cheapest-path smoke for live process orchestration against every provider auth mode. Unit-level smoke now covers:
     - `/v1/models` namespace behavior for OpenAI-compatible and `claude-cli` User-Agent paths.
     - `/v1/metrics/providers` response shape and metric-field assertions with seeded usage data.
     - control-plane lifecycle endpoints with idempotency replay windows.
