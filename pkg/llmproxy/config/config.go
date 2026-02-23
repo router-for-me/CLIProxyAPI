@@ -1042,7 +1042,8 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if strings.EqualFold(name, alias) {
 				continue
 			}
-			aliasKey := strings.ToLower(alias)
+			// Dedupe by name+alias combination, not just alias
+			aliasKey := strings.ToLower(name) + ":" + strings.ToLower(alias)
 			if _, ok := seenAlias[aliasKey]; ok {
 				continue
 			}

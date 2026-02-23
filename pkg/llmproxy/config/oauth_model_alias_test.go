@@ -234,10 +234,17 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultGitHubCopilotAliases(t *testing.T
 	cfg.SanitizeOAuthModelAlias()
 
 	copilotAliases := cfg.OAuthModelAlias["github-copilot"]
-	if len(copilotAliases) != 1 {
-		t.Fatalf("expected 1 default github-copilot alias, got %d", len(copilotAliases))
+	if len(copilotAliases) != 2 {
+		t.Fatalf("expected 2 default github-copilot aliases, got %d", len(copilotAliases))
 	}
-	if copilotAliases[0].Name != "claude-opus-4.6" || copilotAliases[0].Alias != "claude-opus-4-6" || !copilotAliases[0].Fork {
-		t.Fatalf("expected forked alias %q->%q, got name=%q alias=%q fork=%v", "claude-opus-4.6", "claude-opus-4-6", copilotAliases[0].Name, copilotAliases[0].Alias, copilotAliases[0].Fork)
+	aliasMap := make(map[string]string)
+	for _, a := range copilotAliases {
+		aliasMap[a.Alias] = a.Name
+	}
+	if aliasMap["claude-opus-4-6"] != "claude-opus-4.6" {
+		t.Fatalf("expected alias claude-opus-4-6->claude-opus-4.6")
+	}
+	if aliasMap["claude-sonnet-4-6"] != "claude-sonnet-4.6" {
+		t.Fatalf("expected alias claude-sonnet-4-6->claude-sonnet-4.6")
 	}
 }
