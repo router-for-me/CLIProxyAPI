@@ -1,57 +1,10 @@
 # CLIProxyAPI++ (KooshaPari Fork)
 
-**Forked and enhanced from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)**
+Multi-provider LLM proxy with unified OpenAI-compatible API.
 
-Multi-provider LLM proxy with unified OpenAI-compatible API, third-party auth, SDK generation, and enterprise features.
-
-## Overview
-
-CLIProxyAPI++ provides a unified API gateway for multiple LLM providers with:
-- OpenAI-compatible endpoints
-- Third-party provider support (Kiro, GitHub Copilot, Ollama)
-- OAuth authentication flows
-- Built-in rate limiting and metrics
-- SDK auto-generation
-
-## Architecture
-
-```
-┌──────────────┐     ┌─────────────────┐     ┌────────────┐
-│   Clients    │────▶│   CLIProxy++     │────▶│  Providers │
-│ (thegent,   │     │  (this repo)    │     │ (OpenAI,   │
-│  agentapi)   │     │                 │     │  Anthropic,│
-└──────────────┘     └─────────────────┘     │  AWS, etc) │
-                         │                   └────────────┘
-                         ▼
-                  ┌─────────────────┐
-                  │   SDK Gen      │
-                  │ (Python, Go)   │
-                  └─────────────────┘
-```
+This repository works with Claude and other AI agents as autonomous software engineers.
 
 ## Quick Start
-
-### Docker
-
-```bash
-mkdir -p ~/cli-proxy && cd ~/cli-proxy
-
-cat > docker-compose.yml << 'EOF'
-services:
-  cli-proxy-api:
-    image: eceasy/cli-proxy-api-plus:latest
-    ports:
-      - "8317:8317"
-    volumes:
-      - ./config.yaml:/CLIProxyAPI/config.yaml
-    restart: unless-stopped
-EOF
-
-curl -o config.yaml https://raw.githubusercontent.com/KooshaPari/cliproxyapi-plusplus/main/config.example.yaml
-docker compose up -d
-```
-
-### From Source
 
 ```bash
 # Build
@@ -59,32 +12,75 @@ go build -o cliproxy ./cmd/cliproxy
 
 # Run
 ./cliproxy --config config.yaml
+
+# Docker
+docker compose up -d
 ```
 
-## Configuration
+## Environment
 
-```yaml
-server:
-  port: 8317
-
-providers:
-  openai:
-    api_key: ${OPENAI_API_KEY}
-  anthropic:
-    api_key: ${ANTHROPIC_API_KEY}
-  kiro:
-    enabled: true
-  github_copilot:
-    enabled: true
-
-rate_limit:
-  requests_per_minute: 60
-  tokens_per_minute: 100000
+```bash
+# Required environment variables
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-..."
 ```
 
-## Features
+---
 
-### Provider Support
+## Development Philosophy
+
+### Extend, Never Duplicate
+
+- NEVER create a v2 file. Refactor the original.
+- NEVER create a new class if an existing one can be made generic.
+- NEVER create custom implementations when an OSS library exists.
+- Before writing ANY new code: search the codebase for existing patterns.
+
+### Primitives First
+
+- Build generic building blocks before application logic.
+- A provider interface + registry is better than N isolated classes.
+- Template strings > hardcoded messages. Config-driven > code-driven.
+
+### Research Before Implementing
+
+- Check pkg.go.dev for existing libraries.
+- Search GitHub for 80%+ implementations to fork/adapt.
+
+---
+
+## Library Preferences (DO NOT REINVENT)
+
+| Need | Use | NOT |
+|------|-----|-----|
+| HTTP router | chi | custom router |
+| Logging | zerolog | fmt.Print |
+| Config | viper | manual env parsing |
+| Validation | go-playground/validator | manual if/else |
+| Rate limiting | golang.org/x/time/rate | custom limiter |
+
+---
+
+## Code Quality Non-Negotiables
+
+- Zero new lint suppressions without inline justification
+- All new code must pass: go fmt, go vet, golint
+- Max function: 40 lines
+- No placeholder TODOs in committed code
+
+---
+
+## Verifiable Constraints
+
+| Metric | Threshold | Enforcement |
+|--------|-----------|-------------|
+| Tests | 80% coverage | CI gate |
+| Lint | 0 errors | golangci-lint |
+| Security | 0 critical | trivy scan |
+
+---
+
+## Provider Support
 
 | Provider | Auth | Status |
 |----------|------|--------|
@@ -97,42 +93,7 @@ rate_limit:
 | GitHub Copilot | OAuth | ✅ |
 | Ollama | Local | ✅ |
 
-### Authentication
-
-- **API Key** - Standard OpenAI-style
-- **OAuth** - Kiro, GitHub Copilot via web flow
-- **AWS IAM** - Bedrock credentials
-
-### Rate Limiting
-
-- Token bucket algorithm
-- Per-provider limits
-- Cooldown management
-- Usage quotas
-
-### Observability
-
-- Request/response logging
-- Cost tracking
-- Latency metrics
-- Error rate monitoring
-
-## Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /v1/chat/completions` | Chat completions |
-| `POST /v1/completions` | Text completions |
-| `GET /v1/models` | List models |
-| `GET /health` | Health check |
-| `GET /metrics` | Prometheus metrics |
-
-## SDKs
-
-Auto-generated SDKs for:
-
-- **Python** - `pip install cliproxy-sdk`
-- **Go** - `go get github.com/KooshaPari/cliproxy-sdk-go`
+---
 
 ## Integration
 
@@ -143,7 +104,6 @@ Auto-generated SDKs for:
 llm:
   provider: cliproxy
   base_url: http://localhost:8317/v1
-  api_key: ${CLIPROXY_API_KEY}
 ```
 
 ### With agentapi
@@ -152,29 +112,18 @@ llm:
 agentapi --cliproxy http://localhost:8317
 ```
 
-## Development
-
-```bash
-# Lint
-go fmt ./...
-go vet ./...
-
-# Test
-go test ./...
-
-# Generate SDKs
-./scripts/generate_sdks.sh
-```
+---
 
 ## Fork Differences
 
 This fork includes:
-
 - ✅ SDK auto-generation workflow
 - ✅ Enhanced OpenAPI spec
-- ✅ Python client SDK (`pkg/sdk/python`)
-- ✅ Go client SDK (`pkg/sdk/go`)
+- ✅ Python client SDK
+- ✅ Go client SDK
 - ✅ Integration with tokenledger for cost tracking
+
+---
 
 ## License
 
