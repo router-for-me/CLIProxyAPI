@@ -1662,14 +1662,14 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 			log.Debug("kiro: unknown sonnet 4.6 variant, mapping to claude-sonnet-4.6")
 			return "claude-sonnet-4.6"
 		}
-		if strings.Contains(modelLower, "4-5") || strings.Contains(modelLower, "4.5") {
-			log.Debug("kiro: unknown sonnet 4.5 variant, mapping to claude-sonnet-4.5")
-			return "claude-sonnet-4.5"
+			if strings.Contains(modelLower, "4-5") || strings.Contains(modelLower, "4.5") {
+				log.Debugf("kiro: unknown Sonnet 4.5 model '%s', mapping to claude-sonnet-4.5", model)
+				return "claude-sonnet-4.5"
+			}
+			// Default to Sonnet 4
+			log.Debug("kiro: unknown Sonnet model, mapping to claude-sonnet-4")
+			return "claude-sonnet-4"
 		}
-		// Default to Sonnet 4
-		log.Debug("kiro: unknown sonnet variant, mapping to claude-sonnet-4")
-		return "claude-sonnet-4"
-	}
 
 	// Check for Opus variants
 	if strings.Contains(modelLower, "opus") {
