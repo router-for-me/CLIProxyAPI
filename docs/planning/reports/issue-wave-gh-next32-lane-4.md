@@ -6,8 +6,13 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-4`
 ## Per-Issue Status
 
 ### #125
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: issue is still `OPEN` (`Error 403`); reported payload is upstream entitlement/subscription denial (`SUBSCRIPTION_REQUIRED`) and is not deterministically closable in this lane.
+- Code/test surface:
+  - `pkg/llmproxy/executor/antigravity_executor_error_test.go`
+- Evidence command:
+  - `go test ./pkg/llmproxy/executor -run 'TestAntigravityErrorMessage_(AddsLicenseHintForKnown403|NoHintForNon403)' -count=1`
+  - Result: `FAIL github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/executor [build failed]` due pre-existing syntax errors in `pkg/llmproxy/executor/kiro_executor.go` (`unexpected name kiroModelFingerprint`, `unexpected name string`).
 
 ### #115
 - Status: `blocked`
@@ -30,8 +35,14 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-4`
   - Result: `ok   github.com/router-for-me/CLIProxyAPI/v6/sdk/auth`
 
 ### #102
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: issue is still `OPEN` (`登录incognito参数无效`); deterministic evidence shows `qwen-login` flag exists, but current in-file incognito guidance/comments are Kiro-focused and no qwen-specific proof-of-fix test surfaced in this lane.
+- Code/test surface:
+  - `cmd/server/main.go`
+  - `pkg/llmproxy/browser/browser.go`
+- Evidence command:
+  - `rg -n "qwen-login|incognito|no-incognito|SetIncognitoMode" cmd/server/main.go pkg/llmproxy/auth/qwen pkg/llmproxy/browser/browser.go | head -n 80`
+  - Result: includes `flag.BoolVar(&qwenLogin, "qwen-login", false, ...)` (`cmd/server/main.go:122`) and Kiro-specific incognito comments (`cmd/server/main.go:572-586`), but no deterministic qwen-incognito regression proof.
 
 ### #101
 - Status: `blocked`
@@ -45,7 +56,8 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-4`
 
 ## Blockers
 
-- None recorded yet; work is in planning state.
+- `#125`: deterministic closure blocked by upstream entitlement dependency and unrelated package compile break in `pkg/llmproxy/executor/kiro_executor.go`.
+- `#102`: no deterministic qwen-incognito fix validation path identified in current lane scope.
 
 ## Wave2 Updates
 

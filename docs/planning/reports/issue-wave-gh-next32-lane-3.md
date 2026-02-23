@@ -20,8 +20,14 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-3`
 - Notes: no deterministic failing fixture in current repo state that maps to a safe bounded patch; deferred to dedicated repro lane.
 
 ### #145
-- Status: `pending`
-- Notes: lane-started
+- Status: `done`
+- Notes: issue is still `OPEN` upstream, but deterministic regression coverage for the exact OpenAI-compat payload path exists and passes in this tree.
+- Code/test surface:
+  - `pkg/llmproxy/translator/kiro/claude/kiro_claude_request.go`
+  - `pkg/llmproxy/translator/kiro/claude/kiro_claude_request_test.go`
+- Evidence command:
+  - `go test ./pkg/llmproxy/translator/kiro/claude -run 'TestBuildKiroPayload_OpenAICompatIssue145Payload' -count=1`
+  - Result: `ok   github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/kiro/claude	0.523s`
 
 ### #136
 - Status: `blocked`
@@ -33,8 +39,14 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-3`
   - Result: `ok   github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro`
 
 ### #133
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: issue is still `OPEN`; current deterministic evidence shows config/normalization support for `fill-first`, but no direct request-routing behavior proof in this lane for the reported runtime symptom.
+- Code/test surface:
+  - `pkg/llmproxy/api/handlers/management/config_basic.go`
+  - `pkg/llmproxy/api/handlers/management/config_basic_routing_test.go`
+- Evidence command:
+  - `rg -n "fill-first|Test.*Fill|TestNormalizeRoutingStrategy_AcceptsFillFirstAliases" pkg/llmproxy | head -n 80`
+  - Result: shows `fill-first` normalization/config coverage (for example `config_basic_routing_test.go:5`) but no deterministic end-to-end routing-behavior proof.
 
 ### #129
 - Status: `done`
@@ -66,4 +78,4 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-3`
 
 ## Blockers
 
-- None recorded yet; work is in planning state.
+- `#133`: missing deterministic runtime proof for fill-first behavior beyond normalization-level coverage.
