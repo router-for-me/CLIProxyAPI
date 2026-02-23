@@ -1,6 +1,8 @@
 package synthesizer
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,6 +11,26 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+func TestStableIDGenerator_Next_DoesNotUseLegacySHA256(t *testing.T) {
+	gen := NewStableIDGenerator()
+	id, short := gen.Next("gemini:apikey", "test-key", "https://api.example.com")
+	if id == "" || short == "" {
+		t.Fatal("expected generated IDs to be non-empty")
+	}
+
+	legacyHasher := sha256.New()
+	legacyHasher.Write([]byte("gemini:apikey"))
+	legacyHasher.Write([]byte{0})
+	legacyHasher.Write([]byte("test-key"))
+	legacyHasher.Write([]byte{0})
+	legacyHasher.Write([]byte("https://api.example.com"))
+	legacyShort := hex.EncodeToString(legacyHasher.Sum(nil))[:12]
+
+	if short == legacyShort {
+		t.Fatalf("expected short id to differ from legacy sha256 digest %q", legacyShort)
+	}
+}
 
 func TestNewStableIDGenerator(t *testing.T) {
 	gen := NewStableIDGenerator()
