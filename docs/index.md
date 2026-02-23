@@ -1,6 +1,6 @@
 # cliproxyapi++ Docs
 
-`cliproxyapi++` is a high-performance OpenAI-compatible proxy that lets you route one client API surface to many upstream providers.
+`cliproxyapi++` is an OpenAI-compatible proxy that routes one client API surface to multiple upstream providers.
 
 ## Who This Documentation Is For
 
@@ -14,7 +14,7 @@
 - Use one endpoint (`/v1/*`) across heterogeneous providers.
 - Configure routing and model-prefix behavior in `config.yaml`.
 - Manage credentials and runtime controls through management APIs.
-- Monitor health and per-provider metrics for production operations.
+- Monitor health and per-provider metrics for operations.
 
 ## Start Here
 
@@ -23,10 +23,10 @@
 3. [Provider Usage](/provider-usage) for provider strategy and setup patterns.
 4. [Provider Quickstarts](/provider-quickstarts) for provider-specific 5-minute success paths.
 5. [Provider Catalog](/provider-catalog) for provider block reference.
-5. [Provider Operations](/provider-operations) for on-call runbook and incident workflows.
-6. [Routing and Models Reference](/routing-reference) for model resolution behavior.
-7. [Troubleshooting](/troubleshooting) for common failures and concrete fixes.
-8. [Planning Boards](/planning/) for source-linked execution tracking and import-ready board artifacts.
+6. [Provider Operations](/provider-operations) for on-call runbook and incident workflows.
+7. [Routing and Models Reference](/routing-reference) for model resolution behavior.
+8. [Troubleshooting](/troubleshooting) for common failures and concrete fixes.
+9. [Planning Boards](/planning/) for source-linked execution tracking and import-ready board artifacts.
 
 ## API Surfaces
 

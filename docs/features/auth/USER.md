@@ -1,8 +1,8 @@
-# User Guide: Enterprise Authentication
+# User Guide: Authentication
 
 ## Understanding Authentication in cliproxyapi++
 
-cliproxyapi++ supports multiple authentication methods for different LLM providers. The authentication system handles credential management, automatic token refresh, and quota tracking seamlessly in the background.
+cliproxyapi++ supports multiple authentication methods for different LLM providers. The authentication system handles credential management, automatic token refresh, and quota tracking.
 
 ## Quick Start: Adding Credentials
 
@@ -89,7 +89,7 @@ curl -X POST http://localhost:8317/v0/management/auths \
 - Mistral
 - Groq
 - DeepSeek
-- And many more
+- Additional providers can be configured through provider blocks
 
 **Setup**:
 ```json
@@ -126,7 +126,7 @@ open http://localhost:8317/v0/oauth/copilot
 
 # Enter your GitHub credentials
 # Authorize the application
-# Done! Token is stored and managed automatically
+# Token is stored and managed automatically
 ```
 
 ### Custom Provider Authentication
@@ -310,7 +310,7 @@ Response:
 When quota is exhausted or token expires:
 1. System selects next available credential
 2. Notifications sent (configured)
-3. Load continues seamlessly
+3. Requests continue with the next available credential
 
 ### Manual Rotation
 
@@ -406,7 +406,7 @@ curl -X POST http://localhost:8317/v0/management/auths \
 3. **Monitor refresh failures**
 4. **Review credential usage** patterns
 
-## Advanced: Encryption
+## Encryption
 
 Enable credential encryption:
 
