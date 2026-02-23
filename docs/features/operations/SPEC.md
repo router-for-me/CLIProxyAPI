@@ -1,8 +1,8 @@
-# Technical Specification: High-Scale Operations
+# Technical Specification: Operations
 
 ## Overview
 
-**cliproxyapi++** is designed for high-scale production environments with intelligent operations features: automated cooldown, load balancing, health checking, and comprehensive observability.
+**cliproxyapi++** includes operations features for cooldown handling, load balancing, health checks, and observability.
 
 ## Operations Architecture
 
@@ -10,7 +10,7 @@
 
 ```
 Operations Layer
-├── Intelligent Cooldown System
+├── Cooldown System
 │   ├── Rate Limit Detection
 │   ├── Provider-Specific Cooldown
 │   ├── Automatic Recovery

@@ -1,8 +1,8 @@
-# Technical Specification: Enterprise Authentication & Lifecycle
+# Technical Specification: Authentication & Lifecycle
 
 ## Overview
 
-**cliproxyapi++** implements enterprise-grade authentication management with full lifecycle automation, supporting multiple authentication flows (API keys, OAuth, device authorization) and automatic token refresh capabilities.
+**cliproxyapi++** implements authentication lifecycle management with multiple flows (API keys, OAuth, device authorization) and automatic token refresh.
 
 ## Authentication Architecture
 
@@ -315,7 +315,7 @@ auth:
     refresh_lead_time: "10m"
 ```
 
-**Refresh Lead Time**: Tokens are refreshed 10 minutes before expiration to ensure zero downtime.
+**Refresh Lead Time**: Tokens are refreshed 10 minutes before expiration to reduce token-expiry interruptions.
 
 ### Refresh Strategies
 
