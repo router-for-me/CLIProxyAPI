@@ -8,6 +8,7 @@ permissions:
 
 jobs:
   quality-ci:
+    name: quality-ci
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
