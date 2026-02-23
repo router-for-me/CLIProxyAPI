@@ -87,6 +87,26 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Pass criteria:
   - `diff` is empty, or any difference is explainable by provider-side truncation/stream interruption.
 
+### iFlow OAuth model visibility is narrower than expected
+
+- Symptom: login/auth succeeds, but only a subset of `iflow/*` models appear or work.
+- Immediate checks:
+  - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg '^iflow/'`
+  - Validate request model is exactly one of the exposed IDs.
+- Mitigation:
+  - Do not assume upstream catalog parity after OAuth login.
+  - Keep a known-good iFlow canary model and gate rollout on successful canary responses.
+
+### Usage dashboard shows zeros under load
+
+- Symptom: traffic volume rises but usage counters remain `0`.
+- Immediate checks:
+  - Run one non-stream and one stream request against the same model and compare emitted usage fields/log lines.
+  - Verify provider metrics endpoint still records request/error activity.
+- Mitigation:
+  - Treat missing upstream usage as a provider payload gap, not a transport success signal.
+  - Keep stream/non-stream parity probes in pre-release checks.
+
 ### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
 
 - Symptom: plus/team users get `400/404 model_not_found` for `gpt-5.3-codex-spark`.
@@ -97,6 +117,44 @@ This runbook is for operators who care about provider uptime, quota health, and 
   - Warn: Spark error ratio > 2% over 10 minutes.
   - Critical: Spark error ratio > 5% over 10 minutes.
   - Auto-mitigation: fallback alias to `gpt-5.3-codex` when critical threshold is crossed.
+
+### Codex 5.3 integration path (non-subprocess first)
+
+- Preferred path:
+  - Embed via `sdk/cliproxy` when the caller owns the runtime process.
+- HTTP fallback path:
+  - Use `/v1/*` only when crossing process boundaries.
+- Negotiation checks:
+  - Probe `/health` and `/v1/models` before enabling codex5.3-specific flows.
+  - Gate advanced behavior on observed model exposure (`gpt-5.3-codex`, `gpt-5.3-codex-spark`).
+
+### Amp traffic does not route through CLIProxyAPI
+
+- Symptom: Amp appears to call upstream directly and proxy logs remain idle.
+- Immediate checks:
+  - Ensure Amp process has `OPENAI_API_BASE=http://127.0.0.1:8317/v1`.
+  - Ensure Amp process has `OPENAI_API_KEY=<client-key>`.
+  - Run one direct canary request with identical env and confirm it appears in proxy logs.
+- Mitigation:
+  - Standardize Amp launch wrappers to export proxy env explicitly.
+  - Add startup validation that fails early when base URL does not target CLIProxyAPI.
+
+### Gemini thinking-length control drift (OpenAI-compatible clients)
+
+- Symptom: client requests a specific thinking level/budget but observed behavior looks unbounded or unchanged.
+- Immediate checks:
+  - Inspect request/response pair and compare with runtime debug lines:
+    - `thinking: original config from request`
+    - `thinking: processed config to apply`
+  - Confirm requested model and its thinking-capable alias are exposed in `/v1/models`.
+- Suggested alert thresholds:
+  - Warn: processed thinking mode mismatch ratio > 2% over 10 minutes.
+  - Critical: processed thinking mode mismatch ratio > 5% over 10 minutes.
+  - Warn: reasoning token growth > 25% above baseline for fixed-thinking workloads over 10 minutes.
+- Mitigation:
+  - Force explicit thinking-capable model alias for affected workloads.
+  - Reduce rollout blast radius by pinning the model suffix/level per workload class.
+  - Keep one non-stream and one stream canary for each affected client integration.
 
 ## Recommended Production Pattern
 

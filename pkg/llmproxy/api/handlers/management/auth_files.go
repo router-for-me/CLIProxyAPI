@@ -2160,7 +2160,7 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 		Metadata: map[string]any{
 			"email":        email,
 			"api_key":      tokenStorage.APIKey,
-			"expired":      tokenStorage.Expire,
+			"expires_at":   tokenStorage.Expire,
 			"cookie":       tokenStorage.Cookie,
 			"type":         tokenStorage.Type,
 			"last_refresh": tokenStorage.LastRefresh,
@@ -2181,7 +2181,7 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 		"status":     "ok",
 		"saved_path": savedPath,
 		"email":      email,
-		"expired":    tokenStorage.Expire,
+		"expires_at": tokenStorage.Expire,
 		"type":       tokenStorage.Type,
 	})
 }

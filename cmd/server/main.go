@@ -288,6 +288,19 @@ func main() {
 	if deployEnv == "cloud" {
 		isCloudDeploy = true
 	}
+	if showConfigPaths {
+		selected, candidates := resolveDefaultConfigPathWithCandidates(wd, isCloudDeploy)
+		fmt.Println("Config path candidates:")
+		if strings.TrimSpace(configPath) != "" {
+			fmt.Printf("* %s [from --config]\n", configPath)
+		}
+		printConfigCandidates(selected, candidates)
+		fmt.Printf("Selected: %s\n", selected)
+		if _, err := fmt.Fprintf(os.Stdout, "Template: %s\n", filepath.Join(wd, "config.example.yaml")); err != nil {
+			log.Errorf("failed to print config template path: %v", err)
+		}
+		return
+	}
 
 	// Determine and load the configuration file.
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
