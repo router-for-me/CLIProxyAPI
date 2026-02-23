@@ -273,6 +273,11 @@ tasks:
     cmds:
       - task: quality:quick:check
 
+  changelog:check:
+    desc: "Verify CHANGELOG.md contains an Unreleased heading"
+    cmds:
+      - rg -q '^## \[Unreleased\]' CHANGELOG.md
+
   quality:shellcheck:
     desc: "Run shellcheck on shell scripts (best-effort, no-op when shellcheck missing)"
     cmds:

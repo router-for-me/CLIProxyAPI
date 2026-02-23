@@ -196,6 +196,10 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
   - [Agent Operator](./docs/docsets/agent/)
 - **Research**: [AgentAPI + cliproxyapi++ tandem and alternatives](./docs/planning/agentapi-cliproxy-integration-research-2026-02-22.md)
 - **Research (300 repo sweep)**: [coder org + 97 adjacent repos](./docs/planning/coder-org-plus-relative-300-inventory-2026-02-22.md)
+- **Changelog and Release Notes:**
+  - [CHANGELOG](./CHANGELOG.md)
+  - [Changelog Process](./docs/guides/CHANGELOG_PROCESS.md)
+  - [Changelog Entry Template](./docs/guides/CHANGELOG_ENTRY_TEMPLATE.md)
 - **[Feature Changes in ++](./docs/FEATURE_CHANGES_PLUSPLUS.md)** — Comprehensive list of `++` differences and impacts.
 - **[Docs README](./docs/README.md)** — Core docs map.
 
