@@ -1,0 +1,175 @@
+openapi: 3.0.0
+info:
+  title: CLIProxyAPI Plus
+  description: |
+    AI Gateway API with OAuth support for multiple providers.
+    
+    ## Providers
+    - Anthropic (Claude)
+    - OpenAI
+    - Google (Gemini)
+    - MiniMax
+    - Kiro
+    - Codex
+    - And more...
+  version: 2.0.0
+  contact:
+    name: CLIProxyAPI Plus
+
+servers:
+  - url: http://127.0.0.1:8317
+    description: Local development
+  - url: {baseUrl}
+    variables:
+      baseUrl:
+        default: http://localhost:8317
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+
+  /v1/chat/completions:
+    post:
+      summary: Chat completions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model:
+                  type: string
+                messages:
+                  type: array
+                  items:
+                    type: object
+                stream:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Chat completion response
+
+  /v1/models:
+    get:
+      summary: List available models
+      responses:
+        '200':
+          description: Model list
+
+  /v1/models/{model_name}:
+    get:
+      summary: Get model info
+      parameters:
+        - name: model_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Model info
+
+  /v0/management/config:
+    get:
+      summary: Get configuration
+      security:
+        - ManagementKey: []
+      responses:
+        '200':
+          description: Configuration object
+
+  /v0/management/config:
+    put:
+      summary: Update configuration
+      security:
+        - ManagementKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Configuration updated
+
+  /v0/management/auth:
+    get:
+      summary: List auth entries
+      security:
+        - ManagementKey: []
+      responses:
+        '200':
+          description: Auth list
+
+  /v0/management/auth:
+    post:
+      summary: Add auth entry
+      security:
+        - ManagementKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Auth added
+
+  /v0/management/usage:
+    get:
+      summary: Get usage statistics
+      security:
+        - ManagementKey: []
+      responses:
+        '200':
+          description: Usage statistics
+
+  /v0/management/logs:
+    get:
+      summary: Get logs
+      security:
+        - ManagementKey: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: Log entries
+
+components:
+  securitySchemes:
+    ManagementKey:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Management API key
+
+tags:
+  - name: Chat
+    description: Chat completions endpoints
+  - name: Models
+    description: Model management
+  - name: Management
+    description: Configuration and management
+  - name: Auth
+    description: Authentication management
+  - name: Usage
+    description: Usage and statistics
