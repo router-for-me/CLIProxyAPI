@@ -80,3 +80,25 @@ func TestGenerateWebSearchEvents(t *testing.T) {
 		t.Error("message_start event not found")
 	}
 }
+
+func TestCheckedSearchContentCapacity(t *testing.T) {
+	t.Run("ok", func(t *testing.T) {
+		got, err := checkedSearchContentCapacity(3, 4)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != 10 {
+			t.Fatalf("expected 10, got %d", got)
+		}
+	})
+
+	t.Run("overflow", func(t *testing.T) {
+		_, err := checkedSearchContentCapacity(maxInt/2+1, 0)
+		if err == nil {
+			t.Fatal("expected overflow error, got nil")
+		}
+		if !strings.Contains(err.Error(), "overflow") {
+			t.Fatalf("expected overflow error, got: %v", err)
+		}
+	})
+}

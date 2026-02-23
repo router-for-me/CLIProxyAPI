@@ -3,6 +3,8 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1739,7 +1741,7 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 			if !m.shouldRefresh(a, now) {
 				continue
 			}
-			log.Debugf("checking refresh for %s, %s, %s", a.Provider, a.ID, typ)
+			log.Debugf("checking refresh for %s kind=%s", authLogRef(a), typ)
 
 			if exec := m.executorFor(a.Provider); exec == nil {
 				continue
@@ -1999,10 +2001,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	cloned := auth.Clone()
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
-		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
+		log.Debugf("refresh canceled for %s", authLogRef(auth))
 		return
 	}
-	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
+	log.Debugf("refresh completed for %s err=%v", authLogRef(auth), err)
 	now := time.Now()
 	if err != nil {
 		m.mu.Lock()
@@ -2141,6 +2143,25 @@ func formatOauthIdentity(auth *Auth, provider string, accountInfo string) string
 		return accountInfo
 	}
 	return strings.Join(parts, " ")
+}
+
+func authLogRef(auth *Auth) string {
+	if auth == nil {
+		return "provider=unknown auth_id_hash=none"
+	}
+	provider := strings.TrimSpace(auth.Provider)
+	if provider == "" {
+		provider = "unknown"
+	}
+	identifier := strings.TrimSpace(auth.ID)
+	if identifier == "" {
+		identifier = strings.TrimSpace(auth.FileName)
+	}
+	if identifier == "" {
+		return "provider=" + provider + " auth_id_hash=none"
+	}
+	sum := sha256.Sum256([]byte(identifier))
+	return "provider=" + provider + " auth_id_hash=" + hex.EncodeToString(sum[:6])
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.

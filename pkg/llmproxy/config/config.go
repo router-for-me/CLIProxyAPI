@@ -1756,10 +1756,18 @@ func appendPath(path []string, key string) []string {
 	if len(path) == 0 {
 		return []string{key}
 	}
-	newPath := make([]string, len(path)+1)
+	newPath := make([]string, checkedPathLengthPlusOne(len(path)))
 	copy(newPath, path)
 	newPath[len(path)] = key
 	return newPath
+}
+
+func checkedPathLengthPlusOne(pathLen int) int {
+	maxInt := int(^uint(0) >> 1)
+	if pathLen < 0 || pathLen >= maxInt {
+		panic(fmt.Sprintf("path length overflow: %d", pathLen))
+	}
+	return pathLen + 1
 }
 
 // isKnownDefaultValue returns true if the given node at the specified path
