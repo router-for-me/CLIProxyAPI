@@ -107,6 +107,25 @@ This runbook is for operators who care about provider uptime, quota health, and 
   - Treat missing upstream usage as a provider payload gap, not a transport success signal.
   - Keep stream/non-stream parity probes in pre-release checks.
 
+### Antigravity / CLA CLI support matrix (`CPB-0743`)
+
+- Symptom: `antigravity` clients intermittently produce empty payloads or different behavior between `antigravity-cli` and CLIProxyAPI Plus front-end calls.
+- Immediate checks:
+  - Confirm model coverage:
+    - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg '^antigravity/'`
+  - Confirm supported CLI client class:
+    - `curl -sS http://localhost:8317/v0/management/config -H "Authorization: Bearer <management-secret>" | jq '.providers[] | select(.name==\"antigravity\") | .supported_clients'`
+  - Confirm request translation path in logs:
+    - `rg -n "antigravity|claude|tool_use|custom_model|request.*model" logs/*.log`
+- Suggested matrix checks:
+  - `antigravity-cli` should map to supported auth-backed model IDs.
+  - Provider alias mode should keep aliases explicit in `/v1/models`.
+  - Tool/callback-heavy workloads should pass through without dropping `tool_use` boundaries.
+- Mitigation:
+  - If parity is missing, align source request to provider-native model IDs and re-check with a non-stream request first.
+  - Route unsupported workloads through mapped aliases using `ampcode.model-mappings` and document temporary exclusion.
+  - Keep a canary for each supported `antigravity/*` model with 10-minute trend windows.
+
 ### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
 
 - Symptom: plus/team users get `400/404 model_not_found` for `gpt-5.3-codex-spark`.

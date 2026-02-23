@@ -230,6 +230,11 @@ type AmpModelMapping struct {
 	// The target model must have available providers in the registry.
 	To string `yaml:"to" json:"to"`
 
+	// Params define provider-agnostic request overrides to apply when this mapping is used.
+	// Keys are merged into the request JSON at the root level unless they already exist.
+	// For example: params: {"custom_model": "iflow/tab-rt", "enable_stream": true}
+	Params map[string]interface{} `yaml:"params,omitempty" json:"params,omitempty"`
+
 	// Regex indicates whether the 'from' field should be interpreted as a regular
 	// expression for matching model names. When true, this mapping is evaluated
 	// after exact matches and in the order provided. Defaults to false (exact match).
