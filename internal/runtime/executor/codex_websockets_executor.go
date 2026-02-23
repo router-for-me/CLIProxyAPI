@@ -1294,7 +1294,7 @@ func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
 	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), util.RedactAPIKey(strings.TrimSpace(authID)), sanitizeURLForLog(wsURL))
 }
 
-func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
+func logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason string, err error) {
 	if err != nil {
 		// codeql[go/clear-text-logging] - authID is a filename/identifier, not a credential; wsURL is sanitized
 		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s err=%v", strings.TrimSpace(sessionID), util.RedactAPIKey(strings.TrimSpace(authID)), sanitizeURLForLog(wsURL), strings.TrimSpace(reason), err)
