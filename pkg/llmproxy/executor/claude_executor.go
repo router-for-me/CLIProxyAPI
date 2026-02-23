@@ -534,12 +534,19 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	var betas []string
 	if betasResult.IsArray() {
 		for _, item := range betasResult.Array() {
+			if item.Type != gjson.String {
+				continue
+			}
 			if s := strings.TrimSpace(item.String()); s != "" {
 				betas = append(betas, s)
 			}
 		}
-	} else if s := strings.TrimSpace(betasResult.String()); s != "" {
-		betas = append(betas, s)
+	} else if betasResult.Type == gjson.String {
+		for _, token := range strings.Split(betasResult.Str, ",") {
+			if s := strings.TrimSpace(token); s != "" {
+				betas = append(betas, s)
+			}
+		}
 	}
 	body, _ = sjson.DeleteBytes(body, "betas")
 	return betas, body

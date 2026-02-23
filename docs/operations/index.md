@@ -18,3 +18,8 @@ This section centralizes first-response runbooks for active incidents.
 - Last reviewed: `2026-02-21`
 - Date format standard: `YYYY-MM-DD`
 - Owner field pattern: `Owner: <team-or-role>`
+
+## Migration Notes
+
+- [CPB-0600 model metadata naming cleanup for iFlow](./cpb-0600-iflow-metadata-migration.md)
+- [CPB-0783 process-compose/HMR refresh for gemini-3-pro-preview tool issues](./cpb-0783-gemini-3-pro-preview-hmr.md)
