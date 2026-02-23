@@ -1186,12 +1186,11 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 
 	// Fetch quota information from /copilot_pkg/llmproxy/user
 	// Derive the base URL from the original token request to support proxies and test servers
-	parsedURL, errParse := url.Parse(originalURL)
-	if errParse != nil {
-		log.WithError(errParse).Debug("enrichCopilotTokenResponse: failed to parse URL")
+	quotaURL, errQuotaURL := copilotQuotaURLFromTokenURL(originalURL)
+	if errQuotaURL != nil {
+		log.WithError(errQuotaURL).Debug("enrichCopilotTokenResponse: rejected token URL for quota request")
 		return response
 	}
-	quotaURL := fmt.Sprintf("%s://%s/copilot_pkg/llmproxy/user", parsedURL.Scheme, parsedURL.Host)
 
 	req, errNewRequest := http.NewRequestWithContext(ctx, http.MethodGet, quotaURL, nil)
 	if errNewRequest != nil {
@@ -1331,4 +1330,21 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	response.Body = string(enrichedBody)
 
 	return response
+}
+
+func copilotQuotaURLFromTokenURL(originalURL string) (string, error) {
+	parsedURL, errParse := url.Parse(strings.TrimSpace(originalURL))
+	if errParse != nil {
+		return "", errParse
+	}
+	host := strings.ToLower(parsedURL.Hostname())
+	if parsedURL.Scheme != "https" {
+		return "", fmt.Errorf("unsupported scheme %q", parsedURL.Scheme)
+	}
+	switch host {
+	case "api.github.com", "api.githubcopilot.com":
+		return fmt.Sprintf("https://%s/copilot_pkg/llmproxy/user", host), nil
+	default:
+		return "", fmt.Errorf("unsupported host %q", parsedURL.Hostname())
+	}
 }

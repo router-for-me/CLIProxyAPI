@@ -408,3 +408,56 @@ func TestGetKiroQuotaWithChecker_MissingCredentialIncludesRequestedIndex(t *test
 		t.Fatalf("expected requested auth_index in response, got: %s", rec.Body.String())
 	}
 }
+
+func TestCopilotQuotaURLFromTokenURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		tokenURL  string
+		wantURL   string
+		expectErr bool
+	}{
+		{
+			name:      "github_api",
+			tokenURL:  "https://api.github.com/copilot_internal/v2/token",
+			wantURL:   "https://api.github.com/copilot_pkg/llmproxy/user",
+			expectErr: false,
+		},
+		{
+			name:      "copilot_api",
+			tokenURL:  "https://api.githubcopilot.com/copilot_internal/v2/token",
+			wantURL:   "https://api.githubcopilot.com/copilot_pkg/llmproxy/user",
+			expectErr: false,
+		},
+		{
+			name:      "reject_http",
+			tokenURL:  "http://api.github.com/copilot_internal/v2/token",
+			expectErr: true,
+		},
+		{
+			name:      "reject_untrusted_host",
+			tokenURL:  "https://127.0.0.1/copilot_internal/v2/token",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := copilotQuotaURLFromTokenURL(tt.tokenURL)
+			if tt.expectErr {
+				if err == nil {
+					t.Fatalf("expected error, got url=%q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("copilotQuotaURLFromTokenURL returned error: %v", err)
+			}
+			if got != tt.wantURL {
+				t.Fatalf("copilotQuotaURLFromTokenURL = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}

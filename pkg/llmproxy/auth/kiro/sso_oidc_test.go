@@ -106,3 +106,28 @@ func TestRefreshTokenWithRegion_UsesRegionHostAndGrantType(t *testing.T) {
 		t.Fatalf("unexpected token data: %#v", got)
 	}
 }
+
+func TestCreateTokenWithRegion_RejectsInvalidRegion(t *testing.T) {
+	t.Parallel()
+
+	var called bool
+	client := &SSOOIDCClient{
+		httpClient: &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				called = true
+				return nil, nil
+			}),
+		},
+	}
+
+	_, err := client.CreateTokenWithRegion(context.Background(), "cid", "secret", "device", "us-east-1/../../169.254.169.254")
+	if err == nil {
+		t.Fatal("expected invalid region error")
+	}
+	if !strings.Contains(err.Error(), "invalid OIDC region") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called {
+		t.Fatal("unexpected HTTP call with invalid region")
+	}
+}
