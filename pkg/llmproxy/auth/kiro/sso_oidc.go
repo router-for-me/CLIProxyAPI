@@ -106,66 +106,11 @@ type CreateTokenResponse struct {
 }
 
 // getOIDCEndpoint returns the OIDC endpoint for the given region.
-func getOIDCEndpoint(region string) (string, error) {
+func getOIDCEndpoint(region string) string {
 	if region == "" {
 		region = defaultIDCRegion
 	}
-	endpoint := fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return "", fmt.Errorf("invalid OIDC endpoint %q: %w", endpoint, err)
-	}
-	if parsed.Scheme != "https" || parsed.Hostname() == "" {
-		return "", fmt.Errorf("invalid OIDC endpoint %q", endpoint)
-	}
-	if !strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".amazonaws.com") {
-		return "", fmt.Errorf("invalid OIDC host %q", parsed.Hostname())
-	}
-	return endpoint, nil
-}
-
-func validateIDCRegion(region string) (string, error) {
-	region = strings.TrimSpace(region)
-	if region == "" {
-		return defaultIDCRegion, nil
-	}
-	if !awsRegionPattern.MatchString(region) {
-		return "", fmt.Errorf("invalid region %q", region)
-	}
-	return region, nil
-}
-
-func buildIDCRefreshPayload(clientID, clientSecret, refreshToken string) map[string]string {
-	return map[string]string{
-		"clientId":      clientID,
-		"clientSecret":  clientSecret,
-		"refreshToken":  refreshToken,
-		"client_id":     clientID,
-		"client_secret": clientSecret,
-		"refresh_token": refreshToken,
-		"grant_type":    "refresh_token",
-	}
-}
-
-func applyIDCRefreshHeaders(req *http.Request, region string) {
-	if region == "" {
-		region = defaultIDCRegion
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Host", fmt.Sprintf("oidc.%s.amazonaws.com", region))
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("x-amz-user-agent", idcAmzUserAgent)
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "*")
-	req.Header.Set("sec-fetch-mode", "cors")
-	req.Header.Set("User-Agent", "node")
-	req.Header.Set("Accept-Encoding", "br, gzip, deflate")
-	req.Header.Set("X-PLATFORM", idcPlatform)
-	req.Header.Set("X-PLATFORM-VERSION", idcDefaultVer)
-	req.Header.Set("X-CLIENT-VERSION", idcDefaultVer)
-	req.Header.Set("X-CLIENT-TYPE", idcClientType)
-	req.Header.Set("X-CORE-VERSION", idcDefaultVer)
-	req.Header.Set("X-IS-MULTIROOT", "false")
+	return fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
 }
 
 func validateIDCRegion(region string) (string, error) {
@@ -300,10 +245,7 @@ func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region str
 	if err != nil {
 		return nil, err
 	}
-	endpoint, err := getOIDCEndpoint(validatedRegion)
-	if err != nil {
-		return nil, err
-	}
+	endpoint := getOIDCEndpoint(validatedRegion)
 
 	payload := map[string]interface{}{
 		"clientName": "Kiro IDE",
@@ -354,10 +296,10 @@ func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, cli
 	if err != nil {
 		return nil, err
 	}
-	endpoint, err := getOIDCEndpoint(validatedRegion)
-	if err != nil {
+	if err := validateStartURL(startURL); err != nil {
 		return nil, err
 	}
+	endpoint := getOIDCEndpoint(validatedRegion)
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -407,10 +349,7 @@ func (c *SSOOIDCClient) CreateTokenWithRegion(ctx context.Context, clientID, cli
 	if errRegion != nil {
 		return nil, errRegion
 	}
-	endpoint, err := getOIDCEndpoint(normalizedRegion)
-	if err != nil {
-		return nil, err
-	}
+	endpoint := getOIDCEndpoint(normalizedRegion)
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -485,14 +424,7 @@ func normalizeOIDCRegion(region string) (string, error) {
 
 // RefreshTokenWithRegion refreshes an access token using the refresh token with a specific region.
 func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, clientSecret, refreshToken, region, startURL string) (*KiroTokenData, error) {
-	validatedRegion, errRegion := validateIDCRegion(region)
-	if errRegion != nil {
-		return nil, errRegion
-	}
-	endpoint, err := getOIDCEndpoint(validatedRegion)
-	if err != nil {
-		return nil, err
-	}
+	endpoint := getOIDCEndpoint(region)
 	payload := buildIDCRefreshPayload(clientID, clientSecret, refreshToken)
 
 	body, err := json.Marshal(payload)

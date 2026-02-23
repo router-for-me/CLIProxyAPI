@@ -985,11 +985,10 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		return
 	}
 
-	// Inject default Kiro aliases if no user-configured kiro aliases exist
+	// Inject default aliases for channels with built-in compatibility mappings.
 	if cfg.OAuthModelAlias == nil {
 		cfg.OAuthModelAlias = make(map[string][]OAuthModelAlias)
 	}
-	// Preserve explicitly configured aliases, including empty/nil markers, to support opt-out.
 	if _, hasKiro := cfg.OAuthModelAlias["kiro"]; !hasKiro {
 		// Check case-insensitive too
 		found := false
@@ -1003,8 +1002,8 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
 		}
 	}
-	// Inject default GitHub Copilot aliases if no user-configured channel exists.
-	if _, hasGithubCopilot := cfg.OAuthModelAlias["github-copilot"]; !hasGithubCopilot {
+	if _, hasGitHubCopilot := cfg.OAuthModelAlias["github-copilot"]; !hasGitHubCopilot {
+		// Check case-insensitive too
 		found := false
 		for k := range cfg.OAuthModelAlias {
 			if strings.EqualFold(strings.TrimSpace(k), "github-copilot") {
@@ -1043,7 +1042,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if strings.EqualFold(name, alias) {
 				continue
 			}
-			aliasKey := strings.ToLower(name) + "\x00" + strings.ToLower(alias)
+			aliasKey := strings.ToLower(alias)
 			if _, ok := seenAlias[aliasKey]; ok {
 				continue
 			}
