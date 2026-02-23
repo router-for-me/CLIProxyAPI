@@ -54,10 +54,10 @@ type mcpResult struct {
 
 // McpResponse represents a JSON-RPC response from the MCP endpoint.
 type McpResponse struct {
-	ID      string    `json:"id,omitempty"`
-	JSONRPC string    `json:"jsonrpc,omitempty"`
+	ID      string     `json:"id,omitempty"`
+	JSONRPC string     `json:"jsonrpc,omitempty"`
 	Result  *mcpResult `json:"result,omitempty"`
-	Error   *mcpError `json:"error,omitempty"`
+	Error   *mcpError  `json:"error,omitempty"`
 }
 
 // WebSearchResults is the parsed structure for web search response payloads.

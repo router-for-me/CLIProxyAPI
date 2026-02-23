@@ -795,3 +795,42 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 		t.Errorf("Interleaved thinking hint should be in created systemInstruction, got: %v", sysInstruction.Raw)
 	}
 }
+
+func TestConvertClaudeRequestToAntigravity_SkipsEmptySystemTextParts(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
+		"system": [{"type": "text", "text": ""}, {"type": "text", "text": "   "}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	if gjson.Get(outputStr, "request.systemInstruction").Exists() {
+		t.Fatalf("systemInstruction should be omitted when all system text blocks are empty: %s", outputStr)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_SkipsEmptyStringMessageContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{"role": "user", "content": "   "},
+			{"role": "assistant", "content": "ok"}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	contents := gjson.Get(outputStr, "request.contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("expected 1 non-empty message after filtering empty string content, got %d (%s)", len(contents), outputStr)
+	}
+	if contents[0].Get("role").String() != "model" {
+		t.Fatalf("expected remaining message role=model, got %q", contents[0].Get("role").String())
+	}
+	if contents[0].Get("parts.0.text").String() != "ok" {
+		t.Fatalf("expected remaining text 'ok', got %q", contents[0].Get("parts.0.text").String())
+	}
+}

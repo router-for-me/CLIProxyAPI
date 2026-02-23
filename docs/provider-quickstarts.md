@@ -172,6 +172,102 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 Strict tool schema note:
 - Function tools with `strict: true` are normalized to Gemini-safe schema with root `type: "OBJECT"`, explicit `properties`, and `additionalProperties: false`.
 
+Gemini 3 Flash `includeThoughts` quickstart:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model":"gemini/flash",
+    "messages":[{"role":"user","content":"ping"}],
+    "reasoning_effort":"high",
+    "stream":false
+  }' | jq
+```
+
+If you pass `generationConfig.thinkingConfig.include_thoughts`, the proxy normalizes it to `includeThoughts` before upstream calls.
+
+ToolSearch compatibility quick check (`defer_loading`):
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model":"gemini/flash",
+    "messages":[{"role":"user","content":"search latest docs"}],
+    "tools":[{"google_search":{"defer_loading":true,"lat":"1"}}]
+  }' | jq
+```
+
+`defer_loading`/`deferLoading` fields are removed in Gemini-family outbound payloads to avoid Gemini `400` validation failures.
+
+### Gemini CLI 404 quickstart (`Error 404: Requested entity was not found`)
+
+Use this path when Gemini CLI/Gemini 3 requests return provider-side `404` and you need a deterministic isolate flow.
+
+1. Verify model is exposed to the same client key:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'gemini|gemini-2\.5|gemini-3'
+```
+
+2. Run non-stream check first:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/flash","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
+```
+
+3. Run stream parity check immediately after:
+
+```bash
+curl -N -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/flash","messages":[{"role":"user","content":"ping"}],"stream":true}'
+```
+
+If non-stream succeeds but stream fails, treat it as stream transport/proxy compatibility first. If both fail with `404`, fix alias/model mapping before retry.
+
+### NVIDIA OpenAI-compat QA scenarios (stream/non-stream parity)
+
+Use these checks when an OpenAI-compatible NVIDIA upstream reports connect failures.
+
+```bash
+# Non-stream baseline
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"openai-compat/nvidia-model","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
+
+# Stream parity
+curl -N -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"openai-compat/nvidia-model","messages":[{"role":"user","content":"ping"}],"stream":true}'
+```
+
+Edge-case payload checks:
+
+```bash
+# Empty content guard
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"openai-compat/nvidia-model","messages":[{"role":"user","content":""}],"stream":false}' | jq
+
+# Tool payload surface
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"openai-compat/nvidia-model","messages":[{"role":"user","content":"return ok"}],"tools":[{"type":"function","function":{"name":"noop","description":"noop","parameters":{"type":"object","properties":{}}}}],"stream":false}' | jq
+```
+
 ## 4) GitHub Copilot
 
 `config.yaml`:

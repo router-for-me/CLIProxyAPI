@@ -51,19 +51,23 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			systemPromptResult := systemResults[i]
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
-				systemPrompt := systemPromptResult.Get("text").String()
-				partJSON := `{}`
-				if systemPrompt != "" {
-					partJSON, _ = sjson.Set(partJSON, "text", systemPrompt)
+				systemPrompt := strings.TrimSpace(systemPromptResult.Get("text").String())
+				if systemPrompt == "" {
+					continue
 				}
+				partJSON := `{}`
+				partJSON, _ = sjson.Set(partJSON, "text", systemPrompt)
 				systemInstructionJSON, _ = sjson.SetRaw(systemInstructionJSON, "parts.-1", partJSON)
 				hasSystemInstruction = true
 			}
 		}
 	} else if systemResult.Type == gjson.String {
-		systemInstructionJSON = `{"role":"user","parts":[{"text":""}]}`
-		systemInstructionJSON, _ = sjson.Set(systemInstructionJSON, "parts.0.text", systemResult.String())
-		hasSystemInstruction = true
+		systemPrompt := strings.TrimSpace(systemResult.String())
+		if systemPrompt != "" {
+			systemInstructionJSON = `{"role":"user","parts":[{"text":""}]}`
+			systemInstructionJSON, _ = sjson.Set(systemInstructionJSON, "parts.0.text", systemPrompt)
+			hasSystemInstruction = true
+		}
 	}
 
 	// contents
@@ -303,11 +307,12 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				contentsJSON, _ = sjson.SetRaw(contentsJSON, "-1", clientContentJSON)
 				hasContents = true
 			} else if contentsResult.Type == gjson.String {
-				prompt := contentsResult.String()
-				partJSON := `{}`
-				if prompt != "" {
-					partJSON, _ = sjson.Set(partJSON, "text", prompt)
+				prompt := strings.TrimSpace(contentsResult.String())
+				if prompt == "" {
+					continue
 				}
+				partJSON := `{}`
+				partJSON, _ = sjson.Set(partJSON, "text", prompt)
 				clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 				contentsJSON, _ = sjson.SetRaw(contentsJSON, "-1", clientContentJSON)
 				hasContents = true
