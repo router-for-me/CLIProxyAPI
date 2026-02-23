@@ -18,7 +18,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/kimi"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/openai"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
