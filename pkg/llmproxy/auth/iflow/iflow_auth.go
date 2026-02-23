@@ -143,6 +143,10 @@ func (ia *IFlowAuth) doTokenRequest(ctx context.Context, req *http.Request) (*IF
 
 	if resp.StatusCode != http.StatusOK {
 		log.Debugf("iflow token request failed: status=%d body=%s", resp.StatusCode, string(body))
+		var providerErr iFlowAPIKeyResponse
+		if err = json.Unmarshal(body, &providerErr); err == nil && (strings.TrimSpace(providerErr.Code) != "" || strings.TrimSpace(providerErr.Message) != "") {
+			return nil, fmt.Errorf("iflow token: provider rejected token request (code=%s message=%s)", strings.TrimSpace(providerErr.Code), strings.TrimSpace(providerErr.Message))
+		}
 		return nil, fmt.Errorf("iflow token: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 

@@ -63,7 +63,7 @@ func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 		return nil, fmt.Errorf("aistudio executor: ws relay is nil")
 	}
 	if auth == nil || auth.ID == "" {
-		return nil, fmt.Errorf("aistudio executor: missing auth")
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
 	}
 	httpReq := req.WithContext(ctx)
 	if httpReq.URL == nil || strings.TrimSpace(httpReq.URL.String()) == "" {

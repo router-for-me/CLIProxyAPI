@@ -294,7 +294,7 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 // Refresh validates the Kilo token.
 func (e *KiloExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if auth == nil {
-		return nil, fmt.Errorf("missing auth")
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
 	}
 	return auth, nil
 }
