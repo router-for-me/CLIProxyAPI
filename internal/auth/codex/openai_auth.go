@@ -267,6 +267,7 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 			return tokenData, nil
 		}
 		if isNonRetryableRefreshErr(err) {
+			log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
 			return nil, err
 		}
 
