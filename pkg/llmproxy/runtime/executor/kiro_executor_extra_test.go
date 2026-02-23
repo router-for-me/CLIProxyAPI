@@ -105,3 +105,43 @@ func TestFormatKiroSuspendedStatusMessage(t *testing.T) {
 		t.Fatalf("expected remediation text in message, got %q", msg)
 	}
 }
+
+func TestIsKiroSuspendedOrBannedResponse(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "uppercase suspended token",
+			body: `{"status":"SUSPENDED"}`,
+			want: true,
+		},
+		{
+			name: "lowercase banned sentence",
+			body: `{"message":"account banned due to abuse checks"}`,
+			want: true,
+		},
+		{
+			name: "temporary suspended lowercase key",
+			body: `{"status":"temporarily_suspended"}`,
+			want: true,
+		},
+		{
+			name: "token expired should not count as banned",
+			body: `{"error":"token expired"}`,
+			want: false,
+		},
+		{
+			name: "empty body",
+			body: ` `,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		if got := isKiroSuspendedOrBannedResponse(tt.body); got != tt.want {
+			t.Fatalf("%s: isKiroSuspendedOrBannedResponse(%q) = %v, want %v", tt.name, tt.body, got, tt.want)
+		}
+	}
+}
