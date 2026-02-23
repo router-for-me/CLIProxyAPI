@@ -338,6 +338,60 @@ func TestDeleteAuthFile(t *testing.T) {
 	}
 }
 
+func TestDownloadAuthFileRejectsTraversalName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	h := &Handler{cfg: &config.Config{AuthDir: tmpDir}}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("GET", "/?name=..\\evil.json", nil)
+
+	h.DownloadAuthFile(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUploadAuthFileRejectsTraversalName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	h := &Handler{
+		cfg:         &config.Config{AuthDir: tmpDir},
+		authManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/?name=..\\evil.json", strings.NewReader("{}"))
+
+	h.UploadAuthFile(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDeleteAuthFileRejectsTraversalName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	h := &Handler{
+		cfg:         &config.Config{AuthDir: tmpDir},
+		authManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("DELETE", "/?name=..\\evil.json", nil)
+
+	h.DeleteAuthFile(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestIsReadOnlyConfigWriteError(t *testing.T) {
 	if !isReadOnlyConfigWriteError(&os.PathError{Op: "open", Path: "/tmp/config.yaml", Err: syscall.EROFS}) {
 		t.Fatal("expected EROFS path error to be treated as read-only config write error")

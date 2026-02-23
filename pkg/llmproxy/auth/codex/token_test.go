@@ -60,10 +60,9 @@ func TestSaveTokenToFile_MkdirFail(t *testing.T) {
 	}
 }
 
-func TestSaveTokenToFile_RejectsParentTraversal(t *testing.T) {
+func TestCodexTokenStorage_SaveTokenToFileRejectsTraversalPath(t *testing.T) {
 	ts := &CodexTokenStorage{}
-	err := ts.SaveTokenToFile("../token.json")
-	if err == nil {
-		t.Fatal("expected error for parent traversal path")
+	if err := ts.SaveTokenToFile("/tmp/../codex-escape.json"); err == nil {
+		t.Fatal("expected traversal path to be rejected")
 	}
 }

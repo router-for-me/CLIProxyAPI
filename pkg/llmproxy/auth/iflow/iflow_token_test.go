@@ -1,19 +1,10 @@
 package iflow
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
-func TestIFlowTokenStorage_SaveTokenToFile_RejectsTraversalPath(t *testing.T) {
-	ts := &IFlowTokenStorage{AccessToken: "token"}
-	badPath := t.TempDir() + "/../iflow-token.json"
-
-	err := ts.SaveTokenToFile(badPath)
-	if err == nil {
-		t.Fatal("expected error for traversal path")
-	}
-	if !strings.Contains(err.Error(), "invalid file path") {
-		t.Fatalf("expected invalid path error, got %v", err)
+func TestIFlowTokenStorage_SaveTokenToFileRejectsTraversalPath(t *testing.T) {
+	ts := &IFlowTokenStorage{}
+	if err := ts.SaveTokenToFile("/tmp/../iflow-escape.json"); err == nil {
+		t.Fatal("expected traversal path to be rejected")
 	}
 }

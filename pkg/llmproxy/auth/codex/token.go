@@ -66,17 +66,17 @@ type CodexTokenStorage struct {
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
 func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
-	ts.Type = "codex"
-	safePath, err := sanitizeTokenFilePath(authFilePath)
+	safePath, err := misc.ResolveSafeFilePath(authFilePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("invalid token file path: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(safePath), 0700); err != nil {
+	misc.LogSavingCredentials(safePath)
+	ts.Type = "codex"
+	if err = os.MkdirAll(filepath.Dir(safePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
-	f, err := os.OpenFile(safePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := os.Create(safePath)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
