@@ -66,6 +66,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetRooModels()
 	case "kilo":
 		return GetKiloModels()
+	case "kilocode":
+		return GetKiloModels()
 	case "deepseek":
 		return GetDeepSeekModels()
 	case "groq":

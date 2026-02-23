@@ -31,6 +31,7 @@ type ProviderMetrics struct {
 var knownProviders = map[string]struct{}{
 	"nim": {}, "kilo": {}, "minimax": {}, "glm": {}, "openrouter": {},
 	"antigravity": {}, "claude": {}, "codex": {}, "gemini": {}, "roo": {},
+	"kiro": {}, "cursor": {},
 }
 
 // Fallback cost per 1k tokens (USD) when no usage data. Align with thegent _GLM_OFFER_COST.
