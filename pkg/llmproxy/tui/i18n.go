@@ -55,10 +55,10 @@ func T(key string) string {
 }
 
 var locales = map[string]map[string]string{
-	"en":    enStrings,
-	"zh-CN": zhCNStrings,
-	"zh-TW": zhTWStrings,
-	"fa":    faStrings,
+	"en":      enStrings,
+	"zh-CN":   zhCNStrings,
+	"zh-TW":   zhTWStrings,
+	"fa":      faStrings,
 	"fa-Latn": faLatnStrings,
 }
 
@@ -609,7 +609,7 @@ var faLatnStrings = map[string]string{ // Farsi in Latin/Pinglish script
 	"section_logging":   "log va amar",
 	"section_quota":     "modiriyat gozar az sahmiyeh",
 	"section_routing":   "masiriabi",
-	"section_websocket":  "websocket",
+	"section_websocket": "websocket",
 	"section_ampcode":   "AMP Code",
 	"section_other":     "sayar",
 
