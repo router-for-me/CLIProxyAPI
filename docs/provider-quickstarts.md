@@ -302,7 +302,53 @@ Expected:
 - Request succeeds without upstream `INVALID_ARGUMENT`.
 - If you inspect translated payload logs, thinking/tool parts should carry safe signature placeholders where required.
 
-## 9) Claude Code Tool Search (`ENABLE_TOOL_SEARCH`) Sanity Check
+## 9a) Claude Code Stream/Variant Parity (`variant` + `stream`)
+
+This section is a direct fix-path for Claude Code + OpenWork-style payloads.
+
+`config.yaml`:
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+codex-api-key:
+  - api-key: "codex-key"
+    prefix: "openwork"
+```
+
+Variant-only request baseline (repro should not regress when `stream: false`):
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.3-codex","variant":"high","messages":[{"role":"user","content":"ow-issue258-variant-only-check"}],"stream":false}' | jq '.choices[0].message.content'
+```
+
+Streaming parity check:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.3-codex","variant":"high","messages":[{"role":"user","content":"ow-issue258-variant-only-check"}],"stream":true}' | head -n 40
+```
+
+Checks:
+
+- Confirm same request succeeds with/without `stream`.
+- Compare first 5 SSE chunks for ordering and final `[DONE]`.
+- If streaming collapses into a single burst, compare with `/v1/models` and validate proxy logs around `apply.go` thinking config.
+- Keep `reasoning` and tool payloads minimal while validating parity.
+
+Expected:
+
+- Variant-only requests stay stable in both modes.
+- Streaming responses should arrive incrementally, not one-shot at completion.
+- If variant-only handling is inconsistent, capture request body and response body in logs before adjusting model aliasing/variant fallback.
+
+## 9b) Claude Code Tool Search (`ENABLE_TOOL_SEARCH`) Sanity Check
 
 Use this to catch MCP tool-availability regressions early.
 

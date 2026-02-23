@@ -1,0 +1,11 @@
+{
+  "model": "gpt-5.3-codex",
+  "stream": false,
+  "variant": "high",
+  "messages": [
+    {
+      "role": "user",
+      "content": "ow-issue258-variant-only-check"
+    }
+  ]
+}
