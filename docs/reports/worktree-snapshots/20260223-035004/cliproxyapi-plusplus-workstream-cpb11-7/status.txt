@@ -1,0 +1,44 @@
+## cpb-0036-0047-next
+ M Taskfile.yml
+ M cmd/server/main.go
+ M docs/FEATURE_CHANGES_PLUSPLUS.md
+ M docs/api/openai-compatible.md
+ M docs/features/auth/USER.md
+ M docs/features/operations/USER.md
+ M docs/features/providers/SPEC.md
+ M docs/planning/reports/fragemented/issue-wave-cpb-0036-0105-lane-1.md
+ M docs/planning/reports/fragemented/issue-wave-cpb-0036-0105-lane-2.md
+ M docs/planning/reports/issue-wave-cpb-0036-0105-lane-1.md
+ M docs/planning/reports/issue-wave-cpb-0036-0105-lane-2.md
+ M docs/planning/reports/issue-wave-cpb-0176-0245-lane-1.md
+ M docs/provider-catalog.md
+ M docs/provider-operations.md
+ M docs/provider-quickstarts.md
+ M docs/provider-usage.md
+ M docs/troubleshooting.md
+ M pkg/llmproxy/api/modules/amp/fallback_handlers.go
+ M pkg/llmproxy/api/modules/amp/fallback_handlers_test.go
+ M pkg/llmproxy/api/modules/amp/response_rewriter_test.go
+ M pkg/llmproxy/config/config.go
+ M pkg/llmproxy/config/oauth_model_alias_migration.go
+ M pkg/llmproxy/config/oauth_model_alias_test.go
+ M pkg/llmproxy/registry/model_registry.go
+ M pkg/llmproxy/runtime/executor/claude_executor_test.go
+ M pkg/llmproxy/runtime/executor/kiro_executor.go
+ M pkg/llmproxy/runtime/executor/kiro_executor_extra_test.go
+ M pkg/llmproxy/thinking/apply.go
+ M pkg/llmproxy/translator/kiro/openai/kiro_openai.go
+ M pkg/llmproxy/watcher/events.go
+ M pkg/llmproxy/watcher/watcher.go
+ M pkg/llmproxy/watcher/watcher_test.go
+ M sdk/api/handlers/openai/openai_responses_compact_test.go
+ M sdk/api/handlers/openai/openai_responses_handlers.go
+?? docs/planning/reports/issue-wave-cpb-0088-0147-orchestrator.md
+?? docs/planning/reports/issue-wave-cpb-0176-0187-orchestrator.md
+?? docs/planning/reports/issue-wave-cpb-0188-0237-orchestrator.md
+?? docs/planning/reports/issue-wave-cpb-0238-0267-orchestrator.md
+?? docs/planning/reports/issue-wave-cpb-0741-0750-lane-d8.md
+?? pkg/llmproxy/registry/model_registry_fallback_test.go
+?? pkg/llmproxy/thinking/apply_gemini_extract_test.go
+?? pkg/llmproxy/thinking/provider/claude/apply_test.go
+?? pkg/llmproxy/translator/kiro/openai/kiro_openai_nonstream_usage_test.go
