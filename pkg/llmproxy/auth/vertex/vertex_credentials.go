@@ -45,15 +45,15 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 	}
 	// Ensure we tag the file with the provider type.
 	s.Type = "vertex"
-	path, err := validateCredentialFilePath(authFilePath)
+	cleanPath, err := cleanCredentialPath(authFilePath, "vertex credential")
 	if err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o700); err != nil {
 		return fmt.Errorf("vertex credential: create directory failed: %w", err)
 	}
-	f, err := os.Create(path)
+	f, err := os.Create(cleanPath)
 	if err != nil {
 		return fmt.Errorf("vertex credential: create file failed: %w", err)
 	}
@@ -70,20 +70,18 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 	return nil
 }
 
-func validateCredentialFilePath(authFilePath string) (string, error) {
-	trimmed := strings.TrimSpace(authFilePath)
+func cleanCredentialPath(path, scope string) (string, error) {
+	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
-		return "", fmt.Errorf("vertex credential: auth file path is empty")
+		return "", fmt.Errorf("%s: auth file path is empty", scope)
 	}
-	segments := strings.Split(filepath.ToSlash(trimmed), "/")
-	for _, segment := range segments {
-		if segment == ".." {
-			return "", fmt.Errorf("vertex credential: auth file path traversal is not allowed")
-		}
+	clean := filepath.Clean(filepath.FromSlash(trimmed))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%s: auth file path is invalid", scope)
 	}
-	clean := filepath.Clean(trimmed)
-	if clean == "." {
-		return "", fmt.Errorf("vertex credential: auth file path is invalid")
+	abs, err := filepath.Abs(clean)
+	if err != nil {
+		return "", fmt.Errorf("%s: resolve auth file path: %w", scope, err)
 	}
-	return clean, nil
+	return filepath.Clean(abs), nil
 }

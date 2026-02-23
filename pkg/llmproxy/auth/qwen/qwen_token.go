@@ -45,15 +45,15 @@ type QwenTokenStorage struct {
 func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "qwen"
-	path, err := validateTokenFilePath(authFilePath)
+	cleanPath, err := cleanTokenFilePath(authFilePath, "qwen token")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
-	f, err := os.Create(path)
+	f, err := os.Create(cleanPath)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
@@ -67,20 +67,18 @@ func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 	return nil
 }
 
-func validateTokenFilePath(authFilePath string) (string, error) {
-	trimmed := strings.TrimSpace(authFilePath)
+func cleanTokenFilePath(path, scope string) (string, error) {
+	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
-		return "", fmt.Errorf("failed to write token: auth file path is empty")
+		return "", fmt.Errorf("%s: auth file path is empty", scope)
 	}
-	segments := strings.Split(filepath.ToSlash(trimmed), "/")
-	for _, segment := range segments {
-		if segment == ".." {
-			return "", fmt.Errorf("failed to write token: auth file path traversal is not allowed")
-		}
+	clean := filepath.Clean(filepath.FromSlash(trimmed))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%s: auth file path is invalid", scope)
 	}
-	clean := filepath.Clean(trimmed)
-	if clean == "." {
-		return "", fmt.Errorf("failed to write token: auth file path is invalid")
+	abs, err := filepath.Abs(clean)
+	if err != nil {
+		return "", fmt.Errorf("%s: resolve auth file path: %w", scope, err)
 	}
-	return clean, nil
+	return filepath.Clean(abs), nil
 }
