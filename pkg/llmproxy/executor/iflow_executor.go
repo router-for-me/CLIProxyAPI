@@ -408,7 +408,7 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 		return auth, nil
 	}
 
-	// Avoid logging token material.
+	// Log refresh start without including token material.
 	if oldAccessToken != "" {
 		log.Debug("iflow executor: refreshing access token")
 	}

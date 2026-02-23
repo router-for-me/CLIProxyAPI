@@ -1116,7 +1116,7 @@ func (s *Server) startSHMSyncLoop() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	log.Infof("Starting SHM metrics sync loop to %s", shmPath)
+	log.Info("Starting SHM metrics sync loop")
 	for {
 		select {
 		case <-ticker.C:
