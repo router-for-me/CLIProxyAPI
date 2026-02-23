@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
@@ -27,6 +29,27 @@ func TestIFlowExecutorParseSuffix(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClassifyIFlowRefreshError(t *testing.T) {
+	t.Run("maps server busy to 503", func(t *testing.T) {
+		err := classifyIFlowRefreshError(errors.New("iflow token: provider rejected token request (code=500 message=server busy)"))
+		se, ok := err.(interface{ StatusCode() int })
+		if !ok {
+			t.Fatalf("expected status error type, got %T", err)
+		}
+		if got := se.StatusCode(); got != http.StatusServiceUnavailable {
+			t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+		}
+	})
+
+	t.Run("non server busy unchanged", func(t *testing.T) {
+		in := errors.New("iflow token: provider rejected token request (code=400 message=invalid_grant)")
+		out := classifyIFlowRefreshError(in)
+		if !errors.Is(out, in) {
+			t.Fatalf("expected original error to be preserved")
+		}
+	})
 }
 
 func TestPreserveReasoningContentInMessages(t *testing.T) {

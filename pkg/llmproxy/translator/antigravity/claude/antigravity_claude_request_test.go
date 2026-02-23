@@ -73,7 +73,7 @@ func TestConvertClaudeRequestToAntigravity_RoleMapping(t *testing.T) {
 	}
 }
 
-func TestConvertClaudeRequestToAntigravity_SkipsWhitespaceOnlyTextBlocks(t *testing.T) {
+func TestConvertClaudeRequestToAntigravity_SkipsWhitespaceOnlyTextBlocksAssistantMessage(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
 		"messages": [

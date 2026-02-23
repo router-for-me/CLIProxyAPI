@@ -30,6 +30,7 @@ create_fake_curl() {
   cat >"${output_path}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+: "${STATUS_SEQUENCE:=200}"
 
 url=""
 output_file=""
@@ -180,7 +181,6 @@ run_create_fake_curl_min_args_case() {
 
   run_matrix_check "create_fake_curl works with required args only" 0 \
     env \
-      STATUS_SEQUENCE="200" \
       STATE_FILE="${state}" \
       CLIPROXY_PROVIDER_SMOKE_CASES="openai:gpt-4o-mini" \
       CLIPROXY_SMOKE_CURL_BIN="${fake_curl}" \

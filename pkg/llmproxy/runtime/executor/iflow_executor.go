@@ -418,7 +418,7 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 	tokenData, err := svc.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		log.Errorf("iflow executor: token refresh failed: %v", err)
-		return nil, err
+		return nil, classifyIFlowRefreshError(err)
 	}
 
 	if auth.Metadata == nil {
@@ -446,6 +446,20 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 	}
 
 	return auth, nil
+}
+
+func classifyIFlowRefreshError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "iflow token") && strings.Contains(msg, "server busy") {
+		return statusErr{code: http.StatusServiceUnavailable, msg: err.Error()}
+	}
+	if strings.Contains(msg, "provider rejected token request") && strings.Contains(msg, "code=500") {
+		return statusErr{code: http.StatusServiceUnavailable, msg: err.Error()}
+	}
+	return err
 }
 
 func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {

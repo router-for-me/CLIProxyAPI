@@ -78,6 +78,7 @@ func main() {
 
 	// Command-line flags to control the application's behavior.
 	var login bool
+	var setup bool
 	var codexLogin bool
 	var claudeLogin bool
 	var qwenLogin bool
@@ -115,6 +116,7 @@ func main() {
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
+	flag.BoolVar(&setup, "setup", false, "Run guided provider setup wizard")
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
@@ -526,6 +528,8 @@ func main() {
 	if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport)
+	} else if setup {
+		cmd.DoSetupWizard(cfg, &cmd.SetupOptions{ConfigPath: configFilePath})
 	} else if login {
 		// Handle Google/Gemini login
 		cmd.DoLogin(cfg, projectID, options)

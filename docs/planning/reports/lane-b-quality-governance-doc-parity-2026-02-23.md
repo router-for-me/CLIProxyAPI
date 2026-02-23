@@ -52,12 +52,11 @@ Pass:
 
 Fail (known non-lane blocker):
 - `QUALITY_PACKAGES='./pkg/llmproxy/runtime/executor' task quality:quick:check`
-  - Fails in `test:provider-smoke-matrix:test`
-  - Error: `scripts/provider-smoke-matrix-test.sh: line 29: $3: unbound variable`
+  - No longer fails in `test:provider-smoke-matrix:test` after script fix.
+  - Current failure is shared-env lint contention in `lint:changed`: `parallel golangci-lint is running`.
 
 ## Unresolved Blocked Items (Need Larger Refactor/Separate Lane)
-1. `scripts/provider-smoke-matrix-test.sh` negative-path harness has `set -u` positional arg bug (`$3` unbound) during `EXPECT_SUCCESS=0` scenario.
-2. `task quality:quick` currently depends on provider smoke matrix behavior outside this lane-B doc/token parity scope.
+1. `task quality:quick:check` is intermittently blocked in shared environment by concurrent lint runs: `parallel golangci-lint is running`.
 
 ## Changed Files
 - `pkg/llmproxy/runtime/executor/usage_helpers.go`
@@ -68,4 +67,11 @@ Fail (known non-lane blocker):
 - `docs/reports/fragemented/OPEN_ITEMS_VALIDATION_2026-02-22.md`
 - `docs/reports/fragemented/merged.md`
 - `docs/provider-operations.md`
+- `scripts/provider-smoke-matrix-test.sh`
+- `docs/planning/reports/issue-wave-gh-next32-lane-5.md`
 - `docs/planning/reports/lane-b-quality-governance-doc-parity-2026-02-23.md`
+
+## C2 Follow-up Verification (2026-02-23)
+- `bash scripts/provider-smoke-matrix-test.sh`: pass (includes new case `create_fake_curl works with required args only`).
+- `QUALITY_PACKAGES='./pkg/llmproxy/runtime/executor' task quality:quick:check`: fail due to `parallel golangci-lint is running` in `lint:changed`.
+- `./.github/scripts/check-open-items-fragmented-parity.sh`: pass.

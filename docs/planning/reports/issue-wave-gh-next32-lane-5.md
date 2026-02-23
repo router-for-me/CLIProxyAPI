@@ -6,24 +6,29 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-5`
 ## Per-Issue Status
 
 ### #97
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: upstream issue remains open; no scoped implementation delta landed in this lane pass.
+  - Evidence: `gh issue view 97 --repo router-for-me/CLIProxyAPIPlus --json number,state,url`
 
 ### #99
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: upstream issue remains open; no scoped implementation delta landed in this lane pass.
+  - Evidence: `gh issue view 99 --repo router-for-me/CLIProxyAPIPlus --json number,state,url`
 
 ### #94
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: upstream issue remains open; no scoped implementation delta landed in this lane pass.
+  - Evidence: `gh issue view 94 --repo router-for-me/CLIProxyAPIPlus --json number,state,url`
 
 ### #87
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: upstream issue remains open; no scoped implementation delta landed in this lane pass.
+  - Evidence: `gh issue view 87 --repo router-for-me/CLIProxyAPIPlus --json number,state,url`
 
 ### #86
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: upstream issue remains open; no scoped implementation delta landed in this lane pass.
+  - Evidence: `gh issue view 86 --repo router-for-me/CLIProxyAPIPlus --json number,state,url`
 
 ## Focused Checks
 
@@ -32,5 +37,4 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-5`
 
 ## Blockers
 
-- None recorded yet; work is in planning state.
-
+- #97, #99, #94, #87, #86 remain open upstream and were not implemented in this lane pass.
