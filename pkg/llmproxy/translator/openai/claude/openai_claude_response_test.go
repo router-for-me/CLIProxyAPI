@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -26,6 +27,52 @@ func TestConvertOpenAIResponseToClaude(t *testing.T) {
 	gotDone := ConvertOpenAIResponseToClaude(ctx, "claude-3-sonnet", originalRequest, request, doneChunk, &param)
 	if len(gotDone) == 0 {
 		t.Errorf("expected events for [DONE], got 0")
+	}
+}
+
+func TestConvertOpenAIResponseToClaude_DoneWithoutDataPrefix(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"stream": true}`)
+	request := []byte(`{}`)
+	var param any
+
+	chunk := []byte(`data: {"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hello"}}]}`)
+	_ = ConvertOpenAIResponseToClaude(ctx, "claude-3-sonnet", originalRequest, request, chunk, &param)
+
+	doneChunk := []byte(`[DONE]`)
+	got := ConvertOpenAIResponseToClaude(ctx, "claude-3-sonnet", originalRequest, request, doneChunk, &param)
+	if len(got) == 0 {
+		t.Fatalf("expected terminal events for bare [DONE], got 0")
+	}
+
+	last := got[len(got)-1]
+	if !strings.Contains(last, `"type":"message_stop"`) {
+		t.Fatalf("expected final message_stop event, got %q", last)
+	}
+}
+
+func TestConvertOpenAIResponseToClaude_DoneWithoutDataPrefixEmitsMessageDeltaAfterFinishReason(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"stream": true}`)
+	request := []byte(`{}`)
+	var param any
+
+	chunk := []byte(`data: {"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+	gotFinish := ConvertOpenAIResponseToClaude(ctx, "claude-3-sonnet", originalRequest, request, chunk, &param)
+	if len(gotFinish) == 0 {
+		t.Fatalf("expected finish chunk events, got 0")
+	}
+
+	doneChunk := []byte(`[DONE]`)
+	gotDone := ConvertOpenAIResponseToClaude(ctx, "claude-3-sonnet", originalRequest, request, doneChunk, &param)
+	if len(gotDone) < 2 {
+		t.Fatalf("expected message_delta and message_stop on bare [DONE], got %d events", len(gotDone))
+	}
+	if !strings.Contains(gotDone[0], `"type":"message_delta"`) {
+		t.Fatalf("expected first event message_delta, got %q", gotDone[0])
+	}
+	if !strings.Contains(gotDone[len(gotDone)-1], `"type":"message_stop"`) {
+		t.Fatalf("expected last event message_stop, got %q", gotDone[len(gotDone)-1])
 	}
 }
 

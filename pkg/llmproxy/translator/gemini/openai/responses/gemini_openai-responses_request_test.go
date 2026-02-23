@@ -45,6 +45,27 @@ func TestConvertOpenAIResponsesRequestToGeminiFunctionCall(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToGeminiSkipsEmptyTextParts(t *testing.T) {
+	input := []byte(`{
+		"model":"gemini-2.0-flash",
+		"input":[
+			{"type":"message","role":"user","content":[
+				{"type":"input_text","text":"   "},
+				{"type":"input_text","text":"real prompt"}
+			]}
+		]
+	}`)
+
+	got := ConvertOpenAIResponsesRequestToGemini("gemini-2.0-flash", input, false)
+	res := gjson.ParseBytes(got)
+	if res.Get("contents.0.parts.#").Int() != 1 {
+		t.Fatalf("expected only one non-empty text part, got %s", res.Get("contents.0.parts").Raw)
+	}
+	if res.Get("contents.0.parts.0.text").String() != "real prompt" {
+		t.Fatalf("expected surviving text part to be preserved")
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToGeminiMapsMaxOutputTokens(t *testing.T) {
 	input := []byte(`{"model":"gemini-2.0-flash","input":"hello","max_output_tokens":123}`)
 

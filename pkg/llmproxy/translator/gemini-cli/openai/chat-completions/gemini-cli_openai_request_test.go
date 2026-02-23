@@ -51,3 +51,51 @@ func TestConvertOpenAIRequestToGeminiCLIRemovesUnsupportedGoogleSearchFields(t *
 		t.Fatalf("expected non-problematic fields to remain")
 	}
 }
+
+func TestConvertOpenAIRequestToGeminiCLINormalizesFunctionSchema(t *testing.T) {
+	input := []byte(`{
+		"model":"gemini-2.5-pro",
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"search",
+					"strict":true,
+					"parameters":{
+						"type":"object",
+						"$id":"urn:search",
+						"properties":{
+							"query":{"type":"string"},
+							"limit":{"type":["integer","null"],"nullable":true}
+						},
+						"patternProperties":{"^x-":{"type":"string"}},
+						"required":["query","limit"]
+					}
+				}
+			}
+		]
+	}`)
+
+	got := ConvertOpenAIRequestToGeminiCLI("gemini-2.5-pro", input, false)
+	res := gjson.ParseBytes(got)
+	schema := res.Get("request.tools.0.functionDeclarations.0.parametersJsonSchema")
+	if !schema.Exists() {
+		t.Fatalf("expected normalized parametersJsonSchema to exist")
+	}
+	if schema.Get("$id").Exists() {
+		t.Fatalf("expected $id to be removed")
+	}
+	if schema.Get("patternProperties").Exists() {
+		t.Fatalf("expected patternProperties to be removed")
+	}
+	if schema.Get("properties.limit.nullable").Exists() {
+		t.Fatalf("expected nullable to be removed")
+	}
+	if schema.Get("properties.limit.type").IsArray() {
+		t.Fatalf("expected limit.type to be flattened from array")
+	}
+	if !schema.Get("additionalProperties").Exists() || schema.Get("additionalProperties").Bool() {
+		t.Fatalf("expected strict schema additionalProperties=false")
+	}
+}

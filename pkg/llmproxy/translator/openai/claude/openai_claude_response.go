@@ -92,6 +92,11 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 		}
 	}
 
+	trimmed := bytes.TrimSpace(rawJSON)
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return convertOpenAIDoneToAnthropic((*param).(*ConvertOpenAIResponseToAnthropicParams))
+	}
+
 	if !bytes.HasPrefix(rawJSON, dataTag) {
 		return []string{}
 	}

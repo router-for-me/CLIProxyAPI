@@ -1,6 +1,7 @@
 package chat_completions
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -129,5 +130,24 @@ func TestConvertOpenAIRequestToGeminiStrictToolSchemaSetsClosedObject(t *testing
 	}
 	if res.Get("tools.0.functionDeclarations.0.parametersJsonSchema.additionalProperties").Bool() {
 		t.Fatalf("expected additionalProperties=false for strict schema")
+	}
+}
+
+func TestConvertOpenAIRequestToGeminiStripsThoughtSignatureFields(t *testing.T) {
+	input := []byte(`{
+		"model":"gemini-2.5-pro",
+		"messages":[
+			{"role":"user","content":"hello"}
+		],
+		"metadata":{"thought_signature":"abc","thoughtSignature":"def"}
+	}`)
+
+	got := ConvertOpenAIRequestToGemini("gemini-2.5-pro", input, false)
+	raw := string(got)
+	if strings.Contains(raw, "thought_signature") {
+		t.Fatalf("expected thought_signature to be removed from translated payload")
+	}
+	if strings.Contains(raw, "\"thoughtSignature\":\"def\"") {
+		t.Fatalf("expected inbound thoughtSignature value to be removed from translated payload")
 	}
 }

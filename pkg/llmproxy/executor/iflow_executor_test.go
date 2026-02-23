@@ -50,6 +50,28 @@ func TestClassifyIFlowRefreshError(t *testing.T) {
 			t.Fatalf("expected original error to be preserved")
 		}
 	})
+
+	t.Run("maps provider 429 to 429", func(t *testing.T) {
+		err := classifyIFlowRefreshError(errors.New("iflow token: provider rejected token request (code=429 message=rate limit exceeded)"))
+		se, ok := err.(interface{ StatusCode() int })
+		if !ok {
+			t.Fatalf("expected status error type, got %T", err)
+		}
+		if got := se.StatusCode(); got != http.StatusTooManyRequests {
+			t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+		}
+	})
+
+	t.Run("maps provider 503 to 503", func(t *testing.T) {
+		err := classifyIFlowRefreshError(errors.New("iflow token: provider rejected token request (code=503 message=service unavailable)"))
+		se, ok := err.(interface{ StatusCode() int })
+		if !ok {
+			t.Fatalf("expected status error type, got %T", err)
+		}
+		if got := se.StatusCode(); got != http.StatusServiceUnavailable {
+			t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+		}
+	})
 }
 
 func TestPreserveReasoningContentInMessages(t *testing.T) {

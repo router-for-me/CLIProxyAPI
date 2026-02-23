@@ -75,3 +75,52 @@ Fail (known non-lane blocker):
 - `bash scripts/provider-smoke-matrix-test.sh`: pass (includes new case `create_fake_curl works with required args only`).
 - `QUALITY_PACKAGES='./pkg/llmproxy/runtime/executor' task quality:quick:check`: fail due to `parallel golangci-lint is running` in `lint:changed`.
 - `./.github/scripts/check-open-items-fragmented-parity.sh`: pass.
+
+## C4 Parity Guard Hardening Addendum (2026-02-23)
+
+### Scope
+- Harden `.github/scripts/check-open-items-fragmented-parity.sh` to avoid `#258` status false positives/negatives.
+- Add fixture-based regression coverage for parity behavior.
+- Re-verify parity and quick quality-governance path signals.
+
+### Changes Applied
+- `.github/scripts/check-open-items-fragmented-parity.sh`
+  - Added `REPORT_PATH`/`ISSUE_ID` overrides for deterministic testability.
+  - Replaced broad keyword matching with boundary-safe extraction of the exact `Issue #258` block.
+  - Enforced explicit status mapping from `- Status:` or `- #status:` lines.
+  - Added canonical status mapping:
+    - Pass tokens: `implemented|done|fixed|resolved|complete|completed`
+    - Fail tokens: `partial|partially|blocked|pending|todo|not implemented`
+- Added regression suite:
+  - `.github/scripts/tests/check-open-items-fragmented-parity-test.sh`
+  - `.github/scripts/tests/fixtures/open-items-parity/pass-status-implemented.md`
+  - `.github/scripts/tests/fixtures/open-items-parity/pass-hash-status-done.md`
+  - `.github/scripts/tests/fixtures/open-items-parity/fail-status-partial.md`
+  - `.github/scripts/tests/fixtures/open-items-parity/fail-missing-status.md`
+
+### Verified Command Outcomes
+- `./.github/scripts/check-open-items-fragmented-parity.sh`
+  - Result: pass
+  - Expected success signal: `[OK] fragmented open-items report parity checks passed`
+- `./.github/scripts/tests/check-open-items-fragmented-parity-test.sh`
+  - Result: pass
+  - Expected success signals:
+    - `[OK] passes_with_status_implemented`
+    - `[OK] passes_with_hash_status_done`
+    - `[OK] fails_with_partial_status`
+    - `[OK] fails_without_status_mapping`
+- `task test:provider-smoke-matrix:test`
+  - Result: pass
+  - Expected terminal signal: `[OK] provider-smoke-matrix script test suite passed`
+- `QUALITY_PACKAGES='./pkg/llmproxy/runtime/executor' task quality:quick:check`
+  - Result: blocked in shared environment (non-code blocker)
+  - Observed error signal: `Error: parallel golangci-lint is running`
+
+### Concise Runbook Note (Exact Expectations)
+- Parity guard command:
+  - `./.github/scripts/check-open-items-fragmented-parity.sh`
+  - Expect `[OK] fragmented open-items report parity checks passed` on success.
+  - Expect `[FAIL] ... status ...` when `Issue #258` status mapping is missing, partial, blocked, pending, or otherwise non-implemented.
+- Regression command:
+  - `./.github/scripts/tests/check-open-items-fragmented-parity-test.sh`
+  - Expect four `[OK]` case lines and zero `[FAIL]` lines.

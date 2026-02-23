@@ -78,7 +78,7 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	apiKey, baseURL := iflowCreds(auth)
 	if strings.TrimSpace(apiKey) == "" {
-		err = fmt.Errorf("iflow executor: missing api key")
+		err = statusErr{code: http.StatusUnauthorized, msg: "iflow executor: missing api key"}
 		return resp, err
 	}
 	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), iflowauth.DefaultAPIBaseURL, baseURL)
@@ -179,7 +179,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	apiKey, baseURL := iflowCreds(auth)
 	if strings.TrimSpace(apiKey) == "" {
-		err = fmt.Errorf("iflow executor: missing api key")
+		err = statusErr{code: http.StatusUnauthorized, msg: "iflow executor: missing api key"}
 		return nil, err
 	}
 	baseURL = resolveOAuthBaseURLWithOverride(e.cfg, e.Identifier(), iflowauth.DefaultAPIBaseURL, baseURL)
@@ -317,7 +317,7 @@ func (e *IFlowExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 func (e *IFlowExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("iflow executor: refresh called")
 	if auth == nil {
-		return nil, fmt.Errorf("iflow executor: auth is nil")
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "iflow executor: missing auth"}
 	}
 
 	// Check if this is cookie-based authentication
@@ -452,6 +452,12 @@ func classifyIFlowRefreshError(err error) error {
 	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "iflow token") && strings.Contains(msg, "server busy") {
+		return statusErr{code: http.StatusServiceUnavailable, msg: err.Error()}
+	}
+	if strings.Contains(msg, "provider rejected token request") && (strings.Contains(msg, "code=429") || strings.Contains(msg, "too many requests") || strings.Contains(msg, "rate limit") || strings.Contains(msg, "quota")) {
+		return statusErr{code: http.StatusTooManyRequests, msg: err.Error()}
+	}
+	if strings.Contains(msg, "provider rejected token request") && strings.Contains(msg, "code=503") {
 		return statusErr{code: http.StatusServiceUnavailable, msg: err.Error()}
 	}
 	if strings.Contains(msg, "provider rejected token request") && strings.Contains(msg, "code=500") {

@@ -133,6 +133,48 @@ func DoNovitaLogin(cfg *config.Config, options *LoginOptions) {
 	})
 }
 
+// DoClineLogin prompts for Cline API key and stores it as an OpenAI-compatible provider.
+func DoClineLogin(cfg *config.Config, options *LoginOptions) {
+	doGenericOpenAICompatLogin(
+		cfg,
+		options,
+		"Cline",
+		"cline.bot",
+		"cline-api-key.json",
+		"cline",
+		"https://api.cline.bot/v1",
+		"cline-default",
+	)
+}
+
+// DoAmpLogin prompts for AMP API key and stores it as an OpenAI-compatible provider.
+func DoAmpLogin(cfg *config.Config, options *LoginOptions) {
+	doGenericOpenAICompatLogin(
+		cfg,
+		options,
+		"AMP",
+		"ampcode.com",
+		"amp-api-key.json",
+		"amp",
+		"https://api.ampcode.com/v1",
+		"amp-default",
+	)
+}
+
+// DoFactoryAPILogin prompts for Factory API key and stores it as an OpenAI-compatible provider.
+func DoFactoryAPILogin(cfg *config.Config, options *LoginOptions) {
+	doGenericOpenAICompatLogin(
+		cfg,
+		options,
+		"Factory API",
+		"app.factory.ai",
+		"factory-api-key.json",
+		"factory-api",
+		"https://api.factory.ai/v1",
+		"factory-default",
+	)
+}
+
 func doGenericAPIKeyLogin(cfg *config.Config, options *LoginOptions, providerName, providerURL, fileName string, updateConfig func(string)) {
 	if options == nil {
 		options = &LoginOptions{}
@@ -216,4 +258,40 @@ func doGenericAPIKeyLogin(cfg *config.Config, options *LoginOptions, providerNam
 	}
 
 	fmt.Printf("%s API key saved to %s (auth-dir). Config updated with token-file. Restart the proxy to apply.\n", providerName, tokenPath)
+}
+
+func doGenericOpenAICompatLogin(
+	cfg *config.Config,
+	options *LoginOptions,
+	providerName string,
+	providerURL string,
+	fileName string,
+	compatName string,
+	baseURL string,
+	defaultModel string,
+) {
+	doGenericAPIKeyLogin(cfg, options, providerName, providerURL, fileName, func(tokenFileRef string) {
+		entry := config.OpenAICompatibility{
+			Name:    compatName,
+			BaseURL: baseURL,
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{TokenFile: tokenFileRef},
+			},
+			Models: []config.OpenAICompatibilityModel{
+				{Name: defaultModel, Alias: defaultModel},
+			},
+		}
+
+		replaced := false
+		for i := range cfg.OpenAICompatibility {
+			if strings.EqualFold(cfg.OpenAICompatibility[i].Name, compatName) {
+				cfg.OpenAICompatibility[i] = entry
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cfg.OpenAICompatibility = append(cfg.OpenAICompatibility, entry)
+		}
+	})
 }
