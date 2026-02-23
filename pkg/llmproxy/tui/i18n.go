@@ -1,9 +1,13 @@
 package tui
 
 // i18n provides a simple internationalization system for the TUI.
-// Supported locales: "zh" (Chinese), "en" (English), "fa" (Farsi).
+// Supported locales: "en" (English), "zh-CN" (Simplified Chinese),
+// "zh-TW" (Traditional Chinese), "fa" (Farsi/Persian), "fa-Latn" (Farsi Pinglish).
 
 var currentLocale = "en"
+
+// All supported locales for the 5-option system
+var supportedLocales = []string{"en", "zh-CN", "zh-TW", "fa", "fa-Latn"}
 
 // SetLocale changes the active locale.
 func SetLocale(locale string) {
@@ -17,16 +21,21 @@ func CurrentLocale() string {
 	return currentLocale
 }
 
-// ToggleLocale rotates through en -> zh -> fa.
+// ToggleLocale rotates through en -> zh-CN -> zh-TW -> fa -> fa-Latn -> en.
 func ToggleLocale() {
-	switch currentLocale {
-	case "en":
-		currentLocale = "zh"
-	case "zh":
-		currentLocale = "fa"
-	default:
-		currentLocale = "en"
+	currentIdx := 0
+	for i, loc := range supportedLocales {
+		if loc == currentLocale {
+			currentIdx = i
+			break
+		}
 	}
+	currentLocale = supportedLocales[(currentIdx+1)%len(supportedLocales)]
+}
+
+// SupportedLocales returns all supported locale codes.
+func SupportedLocales() []string {
+	return supportedLocales
 }
 
 // T returns the translated string for the given key.
@@ -46,31 +55,39 @@ func T(key string) string {
 }
 
 var locales = map[string]map[string]string{
-	"zh": zhStrings,
-	"en": enStrings,
-	"fa": faStrings,
+	"en":    enStrings,
+	"zh-CN": zhCNStrings,
+	"zh-TW": zhTWStrings,
+	"fa":    faStrings,
+	"fa-Latn": faLatnStrings,
 }
 
 // ──────────────────────────────────────────
 // Tab names
 // ──────────────────────────────────────────
-var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "使用统计", "日志"}
+var zhCNTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "使用统计", "日志"}
+var zhTWTabNames = []string{"儀表板", "配置", "認證檔案", "API 金鑰", "OAuth", "使用統計", "日誌"}
 var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
 var faTabNames = []string{"داشبورد", "پیکربندی", "فایل\u200cهای احراز هویت", "کلیدهای API", "OAuth", "کاربرد", "لاگ\u200cها"}
+var faLatnTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
 
 // TabNames returns tab names in the current locale.
 func TabNames() []string {
 	switch currentLocale {
-	case "zh":
-		return zhTabNames
+	case "zh-CN":
+		return zhCNTabNames
+	case "zh-TW":
+		return zhTWTabNames
 	case "fa":
 		return faTabNames
+	case "fa-Latn":
+		return faLatnTabNames
 	default:
 		return enTabNames
 	}
 }
 
-var zhStrings = map[string]string{
+var zhCNStrings = map[string]string{
 	// ── Common ──
 	"loading":      "加载中...",
 	"refresh":      "刷新",
@@ -521,4 +538,306 @@ var faStrings = map[string]string{
 	"logs_lines":       "خطوط",
 	"logs_help":        " [a] پیمایش خودکار • [c] پاکسازی • [1] همه [2] info+ [3] warn+ [4] error • [↑↓] پیمایش",
 	"logs_waiting":     "  در انتظار خروجی لاگ...",
+}
+
+var faLatnStrings = map[string]string{ // Farsi in Latin/Pinglish script
+	// ── Common ──
+	"loading":      "Dar hale بارگذارi...",
+	"refresh":      "Bazkhoni",
+	"save":         "zakhire",
+	"cancel":       "laghv",
+	"confirm":      "taiid",
+	"yes":          " bale",
+	"no":           "kheir",
+	"error":        "khata",
+	"success":      "movafaq",
+	"navigate":     "jabajayi",
+	"scroll":       "pimayesh",
+	"enter_save":   "Enter: zakhire",
+	"esc_cancel":   "Esc: laghv",
+	"enter_submit": "Enter: ersal",
+	"press_r":      "[r] bazkhoni",
+	"press_scroll": "[↑↓] pimayesh",
+	"not_set":      "(tanzimNashodeh)",
+	"error_prefix": "⚠ khata: ",
+
+	// ── Status bar ──
+	"status_left":                 " CLIProxyAPI panel modiriyat",
+	"status_right":                "Tab/Shift+Tab: jabajayi • L: zaban • q/Ctrl+C: khoruj ",
+	"initializing_tui":            "Dar hale rahnaveli...",
+	"auth_gate_title":             "🔐 etesal be API modiriyat",
+	"auth_gate_help":              " ramz oboor modiriyat ra vared konid va Enter bezanid",
+	"auth_gate_password":          "Ramz Oboor",
+	"auth_gate_enter":             " Enter: etesal • q/Ctrl+C: khoruj • L: zaban",
+	"auth_gate_connecting":        "Dar hale etesal...",
+	"auth_gate_connect_fail":      "etesal naamovafaq: %s",
+	"auth_gate_password_required": "ramz oboor lazim ast",
+
+	// ── Dashboard ──
+	"dashboard_title":  "📊 dashboard",
+	"dashboard_help":   " [r] bazkhoni • [↑↓] pimayesh",
+	"connected":        "● motasel",
+	"mgmt_keys":        "kelidha modiriyat",
+	"auth_files_label": "file ha ehrarz haiat",
+	"active_suffix":    "faal",
+	"total_requests":   "darkhastha",
+	"success_label":    "movafaq",
+	"failure_label":    "naamovafaq",
+	"total_tokens":     "majmool token ha",
+	"current_config":   "peykbandi fekli",
+	"debug_mode":       "mod ashkaltazai",
+	"usage_stats":      "amar masraf",
+	"log_to_file":      "sabt log dar file",
+	"retry_count":      "tedad talash mojaddad",
+	"proxy_url":        "adrese proxy",
+	"routing_strategy": "stratezhi masiriabi",
+	"model_stats":      "amar model ha",
+	"model":            "model",
+	"requests":         "darkhastha",
+	"tokens":           "token ha",
+	"bool_yes":         "bale ✓",
+	"bool_no":          "kheir",
+
+	// ── Config ──
+	"config_title":      "⚙ peykbandi",
+	"config_help1":      "  [↑↓/jk] jabajayi • [Enter/Space] virayesh • [r] bazkhoni",
+	"config_help2":      "  booli: Enter baraye taghir • matn/adad: Enter baraye vared kardan, Enter baraye taid, Esc baraye laghv",
+	"updated_ok":        "✓ ba movafaqiat baaozresani shod",
+	"no_config":         "  peykbandi بارگذاری نشده ast",
+	"invalid_int":       "adad sahih ghayre mojaz",
+	"section_server":    "server",
+	"section_logging":   "log va amar",
+	"section_quota":     "modiriyat gozar az sahmiyeh",
+	"section_routing":   "masiriabi",
+	"section_websocket":  "websocket",
+	"section_ampcode":   "AMP Code",
+	"section_other":     "sayar",
+
+	// ── Auth Files ──
+	"auth_title":      "🔑 file ha ehrarz haiat",
+	"auth_help1":      " [↑↓/jk] jabajayi • [Enter] baz kardan • [e] faal/gheirfaal • [d] hazf • [r] bazkhoni",
+	"auth_help2":      " [1] virayesh prefix • [2] virayesh proxy_url • [3] virayesh priority",
+	"no_auth_files":   "  file ehrarz haiat yaft nashod",
+	"confirm_delete":  "⚠ hazf %s? [y/n]",
+	"deleted":         "%s hazf shod",
+	"enabled":         "faal shod",
+	"disabled":        "gheirfaal shod",
+	"updated_field":   "%s baraye %s baaozresani shod",
+	"status_active":   "faal",
+	"status_disabled": "gheirfaal",
+
+	// ── API Keys ──
+	"keys_title":         "🔐 kelidha API",
+	"keys_help":          " [↑↓/jk] jabajayi • [a] afzudan • [e] virayesh • [d] hazf • [c] copy • [r] bazkhoni",
+	"no_keys":            "  kelid API vojood nadard. [a] ra bezanid",
+	"access_keys":        "kelidha dastrasi API",
+	"confirm_delete_key": "⚠ hazf %s? [y/n]",
+	"key_added":          "kelid API ezafe shod",
+	"key_updated":        "kelid API baaozresani shod",
+	"key_deleted":        "kelid API hazf shod",
+	"copied":             "✓ dar clipboard copy shod",
+	"copy_failed":        "✗ copy naamovafaq bud",
+	"new_key_prompt":     "  kelid jadid: ",
+	"edit_key_prompt":    "  virayesh kelid: ",
+	"enter_add":          "    Enter: afzudan • Esc: laghv",
+	"enter_save_esc":     "    Enter: zakhire • Esc: laghv",
+
+	// ── OAuth ──
+	"oauth_title":        "🔐 vorood OAuth",
+	"oauth_select":       "  enteza دهنده ra entekhab konid va [Enter] ra baraye shoro bezanid:",
+	"oauth_help":         "  [↑↓/jk] jabajayi • [Enter] vorood • [Esc] pak kardan vaziat",
+	"oauth_initiating":   "⏳ shoro vorood %s...",
+	"oauth_success":      "ehrarz haiat movafaq bud! tab Auth Files ra bazkhoni bebinid.",
+	"oauth_completed":    "farey ehrarz haiat tamam shod.",
+	"oauth_failed":       "ehrarz haiat naamovafaq bud",
+	"oauth_timeout":      "mohlat OAuth tamam shod (5 daqiqe)",
+	"oauth_press_esc":    "  [Esc] baraye laghv",
+	"oauth_auth_url":     "  adrese Mojavez:",
+	"oauth_remote_hint":  "  mod browser door: link bala ra baz konid va baed az ehrarz haiat, URL bazghasht ra vared konid.",
+	"oauth_callback_url": "  URL bazghasht:",
+	"oauth_press_c":      "  [c] baraye vared kardan URL bazghasht • [Esc] baraye bazgasht",
+	"oauth_submitting":   "⏳ dar hale ersal bazghasht...",
+	"oauth_submit_ok":    "✓ bazghasht ersal shod, dar entezar parvaz...",
+	"oauth_submit_fail":  "✗ ersal bazghasht naamovafaq bud",
+	"oauth_waiting":      "  dar entezar ehrarz haiat...",
+
+	// ── Usage ──
+	"usage_title":         "📈 amar masraf",
+	"usage_help":          " [r] bazkhoni • [↑↓] pimayesh",
+	"usage_no_data":       "  data masraf mojood nist",
+	"usage_total_reqs":    "majmool darkhastha",
+	"usage_total_tokens":  "majmool token ha",
+	"usage_success":       "movafaq",
+	"usage_failure":       "naamovafaq",
+	"usage_total_token_l": "majmool token ha",
+	"usage_rpm":           "RPM",
+	"usage_tpm":           "TPM",
+	"usage_req_by_hour":   "darkhastha bar asase saat",
+	"usage_tok_by_hour":   "masraf token bar asase saat",
+	"usage_req_by_day":    "darkhastha bar asase rooz",
+	"usage_api_detail":    "amar jzaii API",
+	"usage_input":         "voredi",
+	"usage_output":        "khoroji",
+	"usage_cached":        "cached",
+	"usage_reasoning":     "estedlal",
+
+	// ── Logs ──
+	"logs_title":       "📋 log ha",
+	"logs_auto_scroll": "● pimayesh khodkar",
+	"logs_paused":      "○ motavaqef",
+	"logs_filter":      "filter",
+	"logs_lines":       "khat ha",
+	"logs_help":        " [a] pimayesh khodkar • [c] pak sazi • [1] hame [2] info+ [3] warn+ [4] error • [↑↓] pimayesh",
+	"logs_waiting":     "  dar entezar khoruji log...",
+}
+
+var zhTWStrings = map[string]string{ // Traditional Chinese
+	// ── Common ──
+	"loading":      "載入中...",
+	"refresh":      "重新整理",
+	"save":         "儲存",
+	"cancel":       "取消",
+	"confirm":      "確認",
+	"yes":          "是",
+	"no":           "否",
+	"error":        "錯誤",
+	"success":      "成功",
+	"navigate":     "導航",
+	"scroll":       "捲動",
+	"enter_save":   "Enter: 儲存",
+	"esc_cancel":   "Esc: 取消",
+	"enter_submit": "Enter: 提交",
+	"press_r":      "[r] 重新整理",
+	"press_scroll": "[↑↓] 捲動",
+	"not_set":      "(未設定)",
+	"error_prefix": "⚠ 錯誤: ",
+
+	// ── Status bar ──
+	"status_left":                 " CLIProxyAPI 管理終端",
+	"status_right":                "Tab/Shift+Tab: 切換 • L: 語言 • q/Ctrl+C: 離開 ",
+	"initializing_tui":            "初始化中...",
+	"auth_gate_title":             "🔐 連線管理 API",
+	"auth_gate_help":              " 請輸入管理密碼並按 Enter 連線",
+	"auth_gate_password":          "密碼",
+	"auth_gate_enter":             " Enter: 連線 • q/Ctrl+C: 離開 • L: 語言",
+	"auth_gate_connecting":        "連線中...",
+	"auth_gate_connect_fail":      "連線失敗：%s",
+	"auth_gate_password_required": "請輸入密碼",
+
+	// ── Dashboard ──
+	"dashboard_title":  "📊 儀表板",
+	"dashboard_help":   " [r] 重新整理 • [↑↓] 捲動",
+	"connected":        "● 已連線",
+	"mgmt_keys":        "管理金鑰",
+	"auth_files_label": "認證檔案",
+	"active_suffix":    "活躍",
+	"total_requests":   "請求",
+	"success_label":    "成功",
+	"failure_label":    "失敗",
+	"total_tokens":     "總 Tokens",
+	"current_config":   "目前配置",
+	"debug_mode":       "啟用除錯模式",
+	"usage_stats":      "啟用使用統計",
+	"log_to_file":      "啟用日誌記錄",
+	"retry_count":      "重試次數",
+	"proxy_url":        "代理 URL",
+	"routing_strategy": "路由策略",
+	"model_stats":      "模型統計",
+	"model":            "模型",
+	"requests":         "請求數",
+	"tokens":           "Tokens",
+	"bool_yes":         "是 ✓",
+	"bool_no":          "否",
+
+	// ── Config ──
+	"config_title":      "⚙ 配置",
+	"config_help1":      "  [↑↓/jk] 導航 • [Enter/Space] 編輯 • [r] 重新整理",
+	"config_help2":      "  布林: Enter 切換 • 文字/數字: Enter 輸入, Enter 確認, Esc 取消",
+	"updated_ok":        "✓ 更新成功",
+	"no_config":         "  未載入配置",
+	"invalid_int":       "無效整數",
+	"section_server":    "伺服器",
+	"section_logging":   "日誌與統計",
+	"section_quota":     "配額超出處理",
+	"section_routing":   "路由",
+	"section_websocket": "WebSocket",
+	"section_ampcode":   "AMP Code",
+	"section_other":     "其他",
+
+	// ── Auth Files ──
+	"auth_title":      "🔑 認證檔案",
+	"auth_help1":      " [↑↓/jk] 導航 • [Enter] 展開 • [e] 啟用/停用 • [d] 刪除 • [r] 重新整理",
+	"auth_help2":      " [1] 編輯 prefix • [2] 編輯 proxy_url • [3] 編輯 priority",
+	"no_auth_files":   "  無認證檔案",
+	"confirm_delete":  "⚠ 刪除 %s? [y/n]",
+	"deleted":         "已刪除 %s",
+	"enabled":         "已啟用",
+	"disabled":        "已停用",
+	"updated_field":   "已更新 %s 的 %s",
+	"status_active":   "活躍",
+	"status_disabled": "已停用",
+
+	// ── API Keys ──
+	"keys_title":         "🔐 API 金鑰",
+	"keys_help":          " [↑↓/jk] 導航 • [a] 新增 • [e] 編輯 • [d] 刪除 • [c] 複製 • [r] 重新整理",
+	"no_keys":            "  無 API Key，按 [a] 新增",
+	"access_keys":        "Access API Keys",
+	"confirm_delete_key": "⚠ 確認刪除 %s? [y/n]",
+	"key_added":          "已新增 API Key",
+	"key_updated":        "已更新 API Key",
+	"key_deleted":        "已刪除 API Key",
+	"copied":             "✓ 已複製到剪貼簿",
+	"copy_failed":        "✗ 複製失敗",
+	"new_key_prompt":     "  New Key: ",
+	"edit_key_prompt":    "  Edit Key: ",
+	"enter_add":          "    Enter: 新增 • Esc: 取消",
+	"enter_save_esc":     "    Enter: 儲存 • Esc: 取消",
+
+	// ── OAuth ──
+	"oauth_title":        "🔐 OAuth 登入",
+	"oauth_select":       "  選擇提供商並按 [Enter] 開始 OAuth 登入:",
+	"oauth_help":         "  [↑↓/jk] 導航 • [Enter] 登入 • [Esc] 清除狀態",
+	"oauth_initiating":   "⏳ 正在初始化 %s 登入...",
+	"oauth_success":      "認證成功! 請重新整理 Auth Files 標籤查看新憑證。",
+	"oauth_completed":    "認證流程已完成。",
+	"oauth_failed":       "認證失敗",
+	"oauth_timeout":      "OAuth 流程超時 (5 分鐘)",
+	"oauth_press_esc":    "  按 [Esc] 取消",
+	"oauth_auth_url":     "  授權連結:",
+	"oauth_remote_hint":  "  遠端瀏覽器模式：在瀏覽器中開啟上述連結完成授權後，將回調 URL 貼至下方。",
+	"oauth_callback_url": "  回調 URL:",
+	"oauth_press_c":      "  按 [c] 輸入回調 URL • [Esc] 返回",
+	"oauth_submitting":   "⏳ 提交回調中...",
+	"oauth_submit_ok":    "✓ 回調已提交，等待處理...",
+	"oauth_submit_fail":  "✗ 提交回調失敗",
+	"oauth_waiting":      "  等待認證中...",
+
+	// ── Usage ──
+	"usage_title":         "📈 使用統計",
+	"usage_help":          " [r] 重新整理 • [↑↓] 捲動",
+	"usage_no_data":       "  使用資料不可用",
+	"usage_total_reqs":    "總請求數",
+	"usage_total_tokens":  "總 Token 數",
+	"usage_success":       "成功",
+	"usage_failure":       "失敗",
+	"usage_total_token_l": "總Token",
+	"usage_rpm":           "RPM",
+	"usage_tpm":           "TPM",
+	"usage_req_by_hour":   "請求趨勢 (按小時)",
+	"usage_tok_by_hour":   "Token 使用趨勢 (按小時)",
+	"usage_req_by_day":    "請求趨勢 (按天)",
+	"usage_api_detail":    "API 詳細統計",
+	"usage_input":         "輸入",
+	"usage_output":        "輸出",
+	"usage_cached":        "快取",
+	"usage_reasoning":     "思考",
+
+	// ── Logs ──
+	"logs_title":       "📋 日誌",
+	"logs_auto_scroll": "● 自動捲動",
+	"logs_paused":      "○ 已暫停",
+	"logs_filter":      "過濾",
+	"logs_lines":       "行數",
+	"logs_help":        " [a] 自動捲動 • [c] 清除 • [1] 全部 [2] info+ [3] warn+ [4] error • [↑↓] 捲動",
+	"logs_waiting":     "  等待日誌輸出...",
 }

@@ -6,10 +6,45 @@ const isCI = process.env.GITHUB_ACTIONS === "true";
 const docsBase = isCI ? `/${repo}/` : "/";
 const faviconHref = `${docsBase}favicon.ico`;
 
+// Supported locales: en, zh-CN, zh-TW, fa, fa-Latn
+const locales = {
+  root: {
+    label: "English",
+    lang: "en",
+    title: "cliproxy++",
+    description: "cliproxyapi-plusplus documentation"
+  },
+  "zh-CN": {
+    label: "简体中文",
+    lang: "zh-CN",
+    title: "cliproxy++",
+    description: "cliproxyapi-plusplus 文档"
+  },
+  "zh-TW": {
+    label: "繁體中文",
+    lang: "zh-TW",
+    title: "cliproxy++",
+    description: "cliproxyapi-plusplus 文檔"
+  },
+  fa: {
+    label: "فارسی",
+    lang: "fa",
+    title: "cliproxy++",
+    description: "مستندات cliproxyapi-plusplus"
+  },
+  "fa-Latn": {
+    label: "Pinglish",
+    lang: "fa-Latn",
+    title: "cliproxy++",
+    description: "cliproxyapi-plusplus docs (Latin)"
+  }
+};
+
 export default defineConfig({
   title: "cliproxy++",
   description: "cliproxyapi-plusplus documentation",
   base: docsBase,
+  locales,
   head: [
     ["link", { rel: "icon", href: faviconHref }]
   ],
@@ -25,7 +60,17 @@ export default defineConfig({
       { text: "Planning", link: "/planning/" },
       { text: "Reference", link: "/routing-reference" },
       { text: "API", link: "/api/" },
-      { text: "Docsets", link: "/docsets/" }
+      { text: "Docsets", link: "/docsets/" },
+      {
+        text: "🌐 Language",
+        items: [
+          { text: "English", link: "/" },
+          { text: "简体中文", link: "/zh-CN/" },
+          { text: "繁體中文", link: "/zh-TW/" },
+          { text: "فارسی", link: "/fa/" },
+          { text: "Pinglish", link: "/fa-Latn/" }
+        ]
+      }
     ],
     sidebar: [
       {
