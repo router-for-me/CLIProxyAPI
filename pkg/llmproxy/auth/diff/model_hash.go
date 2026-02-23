@@ -1,14 +1,16 @@
 package diff
 
 import (
-	"crypto/sha256"
+	"crypto/hmac"
+	"crypto/sha512"
 	"encoding/hex"
-	"encoding/json"
 	"sort"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 )
+
+const modelHashSalt = "auth-model-hash:v1"
 
 // ComputeOpenAICompatModelsHash returns a stable hash for OpenAI-compat models.
 // Used to detect model list changes during hot reload.
@@ -101,9 +103,7 @@ func ComputeExcludedModelsHash(excluded []string) string {
 		return ""
 	}
 	sort.Strings(normalized)
-	data, _ := json.Marshal(normalized)
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
+	return hashJoined(normalized)
 }
 
 func normalizeModelPairs(collect func(out func(key string))) []string {
@@ -127,6 +127,16 @@ func hashJoined(keys []string) string {
 	if len(keys) == 0 {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
-	return hex.EncodeToString(sum[:])
+	hasher := hmac.New(sha512.New, []byte(modelHashSalt))
+	_, _ = hasher.Write([]byte(strings.Join(keys, "\n")))
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func hashString(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	hasher := hmac.New(sha512.New, []byte(modelHashSalt))
+	_, _ = hasher.Write([]byte(value))
+	return hex.EncodeToString(hasher.Sum(nil))
 }

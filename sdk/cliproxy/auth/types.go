@@ -2,8 +2,8 @@ package auth
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -133,7 +133,7 @@ func stableAuthIndex(seed string) string {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(seed))
-	return fmt.Sprintf("%x", sum[:])
+	return hex.EncodeToString(sum[:])
 }
 
 // EnsureIndex returns a stable index derived from the auth file name or API key.

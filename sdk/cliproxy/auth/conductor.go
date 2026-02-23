@@ -3,7 +3,8 @@ package auth
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
+	"crypto/hmac"
+	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -58,6 +59,8 @@ const (
 	quotaBackoffBase      = time.Second
 	quotaBackoffMax       = 30 * time.Minute
 )
+
+const authLogRefHashKey = "conductor-auth-ref:v1"
 
 var quotaCooldownDisabled atomic.Bool
 
@@ -2160,8 +2163,10 @@ func authLogRef(auth *Auth) string {
 	if identifier == "" {
 		return "provider=" + provider + " auth_id_hash=none"
 	}
-	sum := sha256.Sum256([]byte(identifier))
-	return "provider=" + provider + " auth_id_hash=" + hex.EncodeToString(sum[:6])
+	hasher := hmac.New(sha512.New, []byte(authLogRefHashKey))
+	_, _ = hasher.Write([]byte(identifier))
+	logRef := hex.EncodeToString(hasher.Sum(nil))
+	return "provider=" + provider + " auth_id_hash=" + logRef[:32]
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.
