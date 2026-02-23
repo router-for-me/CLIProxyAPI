@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -136,6 +137,11 @@ func isWebUIRequest(c *gin.Context) bool {
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
+	targetURL, errTarget := validateCallbackForwarderTarget(targetBase)
+	if errTarget != nil {
+		return nil, fmt.Errorf("invalid callback target: %w", errTarget)
+	}
+
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
 	if prev != nil {
@@ -154,16 +160,16 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		target := targetBase
+		target := *targetURL
 		if raw := r.URL.RawQuery; raw != "" {
-			if strings.Contains(target, "?") {
-				target = target + "&" + raw
+			if target.RawQuery != "" {
+				target.RawQuery = target.RawQuery + "&" + raw
 			} else {
-				target = target + "?" + raw
+				target.RawQuery = raw
 			}
 		}
 		w.Header().Set("Cache-Control", "no-store")
-		http.Redirect(w, r, target, http.StatusFound)
+		http.Redirect(w, r, target.String(), http.StatusFound)
 	})
 
 	srv := &http.Server{
@@ -193,6 +199,38 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	log.Infof("callback forwarder for %s listening on %s", provider, addr)
 
 	return forwarder, nil
+}
+
+func validateCallbackForwarderTarget(targetBase string) (*url.URL, error) {
+	trimmed := strings.TrimSpace(targetBase)
+	if trimmed == "" {
+		return nil, fmt.Errorf("target cannot be empty")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("parse target: %w", err)
+	}
+	if !parsed.IsAbs() {
+		return nil, fmt.Errorf("target must be absolute")
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("target scheme %q is not allowed", parsed.Scheme)
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" {
+		return nil, fmt.Errorf("target host is required")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() {
+			return nil, fmt.Errorf("target host must be loopback")
+		}
+		return parsed, nil
+	}
+	if host != "localhost" {
+		return nil, fmt.Errorf("target host must be localhost or loopback")
+	}
+	return parsed, nil
 }
 
 func stopCallbackForwarder(port int) {
@@ -243,14 +281,34 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 	if h == nil || h.cfg == nil || h.cfg.Port <= 0 {
 		return "", fmt.Errorf("server port is not configured")
 	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
+	path = normalizeManagementCallbackPath(path)
 	scheme := "http"
 	if h.cfg.TLS.Enable {
 		scheme = "https"
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
+}
+
+func normalizeManagementCallbackPath(rawPath string) string {
+	normalized := strings.TrimSpace(rawPath)
+	normalized = strings.ReplaceAll(normalized, "\\", "/")
+	if idx := strings.IndexAny(normalized, "?#"); idx >= 0 {
+		normalized = normalized[:idx]
+	}
+	if normalized == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(normalized, "/") {
+		normalized = "/" + normalized
+	}
+	normalized = path.Clean(normalized)
+	if normalized == "." {
+		return "/"
+	}
+	if !strings.HasPrefix(normalized, "/") {
+		return "/" + normalized
+	}
+	return normalized
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
@@ -510,8 +568,8 @@ func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
 
 // Download single auth file by name
 func (h *Handler) DownloadAuthFile(c *gin.Context) {
-	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	name := strings.TrimSpace(c.Query("name"))
+	if name == "" {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
@@ -519,7 +577,11 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "name must end with .json"})
 		return
 	}
-	full := filepath.Join(h.cfg.AuthDir, name)
+	full, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid name"})
+		return
+	}
 	data, err := os.ReadFile(full)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -569,7 +631,8 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	name = strings.TrimSpace(name)
+	if name == "" {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
@@ -582,11 +645,10 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
-	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
-	if !filepath.IsAbs(dst) {
-		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
-			dst = abs
-		}
+	dst, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid name"})
+		return
 	}
 	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to write file: %v", errWrite)})
@@ -639,16 +701,15 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
 		return
 	}
-	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	name := strings.TrimSpace(c.Query("name"))
+	if name == "" {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
-	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
-	if !filepath.IsAbs(full) {
-		if abs, errAbs := filepath.Abs(full); errAbs == nil {
-			full = abs
-		}
+	full, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid name"})
+		return
 	}
 	if err := os.Remove(full); err != nil {
 		if os.IsNotExist(err) {
@@ -684,16 +745,51 @@ func (h *Handler) authIDForPath(path string) string {
 	return path
 }
 
+func (h *Handler) resolveAuthPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("auth path is empty")
+	}
+	if h == nil || h.cfg == nil {
+		return "", fmt.Errorf("handler configuration unavailable")
+	}
+	authDir := strings.TrimSpace(h.cfg.AuthDir)
+	if authDir == "" {
+		return "", fmt.Errorf("auth directory not configured")
+	}
+	cleanAuthDir, err := filepath.Abs(filepath.Clean(authDir))
+	if err != nil {
+		return "", fmt.Errorf("resolve auth dir: %w", err)
+	}
+	cleanPath := filepath.Clean(path)
+	absPath := cleanPath
+	if !filepath.IsAbs(absPath) {
+		absPath = filepath.Join(cleanAuthDir, cleanPath)
+	}
+	absPath, err = filepath.Abs(absPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve auth path: %w", err)
+	}
+	relPath, err := filepath.Rel(cleanAuthDir, absPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve relative auth path: %w", err)
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("auth path escapes auth directory")
+	}
+	return absPath, nil
+}
+
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
 	if h.authManager == nil {
 		return nil
 	}
-	if path == "" {
-		return fmt.Errorf("auth path is empty")
+	safePath, err := h.resolveAuthPath(path)
+	if err != nil {
+		return err
 	}
 	if data == nil {
-		var err error
-		data, err = os.ReadFile(path)
+		data, err = os.ReadFile(safePath)
 		if err != nil {
 			return fmt.Errorf("failed to read auth file: %w", err)
 		}
@@ -712,18 +808,18 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	}
 	lastRefresh, hasLastRefresh := extractLastRefreshTimestamp(metadata)
 
-	authID := h.authIDForPath(path)
+	authID := h.authIDForPath(safePath)
 	if authID == "" {
-		authID = path
+		authID = safePath
 	}
 	attr := map[string]string{
-		"path":   path,
-		"source": path,
+		"path":   safePath,
+		"source": safePath,
 	}
 	auth := &coreauth.Auth{
 		ID:         authID,
 		Provider:   provider,
-		FileName:   filepath.Base(path),
+		FileName:   filepath.Base(safePath),
 		Label:      label,
 		Status:     coreauth.StatusActive,
 		Attributes: attr,

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 )
@@ -44,11 +45,15 @@ type QwenTokenStorage struct {
 func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "qwen"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
+	cleanPath, err := cleanTokenFilePath(authFilePath, "qwen token")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := os.Create(cleanPath)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
@@ -60,4 +65,20 @@ func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to write token to file: %w", err)
 	}
 	return nil
+}
+
+func cleanTokenFilePath(path, scope string) (string, error) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s: auth file path is empty", scope)
+	}
+	clean := filepath.Clean(filepath.FromSlash(trimmed))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%s: auth file path is invalid", scope)
+	}
+	abs, err := filepath.Abs(clean)
+	if err != nil {
+		return "", fmt.Errorf("%s: resolve auth file path: %w", scope, err)
+	}
+	return filepath.Clean(abs), nil
 }

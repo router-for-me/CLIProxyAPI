@@ -17,7 +17,6 @@ import (
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -409,9 +408,9 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 		return auth, nil
 	}
 
-	// Log the old access token (masked) before refresh
+	// Log refresh start without including token material.
 	if oldAccessToken != "" {
-		log.Debugf("iflow executor: refreshing access token, old: %s", util.HideAPIKey(oldAccessToken))
+		log.Debug("iflow executor: refreshing access token")
 	}
 
 	svc := iflowauth.NewIFlowAuth(e.cfg, nil)
@@ -435,8 +434,7 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 	auth.Metadata["type"] = "iflow"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
 
-	// Log the new access token (masked) after successful refresh
-	log.Debugf("iflow executor: token refresh successful, new: %s", util.HideAPIKey(tokenData.AccessToken))
+	log.Debug("iflow executor: token refresh successful")
 
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)

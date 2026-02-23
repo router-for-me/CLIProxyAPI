@@ -59,3 +59,10 @@ func TestSaveTokenToFile_MkdirFail(t *testing.T) {
 		t.Error("expected error for invalid directory path")
 	}
 }
+
+func TestCodexTokenStorage_SaveTokenToFileRejectsTraversalPath(t *testing.T) {
+	ts := &CodexTokenStorage{}
+	if err := ts.SaveTokenToFile("/tmp/../codex-escape.json"); err == nil {
+		t.Fatal("expected traversal path to be rejected")
+	}
+}

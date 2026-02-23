@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -213,7 +214,7 @@ attemptLoop:
 					}
 					if attempt+1 < attempts {
 						delay := antigravityNoCapacityRetryDelay(attempt)
-						log.Debugf("antigravity executor: no capacity for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+						log.Debugf("antigravity executor: no capacity, retrying in %s (attempt %d/%d)", delay, attempt+1, attempts)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
@@ -256,6 +257,15 @@ attemptLoop:
 	}
 
 	return resp, err
+}
+
+func antigravityModelFingerprint(model string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:8])
 }
 
 // executeClaudeNonStream performs a claude non-streaming request to the Antigravity API.
@@ -758,7 +768,7 @@ attemptLoop:
 					}
 					if attempt+1 < attempts {
 						delay := antigravityNoCapacityRetryDelay(attempt)
-						log.Debugf("antigravity executor: no capacity for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+						log.Debugf("antigravity executor: no capacity, retrying in %s (attempt %d/%d)", delay, attempt+1, attempts)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return nil, errWait
 						}
@@ -904,6 +914,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		base := strings.TrimSuffix(baseURL, "/")
 		if base == "" {
 			base = buildBaseURL(e.cfg, auth)
+		}
+		base, err = sanitizeAntigravityBaseURL(base)
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
 		}
 
 		var requestURL strings.Builder
@@ -1528,6 +1542,16 @@ func resolveHost(base string) string {
 		return parsed.Host
 	}
 	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
+}
+
+func sanitizeAntigravityBaseURL(base string) (string, error) {
+	normalized := strings.TrimSuffix(strings.TrimSpace(base), "/")
+	switch normalized {
+	case antigravityBaseURLDaily, antigravitySandboxBaseURLDaily, antigravityBaseURLProd:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("antigravity executor: unsupported base url %q", base)
+	}
 }
 
 func resolveUserAgent(auth *cliproxyauth.Auth) string {

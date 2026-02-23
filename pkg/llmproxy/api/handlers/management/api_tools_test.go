@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -16,6 +17,26 @@ import (
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+func TestAPICall_RejectsUnsafeHost(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"method":"GET","url":"http://127.0.0.1:8080/ping"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	h := &Handler{}
+	h.APICall(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
 
 type memoryAuthStore struct {
 	mu    sync.Mutex
@@ -301,5 +322,58 @@ func TestGetKiroQuotaWithChecker_MissingProfileARN(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "profile arn not found") {
 		t.Fatalf("unexpected response body: %s", rec.Body.String())
+	}
+}
+
+func TestCopilotQuotaURLFromTokenURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		tokenURL  string
+		wantURL   string
+		expectErr bool
+	}{
+		{
+			name:      "github_api",
+			tokenURL:  "https://api.github.com/copilot_internal/v2/token",
+			wantURL:   "https://api.github.com/copilot_pkg/llmproxy/user",
+			expectErr: false,
+		},
+		{
+			name:      "copilot_api",
+			tokenURL:  "https://api.githubcopilot.com/copilot_internal/v2/token",
+			wantURL:   "https://api.githubcopilot.com/copilot_pkg/llmproxy/user",
+			expectErr: false,
+		},
+		{
+			name:      "reject_http",
+			tokenURL:  "http://api.github.com/copilot_internal/v2/token",
+			expectErr: true,
+		},
+		{
+			name:      "reject_untrusted_host",
+			tokenURL:  "https://127.0.0.1/copilot_internal/v2/token",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := copilotQuotaURLFromTokenURL(tt.tokenURL)
+			if tt.expectErr {
+				if err == nil {
+					t.Fatalf("expected error, got url=%q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("copilotQuotaURLFromTokenURL returned error: %v", err)
+			}
+			if got != tt.wantURL {
+				t.Fatalf("copilotQuotaURLFromTokenURL = %q, want %q", got, tt.wantURL)
+			}
+		})
 	}
 }

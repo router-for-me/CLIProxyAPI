@@ -79,3 +79,17 @@ func TestLoadConfigOptional_DirectoryPath(t *testing.T) {
 		t.Fatal("expected non-nil config for optional directory config path")
 	}
 }
+
+func TestCheckedPathLengthPlusOne(t *testing.T) {
+	if got := checkedPathLengthPlusOne(4); got != 5 {
+		t.Fatalf("expected 5, got %d", got)
+	}
+
+	maxInt := int(^uint(0) >> 1)
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for overflow path length")
+		}
+	}()
+	_ = checkedPathLengthPlusOne(maxInt)
+}

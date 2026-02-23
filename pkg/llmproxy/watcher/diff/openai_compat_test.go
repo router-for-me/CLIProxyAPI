@@ -1,6 +1,8 @@
 package diff
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -160,6 +162,20 @@ func TestOpenAICompatSignature_StableAndNormalized(t *testing.T) {
 	c.Models = append(c.Models, config.OpenAICompatibilityModel{Name: "m2"})
 	if sigC := openAICompatSignature(c); sigC == sigB {
 		t.Fatalf("expected signature to change when models change, got %s", sigC)
+	}
+
+}
+
+func TestOpenAICompatSignature_DoesNotUseLegacySHA256(t *testing.T) {
+	entry := config.OpenAICompatibility{Name: "provider"}
+	got := openAICompatSignature(entry)
+	if got == "" {
+		t.Fatal("expected non-empty signature")
+	}
+
+	legacy := sha256.Sum256([]byte("name=provider"))
+	if got == hex.EncodeToString(legacy[:]) {
+		t.Fatalf("expected signature to differ from legacy sha256")
 	}
 }
 

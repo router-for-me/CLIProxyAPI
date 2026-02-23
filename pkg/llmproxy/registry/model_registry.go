@@ -602,7 +602,7 @@ func (r *ModelRegistry) SetModelQuotaExceeded(clientID, modelID string) {
 
 	if registration, exists := r.models[modelID]; exists {
 		registration.QuotaExceededClients[clientID] = new(time.Now())
-		log.Debugf("Marked model %s as quota exceeded for client %s", modelID, clientID)
+		log.Debug("Marked model as quota exceeded for client")
 	}
 }
 
@@ -645,9 +645,9 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 	registration.SuspendedClients[clientID] = reason
 	registration.LastUpdated = time.Now()
 	if reason != "" {
-		log.Debugf("Suspended client %s for model %s: %s", clientID, modelID, reason)
+		log.Debugf("Suspended client %s for model %s (reason provided)", clientID, modelID)
 	} else {
-		log.Debugf("Suspended client %s for model %s", clientID, modelID)
+		log.Debug("Suspended client for model")
 	}
 }
 
@@ -671,7 +671,7 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	}
 	delete(registration.SuspendedClients, clientID)
 	registration.LastUpdated = time.Now()
-	log.Debugf("Resumed client %s for model %s", clientID, modelID)
+	log.Debug("Resumed suspended client for model")
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.

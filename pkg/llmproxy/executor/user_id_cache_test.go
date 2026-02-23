@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 	"time"
 )
@@ -82,5 +84,18 @@ func TestCachedUserID_RenewsTTLOnHit(t *testing.T) {
 
 	if entry.expire.Sub(soon) < 30*time.Minute {
 		t.Fatalf("expected TTL to renew, got %v remaining", entry.expire.Sub(soon))
+	}
+}
+
+func TestUserIDCacheKey_DoesNotUseLegacySHA256(t *testing.T) {
+	apiKey := "api-key-legacy-check"
+	got := userIDCacheKey(apiKey)
+	if got == "" {
+		t.Fatal("expected non-empty cache key")
+	}
+
+	legacy := sha256.Sum256([]byte(apiKey))
+	if got == hex.EncodeToString(legacy[:]) {
+		t.Fatalf("expected cache key to differ from legacy sha256")
 	}
 }

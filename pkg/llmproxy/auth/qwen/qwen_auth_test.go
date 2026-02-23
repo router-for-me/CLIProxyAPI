@@ -82,3 +82,16 @@ func TestRefreshTokens(t *testing.T) {
 		t.Errorf("got access token %q, want new-access", resp.AccessToken)
 	}
 }
+
+func TestQwenTokenStorageSaveTokenToFileRejectsTraversalPath(t *testing.T) {
+	t.Parallel()
+
+	ts := &QwenTokenStorage{AccessToken: "token"}
+	err := ts.SaveTokenToFile("../qwen.json")
+	if err == nil {
+		t.Fatal("expected error for traversal path")
+	}
+	if !strings.Contains(err.Error(), "auth file path is invalid") {
+		t.Fatalf("expected invalid path error, got %v", err)
+	}
+}

@@ -225,6 +225,10 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 	if path == "" {
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
 	}
+	path, err = ensurePathWithinDir(path, s.baseDirSnapshot(), "auth filestore")
+	if err != nil {
+		return "", err
+	}
 
 	if auth.Disabled {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
@@ -399,14 +403,26 @@ func (s *GitTokenStore) PersistAuthFiles(_ context.Context, message string, path
 }
 
 func (s *GitTokenStore) resolveDeletePath(id string) (string, error) {
-	if strings.ContainsRune(id, os.PathSeparator) || filepath.IsAbs(id) {
-		return id, nil
-	}
 	dir := s.baseDirSnapshot()
 	if dir == "" {
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
-	return filepath.Join(dir, id), nil
+	clean := filepath.Clean(filepath.FromSlash(strings.TrimSpace(id)))
+	if clean == "." || clean == "" {
+		return "", fmt.Errorf("auth filestore: invalid id")
+	}
+	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("auth filestore: id resolves outside auth directory")
+	}
+	path := filepath.Join(dir, clean)
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return "", fmt.Errorf("auth filestore: relative path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("auth filestore: id resolves outside auth directory")
+	}
+	return path, nil
 }
 
 func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {

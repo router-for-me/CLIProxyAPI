@@ -56,8 +56,14 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	}
 
 	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
-	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
-	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
+	staticCredentialClientCount := summarizeStaticCredentialClients(
+		geminiAPIKeyCount,
+		vertexCompatAPIKeyCount,
+		claudeAPIKeyCount,
+		codexAPIKeyCount,
+		openAICompatCount,
+	)
+	log.Debugf("loaded %d static credential clients", staticCredentialClientCount)
 
 	var authFileCount int
 	if rescanAuth {
@@ -100,7 +106,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Unlock()
 	}
 
-	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
+	totalNewClients := authFileCount + staticCredentialClientCount
 
 	if w.reloadCallback != nil {
 		log.Debugf("triggering server update callback before auth refresh")
@@ -109,15 +115,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	w.refreshAuthState(forceAuthRefresh)
 
-	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
-		totalNewClients,
-		authFileCount,
-		geminiAPIKeyCount,
-		vertexCompatAPIKeyCount,
-		claudeAPIKeyCount,
-		codexAPIKeyCount,
-		openAICompatCount,
-	)
+	log.Infof("%s", clientReloadSummary(totalNewClients, authFileCount, staticCredentialClientCount))
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {

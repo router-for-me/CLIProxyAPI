@@ -7,8 +7,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -259,7 +261,17 @@ func (s *OAuthServer) handleSuccess(w http.ResponseWriter, r *http.Request) {
 // isValidURL checks if the URL is a valid http/https URL to prevent XSS
 func isValidURL(urlStr string) bool {
 	urlStr = strings.TrimSpace(urlStr)
-	return strings.HasPrefix(urlStr, "https://") || strings.HasPrefix(urlStr, "http://")
+	if urlStr == "" {
+		return false
+	}
+	parsed, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+	if parsed.Host == "" {
+		return false
+	}
+	return parsed.Scheme == "https" || parsed.Scheme == "http"
 }
 
 // generateSuccessHTML creates the HTML content for the success page.
@@ -273,20 +285,21 @@ func isValidURL(urlStr string) bool {
 // Returns:
 //   - string: The HTML content for the success page
 func (s *OAuthServer) generateSuccessHTML(setupRequired bool, platformURL string) string {
-	html := LoginSuccessHtml
+	pageHTML := LoginSuccessHtml
+	escapedPlatformURL := html.EscapeString(platformURL)
 
 	// Replace platform URL placeholder
-	html = strings.ReplaceAll(html, "{{PLATFORM_URL}}", platformURL)
+	pageHTML = strings.ReplaceAll(pageHTML, "{{PLATFORM_URL}}", escapedPlatformURL)
 
 	// Add setup notice if required
 	if setupRequired {
-		setupNotice := strings.ReplaceAll(SetupNoticeHtml, "{{PLATFORM_URL}}", platformURL)
-		html = strings.Replace(html, "{{SETUP_NOTICE}}", setupNotice, 1)
+		setupNotice := strings.ReplaceAll(SetupNoticeHtml, "{{PLATFORM_URL}}", escapedPlatformURL)
+		pageHTML = strings.Replace(pageHTML, "{{SETUP_NOTICE}}", setupNotice, 1)
 	} else {
-		html = strings.Replace(html, "{{SETUP_NOTICE}}", "", 1)
+		pageHTML = strings.Replace(pageHTML, "{{SETUP_NOTICE}}", "", 1)
 	}
 
-	return html
+	return pageHTML
 }
 
 // sendResult sends the OAuth result to the waiting channel.
