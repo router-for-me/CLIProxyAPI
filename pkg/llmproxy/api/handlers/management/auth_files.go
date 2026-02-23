@@ -684,16 +684,51 @@ func (h *Handler) authIDForPath(path string) string {
 	return path
 }
 
+func (h *Handler) resolveAuthPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("auth path is empty")
+	}
+	if h == nil || h.cfg == nil {
+		return "", fmt.Errorf("handler configuration unavailable")
+	}
+	authDir := strings.TrimSpace(h.cfg.AuthDir)
+	if authDir == "" {
+		return "", fmt.Errorf("auth directory not configured")
+	}
+	cleanAuthDir, err := filepath.Abs(filepath.Clean(authDir))
+	if err != nil {
+		return "", fmt.Errorf("resolve auth dir: %w", err)
+	}
+	cleanPath := filepath.Clean(path)
+	absPath := cleanPath
+	if !filepath.IsAbs(absPath) {
+		absPath = filepath.Join(cleanAuthDir, cleanPath)
+	}
+	absPath, err = filepath.Abs(absPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve auth path: %w", err)
+	}
+	relPath, err := filepath.Rel(cleanAuthDir, absPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve relative auth path: %w", err)
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("auth path escapes auth directory")
+	}
+	return absPath, nil
+}
+
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
 	if h.authManager == nil {
 		return nil
 	}
-	if path == "" {
-		return fmt.Errorf("auth path is empty")
+	safePath, err := h.resolveAuthPath(path)
+	if err != nil {
+		return err
 	}
 	if data == nil {
-		var err error
-		data, err = os.ReadFile(path)
+		data, err = os.ReadFile(safePath)
 		if err != nil {
 			return fmt.Errorf("failed to read auth file: %w", err)
 		}
@@ -712,18 +747,18 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	}
 	lastRefresh, hasLastRefresh := extractLastRefreshTimestamp(metadata)
 
-	authID := h.authIDForPath(path)
+	authID := h.authIDForPath(safePath)
 	if authID == "" {
-		authID = path
+		authID = safePath
 	}
 	attr := map[string]string{
-		"path":   path,
-		"source": path,
+		"path":   safePath,
+		"source": safePath,
 	}
 	auth := &coreauth.Auth{
 		ID:         authID,
 		Provider:   provider,
-		FileName:   filepath.Base(path),
+		FileName:   filepath.Base(safePath),
 		Label:      label,
 		Status:     coreauth.StatusActive,
 		Attributes: attr,
