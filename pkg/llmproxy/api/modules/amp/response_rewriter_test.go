@@ -100,6 +100,15 @@ func TestRewriteStreamChunk_MessageModel(t *testing.T) {
 	}
 }
 
+func TestSanitizeModelIDForResponse(t *testing.T) {
+	if got := sanitizeModelIDForResponse("  gpt-5.2-codex  "); got != "gpt-5.2-codex" {
+		t.Fatalf("expected trimmed model id, got %q", got)
+	}
+	if got := sanitizeModelIDForResponse("gpt-5<script>"); got != "" {
+		t.Fatalf("expected unsafe model id to be dropped, got %q", got)
+	}
+}
+
 func contains(data, substr []byte) bool {
 	for i := 0; i <= len(data)-len(substr); i++ {
 		if string(data[i:i+len(substr)]) == string(substr) {

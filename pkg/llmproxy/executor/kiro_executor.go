@@ -1674,7 +1674,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	// Check for Opus variants
 	if strings.Contains(modelLower, "opus") {
 		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
-			log.Debug("kiro: unknown opus 4.6 variant, mapping to claude-opus-4.6")
+			log.Debug("kiro: unknown Opus 4.6 model, mapping to claude-opus-4.6")
 			return "claude-opus-4.6"
 		}
 		log.Debug("kiro: unknown opus variant, mapping to claude-opus-4.5")
