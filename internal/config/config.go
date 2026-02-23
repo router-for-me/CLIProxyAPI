@@ -2,6 +2,8 @@
 // It handles loading and parsing YAML configuration files, and provides structured
 // access to application settings including server port, authentication directory,
 // debug settings, proxy configuration, and API keys.
+//
+//go:generate go run ../../cmd/codegen/main.go
 package config
 
 import (
@@ -16,6 +18,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/ratelimit"
 )
 
 const (
@@ -81,11 +85,22 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
+	// ResponsesWebsocketEnabled gates the dedicated /v1/responses/ws route rollout.
+	// Nil means enabled (default behavior).
+	ResponsesWebsocketEnabled *bool `yaml:"responses-websocket-enabled,omitempty" json:"responses-websocket-enabled,omitempty"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
+	// GeneratedConfig contains generated config fields for dedicated providers.
+	GeneratedConfig `yaml:",inline"`
+
 	// KiroKey defines a list of Kiro (AWS CodeWhisperer) configurations.
 	KiroKey []KiroKey `yaml:"kiro" json:"kiro"`
+
+	// CursorKey defines Cursor (via cursor-api) configurations. Uses login protocol, not static API key.
+	// Token file contains sk-... key from cursor-api /build-key, or token:checksum for /build-key.
+	CursorKey []CursorKey `yaml:"cursor" json:"cursor"`
 
 	// KiroPreferredEndpoint sets the global default preferred endpoint for all Kiro providers.
 	// Values: "ide" (default, CodeWhisperer) or "cli" (Amazon Q).
@@ -123,6 +138,11 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// OAuthUpstream defines per-channel upstream base URL overrides for OAuth/file-backed auth channels.
+	// Keys are channel identifiers (e.g., gemini-cli, claude, codex, qwen, iflow, github-copilot, antigravity).
+	// Values must be absolute base URLs (scheme + host), and are normalized by trimming trailing slashes.
+	OAuthUpstream map[string]string `yaml:"oauth-upstream,omitempty" json:"oauth-upstream,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -130,8 +150,6 @@ type Config struct {
 	// This is useful when you want to login with a different account without logging out
 	// from your current session. Default: false.
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
-
-	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests
@@ -211,6 +229,11 @@ type AmpModelMapping struct {
 	// To is the target model name to route to (e.g., "claude-sonnet-4").
 	// The target model must have available providers in the registry.
 	To string `yaml:"to" json:"to"`
+
+	// Params define provider-agnostic request overrides to apply when this mapping is used.
+	// Keys are merged into the request JSON at the root level unless they already exist.
+	// For example: params: {"custom_model": "iflow/tab-rt", "enable_stream": true}
+	Params map[string]interface{} `yaml:"params,omitempty" json:"params,omitempty"`
 
 	// Regex indicates whether the 'from' field should be interpreted as a regular
 	// expression for matching model names. When true, this mapping is evaluated
@@ -314,10 +337,6 @@ type CloakConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
-
-	// CacheUserID controls whether Claude user_id values are cached per API key.
-	// When false, a fresh random user_id is generated for every request.
-	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,
@@ -489,6 +508,100 @@ type KiroKey struct {
 	PreferredEndpoint string `yaml:"preferred-endpoint,omitempty" json:"preferred-endpoint,omitempty"`
 }
 
+// CursorKey represents Cursor (via cursor-api) configuration. Uses login protocol.
+// Token file contains sk-... key from cursor-api /build-key, or token:checksum for /build-key.
+// When token-file is absent, token is auto-read from Cursor IDE storage (zero-action flow).
+type CursorKey struct {
+	// TokenFile is the path to the Cursor token file (sk-... key or token:checksum).
+	// Optional: when empty, token is auto-read from Cursor IDE state.vscdb.
+	TokenFile string `yaml:"token-file,omitempty" json:"token-file,omitempty"`
+
+	// CursorAPIURL is the cursor-api server URL (default: http://127.0.0.1:3000).
+	CursorAPIURL string `yaml:"cursor-api-url,omitempty" json:"cursor-api-url,omitempty"`
+
+	// AuthToken is the cursor-api admin token (matches AUTH_TOKEN env). Required for zero-action
+	// flow when using /tokens/add to register IDE token. Used as Bearer for chat when token-file absent.
+	AuthToken string `yaml:"auth-token,omitempty" json:"auth-token,omitempty"`
+
+	// ProxyURL optionally overrides the global proxy for this configuration.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+}
+
+// OAICompatProviderConfig represents a common configuration for OpenAI-compatible providers.
+type OAICompatProviderConfig struct {
+	// TokenFile is the path to OAuth token file (access/refresh). Optional when APIKey is set.
+	TokenFile string `yaml:"token-file,omitempty" json:"token-file,omitempty"`
+
+	// APIKey is the API key for direct auth (fallback when token-file not used).
+	APIKey string `yaml:"api-key,omitempty" json:"api-key,omitempty"`
+
+	// BaseURL is the API base URL.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL optionally overrides the global proxy for this configuration.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines optional model configurations including aliases for routing.
+	Models []OpenAICompatibilityModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Priority controls selection preference.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Prefix optionally namespaces model aliases for this provider.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent with this key.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// RateLimit defines optional rate limiting configuration for this credential.
+	RateLimit ratelimit.RateLimitConfig `yaml:"rate-limit,omitempty" json:"rate-limit,omitempty"`
+}
+
+// ProviderSpec defines a provider's metadata for codegen and runtime injection.
+type ProviderSpec struct {
+	Name          string
+	YAMLKey       string // If set, a dedicated block is generated in the Config struct
+	GoName        string // Optional: Override PascalCase name in Go (defaults to Title(Name))
+	BaseURL       string
+	EnvVars       []string // Environment variables for automatic injection
+	DefaultModels []OpenAICompatibilityModel
+}
+
+// GetDedicatedProviders returns providers that have a dedicated config block.
+func GetDedicatedProviders() []ProviderSpec {
+	var out []ProviderSpec
+	for _, p := range AllProviders {
+		if p.YAMLKey != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// GetPremadeProviders returns providers that can be injected from environment variables.
+func GetPremadeProviders() []ProviderSpec {
+	var out []ProviderSpec
+	for _, p := range AllProviders {
+		if len(p.EnvVars) > 0 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// GetProviderByName looks up a provider by its name (case-insensitive).
+func GetProviderByName(name string) (ProviderSpec, bool) {
+	for _, p := range AllProviders {
+		if strings.EqualFold(p.Name, name) {
+			return p, true
+		}
+	}
+	return ProviderSpec{}, false
+}
+
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.
 type OpenAICompatibility struct {
@@ -505,6 +618,10 @@ type OpenAICompatibility struct {
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// ModelsEndpoint overrides the upstream model discovery path.
+	// Defaults to "/v1/models" when omitted.
+	ModelsEndpoint string `yaml:"models-endpoint,omitempty" json:"models-endpoint,omitempty"`
+
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
@@ -517,6 +634,9 @@ type OpenAICompatibility struct {
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
 type OpenAICompatibilityAPIKey struct {
+	// TokenFile is the path to OAuth token file (access/refresh). Optional when APIKey is set.
+	TokenFile string `yaml:"token-file,omitempty" json:"token-file,omitempty"`
+
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
@@ -573,6 +693,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 				// Missing and optional: return empty config (cloud deploy standby).
 				return &Config{}, nil
 			}
+		}
+		if errors.Is(err, syscall.EISDIR) {
+			return nil, fmt.Errorf(
+				"failed to read config file: %w (config path %q is a directory; pass a YAML file path such as /CLIProxyAPI/config.yaml)",
+				err,
+				configFile,
+			)
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -667,14 +794,26 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Kiro keys: trim whitespace from credential fields
 	cfg.SanitizeKiroKeys()
 
+	// Sanitize Cursor keys: trim whitespace
+	cfg.SanitizeCursorKeys()
+
+	// Sanitize generated dedicated providers: trim whitespace
+	cfg.SanitizeGeneratedProviders()
+
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
+
+	// Strategy E1: Inject premade providers (zen, nim) from environment if missing in config
+	cfg.InjectPremadeFromEnv()
 
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
+
+	// Normalize OAuth upstream URL override map.
+	cfg.SanitizeOAuthUpstream()
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
@@ -694,6 +833,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// 	}
 	// }
 
+	// Apply environment variable overrides (for Docker deployment convenience)
+	cfg.ApplyEnvOverrides()
+
 	// Return the populated configuration struct.
 	return &cfg, nil
 }
@@ -703,8 +845,41 @@ func (cfg *Config) SanitizePayloadRules() {
 	if cfg == nil {
 		return
 	}
+	cfg.Payload.Default = sanitizePayloadRules(cfg.Payload.Default, "default")
+	cfg.Payload.Override = sanitizePayloadRules(cfg.Payload.Override, "override")
+	cfg.Payload.Filter = sanitizePayloadFilterRules(cfg.Payload.Filter, "filter")
 	cfg.Payload.DefaultRaw = sanitizePayloadRawRules(cfg.Payload.DefaultRaw, "default-raw")
 	cfg.Payload.OverrideRaw = sanitizePayloadRawRules(cfg.Payload.OverrideRaw, "override-raw")
+}
+
+func sanitizePayloadRules(rules []PayloadRule, section string) []PayloadRule {
+	if len(rules) == 0 {
+		return rules
+	}
+	out := make([]PayloadRule, 0, len(rules))
+	for i := range rules {
+		rule := rules[i]
+		if len(rule.Params) == 0 {
+			continue
+		}
+		invalid := false
+		for path := range rule.Params {
+			if payloadPathInvalid(path) {
+				log.WithFields(log.Fields{
+					"section":    section,
+					"rule_index": i + 1,
+					"param":      path,
+				}).Warn("payload rule dropped: invalid parameter path")
+				invalid = true
+				break
+			}
+		}
+		if invalid {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
 }
 
 func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule {
@@ -719,6 +894,15 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		}
 		invalid := false
 		for path, value := range rule.Params {
+			if payloadPathInvalid(path) {
+				log.WithFields(log.Fields{
+					"section":    section,
+					"rule_index": i + 1,
+					"param":      path,
+				}).Warn("payload rule dropped: invalid parameter path")
+				invalid = true
+				break
+			}
 			raw, ok := payloadRawString(value)
 			if !ok {
 				continue
@@ -742,6 +926,44 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 	return out
 }
 
+func sanitizePayloadFilterRules(rules []PayloadFilterRule, section string) []PayloadFilterRule {
+	if len(rules) == 0 {
+		return rules
+	}
+	out := make([]PayloadFilterRule, 0, len(rules))
+	for i := range rules {
+		rule := rules[i]
+		if len(rule.Params) == 0 {
+			continue
+		}
+		invalid := false
+		for _, path := range rule.Params {
+			if payloadPathInvalid(path) {
+				log.WithFields(log.Fields{
+					"section":    section,
+					"rule_index": i + 1,
+					"param":      path,
+				}).Warn("payload filter rule dropped: invalid parameter path")
+				invalid = true
+				break
+			}
+		}
+		if invalid {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
+}
+
+func payloadPathInvalid(path string) bool {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return true
+	}
+	return strings.HasPrefix(p, ".") || strings.HasSuffix(p, ".") || strings.Contains(p, "..")
+}
+
 func payloadRawString(value any) ([]byte, bool) {
 	switch typed := value.(type) {
 	case string:
@@ -763,24 +985,35 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		return
 	}
 
-	// Inject channel defaults when the channel is absent in user config.
-	// Presence is checked case-insensitively and includes explicit nil/empty markers.
+	// Inject default aliases for channels with built-in compatibility mappings.
 	if cfg.OAuthModelAlias == nil {
 		cfg.OAuthModelAlias = make(map[string][]OAuthModelAlias)
 	}
-	hasChannel := func(channel string) bool {
+	if _, hasKiro := cfg.OAuthModelAlias["kiro"]; !hasKiro {
+		// Check case-insensitive too
+		found := false
 		for k := range cfg.OAuthModelAlias {
-			if strings.EqualFold(strings.TrimSpace(k), channel) {
-				return true
+			if strings.EqualFold(strings.TrimSpace(k), "kiro") {
+				found = true
+				break
 			}
 		}
-		return false
+		if !found {
+			cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
+		}
 	}
-	if !hasChannel("kiro") {
-		cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
-	}
-	if !hasChannel("github-copilot") {
-		cfg.OAuthModelAlias["github-copilot"] = defaultGitHubCopilotAliases()
+	if _, hasGitHubCopilot := cfg.OAuthModelAlias["github-copilot"]; !hasGitHubCopilot {
+		// Check case-insensitive too
+		found := false
+		for k := range cfg.OAuthModelAlias {
+			if strings.EqualFold(strings.TrimSpace(k), "github-copilot") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cfg.OAuthModelAlias["github-copilot"] = defaultGitHubCopilotAliases()
+		}
 	}
 
 	if len(cfg.OAuthModelAlias) == 0 {
@@ -809,7 +1042,8 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if strings.EqualFold(name, alias) {
 				continue
 			}
-			aliasKey := strings.ToLower(alias)
+			// Dedupe by name+alias combination, not just alias
+			aliasKey := strings.ToLower(name) + ":" + strings.ToLower(alias)
 			if _, ok := seenAlias[aliasKey]; ok {
 				continue
 			}
@@ -821,6 +1055,67 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+// SanitizeOAuthUpstream normalizes OAuth upstream URL override keys/values.
+// It trims whitespace, lowercases channel names, drops empty keys/values, and
+// strips trailing slashes from URLs.
+func (cfg *Config) SanitizeOAuthUpstream() {
+	if cfg == nil {
+		return
+	}
+	if len(cfg.OAuthUpstream) == 0 {
+		return
+	}
+	out := make(map[string]string, len(cfg.OAuthUpstream))
+	for rawChannel, rawURL := range cfg.OAuthUpstream {
+		channel := normalizeOAuthUpstreamChannel(rawChannel)
+		if channel == "" {
+			continue
+		}
+		baseURL := strings.TrimSpace(rawURL)
+		if baseURL == "" {
+			continue
+		}
+		out[channel] = strings.TrimRight(baseURL, "/")
+	}
+	cfg.OAuthUpstream = out
+}
+
+// OAuthUpstreamURL resolves the configured OAuth upstream override for a channel.
+// Returns empty string when no override exists.
+func (cfg *Config) OAuthUpstreamURL(channel string) string {
+	if cfg == nil || len(cfg.OAuthUpstream) == 0 {
+		return ""
+	}
+	key := normalizeOAuthUpstreamChannel(channel)
+	if key == "" {
+		return ""
+	}
+	return strings.TrimSpace(cfg.OAuthUpstream[key])
+}
+
+func normalizeOAuthUpstreamChannel(channel string) string {
+	key := strings.TrimSpace(strings.ToLower(channel))
+	if key == "" {
+		return ""
+	}
+	key = strings.ReplaceAll(key, "_", "-")
+	key = strings.ReplaceAll(key, " ", "-")
+	key = strings.ReplaceAll(key, ".", "-")
+	key = strings.ReplaceAll(key, "/", "-")
+	key = strings.Trim(key, "-")
+	key = strings.Join(strings.FieldsFunc(key, func(r rune) bool { return r == '-' }), "-")
+	return key
+}
+
+// IsResponsesWebsocketEnabled returns true when the dedicated responses websocket
+// route should be mounted. Default is enabled when unset.
+func (cfg *Config) IsResponsesWebsocketEnabled() bool {
+	if cfg == nil || cfg.ResponsesWebsocketEnabled == nil {
+		return true
+	}
+	return *cfg.ResponsesWebsocketEnabled
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
@@ -897,6 +1192,20 @@ func (cfg *Config) SanitizeKiroKeys() {
 	}
 }
 
+// SanitizeCursorKeys trims whitespace from Cursor credential fields.
+func (cfg *Config) SanitizeCursorKeys() {
+	if cfg == nil || len(cfg.CursorKey) == 0 {
+		return
+	}
+	for i := range cfg.CursorKey {
+		entry := &cfg.CursorKey[i]
+		entry.TokenFile = strings.TrimSpace(entry.TokenFile)
+		entry.CursorAPIURL = strings.TrimSpace(entry.CursorAPIURL)
+		entry.AuthToken = strings.TrimSpace(entry.AuthToken)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	}
+}
+
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.
 func (cfg *Config) SanitizeGeminiKeys() {
 	if cfg == nil {
@@ -935,6 +1244,46 @@ func normalizeModelPrefix(prefix string) string {
 		return ""
 	}
 	return trimmed
+}
+
+// InjectPremadeFromEnv injects premade providers (zen, nim) if their environment variables are set.
+// This implements Recommendation: Option B from LLM_PROXY_RESEARCH_AUDIT_PLAN.md.
+func (cfg *Config) InjectPremadeFromEnv() {
+	for _, spec := range GetPremadeProviders() {
+		cfg.injectPremadeFromSpec(spec.Name, spec)
+	}
+}
+
+func (cfg *Config) injectPremadeFromSpec(name string, spec ProviderSpec) {
+	// Check if already in config
+	for _, compat := range cfg.OpenAICompatibility {
+		if strings.ToLower(compat.Name) == name {
+			return
+		}
+	}
+
+	// Check env vars
+	var apiKey string
+	for _, ev := range spec.EnvVars {
+		if val := os.Getenv(ev); val != "" {
+			apiKey = val
+			break
+		}
+	}
+	if apiKey == "" {
+		return
+	}
+
+	// Inject virtual entry
+	entry := OpenAICompatibility{
+		Name:    name,
+		BaseURL: spec.BaseURL,
+		APIKeyEntries: []OpenAICompatibilityAPIKey{
+			{APIKey: apiKey},
+		},
+		Models: spec.DefaultModels,
+	}
+	cfg.OpenAICompatibility = append(cfg.OpenAICompatibility, entry)
 }
 
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.
@@ -1019,6 +1368,120 @@ func hashSecret(secret string) (string, error) {
 		return "", err
 	}
 	return string(hashedBytes), nil
+}
+
+// ApplyEnvOverrides applies environment variable overrides to the configuration.
+// This enables Docker deployments with runtime configuration without modifying config.yaml.
+// Environment variables take precedence over config file values.
+func (cfg *Config) ApplyEnvOverrides() {
+	if cfg == nil {
+		return
+	}
+
+	// CLIPROXY_HOST - Server host (default: "" for all interfaces)
+	if val := os.Getenv("CLIPROXY_HOST"); val != "" {
+		cfg.Host = val
+		log.WithField("host", val).Info("Applied CLIPROXY_HOST override")
+	}
+
+	// CLIPROXY_PORT - Server port (default: 8317)
+	if val := os.Getenv("CLIPROXY_PORT"); val != "" {
+		if port, err := parseIntEnvVar(val); err == nil && port > 0 && port <= 65535 {
+			cfg.Port = port
+			log.WithField("port", port).Info("Applied CLIPROXY_PORT override")
+		} else {
+			log.WithField("value", val).Warn("Invalid CLIPROXY_PORT value, ignoring")
+		}
+	}
+
+	// CLIPROXY_SECRET_KEY - Management API secret key
+	if val := os.Getenv("CLIPROXY_SECRET_KEY"); val != "" {
+		// Hash if not already a bcrypt hash
+		if !looksLikeBcrypt(val) {
+			hashed, err := hashSecret(val)
+			if err != nil {
+				log.WithError(err).Warn("Failed to hash CLIPROXY_SECRET_KEY, using as-is")
+				cfg.RemoteManagement.SecretKey = val
+			} else {
+				cfg.RemoteManagement.SecretKey = hashed
+			}
+		} else {
+			cfg.RemoteManagement.SecretKey = val
+		}
+		log.Info("Applied CLIPROXY_SECRET_KEY override")
+	}
+
+	// CLIPROXY_ALLOW_REMOTE - Allow remote management access (true/false)
+	if val := os.Getenv("CLIPROXY_ALLOW_REMOTE"); val != "" {
+		if parsed, err := parseBoolEnvVar(val); err == nil {
+			cfg.RemoteManagement.AllowRemote = parsed
+			log.WithField("allow-remote", parsed).Info("Applied CLIPROXY_ALLOW_REMOTE override")
+		} else {
+			log.WithField("value", val).Warn("Invalid CLIPROXY_ALLOW_REMOTE value, ignoring")
+		}
+	}
+
+	// CLIPROXY_DEBUG - Enable debug logging (true/false)
+	if val := os.Getenv("CLIPROXY_DEBUG"); val != "" {
+		if parsed, err := parseBoolEnvVar(val); err == nil {
+			cfg.Debug = parsed
+			log.WithField("debug", parsed).Info("Applied CLIPROXY_DEBUG override")
+		} else {
+			log.WithField("value", val).Warn("Invalid CLIPROXY_DEBUG value, ignoring")
+		}
+	}
+
+	// CLIPROXY_ROUTING_STRATEGY - Routing strategy (round-robin/fill-first)
+	if val := os.Getenv("CLIPROXY_ROUTING_STRATEGY"); val != "" {
+		normalized := strings.ToLower(strings.TrimSpace(val))
+		switch normalized {
+		case "round-robin", "roundrobin", "rr":
+			cfg.Routing.Strategy = "round-robin"
+			log.Info("Applied CLIPROXY_ROUTING_STRATEGY override: round-robin")
+		case "fill-first", "fillfirst", "ff":
+			cfg.Routing.Strategy = "fill-first"
+			log.Info("Applied CLIPROXY_ROUTING_STRATEGY override: fill-first")
+		default:
+			log.WithField("value", val).Warn("Invalid CLIPROXY_ROUTING_STRATEGY value, ignoring")
+		}
+	}
+
+	// CLIPROXY_API_KEYS - Comma-separated list of API keys
+	if val := os.Getenv("CLIPROXY_API_KEYS"); val != "" {
+		keys := strings.Split(val, ",")
+		cfg.APIKeys = make([]string, 0, len(keys))
+		for _, key := range keys {
+			trimmed := strings.TrimSpace(key)
+			if trimmed != "" {
+				cfg.APIKeys = append(cfg.APIKeys, trimmed)
+			}
+		}
+		if len(cfg.APIKeys) > 0 {
+			log.WithField("count", len(cfg.APIKeys)).Info("Applied CLIPROXY_API_KEYS override")
+		}
+	}
+}
+
+// parseIntEnvVar parses an integer from an environment variable string.
+func parseIntEnvVar(val string) (int, error) {
+	val = strings.TrimSpace(val)
+	var result int
+	_, err := fmt.Sscanf(val, "%d", &result)
+	return result, err
+}
+
+// parseBoolEnvVar parses a boolean from an environment variable string.
+// Accepts: true/false, yes/no, 1/0, on/off (case-insensitive).
+func parseBoolEnvVar(val string) (bool, error) {
+	val = strings.ToLower(strings.TrimSpace(val))
+	switch val {
+	case "true", "yes", "1", "on":
+		return true, nil
+	case "false", "no", "0", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean value: %s", val)
+	}
 }
 
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
@@ -1312,10 +1775,18 @@ func appendPath(path []string, key string) []string {
 	if len(path) == 0 {
 		return []string{key}
 	}
-	newPath := make([]string, len(path)+1)
+	newPath := make([]string, checkedPathLengthPlusOne(len(path)))
 	copy(newPath, path)
 	newPath[len(path)] = key
 	return newPath
+}
+
+func checkedPathLengthPlusOne(pathLen int) int {
+	maxInt := int(^uint(0) >> 1)
+	if pathLen < 0 || pathLen >= maxInt {
+		panic(fmt.Sprintf("path length overflow: %d", pathLen))
+	}
+	return pathLen + 1
 }
 
 // isKnownDefaultValue returns true if the given node at the specified path
@@ -1736,154 +2207,6 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 	default:
 		// Scalars keep their existing style to preserve quoting
 	}
-}
-
-// Legacy migration helpers (move deprecated config keys into structured fields).
-type legacyConfigData struct {
-	LegacyGeminiKeys      []string                    `yaml:"generative-language-api-key"`
-	OpenAICompat          []legacyOpenAICompatibility `yaml:"openai-compatibility"`
-	AmpUpstreamURL        string                      `yaml:"amp-upstream-url"`
-	AmpUpstreamAPIKey     string                      `yaml:"amp-upstream-api-key"`
-	AmpRestrictManagement *bool                       `yaml:"amp-restrict-management-to-localhost"`
-	AmpModelMappings      []AmpModelMapping           `yaml:"amp-model-mappings"`
-}
-
-type legacyOpenAICompatibility struct {
-	Name    string   `yaml:"name"`
-	BaseURL string   `yaml:"base-url"`
-	APIKeys []string `yaml:"api-keys"`
-}
-
-func (cfg *Config) migrateLegacyGeminiKeys(legacy []string) bool {
-	if cfg == nil || len(legacy) == 0 {
-		return false
-	}
-	changed := false
-	seen := make(map[string]struct{}, len(cfg.GeminiKey))
-	for i := range cfg.GeminiKey {
-		key := strings.TrimSpace(cfg.GeminiKey[i].APIKey)
-		if key == "" {
-			continue
-		}
-		seen[key] = struct{}{}
-	}
-	for _, raw := range legacy {
-		key := strings.TrimSpace(raw)
-		if key == "" {
-			continue
-		}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		cfg.GeminiKey = append(cfg.GeminiKey, GeminiKey{APIKey: key})
-		seen[key] = struct{}{}
-		changed = true
-	}
-	return changed
-}
-
-func (cfg *Config) migrateLegacyOpenAICompatibilityKeys(legacy []legacyOpenAICompatibility) bool {
-	if cfg == nil || len(cfg.OpenAICompatibility) == 0 || len(legacy) == 0 {
-		return false
-	}
-	changed := false
-	for _, legacyEntry := range legacy {
-		if len(legacyEntry.APIKeys) == 0 {
-			continue
-		}
-		target := findOpenAICompatTarget(cfg.OpenAICompatibility, legacyEntry.Name, legacyEntry.BaseURL)
-		if target == nil {
-			continue
-		}
-		if mergeLegacyOpenAICompatAPIKeys(target, legacyEntry.APIKeys) {
-			changed = true
-		}
-	}
-	return changed
-}
-
-func mergeLegacyOpenAICompatAPIKeys(entry *OpenAICompatibility, keys []string) bool {
-	if entry == nil || len(keys) == 0 {
-		return false
-	}
-	changed := false
-	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
-	for i := range entry.APIKeyEntries {
-		key := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
-		if key == "" {
-			continue
-		}
-		existing[key] = struct{}{}
-	}
-	for _, raw := range keys {
-		key := strings.TrimSpace(raw)
-		if key == "" {
-			continue
-		}
-		if _, ok := existing[key]; ok {
-			continue
-		}
-		entry.APIKeyEntries = append(entry.APIKeyEntries, OpenAICompatibilityAPIKey{APIKey: key})
-		existing[key] = struct{}{}
-		changed = true
-	}
-	return changed
-}
-
-func findOpenAICompatTarget(entries []OpenAICompatibility, legacyName, legacyBase string) *OpenAICompatibility {
-	nameKey := strings.ToLower(strings.TrimSpace(legacyName))
-	baseKey := strings.ToLower(strings.TrimSpace(legacyBase))
-	if nameKey != "" && baseKey != "" {
-		for i := range entries {
-			if strings.ToLower(strings.TrimSpace(entries[i].Name)) == nameKey &&
-				strings.ToLower(strings.TrimSpace(entries[i].BaseURL)) == baseKey {
-				return &entries[i]
-			}
-		}
-	}
-	if baseKey != "" {
-		for i := range entries {
-			if strings.ToLower(strings.TrimSpace(entries[i].BaseURL)) == baseKey {
-				return &entries[i]
-			}
-		}
-	}
-	if nameKey != "" {
-		for i := range entries {
-			if strings.ToLower(strings.TrimSpace(entries[i].Name)) == nameKey {
-				return &entries[i]
-			}
-		}
-	}
-	return nil
-}
-
-func (cfg *Config) migrateLegacyAmpConfig(legacy *legacyConfigData) bool {
-	if cfg == nil || legacy == nil {
-		return false
-	}
-	changed := false
-	if cfg.AmpCode.UpstreamURL == "" {
-		if val := strings.TrimSpace(legacy.AmpUpstreamURL); val != "" {
-			cfg.AmpCode.UpstreamURL = val
-			changed = true
-		}
-	}
-	if cfg.AmpCode.UpstreamAPIKey == "" {
-		if val := strings.TrimSpace(legacy.AmpUpstreamAPIKey); val != "" {
-			cfg.AmpCode.UpstreamAPIKey = val
-			changed = true
-		}
-	}
-	if legacy.AmpRestrictManagement != nil {
-		cfg.AmpCode.RestrictManagementToLocalhost = *legacy.AmpRestrictManagement
-		changed = true
-	}
-	if len(cfg.AmpCode.ModelMappings) == 0 && len(legacy.AmpModelMappings) > 0 {
-		cfg.AmpCode.ModelMappings = append([]AmpModelMapping(nil), legacy.AmpModelMappings...)
-		changed = true
-	}
-	return changed
 }
 
 func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {

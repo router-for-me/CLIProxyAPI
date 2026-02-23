@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 // Register ensures the config-access provider is available to the access manager.

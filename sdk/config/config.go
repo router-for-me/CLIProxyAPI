@@ -1,54 +1,76 @@
 // Package config provides the public SDK configuration API.
 //
-// It re-exports the server configuration types and helpers so external projects can
-// embed CLIProxyAPI without importing internal packages.
+// It re-exports the server configuration types from pkg/llmproxy/config
+// so external projects can embed CLIProxyAPI without importing internal packages.
 package config
 
-import internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+import llmproxyconfig "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 
-type SDKConfig = internalconfig.SDKConfig
+type SDKConfig = llmproxyconfig.SDKConfig
+type Config = llmproxyconfig.Config
+type StreamingConfig = llmproxyconfig.StreamingConfig
+type TLSConfig = llmproxyconfig.TLSConfig
+type PprofConfig = llmproxyconfig.PprofConfig
+type RemoteManagement = llmproxyconfig.RemoteManagement
+type QuotaExceeded = llmproxyconfig.QuotaExceeded
+type RoutingConfig = llmproxyconfig.RoutingConfig
+type OAuthModelAlias = llmproxyconfig.OAuthModelAlias
+type AmpModelMapping = llmproxyconfig.AmpModelMapping
+type AmpCode = llmproxyconfig.AmpCode
+type AmpUpstreamAPIKeyEntry = llmproxyconfig.AmpUpstreamAPIKeyEntry
+type PayloadConfig = llmproxyconfig.PayloadConfig
+type PayloadRule = llmproxyconfig.PayloadRule
+type PayloadFilterRule = llmproxyconfig.PayloadFilterRule
+type PayloadModelRule = llmproxyconfig.PayloadModelRule
+type CloakConfig = llmproxyconfig.CloakConfig
+type ClaudeKey = llmproxyconfig.ClaudeKey
+type ClaudeModel = llmproxyconfig.ClaudeModel
+type CodexKey = llmproxyconfig.CodexKey
+type CodexModel = llmproxyconfig.CodexModel
+type GeminiKey = llmproxyconfig.GeminiKey
+type GeminiModel = llmproxyconfig.GeminiModel
+type KiroKey = llmproxyconfig.KiroKey
+type CursorKey = llmproxyconfig.CursorKey
+type OAICompatProviderConfig = llmproxyconfig.OAICompatProviderConfig
+type ProviderSpec = llmproxyconfig.ProviderSpec
+type VertexCompatKey = llmproxyconfig.VertexCompatKey
+type VertexCompatModel = llmproxyconfig.VertexCompatModel
+type OpenAICompatibility = llmproxyconfig.OpenAICompatibility
+type OpenAICompatibilityAPIKey = llmproxyconfig.OpenAICompatibilityAPIKey
+type OpenAICompatibilityModel = llmproxyconfig.OpenAICompatibilityModel
+type MiniMaxKey = llmproxyconfig.MiniMaxKey
+type DeepSeekKey = llmproxyconfig.DeepSeekKey
 
-type Config = internalconfig.Config
+type TLS = llmproxyconfig.TLSConfig
 
-type StreamingConfig = internalconfig.StreamingConfig
-type TLSConfig = internalconfig.TLSConfig
-type RemoteManagement = internalconfig.RemoteManagement
-type AmpCode = internalconfig.AmpCode
-type OAuthModelAlias = internalconfig.OAuthModelAlias
-type PayloadConfig = internalconfig.PayloadConfig
-type PayloadRule = internalconfig.PayloadRule
-type PayloadFilterRule = internalconfig.PayloadFilterRule
-type PayloadModelRule = internalconfig.PayloadModelRule
+const DefaultPanelGitHubRepository = llmproxyconfig.DefaultPanelGitHubRepository
 
-type GeminiKey = internalconfig.GeminiKey
-type CodexKey = internalconfig.CodexKey
-type ClaudeKey = internalconfig.ClaudeKey
-type VertexCompatKey = internalconfig.VertexCompatKey
-type VertexCompatModel = internalconfig.VertexCompatModel
-type OpenAICompatibility = internalconfig.OpenAICompatibility
-type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
-type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
-
-type TLS = internalconfig.TLSConfig
-
-const (
-	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
-)
-
-func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }
+func LoadConfig(configFile string) (*Config, error) { return llmproxyconfig.LoadConfig(configFile) }
 
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
-	return internalconfig.LoadConfigOptional(configFile, optional)
+	return llmproxyconfig.LoadConfigOptional(configFile, optional)
 }
 
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
-	return internalconfig.SaveConfigPreserveComments(configFile, cfg)
+	return llmproxyconfig.SaveConfigPreserveComments(configFile, cfg)
 }
 
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
-	return internalconfig.SaveConfigPreserveCommentsUpdateNestedScalar(configFile, path, value)
+	return llmproxyconfig.SaveConfigPreserveCommentsUpdateNestedScalar(configFile, path, value)
 }
 
 func NormalizeCommentIndentation(data []byte) []byte {
-	return internalconfig.NormalizeCommentIndentation(data)
+	return llmproxyconfig.NormalizeCommentIndentation(data)
+}
+
+func NormalizeHeaders(headers map[string]string) map[string]string {
+	return llmproxyconfig.NormalizeHeaders(headers)
+}
+
+func NormalizeExcludedModels(models []string) []string {
+	return llmproxyconfig.NormalizeExcludedModels(models)
+}
+
+func NormalizeOAuthExcludedModels(entries map[string][]string) map[string][]string {
+	return llmproxyconfig.NormalizeOAuthExcludedModels(entries)
 }

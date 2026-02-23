@@ -1108,9 +1108,6 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		cloakMode = cloakCfg.Mode
 		strictMode = cloakCfg.StrictMode
 		sensitiveWords = cloakCfg.SensitiveWords
-		if cloakCfg.CacheUserID != nil {
-			cacheUserID = *cloakCfg.CacheUserID
-		}
 	}
 
 	// Fallback to auth attributes if no config found
@@ -1123,10 +1120,10 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		if len(sensitiveWords) == 0 {
 			sensitiveWords = attrWords
 		}
-		if cloakCfg == nil || cloakCfg.CacheUserID == nil {
+		if true {
 			cacheUserID = attrCache
 		}
-	} else if cloakCfg == nil || cloakCfg.CacheUserID == nil {
+	} else if true {
 		_, _, _, attrCache := getCloakConfigFromAuth(auth)
 		cacheUserID = attrCache
 	}

@@ -17,6 +17,7 @@ var antigravityModelConversionTable = map[string]string{
 	"gemini-claude-sonnet-4-5":                "claude-sonnet-4-5",
 	"gemini-claude-sonnet-4-5-thinking":       "claude-sonnet-4-5-thinking",
 	"gemini-claude-opus-4-5-thinking":         "claude-opus-4-5-thinking",
+	"gemini-claude-opus-thinking":             "claude-opus-4-6-thinking",
 	"gemini-claude-opus-4-6-thinking":         "claude-opus-4-6-thinking",
 }
 
@@ -42,33 +43,28 @@ func defaultKiroAliases() []OAuthModelAlias {
 	}
 }
 
-// defaultGitHubCopilotAliases returns default oauth-model-alias entries that
-// expose Claude hyphen-style IDs for GitHub Copilot Claude models.
-// This keeps compatibility with clients (e.g. Claude Code) that use
-// Anthropic-style model IDs like "claude-opus-4-6".
-func defaultGitHubCopilotAliases() []OAuthModelAlias {
-	return []OAuthModelAlias{
-		{Name: "claude-haiku-4.5", Alias: "claude-haiku-4-5", Fork: true},
-		{Name: "claude-opus-4.1", Alias: "claude-opus-4-1", Fork: true},
-		{Name: "claude-opus-4.5", Alias: "claude-opus-4-5", Fork: true},
-		{Name: "claude-opus-4.6", Alias: "claude-opus-4-6", Fork: true},
-		{Name: "claude-sonnet-4.5", Alias: "claude-sonnet-4-5", Fork: true},
-		{Name: "claude-sonnet-4.6", Alias: "claude-sonnet-4-6", Fork: true},
-	}
-}
-
 // defaultAntigravityAliases returns the default oauth-model-alias configuration
 // for the antigravity channel when neither field exists.
 func defaultAntigravityAliases() []OAuthModelAlias {
 	return []OAuthModelAlias{
-		{Name: "rev19-uic3-1p", Alias: "gemini-2.5-computer-use-preview-10-2025"},
+		{Name: "rev19-uic3-1p", Alias: "rev19-uic3-1p"},
 		{Name: "gemini-3-pro-image", Alias: "gemini-3-pro-image-preview"},
 		{Name: "gemini-3-pro-high", Alias: "gemini-3-pro-preview"},
 		{Name: "gemini-3-flash", Alias: "gemini-3-flash-preview"},
 		{Name: "claude-sonnet-4-5", Alias: "gemini-claude-sonnet-4-5"},
 		{Name: "claude-sonnet-4-5-thinking", Alias: "gemini-claude-sonnet-4-5-thinking"},
 		{Name: "claude-opus-4-5-thinking", Alias: "gemini-claude-opus-4-5-thinking"},
+		{Name: "claude-opus-4-6-thinking", Alias: "gemini-claude-opus-thinking"},
 		{Name: "claude-opus-4-6-thinking", Alias: "gemini-claude-opus-4-6-thinking"},
+	}
+}
+
+// defaultGitHubCopilotAliases returns the default oauth-model-alias configuration
+// for the github-copilot channel.
+func defaultGitHubCopilotAliases() []OAuthModelAlias {
+	return []OAuthModelAlias{
+		{Name: "claude-opus-4.6", Alias: "claude-opus-4-6", Fork: true},
+		{Name: "claude-sonnet-4.6", Alias: "claude-sonnet-4-6", Fork: true},
 	}
 }
 
@@ -163,15 +159,18 @@ func migrateFromOldField(configFile string, root *yaml.Node, rootMap *yaml.Node,
 
 	// For antigravity channel, supplement missing default aliases
 	if antigravityEntries, exists := newAliases["antigravity"]; exists {
-		// Build a set of already configured model names (upstream names)
-		configuredModels := make(map[string]bool, len(antigravityEntries))
+		// Build a set of already configured (name, alias) pairs.
+		// A single upstream model may intentionally expose multiple aliases.
+		configuredPairs := make(map[string]bool, len(antigravityEntries))
 		for _, entry := range antigravityEntries {
-			configuredModels[entry.Name] = true
+			key := entry.Name + "\x00" + entry.Alias
+			configuredPairs[key] = true
 		}
 
 		// Add missing default aliases
 		for _, defaultAlias := range defaultAntigravityAliases() {
-			if !configuredModels[defaultAlias.Name] {
+			key := defaultAlias.Name + "\x00" + defaultAlias.Alias
+			if !configuredPairs[key] {
 				antigravityEntries = append(antigravityEntries, defaultAlias)
 			}
 		}
@@ -300,7 +299,7 @@ func writeYAMLNode(configFile string, root *yaml.Node) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	enc := yaml.NewEncoder(f)
 	enc.SetIndent(2)

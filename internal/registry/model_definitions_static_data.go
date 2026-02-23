@@ -1028,3 +1028,58 @@ func GetKimiModels() []*ModelInfo {
 		},
 	}
 }
+
+// GetCursorModels returns the Cursor model definitions (fallback stubs)
+func GetCursorModels() []*ModelInfo {
+	return nil // Cursor models are typically fetched from executor
+}
+
+// GetMiniMaxModels returns the MiniMax model definitions (fallback stubs)
+func GetMiniMaxModels() []*ModelInfo {
+	return nil // MiniMax models are typically fetched from executor
+}
+
+// GetRooModels returns the Roo model definitions (fallback stubs)
+func GetRooModels() []*ModelInfo {
+	return nil // Roo models are typically fetched from executor
+}
+
+// GetDeepSeekModels returns the DeepSeek model definitions (fallback stubs)
+func GetDeepSeekModels() []*ModelInfo {
+	return nil // DeepSeek models are typically fetched from executor
+}
+
+// GetGroqModels returns the Groq model definitions (fallback stubs)
+func GetGroqModels() []*ModelInfo {
+	return nil // Groq models are typically fetched from executor
+}
+
+// GetMistralModels returns the Mistral model definitions (fallback stubs)
+func GetMistralModels() []*ModelInfo {
+	return nil // Mistral models are typically fetched from executor
+}
+
+// GetSiliconFlowModels returns the SiliconFlow model definitions (fallback stubs)
+func GetSiliconFlowModels() []*ModelInfo {
+	return nil // SiliconFlow models are typically fetched from executor
+}
+
+// GetOpenRouterModels returns the OpenRouter model definitions (fallback stubs)
+func GetOpenRouterModels() []*ModelInfo {
+	return nil // OpenRouter models are typically fetched from executor
+}
+
+// GetTogetherModels returns the Together model definitions (fallback stubs)
+func GetTogetherModels() []*ModelInfo {
+	return nil // Together models are typically fetched from executor
+}
+
+// GetFireworksModels returns the Fireworks model definitions (fallback stubs)
+func GetFireworksModels() []*ModelInfo {
+	return nil // Fireworks models are typically fetched from executor
+}
+
+// GetNovitaModels returns the Novita model definitions (fallback stubs)
+func GetNovitaModels() []*ModelInfo {
+	return nil // Novita models are typically fetched from executor
+}

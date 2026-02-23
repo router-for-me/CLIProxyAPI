@@ -1,0 +1,48 @@
+root = "."
+testdata_dir = "testdata"
+tmp_dir = ".air"
+
+[build]
+  args_bin = []
+  bin = "./cliproxyapi++"
+  cmd = "go build -o ./cliproxyapi++ ./cmd/server"
+  delay = 1000
+  exclude_dir = ["assets", "tmp", "vendor", "testdata", "node_modules", ".git", "docs/node_modules", ".air"]
+  exclude_file = []
+  exclude_regex = ["_test.go", "_test_ts.go"]
+  exclude_unchanged = false
+  follow_symlink = false
+  full_bin = ""
+  include_dir = ["pkg/llmproxy", "cmd/server", "internal", "sdk"]
+  include_ext = ["go"]
+  include_file = []
+  kill_delay = "0s"
+  log = "build-errors.log"
+  poll = false
+  poll_interval = 0
+  rerun = false
+  rerun_delay = 500
+  send_interrupt = false
+  stop_on_error = false
+
+[color]
+  app = ""
+  build = "yellow"
+  main = "magenta"
+  runner = "green"
+  watcher = "cyan"
+
+[log]
+  main_only = false
+  time = false
+
+[misc]
+  clean_on_exit = true
+
+[screen]
+  clear_on_rebuild = false
+  keep_scroll = true
+
+[watcher]
+  watch_exts = ["go", "yaml", "yml", "json", "toml"]
+  ignore_paths = [".git", "node_modules", "vendor", "tmp", ".air"]
