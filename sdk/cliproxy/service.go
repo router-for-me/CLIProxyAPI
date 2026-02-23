@@ -23,7 +23,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -533,8 +533,8 @@ func (s *Service) Run(ctx context.Context) error {
 	s.ensureWebsocketGateway()
 	if s.server != nil && s.wsGateway != nil {
 		s.server.AttachWebsocketRoute(s.wsGateway.Path(), s.wsGateway.Handler())
-		// Codex expects WebSocket at /v1/responses - already registered in server.go as POST
-		// s.server.AttachWebsocketRoute("/v1/responses", s.wsGateway.Handler())
+		// Codex expects WebSocket at /v1/responses; register same handler for compatibility
+		s.server.AttachWebsocketRoute("/v1/responses", s.wsGateway.Handler())
 		s.server.SetWebsocketAuthChangeHandler(func(oldEnabled, newEnabled bool) {
 			if oldEnabled == newEnabled {
 				return
