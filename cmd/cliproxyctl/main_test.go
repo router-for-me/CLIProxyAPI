@@ -546,6 +546,22 @@ func TestSupportedProvidersSortedAndStable(t *testing.T) {
 	}
 }
 
+func TestResolveLoginProviderNormalizesDroidAliases(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{"droid", "droid-cli", "droidcli"} {
+		got, details, err := resolveLoginProvider(input)
+		if err != nil {
+			t.Fatalf("resolveLoginProvider(%q) returned error: %v", input, err)
+		}
+		if got != "gemini" {
+			t.Fatalf("resolveLoginProvider(%q) = %q, want %q", input, got, "gemini")
+		}
+		if details["provider_supported"] != true {
+			t.Fatalf("expected provider_supported=true for %q, details=%#v", input, details)
+		}
+	}
+}
+
 func TestCPB0011To0020LaneMRegressionEvidence(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
