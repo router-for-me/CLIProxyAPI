@@ -64,7 +64,6 @@ func defaultAntigravityAliases() []OAuthModelAlias {
 func defaultGitHubCopilotAliases() []OAuthModelAlias {
 	return []OAuthModelAlias{
 		{Name: "claude-opus-4.6", Alias: "claude-opus-4-6", Fork: true},
-		{Name: "claude-sonnet-4.6", Alias: "claude-sonnet-4-6", Fork: true},
 	}
 }
 

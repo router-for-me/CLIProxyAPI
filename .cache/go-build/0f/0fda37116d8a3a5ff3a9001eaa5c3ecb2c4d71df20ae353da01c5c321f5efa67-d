@@ -1,4 +1,0 @@
-./constant_time.go
-./xor.go
-./xor_asm.go
-./xor_arm64.s

@@ -1,130 +1,100 @@
-# CLIProxyAPI++ (KooshaPari Fork)
+# CLIProxyAPI Plus
 
-Multi-provider LLM proxy with unified OpenAI-compatible API.
+English | [Chinese](README_CN.md)
 
-This repository works with Claude and other AI agents as autonomous software engineers.
+This is the Plus version of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), adding support for third-party providers on top of the mainline project.
 
-## Quick Start
+All third-party provider support is maintained by community contributors; CLIProxyAPI does not provide technical support. Please contact the corresponding community maintainer if you need assistance.
 
-```bash
-# Build
-go build -o cliproxy ./cmd/cliproxy
+The Plus release stays in lockstep with the mainline features.
 
-# Run
-./cliproxy --config config.yaml
+## Differences from the Mainline
 
-# Docker
-docker compose up -d
+- Added GitHub Copilot support (OAuth login), provided by [em4go](https://github.com/em4go/CLIProxyAPI/tree/feature/github-copilot-auth)
+- Added Kiro (AWS CodeWhisperer) support (OAuth login), provided by [fuko2935](https://github.com/fuko2935/CLIProxyAPI/tree/feature/kiro-integration), [Ravens2121](https://github.com/Ravens2121/CLIProxyAPIPlus/)
+
+## New Features (Plus Enhanced)
+
+- **OAuth Web Authentication**: Browser-based OAuth login for Kiro with beautiful web UI
+- **Rate Limiter**: Built-in request rate limiting to prevent API abuse
+- **Background Token Refresh**: Automatic token refresh 10 minutes before expiration
+- **Metrics & Monitoring**: Request metrics collection for monitoring and debugging
+- **Device Fingerprint**: Device fingerprint generation for enhanced security
+- **Cooldown Management**: Smart cooldown mechanism for API rate limits
+- **Usage Checker**: Real-time usage monitoring and quota management
+- **Model Converter**: Unified model name conversion across providers
+- **UTF-8 Stream Processing**: Improved streaming response handling
+
+## Kiro Authentication
+
+### Web-based OAuth Login
+
+Access the Kiro OAuth web interface at:
+
+```
+http://your-server:8080/v0/oauth/kiro
 ```
 
-## Environment
+This provides a browser-based OAuth flow for Kiro (AWS CodeWhisperer) authentication with:
+- AWS Builder ID login
+- AWS Identity Center (IDC) login
+- Token import from Kiro IDE
+
+## Quick Deployment with Docker
+
+### One-Command Deployment
 
 ```bash
-# Required environment variables
-export OPENAI_API_KEY="sk-..."
-export ANTHROPIC_API_KEY="sk-..."
+# Create deployment directory
+mkdir -p ~/cli-proxy && cd ~/cli-proxy
+
+# Create docker-compose.yml
+cat > docker-compose.yml << 'EOF'
+services:
+  cli-proxy-api:
+    image: eceasy/cli-proxy-api-plus:latest
+    container_name: cli-proxy-api-plus
+    ports:
+      - "8317:8317"
+    volumes:
+      - ./config.yaml:/CLIProxyAPI/config.yaml
+      - ./auths:/root/.cli-proxy-api
+      - ./logs:/CLIProxyAPI/logs
+    restart: unless-stopped
+EOF
+
+# Download example config
+curl -o config.yaml https://raw.githubusercontent.com/router-for-me/CLIProxyAPIPlus/main/config.example.yaml
+
+# Pull and start
+docker compose pull && docker compose up -d
 ```
 
----
+### Configuration
 
-## Development Philosophy
-
-### Extend, Never Duplicate
-
-- NEVER create a v2 file. Refactor the original.
-- NEVER create a new class if an existing one can be made generic.
-- NEVER create custom implementations when an OSS library exists.
-- Before writing ANY new code: search the codebase for existing patterns.
-
-### Primitives First
-
-- Build generic building blocks before application logic.
-- A provider interface + registry is better than N isolated classes.
-- Template strings > hardcoded messages. Config-driven > code-driven.
-
-### Research Before Implementing
-
-- Check pkg.go.dev for existing libraries.
-- Search GitHub for 80%+ implementations to fork/adapt.
-
----
-
-## Library Preferences (DO NOT REINVENT)
-
-| Need | Use | NOT |
-|------|-----|-----|
-| HTTP router | chi | custom router |
-| Logging | zerolog | fmt.Print |
-| Config | viper | manual env parsing |
-| Validation | go-playground/validator | manual if/else |
-| Rate limiting | golang.org/x/time/rate | custom limiter |
-
----
-
-## Code Quality Non-Negotiables
-
-- Zero new lint suppressions without inline justification
-- All new code must pass: go fmt, go vet, golint
-- Max function: 40 lines
-- No placeholder TODOs in committed code
-
----
-
-## Verifiable Constraints
-
-| Metric | Threshold | Enforcement |
-|--------|-----------|-------------|
-| Tests | 80% coverage | CI gate |
-| Lint | 0 errors | golangci-lint |
-| Security | 0 critical | trivy scan |
-
----
-
-## Provider Support
-
-| Provider | Auth | Status |
-|----------|------|--------|
-| OpenAI | API Key | ✅ |
-| Anthropic | API Key | ✅ |
-| Azure OpenAI | API Key/OAuth | ✅ |
-| Google Gemini | API Key | ✅ |
-| AWS Bedrock | IAM | ✅ |
-| Kiro (CodeWhisperer) | OAuth | ✅ |
-| GitHub Copilot | OAuth | ✅ |
-| Ollama | Local | ✅ |
-
----
-
-## Integration
-
-### With thegent
+Edit `config.yaml` before starting:
 
 ```yaml
-# thegent config
-llm:
-  provider: cliproxy
-  base_url: http://localhost:8317/v1
+# Basic configuration example
+server:
+  port: 8317
+
+# Add your provider configurations here
 ```
 
-### With agentapi
+### Update to Latest Version
 
 ```bash
-agentapi --cliproxy http://localhost:8317
+cd ~/cli-proxy
+docker compose pull && docker compose up -d
 ```
 
----
+## Contributing
 
-## Fork Differences
+This project only accepts pull requests that relate to third-party provider support. Any pull requests unrelated to third-party provider support will be rejected.
 
-This fork includes:
-- ✅ SDK auto-generation workflow
-- ✅ Enhanced OpenAPI spec
-- ✅ Python client SDK
-- ✅ Go client SDK
-- ✅ Integration with tokenledger for cost tracking
-
----
+If you need to submit any non-third-party provider changes, please open them against the [mainline](https://github.com/router-for-me/CLIProxyAPI) repository.
 
 ## License
 
-MIT License - see LICENSE file
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

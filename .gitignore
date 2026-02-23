@@ -53,6 +53,3 @@ _bmad-output/*
 .DS_Store
 ._*
 *.bak
-server
-server
-cli-proxy-api-plus-integration-test

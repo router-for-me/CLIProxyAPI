@@ -1,9 +1,0 @@
-./consts.go
-./consts_norace.go
-./dit_arm64.go
-./intrinsics.go
-./nih.go
-./sys.go
-./zversion.go
-./dit_arm64.s
-./empty.s
