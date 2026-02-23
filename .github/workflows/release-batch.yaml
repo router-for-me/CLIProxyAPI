@@ -24,6 +24,10 @@ jobs:
         with:
           go-version: ">=1.26.0"
           cache: true
+      - name: Configure git
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
       - name: Create and publish next batch release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
