@@ -1,89 +1,95 @@
 # CLIProxyAPI++ (KooshaPari Fork)
 
-Multi-provider LLM proxy with unified OpenAI-compatible API.
+**Forked and enhanced from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)**
 
-This repository works with Claude and other AI agents as autonomous software engineers.
+Multi-provider LLM proxy with unified OpenAI-compatible API, third-party auth, SDK generation, and enterprise features.
+
+---
+
+## What is CLIProxyAPI++?
+
+CLIProxyAPI++ provides a unified API gateway that translates OpenAI-compatible requests to any LLM provider:
+
+```
+Client (OpenAI format) → CLIProxyAPI++ → OpenAI, Anthropic, Google, AWS, Ollama, etc.
+```
+
+### Key Capabilities
+
+| Capability | Description |
+|------------|-------------|
+| **Multi-Provider Routing** | Single endpoint for OpenAI, Anthropic, Google, AWS Bedrock, Ollama, Kiro, GitHub Copilot |
+| **OAuth Authentication** | Built-in OAuth flows for Kiro (AWS CodeWhisperer) and GitHub Copilot |
+| **Rate Limiting** | Token bucket algorithm with per-provider limits |
+| **Metrics & Monitoring** | Prometheus metrics, cost tracking, latency monitoring |
+| **SDK Generation** | Auto-generated Python and Go SDKs |
+
+---
 
 ## Quick Start
 
+### Docker
+
 ```bash
-# Build
-go build -o cliproxy ./cmd/cliproxy
+mkdir -p ~/cli-proxy && cd ~/cli-proxy
 
-# Run
-./cliproxy --config config.yaml
+cat > docker-compose.yml << 'EOF'
+services:
+  cli-proxy-api:
+    image: eceasy/cli-proxy-api-plus:latest
+    ports:
+      - "8317:8317"
+    volumes:
+      - ./config.yaml:/CLIProxyAPI/config.yaml
+EOF
 
-# Docker
+curl -o config.yaml https://raw.githubusercontent.com/KooshaPari/cliproxyapi-plusplus/main/config.example.yaml
 docker compose up -d
 ```
 
-## Environment
+### From Source
 
 ```bash
-# Required environment variables
-export OPENAI_API_KEY="sk-..."
-export ANTHROPIC_API_KEY="sk-..."
+go build -o cliproxy ./cmd/cliproxy
+./cliproxy --config config.yaml
 ```
 
 ---
 
-## Development Philosophy
+## Configuration
 
-### Extend, Never Duplicate
+### Provider Setup
 
-- NEVER create a v2 file. Refactor the original.
-- NEVER create a new class if an existing one can be made generic.
-- NEVER create custom implementations when an OSS library exists.
-- Before writing ANY new code: search the codebase for existing patterns.
+```yaml
+providers:
+  openai:
+    api_key: ${OPENAI_API_KEY}
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY}
+  kiro:
+    enabled: true
+  github_copilot:
+    enabled: true
+  ollama:
+    enabled: true
+    base_url: http://localhost:11434
+```
 
-### Primitives First
+### Rate Limiting
 
-- Build generic building blocks before application logic.
-- A provider interface + registry is better than N isolated classes.
-- Template strings > hardcoded messages. Config-driven > code-driven.
-
-### Research Before Implementing
-
-- Check pkg.go.dev for existing libraries.
-- Search GitHub for 80%+ implementations to fork/adapt.
-
----
-
-## Library Preferences (DO NOT REINVENT)
-
-| Need | Use | NOT |
-|------|-----|-----|
-| HTTP router | chi | custom router |
-| Logging | zerolog | fmt.Print |
-| Config | viper | manual env parsing |
-| Validation | go-playground/validator | manual if/else |
-| Rate limiting | golang.org/x/time/rate | custom limiter |
+```yaml
+rate_limit:
+  requests_per_minute: 60
+  tokens_per_minute: 100000
+  cooldown_seconds: 30
+```
 
 ---
 
-## Code Quality Non-Negotiables
+## Supported Providers
 
-- Zero new lint suppressions without inline justification
-- All new code must pass: go fmt, go vet, golint
-- Max function: 40 lines
-- No placeholder TODOs in committed code
-
----
-
-## Verifiable Constraints
-
-| Metric | Threshold | Enforcement |
-|--------|-----------|-------------|
-| Tests | 80% coverage | CI gate |
-| Lint | 0 errors | golangci-lint |
-| Security | 0 critical | trivy scan |
-
----
-
-## Provider Support
-
-| Provider | Auth | Status |
-|----------|------|--------|
+| Provider | Auth Type | Status |
+|----------|-----------|--------|
 | OpenAI | API Key | ✅ |
 | Anthropic | API Key | ✅ |
 | Azure OpenAI | API Key/OAuth | ✅ |
@@ -92,36 +98,111 @@ export ANTHROPIC_API_KEY="sk-..."
 | Kiro (CodeWhisperer) | OAuth | ✅ |
 | GitHub Copilot | OAuth | ✅ |
 | Ollama | Local | ✅ |
+| LM Studio | Local | ✅ |
 
 ---
 
-## Integration
+## API Endpoints
 
-### With thegent
+### OpenAI-Compatible
 
-```yaml
-# thegent config
-llm:
-  provider: cliproxy
-  base_url: http://localhost:8317/v1
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/chat/completions` | Chat completions |
+| `POST /v1/completions` | Text completions |
+| `GET /v1/models` | List available models |
+
+### Management
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check |
+| `GET /metrics` | Prometheus metrics |
+| `GET /v1/providers` | Provider status |
+| `POST /v1/providers/{provider}/refresh` | Refresh credentials |
+
+---
+
+## SDKs
+
+### Python
+
+```python
+from cliproxy import CliproxyClient
+
+client = CliproxyClient(
+    base_url="http://localhost:8317",
+    api_key="your-api-key"
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
 ```
 
-### With agentapi
+### Go
 
-```bash
-agentapi --cliproxy http://localhost:8317
+```go
+package main
+
+import (
+    "github.com/KooshaPari/cliproxy-sdk-go/client"
+)
+
+func main() {
+    c := client.New("http://localhost:8317", "your-api-key")
+    resp, _ := c.Chat.Completions(&.ChatCompletionRequest{
+        Model: "gpt-4o",
+        Messages: []map[string]string{{"role": "user", "content": "Hello!"}},
+    })
+}
 ```
 
 ---
 
-## Fork Differences
+## Architecture
 
-This fork includes:
-- ✅ SDK auto-generation workflow
-- ✅ Enhanced OpenAPI spec
-- ✅ Python client SDK
-- ✅ Go client SDK
-- ✅ Integration with tokenledger for cost tracking
+```
+┌──────────────┐     ┌─────────────────┐     ┌────────────┐
+│   Clients    │────▶│   CLIProxy++     │────▶│  Providers │
+│ (thegent,   │     │  (this repo)    │     │ (OpenAI,   │
+│  agentapi)   │     │                 │     │  Anthropic,│
+└──────────────┘     └─────────────────┘     │  AWS, etc) │
+                         │                   └────────────┘
+                         ▼
+                  ┌─────────────────┐
+                  │   SDK Gen       │
+                  │ (Python, Go)     │
+                  └─────────────────┘
+```
+
+---
+
+## Documentation
+
+- [Start Here](docs/start-here.md) - Getting started guide
+- [Provider Usage](docs/provider-usage.md) - Provider configuration
+- [Provider Quickstarts](docs/provider-quickstarts.md) - 5-minute setup per provider
+- [API Reference](docs/api/) - Full API documentation
+- [SDK Usage](docs/sdk-usage.md) - SDK guides
+
+---
+
+## Development Philosophy
+
+### Extend, Never Duplicate
+- NEVER create a v2 file. Refactor the original.
+- NEVER create a new class if an existing one can be made generic.
+- NEVER create custom implementations when an OSS library exists.
+
+### Primitives First
+- Build generic building blocks before application logic.
+- A provider interface + registry is better than N isolated classes.
+
+### Research Before Implementing
+- Check pkg.go.dev for existing libraries.
+- Search GitHub for 80%+ implementations to fork/adapt.
 
 ---
 
