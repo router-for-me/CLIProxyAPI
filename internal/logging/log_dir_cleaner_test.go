@@ -57,9 +57,38 @@ func TestEnforceLogDirSizeLimitSkipsProtected(t *testing.T) {
 	}
 }
 
+func TestEnforceLogDirSizeLimitIncludesNestedLogs(t *testing.T) {
+	dir := t.TempDir()
+
+	writeLogFile(t, filepath.Join(dir, "main.log"), 50, time.Unix(3, 0))
+	writeLogFile(t, filepath.Join(dir, "2026-02-14", "old-request.log"), 80, time.Unix(1, 0))
+	writeLogFile(t, filepath.Join(dir, "2026-02-15", "new-request.log"), 80, time.Unix(2, 0))
+
+	deleted, err := enforceLogDirSizeLimit(dir, 120, filepath.Join(dir, "main.log"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("expected 2 deleted files, got %d", deleted)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "2026-02-14", "old-request.log")); !os.IsNotExist(err) {
+		t.Fatalf("expected old nested log to be removed, stat error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "2026-02-15", "new-request.log")); !os.IsNotExist(err) {
+		t.Fatalf("expected new nested log to be removed, stat error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "main.log")); err != nil {
+		t.Fatalf("expected protected main.log to remain, stat error: %v", err)
+	}
+}
+
 func writeLogFile(t *testing.T, path string, size int, modTime time.Time) {
 	t.Helper()
 
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir all: %v", err)
+	}
 	data := make([]byte, size)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write file: %v", err)

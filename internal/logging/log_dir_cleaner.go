@@ -82,12 +82,11 @@ func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string)
 	}
 	dir = filepath.Clean(dir)
 
-	entries, errRead := os.ReadDir(dir)
-	if errRead != nil {
-		if os.IsNotExist(errRead) {
+	if _, errStat := os.Stat(dir); errStat != nil {
+		if os.IsNotExist(errStat) {
 			return 0, nil
 		}
-		return 0, errRead
+		return 0, errStat
 	}
 
 	protected := strings.TrimSpace(protectedPath)
@@ -105,28 +104,31 @@ func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string)
 		files []logFile
 		total int64
 	)
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+
+	errWalk := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-		name := entry.Name()
-		if !isLogFileName(name) {
-			continue
+		if entry.IsDir() {
+			return nil
+		}
+		if !isLogFileName(entry.Name()) {
+			return nil
 		}
 		info, errInfo := entry.Info()
-		if errInfo != nil {
-			continue
+		if errInfo != nil || !info.Mode().IsRegular() {
+			return nil
 		}
-		if !info.Mode().IsRegular() {
-			continue
-		}
-		path := filepath.Join(dir, name)
 		files = append(files, logFile{
 			path:    path,
 			size:    info.Size(),
 			modTime: info.ModTime(),
 		})
 		total += info.Size()
+		return nil
+	})
+	if errWalk != nil {
+		return 0, errWalk
 	}
 
 	if total <= maxBytes {
