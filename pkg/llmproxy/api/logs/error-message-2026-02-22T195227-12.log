@@ -1,0 +1,19 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /message
+Method: POST
+Timestamp: 2026-02-22T19:52:27.071426-07:00
+
+=== HEADERS ===
+Content-Type: application/json
+
+=== REQUEST BODY ===
+{"message":"alias test","capability":"ask"}
+
+=== RESPONSE ===
+Status: 404
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: *
+
+

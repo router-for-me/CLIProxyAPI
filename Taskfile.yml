@@ -123,7 +123,7 @@ tasks:
     desc: "Format and lint staged files only"
     cmds:
       - |
-        mapfile -t go_files < <(git diff --cached --name-only -- '*.go')
+        mapfile -t go_files < <(git diff --cached --name-only --diff-filter=ACMR -- '*.go')
         if [ "${#go_files[@]}" -eq 0 ]; then
           echo "[SKIP] No staged Go files to format/lint."
           exit 0
@@ -141,9 +141,9 @@ tasks:
     cmds:
       - |
         if [ -n "${QUALITY_DIFF_RANGE:-}" ]; then
-          mapfile -t go_files < <(git diff --name-only "$QUALITY_DIFF_RANGE" -- '*.go' | sort -u)
+          mapfile -t go_files < <(git diff --name-only --diff-filter=ACMR "$QUALITY_DIFF_RANGE" -- '*.go' | sort -u)
         else
-          mapfile -t go_files < <(git diff --cached --name-only -- '*.go')
+          mapfile -t go_files < <(git diff --cached --name-only --diff-filter=ACMR -- '*.go')
         fi
         if [ "${#go_files[@]}" -eq 0 ]; then
           echo "[SKIP] No staged or diff Go files to check."

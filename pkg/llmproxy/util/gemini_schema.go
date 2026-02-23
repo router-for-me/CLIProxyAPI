@@ -113,9 +113,7 @@ func processNullableKeyword(jsonStr string) string {
 
 	// Remove all nullable keywords
 	deletePaths := make([]string, 0)
-	for _, p := range paths {
-		deletePaths = append(deletePaths, p)
-	}
+	deletePaths = append(deletePaths, paths...)
 	sortByDepth(deletePaths)
 	for _, p := range deletePaths {
 		jsonStr, _ = sjson.Delete(jsonStr, p)

@@ -227,15 +227,12 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 
 	t.Logf("End-to-end test: Fake HTTP server started at %s", server.URL)
 
-	cacheEnabled := true
 	executor := NewClaudeExecutor(&config.Config{
 		ClaudeKey: []config.ClaudeKey{
 			{
 				APIKey:  "key-123",
 				BaseURL: server.URL,
-				Cloak: &config.CloakConfig{
-					CacheUserID: &cacheEnabled,
-				},
+				Cloak:   &config.CloakConfig{},
 			},
 		},
 	})

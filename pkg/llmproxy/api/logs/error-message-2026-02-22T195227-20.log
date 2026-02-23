@@ -1,0 +1,20 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /message
+Method: POST
+Timestamp: 2026-02-22T19:52:27.074866-07:00
+
+=== HEADERS ===
+Content-Type: application/json
+Idempotency-Key: dup-key-one
+
+=== REQUEST BODY ===
+{"session_id":"cp-replay-session-dupe","message":"first","capability":"continue"}
+
+=== RESPONSE ===
+Status: 404
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: *
+Access-Control-Allow-Origin: *
+
+

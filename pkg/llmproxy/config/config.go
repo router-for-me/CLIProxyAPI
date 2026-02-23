@@ -1401,13 +1401,14 @@ func (cfg *Config) ApplyEnvOverrides() {
 	// CLIPROXY_ROUTING_STRATEGY - Routing strategy (round-robin/fill-first)
 	if val := os.Getenv("CLIPROXY_ROUTING_STRATEGY"); val != "" {
 		normalized := strings.ToLower(strings.TrimSpace(val))
-		if normalized == "round-robin" || normalized == "roundrobin" || normalized == "rr" {
+		switch normalized {
+		case "round-robin", "roundrobin", "rr":
 			cfg.Routing.Strategy = "round-robin"
 			log.Info("Applied CLIPROXY_ROUTING_STRATEGY override: round-robin")
-		} else if normalized == "fill-first" || normalized == "fillfirst" || normalized == "ff" {
+		case "fill-first", "fillfirst", "ff":
 			cfg.Routing.Strategy = "fill-first"
 			log.Info("Applied CLIPROXY_ROUTING_STRATEGY override: fill-first")
-		} else {
+		default:
 			log.WithField("value", val).Warn("Invalid CLIPROXY_ROUTING_STRATEGY value, ignoring")
 		}
 	}

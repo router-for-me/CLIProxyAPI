@@ -12,6 +12,13 @@ import (
 
 const thegentInstallHint = "Install: pipx install thegent (or pip install -U thegent)"
 
+func ThegentSpec(provider string) NativeCLISpec {
+	return NativeCLISpec{
+		Name: "thegent",
+		Args: []string{"cliproxy", "login", strings.TrimSpace(provider)},
+	}
+}
+
 // RunThegentLoginWithRunner runs TheGent unified login for a provider.
 func RunThegentLoginWithRunner(runner NativeCLIRunner, stdout, stderr io.Writer, provider string) int {
 	if runner == nil {
