@@ -116,16 +116,16 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	if IsUserDefinedModel(modelInfo) {
 		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult)
 	}
-		if modelInfo.Thinking == nil {
-			config := extractThinkingConfig(body, providerFormat)
-			if hasThinkingConfig(config) {
-				log.Debug("thinking: model does not support thinking, stripping config |")
-				return StripThinkingConfig(body, providerFormat), nil
-			}
-		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    baseModel,
-		}).Debug("thinking: model does not support thinking, passthrough |")
+	if modelInfo.Thinking == nil {
+		config := extractThinkingConfig(body, providerFormat)
+		if hasThinkingConfig(config) {
+			log.WithFields(log.Fields{
+				"model":    baseModel,
+				"provider": providerFormat,
+			}).Debug("thinking: model does not support thinking, stripping config |")
+			return StripThinkingConfig(body, providerFormat), nil
+		}
+		log.Debug("thinking: model does not support thinking, passthrough |")
 		return body, nil
 	}
 

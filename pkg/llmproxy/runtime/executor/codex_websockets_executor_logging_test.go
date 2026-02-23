@@ -1,20 +1,28 @@
 package executor
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-func TestCodexLogFingerprint_RedactsRawValue(t *testing.T) {
-	raw := "wss://example.openai.com/v1/realtime?token=secret"
-	got := codexLogFingerprint(raw)
-	if got == "" {
-		t.Fatal("expected non-empty fingerprint")
+func TestSanitizeCodexWebsocketLogURLMasksQueryAndUserInfo(t *testing.T) {
+	raw := "wss://user:secret@example.com/v1/realtime?api_key=verysecret&token=abc123&foo=bar#frag"
+	got := sanitizeCodexWebsocketLogURL(raw)
+
+	if strings.Contains(got, "secret") || strings.Contains(got, "abc123") || strings.Contains(got, "verysecret") {
+		t.Fatalf("expected sensitive values to be masked, got %q", got)
 	}
-	if got == raw {
-		t.Fatalf("fingerprint must not equal raw input: %q", got)
+	if strings.Contains(got, "user:") {
+		t.Fatalf("expected userinfo to be removed, got %q", got)
+	}
+	if strings.Contains(got, "#frag") {
+		t.Fatalf("expected fragment to be removed, got %q", got)
 	}
 }
 
-func TestCodexLogFingerprint_TrimmedEmpty(t *testing.T) {
-	if got := codexLogFingerprint("   \t\n"); got != "" {
-		t.Fatalf("expected empty fingerprint for blank input, got %q", got)
+func TestSanitizeCodexWebsocketLogFieldMasksTokenLikeValue(t *testing.T) {
+	got := sanitizeCodexWebsocketLogField("  sk-super-secret-token  ")
+	if got == "sk-super-secret-token" {
+		t.Fatalf("expected auth field to be masked, got %q", got)
 	}
 }

@@ -645,7 +645,7 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 	registration.SuspendedClients[clientID] = reason
 	registration.LastUpdated = time.Now()
 	if reason != "" {
-		log.Debugf("Suspended client for model due to suspension reason: %s", reason)
+		log.Debugf("Suspended client %s for model %s (reason provided)", clientID, modelID)
 	} else {
 		log.Debug("Suspended client for model")
 	}

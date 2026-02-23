@@ -1297,15 +1297,34 @@ func (e *CodexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 }
 
 func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
-	log.Info("codex websockets: upstream connected")
+	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogURL(wsURL))
 }
 
 func logCodexWebsocketDisconnected(sessionID string, _ string, _ string, reason string, err error) {
 	if err != nil {
-		log.Infof("codex websockets: upstream disconnected reason=%s err=%v", strings.TrimSpace(reason), err)
+		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s err=%v", strings.TrimSpace(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogURL(wsURL), strings.TrimSpace(reason), err)
 		return
 	}
-	log.Infof("codex websockets: upstream disconnected reason=%s", strings.TrimSpace(reason))
+	log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s", strings.TrimSpace(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogURL(wsURL), strings.TrimSpace(reason))
+}
+
+func sanitizeCodexWebsocketLogField(raw string) string {
+	return util.HideAPIKey(strings.TrimSpace(raw))
+}
+
+func sanitizeCodexWebsocketLogURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || !parsed.IsAbs() {
+		return util.HideAPIKey(trimmed)
+	}
+	parsed.User = nil
+	parsed.Fragment = ""
+	parsed.RawQuery = util.MaskSensitiveQuery(parsed.RawQuery)
+	return parsed.String()
 }
 
 // CodexAutoExecutor routes Codex requests to the websocket transport only when:
