@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,6 +21,8 @@ const (
 	latestReleaseURL       = "https://api.github.com/repos/KooshaPari/cliproxyapi-plusplus/releases/latest"
 	latestReleaseUserAgent = "cliproxyapi++"
 )
+
+var writeConfigFile = WriteConfig
 
 func (h *Handler) GetConfig(c *gin.Context) {
 	if h == nil || h.cfg == nil {
@@ -119,9 +120,9 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
 		return
 	}
-	// Validate config using LoadConfigOptional with optional=false to enforce parsing
-	tmpDir := filepath.Dir(h.configFilePath)
-	tmpFile, err := os.CreateTemp(tmpDir, "config-validate-*.yaml")
+	// Validate config using LoadConfigOptional with optional=false to enforce parsing.
+	// Use the system temp dir so validation remains available even when config dir is read-only.
+	tmpFile, err := os.CreateTemp("", "config-validate-*.yaml")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
 		return
@@ -141,24 +142,28 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	defer func() {
 		_ = os.Remove(tempFile)
 	}()
-	_, err = config.LoadConfigOptional(tempFile, false)
+	validatedCfg, err := config.LoadConfigOptional(tempFile, false)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if WriteConfig(h.configFilePath, body) != nil {
+	if errWrite := writeConfigFile(h.configFilePath, body); errWrite != nil {
+		if isReadOnlyConfigWriteError(errWrite) {
+			h.cfg = validatedCfg
+			c.JSON(http.StatusOK, gin.H{
+				"ok":        true,
+				"changed":   []string{"config"},
+				"persisted": false,
+				"warning":   "config filesystem is read-only; runtime changes applied but not persisted",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
 	}
-	// Reload into handler to keep memory in sync
-	newCfg, err := config.LoadConfig(h.configFilePath)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
-		return
-	}
-	h.cfg = newCfg
+	h.cfg = validatedCfg
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 

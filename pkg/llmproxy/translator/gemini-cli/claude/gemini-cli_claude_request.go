@@ -94,10 +94,16 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 						functionArgs := contentResult.Get("input").String()
 						argsResult := gjson.Parse(functionArgs)
 						if argsResult.IsObject() && gjson.Valid(functionArgs) {
+							// Claude may include thought_signature in tool args; Gemini treats this as
+							// a base64 thought signature and can reject malformed values.
+							sanitizedArgs, err := sjson.Delete(functionArgs, "thought_signature")
+							if err != nil {
+								sanitizedArgs = functionArgs
+							}
 							part := `{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`
 							part, _ = sjson.Set(part, "thoughtSignature", geminiCLIClaudeThoughtSignature)
 							part, _ = sjson.Set(part, "functionCall.name", functionName)
-							part, _ = sjson.SetRaw(part, "functionCall.args", functionArgs)
+							part, _ = sjson.SetRaw(part, "functionCall.args", sanitizedArgs)
 							contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 						}
 
