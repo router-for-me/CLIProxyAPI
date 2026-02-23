@@ -9,6 +9,7 @@ on:
 
 jobs:
   ensure-no-translator-changes:
+    name: ensure-no-translator-changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

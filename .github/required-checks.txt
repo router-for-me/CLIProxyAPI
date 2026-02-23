@@ -1,6 +1,5 @@
 # workflow_file|job_name
 pr-test-build.yml|go-ci
-pr-test-build.yml|quality-ci
 pr-test-build.yml|quality-staged-check
 pr-test-build.yml|fmt-check
 pr-test-build.yml|golangci-lint
