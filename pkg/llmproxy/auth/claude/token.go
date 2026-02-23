@@ -8,9 +8,31 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 )
+
+func sanitizeTokenFilePath(authFilePath string) (string, error) {
+	trimmed := strings.TrimSpace(authFilePath)
+	if trimmed == "" {
+		return "", fmt.Errorf("token file path is empty")
+	}
+	cleaned := filepath.Clean(trimmed)
+	parts := strings.FieldsFunc(cleaned, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	for _, part := range parts {
+		if part == ".." {
+			return "", fmt.Errorf("invalid token file path")
+		}
+	}
+	absPath, err := filepath.Abs(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve token file path: %w", err)
+	}
+	return absPath, nil
+}
 
 // ClaudeTokenStorage stores OAuth2 token information for Anthropic Claude API authentication.
 // It maintains compatibility with the existing auth system while adding Claude-specific fields
@@ -50,14 +72,18 @@ type ClaudeTokenStorage struct {
 func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "claude"
+	safePath, err := sanitizeTokenFilePath(authFilePath)
+	if err != nil {
+		return err
+	}
 
 	// Create directory structure if it doesn't exist
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(safePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
 	// Create the token file
-	f, err := os.Create(authFilePath)
+	f, err := os.OpenFile(safePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}

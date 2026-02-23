@@ -59,3 +59,11 @@ func TestSaveTokenToFile_MkdirFail(t *testing.T) {
 		t.Error("expected error for invalid directory path")
 	}
 }
+
+func TestSaveTokenToFile_RejectsParentTraversal(t *testing.T) {
+	ts := &CodexTokenStorage{}
+	err := ts.SaveTokenToFile("../token.json")
+	if err == nil {
+		t.Fatal("expected error for parent traversal path")
+	}
+}
