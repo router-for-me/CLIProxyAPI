@@ -1,6 +1,3 @@
-//go:build skip
-// +build skip
-
 package util
 
 import (

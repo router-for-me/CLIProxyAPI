@@ -19,10 +19,15 @@ import (
 )
 
 const (
-	apiAttemptsKey = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey  = "API_REQUEST"
-	apiResponseKey = "API_RESPONSE"
+	apiAttemptsKey          = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey           = "API_REQUEST"
+	apiResponseKey          = "API_RESPONSE"
+	apiResponseTimestampKey = "API_RESPONSE_TIMESTAMP"
 )
+
+type contextKey string
+
+const ginContextKey contextKey = "gin"
 
 // upstreamRequestLog captures the outbound upstream request details for logging.
 type upstreamRequestLog struct {
@@ -105,6 +110,7 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	if ginCtx == nil {
 		return
 	}
+	setAPIResponseTimestamp(ginCtx)
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
 
@@ -131,6 +137,7 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	if ginCtx == nil {
 		return
 	}
+	setAPIResponseTimestamp(ginCtx)
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
 
@@ -160,6 +167,7 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if ginCtx == nil {
 		return
 	}
+	setAPIResponseTimestamp(ginCtx)
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
 
@@ -183,7 +191,7 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 }
 
 func ginContextFrom(ctx context.Context) *gin.Context {
-	ginCtx, _ := ctx.Value("gin").(*gin.Context)
+	ginCtx, _ := ctx.Value(ginContextKey).(*gin.Context)
 	return ginCtx
 }
 
@@ -197,6 +205,16 @@ func getAttempts(ginCtx *gin.Context) []*upstreamAttempt {
 		}
 	}
 	return nil
+}
+
+func setAPIResponseTimestamp(ginCtx *gin.Context) {
+	if ginCtx == nil {
+		return
+	}
+	if _, exists := ginCtx.Get(apiResponseTimestampKey); exists {
+		return
+	}
+	ginCtx.Set(apiResponseTimestampKey, time.Now())
 }
 
 func ensureAttempt(ginCtx *gin.Context) ([]*upstreamAttempt, *upstreamAttempt) {

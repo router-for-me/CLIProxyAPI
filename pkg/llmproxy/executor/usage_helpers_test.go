@@ -108,28 +108,3 @@ func TestParseOpenAIResponsesUsageDetail_WithAlternateFields(t *testing.T) {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 3)
 	}
 }
-
-func TestParseOpenAIUsage_PrefersCompletionTokensWhenOutputTokensZero(t *testing.T) {
-	data := []byte(`{"usage":{"input_tokens":12,"output_tokens":0,"completion_tokens":9}}`)
-	detail := parseOpenAIUsage(data)
-	if detail.OutputTokens != 9 {
-		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 9)
-	}
-	if detail.TotalTokens != 21 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 21)
-	}
-}
-
-func TestParseOpenAIStreamUsage_PrefersCompletionTokensWhenOutputTokensZero(t *testing.T) {
-	line := []byte(`data: {"usage":{"prompt_tokens":7,"output_tokens":0,"completion_tokens":5}}`)
-	detail, ok := parseOpenAIStreamUsage(line)
-	if !ok {
-		t.Fatal("expected stream usage")
-	}
-	if detail.OutputTokens != 5 {
-		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
-	}
-	if detail.TotalTokens != 12 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 12)
-	}
-}

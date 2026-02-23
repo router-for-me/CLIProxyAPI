@@ -47,8 +47,7 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	}
 	var transport *http.Transport
 	// Handle different proxy schemes.
-	switch proxyURL.Scheme {
-	case "socks5":
+	if proxyURL.Scheme == "socks5" {
 		// Configure SOCKS5 proxy with optional authentication.
 		username := proxyURL.User.Username()
 		password, _ := proxyURL.User.Password()
@@ -64,10 +63,10 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 				return dialer.Dial(network, addr)
 			},
 		}
-	case "http", "https":
+	} else if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
 		// Configure HTTP or HTTPS proxy.
 		transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
-	default:
+	} else {
 		log.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
 		return nil
 	}

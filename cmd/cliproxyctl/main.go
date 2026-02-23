@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -147,6 +148,16 @@ func normalizeProvider(provider string) string {
 		return "kilo"
 	case "kilocode":
 		return "kilo"
+	case "roo-code":
+		return "roo"
+	case "roocode":
+		return "roo"
+	case "droid":
+		return "gemini"
+	case "droid-cli":
+		return "gemini"
+	case "droidcli":
+		return "gemini"
 	case "factoryapi":
 		return "factory-api"
 	case "openai-compatible":
@@ -245,6 +256,9 @@ func runSetup(args []string, stdout io.Writer, stderr io.Writer, now func() time
 			details["stderr"] = capturedStderr
 		}
 		if runErr != nil {
+			if hint := rateLimitHint(runErr); hint != "" {
+				details["hint"] = hint
+			}
 			details["error"] = runErr.Error()
 			writeEnvelope(stdout, now, "setup", false, details)
 			return 1
@@ -259,6 +273,9 @@ func runSetup(args []string, stdout io.Writer, stderr io.Writer, now func() time
 		for _, provider := range providers {
 			if err := exec.login(cfg, provider, "", &cliproxycmd.LoginOptions{ConfigPath: configPath}); err != nil {
 				_, _ = fmt.Fprintf(stderr, "setup failed for provider %q: %v\n", provider, err)
+				if hint := rateLimitHint(err); hint != "" {
+					_, _ = fmt.Fprintln(stderr, hint)
+				}
 				return 1
 			}
 		}
@@ -334,6 +351,9 @@ func runLogin(args []string, stdout io.Writer, stderr io.Writer, now func() time
 			details["stderr"] = capturedStderr
 		}
 		if runErr != nil {
+			if hint := rateLimitHint(runErr); hint != "" {
+				details["hint"] = hint
+			}
 			details["error"] = runErr.Error()
 			writeEnvelope(stdout, now, "login", false, details)
 			return 1
@@ -348,6 +368,9 @@ func runLogin(args []string, stdout io.Writer, stderr io.Writer, now func() time
 		ConfigPath:   configPath,
 	}); err != nil {
 		_, _ = fmt.Fprintf(stderr, "login failed for provider %q: %v\n", resolvedProvider, err)
+		if hint := rateLimitHint(err); hint != "" {
+			_, _ = fmt.Fprintln(stderr, hint)
+		}
 		return 1
 	}
 	return 0
@@ -423,8 +446,9 @@ func runDev(args []string, stdout io.Writer, stderr io.Writer, now func() time.T
 
 	path := strings.TrimSpace(file)
 	details := map[string]any{
-		"profile_file": path,
-		"hint":         fmt.Sprintf("process-compose -f %s up", path),
+		"profile_file":             path,
+		"hint":                     fmt.Sprintf("process-compose -f %s up", path),
+		"tool_failure_remediation": gemini3ProPreviewToolUsageRemediationHint(path),
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -455,8 +479,21 @@ func runDev(args []string, stdout io.Writer, stderr io.Writer, now func() time.T
 	} else {
 		_, _ = fmt.Fprintf(stdout, "dev profile ok: %s\n", path)
 		_, _ = fmt.Fprintf(stdout, "run: process-compose -f %s up\n", path)
+		_, _ = fmt.Fprintf(stdout, "tool-failure triage hint: %s\n", gemini3ProPreviewToolUsageRemediationHint(path))
 	}
 	return 0
+}
+
+func gemini3ProPreviewToolUsageRemediationHint(profilePath string) string {
+	profilePath = strings.TrimSpace(profilePath)
+	if profilePath == "" {
+		profilePath = "examples/process-compose.dev.yaml"
+	}
+	return fmt.Sprintf(
+		"for gemini-3-pro-preview tool-use failures: touch config.yaml; process-compose -f %s down; process-compose -f %s up; curl -sS http://localhost:8317/v1/models -H \"Authorization: Bearer <client-key>\" | jq '.data[].id' | rg 'gemini-3-pro-preview'; curl -sS -X POST http://localhost:8317/v1/chat/completions -H \"Authorization: Bearer <client-key>\" -H \"Content-Type: application/json\" -d '{\"model\":\"gemini-3-pro-preview\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":false}'",
+		profilePath,
+		profilePath,
+	)
 }
 
 func renderError(stdout io.Writer, stderr io.Writer, jsonOutput bool, now func() time.Time, command string, err error) int {
@@ -562,7 +599,7 @@ func ensureConfigFile(configPath string) error {
 		return nil
 	}
 	configDir := filepath.Dir(configPath)
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
 	if err := ensureDirectoryWritable(configDir); err != nil {
@@ -649,6 +686,23 @@ func hasJSONFlag(args []string) bool {
 		}
 	}
 	return false
+}
+
+const rateLimitHintMessage = "Provider returned HTTP 429 (too many requests). Pause or rotate credentials, run `cliproxyctl doctor`, and consult docs/troubleshooting.md#429 before retrying."
+
+type statusCoder interface {
+	StatusCode() int
+}
+
+func rateLimitHint(err error) string {
+	if err == nil {
+		return ""
+	}
+	var coder statusCoder
+	if errors.As(err, &coder) && coder.StatusCode() == http.StatusTooManyRequests {
+		return rateLimitHintMessage
+	}
+	return ""
 }
 
 func normalizeProviders(raw string) []string {

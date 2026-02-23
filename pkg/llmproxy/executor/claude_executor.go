@@ -528,31 +528,24 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	var betas []string
 	if betasResult.IsArray() {
 		for _, item := range betasResult.Array() {
-			if item.Type != gjson.String {
-				continue
-			}
 			if s := strings.TrimSpace(item.String()); s != "" {
 				betas = append(betas, s)
 			}
 		}
-	} else if betasResult.Type == gjson.String {
-		for _, token := range strings.Split(betasResult.Str, ",") {
-			if s := strings.TrimSpace(token); s != "" {
-				betas = append(betas, s)
-			}
-		}
+	} else if s := strings.TrimSpace(betasResult.String()); s != "" {
+		betas = append(betas, s)
 	}
 	body, _ = sjson.DeleteBytes(body, "betas")
 	return betas, body
 }
 
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
-// Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
+// Anthropic API does not allow thinking when tool_choice is set to "any", "tool", or "function".
 // See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
 func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
-	// "auto" is allowed with thinking, but "any" or "tool" (specific tool) are not
-	if toolChoiceType == "any" || toolChoiceType == "tool" {
+	// "auto" is allowed with thinking, but explicit forcing is not.
+	if toolChoiceType == "any" || toolChoiceType == "tool" || toolChoiceType == "function" {
 		// Remove thinking configuration entirely to avoid API error
 		body, _ = sjson.DeleteBytes(body, "thinking")
 	}

@@ -19,7 +19,12 @@ func sanitizeClaudeRequest(rawJSON []byte) []byte {
 	updated := rawJSON
 	changed := false
 	for i, tool := range tools.Array() {
+		schemaPath := "tools." + strconv.Itoa(i) + ".input_schema"
 		inputSchema := tool.Get("input_schema")
+		if !inputSchema.Exists() {
+			inputSchema = tool.Get("custom.input_schema")
+			schemaPath = "tools." + strconv.Itoa(i) + ".custom.input_schema"
+		}
 		if !inputSchema.Exists() || !inputSchema.IsObject() {
 			continue
 		}
@@ -27,7 +32,7 @@ func sanitizeClaudeRequest(rawJSON []byte) []byte {
 		if !schemaChanged {
 			continue
 		}
-		next, err := sjson.SetRawBytes(updated, "tools."+strconv.Itoa(i)+".input_schema", sanitizedSchema)
+		next, err := sjson.SetRawBytes(updated, schemaPath, sanitizedSchema)
 		if err != nil {
 			return rawJSON
 		}
@@ -83,7 +88,7 @@ func stripSchemaPlaceholders(node any) bool {
 		}
 
 		reasonRaw, hasReason := props["reason"]
-		if hasReason && len(props) == 1 && isPlaceholderReason(reasonRaw) {
+		if hasReason && isPlaceholderReason(reasonRaw) {
 			delete(props, "reason")
 			filterRequired(current, "reason")
 			changed = true

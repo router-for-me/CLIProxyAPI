@@ -35,6 +35,67 @@ func TestAntigravityBuildRequest_SanitizesAntigravityToolSchema(t *testing.T) {
 	assertSchemaSanitizedAndPropertyPreserved(t, params)
 }
 
+func TestAntigravityBuildRequest_RemovesRefAndDefsFromToolSchema(t *testing.T) {
+	body := buildRequestBodyFromPayloadWithSchemaRefs(t, "claude-opus-4-6")
+
+	decl := extractFirstFunctionDeclaration(t, body)
+	params, ok := decl["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("parameters missing or invalid type")
+	}
+	assertNoSchemaKeywords(t, params)
+}
+
+func TestGenerateStableSessionID_UsesAllUserTextParts(t *testing.T) {
+	payload := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"inline_data": {"mimeType":"image/png","data":"Zm9v"}},
+						{"text": "first real user text"},
+						{"text": "ignored?"}
+					]
+				}
+			]
+		}
+	}`)
+
+	first := generateStableSessionID(payload)
+	second := generateStableSessionID(payload)
+	if first != second {
+		t.Fatalf("expected deterministic session id from non-leading user text, got %q and %q", first, second)
+	}
+	if first == "" {
+		t.Fatal("expected non-empty session id")
+	}
+}
+
+func TestGenerateStableSessionID_FallsBackToContentRawForNonTextUserMessage(t *testing.T) {
+	payload := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"tool_call": {"name": "debug", "input": {"value": "ok"}}
+					]
+				}
+			]
+		}
+	}`)
+
+	first := generateStableSessionID(payload)
+	second := generateStableSessionID(payload)
+	if first != second {
+		t.Fatalf("expected deterministic fallback session id for non-text user content, got %q and %q", first, second)
+	}
+	if first == "" {
+		t.Fatal("expected non-empty fallback session id")
+	}
+}
+
 func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any {
 	t.Helper()
 
@@ -67,6 +128,69 @@ func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any 
 								},
 								"patternProperties": {
 									"^x-": {"type": "string"}
+								}
+							}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	req, err := executor.buildRequest(context.Background(), auth, "token", modelName, payload, false, "", "https://example.com")
+	if err != nil {
+		t.Fatalf("buildRequest error: %v", err)
+	}
+
+	raw, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read request body error: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal request body error: %v, body=%s", err, string(raw))
+	}
+	return body
+}
+
+func buildRequestBodyFromPayloadWithSchemaRefs(t *testing.T, modelName string) map[string]any {
+	t.Helper()
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{}
+	payload := []byte(`{
+		"request": {
+			"tools": [
+				{
+					"function_declarations": [
+						{
+							"name": "tool_with_refs",
+							"parametersJsonSchema": {
+								"$schema": "http://json-schema.org/draft-07/schema#",
+								"$id": "root-schema",
+								"type": "object",
+								"$defs": {
+									"Address": {
+										"type": "object",
+										"properties": {
+											"city": { "type": "string" },
+											"zip": { "type": "string" }
+										}
+									}
+								},
+								"properties": {
+									"address": {
+										"$ref": "#/$defs/Address"
+									},
+									"payload": {
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": "string"
+											}
+										}
+									}
 								}
 							}
 						}
@@ -155,5 +279,25 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	}
 	if _, ok := mode["enumTitles"]; ok {
 		t.Fatalf("enumTitles should be removed from nested schema")
+	}
+}
+
+func assertNoSchemaKeywords(t *testing.T, value any) {
+	t.Helper()
+
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			switch key {
+			case "$ref", "$defs":
+				t.Fatalf("schema keyword %q should be removed for Antigravity request", key)
+			default:
+				assertNoSchemaKeywords(t, nested)
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			assertNoSchemaKeywords(t, nested)
+		}
 	}
 }

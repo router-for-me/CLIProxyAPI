@@ -10,11 +10,23 @@ CONFIG_EXAMPLE="${CONFIG_EXAMPLE:-/CLIProxyAPI/config.example.yaml}"
 AUTH_DIR="${AUTH_DIR:-/root/.cli-proxy-api}"
 LOGS_DIR="${LOGS_DIR:-/CLIProxyAPI/logs}"
 
+<<<<<<< HEAD
+=======
+# Normalize CONFIG_FILE when mount points incorrectly create a directory.
+if [ -d "${CONFIG_FILE}" ]; then
+    CONFIG_FILE="${CONFIG_FILE%/}/config.yaml"
+fi
+
+>>>>>>> archive/pr-234-head-20260223
 # Create auth directory if it doesn't exist
 if [ ! -d "${AUTH_DIR}" ]; then
     echo "[docker-init] Creating auth directory: ${AUTH_DIR}"
     mkdir -p "${AUTH_DIR}"
 fi
+<<<<<<< HEAD
+=======
+chmod 700 "${AUTH_DIR}"
+>>>>>>> archive/pr-234-head-20260223
 
 # Create logs directory if it doesn't exist
 if [ ! -d "${LOGS_DIR}" ]; then
@@ -25,6 +37,10 @@ fi
 # Check if config file exists, if not create from example
 if [ ! -f "${CONFIG_FILE}" ]; then
     echo "[docker-init] Config file not found, creating from example..."
+<<<<<<< HEAD
+=======
+    mkdir -p "$(dirname "${CONFIG_FILE}")"
+>>>>>>> archive/pr-234-head-20260223
     if [ -f "${CONFIG_EXAMPLE}" ]; then
         cp "${CONFIG_EXAMPLE}" "${CONFIG_FILE}"
         echo "[docker-init] Created ${CONFIG_FILE} from example"

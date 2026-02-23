@@ -1,6 +1,6 @@
 package cliproxy
 
-import "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
+import "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 
 // ModelInfo re-exports the registry model info structure.
 type ModelInfo = registry.ModelInfo

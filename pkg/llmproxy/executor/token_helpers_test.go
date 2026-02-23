@@ -70,3 +70,20 @@ func TestEstimateImageTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestIsGPT5FamilyModel(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"gpt-5":           true,
+		"gpt-5.1":         true,
+		"gpt-5.3-codex":   true,
+		"gpt-5-pro":       true,
+		"gpt-4o":          false,
+		"claude-sonnet-4": false,
+	}
+	for model, want := range cases {
+		if got := isGPT5FamilyModel(model); got != want {
+			t.Fatalf("isGPT5FamilyModel(%q) = %v, want %v", model, got, want)
+		}
+	}
+}

@@ -6,6 +6,8 @@ package util
 import (
 	"bytes"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -218,4 +220,57 @@ func FixJSON(input string) string {
 	}
 
 	return out.String()
+}
+
+// DeleteKeysByName removes all keys matching the provided names from any depth in the JSON document.
+//
+// Parameters:
+//   - jsonStr: source JSON string
+//   - keys: key names to remove, e.g. "$ref", "$defs"
+//
+// Returns:
+//   - string: JSON with matching keys removed
+func DeleteKeysByName(jsonStr string, keys ...string) string {
+	if strings.TrimSpace(jsonStr) == "" || len(keys) == 0 {
+		return jsonStr
+	}
+
+	filtered := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		filtered[key] = struct{}{}
+	}
+
+	paths := make([]string, 0)
+	for key := range filtered {
+		utilPaths := make([]string, 0)
+		Walk(gjson.Parse(jsonStr), "", key, &utilPaths)
+		paths = append(paths, utilPaths...)
+	}
+
+	seen := make(map[string]struct{}, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		unique = append(unique, path)
+	}
+
+	sortByPathDepthDesc(unique)
+	for _, path := range unique {
+		jsonStr, _ = sjson.Delete(jsonStr, path)
+	}
+	return jsonStr
+}
+
+func sortByPathDepthDesc(paths []string) {
+	sort.Slice(paths, func(i, j int) bool {
+		depthI := strings.Count(paths[i], ".")
+		depthJ := strings.Count(paths[j], ".")
+		if depthI != depthJ {
+			return depthI > depthJ
+		}
+		return len(paths[i]) > len(paths[j])
+	})
 }

@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -163,7 +162,14 @@ func (s *FileTokenStore) Delete(ctx context.Context, id string) error {
 }
 
 func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
-	return s.resolveManagedPath(id)
+	if strings.ContainsRune(id, os.PathSeparator) || filepath.IsAbs(id) {
+		return id, nil
+	}
+	dir := s.baseDirSnapshot()
+	if dir == "" {
+		return "", fmt.Errorf("auth filestore: directory not configured")
+	}
+	return filepath.Join(dir, id), nil
 }
 
 func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
@@ -268,51 +274,29 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 	}
 	if auth.Attributes != nil {
 		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
-			return s.resolveManagedPath(p)
+			return p, nil
 		}
 	}
 	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
-		return s.resolveManagedPath(fileName)
+		if filepath.IsAbs(fileName) {
+			return fileName, nil
+		}
+		if dir := s.baseDirSnapshot(); dir != "" {
+			return filepath.Join(dir, fileName), nil
+		}
+		return fileName, nil
 	}
 	if auth.ID == "" {
 		return "", fmt.Errorf("auth filestore: missing id")
 	}
-	return s.resolveManagedPath(auth.ID)
-}
-
-func (s *FileTokenStore) resolveManagedPath(candidate string) (string, error) {
-	trimmed := strings.TrimSpace(candidate)
-	if trimmed == "" {
-		return "", fmt.Errorf("auth filestore: path is empty")
+	if filepath.IsAbs(auth.ID) {
+		return auth.ID, nil
 	}
-	cleanCandidate, err := misc.ResolveSafeFilePath(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("auth filestore: resolve candidate path: %w", err)
-	}
-	baseDir := s.baseDirSnapshot()
-	if baseDir == "" {
+	dir := s.baseDirSnapshot()
+	if dir == "" {
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
-	absBase, err := filepath.Abs(baseDir)
-	if err != nil {
-		return "", fmt.Errorf("auth filestore: resolve base directory: %w", err)
-	}
-
-	var resolved string
-	if filepath.IsAbs(trimmed) {
-		resolved = filepath.Clean(filepath.FromSlash(cleanCandidate))
-	} else {
-		resolved = filepath.Join(absBase, filepath.FromSlash(cleanCandidate))
-		resolved = filepath.Clean(resolved)
-	}
-	rel, err := filepath.Rel(absBase, resolved)
-	if err != nil {
-		return "", fmt.Errorf("auth filestore: resolve relative path: %w", err)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("auth filestore: path %q escapes base directory", candidate)
-	}
-	return resolved, nil
+	return filepath.Join(dir, auth.ID), nil
 }
 
 func (s *FileTokenStore) labelFor(metadata map[string]any) string {

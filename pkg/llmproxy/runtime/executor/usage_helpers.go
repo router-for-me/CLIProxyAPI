@@ -215,6 +215,45 @@ func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	return parseOpenAIUsageDetail(usageNode), true
 }
 
+func splitOpenAIStreamUsage(line []byte) ([]byte, usage.Detail, bool) {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return line, usage.Detail{}, false
+	}
+
+	usageNode := gjson.GetBytes(payload, "usage")
+	if !usageNode.Exists() {
+		return line, usage.Detail{}, false
+	}
+	detail := parseOpenAIUsageDetail(usageNode)
+
+	if !hasOpenAIFinishReason(payload) {
+		return line, detail, false
+	}
+
+	cleaned, err := sjson.DeleteBytes(payload, "usage")
+	if err != nil {
+		return line, detail, false
+	}
+	return bytes.TrimSpace(cleaned), detail, true
+}
+
+func hasOpenAIFinishReason(payload []byte) bool {
+	choicesNode := gjson.GetBytes(payload, "choices")
+	if !choicesNode.Exists() || !choicesNode.IsArray() {
+		return false
+	}
+	for _, choice := range choicesNode.Array() {
+		if finishReason := choice.Get("finish_reason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+			return true
+		}
+		if finishReason := choice.Get("delta.finish_reason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func parseOpenAIResponsesUsageDetail(usageNode gjson.Result) usage.Detail {
 	return parseOpenAIUsageDetail(usageNode)
 }

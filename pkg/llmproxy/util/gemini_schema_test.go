@@ -921,6 +921,28 @@ func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *test
 	compareJSON(t, expected, result)
 }
 
+func TestCleanJSONSchemaForGemini_PreservesPlaceholderReason(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"reason": {
+				"type": "string",
+				"description": "Brief explanation of why you are calling this tool"
+			}
+		},
+		"required": ["reason"]
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	parsed := gjson.Parse(result)
+	if !parsed.Get("properties.reason").Exists() {
+		t.Fatalf("expected placeholder reason property to remain, got: %s", result)
+	}
+	if parsed.Get("required").Exists() {
+		t.Fatalf("expected required array to be removed for placeholder schema, got: %s", result)
+	}
+}
+
 func TestRemoveExtensionFields(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1044,5 +1066,42 @@ func TestRemoveExtensionFields(t *testing.T) {
 			actual := removeExtensionFields(tt.input)
 			compareJSON(t, tt.expected, actual)
 		})
+	}
+}
+
+func TestCleanJSONSchemaForAntigravity_RemovesInvalidToolProperties(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"value": {
+				"type": "object",
+				"properties": {
+					"cornerRadius": {"type": "number"},
+					"strokeColor": {"type": "string"},
+					"textColor": {"type": "string"},
+					"allowed": {"type": "string"}
+				},
+				"required": ["cornerRadius", "allowed"]
+			}
+		},
+		"required": ["value"]
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+	if gjson.Get(result, "properties.value.properties.cornerRadius").Exists() {
+		t.Fatalf("cornerRadius should be removed from the schema")
+	}
+	if gjson.Get(result, "properties.value.properties.strokeColor").Exists() {
+		t.Fatalf("strokeColor should be removed from the schema")
+	}
+	if gjson.Get(result, "properties.value.properties.textColor").Exists() {
+		t.Fatalf("textColor should be removed from the schema")
+	}
+	if !gjson.Get(result, "properties.value.properties.allowed").Exists() {
+		t.Fatalf("allowed property should be preserved")
+	}
+	required := gjson.Get(result, "properties.value.required")
+	if !required.IsArray() || len(required.Array()) != 1 || required.Array()[0].String() != "allowed" {
+		t.Fatalf("required array should only contain allowed after cleaning, got %s", required.Raw)
 	}
 }

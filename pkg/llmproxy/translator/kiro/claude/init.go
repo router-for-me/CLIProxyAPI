@@ -1,10 +1,10 @@
-// Package claude provides translation between Kiro and Claude formats.
+// Package claude provides translation between constant.Kiro and constant.Claude formats.
 package claude
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/translator"
 )
 
 func init() {

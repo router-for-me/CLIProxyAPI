@@ -51,6 +51,7 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-5`
 ## Blockers
 
 - None recorded yet; work is in planning state.
+<<<<<<< HEAD
 
 ## Wave3 Execution Entry (Lane 5 Ownership)
 
@@ -101,3 +102,5 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-5`
 
 - `go test ./pkg/llmproxy/watcher -run 'TestHandleEventAuthWriteTriggersUpdate|TestIsWriteOnlyAuthEvent' -count=1`
 - `go test ./pkg/llmproxy/executor ./pkg/llmproxy/runtime/executor -run 'TestResolveOpenAIModelsURL|TestFetchOpenAIModels_UsesVersionedPath' -count=1`
+=======
+>>>>>>> archive/pr-234-head-20260223

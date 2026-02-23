@@ -491,3 +491,5 @@ func ensureColonSpacedJSON(payload []byte) []byte {
 
 	return compacted
 }
+
+func (e *AIStudioExecutor) CloseExecutionSession(sessionID string) {}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -243,12 +245,25 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
-			line := scanner.Bytes()
-			appendAPIResponseChunk(ctx, e.cfg, line)
+			rawLine := bytes.TrimSpace(scanner.Bytes())
+			appendAPIResponseChunk(ctx, e.cfg, rawLine)
+			line := bytes.Clone(rawLine)
+			if bytes.HasPrefix(line, []byte("data:")) {
+				line = bytes.TrimSpace(line[len("data:"):])
+			}
+
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
+			lineToTranslate := line
+			if splitLine, usageDetail, shouldSplit := splitOpenAIStreamUsage(line); shouldSplit {
+				lineToTranslate = splitLine
+				usageChunk, errUsageChunk := buildOpenAIUsageStreamLine(usageDetail)
+				if errUsageChunk == nil {
+					out <- cliproxyexecutor.StreamChunk{Payload: usageChunk}
+				}
+			}
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(lineToTranslate), &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 			}
@@ -264,6 +279,24 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func buildOpenAIUsageStreamLine(detail usage.Detail) ([]byte, error) {
+	usageJSON, err := json.Marshal(map[string]any{
+		"prompt_tokens":             detail.InputTokens,
+		"completion_tokens":         detail.OutputTokens,
+		"total_tokens":              detail.TotalTokens,
+		"prompt_tokens_details":     map[string]any{"cached_tokens": detail.CachedTokens},
+		"completion_tokens_details": map[string]any{"reasoning_tokens": detail.ReasoningTokens},
+	})
+	if err != nil {
+		return nil, err
+	}
+	line, err := sjson.SetRawBytes([]byte("{}"), "usage", usageJSON)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(line), nil
 }
 
 func (e *QwenExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

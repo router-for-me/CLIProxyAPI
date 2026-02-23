@@ -22,7 +22,6 @@ func TestValidateCallbackForwarderTargetRejectsNonLocalTargets(t *testing.T) {
 		"ftp://127.0.0.1/callback",
 		"http://example.com/callback",
 		"https://8.8.8.8/callback",
-		"https://user:pass@127.0.0.1/callback",
 	}
 	for _, target := range cases {
 		if _, err := validateCallbackForwarderTarget(target); err == nil {

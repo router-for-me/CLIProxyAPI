@@ -127,11 +127,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-
-	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return resp, err
-	}
+	requestSuffix := thinking.ParseSuffix(req.Model)
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := payloadRequestedModel(opts, req.Model)
@@ -163,6 +159,10 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
+		payload, err = applyGeminiThinkingForAttempt(payload, requestSuffix, attemptModel, from.String(), to.String(), e.Identifier())
+		if err != nil {
+			return resp, err
+		}
 		if action == "countTokens" {
 			payload = deleteJSONField(payload, "project")
 			payload = deleteJSONField(payload, "model")
@@ -235,7 +235,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		if httpResp.StatusCode == 429 {
 			if idx+1 < len(models) {
-				log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
+				log.Debug("gemini cli executor: rate limited, retrying with next model")
 			} else {
 				log.Debug("gemini cli executor: rate limited, no additional fallback model")
 			}
@@ -281,11 +281,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-
-	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return nil, err
-	}
+	requestSuffix := thinking.ParseSuffix(req.Model)
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := payloadRequestedModel(opts, req.Model)
@@ -311,6 +307,10 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 	for idx, attemptModel := range models {
 		payload := append([]byte(nil), basePayload...)
+		payload, err = applyGeminiThinkingForAttempt(payload, requestSuffix, attemptModel, from.String(), to.String(), e.Identifier())
+		if err != nil {
+			return nil, err
+		}
 		payload = setJSONField(payload, "project", projectID)
 		payload = setJSONField(payload, "model", attemptModel)
 
@@ -372,7 +372,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 			if httpResp.StatusCode == 429 {
 				if idx+1 < len(models) {
-					log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
+					log.Debug("gemini cli executor: rate limited, retrying with next model")
 				} else {
 					log.Debug("gemini cli executor: rate limited, no additional fallback model")
 				}
@@ -509,11 +509,14 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
+	requestSuffix := thinking.ParseSuffix(req.Model)
 
 	models := cliPreviewFallbackOrder(baseModel)
 	if len(models) == 0 || models[0] != baseModel {
 		models = append([]string{baseModel}, models...)
 	}
+
+	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
 	respCtx := context.WithValue(ctx, interfaces.ContextKeyAlt, opts.Alt)
@@ -528,12 +531,9 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	var lastStatus int
 	var lastBody []byte
 
-	// The loop variable attemptModel is only used as the concrete model id sent to the upstream
-	// Gemini CLI endpoint when iterating fallback variants.
-	for range models {
-		payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-
-		payload, err = thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
+	for _, attemptModel := range models {
+		payload := append([]byte(nil), basePayload...)
+		payload, err = applyGeminiThinkingForAttempt(payload, requestSuffix, attemptModel, from.String(), to.String(), e.Identifier())
 		if err != nil {
 			return cliproxyexecutor.Response{}, err
 		}
@@ -911,6 +911,15 @@ func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 	return err
 }
 
+func applyGeminiThinkingForAttempt(body []byte, requestSuffix thinking.SuffixResult, attemptModel, fromFormat, toFormat, provider string) ([]byte, error) {
+	modelWithSuffix := attemptModel
+	if requestSuffix.HasSuffix {
+		modelWithSuffix = attemptModel + "(" + requestSuffix.RawSuffix + ")"
+	}
+
+	return thinking.ApplyThinking(body, modelWithSuffix, fromFormat, toFormat, provider)
+}
+
 // parseRetryDelay extracts the retry delay from a Google API 429 error response.
 // The error response contains a RetryInfo.retryDelay field in the format "0.847655010s".
 // Returns the parsed duration or an error if it cannot be determined.
@@ -963,3 +972,5 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 
 	return nil, fmt.Errorf("no RetryInfo found")
 }
+
+func (e *GeminiCLIExecutor) CloseExecutionSession(sessionID string) {}

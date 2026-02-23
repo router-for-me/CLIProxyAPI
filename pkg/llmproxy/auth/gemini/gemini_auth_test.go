@@ -3,8 +3,9 @@ package gemini
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,28 +82,29 @@ func TestGeminiTokenStorage_SaveTokenToFile_RejectsTraversalPath(t *testing.T) {
 }
 
 func TestGeminiAuth_CreateTokenStorage(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/oauth2/v1/userinfo" {
-			_, _ = fmt.Fprint(w, `{"email":"test@example.com"}`)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer server.Close()
-
 	auth := NewGeminiAuth()
 	conf := &oauth2.Config{
 		Endpoint: oauth2.Endpoint{
-			AuthURL:  server.URL + "/auth",
-			TokenURL: server.URL + "/token",
+			AuthURL:  "https://example.com/auth",
+			TokenURL: "https://example.com/token",
 		},
 	}
 	token := &oauth2.Token{AccessToken: "token123"}
 
 	ctx := context.Background()
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		mockReq, _ := http.NewRequest(req.Method, server.URL+"/oauth2/v1/userinfo", req.Body)
-		return http.DefaultClient.Do(mockReq)
+		if strings.Contains(req.URL.Path, "/oauth2/v1/userinfo") {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"email":"test@example.com"}`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+		}, nil
 	})
 
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: transport})
@@ -114,6 +116,32 @@ func TestGeminiAuth_CreateTokenStorage(t *testing.T) {
 
 	if ts.Email != "test@example.com" || ts.ProjectID != "project-123" {
 		t.Errorf("unexpected ts: %+v", ts)
+	}
+}
+
+func TestStartOAuthCallbackListener_Fallback(t *testing.T) {
+	busy, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", DefaultCallbackPort))
+	if err != nil {
+		t.Skipf("default callback port %d unavailable: %v", DefaultCallbackPort, err)
+	}
+	defer func() {
+		if closeErr := busy.Close(); closeErr != nil {
+			t.Fatalf("busy.Close failed: %v", closeErr)
+		}
+	}()
+
+	listener, port, err := startOAuthCallbackListener(DefaultCallbackPort)
+	if err != nil {
+		t.Fatalf("startOAuthCallbackListener failed: %v", err)
+	}
+	defer func() {
+		if closeErr := listener.Close(); closeErr != nil {
+			t.Fatalf("listener.Close failed: %v", closeErr)
+		}
+	}()
+
+	if port == DefaultCallbackPort {
+		t.Fatalf("expected fallback port, got default %d", port)
 	}
 }
 

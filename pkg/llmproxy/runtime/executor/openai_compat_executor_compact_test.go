@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
@@ -141,5 +142,76 @@ func TestOpenAICompatExecutorExecuteStream_SetsSSEAcceptAndStreamTrue(t *testing
 	}
 	if len(gotBody) == 0 {
 		t.Fatal("expected non-empty request body")
+	}
+}
+
+func TestOpenAICompatExecutorExecute_InvalidJSONUpstreamReturnsError(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": "data:,/v1",
+	}}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-json"))
+	}))
+	defer server.Close()
+	auth.Attributes["base_url"] = server.URL + "/v1"
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o-mini",
+		Payload: []byte(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	if err == nil {
+		t.Fatal("expected invalid-json error, got nil")
+	}
+	if statusErr, ok := err.(statusErr); !ok || statusErr.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("unexpected error type/code: %T %v", err, err)
+	}
+}
+
+func TestOpenAICompatExecutorExecuteStream_InvalidJSONChunkErrors(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": "data:,/v1",
+		"api_key":  "test",
+	}}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {bad\n\n"))
+	}))
+	defer server.Close()
+	auth.Attributes["base_url"] = server.URL
+
+	streamResult, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o-mini",
+		Payload: []byte(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var gotErr error
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+			break
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected stream chunk error")
+	}
+	if !strings.Contains(gotErr.Error(), "invalid json") {
+		t.Fatalf("unexpected stream error: %v", gotErr)
 	}
 }

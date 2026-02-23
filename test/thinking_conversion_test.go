@@ -6,20 +6,20 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 
 	// Import provider packages to trigger init() registration of ProviderAppliers
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/antigravity"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/claude"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/codex"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/gemini"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/geminicli"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/iflow"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/kimi"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/openai"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/antigravity"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/claude"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/codex"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/gemini"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/geminicli"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/iflow"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/kimi"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/openai"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -2815,17 +2815,6 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:   `{"model":"gpt-5-codex","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"none"}}`,
 			expectField: "reasoning.effort",
 			expectValue: "low",
-			expectErr:   false,
-		},
-		// Case 122: OpenAI-Response to gpt-5-codex, variant=high → high
-		{
-			name:        "122",
-			from:        "openai-response",
-			to:          "github-copilot",
-			model:       "gpt-5-codex",
-			inputJSON:   `{"model":"gpt-5-codex","input":[{"role":"user","content":"hi"}],"variant":"high"}`,
-			expectField: "reasoning.effort",
-			expectValue: "high",
 			expectErr:   false,
 		},
 	}

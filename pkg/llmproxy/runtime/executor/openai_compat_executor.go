@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -169,6 +170,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, body)
+	if err = validateOpenAICompatJSON(body); err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
 	reporter.publish(ctx, parseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
@@ -284,6 +289,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if !bytes.HasPrefix(line, []byte("data:")) {
 				continue
 			}
+			if err := validateOpenAICompatJSON(bytes.Clone(line)); err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: err}
+				return
+			}
 
 			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 			// Pass through translator; it yields one or more chunks for the target schema.
@@ -364,3 +375,24 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+func validateOpenAICompatJSON(data []byte) error {
+	line := bytes.TrimSpace(data)
+	if len(line) == 0 {
+		return nil
+	}
+
+	if bytes.HasPrefix(line, []byte("data:")) {
+		payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			return nil
+		}
+		line = payload
+	}
+
+	if !json.Valid(line) {
+		return statusErr{code: http.StatusBadRequest, msg: "invalid json in OpenAI-compatible response"}
+	}
+
+	return nil
+}

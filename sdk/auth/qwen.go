@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/qwen"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/browser"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	// legacy client removed
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -41,7 +41,7 @@ func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		opts = &LoginOptions{}
 	}
 
-	authSvc := qwen.NewQwenAuth(cfg, nil)
+	authSvc := qwen.NewQwenAuth(cfg)
 
 	deviceFlow, err := authSvc.InitiateDeviceFlow(ctx)
 	if err != nil {

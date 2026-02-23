@@ -1,21 +1,16 @@
 package auth
 
 import (
-	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	baseauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth"
 )
-
-// CloseAllExecutionSessionsID is a special session ID used to signal that all
-// active execution sessions should be terminated.
-const CloseAllExecutionSessionsID = "*"
 
 // Auth encapsulates the runtime state and metadata associated with a single credential.
 type Auth struct {
@@ -133,10 +128,8 @@ func stableAuthIndex(seed string) string {
 	if seed == "" {
 		return ""
 	}
-	mac := hmac.New(sha256.New, []byte("cliproxy-auth-index-v1"))
-	_, _ = mac.Write([]byte(seed))
-	sum := mac.Sum(nil)
-	return fmt.Sprintf("%x", sum[:])
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:8])
 }
 
 // EnsureIndex returns a stable index derived from the auth file name or API key.
@@ -151,6 +144,10 @@ func (a *Auth) EnsureIndex() string {
 	seed := strings.TrimSpace(a.FileName)
 	if seed != "" {
 		seed = "file:" + seed
+	} else if a.Attributes != nil {
+		if apiKey := strings.TrimSpace(a.Attributes["api_key"]); apiKey != "" {
+			seed = "api_key:" + apiKey
+		}
 	}
 	if seed == "" {
 		if id := strings.TrimSpace(a.ID); id != "" {

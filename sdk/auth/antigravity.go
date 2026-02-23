@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -57,7 +57,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 
 	srv, port, cbChan, errServer := startAntigravityCallbackServer(callbackPort)
 	if errServer != nil {
-		return nil, fmt.Errorf("antigravity: failed to start callback server: %s", formatAntigravityCallbackServerError(callbackPort, errServer))
+		return nil, fmt.Errorf("antigravity: failed to start callback server: %w", errServer)
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -211,30 +211,6 @@ waitForCallback:
 		Label:    label,
 		Metadata: metadata,
 	}, nil
-}
-
-func formatAntigravityCallbackServerError(port int, err error) string {
-	if err == nil {
-		return ""
-	}
-	raw := strings.TrimSpace(err.Error())
-	if raw == "" {
-		raw = "unknown callback server error"
-	}
-	lower := strings.ToLower(raw)
-	suggestion := fmt.Sprintf("try --oauth-callback-port <free-port> (for example --oauth-callback-port %d)", antigravity.CallbackPort+100)
-	if port > 0 {
-		suggestion = fmt.Sprintf("try --oauth-callback-port <free-port> (current=%d)", port)
-	}
-	if strings.Contains(lower, "address already in use") {
-		return fmt.Sprintf("%s; callback port is already in use, %s", raw, suggestion)
-	}
-	if strings.Contains(lower, "forbidden by its access permissions") ||
-		strings.Contains(lower, "permission denied") ||
-		strings.Contains(lower, "access permissions") {
-		return fmt.Sprintf("%s; callback port is blocked by OS policy, %s", raw, suggestion)
-	}
-	return raw
 }
 
 type callbackResult struct {

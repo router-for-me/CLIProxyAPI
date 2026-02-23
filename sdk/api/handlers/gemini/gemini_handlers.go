@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
+	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 )
 
@@ -35,7 +35,7 @@ func NewGeminiAPIHandler(apiHandlers *handlers.BaseAPIHandler) *GeminiAPIHandler
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *GeminiAPIHandler) HandlerType() string {
-	return constant.Gemini
+	return Gemini
 }
 
 // Models returns the Gemini-compatible model metadata supported by this handler.
@@ -45,33 +45,6 @@ func (h *GeminiAPIHandler) Models() []map[string]any {
 	return modelRegistry.GetAvailableModels("gemini")
 }
 
-// geminiAllowedModelFields defines the allowed fields for Gemini model responses.
-// These fields match the official Gemini API specification for the /v1beta/models endpoint.
-var geminiAllowedModelFields = map[string]bool{
-	"name":                       true,
-	"version":                    true,
-	"displayName":                true,
-	"description":                true,
-	"inputTokenLimit":            true,
-	"outputTokenLimit":           true,
-	"supportedGenerationMethods": true,
-	"temperature":                true,
-	"topP":                       true,
-	"topK":                       true,
-}
-
-// filterGeminiModelFields removes internal metadata fields that should not be exposed via the Gemini API.
-// This ensures only Gemini-compatible fields are returned in the response.
-func filterGeminiModelFields(model map[string]any) map[string]any {
-	filtered := make(map[string]any)
-	for k, v := range model {
-		if geminiAllowedModelFields[k] {
-			filtered[k] = v
-		}
-	}
-	return filtered
-}
-
 // GeminiModels handles the Gemini models listing endpoint.
 // It returns a JSON response containing available Gemini models and their specifications.
 func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
@@ -79,8 +52,10 @@ func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
 	normalizedModels := make([]map[string]any, 0, len(rawModels))
 	defaultMethods := []string{"generateContent"}
 	for _, model := range rawModels {
-		// Filter out internal metadata fields, keeping only Gemini API compatible fields
-		normalizedModel := filterGeminiModelFields(model)
+		normalizedModel := make(map[string]any, len(model))
+		for k, v := range model {
+			normalizedModel[k] = v
+		}
 		if name, ok := normalizedModel["name"].(string); ok && name != "" {
 			if !strings.HasPrefix(name, "models/") {
 				normalizedModel["name"] = "models/" + name
@@ -133,13 +108,11 @@ func (h *GeminiAPIHandler) GeminiGetHandler(c *gin.Context) {
 	}
 
 	if targetModel != nil {
-		// Filter out internal metadata fields, keeping only Gemini API compatible fields
-		filteredModel := filterGeminiModelFields(targetModel)
 		// Ensure the name has 'models/' prefix in the output if it's a Gemini model
-		if name, ok := filteredModel["name"].(string); ok && name != "" && !strings.HasPrefix(name, "models/") {
-			filteredModel["name"] = "models/" + name
+		if name, ok := targetModel["name"].(string); ok && name != "" && !strings.HasPrefix(name, "models/") {
+			targetModel["name"] = "models/" + name
 		}
-		c.JSON(http.StatusOK, filteredModel)
+		c.JSON(http.StatusOK, targetModel)
 		return
 	}
 

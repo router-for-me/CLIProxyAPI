@@ -18,94 +18,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// Cached web_search tool description fetched from MCP tools/list.
-// Uses atomic.Pointer[sync.Once] for lock-free reads with retry-on-failure:
-// - sync.Once prevents race conditions and deduplicates concurrent calls
-// - On failure, a fresh sync.Once is swapped in to allow retry on next call
-// - On success, sync.Once stays "done" forever — zero overhead for subsequent calls
+// fallbackFpOnce and fallbackFp provide a shared fallback fingerprint
+// for WebSearchHandler when no fingerprint is provided.
 var (
-	cachedToolDescription atomic.Value // stores string
-	toolDescOnce          atomic.Pointer[sync.Once]
-	fallbackFpOnce        sync.Once
-	fallbackFp            *kiroauth.Fingerprint
+	fallbackFpOnce sync.Once
+	fallbackFp     *kiroauth.Fingerprint
 )
-
-func init() {
-	toolDescOnce.Store(&sync.Once{})
-}
-
-// FetchToolDescription calls MCP tools/list to get the web_search tool description
-// and caches it. Safe to call concurrently — only one goroutine fetches at a time.
-// If the fetch fails, subsequent calls will retry. On success, no further fetches occur.
-// The httpClient parameter allows reusing a shared pooled HTTP client.
-func FetchToolDescription(mcpEndpoint, authToken string, httpClient *http.Client, fp *kiroauth.Fingerprint, authAttrs map[string]string) {
-	toolDescOnce.Load().Do(func() {
-		handler := NewWebSearchHandler(mcpEndpoint, authToken, httpClient, fp, authAttrs)
-		reqBody := []byte(`{"id":"tools_list","jsonrpc":"2.0","method":"tools/list"}`)
-		log.Debugf("kiro/websearch MCP tools/list request: %d bytes", len(reqBody))
-
-		req, err := http.NewRequest("POST", mcpEndpoint, bytes.NewReader(reqBody))
-		if err != nil {
-			log.Warnf("kiro/websearch: failed to create tools/list request: %v", err)
-			toolDescOnce.Store(&sync.Once{}) // allow retry
-			return
-		}
-
-		// Reuse same headers as CallMcpAPI
-		handler.setMcpHeaders(req)
-
-		resp, err := handler.HTTPClient.Do(req)
-		if err != nil {
-			log.Warnf("kiro/websearch: tools/list request failed: %v", err)
-			toolDescOnce.Store(&sync.Once{}) // allow retry
-			return
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			log.Warnf("kiro/websearch: tools/list returned status %d", resp.StatusCode)
-			toolDescOnce.Store(&sync.Once{}) // allow retry
-			return
-		}
-		log.Debugf("kiro/websearch MCP tools/list response: [%d] %d bytes", resp.StatusCode, len(body))
-
-		// Parse: {"result":{"tools":[{"name":"web_search","description":"..."}]}}
-		var result struct {
-			Result *struct {
-				Tools []struct {
-					Name        string `json:"name"`
-					Description string `json:"description"`
-				} `json:"tools"`
-			} `json:"result"`
-		}
-		if err := json.Unmarshal(body, &result); err != nil || result.Result == nil {
-			log.Warnf("kiro/websearch: failed to parse tools/list response")
-			toolDescOnce.Store(&sync.Once{}) // allow retry
-			return
-		}
-
-		for _, tool := range result.Result.Tools {
-			if tool.Name == "web_search" && tool.Description != "" {
-				cachedToolDescription.Store(tool.Description)
-				log.Infof("kiro/websearch: cached web_search description from tools/list (%d bytes)", len(tool.Description))
-				return // success — sync.Once stays "done", no more fetches
-			}
-		}
-
-		// web_search tool not found in response
-		toolDescOnce.Store(&sync.Once{}) // allow retry
-	})
-}
-
-// GetWebSearchDescription returns the cached web_search tool description,
-// or empty string if not yet fetched. Lock-free via atomic.Value.
-func GetWebSearchDescription() string {
-	if v := cachedToolDescription.Load(); v != nil {
-		return v.(string)
-	}
-	return ""
-}
 
 // WebSearchHandler handles web search requests via Kiro MCP API
 type WebSearchHandler struct {
@@ -247,24 +165,4 @@ func (h *WebSearchHandler) CallMcpAPI(request *McpRequest) (*McpResponse, error)
 	}
 
 	return nil, lastErr
-}
-
-// ParseSearchResults extracts WebSearchResults from MCP response
-func ParseSearchResults(response *McpResponse) *WebSearchResults {
-	if response == nil || response.Result == nil || len(response.Result.Content) == 0 {
-		return nil
-	}
-
-	content := response.Result.Content[0]
-	if content.ContentType != "text" {
-		return nil
-	}
-
-	var results WebSearchResults
-	if err := json.Unmarshal([]byte(content.Text), &results); err != nil {
-		log.Warnf("kiro/websearch: failed to parse search results: %v", err)
-		return nil
-	}
-
-	return &results
 }

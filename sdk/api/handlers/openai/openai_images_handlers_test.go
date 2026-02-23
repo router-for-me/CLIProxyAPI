@@ -27,7 +27,7 @@ func TestConvertToOpenAIFormat_GeminiDefaultsToDataURL(t *testing.T) {
 		]
 	}`)
 
-	got := h.convertToOpenAIFormat(resp, "gemini-2.5-flash-image", "cat", "")
+	got := h.convertToOpenAIFormat(resp, "gemini-2.5-flash-image", "cat", "url")
 	if len(got.Data) != 1 {
 		t.Fatalf("expected 1 image, got %d", len(got.Data))
 	}

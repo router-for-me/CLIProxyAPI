@@ -3,9 +3,6 @@ package auth
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,12 +15,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
@@ -34,7 +30,8 @@ type ProviderExecutor interface {
 	Identifier() string
 	// Execute handles non-streaming execution and returns the provider response payload.
 	Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
-	// ExecuteStream handles streaming execution and returns the stream result including headers.
+	// ExecuteStream handles streaming execution and returns a StreamResult containing
+	// upstream headers and a channel of provider chunks.
 	ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error)
 	// Refresh attempts to refresh provider credentials and returns the updated auth state.
 	Refresh(ctx context.Context, auth *Auth) (*Auth, error)
@@ -43,9 +40,18 @@ type ProviderExecutor interface {
 	// HttpRequest injects provider credentials into the supplied HTTP request and executes it.
 	// Callers must close the response body when non-nil.
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
-	// CloseExecutionSession terminates a long-lived execution session (e.g. WebSocket).
+}
+
+// ExecutionSessionCloser allows executors to release per-session runtime resources.
+type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
 }
+
+const (
+	// CloseAllExecutionSessionsID asks an executor to release all active execution sessions.
+	// Executors that do not support this marker may ignore it.
+	CloseAllExecutionSessionsID = "__all_execution_sessions__"
+)
 
 // RefreshEvaluator allows runtime state to override refresh decisions.
 type RefreshEvaluator interface {
@@ -391,19 +397,27 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration) {
 }
 
 // RegisterExecutor registers a provider executor with the manager.
-// If an executor with the same identifier already exists, it is closed
-// using CloseAllExecutionSessionsID before being replaced.
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if executor == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	key := executor.Identifier()
-	if existing, ok := m.executors[key]; ok && existing != nil {
-		existing.CloseExecutionSession(CloseAllExecutionSessionsID)
+	provider := strings.TrimSpace(executor.Identifier())
+	if provider == "" {
+		return
 	}
-	m.executors[key] = executor
+
+	var replaced ProviderExecutor
+	m.mu.Lock()
+	replaced = m.executors[provider]
+	m.executors[provider] = executor
+	m.mu.Unlock()
+
+	if replaced == nil || replaced == executor {
+		return
+	}
+	if closer, ok := replaced.(ExecutionSessionCloser); ok && closer != nil {
+		closer.CloseExecutionSession(CloseAllExecutionSessionsID)
+	}
 }
 
 // UnregisterExecutor removes the executor associated with the provider key.
@@ -415,36 +429,6 @@ func (m *Manager) UnregisterExecutor(provider string) {
 	m.mu.Lock()
 	delete(m.executors, provider)
 	m.mu.Unlock()
-}
-
-// Executor retrieves the executor registered for the given provider key.
-// Returns the executor and true if found, or nil and false otherwise.
-func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
-		return nil, false
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	exec, ok := m.executors[provider]
-	return exec, ok
-}
-
-// CloseExecutionSession terminates a long-lived execution session by delegating to all registered executors.
-func (m *Manager) CloseExecutionSession(sessionID string) {
-	if m == nil {
-		return
-	}
-	m.mu.RLock()
-	executors := make([]ProviderExecutor, 0, len(m.executors))
-	for _, exec := range m.executors {
-		executors = append(executors, exec)
-	}
-	m.mu.RUnlock()
-
-	for _, exec := range executors {
-		exec.CloseExecutionSession(sessionID)
-	}
 }
 
 // Register inserts a new auth entry into the manager.
@@ -575,7 +559,6 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
-// It returns a StreamResult which contains both the response headers and the chunk channel.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -586,9 +569,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		chunks, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts)
+		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts)
 		if errStream == nil {
-			return chunks, nil
+			return result, nil
 		}
 		lastErr = errStream
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
@@ -624,12 +607,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, interfaces.ContextKeyRoundRobin, rt)
+			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
@@ -679,12 +663,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, interfaces.ContextKeyRoundRobin, rt)
+			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
@@ -734,12 +719,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, interfaces.ContextKeyRoundRobin, rt)
+			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		execReq := req
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
@@ -751,7 +737,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errCtx
 			}
 			rerr := &Error{Message: errStream.Error()}
-			if se, ok := errStream.(interface{ StatusCode() int }); ok && se != nil {
+			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
@@ -772,7 +758,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if chunk.Err != nil && !failed {
 					failed = true
 					rerr := &Error{Message: chunk.Err.Error()}
-					if se, ok := chunk.Err.(interface{ StatusCode() int }); ok && se != nil {
+					if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
 					}
 					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
@@ -794,10 +780,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
 		}(execCtx, auth.Clone(), provider, streamResult.Chunks)
-		// Invoke the selected auth callback if provided in the options metadata.
-		if callback, ok := opts.Metadata[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string)); ok && callback != nil {
-			callback(auth.ID)
-		}
 		return &cliproxyexecutor.StreamResult{
 			Headers: streamResult.Headers,
 			Chunks:  out,
@@ -841,6 +823,38 @@ func hasRequestedModelMetadata(meta map[string]any) bool {
 		return strings.TrimSpace(string(v)) != ""
 	default:
 		return false
+	}
+}
+
+func pinnedAuthIDFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[cliproxyexecutor.PinnedAuthMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch val := raw.(type) {
+	case string:
+		return strings.TrimSpace(val)
+	case []byte:
+		return strings.TrimSpace(string(val))
+	default:
+		return ""
+	}
+}
+
+func publishSelectedAuthMetadata(meta map[string]any, authID string) {
+	if len(meta) == 0 {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	meta[cliproxyexecutor.SelectedAuthMetadataKey] = authID
+	if callback, ok := meta[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string)); ok && callback != nil {
+		callback(authID)
 	}
 }
 
@@ -1499,11 +1513,7 @@ func isRequestInvalidError(err error) bool {
 	if status != http.StatusBadRequest {
 		return false
 	}
-	lowerMsg := strings.ToLower(err.Error())
-	if strings.Contains(lowerMsg, "validation_required") {
-		return false
-	}
-	return strings.Contains(lowerMsg, "invalid_request_error")
+	return strings.Contains(err.Error(), "invalid_request_error")
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
@@ -1604,7 +1614,116 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	return auth.Clone(), true
 }
 
+// Executor returns the registered provider executor for a provider key.
+func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
+	if m == nil {
+		return nil, false
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return nil, false
+	}
+
+	m.mu.RLock()
+	executor, okExecutor := m.executors[provider]
+	if !okExecutor {
+		lowerProvider := strings.ToLower(provider)
+		if lowerProvider != provider {
+			executor, okExecutor = m.executors[lowerProvider]
+		}
+	}
+	m.mu.RUnlock()
+
+	if !okExecutor || executor == nil {
+		return nil, false
+	}
+	return executor, true
+}
+
+// CloseExecutionSession asks all registered executors to release the supplied execution session.
+func (m *Manager) CloseExecutionSession(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if m == nil || sessionID == "" {
+		return
+	}
+
+	m.mu.RLock()
+	executors := make([]ProviderExecutor, 0, len(m.executors))
+	for _, exec := range m.executors {
+		executors = append(executors, exec)
+	}
+	m.mu.RUnlock()
+
+	for i := range executors {
+		if closer, ok := executors[i].(ExecutionSessionCloser); ok && closer != nil {
+			closer.CloseExecutionSession(sessionID)
+		}
+	}
+}
+
+func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+
+	m.mu.RLock()
+	executor, okExecutor := m.executors[provider]
+	if !okExecutor {
+		m.mu.RUnlock()
+		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	candidates := make([]*Auth, 0, len(m.auths))
+	modelKey := strings.TrimSpace(model)
+	// Always use base model name (without thinking suffix) for auth matching.
+	if modelKey != "" {
+		parsed := thinking.ParseSuffix(modelKey)
+		if parsed.ModelName != "" {
+			modelKey = strings.TrimSpace(parsed.ModelName)
+		}
+	}
+	registryRef := registry.GetGlobalRegistry()
+	for _, candidate := range m.auths {
+		if candidate.Provider != provider || candidate.Disabled {
+			continue
+		}
+		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+			continue
+		}
+		if _, used := tried[candidate.ID]; used {
+			continue
+		}
+		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 {
+		m.mu.RUnlock()
+		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	selected, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
+	if errPick != nil {
+		m.mu.RUnlock()
+		return nil, nil, errPick
+	}
+	if selected == nil {
+		m.mu.RUnlock()
+		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	authCopy := selected.Clone()
+	m.mu.RUnlock()
+	if !selected.indexAssigned {
+		m.mu.Lock()
+		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+			current.EnsureIndex()
+			authCopy = current.Clone()
+		}
+		m.mu.Unlock()
+	}
+	return authCopy, executor, nil
+}
+
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
 		p := strings.TrimSpace(strings.ToLower(provider))
@@ -1630,6 +1749,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
 		if candidate == nil || candidate.Disabled {
+			continue
+		}
+		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
 			continue
 		}
 		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
@@ -1750,7 +1872,7 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 			if !m.shouldRefresh(a, now) {
 				continue
 			}
-			log.Debugf("checking refresh for %s kind=%s", authLogRef(a), typ)
+			log.Debugf("checking refresh for %s, %s, %s", a.Provider, a.ID, typ)
 
 			if exec := m.executorFor(a.Provider); exec == nil {
 				continue
@@ -2010,10 +2132,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	cloned := auth.Clone()
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
-		log.Debugf("refresh canceled for %s", authLogRef(auth))
+		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		return
 	}
-	log.Debugf("refresh completed for %s err=%v", authLogRef(auth), err)
+	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
 		m.mu.Lock()
@@ -2116,6 +2238,7 @@ func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model 
 	}
 	switch accountType {
 	case "api_key":
+		// nolint:gosec // false positive: model alias, not actual API key
 		entry.Debugf("Use API key %s for model %s%s", util.HideAPIKey(accountInfo), model, suffix)
 	case "oauth":
 		ident := formatOauthIdentity(auth, provider, accountInfo)
@@ -2152,26 +2275,6 @@ func formatOauthIdentity(auth *Auth, provider string, accountInfo string) string
 		return accountInfo
 	}
 	return strings.Join(parts, " ")
-}
-
-func authLogRef(auth *Auth) string {
-	if auth == nil {
-		return "provider=unknown auth_id_hash=none"
-	}
-	provider := strings.TrimSpace(auth.Provider)
-	if provider == "" {
-		provider = "unknown"
-	}
-	identifier := strings.TrimSpace(auth.ID)
-	if identifier == "" {
-		identifier = strings.TrimSpace(auth.FileName)
-	}
-	if identifier == "" {
-		return "provider=" + provider + " auth_id_hash=none"
-	}
-	mac := hmac.New(sha256.New, []byte("cliproxy-auth-log-ref-v1"))
-	_, _ = mac.Write([]byte(identifier))
-	return "provider=" + provider + " auth_id_hash=" + hex.EncodeToString(mac.Sum(nil)[:6])
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.

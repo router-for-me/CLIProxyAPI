@@ -2,7 +2,6 @@ package misc
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,14 +13,10 @@ func ResolveSafeFilePath(path string) (string, error) {
 	if trimmed == "" {
 		return "", fmt.Errorf("path is empty")
 	}
-	normalized, err := normalizePathForTraversalCheck(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("path contains invalid encoding: %w", err)
-	}
-	if hasPathTraversalComponent(normalized) {
+	if hasPathTraversalComponent(trimmed) {
 		return "", fmt.Errorf("path traversal is not allowed")
 	}
-	cleaned := filepath.Clean(normalized)
+	cleaned := filepath.Clean(trimmed)
 	if cleaned == "." {
 		return "", fmt.Errorf("path is invalid")
 	}
@@ -38,17 +33,13 @@ func ResolveSafeFilePathInDir(baseDir, fileName string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("file name is empty")
 	}
-	normalized, err := normalizePathForTraversalCheck(name)
-	if err != nil {
-		return "", fmt.Errorf("file name contains invalid encoding: %w", err)
-	}
-	if strings.ContainsAny(normalized, `/\`) {
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
 		return "", fmt.Errorf("file name must not contain path separators")
 	}
-	if hasPathTraversalComponent(normalized) {
+	if hasPathTraversalComponent(name) {
 		return "", fmt.Errorf("file name must not contain traversal components")
 	}
-	cleanName := filepath.Clean(normalized)
+	cleanName := filepath.Clean(name)
 	if cleanName == "." || cleanName == ".." {
 		return "", fmt.Errorf("file name is invalid")
 	}
@@ -75,19 +66,4 @@ func hasPathTraversalComponent(path string) bool {
 		}
 	}
 	return false
-}
-
-func normalizePathForTraversalCheck(path string) (string, error) {
-	normalized := path
-	for i := 0; i < 4; i++ {
-		decoded, err := url.PathUnescape(normalized)
-		if err != nil {
-			return "", err
-		}
-		if decoded == normalized {
-			break
-		}
-		normalized = decoded
-	}
-	return strings.ReplaceAll(normalized, "\\", "/"), nil
 }

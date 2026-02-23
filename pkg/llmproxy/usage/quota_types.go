@@ -1,14 +1,23 @@
-// Package usage — quota enforcement types.
+// Package usage provides provider-level metrics for OpenRouter-style routing.
+// quota_types.go defines types for quota enforcement.
 package usage
 
-// QuotaLimit defines daily usage limits.
+// QuotaLimit specifies daily usage caps.
 type QuotaLimit struct {
-	MaxTokensPerDay float64 `json:"max_tokens_per_day"`
-	MaxCostPerDay   float64 `json:"max_cost_per_day"`
+	// MaxTokensPerDay is the daily token limit. 0 means uncapped.
+	MaxTokensPerDay float64
+	// MaxCostPerDay is the daily cost cap in USD. 0 means uncapped.
+	MaxCostPerDay float64
 }
 
-// UsageRecord tracks accumulated usage.
-type UsageRecord struct {
-	TokensUsed float64 `json:"tokens_used"`
-	CostUsed   float64 `json:"cost_used"`
+// Usage records observed resource consumption.
+type Usage struct {
+	TokensUsed float64
+	CostUsed   float64
+}
+
+// QuotaCheckRequest carries an estimated token/cost projection for a pending request.
+type QuotaCheckRequest struct {
+	EstimatedTokens float64
+	EstimatedCost   float64
 }

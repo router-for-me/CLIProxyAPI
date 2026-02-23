@@ -143,6 +143,61 @@ func TestApplyClaudeToolPrefix_ToolChoiceBuiltin(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_ToolChoiceFunctionName(t *testing.T) {
+	body := []byte(`{
+		"tools": [
+			{"name": "Read"}
+		],
+		"tool_choice": {"type": "function", "function": {"name": "Read"}}
+	}`)
+	out := applyClaudeToolPrefix(body, "proxy_")
+
+	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "proxy_Read" {
+		t.Fatalf("tool_choice.function.name = %q, want %q", got, "proxy_Read")
+	}
+}
+
+func TestDisableThinkingIfToolChoiceForced(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "tool_choice_any",
+			body: `{"tool_choice":{"type":"any"},"thinking":{"budget_tokens":1024}}`,
+		},
+		{
+			name: "tool_choice_tool",
+			body: `{"tool_choice":{"type":"tool","name":"Read"},"thinking":{"budget_tokens":1024}}`,
+		},
+		{
+			name: "tool_choice_function",
+			body: `{"tool_choice":{"type":"function","function":{"name":"Read"}},"thinking":{"budget_tokens":1024}}`,
+		},
+		{
+			name: "tool_choice_auto",
+			body: `{"tool_choice":{"type":"auto"},"thinking":{"budget_tokens":1024}}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := disableThinkingIfToolChoiceForced([]byte(tc.body))
+			hasThinking := gjson.GetBytes(out, "thinking").Exists()
+			switch tc.name {
+			case "tool_choice_any", "tool_choice_tool", "tool_choice_function":
+				if hasThinking {
+					t.Fatalf("thinking should be removed, got %s", string(out))
+				}
+			case "tool_choice_auto":
+				if !hasThinking {
+					t.Fatalf("thinking should be preserved, got %s", string(out))
+				}
+			}
+		})
+	}
+}
+
 func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")

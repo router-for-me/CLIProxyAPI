@@ -547,12 +547,12 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 }
 
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
-// Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
+// Anthropic API does not allow thinking when tool_choice is set to "any", "tool", or "function".
 // See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
 func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
-	// "auto" is allowed with thinking, but "any" or "tool" (specific tool) are not
-	if toolChoiceType == "any" || toolChoiceType == "tool" {
+	// "auto" is allowed with thinking, but explicit forcing is not.
+	if toolChoiceType == "any" || toolChoiceType == "tool" || toolChoiceType == "function" {
 		// Remove thinking configuration entirely to avoid API error
 		body, _ = sjson.DeleteBytes(body, "thinking")
 	}
@@ -826,10 +826,22 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 		})
 	}
 
-	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
+	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
+	if toolChoiceType == "tool" || toolChoiceType == "function" {
 		name := gjson.GetBytes(body, "tool_choice.name").String()
 		if name != "" && !strings.HasPrefix(name, prefix) && !builtinTools[name] {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", prefix+name)
+		}
+
+		functionName := gjson.GetBytes(body, "tool_choice.function.name").String()
+		if functionName != "" && !strings.HasPrefix(functionName, prefix) && !builtinTools[functionName] {
+			body, _ = sjson.SetBytes(body, "tool_choice.function.name", prefix+functionName)
+		}
+	}
+	if toolChoiceType == "function" {
+		functionName := gjson.GetBytes(body, "tool_choice.function.name").String()
+		if functionName != "" && !strings.HasPrefix(functionName, prefix) && !builtinTools[functionName] {
+			body, _ = sjson.SetBytes(body, "tool_choice.function.name", prefix+functionName)
 		}
 	}
 
@@ -1036,17 +1048,24 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 	return nil
 }
 
+func nextFakeUserID(apiKey string, useCache bool) string {
+	if useCache && apiKey != "" {
+		// Note: useCache param is not implemented; always generates new ID
+	}
+	return generateFakeUserID()
+}
+
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
-func injectFakeUserID(payload []byte) []byte {
+func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	metadata := gjson.GetBytes(payload, "metadata")
 	if !metadata.Exists() {
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateFakeUserID())
+		payload, _ = sjson.SetBytes(payload, "metadata.user_id", nextFakeUserID(apiKey, useCache))
 		return payload
 	}
 
 	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if existingUserID == "" || !isValidUserID(existingUserID) {
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateFakeUserID())
+		payload, _ = sjson.SetBytes(payload, "metadata.user_id", nextFakeUserID(apiKey, useCache))
 	}
 	return payload
 }
@@ -1122,8 +1141,10 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		payload = checkSystemInstructionsWithMode(payload, strictMode)
 	}
 
-	// Inject fake user ID
-	payload = injectFakeUserID(payload)
+	// Reuse a stable fake user ID when a matching ClaudeKey cloak config exists.
+	// This keeps consistent metadata across model variants for the same credential.
+	apiKey, _ := claudeCreds(auth)
+	payload = injectFakeUserID(payload, apiKey, cloakCfg != nil)
 
 	// Apply sensitive word obfuscation
 	if len(sensitiveWords) > 0 {
@@ -1389,3 +1410,5 @@ func injectSystemCacheControl(payload []byte) []byte {
 
 	return payload
 }
+
+func (e *ClaudeExecutor) CloseExecutionSession(sessionID string) {}

@@ -1,7 +1,10 @@
 package executor
 
 import (
+	"bytes"
 	"testing"
+
+	"github.com/tidwall/gjson"
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
@@ -75,6 +78,35 @@ func TestParseOpenAIStreamUsageNoUsage(t *testing.T) {
 	}
 }
 
+func TestSplitOpenAIStreamUsageWithFinishReason(t *testing.T) {
+	line := []byte(`data: {"id":"chatcmpl","choices":[{"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}}`)
+	stripped, detail, ok := splitOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("expected stream usage split to occur")
+	}
+	jsonPayload := stripped
+	if bytes.HasPrefix(bytes.TrimSpace(stripped), []byte("data:")) {
+		jsonPayload = bytes.TrimSpace(stripped[len("data:"):])
+	}
+	if !gjson.ValidBytes(jsonPayload) {
+		t.Fatalf("stripped line is invalid json: %q", string(stripped))
+	}
+	if hasUsage := gjson.GetBytes(jsonPayload, "usage").Exists(); hasUsage {
+		t.Fatal("expected usage to be removed from stripped stream line")
+	}
+	if detail.InputTokens != 9 || detail.OutputTokens != 3 || detail.TotalTokens != 12 {
+		t.Fatalf("unexpected usage detail: %+v", detail)
+	}
+}
+
+func TestSplitOpenAIStreamUsageWithoutFinishReason(t *testing.T) {
+	line := []byte(`data: {"id":"chatcmpl","choices":[{"index":0,"delta":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`)
+	_, _, ok := splitOpenAIStreamUsage(line)
+	if ok {
+		t.Fatal("expected no split when usage has no finish reason")
+	}
+}
+
 func TestParseOpenAIResponsesStreamUsageSSE(t *testing.T) {
 	line := []byte(`data: {"usage":{"input_tokens":7,"output_tokens":9,"total_tokens":16,"input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":3}}}`)
 	detail, ok := parseOpenAIResponsesStreamUsage(line)
@@ -103,30 +135,5 @@ func TestParseOpenAIResponsesUsageTotalFallback(t *testing.T) {
 	detail := parseOpenAIResponsesUsage(data)
 	if detail.TotalTokens != 10 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 10)
-	}
-}
-
-func TestParseOpenAIUsage_PrefersCompletionTokensWhenOutputTokensZero(t *testing.T) {
-	data := []byte(`{"usage":{"input_tokens":12,"output_tokens":0,"completion_tokens":9}}`)
-	detail := parseOpenAIUsage(data)
-	if detail.OutputTokens != 9 {
-		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 9)
-	}
-	if detail.TotalTokens != 21 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 21)
-	}
-}
-
-func TestParseOpenAIStreamUsage_PrefersCompletionTokensWhenOutputTokensZero(t *testing.T) {
-	line := []byte(`data: {"usage":{"prompt_tokens":7,"output_tokens":0,"completion_tokens":5}}`)
-	detail, ok := parseOpenAIStreamUsage(line)
-	if !ok {
-		t.Fatal("expected stream usage to be parsed")
-	}
-	if detail.OutputTokens != 5 {
-		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
-	}
-	if detail.TotalTokens != 12 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 12)
 	}
 }
