@@ -1,7 +1,8 @@
 package executor
 
 import (
-	"crypto/sha256"
+	"crypto/hmac"
+	"crypto/sha512"
 	"encoding/hex"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ var (
 const (
 	userIDTTL                = time.Hour
 	userIDCacheCleanupPeriod = 15 * time.Minute
+	userIDCacheHashKey       = "executor-user-id-cache:v1"
 )
 
 func startUserIDCacheCleanup() {
@@ -45,8 +47,9 @@ func purgeExpiredUserIDs() {
 }
 
 func userIDCacheKey(apiKey string) string {
-	sum := sha256.Sum256([]byte(apiKey))
-	return hex.EncodeToString(sum[:])
+	hasher := hmac.New(sha512.New, []byte(userIDCacheHashKey))
+	hasher.Write([]byte(apiKey))
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 func cachedUserID(apiKey string) string {

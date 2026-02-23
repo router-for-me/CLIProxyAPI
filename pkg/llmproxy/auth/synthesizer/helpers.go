@@ -1,7 +1,8 @@
 package synthesizer
 
 import (
-	"crypto/sha256"
+	"crypto/hmac"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -12,8 +13,10 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+const stableIDGeneratorHashKey = "auth-stable-id-generator:v1"
+
 // StableIDGenerator generates stable, deterministic IDs for auth entries.
-// It uses SHA256 hashing with collision handling via counters.
+// It uses keyed HMAC-SHA512 hashing with collision handling via counters.
 // It is not safe for concurrent use.
 type StableIDGenerator struct {
 	counters map[string]int
@@ -30,7 +33,7 @@ func (g *StableIDGenerator) Next(kind string, parts ...string) (string, string) 
 	if g == nil {
 		return kind + ":000000000000", "000000000000"
 	}
-	hasher := sha256.New()
+	hasher := hmac.New(sha512.New, []byte(stableIDGeneratorHashKey))
 	hasher.Write([]byte(kind))
 	for _, part := range parts {
 		trimmed := strings.TrimSpace(part)
