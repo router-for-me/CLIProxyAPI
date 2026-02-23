@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"

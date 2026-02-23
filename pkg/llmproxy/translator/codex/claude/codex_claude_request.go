@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

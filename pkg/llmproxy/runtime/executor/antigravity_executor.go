@@ -915,3 +915,860 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		base := strings.TrimSuffix(baseURL, "/")
 		if base == "" {
 			base = buildBaseURL(e.cfg, auth)
+		}
+
+		var requestURL strings.Builder
+		requestURL.WriteString(base)
+		requestURL.WriteString(antigravityCountTokensPath)
+		if opts.Alt \!= "" {
+			requestURL.WriteString(url.QueryEscape(opts.Alt))
+		}
+
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
+		if errReq != nil {
+			return cliproxyexecutor.Response{}, errReq
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("Accept", "application/json")
+		if host := resolveHost(base); host != "" {
+			httpReq.Host = host
+		}
+
+		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+			URL:       requestURL.String(),
+			Method:    http.MethodPost,
+			Headers:   httpReq.Header.Clone(),
+			Body:      payload,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			recordAPIResponseError(ctx, e.cfg, errDo)
+			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+				return cliproxyexecutor.Response{}, errDo
+			}
+			lastStatus = 0
+			lastBody = nil
+			lastErr = errDo
+			if idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				continue
+			}
+			return cliproxyexecutor.Response{}, errDo
+		}
+
+		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity executor: close response body error: %v", errClose)
+		}
+		if errRead != nil {
+			recordAPIResponseError(ctx, e.cfg, errRead)
+			return cliproxyexecutor.Response{}, errRead
+		}
+		appendAPIResponseChunk(ctx, e.cfg, bodyBytes)
+
+		if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
+			count := gjson.GetBytes(bodyBytes, "totalTokens").Int()
+			translated := sdktranslator.TranslateTokenCount(respCtx, to, from, count, bodyBytes)
+			return cliproxyexecutor.Response{Payload: []byte(translated), Headers: httpResp.Header.Clone()}, nil
+		}
+
+		lastStatus = httpResp.StatusCode
+		lastBody = append([]byte(nil), bodyBytes...)
+		lastErr = nil
+		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+			continue
+		}
+		sErr := newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+				sErr.retryAfter = retryAfter
+			}
+		}
+		return cliproxyexecutor.Response{}, sErr
+	}
+
+	switch {
+	case lastStatus != 0:
+		sErr := newAntigravityStatusErr(lastStatus, lastBody)
+		if lastStatus == http.StatusTooManyRequests {
+			if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
+				sErr.retryAfter = retryAfter
+			}
+		}
+		return cliproxyexecutor.Response{}, sErr
+	case lastErr != nil:
+		return cliproxyexecutor.Response{}, lastErr
+	default:
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity executor: no base url available"}
+	}
+}
+
+// FetchAntigravityModels retrieves available models using the supplied auth.
+// When dynamic fetch fails, it returns a fallback static model list to ensure
+// the credential is still usable.
+func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	exec := &AntigravityExecutor{cfg: cfg}
+	token, updatedAuth, errToken := exec.ensureAccessToken(ctx, auth)
+	if errToken != nil {
+		log.Warnf("antigravity executor: fetch models failed for %s: token error: %v", auth.ID, errToken)
+		// Return fallback models when token refresh fails
+		return getFallbackAntigravityModels()
+	}
+	if token == "" {
+		log.Warnf("antigravity executor: fetch models failed for %s: got empty token", auth.ID)
+		return getFallbackAntigravityModels()
+	}
+	if updatedAuth != nil {
+		auth = updatedAuth
+	}
+
+	baseURLs := antigravityBaseURLFallbackOrder(cfg, auth)
+	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+
+	var lastErr error
+	var lastStatusCode int
+	var lastBody []byte
+
+	for idx, baseURL := range baseURLs {
+		modelsURL := baseURL + antigravityModelsPath
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, bytes.NewReader([]byte(`{}`)))
+		if errReq != nil {
+			log.Warnf("antigravity executor: fetch models failed for %s: create request error: %v", auth.ID, errReq)
+			lastErr = errReq
+			continue
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		if host := resolveHost(baseURL); host != "" {
+			httpReq.Host = host
+		}
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+				log.Warnf("antigravity executor: fetch models failed for %s: context canceled: %v", auth.ID, errDo)
+				return getFallbackAntigravityModels()
+			}
+			lastErr = errDo
+			if idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: models request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				continue
+			}
+			log.Warnf("antigravity executor: fetch models failed for %s: request error: %v", auth.ID, errDo)
+			return getFallbackAntigravityModels()
+		}
+
+		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity executor: close response body error: %v", errClose)
+		}
+		if errRead != nil {
+			lastErr = errRead
+			if idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: models read error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				continue
+			}
+			log.Warnf("antigravity executor: fetch models failed for %s: read body error: %v", auth.ID, errRead)
+			return getFallbackAntigravityModels()
+		}
+		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+			lastStatusCode = httpResp.StatusCode
+			lastBody = bodyBytes
+			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
+				log.Debugf("antigravity executor: models request rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+				continue
+			}
+			log.Warnf("antigravity executor: fetch models failed for %s: unexpected status %d, body: %s", auth.ID, httpResp.StatusCode, string(bodyBytes))
+			continue
+		}
+
+		result := gjson.GetBytes(bodyBytes, "models")
+		if !result.Exists() {
+			log.Warnf("antigravity executor: fetch models failed for %s: no models field in response, body: %s", auth.ID, string(bodyBytes))
+			continue
+		}
+
+		now := time.Now().Unix()
+		modelConfig := registry.GetAntigravityModelConfig()
+		models := make([]*registry.ModelInfo, 0, len(result.Map()))
+		for originalName, modelData := range result.Map() {
+			modelID := strings.TrimSpace(originalName)
+			if modelID == "" {
+				continue
+			}
+			switch modelID {
+			case "chat_20706", "chat_23310", "gemini-2.5-flash-thinking", "gemini-3-pro-low", "gemini-2.5-pro":
+				continue
+			}
+			modelCfg := modelConfig[modelID]
+
+			// Extract displayName from upstream response, fallback to modelID
+			displayName := modelData.Get("displayName").String()
+			if displayName == "" {
+				displayName = modelID
+			}
+
+			modelInfo := &registry.ModelInfo{
+				ID:          modelID,
+				Name:        modelID,
+				Description: displayName,
+				DisplayName: displayName,
+				Version:     modelID,
+				Object:      "model",
+				Created:     now,
+				OwnedBy:     antigravityAuthType,
+				Type:        antigravityAuthType,
+			}
+			// Look up Thinking support from static config using upstream model name.
+			if modelCfg != nil {
+				if modelCfg.Thinking != nil {
+					modelInfo.Thinking = modelCfg.Thinking
+				}
+				if modelCfg.MaxCompletionTokens > 0 {
+					modelInfo.MaxCompletionTokens = modelCfg.MaxCompletionTokens
+				}
+			}
+			models = append(models, modelInfo)
+		}
+		if len(models) > 0 {
+			return models
+		}
+		// Empty models list, try next base URL or return fallback
+		log.Debugf("antigravity executor: empty models list from %s for %s", baseURL, auth.ID)
+	}
+
+	// All base URLs failed, return fallback models
+	if lastStatusCode > 0 {
+		bodyPreview := ""
+		if len(lastBody) > 0 {
+			if len(lastBody) > 200 {
+				bodyPreview = string(lastBody[:200]) + "..."
+			} else {
+				bodyPreview = string(lastBody)
+			}
+		}
+		if bodyPreview != "" {
+			log.Warnf("antigravity executor: all base URLs failed for %s, returning fallback models (last status: %d, body: %s)", auth.ID, lastStatusCode, bodyPreview)
+		} else {
+			log.Warnf("antigravity executor: all base URLs failed for %s, returning fallback models (last status: %d)", auth.ID, lastStatusCode)
+		}
+	} else if lastErr != nil {
+		log.Warnf("antigravity executor: all base URLs failed for %s, returning fallback models (last error: %v)", auth.ID, lastErr)
+	} else {
+		log.Warnf("antigravity executor: no models returned for %s, returning fallback models", auth.ID)
+	}
+	return getFallbackAntigravityModels()
+}
+
+// getFallbackAntigravityModels returns a static list of commonly available Antigravity models.
+// This ensures credentials remain usable even when the dynamic model fetch fails.
+func getFallbackAntigravityModels() []*registry.ModelInfo {
+	now := time.Now().Unix()
+	modelConfig := registry.GetAntigravityModelConfig()
+
+	// Common Antigravity models that should always be available
+	fallbackModelIDs := []string{
+		"gemini-2.5-flash",
+		"gemini-2.5-flash-lite",
+		"gemini-3-pro-high",
+		"gemini-3-pro-image",
+		"gemini-3-flash",
+		"claude-opus-4-5-thinking",
+		"claude-opus-4-6-thinking",
+		"claude-sonnet-4-5",
+		"claude-sonnet-4-5-thinking",
+		"claude-sonnet-4-6",
+		"claude-sonnet-4-6-thinking",
+		"gpt-oss-120b-medium",
+		"tab_flash_lite_preview",
+	}
+
+	models := make([]*registry.ModelInfo, 0, len(fallbackModelIDs))
+	for _, modelID := range fallbackModelIDs {
+		modelInfo := &registry.ModelInfo{
+			ID:          modelID,
+			Name:        modelID,
+			Description: modelID,
+			DisplayName: modelID,
+			Version:     modelID,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     antigravityAuthType,
+			Type:        antigravityAuthType,
+		}
+		if modelCfg := modelConfig[modelID]; modelCfg != nil {
+			if modelCfg.Thinking != nil {
+				modelInfo.Thinking = modelCfg.Thinking
+			}
+			if modelCfg.MaxCompletionTokens > 0 {
+				modelInfo.MaxCompletionTokens = modelCfg.MaxCompletionTokens
+			}
+		}
+		models = append(models, modelInfo)
+	}
+	return models
+}
+
+func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *cliproxyauth.Auth) (string, *cliproxyauth.Auth, error) {
+	if auth == nil {
+		return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
+	}
+	accessToken := metaStringValue(auth.Metadata, "access_token")
+	expiry := tokenExpiry(auth.Metadata)
+	if accessToken != "" && expiry.After(time.Now().Add(refreshSkew)) {
+		return accessToken, nil, nil
+	}
+	refreshCtx := context.Background()
+	if ctx != nil {
+		if rt, ok := ctx.Value(interfaces.ContextKeyRoundRobin).(http.RoundTripper); ok && rt != nil {
+			refreshCtx = context.WithValue(refreshCtx, interfaces.ContextKeyRoundRobin, rt)
+		}
+	}
+	updated, errRefresh := e.refreshToken(refreshCtx, auth.Clone())
+	if errRefresh != nil {
+		return "", nil, errRefresh
+	}
+	return metaStringValue(updated.Metadata, "access_token"), updated, nil
+}
+
+func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if auth == nil {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
+	}
+	refreshToken := metaStringValue(auth.Metadata, "refresh_token")
+	if refreshToken == "" {
+		return auth, statusErr{code: http.StatusUnauthorized, msg: "missing refresh token"}
+	}
+
+	form := url.Values{}
+	form.Set("client_id", antigravityClientID)
+	form.Set("client_secret", antigravityClientSecret)
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
+	if errReq != nil {
+		return auth, errReq
+	}
+	httpReq.Header.Set("Host", "oauth2.googleapis.com")
+	httpReq.Header.Set("User-Agent", defaultAntigravityAgent)
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		return auth, errDo
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity executor: close response body error: %v", errClose)
+		}
+	}()
+
+	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	if errRead != nil {
+		return auth, errRead
+	}
+
+	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+		sErr := newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+				sErr.retryAfter = retryAfter
+			}
+		}
+		return auth, sErr
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		TokenType    string `json:"token_type"`
+	}
+	if errUnmarshal := json.Unmarshal(bodyBytes, &tokenResp); errUnmarshal != nil {
+		return auth, errUnmarshal
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = tokenResp.AccessToken
+	if tokenResp.RefreshToken != "" {
+		auth.Metadata["refresh_token"] = tokenResp.RefreshToken
+	}
+	auth.Metadata["expires_in"] = tokenResp.ExpiresIn
+	now := time.Now()
+	auth.Metadata["timestamp"] = now.UnixMilli()
+	auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
+	auth.Metadata["type"] = antigravityAuthType
+	if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
+		log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
+	}
+	return auth, nil
+}
+
+func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) error {
+	if auth == nil {
+		return nil
+	}
+
+	if auth.Metadata["project_id"] != nil {
+		return nil
+	}
+
+	token := strings.TrimSpace(accessToken)
+	if token == "" {
+		token = metaStringValue(auth.Metadata, "access_token")
+	}
+	if token == "" {
+		return nil
+	}
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	projectID, errFetch := sdkAuth.FetchAntigravityProjectID(ctx, token, httpClient)
+	if errFetch != nil {
+		return errFetch
+	}
+	if strings.TrimSpace(projectID) == "" {
+		return nil
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["project_id"] = strings.TrimSpace(projectID)
+
+	return nil
+}
+
+func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string) (*http.Request, error) {
+	if token == "" {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+	}
+
+	base := strings.TrimSuffix(baseURL, "/")
+	if base == "" {
+		base = buildBaseURL(e.cfg, auth)
+	}
+	path := antigravityGeneratePath
+	if stream {
+		path = antigravityStreamPath
+	}
+	var requestURL strings.Builder
+	requestURL.WriteString(base)
+	requestURL.WriteString(path)
+	if stream {
+		if alt != "" {
+			requestURL.WriteString("?$alt=")
+			requestURL.WriteString(url.QueryEscape(alt))
+		} else {
+			requestURL.WriteString("?alt=sse")
+		}
+	} else if alt != "" {
+		requestURL.WriteString("?$alt=")
+		requestURL.WriteString(url.QueryEscape(alt))
+	}
+
+	// Extract project_id from auth metadata if available
+	projectID := ""
+	if auth != nil && auth.Metadata != nil {
+		if pid, ok := auth.Metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+	}
+	payload = geminiToAntigravity(modelName, payload, projectID)
+	payload, _ = sjson.SetBytes(payload, "model", modelName)
+
+	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-high")
+	payloadStr := string(payload)
+	paths := make([]string, 0)
+	util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
+	for _, p := range paths {
+		payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
+	}
+
+	if useAntigravitySchema {
+		payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
+		payloadStr = util.DeleteKeysByName(payloadStr, "$ref", "$defs")
+	} else {
+		payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
+	}
+
+	if useAntigravitySchema {
+		systemInstructionPartsResult := gjson.Get(payloadStr, "request.systemInstruction.parts")
+		payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.role", "user")
+		payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.parts.0.text", systemInstruction)
+		payloadStr, _ = sjson.Set(payloadStr, "request.systemInstruction.parts.1.text", fmt.Sprintf("Please ignore following [ignore]%s[/ignore]", systemInstruction))
+
+		if systemInstructionPartsResult.Exists() && systemInstructionPartsResult.IsArray() {
+			for _, partResult := range systemInstructionPartsResult.Array() {
+				payloadStr, _ = sjson.SetRaw(payloadStr, "request.systemInstruction.parts.-1", partResult.Raw)
+			}
+		}
+	}
+
+	if strings.Contains(modelName, "claude") {
+		payloadStr, _ = sjson.Set(payloadStr, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+	} else {
+		payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
+	}
+
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), strings.NewReader(payloadStr))
+	if errReq != nil {
+		return nil, errReq
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	if stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	} else {
+		httpReq.Header.Set("Accept", "application/json")
+	}
+	if host := resolveHost(base); host != "" {
+		httpReq.Host = host
+	}
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	var payloadLog []byte
+	if e.cfg != nil && e.cfg.RequestLog {
+		payloadLog = []byte(payloadStr)
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       requestURL.String(),
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      payloadLog,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	return httpReq, nil
+}
+
+func tokenExpiry(metadata map[string]any) time.Time {
+	if metadata == nil {
+		return time.Time{}
+	}
+	if expStr, ok := metadata["expired"].(string); ok {
+		expStr = strings.TrimSpace(expStr)
+		if expStr != "" {
+			if parsed, errParse := time.Parse(time.RFC3339, expStr); errParse == nil {
+				return parsed
+			}
+		}
+	}
+	expiresIn, hasExpires := int64Value(metadata["expires_in"])
+	tsMs, hasTimestamp := int64Value(metadata["timestamp"])
+	if hasExpires && hasTimestamp {
+		return time.Unix(0, tsMs*int64(time.Millisecond)).Add(time.Duration(expiresIn) * time.Second)
+	}
+	return time.Time{}
+}
+
+func metaStringValue(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	if v, ok := metadata[key]; ok {
+		switch typed := v.(type) {
+		case string:
+			return strings.TrimSpace(typed)
+		case []byte:
+			return strings.TrimSpace(string(typed))
+		}
+	}
+	return ""
+}
+
+func int64Value(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case float64:
+		return int64(typed), true
+	case json.Number:
+		if i, errParse := typed.Int64(); errParse == nil {
+			return i, true
+		}
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return 0, false
+		}
+		if i, errParse := strconv.ParseInt(strings.TrimSpace(typed), 10, 64); errParse == nil {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func buildBaseURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if baseURLs := antigravityBaseURLFallbackOrder(cfg, auth); len(baseURLs) > 0 {
+		return baseURLs[0]
+	}
+	return antigravityBaseURLDaily
+}
+
+func resolveHost(base string) string {
+	parsed, errParse := url.Parse(base)
+	if errParse != nil {
+		return ""
+	}
+	if parsed.Host != "" {
+		hostname := parsed.Hostname()
+		if hostname == "" {
+			return ""
+		}
+		if ip := net.ParseIP(hostname); ip != nil {
+			return ""
+		}
+		if parsed.Port() != "" {
+			return net.JoinHostPort(hostname, parsed.Port())
+		}
+		return hostname
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
+}
+
+func sanitizeAntigravityBaseURL(base string) (string, error) {
+	normalized := strings.TrimSuffix(strings.TrimSpace(base), "/")
+	switch normalized {
+	case antigravityBaseURLDaily, antigravitySandboxBaseURLDaily, antigravityBaseURLProd:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("antigravity executor: unsupported base url %q", base)
+	}
+}
+
+func resolveUserAgent(auth *cliproxyauth.Auth) string {
+	if auth != nil {
+		if auth.Attributes != nil {
+			if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
+				return ua
+			}
+		}
+		if auth.Metadata != nil {
+			if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
+				return strings.TrimSpace(ua)
+			}
+		}
+	}
+	return defaultAntigravityAgent
+}
+
+func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
+	retry := 0
+	if cfg != nil {
+		retry = cfg.RequestRetry
+	}
+	if auth != nil {
+		if override, ok := auth.RequestRetryOverride(); ok {
+			retry = override
+		}
+	}
+	if retry < 0 {
+		retry = 0
+	}
+	attempts := retry + 1
+	if attempts < 1 {
+		return 1
+	}
+	return attempts
+}
+
+func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
+	return statusErr{
+		code: statusCode,
+		msg:  antigravityErrorMessage(statusCode, body),
+	}
+}
+
+func antigravityErrorMessage(statusCode int, body []byte) string {
+	msg := strings.TrimSpace(string(body))
+	if statusCode != http.StatusForbidden {
+		return msg
+	}
+	if msg == "" {
+		return msg
+	}
+	lower := strings.ToLower(msg)
+	if !strings.Contains(lower, "subscription_required") &&
+		!strings.Contains(lower, "gemini code assist license") &&
+		!strings.Contains(lower, "permission_denied") {
+		return msg
+	}
+	return msg + "\nHint: The current Google project/account does not have a Gemini Code Assist license. Re-run --antigravity-login with a licensed account/project, or switch providers."
+}
+
+func antigravityShouldRetryNoCapacity(statusCode int, body []byte) bool {
+	if statusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	if len(body) == 0 {
+		return false
+	}
+	msg := strings.ToLower(string(body))
+	return strings.Contains(msg, "no capacity available")
+}
+
+func antigravityNoCapacityRetryDelay(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	// Exponential backoff with jitter: 250ms, 500ms, 1s, 2s, 2s...
+	baseDelay := time.Duration(250*(1<<min(attempt, 3))) * time.Millisecond
+	if baseDelay > 2*time.Second {
+		baseDelay = 2 * time.Second
+	}
+	// Add jitter (±10%)
+	jitter := time.Duration(float64(baseDelay) * 0.1)
+	randSourceMutex.Lock()
+	jitterValue := time.Duration(randSource.Int63n(int64(jitter*2 + 1)))
+	randSourceMutex.Unlock()
+	return baseDelay - jitter + jitterValue
+}
+
+func antigravityWait(ctx context.Context, wait time.Duration) error {
+	if wait <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func antigravityBaseURLFallbackOrder(cfg *config.Config, auth *cliproxyauth.Auth) []string {
+	if base := resolveOAuthBaseURLWithOverride(cfg, antigravityAuthType, "", resolveCustomAntigravityBaseURL(auth)); base != "" {
+		return []string{base}
+	}
+	return []string{
+		antigravityBaseURLDaily,
+		antigravitySandboxBaseURLDaily,
+		// antigravityBaseURLProd,
+	}
+}
+
+func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["base_url"]); v != "" {
+			return strings.TrimSuffix(v, "/")
+		}
+	}
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["base_url"].(string); ok {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				return strings.TrimSuffix(v, "/")
+			}
+		}
+	}
+	return ""
+}
+
+func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
+	template, _ := sjson.Set(string(payload), "model", modelName)
+	template, _ = sjson.Set(template, "userAgent", "antigravity")
+	template, _ = sjson.Set(template, "requestType", "agent")
+
+	// Use real project ID from auth if available, otherwise generate random (legacy fallback)
+	if projectID != "" {
+		template, _ = sjson.Set(template, "project", projectID)
+	} else {
+		template, _ = sjson.Set(template, "project", generateProjectID())
+	}
+	template, _ = sjson.Set(template, "requestId", generateRequestID())
+	template, _ = sjson.Set(template, "request.sessionId", generateStableSessionID(payload))
+
+	template, _ = sjson.Delete(template, "request.safetySettings")
+	if toolConfig := gjson.Get(template, "toolConfig"); toolConfig.Exists() && !gjson.Get(template, "request.toolConfig").Exists() {
+		template, _ = sjson.SetRaw(template, "request.toolConfig", toolConfig.Raw)
+		template, _ = sjson.Delete(template, "toolConfig")
+	}
+	return []byte(template)
+}
+
+func generateRequestID() string {
+	return "agent-" + uuid.NewString()
+}
+
+func generateSessionID() string {
+	randSourceMutex.Lock()
+	n := randSource.Int63n(9_000_000_000_000_000_000)
+	randSourceMutex.Unlock()
+	return "-" + strconv.FormatInt(n, 10)
+}
+
+func generateStableSessionID(payload []byte) string {
+	contents := gjson.GetBytes(payload, "request.contents")
+	if contents.IsArray() {
+		candidates := make([]string, 0)
+		for _, content := range contents.Array() {
+			if content.Get("role").String() == "user" {
+				if parts := content.Get("parts"); parts.IsArray() {
+					for _, part := range parts.Array() {
+						text := strings.TrimSpace(part.Get("text").String())
+						if text != "" {
+							candidates = append(candidates, text)
+						}
+					}
+				}
+				if len(candidates) > 0 {
+					normalized := strings.Join(candidates, "\n")
+					h := sha256.Sum256([]byte(normalized))
+					n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
+					return "-" + strconv.FormatInt(n, 10)
+				}
+
+				contentRaw := strings.TrimSpace(content.Raw)
+				if contentRaw != "" {
+					h := sha256.Sum256([]byte(contentRaw))
+					n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
+					return "-" + strconv.FormatInt(n, 10)
+				}
+			}
+		}
+	}
+	return generateSessionID()
+}
+
+func generateProjectID() string {
+	adjectives := []string{"useful", "bright", "swift", "calm", "bold"}
+	nouns := []string{"fuze", "wave", "spark", "flow", "core"}
+	randSourceMutex.Lock()
+	adj := adjectives[randSource.Intn(len(adjectives))]
+	noun := nouns[randSource.Intn(len(nouns))]
+	randSourceMutex.Unlock()
+	randomPart := strings.ToLower(uuid.NewString())[:5]
+	return adj + "-" + noun + "-" + randomPart
+}
+
+func (e *AntigravityExecutor) CloseExecutionSession(sessionID string) {}

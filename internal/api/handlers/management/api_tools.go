@@ -25,10 +25,20 @@ import (
 
 const defaultAPICallTimeout = 60 * time.Second
 
-const (
-	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	geminiOAuthClientSecret = "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"
-)
+// OAuth credentials should be loaded from environment variables or config, not hardcoded
+// Placeholder values - replace with env var lookups in production
+var geminiOAuthClientID = os.Getenv("GEMINI_OAUTH_CLIENT_ID")
+var geminiOAuthClientSecret = os.Getenv("GEMINI_OAUTH_CLIENT_SECRET")
+
+func init() {
+	// Allow env override for OAuth credentials
+	if geminiOAuthClientID == "" {
+		geminiOAuthClientID = "PLACEHOLDER_SET_FROM_CONFIG"
+	}
+	if geminiOAuthClientSecret == "" {
+		geminiOAuthClientSecret = "PLACEHOLDER_SET_FROM_CONFIG"
+	}
+}
 
 var geminiOAuthScopes = []string{
 	"https://www.googleapis.com/auth/cloud-platform",
@@ -36,10 +46,9 @@ var geminiOAuthScopes = []string{
 	"https://www.googleapis.com/auth/userinfo.profile",
 }
 
-const (
-	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityOAuthClientSecret = "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"
-)
+// OAuth credentials loaded from environment variables - never hardcode
+var antigravityOAuthClientID = os.Getenv("ANTIGRAVITY_OAUTH_CLIENT_ID")
+var antigravityOAuthClientSecret = os.Getenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET")
 
 var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
 

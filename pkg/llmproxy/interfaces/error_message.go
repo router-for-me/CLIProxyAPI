@@ -3,18 +3,10 @@
 // such as AI service clients, API handlers, and data models.
 package interfaces
 
-import "net/http"
+import (
+	internalinterfaces "github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+)
 
-// ErrorMessage encapsulates an error with an associated HTTP status code.
-// This structure is used to provide detailed error information including
-// both the HTTP status and the underlying error.
-type ErrorMessage struct {
-	// StatusCode is the HTTP status code returned by the API.
-	StatusCode int
-
-	// Error is the underlying error that occurred.
-	Error error
-
-	// Addon contains additional headers to be added to the response.
-	Addon http.Header
-}
+// ErrorMessage is an alias to the internal ErrorMessage, ensuring type compatibility
+// across pkg/llmproxy/interfaces and internal/interfaces.
+type ErrorMessage = internalinterfaces.ErrorMessage
