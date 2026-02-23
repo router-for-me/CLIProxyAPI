@@ -164,7 +164,6 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			config = ThinkingConfig{Mode: ModeAuto, Budget: -1}
 			log.WithFields(log.Fields{
 				"provider": providerFormat,
-				"model":    modelInfo.ID,
 				"mode":     config.Mode,
 				"forced":   true,
 			}).Debug("thinking: forced thinking for thinking model |")
