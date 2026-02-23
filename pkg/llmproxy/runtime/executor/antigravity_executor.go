@@ -920,7 +920,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		var requestURL strings.Builder
 		requestURL.WriteString(base)
 		requestURL.WriteString(antigravityCountTokensPath)
-		if opts.Alt \!= "" {
+		if opts.Alt != "" {
 			requestURL.WriteString(url.QueryEscape(opts.Alt))
 		}
 

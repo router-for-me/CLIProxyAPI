@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"context"
 	"fmt"
 	"io"
@@ -16,7 +14,6 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
-	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
@@ -1051,22 +1048,9 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 	return nil
 }
 
-// cachedUserID returns a cached fake user ID based on the API key hash.
-func cachedUserID(apiKey string) string {
-	// Hash the API key to create a consistent user ID
-	h := sha256.Sum256([]byte(apiKey))
-	// Use first 16 chars of hex hash as fake user ID
-	return hex.EncodeToString(h[:])[:16]
-}
-
-// generateFakeUserID generates a random fake user ID.
-func generateFakeUserID() string {
-	return uuid.NewString()[:16]
-}
-
 func nextFakeUserID(apiKey string, useCache bool) string {
 	if useCache && apiKey != "" {
-		return cachedUserID(apiKey)
+		// Note: useCache param is not implemented; always generates new ID
 	}
 	return generateFakeUserID()
 }
