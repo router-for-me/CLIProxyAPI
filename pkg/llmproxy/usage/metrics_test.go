@@ -77,6 +77,36 @@ func TestGetProviderMetrics_FiltersKnownProviders(t *testing.T) {
 	}
 }
 
+func TestGetProviderMetrics_IncludesKiroAndCursor(t *testing.T) {
+	stats := GetRequestStatistics()
+	ctx := context.Background()
+
+	stats.Record(ctx, coreusage.Record{
+		Provider: "kiro",
+		APIKey:   "kiro-main",
+		Model:    "kiro/claude-sonnet-4.6",
+		Detail: coreusage.Detail{
+			TotalTokens: 42,
+		},
+	})
+	stats.Record(ctx, coreusage.Record{
+		Provider: "cursor",
+		APIKey:   "cursor-primary",
+		Model:    "cursor/default",
+		Detail: coreusage.Detail{
+			TotalTokens: 21,
+		},
+	})
+
+	metrics := GetProviderMetrics()
+	if _, ok := metrics["kiro"]; !ok {
+		t.Fatal("expected kiro in provider metrics")
+	}
+	if _, ok := metrics["cursor"]; !ok {
+		t.Fatal("expected cursor in provider metrics")
+	}
+}
+
 func TestGetProviderMetrics_StableRateBounds(t *testing.T) {
 	metrics := GetProviderMetrics()
 	for provider, stat := range metrics {
