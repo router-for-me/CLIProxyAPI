@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"html"
 	"net/http"
 	"strings"
 	"time"
@@ -339,7 +340,7 @@ func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return data
+	return redactLoggedBody(data)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
@@ -351,7 +352,7 @@ func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return data
+	return redactLoggedBody(data)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {
@@ -371,17 +372,17 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 			switch value := bodyOverride.(type) {
 			case []byte:
 				if len(value) > 0 {
-					return bytes.Clone(value)
+					return redactLoggedBody(bytes.Clone(value))
 				}
 			case string:
 				if strings.TrimSpace(value) != "" {
-					return []byte(value)
+					return redactLoggedBody([]byte(value))
 				}
 			}
 		}
 	}
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
-		return w.requestInfo.Body
+		return redactLoggedBody(w.requestInfo.Body)
 	}
 	return nil
 }
@@ -430,10 +431,14 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	)
 }
 
+func sanitizeForLogging(value string) string {
+	return html.EscapeString(strings.TrimSpace(value))
+}
+
 func redactLoggedBody(body []byte) []byte {
 	if len(body) == 0 {
 		return nil
 	}
 	sum := sha256.Sum256(body)
-	return []byte(fmt.Sprintf("[redacted body len=%d sha256=%x]", len(body), sum[:8]))
+	return []byte(fmt.Sprintf("[REDACTED] len=%d sha256=%x", len(body), sum[:8]))
 }
