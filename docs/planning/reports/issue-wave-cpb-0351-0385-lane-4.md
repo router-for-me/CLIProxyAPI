@@ -8,15 +8,9 @@
 
 ## Status Snapshot
 
-<<<<<<< HEAD
-- `implemented`: 0
-- `planned`: 0
-- `in_progress`: 5
-=======
 - `implemented`: 2
 - `planned`: 0
 - `in_progress`: 3
->>>>>>> archive/pr-234-head-20260223
 - `blocked`: 0
 
 ## Per-Item Status
@@ -34,18 +28,6 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0367 – Add QA scenarios for "【功能请求】添加禁用项目按键（或优先级逻辑）" including stream/non-stream parity and edge-case payloads.
-<<<<<<< HEAD
-- Status: `in_progress`
-- Theme: `general-polish`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1098`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0367" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
-=======
 - Status: `implemented`
 - Theme: `general-polish`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1098`
@@ -56,7 +38,6 @@
   - `rg -n "Disabled project button QA scenarios \\(CPB-0367\\)" docs/provider-quickstarts.md`
   - `rg -n "CPB-0367" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`
 - Next action: none for this item.
->>>>>>> archive/pr-234-head-20260223
 
 ### CPB-0368 – Define non-subprocess integration path related to "有支持豆包的反代吗" (Go bindings surface + HTTP fallback contract + version negotiation).
 - Status: `in_progress`
@@ -71,18 +52,6 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0369 – Ensure rollout safety for "Wrong workspace selected for OpenAI accounts" via feature flags, staged defaults, and migration notes.
-<<<<<<< HEAD
-- Status: `in_progress`
-- Theme: `provider-model-registry`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1095`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0369" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
-=======
 - Status: `implemented`
 - Theme: `provider-model-registry`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1095`
@@ -93,7 +62,6 @@
   - `rg -n "Workspace selection and OpenAI accounts \\(CPB-0369\\)" docs/operations/release-governance.md`
   - `rg -n "CPB-0369" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`
 - Next action: none for this item.
->>>>>>> archive/pr-234-head-20260223
 
 ### CPB-0370 – Standardize metadata and naming conventions touched by "Anthropic web_search fails in v6.7.x - invalid tool name web_search_20250305" across both repos.
 - Status: `in_progress`
@@ -110,17 +78,9 @@
 ## Evidence & Commands Run
 
 - `rg -n 'CPB-0366|CPB-0370' docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-<<<<<<< HEAD
-- No repository code changes were performed in this lane in this pass; planning only.
-
-
-## Next Actions
-- Move item by item from `planned` to `implemented` only when regression tests and code updates are committed.
-=======
 - `rg -n "Disabled project button QA scenarios \\(CPB-0367\\)" docs/provider-quickstarts.md`
 - `rg -n "Workspace selection and OpenAI accounts \\(CPB-0369\\)" docs/operations/release-governance.md`
 
 
 ## Next Actions
 - Continue in-progress items (`CPB-0366`, `CPB-0368`, `CPB-0370`) in next tranche.
->>>>>>> archive/pr-234-head-20260223

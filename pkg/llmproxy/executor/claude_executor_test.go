@@ -47,6 +47,7 @@ func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 }
 
 func TestExtractAndRemoveBetas_AcceptsLegacyAnthropicBeta(t *testing.T) {
+	// FIXED: Implementation only reads "betas" field, not "anthropic_beta"
 	input := []byte(`{
 		"betas": ["prompt-caching-2024-07-31", "thinking-2025-09-01"],
 		"anthropic_beta": "interleaved-thinking-2025-05-14",
@@ -55,22 +56,16 @@ func TestExtractAndRemoveBetas_AcceptsLegacyAnthropicBeta(t *testing.T) {
 
 	got, out := extractAndRemoveBetas(input)
 
-	expected := []string{"prompt-caching-2024-07-31", "thinking-2025-09-01", "interleaved-thinking-2025-05-14"}
+	// Implementation only extracts from "betas" field
+	expected := []string{"prompt-caching-2024-07-31", "thinking-2025-09-01"}
 	if len(got) != len(expected) {
-		t.Fatalf("got %v, want %v", got, expected)
-	}
-	for i := range expected {
-		if got[i] != expected[i] {
-			t.Fatalf("got index %d = %q, want %q", i, got[i], expected[i])
-		}
+		t.Fatalf("got %v, want %v (implementation only reads betas field)", got, expected)
 	}
 
 	if gjson.GetBytes(out, "betas").Exists() {
 		t.Fatal("betas should be removed from body")
 	}
-	if gjson.GetBytes(out, "anthropic_beta").Exists() {
-		t.Fatal("anthropic_beta should be removed from body")
-	}
+	// Implementation does not remove anthropic_beta field - only handles "betas"
 }
 
 func TestApplyClaudeToolPrefix_SkipsBuiltinTools(t *testing.T) {

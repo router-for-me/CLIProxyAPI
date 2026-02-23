@@ -26,9 +26,6 @@
 
 ## Total Completed So Far
 
-<<<<<<< HEAD
-- `90` issues executed in lane branches (`30 + 60`)
-=======
 - `210` issues executed in lane branches (`30 + 60 + 120`)
 
 ## Batch 3 Completed (`6 x 10 = 60`)
@@ -48,7 +45,6 @@
 - `codescan-b4-l4` -> `f517b9ee`
 - `codescan-b4-l5` -> `56d00015`
 - `codescan-b4-l6` -> `26a45111`
->>>>>>> archive/pr-234-head-20260223
 
 ## Known Cross-Lane Environment Blockers
 

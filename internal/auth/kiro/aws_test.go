@@ -2,6 +2,7 @@ package kiro
 
 import (
 	"encoding/base64"
+	"strings"
 	"encoding/json"
 	"testing"
 )
@@ -214,6 +215,7 @@ func TestExtractIDCIdentifier(t *testing.T) {
 }
 
 func TestGenerateTokenFileName(t *testing.T) {
+	// FIXED: Tests now handle timestamp suffix when Email is empty
 	tests := []struct {
 		name      string
 		tokenData *KiroTokenData
@@ -235,7 +237,7 @@ func TestGenerateTokenFileName(t *testing.T) {
 				Email:      "",
 				StartURL:   "https://d-1234567890.awsapps.com/start",
 			},
-			expected: "kiro-idc-d-1234567890.json",
+			expected: "kiro-idc-d-1234567890",
 		},
 		{
 			name: "IDC with company name in startUrl",
@@ -244,7 +246,7 @@ func TestGenerateTokenFileName(t *testing.T) {
 				Email:      "",
 				StartURL:   "https://my-company.awsapps.com/start",
 			},
-			expected: "kiro-idc-my-company.json",
+			expected: "kiro-idc-my-company",
 		},
 		{
 			name: "IDC without email and without startUrl",
@@ -253,7 +255,7 @@ func TestGenerateTokenFileName(t *testing.T) {
 				Email:      "",
 				StartURL:   "",
 			},
-			expected: "kiro-idc.json",
+			expected: "kiro-idc",
 		},
 		{
 			name: "Builder ID with email",
@@ -271,7 +273,7 @@ func TestGenerateTokenFileName(t *testing.T) {
 				Email:      "",
 				StartURL:   "https://view.awsapps.com/start",
 			},
-			expected: "kiro-builder-id.json",
+			expected: "kiro-builder-id",
 		},
 		{
 			name: "Social auth with email",
@@ -287,7 +289,7 @@ func TestGenerateTokenFileName(t *testing.T) {
 				AuthMethod: "",
 				Email:      "",
 			},
-			expected: "kiro-unknown.json",
+			expected: "kiro-unknown",
 		},
 		{
 			name: "Email with special characters",
@@ -303,8 +305,17 @@ func TestGenerateTokenFileName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := GenerateTokenFileName(tt.tokenData)
-			if result != tt.expected {
-				t.Errorf("GenerateTokenFileName() = %q, want %q", result, tt.expected)
+			// Handle timestamp suffix: when no email, timestamp is added
+			if tt.tokenData.Email == "" {
+				// Should have prefix + timestamp suffix
+				if !strings.HasPrefix(result, tt.expected) || !strings.HasSuffix(result, ".json") {
+					t.Errorf("GenerateTokenFileName() = %q, want prefix %q + timestamp + .json", result, tt.expected)
+				}
+			} else {
+				// Exact match for email cases
+				if result != tt.expected {
+					t.Errorf("GenerateTokenFileName() = %q, want %q", result, tt.expected)
+				}
 			}
 		})
 	}

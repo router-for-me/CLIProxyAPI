@@ -89,9 +89,6 @@ process-compose -f examples/process-compose.dev.yaml up
 
 Then edit `config.yaml` or files under `auth-dir`; the running process reloads changes automatically.
 
-<<<<<<< HEAD
-## Option D: Go SDK / Embedding
-=======
 For Antigravity quota/routing tuning, this is hot-reload friendly:
 
 - `quota-exceeded.switch-project`
@@ -184,7 +181,6 @@ Run as Administrator:
 ```
 
 ## Option E: Go SDK / Embedding
->>>>>>> archive/pr-234-head-20260223
 
 ```bash
 go get github.com/KooshaPari/cliproxyapi-plusplus/sdk/cliproxy

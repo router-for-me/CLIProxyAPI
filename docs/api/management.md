@@ -32,10 +32,7 @@ Use either header style:
 - `PUT|PATCH /v0/management/quota-exceeded/switch-project`
 - `GET /v0/management/quota-exceeded/switch-preview-model`
 - `PUT|PATCH /v0/management/quota-exceeded/switch-preview-model`
-<<<<<<< HEAD
-=======
 - `GET /v0/management/kiro-quota`
->>>>>>> archive/pr-234-head-20260223
 
 Note: some management routes are provider/tool-specific and may vary by enabled features.
 
@@ -69,8 +66,6 @@ curl -sS http://localhost:8317/v0/management/quota-exceeded/switch-project \
   -H "Authorization: Bearer <management-key>" | jq
 curl -sS http://localhost:8317/v0/management/quota-exceeded/switch-preview-model \
   -H "Authorization: Bearer <management-key>" | jq
-<<<<<<< HEAD
-=======
 
 Read provider quota snapshot (Kiro):
 
@@ -93,7 +88,6 @@ Read Kiro quota for a specific auth index:
 curl -sS "http://localhost:8317/v0/management/kiro-quota?auth_index=0" \
   -H "Authorization: Bearer <management-key>" | jq
 ```
->>>>>>> archive/pr-234-head-20260223
 ```
 
 Update quota fallback toggles:

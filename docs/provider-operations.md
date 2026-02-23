@@ -17,12 +17,6 @@ This runbook is for operators who care about provider uptime, quota health, and 
 
 ## Quota Visibility (`#146` scope)
 
-<<<<<<< HEAD
-- Current operational source of truth is `v1/metrics/providers` plus provider auth/token files.
-- There is no dedicated unified "Kiro quota dashboard" endpoint in this repo today.
-- Treat repeated `429` + falling success ratio as quota pressure and rotate capacity accordingly.
-
-=======
 - Current operational source of truth:
   - `v1/metrics/providers`
   - Management auth snapshots (`/v0/management/auth-files`)
@@ -57,7 +51,6 @@ Suggested alert policy:
   - `quota-exceeded.switch-project=true`
   - `quota-exceeded.switch-preview-model=true`
 
->>>>>>> archive/pr-234-head-20260223
 ## Onboard a New Provider
 
 1. Add provider block in `config.yaml` (`openai-compatibility` preferred for OpenAI-style upstreams).
@@ -134,8 +127,6 @@ Suggested alert policy:
   - Do not assume upstream catalog parity after OAuth login.
   - Keep a known-good iFlow canary model and gate rollout on successful canary responses.
 
-<<<<<<< HEAD
-=======
 ### iFlow account errors shown in terminal
 
 - Symptom: terminal output shows account-level iFlow errors but requests keep retrying noisily.
@@ -147,7 +138,6 @@ Suggested alert policy:
   - Keep one known-good iFlow canary request in non-stream mode.
   - Rotate traffic away from iFlow prefix when account-level failures persist beyond cooldown windows.
 
->>>>>>> archive/pr-234-head-20260223
 ### Usage dashboard shows zeros under load
 
 - Symptom: traffic volume rises but usage counters remain `0`.
@@ -209,8 +199,6 @@ Suggested alert policy:
   - Standardize Amp launch wrappers to export proxy env explicitly.
   - Add startup validation that fails early when base URL does not target CLIProxyAPI.
 
-<<<<<<< HEAD
-=======
 ### Windows duplicate auth-file display safeguards
 
 - Symptom: auth records appear duplicated in management/UI surfaces on Windows.
@@ -240,7 +228,6 @@ Avoid per-tool aliases for these fields in ops docs to keep telemetry queries de
   - `apprise "<apprise-url>" -t "cliproxy canary" -b "provider routing notification check"`
 - Keep this notification path non-blocking for request handling; alerts should not gate proxy response paths.
 
->>>>>>> archive/pr-234-head-20260223
 ### Gemini thinking-length control drift (OpenAI-compatible clients)
 
 - Symptom: client requests a specific thinking level/budget but observed behavior looks unbounded or unchanged.

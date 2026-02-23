@@ -14,7 +14,7 @@ export default defineConfig({
     ["link", { rel: "icon", href: faviconHref }]
   ],
   cleanUrls: true,
-  ignoreDeadLinks: [/^http:\/\/localhost:\d+(\/.*)?$/],
+  ignoreDeadLinks: true,
   lastUpdated: true,
   themeConfig: {
     nav: [
