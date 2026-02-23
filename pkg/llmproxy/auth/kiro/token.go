@@ -6,11 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-<<<<<<< HEAD
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
-=======
->>>>>>> archive/pr-234-head-20260223
 )
 
 // KiroTokenStorage holds the persistent token data for Kiro authentication.
@@ -71,7 +68,6 @@ func cleanTokenPath(path, scope string) (string, error) {
 	if trimmed == "" {
 		return "", fmt.Errorf("%s: auth file path is empty", scope)
 	}
-<<<<<<< HEAD
 	normalizedInput := filepath.FromSlash(trimmed)
 	safe, err := misc.ResolveSafeFilePath(normalizedInput)
 	if err != nil {
@@ -164,30 +160,17 @@ func cleanAuthPath(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve auth file path: %w", err)
-=======
-	clean := filepath.Clean(filepath.FromSlash(trimmed))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("%s: auth file path is invalid", scope)
-	}
-	abs, err := filepath.Abs(clean)
-	if err != nil {
-		return "", fmt.Errorf("%s: resolve auth file path: %w", scope, err)
->>>>>>> archive/pr-234-head-20260223
 	}
 	return filepath.Clean(abs), nil
 }
 
 // LoadFromFile loads token storage from the specified file path.
 func LoadFromFile(authFilePath string) (*KiroTokenStorage, error) {
-<<<<<<< HEAD
 	cleanPath, err := cleanTokenPath(authFilePath, "kiro token")
 	if err != nil {
 		return nil, err
 	}
 	data, err := os.ReadFile(cleanPath)
-=======
-	data, err := os.ReadFile(authFilePath)
->>>>>>> archive/pr-234-head-20260223
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token file: %w", err)
 	}

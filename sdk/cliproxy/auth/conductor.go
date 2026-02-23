@@ -3,15 +3,11 @@ package auth
 import (
 	"bytes"
 	"context"
-<<<<<<< HEAD
 	"crypto/hmac"
-=======
->>>>>>> archive/pr-234-head-20260223
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -1658,30 +1654,6 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-
-	// If a specific auth is pinned, use only that auth.
-	pinnedAuthID := ""
-	if opts.Metadata != nil {
-		if v, ok := opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey]; ok {
-			if id, ok := v.(string); ok {
-				pinnedAuthID = strings.TrimSpace(id)
-			}
-		}
-	}
-	if pinnedAuthID != "" {
-		filtered := make([]*Auth, 0, len(candidates))
-		for _, c := range candidates {
-			if c.ID == pinnedAuthID {
-				filtered = append(filtered, c)
-			}
-		}
-		if len(filtered) == 0 {
-			m.mu.RUnlock()
-			return nil, nil, "", &Error{Code: "auth_not_found", Message: fmt.Sprintf("pinned auth %q not found", pinnedAuthID)}
-		}
-		candidates = filtered
-	}
-
 	selected, errPick := m.selector.Pick(ctx, "mixed", model, opts, candidates)
 	if errPick != nil {
 		m.mu.RUnlock()
@@ -2144,8 +2116,7 @@ func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model 
 	}
 	switch accountType {
 	case "api_key":
-		// nolint:gosec // false positive: using RedactAPIKey for secure logging
-		entry.Debugf("Use API key %s for model %s%s", util.RedactAPIKey(accountInfo), model, suffix)
+		entry.Debugf("Use API key %s for model %s%s", util.HideAPIKey(accountInfo), model, suffix)
 	case "oauth":
 		ident := formatOauthIdentity(auth, provider, accountInfo)
 		entry.Debugf("Use OAuth %s for model %s%s", ident, model, suffix)
@@ -2198,14 +2169,9 @@ func authLogRef(auth *Auth) string {
 	if identifier == "" {
 		return "provider=" + provider + " auth_id_hash=none"
 	}
-<<<<<<< HEAD
 	mac := hmac.New(sha256.New, []byte("cliproxy-auth-log-ref-v1"))
 	_, _ = mac.Write([]byte(identifier))
 	return "provider=" + provider + " auth_id_hash=" + hex.EncodeToString(mac.Sum(nil)[:6])
-=======
-	sum := sha256.Sum256([]byte(identifier))
-	return "provider=" + provider + " auth_id_hash=" + hex.EncodeToString(sum[:6])
->>>>>>> archive/pr-234-head-20260223
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.
