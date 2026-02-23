@@ -224,9 +224,7 @@ func sanitizeJSONPayloadValue(value any) any {
 func isSensitivePayloadKey(key string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(key))
 	normalized = strings.ReplaceAll(normalized, "-", "_")
-	if strings.HasPrefix(normalized, "x_") {
-		normalized = strings.TrimPrefix(normalized, "x_")
-	}
+	normalized = strings.TrimPrefix(normalized, "x_")
 
 	if normalized == "authorization" || normalized == "token" || normalized == "secret" || normalized == "password" {
 		return true

@@ -109,7 +109,9 @@ func TestResponseWriterWrapper_SanitizeAPIAndRequestBodiesBeforeLogging(t *testi
 	}
 	gc.Writer.WriteHeader(http.StatusOK)
 
-	wrapper.Finalize(gc)
+	if err := wrapper.Finalize(gc); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
 
 	if strings.Contains(string(wrapper.extractAPIRequest(gc)), "api-secret") || strings.Contains(string(wrapper.extractAPIResponse(gc)), "resp-secret") {
 		t.Fatalf("API payloads must be redacted")
