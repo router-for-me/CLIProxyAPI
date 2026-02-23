@@ -7,15 +7,17 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-3`
 
 ### #147
 - Status: `done`
-- Notes: ARM64 deployment guidance already present and validated.
+- Notes: ARM64 deployment guidance and build path are validated.
 - Code/docs surface:
   - `docs/install.md`
+  - `Dockerfile`
 - Acceptance command:
   - `rg -n "platform linux/arm64|uname -m|arm64" docs/install.md`
+  - `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/cliproxy_arm64_check ./cmd/server`
 
 ### #146
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: no deterministic failing fixture in current repo state that maps to a safe bounded patch; deferred to dedicated repro lane.
 
 ### #145
 - Status: `pending`
@@ -44,17 +46,6 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-3`
 - Acceptance command:
   - `go test ./cmd/server -count=1`
   - Result: `ok   github.com/router-for-me/CLIProxyAPI/v6/cmd/server`
-
-### Wave2 #221 - `kiro账号被封`
-- Status: `implemented`
-- Source mapping:
-  - Source issue: `router-for-me/CLIProxyAPIPlus#221` (Kiro account banned handling)
-  - Fix: broaden Kiro 403 suspension detection to case-insensitive suspended/banned signals so banned accounts consistently trigger cooldown + remediation messaging in both non-stream and stream paths.
-  - Code: `pkg/llmproxy/runtime/executor/kiro_executor.go`
-  - Tests: `pkg/llmproxy/runtime/executor/kiro_executor_extra_test.go`
-- Test commands:
-  - `go test ./pkg/llmproxy/runtime/executor -run 'Test(IsKiroSuspendedOrBannedResponse|FormatKiroCooldownError|FormatKiroSuspendedStatusMessage)' -count=1`
-  - Result: blocked by pre-existing package build failures in `pkg/llmproxy/runtime/executor/codex_websockets_executor.go` (`unused imports`, `undefined: authID`, `undefined: wsURL`).
 
 ### Wave2 #221 - `kiro账号被封`
 - Status: `implemented`
