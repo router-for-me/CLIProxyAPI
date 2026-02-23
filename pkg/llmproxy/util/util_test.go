@@ -18,8 +18,6 @@ func TestSetLogLevel(t *testing.T) {
 	SetLogLevel(cfg)
 }
 
-<<<<<<< HEAD
-=======
 func TestResolveAuthDirOrDefault(t *testing.T) {
 	home, _ := os.UserHomeDir()
 
@@ -44,7 +42,6 @@ func TestResolveAuthDirOrDefault(t *testing.T) {
 	}
 }
 
->>>>>>> archive/pr-234-head-20260223
 func TestResolveAuthDir(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	cases := []struct {

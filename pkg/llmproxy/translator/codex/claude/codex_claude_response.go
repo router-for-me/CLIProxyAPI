@@ -22,14 +22,9 @@ var (
 
 // ConvertCodexResponseToClaudeParams holds parameters for response conversion.
 type ConvertCodexResponseToClaudeParams struct {
-<<<<<<< HEAD:pkg/llmproxy/translator/codex/claude/codex_claude_response.go
-	HasToolCall bool
-	BlockIndex  int
-=======
 	HasToolCall               bool
 	BlockIndex                int
 	HasReceivedArgumentsDelta bool
->>>>>>> archive/pr-234-head-20260223:internal/translator/codex/claude/codex_claude_response.go
 }
 
 // ConvertCodexResponseToClaude performs sophisticated streaming response format conversion.

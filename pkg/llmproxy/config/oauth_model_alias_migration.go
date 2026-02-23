@@ -43,19 +43,6 @@ func defaultKiroAliases() []OAuthModelAlias {
 	}
 }
 
-<<<<<<< HEAD
-// defaultGitHubCopilotAliases returns default OAuth aliases for GitHub Copilot
-// Claude Opus/Sonnet 4.6 models. These aliases preserve the widely used dashed
-// variant expected by existing clients.
-func defaultGitHubCopilotAliases() []OAuthModelAlias {
-	return []OAuthModelAlias{
-		{Name: "claude-opus-4.6", Alias: "claude-opus-4-6", Fork: true},
-		{Name: "claude-sonnet-4.6", Alias: "claude-sonnet-4-6", Fork: true},
-	}
-}
-
-=======
->>>>>>> archive/pr-234-head-20260223
 // defaultAntigravityAliases returns the default oauth-model-alias configuration
 // for the antigravity channel when neither field exists.
 func defaultAntigravityAliases() []OAuthModelAlias {

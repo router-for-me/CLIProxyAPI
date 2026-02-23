@@ -24,8 +24,6 @@ func TestAntigravityErrorMessage_NoHintForNon403(t *testing.T) {
 		t.Fatalf("did not expect hint for non-403, got %q", msg)
 	}
 }
-<<<<<<< HEAD
-=======
 
 func TestAntigravityErrorMessage_DoesNotDuplicateHint(t *testing.T) {
 	body := []byte(`{"error":{"code":403,"message":"PERMISSION_DENIED: Gemini Code Assist license missing. Hint: The current Google project/account does not have a Gemini Code Assist license. Re-run --antigravity-login with a licensed account/project, or switch providers.","status":"PERMISSION_DENIED"}}`)
@@ -48,4 +46,3 @@ func TestAntigravityShouldRetryNoCapacity_DoesNotRetryUnrelated503(t *testing.T)
 		t.Fatalf("did not expect retry for unrelated 503")
 	}
 }
->>>>>>> archive/pr-234-head-20260223

@@ -300,14 +300,10 @@ func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region str
 	if err != nil {
 		return nil, err
 	}
-<<<<<<< HEAD
-	endpoint := getOIDCEndpoint(validatedRegion)
-=======
 	endpoint, err := getOIDCEndpoint(validatedRegion)
 	if err != nil {
 		return nil, err
 	}
->>>>>>> archive/pr-234-head-20260223
 
 	payload := map[string]interface{}{
 		"clientName": "Kiro IDE",
@@ -358,17 +354,10 @@ func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, cli
 	if err != nil {
 		return nil, err
 	}
-<<<<<<< HEAD
-	if err := validateStartURL(startURL); err != nil {
-		return nil, err
-	}
-	endpoint := getOIDCEndpoint(validatedRegion)
-=======
 	endpoint, err := getOIDCEndpoint(validatedRegion)
 	if err != nil {
 		return nil, err
 	}
->>>>>>> archive/pr-234-head-20260223
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -418,14 +407,10 @@ func (c *SSOOIDCClient) CreateTokenWithRegion(ctx context.Context, clientID, cli
 	if errRegion != nil {
 		return nil, errRegion
 	}
-<<<<<<< HEAD
-	endpoint := getOIDCEndpoint(normalizedRegion)
-=======
 	endpoint, err := getOIDCEndpoint(normalizedRegion)
 	if err != nil {
 		return nil, err
 	}
->>>>>>> archive/pr-234-head-20260223
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -500,9 +485,6 @@ func normalizeOIDCRegion(region string) (string, error) {
 
 // RefreshTokenWithRegion refreshes an access token using the refresh token with a specific region.
 func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, clientSecret, refreshToken, region, startURL string) (*KiroTokenData, error) {
-<<<<<<< HEAD
-	endpoint := getOIDCEndpoint(region)
-=======
 	validatedRegion, errRegion := validateIDCRegion(region)
 	if errRegion != nil {
 		return nil, errRegion
@@ -511,7 +493,6 @@ func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, cl
 	if err != nil {
 		return nil, err
 	}
->>>>>>> archive/pr-234-head-20260223
 	payload := buildIDCRefreshPayload(clientID, clientSecret, refreshToken)
 
 	body, err := json.Marshal(payload)

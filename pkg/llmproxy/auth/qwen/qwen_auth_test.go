@@ -3,15 +3,10 @@ package qwen
 import (
 	"context"
 	"encoding/json"
-<<<<<<< HEAD
-	"net/http"
-	"net/http/httptest"
-=======
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
->>>>>>> archive/pr-234-head-20260223
 	"strings"
 	"testing"
 )
@@ -28,8 +23,6 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return t.base.RoundTrip(newReq)
 }
 
-<<<<<<< HEAD
-=======
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -47,7 +40,6 @@ func jsonResponse(status int, body string) *http.Response {
 	}
 }
 
->>>>>>> archive/pr-234-head-20260223
 func TestInitiateDeviceFlow(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -110,8 +102,6 @@ func TestRefreshTokens(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
-=======
 func TestPollForTokenUsesInjectedHTTPClient(t *testing.T) {
 	defaultTransport := http.DefaultTransport
 	defer func() {
@@ -159,7 +149,6 @@ func TestPollForTokenUsesInjectedHTTPClient(t *testing.T) {
 	}
 }
 
->>>>>>> archive/pr-234-head-20260223
 func TestQwenTokenStorageSaveTokenToFileRejectsTraversalPath(t *testing.T) {
 	t.Parallel()
 

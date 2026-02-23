@@ -213,12 +213,6 @@ func validateCallbackForwarderTarget(targetBase string) (*url.URL, error) {
 	if !parsed.IsAbs() {
 		return nil, fmt.Errorf("target must be absolute")
 	}
-<<<<<<< HEAD
-	if parsed.User != nil {
-		return nil, fmt.Errorf("target must not include user info")
-	}
-=======
->>>>>>> archive/pr-234-head-20260223
 	scheme := strings.ToLower(parsed.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("target scheme %q is not allowed", parsed.Scheme)
@@ -308,16 +302,7 @@ func normalizeManagementCallbackPath(rawPath string) string {
 		normalized = "/" + normalized
 	}
 	normalized = path.Clean(normalized)
-<<<<<<< HEAD
-	// Security: Verify cleaned path is still safe (no open redirect)
-	if normalized == "." || normalized == "" {
-		return "/"
-	}
-	// Prevent open redirect attacks (e.g., //evil.com or http://...)
-	if strings.Contains(normalized, "//") || strings.Contains(normalized, ":/") {
-=======
 	if normalized == "." {
->>>>>>> archive/pr-234-head-20260223
 		return "/"
 	}
 	if !strings.HasPrefix(normalized, "/") {
@@ -709,13 +694,8 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			}
 			full, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
 			if err != nil {
-<<<<<<< HEAD
-				log.WithError(err).Warnf("invalid auth file name while deleting all auth files: %s", name)
-				continue
-=======
 				c.JSON(500, gin.H{"error": fmt.Sprintf("invalid auth file path: %v", err)})
 				return
->>>>>>> archive/pr-234-head-20260223
 			}
 			if err = os.Remove(full); err == nil {
 				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {

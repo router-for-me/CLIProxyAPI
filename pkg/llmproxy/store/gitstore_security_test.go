@@ -4,11 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-<<<<<<< HEAD
-=======
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
->>>>>>> archive/pr-234-head-20260223
 )
 
 func TestResolveDeletePath_RejectsTraversalAndAbsolute(t *testing.T) {
@@ -45,8 +42,6 @@ func TestResolveDeletePath_ReturnsPathInsideBaseDir(t *testing.T) {
 		t.Fatalf("resolved path escaped base dir: %s", path)
 	}
 }
-<<<<<<< HEAD
-=======
 
 func TestResolveAuthPath_RejectsTraversalPath(t *testing.T) {
 	t.Parallel()
@@ -103,4 +98,3 @@ func TestResolveAuthPath_AppendsBaseDirForRelativeFileName(t *testing.T) {
 		t.Fatalf("resolved path escaped auth directory: %s", got)
 	}
 }
->>>>>>> archive/pr-234-head-20260223

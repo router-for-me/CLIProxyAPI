@@ -528,27 +528,12 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	var betas []string
 	if betasResult.IsArray() {
 		for _, item := range betasResult.Array() {
-<<<<<<< HEAD
-			if item.Type != gjson.String {
-				continue
-			}
-=======
->>>>>>> archive/pr-234-head-20260223
 			if s := strings.TrimSpace(item.String()); s != "" {
 				betas = append(betas, s)
 			}
 		}
-<<<<<<< HEAD
-	} else if betasResult.Type == gjson.String {
-		for _, token := range strings.Split(betasResult.Str, ",") {
-			if s := strings.TrimSpace(token); s != "" {
-				betas = append(betas, s)
-			}
-		}
-=======
 	} else if s := strings.TrimSpace(betasResult.String()); s != "" {
 		betas = append(betas, s)
->>>>>>> archive/pr-234-head-20260223
 	}
 	body, _ = sjson.DeleteBytes(body, "betas")
 	return betas, body
@@ -835,15 +820,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 	}
 
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
-<<<<<<< HEAD
-<<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 	if toolChoiceType == "tool" || toolChoiceType == "function" {
-========
-	if toolChoiceType == "tool" {
->>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/claude_executor.go
-=======
-	if toolChoiceType == "tool" || toolChoiceType == "function" {
->>>>>>> archive/pr-234-head-20260223
 		name := gjson.GetBytes(body, "tool_choice.name").String()
 		if name != "" && !strings.HasPrefix(name, prefix) && !builtinTools[name] {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", prefix+name)
@@ -854,15 +831,6 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 			body, _ = sjson.SetBytes(body, "tool_choice.function.name", prefix+functionName)
 		}
 	}
-<<<<<<< HEAD
-	if toolChoiceType == "function" {
-		functionName := gjson.GetBytes(body, "tool_choice.function.name").String()
-		if functionName != "" && !strings.HasPrefix(functionName, prefix) && !builtinTools[functionName] {
-			body, _ = sjson.SetBytes(body, "tool_choice.function.name", prefix+functionName)
-		}
-	}
-=======
->>>>>>> archive/pr-234-head-20260223
 
 	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
 		messages.ForEach(func(msgIndex, msg gjson.Result) bool {
@@ -1067,10 +1035,6 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 	return nil
 }
 
-<<<<<<< HEAD
-<<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
-=======
->>>>>>> archive/pr-234-head-20260223
 func nextFakeUserID(apiKey string, useCache bool) string {
 	if useCache && apiKey != "" {
 		return cachedUserID(apiKey)
@@ -1083,30 +1047,12 @@ func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	metadata := gjson.GetBytes(payload, "metadata")
 	if !metadata.Exists() {
 		payload, _ = sjson.SetBytes(payload, "metadata.user_id", nextFakeUserID(apiKey, useCache))
-<<<<<<< HEAD
-========
-// injectFakeUserID generates and injects a fake user ID into the request metadata.
-func injectFakeUserID(payload []byte) []byte {
-	metadata := gjson.GetBytes(payload, "metadata")
-	if !metadata.Exists() {
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateFakeUserID())
->>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/claude_executor.go
-=======
->>>>>>> archive/pr-234-head-20260223
 		return payload
 	}
 
 	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if existingUserID == "" || !isValidUserID(existingUserID) {
-<<<<<<< HEAD
-<<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
 		payload, _ = sjson.SetBytes(payload, "metadata.user_id", nextFakeUserID(apiKey, useCache))
-========
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateFakeUserID())
->>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/claude_executor.go
-=======
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", nextFakeUserID(apiKey, useCache))
->>>>>>> archive/pr-234-head-20260223
 	}
 	return payload
 }
@@ -1182,21 +1128,10 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		payload = checkSystemInstructionsWithMode(payload, strictMode)
 	}
 
-<<<<<<< HEAD
-<<<<<<<< HEAD:pkg/llmproxy/executor/claude_executor.go
-=======
->>>>>>> archive/pr-234-head-20260223
 	// Reuse a stable fake user ID when a matching ClaudeKey cloak config exists.
 	// This keeps consistent metadata across model variants for the same credential.
 	apiKey, _ := claudeCreds(auth)
 	payload = injectFakeUserID(payload, apiKey, cloakCfg != nil)
-<<<<<<< HEAD
-========
-	// Inject fake user ID
-	payload = injectFakeUserID(payload)
->>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/claude_executor.go
-=======
->>>>>>> archive/pr-234-head-20260223
 
 	// Apply sensitive word obfuscation
 	if len(sensitiveWords) > 0 {

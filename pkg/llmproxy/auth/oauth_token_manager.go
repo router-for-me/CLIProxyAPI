@@ -1,9 +1,3 @@
-<<<<<<< HEAD
-// Package auth — OAuth token manager for automatic token refresh.
-package auth
-
-import (
-=======
 // Package auth provides authentication helpers for CLIProxy.
 // oauth_token_manager.go manages OAuth token lifecycle (store/retrieve/auto-refresh).
 //
@@ -12,15 +6,11 @@ package auth
 
 import (
 	"context"
->>>>>>> ci-compile-fix
 	"fmt"
 	"sync"
 	"time"
 )
 
-<<<<<<< HEAD
-// OAuthTokenManager stores and auto-refreshes OAuth tokens per provider.
-=======
 // tokenRefreshLeadTime refreshes a token this long before its recorded expiry.
 const tokenRefreshLeadTime = 30 * time.Second
 
@@ -28,7 +18,6 @@ const tokenRefreshLeadTime = 30 * time.Second
 // expired tokens via the configured OAuthProvider.
 //
 // Thread-safe: uses RWMutex for concurrent reads and exclusive writes.
->>>>>>> ci-compile-fix
 type OAuthTokenManager struct {
 	store    map[string]*Token
 	mu       sync.RWMutex
@@ -36,10 +25,7 @@ type OAuthTokenManager struct {
 }
 
 // NewOAuthTokenManager returns a new OAuthTokenManager.
-<<<<<<< HEAD
-=======
 // provider may be nil when auto-refresh is not required.
->>>>>>> ci-compile-fix
 func NewOAuthTokenManager(provider OAuthProvider) *OAuthTokenManager {
 	return &OAuthTokenManager{
 		store:    make(map[string]*Token),
@@ -47,40 +33,6 @@ func NewOAuthTokenManager(provider OAuthProvider) *OAuthTokenManager {
 	}
 }
 
-<<<<<<< HEAD
-// StoreToken stores a token for the given provider.
-func (m *OAuthTokenManager) StoreToken(provider string, token *Token) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.store[provider] = token
-}
-
-// GetToken retrieves a token for the given provider, auto-refreshing if expired.
-func (m *OAuthTokenManager) GetToken(provider string) (*Token, error) {
-	m.mu.RLock()
-	token, exists := m.store[provider]
-	m.mu.RUnlock()
-
-	if !exists {
-		return nil, fmt.Errorf("token not found for provider: %s", provider)
-	}
-
-	if time.Now().After(token.ExpiresAt) {
-		if m.provider == nil {
-			return nil, fmt.Errorf("token expired and no provider available to refresh")
-		}
-
-		newAccessToken, err := m.provider.RefreshToken(token.RefreshToken)
-		if err != nil {
-			return nil, fmt.Errorf("token refresh failed: %w", err)
-		}
-
-		m.mu.Lock()
-		token.AccessToken = newAccessToken
-		token.ExpiresAt = time.Now().Add(time.Hour)
-		m.store[provider] = token
-		m.mu.Unlock()
-=======
 // StoreToken stores a token for the given provider key, replacing any existing token.
 func (m *OAuthTokenManager) StoreToken(_ context.Context, providerKey string, token *Token) error {
 	m.mu.Lock()
@@ -123,7 +75,6 @@ func (m *OAuthTokenManager) GetToken(ctx context.Context, providerKey string) (*
 		m.mu.Unlock()
 
 		return refreshed, nil
->>>>>>> ci-compile-fix
 	}
 
 	return token, nil

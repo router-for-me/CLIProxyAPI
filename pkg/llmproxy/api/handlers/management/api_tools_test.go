@@ -15,11 +15,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
-<<<<<<< HEAD
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-)
-
-=======
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -48,7 +43,6 @@ func TestIsAllowedHostOverride(t *testing.T) {
 	}
 }
 
->>>>>>> archive/pr-234-head-20260223
 func TestAPICall_RejectsUnsafeHost(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
@@ -69,40 +63,6 @@ func TestAPICall_RejectsUnsafeHost(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
-func TestValidateAPICallURL(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		raw     string
-		wantErr bool
-	}{
-		{name: "https_allowed", raw: "https://api.github.com/v1", wantErr: false},
-		{name: "localhost_rejected", raw: "http://localhost:8080/ping", wantErr: true},
-		{name: "user_info_rejected", raw: "https://user:pass@api.github.com/v1", wantErr: true},
-		{name: "ipv6_loopback_rejected", raw: "https://[::1]:443/v1", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			u, err := url.Parse(tc.raw)
-			if err != nil {
-				t.Fatalf("parse %q: %v", tc.raw, err)
-			}
-			err = validateAPICallURL(u)
-			if tc.wantErr && err == nil {
-				t.Fatalf("expected error for %q", tc.raw)
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected error for %q: %v", tc.raw, err)
-			}
-		})
-	}
-}
-
-=======
->>>>>>> archive/pr-234-head-20260223
 type memoryAuthStore struct {
 	mu    sync.Mutex
 	items map[string]*coreauth.Auth
@@ -495,11 +455,7 @@ func TestGetKiroQuotaWithChecker_MissingCredentialIncludesRequestedIndex(t *test
 	}
 }
 
-<<<<<<< HEAD
-func TestCopilotQuotaURLFromTokenURL(t *testing.T) {
-=======
 func TestCopilotQuotaURLFromTokenURL_Regression(t *testing.T) {
->>>>>>> archive/pr-234-head-20260223
 	t.Parallel()
 
 	tests := []struct {
@@ -530,11 +486,6 @@ func TestCopilotQuotaURLFromTokenURL_Regression(t *testing.T) {
 			tokenURL:  "https://127.0.0.1/copilot_internal/v2/token",
 			expectErr: true,
 		},
-<<<<<<< HEAD
-		{
-			name:      "reject_user_info",
-			tokenURL:  "https://user:pass@api.github.com/copilot_internal/v2/token",
-=======
 	}
 
 	for _, tt := range tests {
@@ -627,7 +578,6 @@ func TestCopilotQuotaURLFromTokenURLRegression(t *testing.T) {
 		{
 			name:      "reject_untrusted_host",
 			tokenURL:  "https://127.0.0.1/copilot_internal/v2/token",
->>>>>>> archive/pr-234-head-20260223
 			expectErr: true,
 		},
 	}

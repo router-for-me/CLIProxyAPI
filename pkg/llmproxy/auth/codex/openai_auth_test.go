@@ -150,8 +150,6 @@ func TestCodexAuth_RefreshTokens(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
-=======
 func TestCodexAuth_RefreshTokens_rateLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -236,7 +234,6 @@ func TestCodexAuth_RefreshTokensWithRetry_preservesStatus(t *testing.T) {
 	}
 }
 
->>>>>>> archive/pr-234-head-20260223
 func TestCodexAuth_CreateTokenStorage(t *testing.T) {
 	auth := &CodexAuth{}
 	bundle := &CodexAuthBundle{

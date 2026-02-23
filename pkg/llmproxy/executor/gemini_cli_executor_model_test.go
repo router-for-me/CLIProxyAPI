@@ -1,8 +1,5 @@
 package executor
 
-<<<<<<< HEAD
-import "testing"
-=======
 import (
 	"strings"
 	"testing"
@@ -22,7 +19,6 @@ func normalizeGeminiCLIModel(model string) string {
 		return model
 	}
 }
->>>>>>> archive/pr-234-head-20260223
 
 func TestNormalizeGeminiCLIModel(t *testing.T) {
 	t.Parallel()
@@ -49,8 +45,6 @@ func TestNormalizeGeminiCLIModel(t *testing.T) {
 		})
 	}
 }
-<<<<<<< HEAD
-=======
 
 func TestApplyGeminiThinkingForAttemptModelUsesRequestSuffix(t *testing.T) {
 	t.Parallel()
@@ -68,4 +62,3 @@ func TestApplyGeminiThinkingForAttemptModelUsesRequestSuffix(t *testing.T) {
 		t.Fatalf("expected thinking budget 2048, got %q", budget.String())
 	}
 }
->>>>>>> archive/pr-234-head-20260223

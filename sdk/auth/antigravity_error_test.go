@@ -25,8 +25,6 @@ func TestFormatAntigravityCallbackServerError_Permission(t *testing.T) {
 		t.Fatalf("expected callback-port suggestion, got %q", msg)
 	}
 }
-<<<<<<< HEAD
-=======
 
 func TestShouldFallbackToEphemeralCallbackPort(t *testing.T) {
 	tests := []struct {
@@ -65,4 +63,3 @@ func TestShouldFallbackToEphemeralCallbackPort(t *testing.T) {
 		})
 	}
 }
->>>>>>> archive/pr-234-head-20260223

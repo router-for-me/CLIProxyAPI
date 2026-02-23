@@ -7,11 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
 	"net/http"
->>>>>>> archive/pr-234-head-20260223
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
->>>>>>> ci-compile-fix
 	"time"
 
 	cliproxycmd "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/cmd"
@@ -40,22 +35,14 @@ type responseEnvelope struct {
 
 type commandExecutor struct {
 	setup  func(*config.Config, *cliproxycmd.SetupOptions)
-<<<<<<< HEAD
-	login  func(*config.Config, string, string, *cliproxycmd.LoginOptions) error
-=======
 	login  func(*config.Config, string, *cliproxycmd.LoginOptions)
->>>>>>> ci-compile-fix
 	doctor func(string) (map[string]any, error)
 }
 
 func defaultCommandExecutor() commandExecutor {
 	return commandExecutor{
 		setup: cliproxycmd.DoSetupWizard,
-<<<<<<< HEAD
-		login: runProviderLogin,
-=======
 		login: cliproxycmd.DoLogin,
->>>>>>> ci-compile-fix
 		doctor: func(configPath string) (map[string]any, error) {
 			details := map[string]any{
 				"config_path": configPath,
@@ -94,80 +81,6 @@ func defaultCommandExecutor() commandExecutor {
 	}
 }
 
-<<<<<<< HEAD
-func runProviderLogin(cfg *config.Config, provider string, projectID string, options *cliproxycmd.LoginOptions) error {
-	switch normalizeProvider(provider) {
-	case "gemini":
-		cliproxycmd.DoLogin(cfg, strings.TrimSpace(projectID), options)
-	case "claude":
-		cliproxycmd.DoClaudeLogin(cfg, options)
-	case "codex":
-		cliproxycmd.DoCodexLogin(cfg, options)
-	case "kiro":
-		cliproxycmd.DoKiroLogin(cfg, options)
-	case "cursor":
-		cliproxycmd.DoCursorLogin(cfg, options)
-	case "copilot":
-		cliproxycmd.DoGitHubCopilotLogin(cfg, options)
-	case "minimax":
-		cliproxycmd.DoMinimaxLogin(cfg, options)
-	case "kimi":
-		cliproxycmd.DoKimiLogin(cfg, options)
-	case "deepseek":
-		cliproxycmd.DoDeepSeekLogin(cfg, options)
-	case "groq":
-		cliproxycmd.DoGroqLogin(cfg, options)
-	case "mistral":
-		cliproxycmd.DoMistralLogin(cfg, options)
-	case "siliconflow":
-		cliproxycmd.DoSiliconFlowLogin(cfg, options)
-	case "openrouter":
-		cliproxycmd.DoOpenRouterLogin(cfg, options)
-	case "together":
-		cliproxycmd.DoTogetherLogin(cfg, options)
-	case "fireworks":
-		cliproxycmd.DoFireworksLogin(cfg, options)
-	case "novita":
-		cliproxycmd.DoNovitaLogin(cfg, options)
-	case "roo":
-		cliproxycmd.DoRooLogin(cfg, options)
-	case "antigravity":
-		cliproxycmd.DoAntigravityLogin(cfg, options)
-	case "iflow":
-		cliproxycmd.DoIFlowLogin(cfg, options)
-	case "qwen":
-		cliproxycmd.DoQwenLogin(cfg, options)
-	case "kilo":
-		cliproxycmd.DoKiloLogin(cfg, options)
-	case "cline":
-		cliproxycmd.DoClineLogin(cfg, options)
-	case "amp":
-		cliproxycmd.DoAmpLogin(cfg, options)
-	case "factory-api":
-		cliproxycmd.DoFactoryAPILogin(cfg, options)
-	default:
-		return fmt.Errorf("unsupported provider %q", provider)
-	}
-	return nil
-}
-
-func normalizeProvider(provider string) string {
-	normalized := strings.ToLower(strings.TrimSpace(provider))
-	switch normalized {
-	case "github-copilot":
-		return "copilot"
-	case "githubcopilot":
-		return "copilot"
-	case "ampcode":
-		return "amp"
-	case "amp-code":
-		return "amp"
-	case "kilo-code":
-		return "kilo"
-	case "kilocode":
-		return "kilo"
-<<<<<<< HEAD
-=======
 	case "roo-code":
 		return "roo"
 	case "roocode":
@@ -178,7 +91,6 @@ func normalizeProvider(provider string) string {
 		return "gemini"
 	case "droidcli":
 		return "gemini"
->>>>>>> archive/pr-234-head-20260223
 	case "factoryapi":
 		return "factory-api"
 	case "openai-compatible":
@@ -189,18 +101,13 @@ func normalizeProvider(provider string) string {
 }
 
 =======
->>>>>>> ci-compile-fix
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, time.Now, defaultCommandExecutor()))
 }
 
 func run(args []string, stdout io.Writer, stderr io.Writer, now func() time.Time, exec commandExecutor) int {
 	if len(args) == 0 {
-<<<<<<< HEAD
-		_, _ = fmt.Fprintln(stderr, "usage: cliproxyctl <setup|login|doctor|dev> [flags]")
-=======
 		_, _ = fmt.Fprintln(stderr, "usage: cliproxyctl <setup|login|doctor> [flags]")
->>>>>>> ci-compile-fix
 		return 2
 	}
 
@@ -212,11 +119,6 @@ func run(args []string, stdout io.Writer, stderr io.Writer, now func() time.Time
 		return runLogin(args[1:], stdout, stderr, now, exec)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr, now, exec)
-<<<<<<< HEAD
-	case "dev":
-		return runDev(args[1:], stdout, stderr, now)
-=======
->>>>>>> ci-compile-fix
 	default:
 		if hasJSONFlag(args[1:]) {
 			writeEnvelope(stdout, now, command, false, map[string]any{
@@ -234,17 +136,8 @@ func runSetup(args []string, stdout io.Writer, stderr io.Writer, now func() time
 	fs.SetOutput(io.Discard)
 	var jsonOutput bool
 	var configPathFlag string
-<<<<<<< HEAD
-	var providersRaw string
-	var seedKiroAlias bool
 	fs.BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON response")
 	fs.StringVar(&configPathFlag, "config", "", "Path to config file")
-	fs.StringVar(&providersRaw, "providers", "", "Comma-separated provider list for direct setup")
-	fs.BoolVar(&seedKiroAlias, "seed-kiro-alias", false, "Persist default oauth-model-alias entries for kiro when missing")
-=======
-	fs.BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON response")
-	fs.StringVar(&configPathFlag, "config", "", "Path to config file")
->>>>>>> ci-compile-fix
 	if err := fs.Parse(args); err != nil {
 		return renderError(stdout, stderr, jsonOutput, now, "setup", err)
 	}
@@ -259,56 +152,21 @@ func runSetup(args []string, stdout io.Writer, stderr io.Writer, now func() time
 		"config_path":   configPath,
 		"config_exists": configFileExists(configPath),
 	}
-<<<<<<< HEAD
-	providers := normalizeProviders(providersRaw)
-	if len(providers) > 0 {
-		details["providers"] = providers
-	}
-	details["seed_kiro_alias"] = seedKiroAlias
-
-	if jsonOutput {
-		capturedStdout, capturedStderr, runErr := captureStdIO(func() error {
-			if len(providers) == 0 {
-				exec.setup(cfg, &cliproxycmd.SetupOptions{ConfigPath: configPath})
-				return nil
-			}
-			for _, provider := range providers {
-				if err := exec.login(cfg, provider, "", &cliproxycmd.LoginOptions{ConfigPath: configPath}); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-		if runErr == nil && seedKiroAlias {
-			seedErr := persistDefaultKiroAliases(configPath)
-			if seedErr != nil {
-				runErr = seedErr
-			} else {
-				details["kiro_alias_seeded"] = true
-			}
-		}
-=======
 
 	if jsonOutput {
 		capturedStdout, capturedStderr, runErr := captureStdIO(func() error {
 			exec.setup(cfg, &cliproxycmd.SetupOptions{ConfigPath: configPath})
 			return nil
 		})
->>>>>>> ci-compile-fix
 		details["stdout"] = capturedStdout
 		if capturedStderr != "" {
 			details["stderr"] = capturedStderr
 		}
 		if runErr != nil {
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
 			if hint := rateLimitHint(runErr); hint != "" {
 				details["hint"] = hint
 			}
->>>>>>> archive/pr-234-head-20260223
 =======
->>>>>>> ci-compile-fix
 			details["error"] = runErr.Error()
 			writeEnvelope(stdout, now, "setup", false, details)
 			return 1
@@ -317,19 +175,9 @@ func runSetup(args []string, stdout io.Writer, stderr io.Writer, now func() time
 		return 0
 	}
 
-<<<<<<< HEAD
-	if len(providers) == 0 {
-		exec.setup(cfg, &cliproxycmd.SetupOptions{ConfigPath: configPath})
-	} else {
-		for _, provider := range providers {
-			if err := exec.login(cfg, provider, "", &cliproxycmd.LoginOptions{ConfigPath: configPath}); err != nil {
-				_, _ = fmt.Fprintf(stderr, "setup failed for provider %q: %v\n", provider, err)
-<<<<<<< HEAD
-=======
 				if hint := rateLimitHint(err); hint != "" {
 					_, _ = fmt.Fprintln(stderr, hint)
 				}
->>>>>>> archive/pr-234-head-20260223
 				return 1
 			}
 		}
@@ -342,7 +190,6 @@ func runSetup(args []string, stdout io.Writer, stderr io.Writer, now func() time
 	}
 =======
 	exec.setup(cfg, &cliproxycmd.SetupOptions{ConfigPath: configPath})
->>>>>>> ci-compile-fix
 	return 0
 }
 
@@ -351,42 +198,17 @@ func runLogin(args []string, stdout io.Writer, stderr io.Writer, now func() time
 	fs.SetOutput(io.Discard)
 	var jsonOutput bool
 	var configPathFlag string
-<<<<<<< HEAD
-	var provider string
-=======
->>>>>>> ci-compile-fix
 	var projectID string
 	var noBrowser bool
 	var callbackPort int
 	fs.BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON response")
 	fs.StringVar(&configPathFlag, "config", "", "Path to config file")
-<<<<<<< HEAD
-	fs.StringVar(&provider, "provider", "", "Provider to login (or pass as first positional arg)")
-=======
->>>>>>> ci-compile-fix
 	fs.StringVar(&projectID, "project-id", "", "Optional Gemini project ID")
 	fs.BoolVar(&noBrowser, "no-browser", false, "Do not open browser for OAuth login")
 	fs.IntVar(&callbackPort, "oauth-callback-port", 0, "Override OAuth callback port")
 	if err := fs.Parse(args); err != nil {
 		return renderError(stdout, stderr, jsonOutput, now, "login", err)
 	}
-<<<<<<< HEAD
-	if strings.TrimSpace(provider) == "" {
-		positionals := fs.Args()
-		if len(positionals) > 0 {
-			provider = strings.TrimSpace(positionals[0])
-		}
-	}
-	resolvedProvider, providerDetails, resolveErr := resolveLoginProvider(provider)
-	if resolveErr != nil {
-		if jsonOutput {
-			writeEnvelope(stdout, now, "login", false, providerDetails)
-			return 2
-		}
-		return renderError(stdout, stderr, false, now, "login", resolveErr)
-	}
-=======
->>>>>>> ci-compile-fix
 
 	configPath := resolveConfigPath(strings.TrimSpace(configPathFlag))
 	cfg, err := loadConfig(configPath, true)
@@ -397,69 +219,34 @@ func runLogin(args []string, stdout io.Writer, stderr io.Writer, now func() time
 	details := map[string]any{
 		"config_path":   configPath,
 		"config_exists": configFileExists(configPath),
-<<<<<<< HEAD
-		"provider":      resolvedProvider,
-		"project_id":    strings.TrimSpace(projectID),
-	}
-	for key, value := range providerDetails {
-		details[key] = value
-	}
-
-	if jsonOutput {
-		capturedStdout, capturedStderr, runErr := captureStdIO(func() error {
-			return exec.login(cfg, resolvedProvider, strings.TrimSpace(projectID), &cliproxycmd.LoginOptions{
-=======
 		"project_id":    strings.TrimSpace(projectID),
 	}
 
 	if jsonOutput {
 		capturedStdout, capturedStderr, runErr := captureStdIO(func() error {
 			exec.login(cfg, strings.TrimSpace(projectID), &cliproxycmd.LoginOptions{
->>>>>>> ci-compile-fix
 				NoBrowser:    noBrowser,
 				CallbackPort: callbackPort,
 				ConfigPath:   configPath,
 			})
-<<<<<<< HEAD
-=======
 			return nil
->>>>>>> ci-compile-fix
 		})
 		details["stdout"] = capturedStdout
 		if capturedStderr != "" {
 			details["stderr"] = capturedStderr
 		}
 		if runErr != nil {
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
 			if hint := rateLimitHint(runErr); hint != "" {
 				details["hint"] = hint
 			}
->>>>>>> archive/pr-234-head-20260223
 =======
->>>>>>> ci-compile-fix
 			details["error"] = runErr.Error()
 			writeEnvelope(stdout, now, "login", false, details)
 			return 1
 		}
-<<<<<<< HEAD
-		writeEnvelope(stdout, now, "login", true, details)
-		return 0
-	}
-
-	if err := exec.login(cfg, resolvedProvider, strings.TrimSpace(projectID), &cliproxycmd.LoginOptions{
-		NoBrowser:    noBrowser,
-		CallbackPort: callbackPort,
-		ConfigPath:   configPath,
-	}); err != nil {
-		_, _ = fmt.Fprintf(stderr, "login failed for provider %q: %v\n", resolvedProvider, err)
-<<<<<<< HEAD
-=======
 		if hint := rateLimitHint(err); hint != "" {
 			_, _ = fmt.Fprintln(stderr, hint)
 		}
->>>>>>> archive/pr-234-head-20260223
 		return 1
 	}
 =======
@@ -479,7 +266,6 @@ func runLogin(args []string, stdout io.Writer, stderr io.Writer, now func() time
 		CallbackPort: callbackPort,
 		ConfigPath:   configPath,
 	})
->>>>>>> ci-compile-fix
 	return 0
 }
 
@@ -487,49 +273,19 @@ func runDoctor(args []string, stdout io.Writer, stderr io.Writer, now func() tim
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var jsonOutput bool
-<<<<<<< HEAD
-	var fix bool
 	var configPathFlag string
 	fs.BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON response")
-	fs.BoolVar(&fix, "fix", false, "Attempt deterministic remediation for known doctor failures")
-=======
-	var configPathFlag string
-	fs.BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON response")
->>>>>>> ci-compile-fix
 	fs.StringVar(&configPathFlag, "config", "", "Path to config file")
 	if err := fs.Parse(args); err != nil {
 		return renderError(stdout, stderr, jsonOutput, now, "doctor", err)
 	}
 
 	configPath := resolveConfigPath(strings.TrimSpace(configPathFlag))
-<<<<<<< HEAD
-	if fix {
-		if err := ensureConfigFile(configPath); err != nil {
-			if jsonOutput {
-				writeEnvelope(stdout, now, "doctor", false, map[string]any{
-					"config_path": configPath,
-					"fix":         true,
-					"error":       err.Error(),
-					"remediation": readOnlyRemediationHint(configPath),
-				})
-			} else {
-				_, _ = fmt.Fprintf(stderr, "doctor --fix failed: %v\n", err)
-				_, _ = fmt.Fprintln(stderr, readOnlyRemediationHint(configPath))
-			}
-			return 1
-		}
-	}
-=======
->>>>>>> ci-compile-fix
 	details, err := exec.doctor(configPath)
 	if err != nil {
 		if details == nil {
 			details = map[string]any{}
 		}
-<<<<<<< HEAD
-		details["fix"] = fix
-=======
->>>>>>> ci-compile-fix
 		details["error"] = err.Error()
 		if jsonOutput {
 			writeEnvelope(stdout, now, "doctor", false, details)
@@ -542,10 +298,6 @@ func runDoctor(args []string, stdout io.Writer, stderr io.Writer, now func() tim
 	if details == nil {
 		details = map[string]any{}
 	}
-<<<<<<< HEAD
-	details["fix"] = fix
-=======
->>>>>>> ci-compile-fix
 	if jsonOutput {
 		writeEnvelope(stdout, now, "doctor", true, details)
 	} else {
@@ -554,28 +306,9 @@ func runDoctor(args []string, stdout io.Writer, stderr io.Writer, now func() tim
 	return 0
 }
 
-<<<<<<< HEAD
-func runDev(args []string, stdout io.Writer, stderr io.Writer, now func() time.Time) int {
-	fs := flag.NewFlagSet("dev", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var jsonOutput bool
-	var file string
-	fs.BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON response")
-	fs.StringVar(&file, "file", "examples/process-compose.dev.yaml", "Path to process-compose profile file")
-	if err := fs.Parse(args); err != nil {
-		return renderError(stdout, stderr, jsonOutput, now, "dev", err)
-	}
-
-	path := strings.TrimSpace(file)
-	details := map[string]any{
-<<<<<<< HEAD
-		"profile_file": path,
-		"hint":         fmt.Sprintf("process-compose -f %s up", path),
-=======
 		"profile_file":             path,
 		"hint":                     fmt.Sprintf("process-compose -f %s up", path),
 		"tool_failure_remediation": gemini3ProPreviewToolUsageRemediationHint(path),
->>>>>>> archive/pr-234-head-20260223
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -606,16 +339,11 @@ func runDev(args []string, stdout io.Writer, stderr io.Writer, now func() time.T
 	} else {
 		_, _ = fmt.Fprintf(stdout, "dev profile ok: %s\n", path)
 		_, _ = fmt.Fprintf(stdout, "run: process-compose -f %s up\n", path)
-<<<<<<< HEAD
-=======
 		_, _ = fmt.Fprintf(stdout, "tool-failure triage hint: %s\n", gemini3ProPreviewToolUsageRemediationHint(path))
->>>>>>> archive/pr-234-head-20260223
 	}
 	return 0
 }
 
-<<<<<<< HEAD
-=======
 func gemini3ProPreviewToolUsageRemediationHint(profilePath string) string {
 	profilePath = strings.TrimSpace(profilePath)
 	if profilePath == "" {
@@ -628,9 +356,7 @@ func gemini3ProPreviewToolUsageRemediationHint(profilePath string) string {
 	)
 }
 
->>>>>>> archive/pr-234-head-20260223
 =======
->>>>>>> ci-compile-fix
 func renderError(stdout io.Writer, stderr io.Writer, jsonOutput bool, now func() time.Time, command string, err error) int {
 	if jsonOutput {
 		writeEnvelope(stdout, now, command, false, map[string]any{
@@ -723,23 +449,7 @@ func configFileExists(path string) bool {
 	return !info.IsDir()
 }
 
-<<<<<<< HEAD
-func ensureConfigFile(configPath string) error {
-	if strings.TrimSpace(configPath) == "" {
-		return errors.New("config path is required")
-	}
-	if info, err := os.Stat(configPath); err == nil && info.IsDir() {
-		return fmt.Errorf("config path %q is a directory", configPath)
-	}
-	if configFileExists(configPath) {
-		return nil
-	}
-	configDir := filepath.Dir(configPath)
-<<<<<<< HEAD
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-=======
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
->>>>>>> archive/pr-234-head-20260223
 		return fmt.Errorf("create config directory: %w", err)
 	}
 	if err := ensureDirectoryWritable(configDir); err != nil {
@@ -785,7 +495,6 @@ func readOnlyRemediationHint(configPath string) string {
 }
 
 =======
->>>>>>> ci-compile-fix
 func captureStdIO(runFn func() error) (string, string, error) {
 	origStdout := os.Stdout
 	origStderr := os.Stderr
@@ -830,9 +539,6 @@ func hasJSONFlag(args []string) bool {
 	return false
 }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
 const rateLimitHintMessage = "Provider returned HTTP 429 (too many requests). Pause or rotate credentials, run `cliproxyctl doctor`, and consult docs/troubleshooting.md#429 before retrying."
 
 type statusCoder interface {
@@ -850,7 +556,6 @@ func rateLimitHint(err error) string {
 	return ""
 }
 
->>>>>>> archive/pr-234-head-20260223
 func normalizeProviders(raw string) []string {
 	parts := strings.FieldsFunc(strings.ToLower(raw), func(r rune) bool {
 		return r == ',' || r == ' '
@@ -954,7 +659,6 @@ func ensureDirectoryWritable(dir string) error {
 }
 
 =======
->>>>>>> ci-compile-fix
 func escapeForJSON(in string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return replacer.Replace(in)

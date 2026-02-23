@@ -915,19 +915,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		base := strings.TrimSuffix(baseURL, "/")
 		if base == "" {
 			base = buildBaseURL(e.cfg, auth)
-<<<<<<< HEAD
-<<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
-=======
->>>>>>> archive/pr-234-head-20260223
 		}
 		base, err = sanitizeAntigravityBaseURL(base)
 		if err != nil {
 			return cliproxyexecutor.Response{}, err
-<<<<<<< HEAD
-========
->>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/antigravity_executor.go
-=======
->>>>>>> archive/pr-234-head-20260223
 		}
 
 		var requestURL strings.Builder
@@ -1632,12 +1623,9 @@ func antigravityErrorMessage(statusCode int, body []byte) string {
 		!strings.Contains(lower, "permission_denied") {
 		return msg
 	}
-<<<<<<< HEAD
-=======
 	if strings.Contains(lower, "hint: the current google project/account does not have a gemini code assist license") {
 		return msg
 	}
->>>>>>> archive/pr-234-head-20260223
 	return msg + "\nHint: The current Google project/account does not have a Gemini Code Assist license. Re-run --antigravity-login with a licensed account/project, or switch providers."
 }
 

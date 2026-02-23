@@ -77,8 +77,6 @@ func TestGetProviderMetrics_FiltersKnownProviders(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
-=======
 func TestNormalizeProviderAliasesDroidToGemini(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
@@ -93,7 +91,6 @@ func TestNormalizeProviderAliasesDroidToGemini(t *testing.T) {
 	}
 }
 
->>>>>>> archive/pr-234-head-20260223
 func TestGetProviderMetrics_IncludesKiroAndCursor(t *testing.T) {
 	stats := GetRequestStatistics()
 	ctx := context.Background()

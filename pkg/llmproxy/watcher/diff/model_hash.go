@@ -1,26 +1,15 @@
 package diff
 
 import (
-<<<<<<< HEAD
-	"crypto/hmac"
-	"crypto/sha512"
-	"encoding/hex"
-=======
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
->>>>>>> archive/pr-234-head-20260223
 	"sort"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 )
 
-<<<<<<< HEAD
-const modelHashSalt = "watcher-model-hash:v1"
-
-=======
->>>>>>> archive/pr-234-head-20260223
 // ComputeOpenAICompatModelsHash returns a stable hash for OpenAI-compat models.
 // Used to detect model list changes during hot reload.
 func ComputeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) string {
@@ -112,13 +101,9 @@ func ComputeExcludedModelsHash(excluded []string) string {
 		return ""
 	}
 	sort.Strings(normalized)
-<<<<<<< HEAD
-	return hashJoined(normalized)
-=======
 	data, _ := json.Marshal(normalized)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
->>>>>>> archive/pr-234-head-20260223
 }
 
 func normalizeModelPairs(collect func(out func(key string))) []string {
@@ -142,12 +127,6 @@ func hashJoined(keys []string) string {
 	if len(keys) == 0 {
 		return ""
 	}
-<<<<<<< HEAD
-	hasher := hmac.New(sha512.New, []byte(modelHashSalt))
-	_, _ = hasher.Write([]byte(strings.Join(keys, "\n")))
-	return hex.EncodeToString(hasher.Sum(nil))
-=======
 	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
 	return hex.EncodeToString(sum[:])
->>>>>>> archive/pr-234-head-20260223
 }

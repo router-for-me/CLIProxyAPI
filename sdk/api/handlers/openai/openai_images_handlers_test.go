@@ -27,11 +27,7 @@ func TestConvertToOpenAIFormat_GeminiDefaultsToDataURL(t *testing.T) {
 		]
 	}`)
 
-<<<<<<< HEAD
-	got := h.convertToOpenAIFormat(resp, "gemini-2.5-flash-image", "cat")
-=======
 	got := h.convertToOpenAIFormat(resp, "gemini-2.5-flash-image", "cat", "url")
->>>>>>> archive/pr-234-head-20260223
 	if len(got.Data) != 1 {
 		t.Fatalf("expected 1 image, got %d", len(got.Data))
 	}
@@ -64,11 +60,7 @@ func TestConvertToOpenAIFormat_GeminiB64JSONResponseFormat(t *testing.T) {
 		]
 	}`)
 
-<<<<<<< HEAD
-	got := h.convertToOpenAIFormat(resp, "imagen-4.0-generate-001", "mountain")
-=======
 	got := h.convertToOpenAIFormat(resp, "imagen-4.0-generate-001", "mountain", "b64_json")
->>>>>>> archive/pr-234-head-20260223
 	if len(got.Data) != 1 {
 		t.Fatalf("expected 1 image, got %d", len(got.Data))
 	}

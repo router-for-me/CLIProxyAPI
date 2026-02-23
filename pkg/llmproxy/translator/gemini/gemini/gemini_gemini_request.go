@@ -6,11 +6,7 @@ package gemini
 import (
 	"fmt"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/gemini/gemini/gemini_gemini_request.go
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/gemini/common"
-=======
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
->>>>>>> archive/pr-234-head-20260223:internal/translator/gemini/gemini/gemini_gemini_request.go
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"

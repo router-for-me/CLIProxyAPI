@@ -70,8 +70,6 @@ func TestEstimateImageTokens(t *testing.T) {
 		}
 	}
 }
-<<<<<<< HEAD
-=======
 
 func TestIsGPT5FamilyModel(t *testing.T) {
 	t.Parallel()
@@ -89,4 +87,3 @@ func TestIsGPT5FamilyModel(t *testing.T) {
 		}
 	}
 }
->>>>>>> archive/pr-234-head-20260223

@@ -9,10 +9,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-<<<<<<< HEAD
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
-=======
->>>>>>> archive/pr-234-head-20260223
 	log "github.com/sirupsen/logrus"
 )
 
@@ -208,26 +204,9 @@ func doGenericAPIKeyLogin(cfg *config.Config, options *LoginOptions, providerNam
 		return
 	}
 
-<<<<<<< HEAD
-	authDir := strings.TrimSpace(cfg.AuthDir)
-	if authDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Errorf("%s: cannot resolve home dir: %v", providerName, err)
-			return
-		}
-		authDir = filepath.Join(home, ".cli-proxy-api")
-	} else if resolved, err := util.ResolveAuthDir(authDir); err == nil && resolved != "" {
-		authDir = resolved
-	}
-
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
-		log.Errorf("%s: failed to create auth dir %s: %v", providerName, authDir, err)
-=======
 	authDir, err := ensureAuthDir(strings.TrimSpace(cfg.AuthDir), providerName)
 	if err != nil {
 		log.Errorf("%s: %v", providerName, err)
->>>>>>> archive/pr-234-head-20260223
 		return
 	}
 
@@ -243,19 +222,7 @@ func doGenericAPIKeyLogin(cfg *config.Config, options *LoginOptions, providerNam
 		return
 	}
 
-<<<<<<< HEAD
-	tokenFileRef := tokenPath
-	if home, err := os.UserHomeDir(); err == nil {
-		defaultAuth := filepath.Join(home, ".cli-proxy-api")
-		if tokenPath == filepath.Join(defaultAuth, fileName) {
-			tokenFileRef = "~/.cli-proxy-api/" + fileName
-		} else if rel, err := filepath.Rel(home, tokenPath); err == nil && !strings.HasPrefix(rel, "..") {
-			tokenFileRef = "~/" + filepath.ToSlash(rel)
-		}
-	}
-=======
 	tokenFileRef := authDirTokenFileRef(authDir, fileName)
->>>>>>> archive/pr-234-head-20260223
 
 	updateConfig(tokenFileRef)
 

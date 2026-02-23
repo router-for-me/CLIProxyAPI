@@ -45,15 +45,9 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 	}
 	// Ensure we tag the file with the provider type.
 	s.Type = "vertex"
-<<<<<<< HEAD
-	cleanPath, err := misc.ResolveSafeFilePath(authFilePath)
-	if err != nil {
-		return fmt.Errorf("invalid token file path: %w", err)
-=======
 	cleanPath, err := cleanCredentialPath(authFilePath, "vertex credential")
 	if err != nil {
 		return err
->>>>>>> archive/pr-234-head-20260223
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o700); err != nil {

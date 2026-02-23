@@ -19,16 +19,12 @@ func sanitizeClaudeRequest(rawJSON []byte) []byte {
 	updated := rawJSON
 	changed := false
 	for i, tool := range tools.Array() {
-<<<<<<< HEAD
-		inputSchema := tool.Get("input_schema")
-=======
 		schemaPath := "tools." + strconv.Itoa(i) + ".input_schema"
 		inputSchema := tool.Get("input_schema")
 		if !inputSchema.Exists() {
 			inputSchema = tool.Get("custom.input_schema")
 			schemaPath = "tools." + strconv.Itoa(i) + ".custom.input_schema"
 		}
->>>>>>> archive/pr-234-head-20260223
 		if !inputSchema.Exists() || !inputSchema.IsObject() {
 			continue
 		}
@@ -36,11 +32,7 @@ func sanitizeClaudeRequest(rawJSON []byte) []byte {
 		if !schemaChanged {
 			continue
 		}
-<<<<<<< HEAD
-		next, err := sjson.SetRawBytes(updated, "tools."+strconv.Itoa(i)+".input_schema", sanitizedSchema)
-=======
 		next, err := sjson.SetRawBytes(updated, schemaPath, sanitizedSchema)
->>>>>>> archive/pr-234-head-20260223
 		if err != nil {
 			return rawJSON
 		}
@@ -96,11 +88,7 @@ func stripSchemaPlaceholders(node any) bool {
 		}
 
 		reasonRaw, hasReason := props["reason"]
-<<<<<<< HEAD
-		if hasReason && len(props) == 1 && isPlaceholderReason(reasonRaw) {
-=======
 		if hasReason && isPlaceholderReason(reasonRaw) {
->>>>>>> archive/pr-234-head-20260223
 			delete(props, "reason")
 			filterRequired(current, "reason")
 			changed = true

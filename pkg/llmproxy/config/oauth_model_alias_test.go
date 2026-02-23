@@ -135,12 +135,6 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultKiroAliases(t *testing.T) {
 	if len(cfg.OAuthModelAlias["codex"]) != 1 {
 		t.Fatal("expected codex aliases to be preserved")
 	}
-<<<<<<< HEAD
-	if len(cfg.OAuthModelAlias["github-copilot"]) == 0 {
-		t.Fatal("expected default github-copilot aliases to be injected")
-	}
-=======
->>>>>>> archive/pr-234-head-20260223
 }
 
 func TestSanitizeOAuthModelAlias_DoesNotOverrideUserKiroAliases(t *testing.T) {

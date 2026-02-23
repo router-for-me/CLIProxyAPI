@@ -68,8 +68,6 @@ func TestSanitizeClaudeRequest_PreservesNonPlaceholderReasonSchema(t *testing.T)
 		t.Fatalf("expected required reason to be preserved, got: %s", string(sanitized))
 	}
 }
-<<<<<<< HEAD
-=======
 
 func TestSanitizeClaudeRequest_RemovesPlaceholderReasonWithOtherProperties(t *testing.T) {
 	raw := []byte(`{
@@ -150,4 +148,3 @@ func TestSanitizeClaudeRequest_RemovesPlaceholderReasonFromCustomInputSchema(t *
 		t.Fatalf("expected remaining required field to be mode, got %q in %s", got, string(sanitized))
 	}
 }
->>>>>>> archive/pr-234-head-20260223

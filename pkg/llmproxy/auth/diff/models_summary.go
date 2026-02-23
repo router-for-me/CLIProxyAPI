@@ -112,11 +112,7 @@ func SummarizeVertexModels(models []config.VertexCompatModel) VertexModelsSummar
 	}
 	sort.Strings(names)
 	return VertexModelsSummary{
-<<<<<<< HEAD
-		hash:  hashJoined(names),
-=======
 		hash:  strings.Join(names, "|"),
->>>>>>> archive/pr-234-head-20260223
 		count: len(names),
 	}
 }

@@ -862,8 +862,3 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	}
 	return
 }
-<<<<<<<< HEAD:pkg/llmproxy/executor/codex_executor.go
-
-func (e *CodexExecutor) CloseExecutionSession(sessionID string) {}
-========
->>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/codex_executor.go

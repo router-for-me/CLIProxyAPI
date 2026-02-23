@@ -1,12 +1,6 @@
 package executor
 
 import (
-<<<<<<< HEAD
-	"strings"
-	"testing"
-)
-
-=======
 	"context"
 	"errors"
 	"net/http"
@@ -133,7 +127,6 @@ func TestRecordAPIResponseMetadataDoesNotSetWhenRequestLoggingDisabled(t *testin
 	}
 }
 
->>>>>>> archive/pr-234-head-20260223
 func TestExtractJSONErrorMessage_ModelNotFoundAddsGuidance(t *testing.T) {
 	body := []byte(`{"error":{"code":"model_not_found","message":"model not found: foo"}}`)
 	got := extractJSONErrorMessage(body)

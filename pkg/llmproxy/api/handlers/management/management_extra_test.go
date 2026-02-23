@@ -417,18 +417,6 @@ func TestUploadAuthFileRejectsTraversalMultipartName(t *testing.T) {
 	}
 
 	var body bytes.Buffer
-<<<<<<< HEAD
-	writer := multipart.NewWriter(&body)
-	partWriter, err := writer.CreateFormFile("file", "../escape.json")
-	if err != nil {
-		t.Fatalf("create form file: %v", err)
-	}
-	if _, err = partWriter.Write([]byte("{}")); err != nil {
-		t.Fatalf("write form file: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("close writer: %v", err)
-=======
 	form := multipart.NewWriter(&body)
 	part, err := form.CreateFormFile("file", "..\\evil.json")
 	if err != nil {
@@ -439,18 +427,12 @@ func TestUploadAuthFileRejectsTraversalMultipartName(t *testing.T) {
 	}
 	if err := form.Close(); err != nil {
 		t.Fatalf("close form: %v", err)
->>>>>>> archive/pr-234-head-20260223
 	}
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-<<<<<<< HEAD
-	req := httptest.NewRequest(http.MethodPost, "/", &body)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-=======
 	req := httptest.NewRequest("POST", "/", &body)
 	req.Header.Set("Content-Type", form.FormDataContentType())
->>>>>>> archive/pr-234-head-20260223
 	c.Request = req
 
 	h.UploadAuthFile(c)

@@ -190,8 +190,6 @@ func TestApplyClaudeToolPrefix_ToolChoiceFunctionName(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
-=======
 func TestDisableThinkingIfToolChoiceForced(t *testing.T) {
 	tests := []struct {
 		name string
@@ -221,7 +219,6 @@ func TestDisableThinkingIfToolChoiceForced(t *testing.T) {
 	}
 }
 
->>>>>>> archive/pr-234-head-20260223
 func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")

@@ -372,8 +372,6 @@ func (e statusErr) Error() string {
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 
-<<<<<<< HEAD
-=======
 func validateOpenAICompatJSON(data []byte) error {
 	line := bytes.TrimSpace(data)
 	if len(line) == 0 {
@@ -395,5 +393,4 @@ func validateOpenAICompatJSON(data []byte) error {
 	return nil
 }
 
->>>>>>> archive/pr-234-head-20260223
 func (e *OpenAICompatExecutor) CloseExecutionSession(sessionID string) {}

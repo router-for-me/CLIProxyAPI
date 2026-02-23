@@ -6,14 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-<<<<<<< HEAD:pkg/llmproxy/translator/gemini-cli/openai/chat-completions/gemini-cli_openai_request.go
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/gemini/common"
-=======
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
->>>>>>> archive/pr-234-head-20260223:internal/translator/gemini-cli/openai/chat-completions/gemini-cli_openai_request.go
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"

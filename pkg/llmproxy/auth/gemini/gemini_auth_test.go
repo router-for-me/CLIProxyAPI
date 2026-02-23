@@ -3,14 +3,9 @@ package gemini
 import (
 	"context"
 	"fmt"
-<<<<<<< HEAD
-	"net/http"
-	"net/http/httptest"
-=======
 	"io"
 	"net"
 	"net/http"
->>>>>>> archive/pr-234-head-20260223
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,38 +82,17 @@ func TestGeminiTokenStorage_SaveTokenToFile_RejectsTraversalPath(t *testing.T) {
 }
 
 func TestGeminiAuth_CreateTokenStorage(t *testing.T) {
-<<<<<<< HEAD
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/oauth2/v1/userinfo" {
-			_, _ = fmt.Fprint(w, `{"email":"test@example.com"}`)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer server.Close()
-
-	auth := NewGeminiAuth()
-	conf := &oauth2.Config{
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  server.URL + "/auth",
-			TokenURL: server.URL + "/token",
-=======
 	auth := NewGeminiAuth()
 	conf := &oauth2.Config{
 		Endpoint: oauth2.Endpoint{
 			AuthURL:  "https://example.com/auth",
 			TokenURL: "https://example.com/token",
->>>>>>> archive/pr-234-head-20260223
 		},
 	}
 	token := &oauth2.Token{AccessToken: "token123"}
 
 	ctx := context.Background()
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-<<<<<<< HEAD
-		mockReq, _ := http.NewRequest(req.Method, server.URL+"/oauth2/v1/userinfo", req.Body)
-		return http.DefaultClient.Do(mockReq)
-=======
 		if strings.Contains(req.URL.Path, "/oauth2/v1/userinfo") {
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -131,7 +105,6 @@ func TestGeminiAuth_CreateTokenStorage(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader("")),
 			Header:     make(http.Header),
 		}, nil
->>>>>>> archive/pr-234-head-20260223
 	})
 
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: transport})
@@ -146,8 +119,6 @@ func TestGeminiAuth_CreateTokenStorage(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
-=======
 func TestStartOAuthCallbackListener_Fallback(t *testing.T) {
 	busy, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", DefaultCallbackPort))
 	if err != nil {
@@ -174,7 +145,6 @@ func TestStartOAuthCallbackListener_Fallback(t *testing.T) {
 	}
 }
 
->>>>>>> archive/pr-234-head-20260223
 func TestGetAuthenticatedClient_Proxy(t *testing.T) {
 	auth := NewGeminiAuth()
 	ts := &GeminiTokenStorage{

@@ -6,10 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
-<<<<<<< HEAD
-	"strconv"
-=======
->>>>>>> archive/pr-234-head-20260223
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
@@ -179,11 +175,7 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 
 	// Intentionally exclude API key material; only count non-empty entries.
 	if count := countAPIKeys(entry); count > 0 {
-<<<<<<< HEAD
-		parts = append(parts, "api_keys="+strconv.Itoa(count))
-=======
 		parts = append(parts, fmt.Sprintf("api_keys=%d", count))
->>>>>>> archive/pr-234-head-20260223
 	}
 
 	if len(parts) == 0 {

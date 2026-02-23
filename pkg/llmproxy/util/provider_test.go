@@ -4,10 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-<<<<<<< HEAD
-=======
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
->>>>>>> archive/pr-234-head-20260223
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 )
 
@@ -48,8 +45,6 @@ func TestGetProviderName_ProviderPinnedModel(t *testing.T) {
 		t.Fatalf("GetProviderName() = %v, want %v", got, want)
 	}
 }
-<<<<<<< HEAD
-=======
 
 func TestIsOpenAICompatibilityAlias_MatchesAliasAndNameCaseInsensitive(t *testing.T) {
 	cfg := &config.Config{
@@ -99,4 +94,3 @@ func TestGetOpenAICompatibilityConfig_MatchesAliasAndName(t *testing.T) {
 		t.Fatalf("resolved model alias = %q, want gpt-5.2-codex", modelByName.Alias)
 	}
 }
->>>>>>> archive/pr-234-head-20260223
