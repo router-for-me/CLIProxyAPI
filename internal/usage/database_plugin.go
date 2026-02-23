@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
@@ -218,12 +219,26 @@ func (p *DatabasePlugin) triggerFlush() {
 	}
 }
 
+// ginMethodPath extracts the HTTP method and path from a gin.Context stored in ctx.
+func ginMethodPath(ctx context.Context) (string, string) {
+	if ctx == nil {
+		return "", ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return "", ""
+	}
+	return ginCtx.Request.Method, ginCtx.Request.URL.Path
+}
+
 // HandleUsage implements coreusage.Plugin interface.
 // It buffers the usage record and flushes to database when buffer is full or on interval.
 func (p *DatabasePlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if p == nil || p.store == nil {
 		return
 	}
+
+	method, path := ginMethodPath(ctx)
 
 	dbRecord := UsageRecord{
 		APIKey:          record.APIKey,
@@ -237,6 +252,8 @@ func (p *DatabasePlugin) HandleUsage(ctx context.Context, record coreusage.Recor
 		ReasoningTokens: record.Detail.ReasoningTokens,
 		CachedTokens:    record.Detail.CachedTokens,
 		TotalTokens:     record.Detail.TotalTokens,
+		Method:          method,
+		Path:            path,
 	}
 
 	p.bufferMu.Lock()

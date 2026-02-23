@@ -174,3 +174,84 @@ func assertStringSliceEqual(t *testing.T, got, want []string) {
 		}
 	}
 }
+
+func TestSQLiteUsageStoreQueryMonitorRequestDetails(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteUsageStore(t)
+	defer store.Close()
+
+	base := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
+	insertUsageRecords(t, store,
+		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "source-a", AuthIndex: "0", Method: "POST", Path: "/v1/chat/completions", RequestedAt: base.Add(-3 * time.Hour)},
+		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "source-a", AuthIndex: "1", Method: "POST", Path: "/v1/chat/completions", RequestedAt: base.Add(-2 * time.Hour), Failed: true},
+		UsageRecord{APIKey: "api-1", Model: "model-b", Source: "source-b", AuthIndex: "0", Method: "GET", Path: "/v1/models", RequestedAt: base.Add(-1 * time.Hour)},
+		UsageRecord{APIKey: "api-2", Model: "model-c", Source: "source-b", AuthIndex: "2", Method: "POST", Path: "/v1/responses", RequestedAt: base.Add(-30 * time.Minute)},
+	)
+
+	// Test: no filters, returns all ordered by timestamp DESC
+	results, err := store.QueryMonitorRequestDetails(ctx, nil, 0, "", "", 100)
+	if err != nil {
+		t.Fatalf("QueryMonitorRequestDetails failed: %v", err)
+	}
+	if len(results) != 4 {
+		t.Fatalf("expected 4 results, got %d", len(results))
+	}
+	if results[0].Path != "/v1/responses" {
+		t.Fatalf("expected first result path /v1/responses, got %s", results[0].Path)
+	}
+
+	// Test: filter by method
+	results, err = store.QueryMonitorRequestDetails(ctx, nil, 0, "GET", "", 100)
+	if err != nil {
+		t.Fatalf("QueryMonitorRequestDetails with method filter failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result for GET, got %d", len(results))
+	}
+	if results[0].Model != "model-b" {
+		t.Fatalf("expected model-b, got %s", results[0].Model)
+	}
+
+	// Test: filter by path prefix
+	results, err = store.QueryMonitorRequestDetails(ctx, nil, 0, "", "/v1/chat", 100)
+	if err != nil {
+		t.Fatalf("QueryMonitorRequestDetails with path filter failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results for /v1/chat prefix, got %d", len(results))
+	}
+
+	// Test: time window filter (center=base-2h, window=2h → covers base-3h to base-1h)
+	center := base.Add(-2 * time.Hour)
+	results, err = store.QueryMonitorRequestDetails(ctx, &center, 7200, "", "", 100)
+	if err != nil {
+		t.Fatalf("QueryMonitorRequestDetails with time window failed: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results in time window, got %d", len(results))
+	}
+
+	// Test: limit
+	results, err = store.QueryMonitorRequestDetails(ctx, nil, 0, "", "", 2)
+	if err != nil {
+		t.Fatalf("QueryMonitorRequestDetails with limit failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results with limit, got %d", len(results))
+	}
+
+	// Test: failed flag is preserved
+	results, err = store.QueryMonitorRequestDetails(ctx, nil, 0, "", "", 100)
+	if err != nil {
+		t.Fatalf("QueryMonitorRequestDetails failed: %v", err)
+	}
+	failedCount := 0
+	for _, r := range results {
+		if r.Failed {
+			failedCount++
+		}
+	}
+	if failedCount != 1 {
+		t.Fatalf("expected 1 failed record, got %d", failedCount)
+	}
+}

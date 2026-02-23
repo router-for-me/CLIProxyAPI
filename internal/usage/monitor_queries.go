@@ -120,6 +120,18 @@ type monitorQueryableStore interface {
 	QueryMonitorRequestLogs(ctx context.Context, filter MonitorQueryFilter, page, pageSize, recentLimit int) (MonitorRequestLogsResult, error)
 	QueryMonitorChannelStats(ctx context.Context, filter MonitorQueryFilter, limit, recentLimit int) (MonitorChannelStatsResult, error)
 	QueryMonitorFailureStats(ctx context.Context, filter MonitorQueryFilter, limit, recentLimit int) (MonitorFailureStatsResult, error)
+	QueryMonitorRequestDetails(ctx context.Context, center *time.Time, windowSec int, method, path string, limit int) ([]MonitorRequestDetail, error)
+}
+
+// MonitorRequestDetail represents a single request detail row for the request-details endpoint.
+type MonitorRequestDetail struct {
+	Timestamp time.Time
+	Method    string
+	Path      string
+	Model     string
+	Source    string
+	AuthIndex string
+	Failed    bool
 }
 
 // MonitorGroupKey returns the stable grouping key used by request log aggregates.
@@ -163,6 +175,18 @@ func (p *DatabasePlugin) QueryMonitorFailureStats(ctx context.Context, filter Mo
 	return queryable.QueryMonitorFailureStats(ctx, normalizeMonitorFilter(filter), limit, recentLimit)
 }
 
+// QueryMonitorRequestDetails queries request details directly from persistence layer.
+func (p *DatabasePlugin) QueryMonitorRequestDetails(ctx context.Context, center *time.Time, windowSec int, method, path string, limit int) ([]MonitorRequestDetail, error) {
+	queryable, err := p.monitorQueryableStore()
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return queryable.QueryMonitorRequestDetails(ctx, center, windowSec, method, path, limit)
+}
+
 func (p *DatabasePlugin) monitorQueryableStore() (monitorQueryableStore, error) {
 	if p == nil || p.store == nil {
 		return nil, ErrMonitorQueryUnsupported
@@ -193,6 +217,13 @@ func (s *mirrorUsageStore) QueryMonitorFailureStats(ctx context.Context, filter 
 		return MonitorFailureStatsResult{}, fmt.Errorf("usage store: mirror store not initialized")
 	}
 	return s.local.QueryMonitorFailureStats(ctx, filter, limit, recentLimit)
+}
+
+func (s *mirrorUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *time.Time, windowSec int, method, path string, limit int) ([]MonitorRequestDetail, error) {
+	if s == nil || s.local == nil {
+		return nil, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	return s.local.QueryMonitorRequestDetails(ctx, center, windowSec, method, path, limit)
 }
 
 func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter MonitorQueryFilter, page, pageSize, recentLimit int) (MonitorRequestLogsResult, error) {
@@ -954,6 +985,77 @@ func sortedSet(items map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *time.Time, windowSec int, method, path string, limit int) ([]MonitorRequestDetail, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("usage store: sqlite store not initialized")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	clauses := []string{}
+	args := []any{}
+
+	if center != nil && windowSec > 0 {
+		half := int64(windowSec) / 2
+		start := center.Unix() - half
+		end := center.Unix() + half
+		clauses = append(clauses, "requested_at >= ?", "requested_at <= ?")
+		args = append(args, start, end)
+	}
+	if method != "" {
+		clauses = append(clauses, "method = ?")
+		args = append(args, method)
+	}
+	if path != "" {
+		clauses = append(clauses, "path LIKE ? ESCAPE '\\'")
+		args = append(args, escapeSQLiteLike(path)+"%")
+	}
+
+	whereClause := "1=1"
+	if len(clauses) > 0 {
+		whereClause = strings.Join(clauses, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT requested_at, method, path, model,
+			COALESCE(NULLIF(source, ''), 'unknown'), auth_index, failed
+		FROM usage_records
+		WHERE %s
+		ORDER BY requested_at DESC
+		LIMIT ?
+	`, whereClause)
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("usage store: query monitor request details: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]MonitorRequestDetail, 0, limit)
+	for rows.Next() {
+		var (
+			item     MonitorRequestDetail
+			unixTime int64
+			failed   int
+		)
+		if err = rows.Scan(&unixTime, &item.Method, &item.Path, &item.Model, &item.Source, &item.AuthIndex, &failed); err != nil {
+			return nil, fmt.Errorf("usage store: scan monitor request detail: %w", err)
+		}
+		item.Timestamp = time.Unix(unixTime, 0)
+		item.Failed = failed != 0
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage store: iterate monitor request details: %w", err)
+	}
+	return items, nil
 }
 
 func containsModel(models []MonitorModelStats, target string) bool {

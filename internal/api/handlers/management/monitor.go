@@ -1668,3 +1668,68 @@ func (h *Handler) GetMonitorKeyStats(c *gin.Context) {
 		},
 	})
 }
+
+// GetMonitorRequestDetails returns request-level details with method/path from the database.
+func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
+	var center *time.Time
+	if raw := firstQuery(c, "timestamp", "center", "ts"); raw != "" {
+		parsed, err := parseFlexibleTimestamp(raw, false)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		center = &parsed
+	}
+
+	windowSec, err := parseBoundedInt(firstQuery(c, "window_seconds", "window"), 300, 1, 86400)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	limit, err := parseBoundedInt(firstQuery(c, "limit"), 100, 1, 500)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	method := strings.ToUpper(strings.TrimSpace(firstQuery(c, "method")))
+	path := strings.TrimSpace(firstQuery(c, "path"))
+
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin == nil {
+		c.JSON(http.StatusOK, gin.H{"items": []any{}})
+		return
+	}
+
+	results, queryErr := dbPlugin.QueryMonitorRequestDetails(c.Request.Context(), center, windowSec, method, path, limit)
+	if queryErr != nil {
+		c.JSON(http.StatusOK, gin.H{"items": []any{}})
+		return
+	}
+
+	type requestDetailItem struct {
+		Timestamp time.Time `json:"timestamp"`
+		Method    string    `json:"method"`
+		Path      string    `json:"path"`
+		Model     string    `json:"model"`
+		Source    string    `json:"source"`
+		AuthIndex string    `json:"auth_index"`
+		Failed    bool      `json:"failed"`
+	}
+
+	items := make([]requestDetailItem, 0, len(results))
+	for _, r := range results {
+		items = append(items, requestDetailItem{
+			Timestamp: r.Timestamp,
+			Method:    r.Method,
+			Path:      r.Path,
+			Model:     r.Model,
+			Source:    r.Source,
+			AuthIndex: r.AuthIndex,
+			Failed:    r.Failed,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
