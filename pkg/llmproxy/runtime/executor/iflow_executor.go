@@ -434,7 +434,6 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 	auth.Metadata["type"] = "iflow"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
 
-	// Avoid logging token material.
 	log.Debug("iflow executor: token refresh successful")
 
 	if auth.Attributes == nil {
