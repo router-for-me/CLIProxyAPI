@@ -26,7 +26,6 @@ run_matrix_check() {
 create_fake_curl() {
   local output_path="$1"
   local state_file="$2"
-  local status_sequence="$3"
 
   cat >"${output_path}" <<'EOF'
 #!/usr/bin/env bash
@@ -171,6 +170,27 @@ run_cheapest_case() {
   rm -rf "${workdir}"
 }
 
+run_create_fake_curl_min_args_case() {
+  local workdir
+  workdir="$(mktemp -d)"
+  local fake_curl="${workdir}/fake-curl.sh"
+  local state="${workdir}/state"
+
+  create_fake_curl "${fake_curl}" "${state}"
+
+  run_matrix_check "create_fake_curl works with required args only" 0 \
+    env \
+      STATUS_SEQUENCE="200" \
+      STATE_FILE="${state}" \
+      CLIPROXY_PROVIDER_SMOKE_CASES="openai:gpt-4o-mini" \
+      CLIPROXY_SMOKE_CURL_BIN="${fake_curl}" \
+      CLIPROXY_SMOKE_WAIT_FOR_READY="0" \
+      CLIPROXY_SMOKE_TIMEOUT_SECONDS="1" \
+      ./scripts/provider-smoke-matrix.sh
+
+  rm -rf "${workdir}"
+}
+
 run_cheapest_all_override_case() {
   local workdir
   workdir="$(mktemp -d)"
@@ -218,6 +238,7 @@ run_skip_case
 run_pass_case
 run_fail_case
 run_cheapest_case
+run_create_fake_curl_min_args_case
 run_cheapest_all_override_case
 run_cheapest_all_fallback_case
 

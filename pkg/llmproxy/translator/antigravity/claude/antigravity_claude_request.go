@@ -159,10 +159,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 						clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
-						prompt := contentResult.Get("text").String()
+						prompt := strings.TrimSpace(contentResult.Get("text").String())
 						// Skip empty text parts to avoid Gemini API error:
 						// "required oneof field 'data' must have one initialized field"
-						if prompt == "" {
+						if strings.TrimSpace(prompt) == "" {
 							continue
 						}
 						partJSON := `{}`

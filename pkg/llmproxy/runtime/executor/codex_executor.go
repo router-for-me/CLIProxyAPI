@@ -558,7 +558,7 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("codex executor: refresh called")
 	if auth == nil {
-		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "codex executor: missing auth"}
 	}
 	var refreshToken string
 	if auth.Metadata != nil {

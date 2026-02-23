@@ -73,6 +73,48 @@ func TestConvertClaudeRequestToAntigravity_RoleMapping(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_SkipsWhitespaceOnlyTextBlocks(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-3-5-sonnet-20240620",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "   \n\t  "}]},
+			{"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	contents := gjson.Get(outputStr, "request.contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("expected only non-empty content entry, got %d", len(contents))
+	}
+	if contents[0].Get("parts.0.text").String() != "Hello" {
+		t.Fatalf("expected assistant text to remain, got %s", contents[0].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_SkipsWhitespaceOnlyTextBlocks(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-3-5-sonnet-20240620",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "   \n\t  "}]},
+			{"role": "user", "content": [{"type": "text", "text": "Hello"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	contents := gjson.Get(outputStr, "request.contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("expected 1 non-empty content entry, got %d", len(contents))
+	}
+	if contents[0].Get("parts.0.text").String() != "Hello" {
+		t.Fatalf("expected non-empty text content to remain")
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ThinkingBlocks(t *testing.T) {
 	cache.ClearSignatureCache("")
 

@@ -87,6 +87,23 @@ func TestConvertOpenAIRequestToGeminiSkipsEmptyAssistantMessage(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToGeminiSkipsWhitespaceOnlyAssistantMessage(t *testing.T) {
+	input := []byte(`{
+		"model":"gemini-2.5-pro",
+		"messages":[
+			{"role":"user","content":"first"},
+			{"role":"assistant","content":"   \n\t  "},
+			{"role":"user","content":"second"}
+		]
+	}`)
+
+	got := ConvertOpenAIRequestToGemini("gemini-2.5-pro", input, false)
+	res := gjson.ParseBytes(got)
+	if count := len(res.Get("contents").Array()); count != 2 {
+		t.Fatalf("expected 2 content entries (assistant whitespace-only skipped), got %d", count)
+	}
+}
+
 func TestConvertOpenAIRequestToGeminiStrictToolSchemaSetsClosedObject(t *testing.T) {
 	input := []byte(`{
 		"model":"gemini-2.5-pro",

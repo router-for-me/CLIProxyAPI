@@ -78,10 +78,10 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				contentsResult.ForEach(func(_, contentResult gjson.Result) bool {
 					switch contentResult.Get("type").String() {
 					case "text":
-						text := contentResult.Get("text").String()
+						text := strings.TrimSpace(contentResult.Get("text").String())
 						// Skip empty text parts to avoid Gemini API error:
 						// "required oneof field 'data' must have one initialized field"
-						if text == "" {
+						if strings.TrimSpace(text) == "" {
 							return true
 						}
 						part := `{"text":""}`
@@ -122,9 +122,9 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
 				}
 			} else if contentsResult.Type == gjson.String {
-				text := contentsResult.String()
+				text := strings.TrimSpace(contentsResult.String())
 				// Skip empty text parts to avoid Gemini API error
-				if text != "" {
+				if strings.TrimSpace(text) != "" {
 					part := `{"text":""}`
 					part, _ = sjson.Set(part, "text", text)
 					contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)

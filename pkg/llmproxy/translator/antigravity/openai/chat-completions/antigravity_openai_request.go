@@ -192,7 +192,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						switch item.Get("type").String() {
 						case "text":
 							text := item.Get("text").String()
-							if text != "" {
+							if strings.TrimSpace(text) != "" {
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
 							}
 							p++
@@ -230,7 +230,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			} else if role == "assistant" {
 				node := []byte(`{"role":"model","parts":[]}`)
 				p := 0
-				if content.Type == gjson.String && content.String() != "" {
+				if content.Type == gjson.String && strings.TrimSpace(content.String()) != "" {
 					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
 					p++
 				} else if content.IsArray() {
@@ -239,7 +239,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						switch item.Get("type").String() {
 						case "text":
 							text := item.Get("text").String()
-							if text != "" {
+							if strings.TrimSpace(text) != "" {
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
 							}
 							p++

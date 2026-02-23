@@ -107,3 +107,43 @@ func TestConvertClaudeRequestToGemini_SanitizesToolUseThoughtSignature(t *testin
 		t.Fatalf("expected thoughtSignature %q, got %q", geminiClaudeThoughtSignature, part.Get("thoughtSignature").String())
 	}
 }
+
+func TestConvertClaudeRequestToGemini_SkipsWhitespaceOnlyTextParts(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"   \n\t  "}]},
+			{"role":"assistant","content":[{"type":"text","text":"ok"}]}
+		]
+	}`)
+
+	got := ConvertClaudeRequestToGemini("gemini-2.5-pro", input, false)
+	res := gjson.ParseBytes(got)
+
+	contents := res.Get("contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("expected only non-empty message to remain, got %d entries", len(contents))
+	}
+	if contents[0].Get("parts.0.text").String() != "ok" {
+		t.Fatalf("expected assistant text to remain, got %s", contents[0].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToGeminiSkipsWhitespaceOnlyTextBlocks(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"   \n\t  "}]},
+			{"role":"user","content":[{"type":"text","text":"hello"}]}
+		]
+	}`)
+
+	got := ConvertClaudeRequestToGemini("gemini-2.5-pro", input, false)
+	res := gjson.ParseBytes(got)
+
+	contents := res.Get("contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("expected only 1 non-empty content entry, got %d", len(contents))
+	}
+	if contents[0].Get("parts.0.text").String() != "hello" {
+		t.Fatalf("expected non-empty text content to remain")
+	}
+}
