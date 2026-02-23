@@ -59,3 +59,28 @@ func TestConvertClaudeRequestToCodex_CustomToolConvertedToFunctionSchema(t *test
 		t.Fatalf("expected tools[0].parameters.type object, got %s", paramType)
 	}
 }
+
+func TestConvertClaudeRequestToCodex_WebSearchToolTypeIsMapped(t *testing.T) {
+	input := []byte(`{
+		"model": "claude-3-5-sonnet-20240620",
+		"messages": [
+			{"role": "user", "content": "hello"}
+		],
+		"tools": [
+			{
+				"name": "web_search",
+				"type": "web_search_20250305"
+			}
+		]
+	}`)
+
+	got := ConvertClaudeRequestToCodex("gpt-4o", input, true)
+	res := gjson.ParseBytes(got)
+
+	if gotType := res.Get("tools.0.type").String(); gotType != "web_search" {
+		t.Fatalf("expected mapped web search tool type, got %q", gotType)
+	}
+	if toolName := res.Get("tools.0.name").String(); toolName != "" {
+		t.Fatalf("web_search mapping should not set explicit name, got %q", toolName)
+	}
+}

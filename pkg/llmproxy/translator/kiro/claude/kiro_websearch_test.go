@@ -22,6 +22,16 @@ func TestHasWebSearchTool(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "web search with legacy type prefix",
+			body: `{"tools":[{"type":"web_search_202501"}]}`,
+			want: true,
+		},
+		{
+			name: "web search with uppercase type",
+			body: `{"tools":[{"type":"WEB_SEARCH_20250305"}]}`,
+			want: true,
+		},
+		{
 			name: "multiple tools",
 			body: `{"tools":[{"name":"web_search"},{"name":"other"}]}`,
 			want: false,

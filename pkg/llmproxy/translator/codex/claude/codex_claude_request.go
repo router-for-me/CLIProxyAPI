@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -183,7 +184,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
-			if toolResult.Get("type").String() == "web_search_20250305" {
+			if util.IsWebSearchTool(toolResult.Get("name").String(), toolResult.Get("type").String()) {
 				// Replace the tool content entirely with {"type":"web_search"}
 				template, _ = sjson.SetRaw(template, "tools.-1", `{"type":"web_search"}`)
 				continue
