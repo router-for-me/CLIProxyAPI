@@ -17,10 +17,21 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"gopkg.in/yaml.v3"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/ratelimit"
 )
+
+// SDKConfig is an alias to sdk/config.SDKConfig.
+type SDKConfig = sdkconfig.SDKConfig
+// VertexCompatKey is an alias to sdk/config.VertexCompatKey.
+type VertexCompatKey = sdkconfig.VertexCompatKey
+// VertexCompatModel is an alias to sdk/config.VertexCompatModel.
+type VertexCompatModel = sdkconfig.VertexCompatModel
+
+
+
 
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"

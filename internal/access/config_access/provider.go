@@ -5,12 +5,12 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
 // Register ensures the config-access provider is available to the access manager.
-func Register(cfg *sdkconfig.SDKConfig) {
+func Register(cfg *config.SDKConfig) {
 	if cfg == nil {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return

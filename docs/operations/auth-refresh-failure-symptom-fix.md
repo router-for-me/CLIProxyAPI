@@ -12,10 +12,7 @@ Use this table when token refresh is failing for OAuth/session-based providers.
 | `iflow executor: token refresh failed` (or similar OAuth refresh errors) | Check auth record has non-empty `refresh_token` and recent `expires_at` timestamp | Follow provider-agnostic sequence: re-login -> management refresh -> one canary `/v1/chat/completions` before reopening traffic |
 | Kiro IDC refresh fails with `400/401` repeatedly (`#149` scope) | Confirm `auth_method=idc` token has `client_id`, `client_secret`, `region`, and `refresh_token` | Re-login with `--kiro-aws-authcode` or `--kiro-aws-login`; verify refreshed token file fields before re-enabling traffic |
 | Kiro login account selection seems ignored (`#102` scope) | Check logs for `kiro: using normal browser mode (--no-incognito)` | Remove `--no-incognito` unless reusing an existing session is intended; default incognito mode is required for clean multi-account selection |
-<<<<<<< HEAD
 | Kiro shows "no authentication available" (`#96` scope) | `GET /v1/models` has no `kiro/*` IDs and `auths/` has no valid Kiro token file | Decision tree: (1) login with `--kiro-aws-authcode` (or `--kiro-aws-login`) in incognito mode, (2) verify token JSON has `refresh_token` + `expires_at`, (3) trigger management refresh, (4) re-check `/v1/models` before routing traffic |
-=======
->>>>>>> archive/pr-234-head-20260223
 | Manual status appears stale after refresh (`#136` scope) | Compare token file `expires_at` and management refresh response | Trigger refresh endpoint, then reload config/watcher if needed and confirm `expires_at` moved forward |
 
 ## Fast Commands

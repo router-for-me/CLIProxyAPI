@@ -1176,11 +1176,7 @@
       "priority": "P1",
       "effort": "S",
       "wave": "wave-1",
-<<<<<<< HEAD
       "status": "proposed",
-=======
-      "status": "in_progress",
->>>>>>> archive/pr-234-head-20260223
       "implementation_ready": "yes",
       "source_kind": "issue",
       "source_repo": "router-for-me/CLIProxyAPI",
@@ -1195,11 +1191,7 @@
       "priority": "P1",
       "effort": "S",
       "wave": "wave-1",
-<<<<<<< HEAD
       "status": "proposed",
-=======
-      "status": "in_progress",
->>>>>>> archive/pr-234-head-20260223
       "implementation_ready": "yes",
       "source_kind": "issue",
       "source_repo": "router-for-me/CLIProxyAPI",

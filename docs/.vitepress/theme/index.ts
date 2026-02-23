@@ -3,7 +3,6 @@ import { tabsClientScript } from '../plugins/content-tabs'
 
 export default {
   extends: DefaultTheme,
-<<<<<<< HEAD
   enhanceApp() {
     if (typeof window === 'undefined') {
       return
@@ -32,8 +31,6 @@ export default {
 
     window.setTimeout(applyMermaidColorFallback, 0)
   },
-=======
->>>>>>> archive/pr-234-head-20260223
   scripts: [
     {
       src: 'data:text/javascript,' + encodeURIComponent(tabsClientScript),

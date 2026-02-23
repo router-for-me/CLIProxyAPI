@@ -1,8 +1,10 @@
 package executor
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"sync"
 	"time"
 )
@@ -16,7 +18,10 @@ var (
 	userIDCache            = make(map[string]userIDCacheEntry)
 	userIDCacheMu          sync.RWMutex
 	userIDCacheCleanupOnce sync.Once
+	userIDCacheHashKey     = resolveUserIDCacheHashKey()
 )
+
+const userIDCacheHashFallback = "executor-user-id-cache:hmac-sha256-v1"
 
 const (
 	userIDTTL                = time.Hour
@@ -45,8 +50,16 @@ func purgeExpiredUserIDs() {
 }
 
 func userIDCacheKey(apiKey string) string {
-	sum := sha256.Sum256([]byte(apiKey))
-	return hex.EncodeToString(sum[:])
+	hasher := hmac.New(sha256.New, userIDCacheHashKey)
+	_, _ = hasher.Write([]byte(apiKey))
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+func resolveUserIDCacheHashKey() []byte {
+	if env := os.Getenv("CLIPROXY_USER_ID_CACHE_HASH_KEY"); env != "" {
+		return []byte(env)
+	}
+	return []byte(userIDCacheHashFallback)
 }
 
 func cachedUserID(apiKey string) string {

@@ -16,6 +16,8 @@ func TestFileTokenStoreResolveDeletePathRejectsEscapeInputs(t *testing.T) {
 	absolute := filepath.Join(t.TempDir(), "outside.json")
 	cases := []string{
 		"../outside.json",
+		"..\\outside.json",
+		"..//..%2foutside.json",
 		absolute,
 	}
 	for _, id := range cases {

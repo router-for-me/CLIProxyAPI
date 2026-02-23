@@ -41,7 +41,7 @@ func TestManager_Authenticate(t *testing.T) {
 	m.SetProviders([]Provider{p1, p2})
 
 	// Test success
-	res, err = m.Authenticate(context.Background(), nil)
+	_, err = m.Authenticate(context.Background(), nil)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}

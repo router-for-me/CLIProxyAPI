@@ -8,48 +8,6 @@ Use this page for fast, provider-specific `config.yaml` setups with a single req
 - Client API key configured in `api-keys` (or management endpoint auth in your deployment model).
 - `jq` installed for response inspection.
 
-<<<<<<< HEAD
-=======
-## Model Combo Support (Alias Routing Quickstart)
-
-Use this when a client requests a model ID you want to remap to a supported provider/model combination.
-
-`config.yaml`:
-
-```yaml
-api-keys:
-  - "demo-client-key"
-
-ampcode:
-  force-model-mappings: true
-  model-mappings:
-    - from: "claude-opus-4-5-20251101"
-      to: "gemini-claude-opus-4-5-thinking"
-    - from: "claude-sonnet-4-5-20250929"
-      to: "gemini-claude-sonnet-4-5-thinking"
-```
-
-Sanity checks:
-
-```bash
-# 1) Confirm target mapped model is exposed
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'gemini-claude-opus-4-5-thinking|gemini-claude-sonnet-4-5-thinking'
-
-# 2) Send request using source model id and verify success
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"claude-opus-4-5-20251101","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
-```
-
-Expected:
-
-- Request succeeds even if the source model is not natively available.
-- Response model metadata reflects routing behavior from `model-mappings`.
-- If request still fails with model-not-found, verify `from`/`to` names match exactly and restart with updated config.
-
->>>>>>> archive/pr-234-head-20260223
 ## 1) Claude
 
 `config.yaml`:
@@ -103,45 +61,6 @@ curl -N -X POST http://localhost:8317/v1/chat/completions \
 
 If Opus 4.6 is missing from `/v1/models`, verify provider alias mapping and prefix ownership before routing production traffic.
 
-<<<<<<< HEAD
-=======
-Opus 4.5 quickstart sanity check:
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"claude/claude-opus-4-5-20251101","messages":[{"role":"user","content":"ping opus 4.5"}],"stream":false}' | jq '.choices[0].message.content'
-```
-
-Opus 4.5 streaming parity check:
-
-```bash
-curl -N -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"claude/claude-opus-4-5","messages":[{"role":"user","content":"stream opus 4.5"}],"stream":true}'
-```
-
-If Opus 4.5 is missing from `/v1/models`, confirm alias routing is active (`ampcode.model-mappings`) and use a mapped model that is visible for the current API key.
-
-### Nano Banana probe (`CPB-0786`)
-
-Use this to validate Nano Banana alias/model visibility and request flow before enabling broad rollout.
-
-```bash
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'banana|nano|nano-banana|nanobanana'
-
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-nano-banana","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
-```
-
-If the model list does not expose Nano Banana in your account, re-check prefix ownership and mapped aliases in `v1/models` first.
-
->>>>>>> archive/pr-234-head-20260223
 ## 2) Codex
 
 `config.yaml`:
@@ -210,27 +129,6 @@ Troubleshooting (`Question: Does load balancing work with 2 Codex accounts for t
 4. Stream works but non-stream fails:
    - Compare `/v1/responses` payload shape and avoid legacy chat-only fields in Responses requests.
 
-<<<<<<< HEAD
-=======
-### Codex `404` triage (provider-agnostic)
-
-Use this when clients report `404` against codex-family routes and you need a deterministic isolate flow independent of client/runtime.
-
-```bash
-# 1) Confirm codex models are exposed for this API key
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'codex|gpt-5'
-
-# 2) Non-stream probe
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.3-codex","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
-```
-
-If model exposure is missing, switch to one that is present in `/v1/models` before retrying and do not rely on guessed aliases.
-
->>>>>>> archive/pr-234-head-20260223
 ### Codex conversation-tracking alias (`conversation_id`)
 
 For `/v1/responses`, `conversation_id` is accepted as a DX alias and normalized to `previous_response_id`:
@@ -246,25 +144,6 @@ Expected behavior:
 - Upstream payload uses `previous_response_id=resp_prev_123`.
 - If both are sent, explicit `previous_response_id` wins.
 
-<<<<<<< HEAD
-=======
-### `/v1/embeddings` quickstart (OpenAI-compatible path)
-
-For embedding-enabled providers, validate the endpoint directly:
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/embeddings \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"text-embedding-3-small","input":"embedding probe"}' | jq '{object,model,data_count:(.data|length)}'
-```
-
-Expected:
-- `object` equals `list`
-- `data_count >= 1`
-- `model` matches the selected embedding model alias
-
->>>>>>> archive/pr-234-head-20260223
 ## 3) Gemini
 
 `config.yaml`:
@@ -355,34 +234,6 @@ curl -N -X POST http://localhost:8317/v1/chat/completions \
 
 If non-stream succeeds but stream fails, treat it as stream transport/proxy compatibility first. If both fail with `404`, fix alias/model mapping before retry.
 
-<<<<<<< HEAD
-=======
-### `force-model-prefix` with Gemini model-list parity
-
-When `force-model-prefix: true` is enabled, verify prefixed aliases are still returned as client-visible IDs:
-
-```bash
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^gemini/'
-```
-
-If prefixed aliases are missing, avoid rollout and reconcile alias registration before enabling strict prefix enforcement.
-
-### macOS Homebrew install: where is the config file?
-
-Common default paths:
-- Intel macOS: `/usr/local/etc/cliproxyapi/config.yaml`
-- Apple Silicon macOS: `/opt/homebrew/etc/cliproxyapi/config.yaml`
-
-Quick check:
-
-```bash
-for p in /usr/local/etc/cliproxyapi/config.yaml /opt/homebrew/etc/cliproxyapi/config.yaml; do
-  [ -f "$p" ] && echo "found: $p"
-done
-```
-
->>>>>>> archive/pr-234-head-20260223
 ### NVIDIA OpenAI-compat QA scenarios (stream/non-stream parity)
 
 Use these checks when an OpenAI-compatible NVIDIA upstream reports connect failures.
@@ -417,78 +268,6 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"openai-compat/nvidia-model","messages":[{"role":"user","content":"return ok"}],"tools":[{"type":"function","function":{"name":"noop","description":"noop","parameters":{"type":"object","properties":{}}}}],"stream":false}' | jq
 ```
 
-<<<<<<< HEAD
-=======
-### Disabled project button QA scenarios (CPB-0367)
-
-Operators and QA teams rely on stream/non-stream parity to validate the disabled-project toggle introduced for priority workflows. The following commands keep the metadata payload constant while flipping the stream flag so you can confirm the translator emits the `project_control.disable_button` flag for every transport.
-
-1. Non-stream baseline (low priority + disabled button):
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model":"antigravity/opus-2",
-    "messages":[{"role":"user","content":"please disable the project button"}],
-    "stream":false,
-    "metadata":{"project_control":{"disable_button":true,"priority":"low"}}
-  }' | jq
-```
-
-2. Stream parity check (same payload, `stream=true`):
-
-```bash
-curl -N -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model":"antigravity/opus-2",
-    "messages":[{"role":"user","content":"please disable the project button"}],
-    "stream":true,
-    "metadata":{"project_control":{"disable_button":true,"priority":"low"}}
-  }'
-```
-
-3. Edge-case payload (empty prompt + high priority) to exercise fallback paths:
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model":"antigravity/opus-2",
-    "messages":[{"role":"user","content":""}],
-    "stream":false,
-    "metadata":{"project_control":{"disable_button":true,"priority":"high"}}
-  }' | jq
-```
-
-Watch the service logs for entries referencing `project_control.disable_button`. The translated payload should deliver the same metadata regardless of stream mode. Cherry Studio and CLI both look up the alias exposed in `/v1/models`, so make sure the alias referenced by the UI is still registered in the same workspace filter.
-
-### Gemini 3 Aspect Ratio Quickstart (CPB-0374)
-
-Gemini 3 rejects malformed `imageConfig.aspect_ratio` pairs with a `Google API 400 (INVALID_IMAGE_CONFIG)` error. Use this deterministic quickstart to prove the config is sane and the ratio is passed through the translator.
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/images/generate \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model":"gemini/flash",
-    "prompt":"Futuristic rooftop skyline at sunset",
-    "imageConfig":{
-      "aspect_ratio":"16:9",
-      "width":1024,
-      "height":576
-    }
-  }' | jq
-```
-
-If the request still emits `400 Invalid Image Config`, inspect the translator logs to confirm the `aspect_ratio`, `width`, and `height` values survive normalization. The Gemini CLI translator only preserves ratios that match the numeric ratio embedded in the same payload, so make sure the dimensions are consistent (for example, `1024x576` for `16:9`). When in doubt, recompute `height = width / ratio` and re-run the sample above.
-
->>>>>>> archive/pr-234-head-20260223
 ## 4) GitHub Copilot
 
 `config.yaml`:
@@ -533,7 +312,6 @@ kiro:
     prefix: "kiro"
 ```
 
-<<<<<<< HEAD
 Multi-account setup/auth/model/sanity flow (`#108` scope):
 
 1. Set one auth file per account and explicit prefixes (for example `auths/kiro-work.json`, `auths/kiro-personal.json`) to avoid token overwrite.
@@ -554,8 +332,6 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"kiro/claude-opus-4-5","messages":[{"role":"user","content":"quick canary"}],"stream":false}' | jq '.choices[0].finish_reason'
 ```
 
-=======
->>>>>>> archive/pr-234-head-20260223
 Validation:
 
 ```bash
@@ -803,33 +579,6 @@ When users report AiStudio-facing errors, run a deterministic triage:
 
 Keep this flow provider-agnostic so the same checklist works for Gemini/Codex/OpenAI-compatible paths.
 
-<<<<<<< HEAD
-=======
-## RooCode alias + `T.match` quick probe (`CPB-0784`, `CPB-0785`)
-
-Use this when RooCode-style clients fail fast with frontend-side `undefined is not an object (evaluating 'T.match')`.
-
-```bash
-# Ensure RooCode aliases normalize to the Roo provider
-cliproxyctl login --provider roocode --json --config ./config.yaml | jq '{ok,provider:.details.provider,provider_input:.details.provider_input}'
-
-# Verify Roo models are visible to the same client key used by the failing UI
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer <client-key>" | jq -r '.data[].id' | rg '^roo/'
-
-# Run one non-stream canary before retrying the UI flow
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer <client-key>" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"roo/roo-cline-v3.7-thinking","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
-```
-
-Expected:
-- `provider` resolves to `roo` even when input is `roocode` or `roo-code`.
-- At least one `roo/*` model appears from `/v1/models`.
-- Non-stream canary succeeds before stream/UI retries.
-
->>>>>>> archive/pr-234-head-20260223
 ## Global Alias + Model Capability Safety (`CPB-0698`, `CPB-0699`)
 
 Before shipping a global alias change:
@@ -968,81 +717,6 @@ go test ./pkg/llmproxy/translator/antigravity/claude -run 'TestConvertClaudeRequ
 
 Expected: empty `functionResponse` content is not propagated as invalid JSON, and malformed tool args retain the `functionCall` block instead of dropping the tool interaction.
 
-<<<<<<< HEAD
-=======
-## Dynamic model provider quick probe (`CPB-0796`)
-
-```bash
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | head -n 40
-
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"auto","messages":[{"role":"user","content":"provider probe"}],"stream":false}' | jq
-```
-
-Expected: selected provider/model is visible in logs and response is OpenAI-compatible.
-
-## Auth not using proxy path (`CPB-0799`)
-
-```bash
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq '.data|length'
-
-cliproxyctl login --provider gemini --json --config ./config.yaml | jq '{ok,details}'
-```
-
-Expected: login output and runtime both resolve the same `auth-dir`; avoid mixed config paths between shells/containers.
-
-## Gemini 3 Pro no response in Roo (`CPB-0802`, `CPB-0811`)
-
-```bash
-curl -sS http://localhost:8317/v1/models \
-  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'gemini-3-pro-preview|gemini-3-pro'
-
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-3-pro-preview","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
-```
-
-Expected: model is present in `/v1/models` before Roo-side routing; if missing, refresh auth inventory first.
-
-## Gemini thinking budget normalization (`CPB-0806`)
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-3-pro-preview","messages":[{"role":"user","content":"thinking budget check"}],"reasoning":{"effort":"high"},"stream":false}' | jq
-```
-
-Expected: translator normalizes thinking budget fields and returns stable non-stream response shape.
-
-## Scoped `auto` model routing (`CPB-0826`)
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"auto:gemini","messages":[{"role":"user","content":"scoped auto"}],"stream":false}' | jq
-```
-
-Expected: scoped provider hint is honored and final routed model appears in response metadata/logs.
-
-## `candidate_count` rollout guard (`CPB-0829`)
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions \
-  -H "Authorization: Bearer demo-client-key" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"multi candidate check"}],"candidate_count":2,"stream":false}' | jq
-```
-
-Expected: if multi-candidate fanout is unsupported in current provider path, service responds with deterministic guidance instead of silent single-candidate fallback.
-
->>>>>>> archive/pr-234-head-20260223
 ## Antigravity thinking-block + tool schema guardrails (`CPB-0731`, `CPB-0735`, `CPB-0742`, `CPB-0746`)
 
 Use this when Claude/Antigravity returns `400` with `thinking` or `input_schema` complaints.
@@ -1155,109 +829,3 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 ```
 
 Expected: translated request preserves `text.format.schema` and response remains JSON-compatible.
-<<<<<<< HEAD
-=======
-
-## Wave Batch 2 quick probes (`CPB-0783..CPB-0808`)
-
-Use this block to close the next 20-item execution set with deterministic checks.
-
-### Dev refresh + Roo alias + stream parity (`CPB-0783`, `CPB-0784`, `CPB-0785`, `CPB-0787`)
-
-```bash
-cliproxyctl dev --json | jq '{mode,config_path,hints}'
-curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer demo-client-key" | jq '.data[].id' | rg -n "roo|roocode|roo-code"
-curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"roo/auto","messages":[{"role":"user","content":"T.match probe"}],"stream":false}' | jq '.choices[0].message.content,.error'
-curl -N -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"roo/auto","messages":[{"role":"user","content":"stream parity probe"}],"stream":true}'
-```
-
-Expected: `dev` output includes refresh guidance, Roo aliases resolve to one provider identity, and stream/non-stream parity stays consistent.
-
-### Antigravity stream + rollout flag + Sonnet mapping (`CPB-0788`, `CPB-0789`, `CPB-0790`)
-
-```bash
-curl -N -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"antigravity/claude-sonnet-4-5-thinking","messages":[{"role":"user","content":"request isolation probe"}],"stream":true}'
-cliproxyctl doctor --json | jq '.config.feature_flags,.models,.warnings'
-curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer demo-client-key" | jq '.data[] | select(.id|test("gemini-claude-sonnet-4-5")) | {id,owned_by,description}'
-```
-
-Expected: no cross-request leakage in stream translation, feature-flag state is explicit, and Sonnet 4.5 model metadata is consistent.
-
-### Reasoning/cache/compose checks (`CPB-0791`, `CPB-0792`, `CPB-0793`)
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"reasoning normalization probe"}],"reasoning":{"effort":"x-high"},"stream":false}' | jq '{model,usage,error}'
-curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"cache token probe"}],"stream":false}' | jq '{usage,error}'
-docker compose ps
-curl -sS http://localhost:8317/health | jq
-```
-
-Expected: reasoning normalization is accepted, cache token fields are coherent, and docker-compose startup failures are visible via service state + health checks.
-
-### Proxy/auth/usage checks (`CPB-0794`, `CPB-0795`, `CPB-0797`)
-
-```bash
-cliproxyctl doctor --json | jq '.auth,.routing,.warnings'
-curl -sS http://localhost:8317/v0/management/auth-files -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.[] | select(.type=="aistudio") | {name,type,disabled}'
-curl -sS -X PATCH http://localhost:8317/v0/management/auth-files/status -H "X-Management-Secret: ${MANAGEMENT_SECRET}" -H "Content-Type: application/json" -d '{"name":"aistudio-default","enabled":true}' | jq
-curl -sS -X POST http://localhost:8317/v1/responses -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","input":[{"role":"user","content":"usage parity probe"}],"stream":false}' | jq '.usage,.error'
-```
-
-Expected: per-provider proxy/auth behavior is inspectable, AI Studio auth toggle is controllable, and usage/token metadata is present in non-stream probes.
-
-### Setup/manual callback/huggingface checks (`CPB-0798`, `CPB-0800`, `CPB-0803`)
-
-```bash
-cliproxyctl setup --help | rg -n "cursor|antigravity|manual|callback"
-cliproxyctl login --provider openai --manual-callback
-curl -sS http://localhost:8317/v0/management/logs -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.entries[]? | select((.provider // "")=="huggingface" or (.message // "" | test("huggingface"; "i")))'
-curl -sS http://localhost:8317/v0/management/usage -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.providers.huggingface // .'
-```
-
-Expected: setup/login surfaces include manual callback support, and huggingface failures are visible in management logs/usage.
-
-### Codex/Gemini integration parity (`CPB-0804`, `CPB-0805`, `CPB-0807`, `CPB-0808`)
-
-```bash
-curl -sS -X POST http://localhost:8317/v1/responses -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"codex/codex-latest","input":[{"role":"user","content":"codex responses path probe"}],"stream":false}' | jq '{id,model,output,error}'
-curl -N -X POST http://localhost:8317/v1/responses -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-3-pro-preview","input":[{"role":"user","content":"stream parity check"}],"stream":true}'
-curl -sS -X POST http://localhost:8317/v1/responses -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-3-pro-preview","input":[{"role":"user","content":"non-stream parity check"}],"stream":false}' | jq '{usage,error}'
-```
-
-Expected: codex responses path remains provider-agnostic, Gemini 3 Pro preview stream/non-stream are both healthy, and cache-sensitive paths remain deterministic.
-
-## Wave Batch 3 quick probes (`CPB-0809..CPB-0830` remaining 17)
-
-### Rollout flags + metadata normalization (`CPB-0809`, `CPB-0810`, `CPB-0818`, `CPB-0819`, `CPB-0820`, `CPB-0830`)
-
-```bash
-cliproxyctl doctor --json | jq '{feature_flags,models,warnings}'
-curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer demo-client-key" | jq '.data[] | select(.id|test("gpt-5|copilot|gemini-claude-sonnet-4-5")) | {id,owned_by,description}'
-curl -sS -X POST http://localhost:8317/v1/responses/compact -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","input":[{"role":"user","content":"compact contract probe"}]}' | jq '{id,output,error}'
-```
-
-Expected: rollout flags are visible, model metadata stays canonical, and `/responses/compact` behavior is deterministic under staged toggles.
-
-### Dev/HMR + OAuth provider flows (`CPB-0812`, `CPB-0816`, `CPB-0817`, `CPB-0821`)
-
-```bash
-docker compose -f docker-compose.yml config
-docker compose -f examples/process-compose.yaml config
-cliproxyctl login --provider gemini
-cliproxyctl login --provider droid-cli
-curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer demo-client-key" | jq '.data[].id' | rg -n "gemini|droid|claude"
-```
-
-Expected: compose-based refresh workflow is valid, Gemini OAuth flow is documented/reproducible, and droid provider alias resolves to a supported login path.
-
-### Management sync + auth controls + observability (`CPB-0813`, `CPB-0822`, `CPB-0823`, `CPB-0824`, `CPB-0825`, `CPB-0827`, `CPB-0828`)
-
-```bash
-curl -sS http://localhost:8317/v0/management/auth-files -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.[] | {name,type,disabled}'
-curl -sS -X PATCH http://localhost:8317/v0/management/auth-files/status -H "X-Management-Secret: ${MANAGEMENT_SECRET}" -H "Content-Type: application/json" -d '{"name":"aistudio-default","enabled":true}' | jq
-curl -sS http://localhost:8317/v0/management/logs -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.entries[]? | select((.provider // "")|test("kimi|nanobanana|aistudio|management";"i"))'
-curl -sS http://localhost:8317/v0/management/usage -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.providers'
-```
-
-Expected: management ban/auth/sync events are inspectable, AI Studio and non-subprocess integration controls are visible, and provider-specific observability signals are queryable.
->>>>>>> archive/pr-234-head-20260223

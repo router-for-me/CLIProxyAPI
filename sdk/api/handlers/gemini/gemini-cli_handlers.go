@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -38,7 +38,7 @@ func NewGeminiCLIAPIHandler(apiHandlers *handlers.BaseAPIHandler) *GeminiCLIAPIH
 
 // HandlerType returns the type of this handler.
 func (h *GeminiCLIAPIHandler) HandlerType() string {
-	return GeminiCLI
+	return constant.GeminiCLI
 }
 
 // Models returns a list of models supported by this handler.
@@ -62,11 +62,12 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 	rawJSON, _ := c.GetRawData()
 	requestRawURI := c.Request.URL.Path
 
-	if requestRawURI == "/v1internal:generateContent" {
+	switch requestRawURI {
+	case "/v1internal:generateContent":
 		h.handleInternalGenerateContent(c, rawJSON)
-	} else if requestRawURI == "/v1internal:streamGenerateContent" {
+	case "/v1internal:streamGenerateContent":
 		h.handleInternalStreamGenerateContent(c, rawJSON)
-	} else {
+	default:
 		reqBody := bytes.NewBuffer(rawJSON)
 		req, err := http.NewRequest("POST", fmt.Sprintf("https://cloudcode-pa.googleapis.com%s", c.Request.URL.RequestURI()), reqBody)
 		if err != nil {
@@ -162,7 +163,6 @@ func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	h.forwardCLIStream(c, flusher, "", func(err error) { cliCancel(err) }, dataChan, errChan)
-	return
 }
 
 // handleInternalGenerateContent handles non-streaming content generation requests.

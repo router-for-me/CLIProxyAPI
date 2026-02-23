@@ -45,14 +45,6 @@ CI smoke check:
   - OAuth model alias migration runs successfully.
   - migrated config reloads successfully.
 
-<<<<<<< HEAD
-=======
-## 5) Workspace selection and OpenAI accounts (CPB-0369)
-
-- Document the `Wrong workspace selected for OpenAI accounts` symptom in the release notes and link to `docs/operations/provider-outage-triage-quick-guide.md` so operators know which workspace filter to refresh before rolling out the release.
-- Re-run the `/v1/models` workspace list with the final release config to ensure every production workspace has the expected alias/prefix exposure, then lock the release until the workspace defaults are in sync.
-
->>>>>>> archive/pr-234-head-20260223
 ## Related
 
 - [Required Branch Check Ownership](./required-branch-check-ownership.md)

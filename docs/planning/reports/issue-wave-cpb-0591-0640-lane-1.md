@@ -6,15 +6,9 @@
 - Window: `CPB-0591` to `CPB-0595`
 
 ## Status Snapshot
-<<<<<<< HEAD
 - `implemented`: 0
 - `planned`: 0
 - `in_progress`: 5
-=======
-- `implemented`: 2
-- `planned`: 0
-- `in_progress`: 3
->>>>>>> archive/pr-234-head-20260223
 - `blocked`: 0
 
 ## Per-Item Status
@@ -32,17 +26,12 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0592 - Harden "Bug: /v1/responses endpoint does not correctly convert message format for Anthropic API" with clearer validation, safer defaults, and defensive fallbacks.
-<<<<<<< HEAD
 - Status: `in_progress`
-=======
-- Status: `implemented`
->>>>>>> archive/pr-234-head-20260223
 - Theme: `responses-and-chat-compat`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/736`
 - Rationale:
   - Item remains `proposed` in the 1000-item execution board.
   - Requires implementation-ready acceptance criteria and target-path verification before execution.
-<<<<<<< HEAD
 - Proposed verification commands:
   - `rg -n "CPB-0592" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
   - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking` (if implementation touches those surfaces)
@@ -50,33 +39,15 @@
 
 ### CPB-0593 - Operationalize "请问有计划支持显示目前剩余额度吗" with observability, alerting thresholds, and runbook updates.
 - Status: `in_progress`
-=======
-- Verified:
-  - Commit: `aa1e2e2b`
-  - Test: `go test ./pkg/llmproxy/translator/claude/openai/responses -run TestConvertOpenAIResponsesRequestToClaude`
-
-### CPB-0593 - Operationalize "请问有计划支持显示目前剩余额度吗" with observability, alerting thresholds, and runbook updates.
-- Status: `implemented`
->>>>>>> archive/pr-234-head-20260223
 - Theme: `general-polish`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/734`
 - Rationale:
   - Item remains `proposed` in the 1000-item execution board.
   - Requires implementation-ready acceptance criteria and target-path verification before execution.
-<<<<<<< HEAD
 - Proposed verification commands:
   - `rg -n "CPB-0593" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
   - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking` (if implementation touches those surfaces)
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
-=======
-- Verification:
-  - `git diff --name-only HEAD~1 docs/api/management.md docs/provider-operations.md docs/troubleshooting.md`
-  - `docs/api/management.md` includes the `GET /v0/management/kiro-quota` API and examples.
-  - Manual review of management API usage and runbook examples in:
-    - `docs/api/management.md`
-    - `docs/provider-operations.md`
-    - `docs/troubleshooting.md`
->>>>>>> archive/pr-234-head-20260223
 
 ### CPB-0594 - Convert "reasoning_content is null for extended thinking models (thinking goes to content instead)" into a provider-agnostic pattern and codify in shared translation utilities.
 - Status: `in_progress`

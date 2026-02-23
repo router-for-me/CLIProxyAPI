@@ -11,14 +11,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	codexconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/openai/chat-completions"
-	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
+	constant "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
+	codexconverter "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/codex/openai/chat-completions"
+	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -46,7 +47,7 @@ func NewOpenAIAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIAPIHandler
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *OpenAIAPIHandler) HandlerType() string {
-	return OpenAI
+	return constant.OpenAI
 }
 
 // Models returns the OpenAI-compatible model metadata supported by this handler.
@@ -62,10 +63,12 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
+	modelRegistry := registry.GetGlobalRegistry()
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
+	filteredModels := make([]map[string]any, 0, len(allModels))
+	seen := make(map[string]struct{}, len(allModels))
+	appendModel := func(model map[string]any) {
 		filteredModel := map[string]any{
 			"id":     model["id"],
 			"object": model["object"],
@@ -81,7 +84,48 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
-		filteredModels[i] = filteredModel
+		if id, ok := filteredModel["id"].(string); ok && id != "" {
+			if _, exists := seen[id]; exists {
+				return
+			}
+			seen[id] = struct{}{}
+		}
+		filteredModels = append(filteredModels, filteredModel)
+	}
+
+	for _, model := range allModels {
+		appendModel(model)
+
+		baseModelID, ok := model["id"].(string)
+		if !ok || baseModelID == "" || strings.Contains(baseModelID, "/") {
+			continue
+		}
+		providers := modelRegistry.GetModelProviders(baseModelID)
+		if len(providers) <= 1 {
+			continue
+		}
+
+		// Expose provider-pinned aliases (provider/model) to disambiguate colliding model IDs.
+		for _, provider := range providers {
+			provider = strings.TrimSpace(provider)
+			if provider == "" {
+				continue
+			}
+
+			aliasModel := map[string]any{
+				"id":     provider + "/" + baseModelID,
+				"object": model["object"],
+			}
+			if info := modelRegistry.GetModelInfo(baseModelID, provider); info != nil {
+				aliasModel["owned_by"] = info.OwnedBy
+				if info.Created > 0 {
+					aliasModel["created"] = info.Created
+				}
+			} else if ownedBy, exists := model["owned_by"]; exists {
+				aliasModel["owned_by"] = ownedBy
+			}
+			appendModel(aliasModel)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -420,7 +464,6 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 
 	// Check if this chunk has any meaningful content
 	hasContent := false
-	hasFinishReason := false
 	hasUsage := root.Get("usage").Exists()
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
 		chatChoices.ForEach(func(_, choice gjson.Result) bool {
@@ -434,7 +477,6 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 			// Also check for finish_reason to ensure we don't skip final chunks
 			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "" && finishReason.String() != "null" {
 				hasContent = true
-				hasFinishReason = true
 				return false // Break out of forEach
 			}
 			return true
@@ -501,13 +543,9 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 		out, _ = sjson.SetRaw(out, "choices", string(choicesJSON))
 	}
 
-	// Only copy usage if:
-	// 1. This is NOT a terminal finish chunk (hasFinishReason=false), OR
-	// 2. This is a usage-only chunk (no choices)
+	// Copy usage if present
 	if usage := root.Get("usage"); usage.Exists() {
-		if !hasFinishReason || len(choices) == 0 {
-			out, _ = sjson.SetRaw(out, "usage", usage.Raw)
-		}
+		out, _ = sjson.SetRaw(out, "usage", usage.Raw)
 	}
 
 	return []byte(out)
@@ -541,7 +579,7 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponseViaResponses(c *gin.Context
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, constant.OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -651,7 +689,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponseViaResponses(c *gin.Context, r
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, constant.OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
 	var param any
 
 	setSSEHeaders := func() {

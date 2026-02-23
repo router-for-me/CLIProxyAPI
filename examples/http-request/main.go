@@ -70,6 +70,8 @@ func (EchoExecutor) CountTokens(context.Context, *coreauth.Auth, clipexec.Reques
 	return clipexec.Response{}, errors.New("echo executor: CountTokens not implemented")
 }
 
+func (EchoExecutor) CloseExecutionSession(sessionID string) {}
+
 func main() {
 	log.SetLevel(log.InfoLevel)
 

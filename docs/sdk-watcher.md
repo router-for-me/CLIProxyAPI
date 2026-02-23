@@ -10,7 +10,7 @@ The SDK service exposes a watcher integration that surfaces granular auth update
 
 ## Watcher Behaviour
 
-- `internal/watcher/watcher.go` keeps a shadow snapshot of auth state (`currentAuths`). Each filesystem or configuration event triggers a recomputation and a diff against the previous snapshot to produce minimal `AuthUpdate` entries that mirror adds, edits, and removals.
+- `pkg/llmproxy/watcher/watcher.go` keeps a shadow snapshot of auth state (`currentAuths`). Each filesystem or configuration event triggers a recomputation and a diff against the previous snapshot to produce minimal `AuthUpdate` entries that mirror adds, edits, and removals.
 - Updates are coalesced per credential identifier. If multiple changes occur before dispatch (e.g., write followed by delete), only the final action is sent downstream.
 - The watcher runs an internal dispatch loop that buffers pending updates in memory and forwards them asynchronously to the queue. Producers never block on channel capacity; they just enqueue into the in-memory buffer and signal the dispatcher. Dispatch cancellation happens when the watcher stops, guaranteeing goroutines exit cleanly.
 

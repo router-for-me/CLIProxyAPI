@@ -24,9 +24,10 @@ import (
 // - On failure, a fresh sync.Once is swapped in to allow retry on next call
 // - On success, sync.Once stays "done" forever — zero overhead for subsequent calls
 var (
-	toolDescOnce   atomic.Pointer[sync.Once]
-	fallbackFpOnce sync.Once
-	fallbackFp     *kiroauth.Fingerprint
+	cachedToolDescription atomic.Value // stores string
+	toolDescOnce          atomic.Pointer[sync.Once]
+	fallbackFpOnce        sync.Once
+	fallbackFp            *kiroauth.Fingerprint
 )
 
 func init() {
@@ -95,6 +96,15 @@ func FetchToolDescription(mcpEndpoint, authToken string, httpClient *http.Client
 		// web_search tool not found in response
 		toolDescOnce.Store(&sync.Once{}) // allow retry
 	})
+}
+
+// GetWebSearchDescription returns the cached web_search tool description,
+// or empty string if not yet fetched. Lock-free via atomic.Value.
+func GetWebSearchDescription() string {
+	if v := cachedToolDescription.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
 }
 
 // WebSearchHandler handles web search requests via Kiro MCP API
@@ -240,3 +250,21 @@ func (h *WebSearchHandler) CallMcpAPI(request *McpRequest) (*McpResponse, error)
 }
 
 // ParseSearchResults extracts WebSearchResults from MCP response
+func ParseSearchResults(response *McpResponse) *WebSearchResults {
+	if response == nil || response.Result == nil || len(response.Result.Content) == 0 {
+		return nil
+	}
+
+	content := response.Result.Content[0]
+	if content.ContentType != "text" {
+		return nil
+	}
+
+	var results WebSearchResults
+	if err := json.Unmarshal([]byte(content.Text), &results); err != nil {
+		log.Warnf("kiro/websearch: failed to parse search results: %v", err)
+		return nil
+	}
+
+	return &results
+}

@@ -1,6 +1,11 @@
 package openai
 
-import "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+import (
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
+)
 
 const (
 	openAIChatEndpoint      = "/chat/completions"
@@ -8,10 +13,11 @@ const (
 )
 
 func resolveEndpointOverride(modelName, requestedEndpoint string) (string, bool) {
+	modelName = strings.TrimSpace(modelName)
 	if modelName == "" {
 		return "", false
 	}
-	info := registry.GetGlobalRegistry().GetModelInfo(modelName, "")
+	info := lookupModelInfoForEndpointOverride(modelName)
 	if info == nil || len(info.SupportedEndpoints) == 0 {
 		return "", false
 	}
@@ -25,6 +31,36 @@ func resolveEndpointOverride(modelName, requestedEndpoint string) (string, bool)
 		return openAIChatEndpoint, true
 	}
 	return "", false
+}
+
+func lookupModelInfoForEndpointOverride(modelName string) *registry.ModelInfo {
+	if info := registry.GetGlobalRegistry().GetModelInfo(modelName, ""); info != nil {
+		return info
+	}
+
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
+	if baseModel != "" && baseModel != modelName {
+		if info := registry.GetGlobalRegistry().GetModelInfo(baseModel, ""); info != nil {
+			return info
+		}
+	}
+
+	providerPinnedModel := modelName
+	if slash := strings.IndexByte(modelName, '/'); slash > 0 && slash+1 < len(modelName) {
+		providerPinnedModel = strings.TrimSpace(modelName[slash+1:])
+	}
+	if providerPinnedModel != "" && providerPinnedModel != modelName {
+		if info := registry.GetGlobalRegistry().GetModelInfo(providerPinnedModel, ""); info != nil {
+			return info
+		}
+		if providerPinnedBase := strings.TrimSpace(thinking.ParseSuffix(providerPinnedModel).ModelName); providerPinnedBase != "" && providerPinnedBase != providerPinnedModel {
+			if info := registry.GetGlobalRegistry().GetModelInfo(providerPinnedBase, ""); info != nil {
+				return info
+			}
+		}
+	}
+
+	return nil
 }
 
 func endpointListContains(items []string, value string) bool {
