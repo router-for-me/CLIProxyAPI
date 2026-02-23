@@ -409,9 +409,9 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 		return auth, nil
 	}
 
-	// Log the old access token (masked) before refresh
+	// Log refresh start without including token material.
 	if oldAccessToken != "" {
-		log.Debugf("iflow executor: refreshing access token, old: %s", util.HideAPIKey(oldAccessToken))
+		log.Debug("iflow executor: refreshing access token")
 	}
 
 	svc := iflowauth.NewIFlowAuth(e.cfg, nil)

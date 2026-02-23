@@ -135,15 +135,14 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 
 	// 4. Get config: suffix priority over body
 	var config ThinkingConfig
-	if suffixResult.HasSuffix {
-		config = parseSuffixToConfig(suffixResult.RawSuffix, providerFormat, model)
-		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    model,
-			"mode":     config.Mode,
-			"budget":   config.Budget,
-			"level":    config.Level,
-		}).Debug("thinking: config from model suffix |")
+		if suffixResult.HasSuffix {
+			config = parseSuffixToConfig(suffixResult.RawSuffix, providerFormat, model)
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"mode":     config.Mode,
+				"budget":   config.Budget,
+				"level":    config.Level,
+			}).Debug("thinking: config from model suffix |")
 	} else {
 		config = extractThinkingConfig(body, providerFormat)
 		if hasThinkingConfig(config) {
