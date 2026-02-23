@@ -1,6 +1,13 @@
 package auth
 
-import "testing"
+import (
+	"context"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+)
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()
@@ -76,5 +83,44 @@ func TestExtractAccessToken(t *testing.T) {
 				t.Errorf("extractAccessToken() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestFileTokenStoreSave_RejectsPathOutsideBaseDir(t *testing.T) {
+	t.Parallel()
+
+	store := NewFileTokenStore()
+	baseDir := t.TempDir()
+	store.SetBaseDir(baseDir)
+
+	auth := &cliproxyauth.Auth{
+		ID:       "outside.json",
+		FileName: "../../outside.json",
+		Metadata: map[string]any{"type": "kiro"},
+	}
+
+	_, err := store.Save(context.Background(), auth)
+	if err == nil {
+		t.Fatalf("expected save to reject path traversal")
+	}
+	if !strings.Contains(err.Error(), "escapes base directory") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFileTokenStoreDelete_RejectsAbsolutePathOutsideBaseDir(t *testing.T) {
+	t.Parallel()
+
+	store := NewFileTokenStore()
+	baseDir := t.TempDir()
+	store.SetBaseDir(baseDir)
+
+	outside := filepath.Join(filepath.Dir(baseDir), "outside.json")
+	err := store.Delete(context.Background(), outside)
+	if err == nil {
+		t.Fatalf("expected delete to reject absolute path outside base dir")
+	}
+	if !strings.Contains(err.Error(), "escapes base directory") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -245,14 +245,14 @@ func (a *KiroAuthenticator) LoginWithAuthCode(ctx context.Context, cfg *config.C
 // NOTE: Google login is not available for third-party applications due to AWS Cognito restrictions.
 // Please use AWS Builder ID or import your token from Kiro IDE.
 func (a *KiroAuthenticator) LoginWithGoogle(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
-	return nil, fmt.Errorf("Google login is not available for third-party applications due to AWS Cognito restrictions.\n\nAlternatives:\n  1. Use AWS Builder ID: cliproxy kiro --builder-id\n  2. Import token from Kiro IDE: cliproxy kiro --import\n\nTo get a token from Kiro IDE:\n  1. Open Kiro IDE and login with Google\n  2. Find: ~/.kiro/kiro-auth-token.json\n  3. Run: cliproxy kiro --import")
+	return nil, fmt.Errorf("google login is not available for third-party applications due to AWS Cognito restrictions.\n\nAlternatives:\n  1. Use AWS Builder ID: cliproxy kiro --builder-id\n  2. Import token from Kiro IDE: cliproxy kiro --import\n\nTo get a token from Kiro IDE:\n  1. Open Kiro IDE and login with Google\n  2. Find: ~/.kiro/kiro-auth-token.json\n  3. Run: cliproxy kiro --import")
 }
 
 // LoginWithGitHub performs OAuth login for Kiro with GitHub.
 // NOTE: GitHub login is not available for third-party applications due to AWS Cognito restrictions.
 // Please use AWS Builder ID or import your token from Kiro IDE.
 func (a *KiroAuthenticator) LoginWithGitHub(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
-	return nil, fmt.Errorf("GitHub login is not available for third-party applications due to AWS Cognito restrictions.\n\nAlternatives:\n  1. Use AWS Builder ID: cliproxy kiro --builder-id\n  2. Import token from Kiro IDE: cliproxy kiro --import\n\nTo get a token from Kiro IDE:\n  1. Open Kiro IDE and login with GitHub\n  2. Find: ~/.kiro/kiro-auth-token.json\n  3. Run: cliproxy kiro --import")
+	return nil, fmt.Errorf("github login is not available for third-party applications due to AWS Cognito restrictions.\n\nAlternatives:\n  1. Use AWS Builder ID: cliproxy kiro --builder-id\n  2. Import token from Kiro IDE: cliproxy kiro --import\n\nTo get a token from Kiro IDE:\n  1. Open Kiro IDE and login with GitHub\n  2. Find: ~/.kiro/kiro-auth-token.json\n  3. Run: cliproxy kiro --import")
 }
 
 // ImportFromKiroIDE imports token from Kiro IDE's token file.
@@ -360,6 +360,12 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 
 	ssoClient := kiroauth.NewSSOOIDCClient(cfg)
 
+	// IDC tokens require registered client credentials for refresh. Falling back to
+	// the social OAuth refresh endpoint for IDC tokens is incorrect and causes opaque failures.
+	if authMethod == "idc" && (clientID == "" || clientSecret == "") {
+		return nil, fmt.Errorf("token refresh failed: missing idc client credentials (auth=%s, client_id/client_secret); re-login with --kiro-aws-login/--kiro-aws-authcode or re-import Kiro IDE token with device registration cache present", auth.ID)
+	}
+
 	// Use SSO OIDC refresh for AWS Builder ID or IDC, otherwise use Kiro's OAuth refresh endpoint
 	switch {
 	case clientID != "" && clientSecret != "" && authMethod == "idc" && region != "":
@@ -375,7 +381,7 @@ func (a *KiroAuthenticator) Refresh(ctx context.Context, cfg *config.Config, aut
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("token refresh failed: %w", err)
+		return nil, fmt.Errorf("token refresh failed (auth_method=%s): %w", authMethod, err)
 	}
 
 	// Parse expires_at

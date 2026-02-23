@@ -12,17 +12,17 @@ import (
 	"sync"
 	"time"
 
+	"context"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
-	"golang.org/x/net/context"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -103,7 +103,10 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 
 	trimmed := strings.TrimSpace(errText)
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
-		return []byte(trimmed)
+		if jsonHasTopLevelError(trimmed) {
+			return []byte(trimmed)
+		}
+		errText = fmt.Sprintf("upstream returned JSON without top-level error field: %s", trimmed)
 	}
 
 	errType := "invalid_request_error"
@@ -121,6 +124,7 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 	case http.StatusNotFound:
 		errType = "invalid_request_error"
 		code = "model_not_found"
+		errText = enrichModelNotFoundMessage(errText)
 	default:
 		if status >= http.StatusInternalServerError {
 			errType = "server_error"
@@ -139,6 +143,30 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 		return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText))
 	}
 	return payload
+}
+
+func jsonHasTopLevelError(payload string) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+		return false
+	}
+	_, ok := obj["error"]
+	return ok
+}
+
+func enrichModelNotFoundMessage(message string) string {
+	trimmed := strings.TrimSpace(message)
+	lower := strings.ToLower(trimmed)
+	if strings.Contains(lower, "/v1/models") {
+		return trimmed
+	}
+	if strings.Contains(lower, "model_not_found") ||
+		strings.Contains(lower, "does not exist") ||
+		strings.Contains(lower, "requested model") ||
+		strings.Contains(lower, "not found") {
+		return trimmed + " Verify available IDs with GET /v1/models and request an exact exposed model ID."
+	}
+	return trimmed
 }
 
 // StreamingKeepAliveInterval returns the SSE keep-alive interval for this server.
@@ -190,7 +218,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// It is forwarded as execution metadata; when absent we generate a UUID.
 	key := ""
 	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if ginCtx := contextGin(ctx); ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 		}
 	}
@@ -209,6 +237,27 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
 	return meta
+}
+
+type ginContextLookupKey string
+
+const ginContextLookupKeyToken ginContextLookupKey = "gin"
+
+func contextGin(ctx context.Context) *gin.Context {
+	if ctx == nil {
+		return nil
+	}
+	if ginCtxRaw := ctx.Value(ginContextLookupKeyToken); ginCtxRaw != nil {
+		if ginCtx, ok := ginCtxRaw.(*gin.Context); ok {
+			return ginCtx
+		}
+	}
+	if ginCtxRaw := ctx.Value("gin"); ginCtxRaw != nil {
+		if ginCtx, ok := ginCtxRaw.(*gin.Context); ok {
+			return ginCtx
+		}
+	}
+	return nil
 }
 
 func pinnedAuthIDFromContext(ctx context.Context) string {
@@ -349,8 +398,8 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			}
 		}()
 	}
-	newCtx = context.WithValue(newCtx, "gin", c)
-	newCtx = context.WithValue(newCtx, "handler", handler)
+	newCtx = context.WithValue(newCtx, interfaces.ContextKeyGin, c)
+	newCtx = context.WithValue(newCtx, interfaces.ContextKeyHandler, handler)
 	return newCtx, func(params ...interface{}) {
 		if h.Cfg.RequestLog && len(params) == 1 {
 			if existing, exists := c.Get("API_RESPONSE"); exists {
@@ -452,7 +501,7 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 
 	if existing, exists := c.Get("API_RESPONSE"); exists {
 		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
-			combined := make([]byte, 0, len(existingBytes)+len(data)+1)
+			combined := make([]byte, 0, len(existingBytes))
 			combined = append(combined, existingBytes...)
 			if existingBytes[len(existingBytes)-1] != '\n' {
 				combined = append(combined, '\n')
@@ -469,6 +518,10 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if errMsg := h.authManagerUnavailableError(); errMsg != nil {
+		return nil, nil, errMsg
+	}
+
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -515,6 +568,10 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if errMsg := h.authManagerUnavailableError(); errMsg != nil {
+		return nil, nil, errMsg
+	}
+
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -562,6 +619,13 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	if errMsg := h.authManagerUnavailableError(); errMsg != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
+	}
+
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -741,7 +805,7 @@ func statusFromError(err error) int {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-	resolvedModelName := modelName
+	var resolvedModelName string
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
 		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
@@ -756,6 +820,13 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
+
+	if pinnedProvider, pinnedModel, ok := util.ResolveProviderPinnedModel(baseModel); ok {
+		if parsed.HasSuffix {
+			return []string{pinnedProvider}, fmt.Sprintf("%s(%s)", pinnedModel, parsed.RawSuffix), nil
+		}
+		return []string{pinnedProvider}, pinnedModel, nil
+	}
 
 	providers = util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
@@ -805,6 +876,16 @@ func replaceHeader(dst http.Header, src http.Header) {
 	}
 }
 
+func (h *BaseAPIHandler) authManagerUnavailableError() *interfaces.ErrorMessage {
+	if h == nil || h.AuthManager == nil {
+		return &interfaces.ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable,
+			Error:      fmt.Errorf("auth manager unavailable: auth file missing or not loaded"),
+		}
+	}
+	return nil
+}
+
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
 func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
 	status := http.StatusInternalServerError
@@ -819,6 +900,19 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 			c.Writer.Header().Del(key)
 			for _, value := range values {
 				c.Writer.Header().Add(key, value)
+			}
+		}
+	}
+	if msg != nil && msg.Error != nil {
+		if rae, ok := msg.Error.(interface{ RetryAfter() *time.Duration }); ok && rae != nil {
+			if retryAfter := rae.RetryAfter(); retryAfter != nil && *retryAfter > 0 {
+				if c.Writer.Header().Get("Retry-After") == "" {
+					seconds := int(retryAfter.Seconds())
+					if seconds < 1 {
+						seconds = 1
+					}
+					c.Writer.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+				}
 			}
 		}
 	}
@@ -857,7 +951,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
 	if h.Cfg.RequestLog {
-		if ginContext, ok := ctx.Value("gin").(*gin.Context); ok {
+		if ginContext := contextGin(ctx); ginContext != nil {
 			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
 				if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
 					slicesAPIResponseError = append(slicesAPIResponseError, err)

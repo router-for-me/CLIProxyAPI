@@ -1,6 +1,6 @@
 # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
 # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
-host: ''
+host: ""
 
 # Server port
 port: 8317
@@ -8,8 +8,8 @@ port: 8317
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
-  cert: ''
-  key: ''
+  cert: ""
+  key: ""
 
 # Management API settings
 remote-management:
@@ -20,22 +20,22 @@ remote-management:
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
-  secret-key: ''
+  secret-key: ""
 
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center'
+  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
 # Authentication directory (supports ~ for home directory)
-auth-dir: '~/.cli-proxy-api'
+auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
 api-keys:
-  - 'your-api-key-1'
-  - 'your-api-key-2'
-  - 'your-api-key-3'
+  - "your-api-key-1"
+  - "your-api-key-2"
+  - "your-api-key-3"
 
 # Enable debug logging
 debug: false
@@ -43,7 +43,7 @@ debug: false
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false
-  addr: '127.0.0.1:8316'
+  addr: "127.0.0.1:8316"
 
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
@@ -68,14 +68,10 @@ error-logs-max-files: 10
 usage-statistics-enabled: false
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
-proxy-url: ''
+proxy-url: ""
 
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
-
-# When true, forward filtered upstream response headers to downstream clients.
-# Default is false (disabled).
-passthrough-headers: false
 
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
@@ -90,7 +86,7 @@ quota-exceeded:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: 'round-robin' # round-robin (default), fill-first
+  strategy: "round-robin" # round-robin (default), fill-first
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
@@ -164,15 +160,6 @@ nonstream-keepalive-interval: 0
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"
-#       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
-
-# Default headers for Claude API requests. Update when Claude Code releases new versions.
-# These are used as fallbacks when the client does not send its own headers.
-# claude-header-defaults:
-#   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
-#   package-version: "0.74.0"
-#   runtime-version: "v24.3.0"
-#   timeout: "600"
 
 # Kiro (AWS CodeWhisperer) configuration
 # Note: Kiro API currently only operates in us-east-1 region
@@ -184,26 +171,89 @@ nonstream-keepalive-interval: 0
 #    profile-arn: "arn:aws:codewhisperer:us-east-1:..."
 #    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy override
 
-# Kilocode (OAuth-based code assistant)
-# Note: Kilocode uses OAuth device flow authentication.
-# Use the CLI command: ./server --kilo-login
-# This will save credentials to the auth directory (default: ~/.cli-proxy-api/)
-# oauth-model-alias:
-#   kilo:
-#     - name: "minimax/minimax-m2.5:free"
-#       alias: "minimax-m2.5"
-#     - name: "z-ai/glm-5:free"
-#       alias: "glm-5"
-# oauth-excluded-models:
-#   kilo:
-#     - "kilo-claude-opus-4-6"  # exclude specific models (exact match)
-#     - "*:free"                # wildcard matching suffix (e.g. all free models)
+# Cursor (via cursor-api): uses LOGIN PROTOCOL, not static API key.
+# User logs in at cursor.com; token from WorkosCursorSessionToken cookie.
+# cursor-api /build-key converts token to short-lived keys; /tokens/refresh for renewal.
+# See sharecli/docs/guides/CURSOR_ZERO_ACTION_FLOW_SPEC.md
+#
+# Option A (manual): Put sk-... from cursor-api /build-key in a file
+#cursor:
+#  - token-file: "~/.cursor/session-token.txt" # path to Cursor session token
+#    cursor-api-url: "http://127.0.0.1:3000"   # cursor-api server (default)
+#
+# Option B (zero-action): Login to Cursor IDE only; token auto-read from IDE storage.
+# Requires cursor-api AUTH_TOKEN env; set auth-token to match.
+#cursor:
+#  - cursor-api-url: "http://127.0.0.1:3000"
+#    auth-token: "${CURSOR_API_AUTH_TOKEN}"   # optional; required if cursor-api uses AUTH_TOKEN
+
+# MiniMax: OAuth (user-code flow) + optional API key. Dedicated block for parity with Kiro.
+# API key: platform.minimax.io; OAuth: OpenClaw minimax-portal-auth (Coding plan).
+# See thegent/docs/plans/CLIPROXY_API_AND_THGENT_UNIFIED_PLAN.md
+#minimax:
+#  - token-file: "~/.minimax/oauth-token.json" # OAuth token (access/refresh)
+#    base-url: "https://api.minimax.io/anthropic" # optional
+#  - api-key: "sk-..." # or API key fallback
+#    base-url: "https://api.minimax.io/anthropic"
+
+# Roo Code: OAuth/Cloud or API key. Dedicated block for parity.
+#roo:
+#  - token-file: "~/.roo/oauth-token.json"
+#    base-url: "https://api.roocode.com/v1"
+#  - api-key: "sk-..."
+#    base-url: "https://api.roocode.com/v1"
+
+# Kilo: Free credits or optional API key. Dedicated block for parity.
+#kilo:
+#  - api-key: "anonymous" # or "sk-..."
+#    base-url: "https://api.kilo.ai/api/openrouter" # OpenRouter-compatible endpoint
+
+# DeepSeek: High performance, ultra-low cost reasoning models.
+#deepseek:
+#  - api-key: "sk-..."
+#    base-url: "https://api.deepseek.com"
+
+# Groq: Fastest inference (LPU).
+#groq:
+#  - api-key: "gsk_..."
+#    base-url: "https://api.groq.com/openai/v1"
+
+# Mistral AI: Premier European models, including Codestral for coding.
+#mistral:
+#  - api-key: "..."
+#    base-url: "https://api.mistral.ai/v1"
+
+# SiliconFlow: Fast, cheap access to DeepSeek and other OSS models.
+#siliconflow:
+#  - api-key: "sk-..."
+#    base-url: "https://api.siliconflow.cn/v1"
+
+# OpenRouter: Aggregate provider with many free and low-cost models.
+#openrouter:
+#  - api-key: "sk-or-v1-..."
+#    base-url: "https://openrouter.ai/api/v1"
+
+# Together AI: Large variety of OSS models with competitive pricing and free trial.
+#together:
+#  - api-key: "..."
+#    base-url: "https://api.together.xyz/v1"
+
+# Fireworks AI: High-speed inference for OSS models.
+#fireworks:
+#  - api-key: "..."
+#    base-url: "https://api.fireworks.ai/inference/v1"
+
+# Novita AI: Extremely low-cost provider for DeepSeek and Llama models.
+#novita:
+#  - api-key: "..."
+#    base-url: "https://api.novita.ai/v1"
 
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     models-endpoint: "/v1/models" # optional: override model-discovery path (e.g. "/api/coding/paas/v4/models")
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
@@ -213,6 +263,9 @@ nonstream-keepalive-interval: 0
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.
+#
+#   # Cursor: use dedicated cursor: block above (login protocol). Do NOT use api-key-entries.
+#   # MiniMax: use dedicated minimax: block above (OAuth + API key). Do NOT use openai-compat only.
 
 # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
 # vertex-api-key:
@@ -269,8 +322,6 @@ nonstream-keepalive-interval: 0
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-alias:
 #  antigravity:
-#    - name: "rev19-uic3-1p"
-#      alias: "gemini-2.5-computer-use-preview-10-2025"
 #    - name: "gemini-3-pro-image"
 #      alias: "gemini-3-pro-image-preview"
 #    - name: "gemini-3-pro-high"
@@ -284,6 +335,18 @@ nonstream-keepalive-interval: 0
 #    - name: "claude-opus-4-5-thinking"
 #      alias: "gemini-claude-opus-4-5-thinking"
 #   gemini-cli:
+
+# Global OAuth upstream URL overrides (per channel)
+# Overrides default OAuth upstream base URLs for file-backed/OAuth channels.
+# Channel keys are case-insensitive and values should be absolute base URLs.
+# oauth-upstream:
+#   claude: "https://api.anthropic.com"
+#   codex: "https://chatgpt.com/backend-api/codex"
+#   gemini-cli: "https://cloudcode-pa.googleapis.com"
+#   qwen: "https://portal.qwen.ai/v1"
+#   iflow: "https://api.iflow.cn/v1"
+#   github-copilot: "https://api.githubcopilot.com"
+#   antigravity: "https://daily-cloudcode-pa.googleapis.com"
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
 #       fork: true                      # when true, keep original and also add the alias as an extra model (default: false)

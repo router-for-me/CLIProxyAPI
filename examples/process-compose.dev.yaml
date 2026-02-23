@@ -1,0 +1,10 @@
+version: "0.5"
+
+processes:
+  cliproxy:
+    command: "go run ./cmd/server --config ./config.yaml"
+    working_dir: "."
+    availability:
+      restart: "on_failure"
+      max_restarts: 10
+

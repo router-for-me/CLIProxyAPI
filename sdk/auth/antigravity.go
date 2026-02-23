@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/browser"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -57,7 +57,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 
 	srv, port, cbChan, errServer := startAntigravityCallbackServer(callbackPort)
 	if errServer != nil {
-		return nil, fmt.Errorf("antigravity: failed to start callback server: %w", errServer)
+		return nil, fmt.Errorf("antigravity: failed to start callback server: %s", formatAntigravityCallbackServerError(callbackPort, errServer))
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -213,6 +213,44 @@ waitForCallback:
 	}, nil
 }
 
+func formatAntigravityCallbackServerError(port int, err error) string {
+	if err == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(err.Error())
+	if raw == "" {
+		raw = "unknown callback server error"
+	}
+	lower := strings.ToLower(raw)
+	suggestion := fmt.Sprintf("try --oauth-callback-port <free-port> (for example --oauth-callback-port %d)", antigravity.CallbackPort+100)
+	if port > 0 {
+		suggestion = fmt.Sprintf("try --oauth-callback-port <free-port> (current=%d)", port)
+	}
+	if strings.Contains(lower, "address already in use") {
+		return fmt.Sprintf("%s; callback port is already in use, %s", raw, suggestion)
+	}
+	if strings.Contains(lower, "forbidden by its access permissions") ||
+		strings.Contains(lower, "permission denied") ||
+		strings.Contains(lower, "access permissions") {
+		return fmt.Sprintf("%s; callback port is blocked by OS policy, %s", raw, suggestion)
+	}
+	return raw
+}
+
+func shouldFallbackToEphemeralCallbackPort(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "address already in use") ||
+		strings.Contains(lower, "forbidden by its access permissions") ||
+		strings.Contains(lower, "permission denied") ||
+		strings.Contains(lower, "access permissions")
+}
+
 type callbackResult struct {
 	Code  string
 	Error string
@@ -226,7 +264,15 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 	addr := fmt.Sprintf(":%d", port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, 0, nil, err
+		if port > 0 && shouldFallbackToEphemeralCallbackPort(err) {
+			fallbackListener, fallbackErr := net.Listen("tcp", ":0")
+			if fallbackErr != nil {
+				return nil, 0, nil, err
+			}
+			listener = fallbackListener
+		} else {
+			return nil, 0, nil, err
+		}
 	}
 	port = listener.Addr().(*net.TCPAddr).Port
 	resultCh := make(chan callbackResult, 1)

@@ -146,9 +146,9 @@ Register any custom providers (typically via blank imports) before calling `Buil
 When configuration changes, refresh any config-backed providers and then reset the manager's provider chain:
 
 ```go
-// configaccess is github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access
+// configaccess is github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/access/config_access
 configaccess.Register(&newCfg.SDKConfig)
 accessManager.SetProviders(sdkaccess.RegisteredProviders())
 ```
 
-This mirrors the behaviour in `internal/access.ApplyAccessProviders`, enabling runtime updates without restarting the process.
+This mirrors the behaviour in `pkg/llmproxy/access.ApplyAccessProviders`, enabling runtime updates without restarting the process.
