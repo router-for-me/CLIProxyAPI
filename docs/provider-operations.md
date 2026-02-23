@@ -15,6 +15,25 @@ This runbook is for operators who care about provider uptime, quota health, and 
 5. Spark eligibility check (Copilot/Codex):
    - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg 'gpt-5.3-codex|gpt-5.3-codex-spark'`
 
+## Update Check Workflow
+
+Use this before reporting “latest image/binary mismatch” incidents.
+
+1. Check running binary/image:
+   - `./cliproxyapi++ --version`
+   - `docker images | head`
+2. Check upstream release/tag:
+   - `git fetch --tags --prune`
+   - `git describe --tags --always`
+3. Refresh deployment:
+   - Docker: `docker pull KooshaPari/cliproxyapi-plusplus:latest && docker compose up -d`
+   - Binary: download latest release asset and restart service supervisor
+4. Validate image digest to catch stale cache:
+   - `docker image inspect KooshaPari/cliproxyapi-plusplus:latest --format '{{index .RepoDigests 0}}'`
+5. Re-validate:
+   - `curl -sS http://localhost:8317/health`
+   - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq '.data | length'`
+
 ## Quota Visibility (`#146` scope)
 
 - Current operational source of truth is `v1/metrics/providers` plus provider auth/token files.
@@ -33,6 +52,7 @@ This runbook is for operators who care about provider uptime, quota health, and 
 ## Rotation and Quota Strategy
 
 - Configure multiple credentials per provider where supported.
+- Use per-credential proxy override first (`auth.proxy-url`); keep global `proxy-url` as fallback only.
 - Keep at least one alternate provider for each critical workload class.
 - Use prefixes to separate high-priority traffic from best-effort traffic.
 - If one provider is degraded, reroute by updating model prefix policy and aliases.
@@ -51,6 +71,12 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Shift traffic to fallback provider prefix.
 - Tighten expensive-model exposure with `excluded-models`.
 
+### Repeated `503` No Capacity (Antigravity)
+
+- Confirm payload includes `MODEL_CAPACITY_EXHAUSTED` or `No capacity available`.
+- Keep `antigravity-no-capacity-retry: true` to allow fallback retry across base URLs.
+- Set `antigravity-no-capacity-retry: false` only for fail-fast incident handling.
+
 ### Repeated `406` for iFlow
 
 - Run two probes with identical payloads (`stream:false` then `stream:true`).
@@ -64,6 +90,21 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Verify alias collisions across provider blocks.
 - Prefer explicit `prefix/model` calls for sensitive workloads.
 
+### Disable One Credential Quickly
+
+- Use management status patch against a specific auth file (file name or full path both supported):
+  - `curl -sS -X PATCH http://localhost:8317/v0/management/auth-files/status -H "Authorization: Bearer <mgmt-secret>" -H "Content-Type: application/json" -d '{"name":"gemini-auth.json","disabled":true}'`
+- Re-enable when incident clears:
+  - `curl -sS -X PATCH http://localhost:8317/v0/management/auth-files/status -H "Authorization: Bearer <mgmt-secret>" -H "Content-Type: application/json" -d '{"name":"gemini-auth.json","disabled":false}'`
+
+### Credential Proxy Misconfiguration
+
+- Confirm per-credential `auth.proxy-url` parses successfully (preferred path).
+- Confirm fallback `config proxy-url` is valid and not shadowing intended credential proxy.
+- Use supported schemes only: `http`, `https`, `socks5`.
+- Example:
+  - `proxy-url: "http://user:pass@proxy.example.com:8080"`
+
 ### Cache Usage Always `0` on Claude OAuth
 
 - Compare `usage` objects between `/v1/chat/completions` and `/v1/responses` for the same prompt.
@@ -76,6 +117,27 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Confirm provider block is enabled and auth loaded.
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
+- For Antigravity specifically, treat `0` returned models as an incident signal and trigger token refresh + auth file verification before retrying production traffic.
+
+### Antigravity Returns Zero Models
+
+- Symptom: `/v1/models` responds successfully but Antigravity inventory is empty.
+- Immediate checks:
+  - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq '.data | length'`
+  - Verify auth file freshness and last token refresh timestamp.
+- Remediation:
+  - Refresh Antigravity auth, reload config, and rerun model inventory.
+  - Keep fallback provider aliases active until model count is stable.
+
+### Banana Pro 4K Empty Output (Thinking Only)
+
+- Symptom: response contains thought/trace fields but no assistant content.
+- Immediate checks:
+  - Re-run same payload with `stream:false`.
+  - Inspect logs for missing `candidates[].content`/`finish_reason`.
+- Remediation:
+  - Route to fallback alias for image generation workloads.
+  - Keep alert active until content-bearing responses return consistently.
 
 ### Port `8317` Becomes Unreachable
 
@@ -94,6 +156,71 @@ This runbook is for operators who care about provider uptime, quota health, and 
   - Warn: Spark error ratio > 2% over 10 minutes.
   - Critical: Spark error ratio > 5% over 10 minutes.
   - Auto-mitigation: fallback alias to `gpt-5.3-codex` when critical threshold is crossed.
+
+### iFlow Cookie Failure After Google Login (`iflow uses cookie`)
+
+- Symptom: `iflow` requests fail after entering Google-style login cookies.
+- Immediate checks:
+  - Capture raw response for `401`/`403` plus redirect/callback traces.
+  - Re-open with the same cookie in a fresh browser context; stale `SameSite`/domain cookies often fail silently.
+- Remediation:
+  - Clear local `iflow` cookie store and re-run `thegent cliproxy login iflow`.
+  - Compare `/v1/models` under `iflow/` alias before and after reauth.
+  - Keep an alternate iFlow model alias (`iflow/minimax-m2.5`) as immediate fallback.
+
+### Invalid Thinking Block Contracts (`max_tokens` / `thinking.budget_tokens`)
+
+- Symptom: `invalid_request_error` rejecting requests with explicit `thinking.budget_tokens`.
+- Immediate checks:
+  - Confirm `thinking.budget_tokens` < `max_tokens` for each `iflow`/`antigravity` payload.
+  - Validate `generationConfig` contains only one of `thinkingBudget` / `thinking` style fields per adapter path.
+- Remediation:
+  - Roll out request-shape standardization before capacity tests.
+  - Enable canary non-stream request first, then stream.
+  - Use explicit `max_tokens` in model-specific sanity harness until telemetry confirms stable.
+
+### Antigravity CLI Compatibility and Reachability (`--iflow-login` and auth channels)
+
+- Symptom: Operators cannot determine which CLIs provide stable Antigravity login flows.
+- Immediate checks:
+  - Record successful login command matrix daily (`claude`, `codex`, `cursor`, `iflow`).
+  - Verify management endpoint login mode is enabled (`/v0/management/*`) and log redaction is active.
+- Remediation:
+  - Update runbook matrix with command-specific caveats (browser callbacks, SSO, proxy dependencies).
+  - Normalize onboarding docs to a canonical command-order for login and validation (`login` → `v1/models` → canary request).
+
+### Antigravity Non-Standard Response / Tooling Path (`/v1/responses`)
+
+- Symptom: `antigravity` request goes through but returns unusual response fields or websocket naming mismatch.
+- Immediate checks:
+  - Compare `GET /v1/models` and `/v1/metrics/providers` for provider ID drift.
+  - Replay failing request in `/v1/responses` and inspect raw `websocket` upgrade traces.
+- Remediation:
+  - Verify client path is hitting `/v1/responses` with expected streaming handshake.
+  - Prefer the websocket endpoint documented for the selected proxy client and keep `/v1/chat/completions` as fallback probe.
+
+### Antigravity Fallback and Timeout Hardening (`not working`)
+
+- Symptom: Antigravity intermittently returns empty responses or 503 despite healthy health checks.
+- Immediate checks:
+  - Compare success/failure ratio for `/v1/chat/completions` and `/v1/responses`.
+  - Inspect `ANTIGRAVITY` provider logs for auth, quota, and schema mismatch warnings.
+- Remediation:
+  - Route critical traffic to fallback providers on sustained failure windows.
+  - Capture and keep a golden response sample for each upstream model during incident.
+
+### Proxy/WebSocket Deployment and Parser Surface (`Gemini/Zeabur compatibility`)
+
+- Symptom: Zeabur-style deployments expose parser drift or request shape issues for Gemini/Gemini-CLI interoperability.
+- Immediate checks:
+  - Confirm proxy/websocket headers pass auth and content-type consistently.
+  - Compare non-stream and stream payload traces against local reference on same model.
+- Remediation:
+  - Rebuild image with minimal config drift and pinned upstream URLs.
+  - Keep `gemini` deployment health with a dedicated deploy verification request matrix:
+    - `/v1/chat/completions`
+    - `/v1/models`
+    - `/v1/responses`
 
 ## Recommended Production Pattern
 

@@ -249,6 +249,140 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
+## 8) Gemini 3 Pro Image Preview
+
+`config.yaml`:
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+gemini-api-key:
+  - api-key: "AIza..."
+    prefix: "gemini"
+    models:
+      - name: "gemini-3-pro-image-preview"
+        alias: "image-preview"
+```
+
+Validation:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/images/generations \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/image-preview","prompt":"a scenic valley at dawn","size":"1024x1024"}' | jq
+```
+
+Timeout sanity check (for long-running image calls):
+
+```bash
+curl -sS -m 70 -X POST http://localhost:8317/v1/images/generations \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/image-preview","prompt":"high-detail concept art city at night","size":"1024x1024"}' | jq '{created,data_count:(.data|length)}'
+```
+
+## 9) Quota-Aware Credential Rotation
+
+Use this when one credential repeatedly hits quota and you need safe fallback behavior.
+
+`config.yaml`:
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+antigravity-api-key:
+  - api-key: "ag-key-1"
+    prefix: "ag"
+  - api-key: "ag-key-2"
+    prefix: "ag"
+```
+
+Validation:
+
+```bash
+for i in 1 2 3; do
+  curl -sS -X POST http://localhost:8317/v1/chat/completions \
+    -H "Authorization: Bearer demo-client-key" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"ag/claude-sonnet-4-6","messages":[{"role":"user","content":"quota probe"}],"stream":false}' \
+    | jq '{error,model,usage}';
+done
+```
+
+## 10) Quota Protection Threshold (Prevent Last-Quota Burn)
+
+Use this when you want a credential to stop receiving traffic before it is completely exhausted.
+
+`config.yaml` example:
+
+```yaml
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true
+
+routing:
+  strategy: "round-robin"
+```
+
+Operational probe (non-stream + stream parity):
+
+```bash
+for mode in false true; do
+  echo "== stream=$mode =="
+  curl -sS -X POST http://localhost:8317/v1/chat/completions \
+    -H "Authorization: Bearer demo-client-key" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"ag/claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"quota-protection probe\"}],\"stream\":$mode}" \
+    | head -n 8
+done
+```
+
+If one credential starts returning repeated `429` while another succeeds, keep threshold protection enabled and rotate traffic to the healthy credential set.
+
+If repeated `429` persists on one credential, rotate auth and re-run `/v1/models` before restoring traffic.
+
+## 11) Kiro Hope
+
+Use this flow when validating Kiro auth + model route stability.
+
+`config.yaml`:
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+kiro:
+  - token-file: "~/.aws/sso/cache/kiro-auth-token.json"
+    prefix: "kiro"
+```
+
+Validation:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"kiro/claude-sonnet-4-6","messages":[{"role":"user","content":"kiro hope sanity check"}],"stream":false}' | jq '{id,model,error}'
+```
+
+Troubleshooting starter:
+- Re-auth Kiro token and retry once with `stream:false`.
+- Compare `/v1/models` output before/after token refresh.
+
+## 12) GLM Coding Plan Setup Helper
+
+Use this when you need an interactive starter for GLM Coding Plan routing.
+
+1. Run helper:
+   - `./cliproxyapi++ --glm-coding-plan`
+2. Copy the emitted `openai-compatibility` snippet into `config.yaml`.
+3. Replace `REPLACE_WITH_GLM_API_KEY` with your actual key.
+4. Reload service, then verify:
+   - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <api-key>" | jq -r '.data[].id' | rg '^glm/'`
+
 ## Related
 
 - [Getting Started](/getting-started)
@@ -261,3 +395,108 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 - For Copilot Codex-family models (for example `gpt-5.1-codex-mini`), prefer `/v1/responses`.
 - `/v1/chat/completions` is still valid for non-Codex Copilot traffic and most non-Copilot providers.
 - If a Codex-family request fails on `/v1/chat/completions`, retry the same request on `/v1/responses` first.
+
+## 13) iFlow CLI Extraction and Claude-Style Rate-Quota Fallback
+
+`CPB-0741` asks for a deterministic fallback when `gemini-2.5-pro` model expiry/renames happen during quota exhaustion.
+
+`config.yaml` (manual `iflow` helper profile):
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+iflow:
+  - token: "reuse existing token from iflow login"
+    prefix: "iflow"
+    models:
+      - name: "gemini-2.5-pro"
+        alias: "gemini-25-pro"
+      - name: "gemini-2.5-flash"
+        alias: "gemini-25-flash"
+```
+
+Validation:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/gemini-25-pro","messages":[{"role":"user","content":"ping"}],"stream":false}' \
+  | jq '{id,model,error}'
+```
+
+If this fails, compare:
+- `GET /v1/models` output for `iflow/` entries
+- `/v1/metrics/providers` error rate by provider
+- model alias drift against `iflow` console metadata
+
+## 14) iFlow `thinking.budget_tokens` and `max_tokens` Guardrail
+
+`CPB-0742` addresses `invalid_request_error: max_tokens must be greater than thinking.budget_tokens`.
+
+Use this request contract check before rollout:
+
+```bash
+for mode in "claude-opus-4-6-thinking" "claude-sonnet-4-6-thinking"; do
+  echo "== $mode =="
+  curl -sS -X POST http://localhost:8317/v1/chat/completions \
+    -H "Authorization: Bearer demo-client-key" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"ag/$mode\",\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":1500},\"max_tokens\":1600,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+    | jq '{model,error}'
+done
+```
+
+If a request returns `invalid_request_error`, rerun with a larger `max_tokens` or smaller `thinking.budget_tokens` and keep `thinking.budget_tokens < max_tokens`.
+
+## 15) Antigravity-Compatible CLI Surface Discovery
+
+`CPB-0743` asks for a quick deterministic view of which CLIs support Antigravity.
+
+```bash
+thegent cliproxy login antigravity --help
+thegent cliproxy login iflow --help
+thegent cliproxy login kiwi --help
+```
+
+Recommended check:
+
+```bash
+thegent cliproxy status --provider antigravity --json | jq '.supported_clients,.login_methods'
+thegent cliproxy status --json | jq '.providers | keys'
+```
+
+Keep supported-provider assumptions versioned in your deployment notes before changing traffic routing.
+
+## 16) Dynamic Mapping and Custom Parameter Injection Validation
+
+`CPB-0744` asks for stable custom parameter injection for dynamic model mapping (for example iFlow `/tab` style model variants).
+
+`config.yaml`:
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+iflow:
+  - token: "..."
+    prefix: "iflow"
+    models:
+      - name: "glm-4.5"
+        alias: "glm"
+      - name: "glm-4.5-tab"
+        alias: "glm/tab"
+```
+
+Validation:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/glm/tab","messages":[{"role":"user","content":"tab mapping probe"}],"stream":false}' \
+  | jq '{model,error}'
+```
+
+Use this whenever `/` or slash-like model suffixes are introduced to prevent accidental provider aliasing.
