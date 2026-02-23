@@ -178,9 +178,6 @@ func TestOpenAICompatSignature_DoesNotIncludeRawAPIKeyMaterial(t *testing.T) {
 	if strings.Contains(sig, "super-secret-key") || strings.Contains(sig, "another-secret-key") {
 		t.Fatalf("signature must not include API key values: %q", sig)
 	}
-	if !strings.Contains(sig, "api_keys=2") {
-		t.Fatalf("expected signature to keep api key count, got %q", sig)
-	}
 }
 
 func TestCountOpenAIModelsSkipsBlanks(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -284,6 +285,10 @@ func (s *FileTokenStore) resolveManagedPath(candidate string) (string, error) {
 	if trimmed == "" {
 		return "", fmt.Errorf("auth filestore: path is empty")
 	}
+	cleanCandidate, err := misc.ResolveSafeFilePath(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("auth filestore: resolve candidate path: %w", err)
+	}
 	baseDir := s.baseDirSnapshot()
 	if baseDir == "" {
 		return "", fmt.Errorf("auth filestore: directory not configured")
@@ -295,9 +300,9 @@ func (s *FileTokenStore) resolveManagedPath(candidate string) (string, error) {
 
 	var resolved string
 	if filepath.IsAbs(trimmed) {
-		resolved = filepath.Clean(trimmed)
+		resolved = filepath.Clean(filepath.FromSlash(cleanCandidate))
 	} else {
-		resolved = filepath.Join(absBase, filepath.FromSlash(trimmed))
+		resolved = filepath.Join(absBase, filepath.FromSlash(cleanCandidate))
 		resolved = filepath.Clean(resolved)
 	}
 	rel, err := filepath.Rel(absBase, resolved)

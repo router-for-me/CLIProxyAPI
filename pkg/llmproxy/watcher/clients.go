@@ -220,7 +220,7 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 
 	errWalk := filepath.Walk(authDir, func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
-			log.Debugf("error accessing path %s: %v", path, err)
+			log.Debugf("error accessing path %s: %v", filepath.Base(path), err)
 			return err
 		}
 		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {

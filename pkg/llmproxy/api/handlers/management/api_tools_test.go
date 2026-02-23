@@ -38,6 +38,37 @@ func TestAPICall_RejectsUnsafeHost(t *testing.T) {
 	}
 }
 
+func TestValidateAPICallURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{name: "https_allowed", raw: "https://api.github.com/v1", wantErr: false},
+		{name: "localhost_rejected", raw: "http://localhost:8080/ping", wantErr: true},
+		{name: "user_info_rejected", raw: "https://user:pass@api.github.com/v1", wantErr: true},
+		{name: "ipv6_loopback_rejected", raw: "https://[::1]:443/v1", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			u, err := url.Parse(tc.raw)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.raw, err)
+			}
+			err = validateAPICallURL(u)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for %q", tc.raw)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.raw, err)
+			}
+		})
+	}
+}
+
 type memoryAuthStore struct {
 	mu    sync.Mutex
 	items map[string]*coreauth.Auth
@@ -459,6 +490,11 @@ func TestCopilotQuotaURLFromTokenURL(t *testing.T) {
 		{
 			name:      "reject_untrusted_host",
 			tokenURL:  "https://127.0.0.1/copilot_internal/v2/token",
+			expectErr: true,
+		},
+		{
+			name:      "reject_user_info",
+			tokenURL:  "https://user:pass@api.github.com/copilot_internal/v2/token",
 			expectErr: true,
 		},
 	}

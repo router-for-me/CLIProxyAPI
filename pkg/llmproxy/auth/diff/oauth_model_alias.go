@@ -1,8 +1,6 @@
 package diff
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -93,9 +91,9 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAlias
 		return OAuthModelAliasSummary{}
 	}
 	sort.Strings(normalized)
-	sum := sha256.Sum256([]byte(strings.Join(normalized, "|")))
+	hash := hashJoined(normalized)
 	return OAuthModelAliasSummary{
-		hash:  hex.EncodeToString(sum[:]),
+		hash:  hash,
 		count: len(normalized),
 	}
 }

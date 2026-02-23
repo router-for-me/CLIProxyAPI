@@ -213,6 +213,9 @@ func validateCallbackForwarderTarget(targetBase string) (*url.URL, error) {
 	if !parsed.IsAbs() {
 		return nil, fmt.Errorf("target must be absolute")
 	}
+	if parsed.User != nil {
+		return nil, fmt.Errorf("target must not include user info")
+	}
 	scheme := strings.ToLower(parsed.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return nil, fmt.Errorf("target scheme %q is not allowed", parsed.Scheme)
@@ -603,16 +606,15 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	if file, err := c.FormFile("file"); err == nil && file != nil {
-		name := filepath.Base(file.Filename)
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			c.JSON(400, gin.H{"error": "file must be .json"})
+		name := strings.TrimSpace(file.Filename)
+		dst, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid auth file name"})
 			return
 		}
-		dst := filepath.Join(h.cfg.AuthDir, name)
-		if !filepath.IsAbs(dst) {
-			if abs, errAbs := filepath.Abs(dst); errAbs == nil {
-				dst = abs
-			}
+		if !strings.HasSuffix(strings.ToLower(filepath.Base(dst)), ".json") {
+			c.JSON(400, gin.H{"error": "file must be .json"})
+			return
 		}
 		if errSave := c.SaveUploadedFile(file, dst); errSave != nil {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to save file: %v", errSave)})
@@ -683,11 +685,10 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			if !strings.HasSuffix(strings.ToLower(name), ".json") {
 				continue
 			}
-			full := filepath.Join(h.cfg.AuthDir, name)
-			if !filepath.IsAbs(full) {
-				if abs, errAbs := filepath.Abs(full); errAbs == nil {
-					full = abs
-				}
+			full, err := misc.ResolveSafeFilePathInDir(h.cfg.AuthDir, name)
+			if err != nil {
+				log.WithError(err).Warnf("invalid auth file name while deleting all auth files: %s", name)
+				continue
 			}
 			if err = os.Remove(full); err == nil {
 				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
@@ -760,6 +761,9 @@ func (h *Handler) resolveAuthPath(path string) (string, error) {
 	cleanAuthDir, err := filepath.Abs(filepath.Clean(authDir))
 	if err != nil {
 		return "", fmt.Errorf("resolve auth dir: %w", err)
+	}
+	if resolvedDir, err := filepath.EvalSymlinks(cleanAuthDir); err == nil {
+		cleanAuthDir = resolvedDir
 	}
 	cleanPath := filepath.Clean(path)
 	absPath := cleanPath

@@ -310,6 +310,9 @@ func validateAPICallURL(parsedURL *url.URL) error {
 	if host == "" {
 		return fmt.Errorf("invalid url host")
 	}
+	if parsedURL.User != nil {
+		return fmt.Errorf("target user info is not allowed")
+	}
 	if strings.EqualFold(host, "localhost") {
 		return fmt.Errorf("target host is not allowed")
 	}
@@ -1364,9 +1367,26 @@ func copilotQuotaURLFromTokenURL(originalURL string) (string, error) {
 	if errParse != nil {
 		return "", errParse
 	}
+	if parsedURL == nil || !parsedURL.IsAbs() {
+		return "", fmt.Errorf("invalid token url")
+	}
+	if parsedURL.User != nil {
+		return "", fmt.Errorf("token url must not include user info")
+	}
 	host := strings.ToLower(parsedURL.Hostname())
+	if host == "" {
+		return "", fmt.Errorf("token url host is required")
+	}
 	if parsedURL.Scheme != "https" {
 		return "", fmt.Errorf("unsupported scheme %q", parsedURL.Scheme)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return "", fmt.Errorf("token url host is not allowed")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return "", fmt.Errorf("token url host is not allowed")
+		}
 	}
 	switch host {
 	case "api.github.com", "api.githubcopilot.com":

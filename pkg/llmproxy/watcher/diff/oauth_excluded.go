@@ -1,8 +1,6 @@
 package diff
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -110,9 +108,8 @@ func SummarizeAmpModelMappings(mappings []config.AmpModelMapping) AmpModelMappin
 		return AmpModelMappingsSummary{}
 	}
 	sort.Strings(entries)
-	sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
 	return AmpModelMappingsSummary{
-		hash:  hex.EncodeToString(sum[:]),
+		hash:  hashJoined(entries),
 		count: len(entries),
 	}
 }

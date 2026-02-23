@@ -3,6 +3,7 @@ package diff
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
@@ -170,11 +171,11 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 
 	// Intentionally exclude API key material; only count non-empty entries.
 	if count := countAPIKeys(entry); count > 0 {
-		parts = append(parts, fmt.Sprintf("api_keys=%d", count))
+		parts = append(parts, "api_keys="+strconv.Itoa(count))
 	}
 
 	if len(parts) == 0 {
 		return ""
 	}
-	return strings.Join(parts, "|")
+	return hashString(strings.Join(parts, "|"))
 }

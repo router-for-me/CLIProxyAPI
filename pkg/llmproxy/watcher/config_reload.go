@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"reflect"
 	"time"
 
@@ -61,7 +62,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 		log.Debugf("config file content unchanged (hash match), skipping reload")
 		return
 	}
-	log.Infof("config file changed, reloading: %s", w.configPath)
+	log.Infof("config file changed, reloading: %s", filepath.Base(w.configPath))
 	if w.reloadConfig() {
 		finalHash := newHash
 		if updatedData, errRead := os.ReadFile(w.configPath); errRead == nil && len(updatedData) > 0 {
@@ -79,7 +80,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 
 func (w *Watcher) reloadConfig() bool {
 	log.Debug("=========================== CONFIG RELOAD ============================")
-	log.Debugf("starting config reload from: %s", w.configPath)
+	log.Debugf("starting config reload from: %s", filepath.Base(w.configPath))
 
 	newConfig, errLoadConfig := config.LoadConfig(w.configPath)
 	if errLoadConfig != nil {

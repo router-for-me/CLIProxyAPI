@@ -103,8 +103,27 @@ func TestFileTokenStoreSave_RejectsPathOutsideBaseDir(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected save to reject path traversal")
 	}
-	if !strings.Contains(err.Error(), "escapes base directory") {
+	if !strings.Contains(err.Error(), "escapes base directory") && !strings.Contains(err.Error(), "path traversal") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFileTokenStoreSave_RejectsEncodedAndWindowsTraversalPath(t *testing.T) {
+	t.Parallel()
+
+	store := NewFileTokenStore()
+	baseDir := t.TempDir()
+	store.SetBaseDir(baseDir)
+
+	for _, path := range []string{"..\\\\outside.json", "..//..%2foutside.json"} {
+		auth := &cliproxyauth.Auth{
+			ID:       "x",
+			FileName: path,
+			Metadata: map[string]any{"type": "kiro"},
+		}
+		if _, err := store.Save(context.Background(), auth); err == nil {
+			t.Fatalf("expected encoded/windows traversal path to be rejected: %s", path)
+		}
 	}
 }
 

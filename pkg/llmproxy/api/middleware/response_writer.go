@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
@@ -199,13 +200,30 @@ func (w *ResponseWriterWrapper) captureCurrentHeaders() {
 		w.headers = make(map[string][]string)
 	}
 
+	// Remove previous values to avoid stale entries after header mutation.
+	for key := range w.headers {
+		delete(w.headers, key)
+	}
+
 	// Capture all current headers from the underlying ResponseWriter
 	for key, values := range w.Header() {
-		// Make a copy of the values slice to avoid reference issues
-		headerValues := make([]string, len(values))
-		copy(headerValues, values)
-		w.headers[key] = headerValues
+		if key == "" {
+			continue
+		}
+		keyLower := strings.ToLower(strings.TrimSpace(key))
+		sanitizedValues := make([]string, len(values))
+		for i, value := range values {
+			sanitizedValues[i] = sanitizeResponseHeaderValue(keyLower, value)
+		}
+		w.headers[key] = sanitizedValues
 	}
+}
+
+func sanitizeResponseHeaderValue(keyLower, value string) string {
+	if keyLower == "authorization" || keyLower == "cookie" || keyLower == "proxy-authorization" || keyLower == "set-cookie" {
+		return "[redacted]"
+	}
+	return util.MaskSensitiveHeaderValue(keyLower, value)
 }
 
 // detectStreaming determines if a response should be treated as a streaming response.
@@ -337,7 +355,7 @@ func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return data
+	return sanitizeLoggedPayloadBytes(data)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
@@ -349,7 +367,7 @@ func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return data
+	return sanitizeLoggedPayloadBytes(data)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {
@@ -369,17 +387,17 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 			switch value := bodyOverride.(type) {
 			case []byte:
 				if len(value) > 0 {
-					return bytes.Clone(value)
+					return sanitizeLoggedPayloadBytes(value)
 				}
 			case string:
 				if strings.TrimSpace(value) != "" {
-					return []byte(value)
+					return sanitizeLoggedPayloadBytes([]byte(value))
 				}
 			}
 		}
 	}
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
-		return w.requestInfo.Body
+		return sanitizeLoggedPayloadBytes(w.requestInfo.Body)
 	}
 	return nil
 }

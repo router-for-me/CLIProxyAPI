@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 	log "github.com/sirupsen/logrus"
@@ -45,9 +44,9 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 	}
 	// Ensure we tag the file with the provider type.
 	s.Type = "vertex"
-	cleanPath, err := cleanCredentialPath(authFilePath, "vertex credential")
+	cleanPath, err := misc.ResolveSafeFilePath(authFilePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("invalid token file path: %w", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o700); err != nil {
@@ -68,20 +67,4 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("vertex credential: encode failed: %w", err)
 	}
 	return nil
-}
-
-func cleanCredentialPath(path, scope string) (string, error) {
-	trimmed := strings.TrimSpace(path)
-	if trimmed == "" {
-		return "", fmt.Errorf("%s: auth file path is empty", scope)
-	}
-	clean := filepath.Clean(filepath.FromSlash(trimmed))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("%s: auth file path is invalid", scope)
-	}
-	abs, err := filepath.Abs(clean)
-	if err != nil {
-		return "", fmt.Errorf("%s: resolve auth file path: %w", scope, err)
-	}
-	return filepath.Clean(abs), nil
 }
