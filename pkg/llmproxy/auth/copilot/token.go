@@ -72,7 +72,7 @@ type DeviceCodeResponse struct {
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
 func (ts *CopilotTokenStorage) SaveTokenToFile(authFilePath string) error {
-	safePath, err := misc.ValidateCredentialPath(authFilePath)
+	safePath, err := misc.ResolveSafeFilePath(authFilePath)
 	if err != nil {
 		return fmt.Errorf("invalid token file path: %w", err)
 	}

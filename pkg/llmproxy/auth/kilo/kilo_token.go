@@ -32,7 +32,7 @@ type KiloTokenStorage struct {
 
 // SaveTokenToFile serializes the Kilo token storage to a JSON file.
 func (ts *KiloTokenStorage) SaveTokenToFile(authFilePath string) error {
-	safePath, err := misc.ValidateCredentialPath(authFilePath)
+	safePath, err := misc.ResolveSafeFilePath(authFilePath)
 	if err != nil {
 		return fmt.Errorf("invalid token file path: %w", err)
 	}

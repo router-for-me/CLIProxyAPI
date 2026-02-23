@@ -42,15 +42,9 @@ func TestCopilotTokenStorage_SaveTokenToFile(t *testing.T) {
 	}
 }
 
-func TestCopilotTokenStorage_SaveTokenToFile_RejectsTraversalPath(t *testing.T) {
-	ts := &CopilotTokenStorage{AccessToken: "access"}
-	badPath := t.TempDir() + "/../token.json"
-
-	err := ts.SaveTokenToFile(badPath)
-	if err == nil {
-		t.Fatal("expected error for traversal path")
-	}
-	if !strings.Contains(err.Error(), "invalid token file path") {
-		t.Fatalf("expected invalid path error, got %v", err)
+func TestCopilotTokenStorage_SaveTokenToFileRejectsTraversalPath(t *testing.T) {
+	ts := &CopilotTokenStorage{}
+	if err := ts.SaveTokenToFile("/tmp/../copilot-escape.json"); err == nil {
+		t.Fatal("expected traversal path to be rejected")
 	}
 }

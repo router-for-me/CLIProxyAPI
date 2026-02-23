@@ -70,7 +70,11 @@ type ClaudeTokenStorage struct {
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
 func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
+	safePath, err := misc.ResolveSafeFilePath(authFilePath)
+	if err != nil {
+		return fmt.Errorf("invalid token file path: %w", err)
+	}
+	misc.LogSavingCredentials(safePath)
 	ts.Type = "claude"
 	safePath, err := sanitizeTokenFilePath(authFilePath)
 	if err != nil {
@@ -78,12 +82,12 @@ func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) error {
 	}
 
 	// Create directory structure if it doesn't exist
-	if err := os.MkdirAll(filepath.Dir(safePath), 0700); err != nil {
+	if err = os.MkdirAll(filepath.Dir(safePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
 	// Create the token file
-	f, err := os.OpenFile(safePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := os.Create(safePath)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
