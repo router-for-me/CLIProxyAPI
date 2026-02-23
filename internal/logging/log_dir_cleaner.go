@@ -107,7 +107,7 @@ func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string)
 
 	errWalk := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if entry.IsDir() {
 			return nil
