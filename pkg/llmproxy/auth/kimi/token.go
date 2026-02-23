@@ -71,14 +71,18 @@ type DeviceCodeResponse struct {
 
 // SaveTokenToFile serializes the Kimi token storage to a JSON file.
 func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
+	safePath, err := misc.ValidateCredentialPath(authFilePath)
+	if err != nil {
+		return fmt.Errorf("invalid token file path: %w", err)
+	}
+	misc.LogSavingCredentials(safePath)
 	ts.Type = "kimi"
 
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
+	if err = os.MkdirAll(filepath.Dir(safePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := os.Create(safePath)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
