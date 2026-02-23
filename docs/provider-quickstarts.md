@@ -500,3 +500,63 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 ```
 
 Use this whenever `/` or slash-like model suffixes are introduced to prevent accidental provider aliasing.
+
+## 16.5) `gemini-3-pro-preview` and `gmini` Compatibility Probe
+
+`CPB-0747` and `CPB-0751` ask for deterministic parity checks for `gemini-3-pro-preview` behavior.
+
+`config.yaml`:
+
+```yaml
+api-keys:
+  - "demo-client-key"
+
+gemini-api-key:
+  - api-key: "AIza..."
+    prefix: "gemini"
+    models:
+      - name: "gemini-3-pro-preview"
+        alias: "3-pro-preview"
+```
+
+Sanity checks:
+
+```bash
+for mode in false true; do
+  echo "== stream=$mode =="
+  curl -sS -X POST http://localhost:8317/v1/chat/completions \
+    -H "Authorization: Bearer demo-client-key" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"gemini/3-pro-preview\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":$mode}" \
+    | jq '{model,object,error}'
+done
+```
+
+If this works in non-stream but not stream, keep `stream:false` for that alias during rollout, then switch back after one stable release.
+
+## 17) Gemini Native Upload/File-Upload Runtime Probe (`CPB-0754`)
+
+Use this before enabling upload-heavy Gemini native API paths:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/3-pro-preview","messages":[{"role":"user","content":"upload probe"}],"stream":false}' \
+  | jq '{id,model,error}'
+
+curl -sS -X POST http://localhost:8317/v1/images/generations \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/image-preview","prompt":"upload-path smoke","size":"1024x1024"}' \
+  | jq '{id,model,error,data:(.data|length)}'
+```
+
+After config updates, use deterministic local reload + validation:
+
+```bash
+process-compose -f examples/process-compose.dev.yaml restart cliproxy
+curl -sS http://localhost:8317/health
+```
+
+Keep `/v1/models` in the runbook as the compatibility ground truth before moving upload workflows into CI.

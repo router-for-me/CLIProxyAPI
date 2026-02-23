@@ -222,6 +222,75 @@ Use this before reporting “latest image/binary mismatch” incidents.
     - `/v1/models`
     - `/v1/responses`
 
+### Gemini `3-pro-preview` and gmini CLI Compatibility (`Could I use gemini-3-pro-preview by gmini cli?`)
+
+- Symptom: `gemini/3-pro-preview` works from some clients but fails from `gmini`/CLI or with stream mismatch.
+- Immediate checks:
+  - Validate both non-stream and stream parity with identical payloads before rollout.
+  - Compare upstream request/response shape against `/v1/chat/completions` golden response from proxy for the same alias.
+- Remediation:
+  - Confirm `alias: "gemini-3-pro-preview"` exists under `gemini-api-key` and is exposed in `/v1/models`.
+  - Re-route to `stream:false` for one full validation cycle, then re-enable `stream:true`.
+  - Keep a fallback alias (`gemini/2.5-pro`, `iflow/gemini-2.5-flash`) ready for canary failures.
+- Suggested parity probe:
+
+```bash
+for mode in false true; do
+  echo "== stream=$mode =="
+  curl -sS -X POST http://localhost:8317/v1/chat/completions \
+    -H "Authorization: Bearer <api-key>" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"gemini/gemini-3-pro-preview\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":$mode}" \
+    | jq 'del(.choices)'
+done
+```
+
+### Windows Hyper-V Reserved Port Validation
+
+- Symptom: service intermittently fails to start on Windows hosts with errors like bind failed / address already in use.
+- Immediate checks:
+  - `netsh interface ipv4 show excludedportrange protocol=tcp | rg 8317`
+  - `netstat -ano | rg :8317`
+- Remediation:
+  - Switch to a free port in `config.yaml` (both `port` and any reverse-proxy backend port mappings).
+  - Prefer explicit `auth-dir` and static config path under writable directories when running under Hyper-V.
+  - Restart process host after port reservation changes and validate `/health` before traffic resume.
+
+### Gemini Image Preview Capability and Observability
+
+- Symptom: image-capable endpoints return confusion (`image` request denied or disabled model behavior).
+- Immediate checks:
+  - Verify model appears in `/v1/models` as an image-enabled alias.
+  - Run a timeout-limited image generation probe and collect error object fields.
+- Remediation:
+  - Route image jobs to a known-good image-capable alias when model-specific capability is uncertain.
+  - Add alert on repeated image generation errors by model prefix:
+    - Warn: image error ratio > 2% over 5 minutes.
+    - Critical: image error ratio > 5% over 5 minutes or `status_code` > 399 in `gemini` image provider metrics.
+  - Refresh capability matrix docs when new image-support changes land from upstream.
+
+### Local Dev Reload for File Upload / Gemini Native API Changes
+
+- Symptom: config edits for upload-capable native API path are not reflected without manual restart.
+- Immediate checks:
+  - Ensure `examples/process-compose.dev.yaml` is started from the repo root with a writable `config.yaml` mount.
+  - Check that `cliproxy` process reports readiness and `/health` remains green after config save.
+- Remediation:
+  - Use process-compose restart-on-failure and explicit file-backed config for deterministic HMR reload behavior.
+  - After upload-related config edits, re-run upload-path parity probe and `/health` check before reopening clients.
+
+Example command sequence after config edits:
+
+```bash
+process-compose -f examples/process-compose.dev.yaml restart cliproxy
+curl -sS http://localhost:8317/health
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/image-preview","messages":[{"role":"user","content":"upload-path sanity"}],"stream":false}' \
+  | jq '{id,error,model} '
+```
+
 ## Recommended Production Pattern
 
 1. One direct primary provider for latency-critical traffic.
