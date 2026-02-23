@@ -7,12 +7,15 @@ import (
 	"context"
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 	"crypto/hmac"
 	"crypto/sha256"
 =======
 >>>>>>> archive/pr-234-head-20260223
 =======
 >>>>>>> chore/cliproxyctl-minimal2
+=======
+>>>>>>> ci-compile-fix
 	"fmt"
 	"io"
 	"net"
@@ -1323,10 +1326,14 @@ func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
 }
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 func logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason string, err error) {
 =======
 func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
 >>>>>>> chore/cliproxyctl-minimal2
+=======
+func logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason string, err error) {
+>>>>>>> ci-compile-fix
 	if err != nil {
 <<<<<<< HEAD
 <<<<<<<< HEAD:pkg/llmproxy/executor/codex_websockets_executor.go

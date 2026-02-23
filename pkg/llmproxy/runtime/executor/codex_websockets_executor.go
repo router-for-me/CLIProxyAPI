@@ -5,8 +5,11 @@ package executor
 import (
 	"bytes"
 	"context"
+<<<<<<< HEAD
 	"crypto/hmac"
 	"crypto/sha256"
+=======
+>>>>>>> ci-compile-fix
 	"fmt"
 	"io"
 	"net"
@@ -1308,7 +1311,11 @@ func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
 >>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/codex_websockets_executor.go
 }
 
+<<<<<<< HEAD
 func logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason string, err error) {
+=======
+func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
+>>>>>>> ci-compile-fix
 	if err != nil {
 <<<<<<<< HEAD:pkg/llmproxy/executor/codex_websockets_executor.go
 		log.Infof("codex websockets: upstream disconnected session=%s auth=%s endpoint=%s reason=%s err=%v", sanitizeCodexSessionID(sessionID), sanitizeCodexWebsocketLogField(authID), sanitizeCodexWebsocketLogEndpoint(wsURL), strings.TrimSpace(reason), err)

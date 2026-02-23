@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+<<<<<<< HEAD
 	"fmt"
 <<<<<<< HEAD
 =======
@@ -11,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+=======
+>>>>>>> ci-compile-fix
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 )
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 =======
 func projectRoot(t *testing.T) string {
@@ -45,6 +49,8 @@ func projectRoot(t *testing.T) string {
 }
 
 >>>>>>> archive/pr-234-head-20260223
+=======
+>>>>>>> ci-compile-fix
 func TestRunSetupJSONResponseShape(t *testing.T) {
 	t.Setenv("CLIPROXY_CONFIG", "")
 	fixedNow := func() time.Time {
@@ -53,7 +59,11 @@ func TestRunSetupJSONResponseShape(t *testing.T) {
 
 	exec := commandExecutor{
 		setup: func(_ *config.Config, _ *cliproxycmd.SetupOptions) {},
+<<<<<<< HEAD
 		login: func(_ *config.Config, _ string, _ string, _ *cliproxycmd.LoginOptions) error { return nil },
+=======
+		login: func(_ *config.Config, _ string, _ *cliproxycmd.LoginOptions) {},
+>>>>>>> ci-compile-fix
 		doctor: func(_ string) (map[string]any, error) {
 			return map[string]any{"status": "ok"}, nil
 		},
@@ -99,7 +109,11 @@ func TestRunDoctorJSONFailureShape(t *testing.T) {
 
 	exec := commandExecutor{
 		setup: func(_ *config.Config, _ *cliproxycmd.SetupOptions) {},
+<<<<<<< HEAD
 		login: func(_ *config.Config, _ string, _ string, _ *cliproxycmd.LoginOptions) error { return nil },
+=======
+		login: func(_ *config.Config, _ string, _ *cliproxycmd.LoginOptions) {},
+>>>>>>> ci-compile-fix
 		doctor: func(configPath string) (map[string]any, error) {
 			return map[string]any{"config_path": configPath}, assertErr("boom")
 		},
@@ -138,6 +152,7 @@ func TestRunDoctorJSONFailureShape(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 func TestRunLoginJSONRequiresProvider(t *testing.T) {
 	t.Setenv("CLIPROXY_CONFIG", "")
 	fixedNow := func() time.Time {
@@ -844,3 +859,8 @@ func (s statusErrorStub) Error() string { return fmt.Sprintf("status %d", s.code
 
 func (s statusErrorStub) StatusCode() int { return s.code }
 >>>>>>> archive/pr-234-head-20260223
+=======
+type assertErr string
+
+func (e assertErr) Error() string { return string(e) }
+>>>>>>> ci-compile-fix
