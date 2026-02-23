@@ -1050,7 +1050,7 @@ func (cfg *Config) SanitizeOAuthUpstream() {
 	}
 	out := make(map[string]string, len(cfg.OAuthUpstream))
 	for rawChannel, rawURL := range cfg.OAuthUpstream {
-		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		channel := normalizeOAuthUpstreamChannel(rawChannel)
 		if channel == "" {
 			continue
 		}
@@ -1069,11 +1069,23 @@ func (cfg *Config) OAuthUpstreamURL(channel string) string {
 	if cfg == nil || len(cfg.OAuthUpstream) == 0 {
 		return ""
 	}
-	key := strings.ToLower(strings.TrimSpace(channel))
+	key := normalizeOAuthUpstreamChannel(channel)
 	if key == "" {
 		return ""
 	}
 	return strings.TrimSpace(cfg.OAuthUpstream[key])
+}
+
+func normalizeOAuthUpstreamChannel(channel string) string {
+	key := strings.TrimSpace(strings.ToLower(channel))
+	if key == "" {
+		return ""
+	}
+	key = strings.ReplaceAll(key, "_", "-")
+	key = strings.ReplaceAll(key, " ", "-")
+	key = strings.Trim(key, "-")
+	key = strings.Join(strings.FieldsFunc(key, func(r rune) bool { return r == '-' }), "-")
+	return key
 }
 
 // IsResponsesWebsocketEnabled returns true when the dedicated responses websocket

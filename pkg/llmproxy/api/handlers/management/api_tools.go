@@ -910,33 +910,32 @@ func (h *Handler) GetKiroQuota(c *gin.Context) {
 }
 
 func (h *Handler) getKiroQuotaWithChecker(c *gin.Context, checker kiroUsageChecker) {
-	authIndex := strings.TrimSpace(c.Query("auth_index"))
-	if authIndex == "" {
-		authIndex = strings.TrimSpace(c.Query("authIndex"))
-	}
-	if authIndex == "" {
-		authIndex = strings.TrimSpace(c.Query("AuthIndex"))
-	}
+	authIndex := firstNonEmptyQuery(c, "auth_index", "authIndex", "AuthIndex", "index")
 
 	auth := h.findKiroAuth(authIndex)
 	if auth == nil {
+		if authIndex != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no kiro credential found", "auth_index": authIndex})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no kiro credential found"})
 		return
 	}
+	auth.EnsureIndex()
 
 	token, tokenErr := h.resolveTokenForAuth(c.Request.Context(), auth)
 	if tokenErr != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to resolve kiro token"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to resolve kiro token", "auth_index": auth.Index, "detail": tokenErr.Error()})
 		return
 	}
 	if token == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "kiro token not found"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kiro token not found", "auth_index": auth.Index})
 		return
 	}
 
 	profileARN := profileARNForAuth(auth)
 	if profileARN == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "kiro profile arn not found"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kiro profile arn not found", "auth_index": auth.Index})
 		return
 	}
 
@@ -946,7 +945,6 @@ func (h *Handler) getKiroQuotaWithChecker(c *gin.Context, checker kiroUsageCheck
 		return
 	}
 
-	auth.EnsureIndex()
 	c.JSON(http.StatusOK, kiroQuotaResponse{
 		AuthIndex:       auth.Index,
 		ProfileARN:      profileARN,
@@ -1151,6 +1149,15 @@ func profileARNForAuth(auth *coreauth.Auth) string {
 		}
 	}
 
+	return ""
+}
+
+func firstNonEmptyQuery(c *gin.Context, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(c.Query(key)); value != "" {
+			return value
+		}
+	}
 	return ""
 }
 

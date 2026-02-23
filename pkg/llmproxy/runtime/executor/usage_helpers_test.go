@@ -41,3 +41,26 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
 	}
 }
+
+func TestParseOpenAIStreamUsageResponsesParity(t *testing.T) {
+	line := []byte(`data: {"usage":{"input_tokens":11,"output_tokens":13,"total_tokens":24,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":5}}}`)
+	detail, ok := parseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("expected stream usage to be parsed")
+	}
+	if detail.InputTokens != 11 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 11)
+	}
+	if detail.OutputTokens != 13 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 13)
+	}
+	if detail.TotalTokens != 24 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 24)
+	}
+	if detail.CachedTokens != 3 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 3)
+	}
+	if detail.ReasoningTokens != 5 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
+	}
+}

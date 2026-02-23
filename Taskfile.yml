@@ -333,7 +333,13 @@ tasks:
     desc: "Validate release-facing config examples and docs snippets"
     cmds:
       - task: preflight
+      - task: quality:docs-open-items-parity
       - ./.github/scripts/release-lint.sh
+
+  quality:docs-open-items-parity:
+    desc: "Prevent stale status drift in fragmented open-items report"
+    cmds:
+      - ./.github/scripts/check-open-items-fragmented-parity.sh
 
   test:smoke:
     desc: "Run smoke tests for startup and control-plane surfaces"
