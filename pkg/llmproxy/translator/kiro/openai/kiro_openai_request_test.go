@@ -452,3 +452,57 @@ func TestBuildAssistantMessageFromOpenAI_PreservesNonObjectToolArguments(t *test
 		t.Fatalf("expected raw argument fallback, got %#v", got.ToolUses[2].Input)
 	}
 }
+
+func TestFilterOrphanedToolResults_RemovesHistoryAndCurrentOrphans(t *testing.T) {
+	history := []KiroHistoryMessage{
+		{
+			AssistantResponseMessage: &KiroAssistantResponseMessage{
+				Content: "assistant",
+				ToolUses: []KiroToolUse{
+					{ToolUseID: "keep-1", Name: "Read", Input: map[string]interface{}{}},
+				},
+			},
+		},
+		{
+			UserInputMessage: &KiroUserInputMessage{
+				Content: "user-with-mixed-results",
+				UserInputMessageContext: &KiroUserInputMessageContext{
+					ToolResults: []KiroToolResult{
+						{ToolUseID: "keep-1", Status: "success", Content: []KiroTextContent{{Text: "ok"}}},
+						{ToolUseID: "orphan-1", Status: "success", Content: []KiroTextContent{{Text: "bad"}}},
+					},
+				},
+			},
+		},
+		{
+			UserInputMessage: &KiroUserInputMessage{
+				Content: "user-only-orphans",
+				UserInputMessageContext: &KiroUserInputMessageContext{
+					ToolResults: []KiroToolResult{
+						{ToolUseID: "orphan-2", Status: "success", Content: []KiroTextContent{{Text: "bad"}}},
+					},
+				},
+			},
+		},
+	}
+
+	currentToolResults := []KiroToolResult{
+		{ToolUseID: "keep-1", Status: "success", Content: []KiroTextContent{{Text: "ok"}}},
+		{ToolUseID: "orphan-3", Status: "success", Content: []KiroTextContent{{Text: "bad"}}},
+	}
+
+	filteredHistory, filteredCurrent := filterOrphanedToolResults(history, currentToolResults)
+
+	ctx1 := filteredHistory[1].UserInputMessage.UserInputMessageContext
+	if ctx1 == nil || len(ctx1.ToolResults) != 1 || ctx1.ToolResults[0].ToolUseID != "keep-1" {
+		t.Fatalf("expected mixed history message to keep only keep-1, got: %+v", ctx1)
+	}
+
+	if filteredHistory[2].UserInputMessage.UserInputMessageContext != nil {
+		t.Fatalf("expected orphan-only history context to be removed")
+	}
+
+	if len(filteredCurrent) != 1 || filteredCurrent[0].ToolUseID != "keep-1" {
+		t.Fatalf("expected current tool results to keep only keep-1, got: %+v", filteredCurrent)
+	}
+}
