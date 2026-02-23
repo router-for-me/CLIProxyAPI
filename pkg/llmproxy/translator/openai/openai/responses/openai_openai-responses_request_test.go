@@ -159,3 +159,29 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsToolChoice(t *testi
 		t.Fatalf("tool_choice should be object, got %s", res.Get("tool_choice").Type.String())
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MapsLegacyReasoningEffort(t *testing.T) {
+	input := []byte(`{
+		"model":"gpt-4.1",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],
+		"reasoning.effort":"low"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-4.1", input, false)
+	if got := gjson.GetBytes(output, "reasoning_effort").String(); got != "low" {
+		t.Fatalf("expected reasoning_effort low from legacy flat field, got %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MapsVariantFallback(t *testing.T) {
+	input := []byte(`{
+		"model":"gpt-4.1",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],
+		"variant":"medium"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-4.1", input, false)
+	if got := gjson.GetBytes(output, "reasoning_effort").String(); got != "medium" {
+		t.Fatalf("expected reasoning_effort medium from variant, got %q", got)
+	}
+}

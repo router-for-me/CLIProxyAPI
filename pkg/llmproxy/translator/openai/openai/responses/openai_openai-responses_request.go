@@ -198,8 +198,24 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 	}
 
+	// Map reasoning controls.
+	//
+	// Priority:
+	// 1. reasoning.effort object field
+	// 2. flat legacy field "reasoning.effort"
+	// 3. variant
 	if reasoningEffort := root.Get("reasoning.effort"); reasoningEffort.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(reasoningEffort.String()))
+		if effort != "" {
+			out, _ = sjson.Set(out, "reasoning_effort", effort)
+		}
+	} else if reasoningEffort := root.Get(`reasoning\.effort`); reasoningEffort.Exists() {
+		effort := strings.ToLower(strings.TrimSpace(reasoningEffort.String()))
+		if effort != "" {
+			out, _ = sjson.Set(out, "reasoning_effort", effort)
+		}
+	} else if variant := root.Get("variant"); variant.Exists() && variant.Type == gjson.String {
+		effort := strings.ToLower(strings.TrimSpace(variant.String()))
 		if effort != "" {
 			out, _ = sjson.Set(out, "reasoning_effort", effort)
 		}
