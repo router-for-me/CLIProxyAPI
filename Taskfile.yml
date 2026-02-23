@@ -17,6 +17,18 @@ tasks:
       - task --list
     silent: true
 
+  check:
+    desc: "Canonical full-project check"
+    cmds:
+      - task: quality
+
+  release:prep:
+    desc: "Canonical release preparation checks"
+    cmds:
+      - task: changelog:check
+      - task: quality:release-lint
+      - task: quality:ci
+
   # -- Build & Run --
   build:
     desc: "Build the cliproxyapi++ binary"
@@ -272,6 +284,11 @@ tasks:
     deps: [preflight, cache:unlock]
     cmds:
       - task: quality:quick:check
+
+  changelog:check:
+    desc: "Verify CHANGELOG.md contains an Unreleased heading"
+    cmds:
+      - rg -q '^## \[Unreleased\]' CHANGELOG.md
 
   quality:shellcheck:
     desc: "Run shellcheck on shell scripts (best-effort, no-op when shellcheck missing)"
