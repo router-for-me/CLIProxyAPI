@@ -214,13 +214,7 @@ attemptLoop:
 					}
 					if attempt+1 < attempts {
 						delay := antigravityNoCapacityRetryDelay(attempt)
-						log.Debugf(
-							"antigravity executor: no capacity for model fingerprint=%s, retrying in %s (attempt %d/%d)",
-							antigravityModelFingerprint(baseModel),
-							delay,
-							attempt+1,
-							attempts,
-						)
+						log.Debugf("antigravity executor: no capacity, retrying in %s (attempt %d/%d)", delay, attempt+1, attempts)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
