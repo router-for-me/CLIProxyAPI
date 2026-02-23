@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -29,6 +29,43 @@ var (
 	fallbackFpOnce        sync.Once
 	fallbackFp            *kiroauth.Fingerprint
 )
+
+// McpRequest represents a JSON-RPC request to the MCP endpoint.
+type McpRequest struct {
+	ID      string         `json:"id,omitempty"`
+	JSONRPC string         `json:"jsonrpc,omitempty"`
+	Method  string         `json:"method"`
+	Params  map[string]any `json:"params,omitempty"`
+}
+
+type mcpError struct {
+	Code    *int    `json:"code,omitempty"`
+	Message *string `json:"message,omitempty"`
+}
+
+type mcpContent struct {
+	ContentType string `json:"type"`
+	Text        string `json:"text,omitempty"`
+}
+
+type mcpResult struct {
+	Content []mcpContent `json:"content,omitempty"`
+}
+
+// McpResponse represents a JSON-RPC response from the MCP endpoint.
+type McpResponse struct {
+	ID      string    `json:"id,omitempty"`
+	JSONRPC string    `json:"jsonrpc,omitempty"`
+	Result  *mcpResult `json:"result,omitempty"`
+	Error   *mcpError `json:"error,omitempty"`
+}
+
+// WebSearchResults is the parsed structure for web search response payloads.
+// It intentionally remains permissive to avoid coupling to provider-specific fields.
+type WebSearchResults struct {
+	Query   string           `json:"query,omitempty"`
+	Results []map[string]any `json:"results,omitempty"`
+}
 
 func init() {
 	toolDescOnce.Store(&sync.Once{})

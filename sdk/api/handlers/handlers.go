@@ -103,7 +103,10 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 
 	trimmed := strings.TrimSpace(errText)
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
-		return []byte(trimmed)
+		if jsonHasTopLevelError(trimmed) {
+			return []byte(trimmed)
+		}
+		errText = fmt.Sprintf("upstream returned JSON without top-level error field: %s", trimmed)
 	}
 
 	errType := "invalid_request_error"
@@ -121,6 +124,7 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 	case http.StatusNotFound:
 		errType = "invalid_request_error"
 		code = "model_not_found"
+		errText = enrichModelNotFoundMessage(errText)
 	default:
 		if status >= http.StatusInternalServerError {
 			errType = "server_error"
@@ -139,6 +143,30 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 		return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText))
 	}
 	return payload
+}
+
+func jsonHasTopLevelError(payload string) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+		return false
+	}
+	_, ok := obj["error"]
+	return ok
+}
+
+func enrichModelNotFoundMessage(message string) string {
+	trimmed := strings.TrimSpace(message)
+	lower := strings.ToLower(trimmed)
+	if strings.Contains(lower, "/v1/models") {
+		return trimmed
+	}
+	if strings.Contains(lower, "model_not_found") ||
+		strings.Contains(lower, "does not exist") ||
+		strings.Contains(lower, "requested model") ||
+		strings.Contains(lower, "not found") {
+		return trimmed + " Verify available IDs with GET /v1/models and request an exact exposed model ID."
+	}
+	return trimmed
 }
 
 // StreamingKeepAliveInterval returns the SSE keep-alive interval for this server.

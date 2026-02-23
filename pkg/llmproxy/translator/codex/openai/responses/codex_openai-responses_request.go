@@ -41,6 +41,11 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Preserve compaction fields for context management
 	// These fields are used for conversation context management in the Responses API
 	previousResponseID := gjson.GetBytes(rawJSON, "previous_response_id")
+	if !previousResponseID.Exists() {
+		if conversationID := gjson.GetBytes(rawJSON, "conversation_id"); conversationID.Exists() {
+			previousResponseID = conversationID
+		}
+	}
 	promptCacheKey := gjson.GetBytes(rawJSON, "prompt_cache_key")
 	safetyIdentifier := gjson.GetBytes(rawJSON, "safety_identifier")
 
@@ -66,6 +71,8 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	// Delete the user field as it is not supported by the Codex upstream.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
+	// Normalize alias-only conversation tracking fields to Codex-native key.
+	rawJSON, _ = sjson.DeleteBytes(rawJSON, "conversation_id")
 
 	// Restore compaction fields after other transformations
 	if previousResponseID.Exists() {

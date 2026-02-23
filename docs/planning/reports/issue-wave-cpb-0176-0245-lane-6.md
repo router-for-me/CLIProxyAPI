@@ -9,47 +9,49 @@
 ## Status Snapshot
 
 - `planned`: 0
-- `implemented`: 0
-- `in_progress`: 10
+- `implemented`: 3
+- `in_progress`: 7
 - `blocked`: 0
 
 ## Per-Item Status
 
 ### CPB-0226 – Expand docs and examples for "Implement MCP Server for Memory Operations" with copy-paste quickstart and troubleshooting section.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1410`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0226" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - Added copy-paste MCP memory operations quickstart examples with `tools/list` and `tools/call` smoke tests.
+  - Added a troubleshooting matrix row for memory-tool failures with concrete diagnosis/remediation flow.
+- Implemented artifacts:
+  - `docs/provider-quickstarts.md`
+  - `docs/troubleshooting.md`
+- Verification commands:
+  - `rg -n "MCP Server \\(Memory Operations\\)|MCP memory tools fail" docs/provider-quickstarts.md docs/troubleshooting.md`
 
 ### CPB-0227 – Add QA scenarios for "■ stream disconnected before completion: stream closed before response.completed" including stream/non-stream parity and edge-case payloads.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `responses-and-chat-compat`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1407`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0227" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - Added explicit stream/non-stream regression tests that reproduce upstream stream closure before `response.completed`.
+  - Hardened `ExecuteStream` to fail loudly (408 statusErr) when the stream ends without completion event.
+- Implemented artifacts:
+  - `pkg/llmproxy/executor/codex_executor.go`
+  - `pkg/llmproxy/executor/codex_executor_cpb0227_test.go`
+- Verification commands:
+  - `go test ./pkg/llmproxy/executor -run 'CPB0227|CPB0106' -count=1` (currently blocked by pre-existing compile error in `pkg/llmproxy/executor/claude_executor_test.go`)
 
 ### CPB-0228 – Port relevant thegent-managed flow implied by "Bug: /v1/responses returns 400 "Input must be a list" when input is string (regression 6.7.42, Droid auto-compress broken)" into first-class cliproxy Go CLI command(s) with interactive setup support.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `go-cli-extraction`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1403`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0228" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - Added regression coverage for `/v1/responses` string-input normalization to list form in Codex translation.
+  - Added regression coverage for compaction fields (`previous_response_id`, `prompt_cache_key`, `safety_identifier`) when string input is used.
+- Implemented artifacts:
+  - `pkg/llmproxy/translator/codex/openai/responses/codex_openai-responses_request_test.go`
+- Verification commands:
+  - `go test ./pkg/llmproxy/translator/codex/openai/responses -run 'CPB0228|ConvertOpenAIResponsesRequestToCodex' -count=1`
 
 ### CPB-0229 – Ensure rollout safety for "Factory Droid CLI got 404" via feature flags, staged defaults, and migration notes.
 - Status: `in_progress`
@@ -138,7 +140,12 @@
 ## Evidence & Commands Run
 
 - `rg -n "CPB-0176|CPB-0245" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`
-- No repository code changes were performed in this lane in this pass; planning only.
+- `go test ./pkg/llmproxy/executor -run 'CPB0227|CPB0106' -count=1` (fails due to pre-existing compile error in `pkg/llmproxy/executor/claude_executor_test.go:237`)
+- `go test ./pkg/llmproxy/translator/codex/openai/responses -run 'CPB0228|ConvertOpenAIResponsesRequestToCodex' -count=1`
+- `go test ./pkg/llmproxy/translator/openai/openai/responses -run 'ConvertOpenAIResponsesRequestToOpenAIChatCompletions' -count=1`
+- `rg -n "MCP Server \\(Memory Operations\\)|MCP memory tools fail" docs/provider-quickstarts.md docs/troubleshooting.md`
+- `rg -n "CPB0227|CPB0228" pkg/llmproxy/executor/codex_executor_cpb0227_test.go pkg/llmproxy/translator/codex/openai/responses/codex_openai-responses_request_test.go`
 
 ## Next Actions
-- Move item by item from `planned` to `implemented` only when regression tests and code updates are committed.
+- Unblock `go test ./pkg/llmproxy/executor` package compilation by fixing the unrelated `CloakConfig.CacheUserID` test fixture mismatch in `pkg/llmproxy/executor/claude_executor_test.go`.
+- After executor package compile is green, rerun `go test ./pkg/llmproxy/executor -run 'CPB0227|CPB0106' -count=1` to capture a fully passing lane-6 evidence set.

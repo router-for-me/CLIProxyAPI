@@ -9,8 +9,8 @@
 ## Status Snapshot
 
 - `planned`: 0
-- `implemented`: 0
-- `in_progress`: 10
+- `implemented`: 2
+- `in_progress`: 8
 - `blocked`: 0
 
 ## Per-Item Status
@@ -112,33 +112,45 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0224 – Convert "Add Strict Schema Mode for OpenAI Function Calling" into a provider-agnostic pattern and codify in shared translation utilities.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `error-handling-retries`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1412`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0224" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - Added shared schema normalization utility to make strict function schema handling consistent across Gemini OpenAI Chat Completions and OpenAI Responses translators.
+  - Strict mode now deterministically sets `additionalProperties: false` while preserving Gemini-safe root/object normalization.
+  - Added focused regression tests for shared utility and both translator entrypoints.
+- Verification commands:
+  - `go test ./pkg/llmproxy/translator/gemini/common`
+  - `go test ./pkg/llmproxy/translator/gemini/openai/chat-completions`
+  - `go test ./pkg/llmproxy/translator/gemini/openai/responses`
+- Evidence paths:
+  - `pkg/llmproxy/translator/gemini/common/sanitize.go`
+  - `pkg/llmproxy/translator/gemini/common/sanitize_test.go`
+  - `pkg/llmproxy/translator/gemini/openai/chat-completions/gemini_openai_request.go`
+  - `pkg/llmproxy/translator/gemini/openai/chat-completions/gemini_openai_request_test.go`
+  - `pkg/llmproxy/translator/gemini/openai/responses/gemini_openai-responses_request.go`
+  - `pkg/llmproxy/translator/gemini/openai/responses/gemini_openai-responses_request_test.go`
 
 ### CPB-0225 – Add DX polish around "Add Conversation Tracking Support for Chat History" through improved command ergonomics and faster feedback loops.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `provider-model-registry`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1411`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0225" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - Added ergonomic alias handling so `conversation_id` is accepted and normalized to `previous_response_id` in Codex Responses request translation.
+  - Preserved deterministic precedence when both keys are provided (`previous_response_id` wins).
+  - Added targeted regression tests for alias mapping and precedence.
+- Verification commands:
+  - `go test ./pkg/llmproxy/translator/codex/openai/responses`
+- Evidence paths:
+  - `pkg/llmproxy/translator/codex/openai/responses/codex_openai-responses_request.go`
+  - `pkg/llmproxy/translator/codex/openai/responses/codex_openai-responses_request_test.go`
+  - `docs/provider-quickstarts.md`
 
 ## Evidence & Commands Run
 
 - `rg -n "CPB-0176|CPB-0245" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`
-- No repository code changes were performed in this lane in this pass; planning only.
+- `go test ./pkg/llmproxy/translator/gemini/common ./pkg/llmproxy/translator/gemini/openai/chat-completions ./pkg/llmproxy/translator/gemini/openai/responses ./pkg/llmproxy/translator/codex/openai/responses`
+- `rg -n "conversation_id|previous_response_id|strict: true" docs/provider-quickstarts.md pkg/llmproxy/translator/codex/openai/responses/codex_openai-responses_request.go pkg/llmproxy/translator/gemini/common/sanitize.go`
 
 ## Next Actions
-- Move item by item from `planned` to `implemented` only when regression tests and code updates are committed.
+- Continue lane-5 by taking one docs-focused item (`CPB-0221` or `CPB-0216`) and one code item (`CPB-0220` or `CPB-0223`) with the same targeted-test evidence format.

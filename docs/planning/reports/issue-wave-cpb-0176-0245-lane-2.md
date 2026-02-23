@@ -9,8 +9,8 @@
 ## Status Snapshot
 
 - `planned`: 0
-- `implemented`: 0
-- `in_progress`: 10
+- `implemented`: 2
+- `in_progress`: 8
 - `blocked`: 0
 
 ## Per-Item Status
@@ -28,16 +28,18 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0187 – Create/refresh provider quickstart derived from "openai-compatibility: streaming response empty when translating Codex protocol (/v1/responses) to OpenAI chat/completions" including setup, auth, model select, and sanity-check commands.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `docs-quickstarts`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1478`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
+  - Added concrete streaming sanity-check commands that compare `/v1/responses` and `/v1/chat/completions` for Codex-family traffic.
+  - Added explicit expected outcomes and remediation path when chat stream appears empty.
+- Implemented changes:
+  - `docs/provider-quickstarts.md`
+- Verification commands:
   - `rg -n "CPB-0187" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - `rg -n "Streaming compatibility sanity check|/v1/responses|/v1/chat/completions" docs/provider-quickstarts.md`
+  - `go test pkg/llmproxy/executor/logging_helpers.go pkg/llmproxy/executor/logging_helpers_test.go -count=1`
 
 ### CPB-0188 – Refactor implementation behind "bug: request-level metadata fields injected into contents[] causing Gemini API rejection (v6.8.4)" to reduce complexity and isolate transformation boundaries.
 - Status: `in_progress`
@@ -112,16 +114,22 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0194 – Convert "model not found for gpt-5.3-codex" into a provider-agnostic pattern and codify in shared translation utilities.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1463`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
+  - Codified model-not-found guidance in shared executor logging helpers used across providers.
+  - Added regression coverage in both executor trees to lock guidance for generic `model_not_found` and Codex-specific hints.
+- Implemented changes:
+  - `pkg/llmproxy/executor/logging_helpers.go`
+  - `pkg/llmproxy/runtime/executor/logging_helpers.go`
+  - `pkg/llmproxy/executor/logging_helpers_test.go`
+  - `pkg/llmproxy/runtime/executor/logging_helpers_test.go`
+- Verification commands:
   - `rg -n "CPB-0194" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - `go test ./pkg/llmproxy/runtime/executor -run 'TestExtractJSONErrorMessage_' -count=1`
+  - `go test pkg/llmproxy/executor/logging_helpers.go pkg/llmproxy/executor/logging_helpers_test.go -count=1`
+  - `go test pkg/llmproxy/runtime/executor/logging_helpers.go pkg/llmproxy/runtime/executor/logging_helpers_test.go -count=1`
 
 ### CPB-0195 – Add DX polish around "antigravity用不了" through improved command ergonomics and faster feedback loops.
 - Status: `in_progress`
@@ -138,7 +146,12 @@
 ## Evidence & Commands Run
 
 - `rg -n "CPB-0176|CPB-0245" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`
-- No repository code changes were performed in this lane in this pass; planning only.
+- `rg -n "CPB-0186|CPB-0187|CPB-0188|CPB-0189|CPB-0190|CPB-0191|CPB-0192|CPB-0193|CPB-0194|CPB-0195" docs/planning/reports/issue-wave-cpb-0176-0245-lane-2.md`
+- `rg -n "Streaming compatibility sanity check|/v1/responses|/v1/chat/completions" docs/provider-quickstarts.md`
+- `go test ./pkg/llmproxy/executor -run 'TestExtractJSONErrorMessage_' -count=1` (failed due pre-existing compile error in `pkg/llmproxy/executor/claude_executor_test.go` unrelated to this lane: unknown field `CacheUserID` in `config.CloakConfig`)
+- `go test ./pkg/llmproxy/runtime/executor -run 'TestExtractJSONErrorMessage_' -count=1`
+- `go test pkg/llmproxy/executor/logging_helpers.go pkg/llmproxy/executor/logging_helpers_test.go -count=1`
+- `go test pkg/llmproxy/runtime/executor/logging_helpers.go pkg/llmproxy/runtime/executor/logging_helpers_test.go -count=1`
 
 ## Next Actions
-- Move item by item from `planned` to `implemented` only when regression tests and code updates are committed.
+- Continue with remaining `in_progress` items (`CPB-0186`, `CPB-0188`..`CPB-0193`, `CPB-0195`) using item-scoped regression tests before status promotion.

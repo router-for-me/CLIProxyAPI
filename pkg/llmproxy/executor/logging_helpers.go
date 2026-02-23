@@ -370,11 +370,50 @@ func extractHTMLTitle(body []byte) string {
 
 // extractJSONErrorMessage attempts to extract error.message from JSON error responses
 func extractJSONErrorMessage(body []byte) string {
-	result := gjson.GetBytes(body, "error.message")
-	if result.Exists() && result.String() != "" {
-		return result.String()
+	message := firstNonEmptyJSONString(body, "error.message", "message", "error.msg")
+	if message == "" {
+		return ""
+	}
+	return appendModelNotFoundGuidance(message, body)
+}
+
+func firstNonEmptyJSONString(body []byte, paths ...string) string {
+	for _, path := range paths {
+		result := gjson.GetBytes(body, path)
+		if result.Exists() {
+			value := strings.TrimSpace(result.String())
+			if value != "" {
+				return value
+			}
+		}
 	}
 	return ""
+}
+
+func appendModelNotFoundGuidance(message string, body []byte) string {
+	normalized := strings.ToLower(message)
+	if strings.Contains(normalized, "/v1/models") || strings.Contains(normalized, "/v1/responses") {
+		return message
+	}
+
+	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	if errorCode == "" {
+		errorCode = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "code").String()))
+	}
+
+	mentionsModelNotFound := strings.Contains(normalized, "model_not_found") ||
+		strings.Contains(normalized, "model not found") ||
+		strings.Contains(errorCode, "model_not_found") ||
+		(strings.Contains(errorCode, "not_found") && strings.Contains(normalized, "model"))
+	if !mentionsModelNotFound {
+		return message
+	}
+
+	hint := "hint: verify the model appears in GET /v1/models"
+	if strings.Contains(normalized, "codex") || strings.Contains(normalized, "gpt-5.3-codex") {
+		hint += "; Codex-family models should be sent to /v1/responses."
+	}
+	return message + " (" + hint + ")"
 }
 
 // logWithRequestID returns a logrus Entry with request_id field populated from context.

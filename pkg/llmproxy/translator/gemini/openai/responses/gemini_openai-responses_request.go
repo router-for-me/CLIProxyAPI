@@ -360,13 +360,13 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				if desc := tool.Get("description"); desc.Exists() {
 					funcDecl, _ = sjson.Set(funcDecl, "description", desc.String())
 				}
-				if params := tool.Get("parameters"); params.Exists() {
-					// Normalize schema for Gemini compatibility (nullable/type arrays, unsupported fields, etc.).
-					cleaned := common.SanitizeParametersJSONSchemaForGemini(params.Raw)
-					// Keep root object type explicit for Gemini tool schema.
-					cleaned, _ = sjson.Set(cleaned, "type", "OBJECT")
-					funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
+				params := tool.Get("parameters")
+				if !params.Exists() {
+					params = tool.Get("parametersJsonSchema")
 				}
+				strict := tool.Get("strict").Exists() && tool.Get("strict").Bool()
+				cleaned := common.NormalizeOpenAIFunctionSchemaForGemini(params, strict)
+				funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
 
 				geminiTools, _ = sjson.SetRaw(geminiTools, "0.functionDeclarations.-1", funcDecl)
 			}

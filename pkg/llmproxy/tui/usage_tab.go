@@ -120,7 +120,7 @@ func (m usageTabModel) renderContent() string {
 	totalReqs := int64(getFloat(usageMap, "total_requests"))
 	successCnt := int64(getFloat(usageMap, "success_count"))
 	failureCnt := int64(getFloat(usageMap, "failure_count"))
-	totalTokens := int64(getFloat(usageMap, "total_tokens"))
+	totalTokens := resolveUsageTotalTokens(usageMap)
 
 	// ━━━ Overview Cards ━━━
 	cardWidth := 20
@@ -259,6 +259,92 @@ func (m usageTabModel) renderContent() string {
 	return sb.String()
 }
 
+func resolveUsageTotalTokens(usageMap map[string]any) int64 {
+	totalTokens := int64(getFloat(usageMap, "total_tokens"))
+	if totalTokens > 0 {
+		return totalTokens
+	}
+
+	apis, ok := usageMap["apis"].(map[string]any)
+	if !ok || len(apis) == 0 {
+		return totalTokens
+	}
+
+	var fromModels int64
+	var fromDetails int64
+	for _, apiSnap := range apis {
+		apiMap, ok := apiSnap.(map[string]any)
+		if !ok {
+			continue
+		}
+		models, ok := apiMap["models"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, statsRaw := range models {
+			stats, ok := statsRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			modelTotal := int64(getFloat(stats, "total_tokens"))
+			if modelTotal > 0 {
+				fromModels += modelTotal
+				continue
+			}
+			fromDetails += usageDetailsTokenTotal(stats)
+		}
+	}
+
+	if fromModels > 0 {
+		return fromModels
+	}
+	if fromDetails > 0 {
+		return fromDetails
+	}
+	return totalTokens
+}
+
+func usageDetailsTokenTotal(modelStats map[string]any) int64 {
+	details, ok := modelStats["details"]
+	if !ok {
+		return 0
+	}
+	detailList, ok := details.([]any)
+	if !ok || len(detailList) == 0 {
+		return 0
+	}
+
+	var total int64
+	for _, d := range detailList {
+		dm, ok := d.(map[string]any)
+		if !ok {
+			continue
+		}
+		input, output, cached, reasoning := usageTokenBreakdown(dm)
+		total += input + output + cached + reasoning
+	}
+	return total
+}
+
+func usageTokenBreakdown(detail map[string]any) (inputTotal, outputTotal, cachedTotal, reasoningTotal int64) {
+	if tokens, ok := detail["tokens"].(map[string]any); ok {
+		inputTotal += int64(getFloat(tokens, "input_tokens"))
+		outputTotal += int64(getFloat(tokens, "output_tokens"))
+		cachedTotal += int64(getFloat(tokens, "cached_tokens"))
+		reasoningTotal += int64(getFloat(tokens, "reasoning_tokens"))
+	}
+
+	// Some providers send token counts flat on detail entries.
+	inputTotal += int64(getFloat(detail, "input_tokens"))
+	inputTotal += int64(getFloat(detail, "prompt_tokens"))
+	outputTotal += int64(getFloat(detail, "output_tokens"))
+	outputTotal += int64(getFloat(detail, "completion_tokens"))
+	cachedTotal += int64(getFloat(detail, "cached_tokens"))
+	reasoningTotal += int64(getFloat(detail, "reasoning_tokens"))
+
+	return inputTotal, outputTotal, cachedTotal, reasoningTotal
+}
+
 // renderTokenBreakdown aggregates input/output/cached/reasoning tokens from model details.
 func (m usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
 	details, ok := modelStats["details"]
@@ -276,14 +362,11 @@ func (m usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
 		if !ok {
 			continue
 		}
-		tokens, ok := dm["tokens"].(map[string]any)
-		if !ok {
-			continue
-		}
-		inputTotal += int64(getFloat(tokens, "input_tokens"))
-		outputTotal += int64(getFloat(tokens, "output_tokens"))
-		cachedTotal += int64(getFloat(tokens, "cached_tokens"))
-		reasoningTotal += int64(getFloat(tokens, "reasoning_tokens"))
+		input, output, cached, reasoning := usageTokenBreakdown(dm)
+		inputTotal += input
+		outputTotal += output
+		cachedTotal += cached
+		reasoningTotal += reasoning
 	}
 
 	if inputTotal == 0 && outputTotal == 0 && cachedTotal == 0 && reasoningTotal == 0 {

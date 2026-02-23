@@ -840,8 +840,41 @@ func (cfg *Config) SanitizePayloadRules() {
 	if cfg == nil {
 		return
 	}
+	cfg.Payload.Default = sanitizePayloadRules(cfg.Payload.Default, "default")
+	cfg.Payload.Override = sanitizePayloadRules(cfg.Payload.Override, "override")
+	cfg.Payload.Filter = sanitizePayloadFilterRules(cfg.Payload.Filter, "filter")
 	cfg.Payload.DefaultRaw = sanitizePayloadRawRules(cfg.Payload.DefaultRaw, "default-raw")
 	cfg.Payload.OverrideRaw = sanitizePayloadRawRules(cfg.Payload.OverrideRaw, "override-raw")
+}
+
+func sanitizePayloadRules(rules []PayloadRule, section string) []PayloadRule {
+	if len(rules) == 0 {
+		return rules
+	}
+	out := make([]PayloadRule, 0, len(rules))
+	for i := range rules {
+		rule := rules[i]
+		if len(rule.Params) == 0 {
+			continue
+		}
+		invalid := false
+		for path := range rule.Params {
+			if payloadPathInvalid(path) {
+				log.WithFields(log.Fields{
+					"section":    section,
+					"rule_index": i + 1,
+					"param":      path,
+				}).Warn("payload rule dropped: invalid parameter path")
+				invalid = true
+				break
+			}
+		}
+		if invalid {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
 }
 
 func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule {
@@ -856,6 +889,15 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		}
 		invalid := false
 		for path, value := range rule.Params {
+			if payloadPathInvalid(path) {
+				log.WithFields(log.Fields{
+					"section":    section,
+					"rule_index": i + 1,
+					"param":      path,
+				}).Warn("payload rule dropped: invalid parameter path")
+				invalid = true
+				break
+			}
 			raw, ok := payloadRawString(value)
 			if !ok {
 				continue
@@ -877,6 +919,44 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		out = append(out, rule)
 	}
 	return out
+}
+
+func sanitizePayloadFilterRules(rules []PayloadFilterRule, section string) []PayloadFilterRule {
+	if len(rules) == 0 {
+		return rules
+	}
+	out := make([]PayloadFilterRule, 0, len(rules))
+	for i := range rules {
+		rule := rules[i]
+		if len(rule.Params) == 0 {
+			continue
+		}
+		invalid := false
+		for _, path := range rule.Params {
+			if payloadPathInvalid(path) {
+				log.WithFields(log.Fields{
+					"section":    section,
+					"rule_index": i + 1,
+					"param":      path,
+				}).Warn("payload filter rule dropped: invalid parameter path")
+				invalid = true
+				break
+			}
+		}
+		if invalid {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
+}
+
+func payloadPathInvalid(path string) bool {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return true
+	}
+	return strings.HasPrefix(p, ".") || strings.HasSuffix(p, ".") || strings.Contains(p, "..")
 }
 
 func payloadRawString(value any) ([]byte, bool) {
