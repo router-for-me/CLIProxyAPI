@@ -9,6 +9,7 @@
 - `task quality:fmt-staged:check` — Check formatting and lint staged/diff files (PR-safe, non-mutating).
 - `task quality:quick` — Fast loop (`QUALITY_PACKAGES` scoped optional), readonly.
 - `task quality:quick:check` — Fast non-mutating quality loop (`quality:fmt:check` + `lint:changed` + targeted tests).
+- `task quality:quick:smoke` — `quality:quick:check` plus provider smoke matrix script (`test:provider-smoke-matrix:test`).
 - `task quality:quick:fix` — Auto-fix format, then run `quality:quick:check`.
 - `task quality:quick:all` — Run `quality:quick` locally, then run `QUALITY_PARENT_TASK` in sibling cliproxy repositories (`QUALITY_PARENT_TASK=quality:quick` by default).
 - `task lint` — Run `golangci-lint` across all packages.
@@ -35,6 +36,7 @@
 5. `task test` (or `task test:unit`)
 6. `task test:smoke`
 7. Optional:
+   - `QUALITY_INCLUDE_SMOKE=1 QUALITY_PACKAGES=\"./pkg/llmproxy/translator/codex/claude\" task quality:quick:check` (fast smoke-capable local path)
    - `CLIPROXY_PROVIDER_SMOKE_CASES="openai:gpt-4o-mini,claude:claude-3-5-sonnet-20241022" CLIPROXY_SMOKE_WAIT_FOR_READY=1 task test:provider-smoke-matrix`
    - `task test:provider-smoke-matrix:cheapest`
    - Add `CLIPROXY_SMOKE_EXPECT_SUCCESS=1` in environments where auth/provider configs are known to return 200.

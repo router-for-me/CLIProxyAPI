@@ -82,3 +82,23 @@ func TestGetAntigravityModelConfig_IncludesOpusAlias(t *testing.T) {
 		t.Fatal("expected gemini-claude-opus-thinking to define thinking support")
 	}
 }
+
+func TestGetQwenModels_IncludesQwen35Alias(t *testing.T) {
+	models := GetQwenModels()
+	foundAlias := false
+	for _, model := range models {
+		if model.ID == "qwen3.5" {
+			foundAlias = true
+			if model.DisplayName == "" {
+				t.Fatal("expected qwen3.5 to expose display name")
+			}
+			break
+		}
+	}
+	if !foundAlias {
+		t.Fatal("expected qwen3.5 in Qwen model definitions")
+	}
+	if LookupStaticModelInfo("qwen3.5") == nil {
+		t.Fatal("expected static lookup for qwen3.5")
+	}
+}

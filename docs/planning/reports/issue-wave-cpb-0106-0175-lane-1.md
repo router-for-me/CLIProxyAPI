@@ -11,9 +11,9 @@
 ## Status Snapshot
 
 - `in_progress`: 10/10 items reviewed
-- `planned`: 9
+- `planned`: 7
 - `partial`: 0
-- `implemented`: 1
+- `implemented`: 3
 - `blocked`: 0
 
 ## Per-Item Status
@@ -70,16 +70,16 @@
 - Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
 
 ### CPB-0110 – Standardize metadata and naming conventions touched by "qwen auth 里获取到了 qwen3.5，但是 ai 客户端获取不到这个模型" across both repos.
-- Status: `planned`
+- Status: `implemented`
 - Theme: `oauth-and-authentication`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1611`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
+  - Added explicit `qwen3.5` static model alias to ensure client model listings expose the expected identifier without removing existing `coder-model`.
+  - Added regression coverage in `pkg/llmproxy/registry/model_definitions_test.go` for alias visibility and lookup.
 - Proposed verification commands:
   - `rg -n "CPB-0110" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
+  - `go test ./pkg/llmproxy/registry -run TestGetQwenModels_IncludesQwen35Alias -count=1`
+- Next action: coordinate parity check with upstream auth source once available.
 
 ### CPB-0111 – Follow up on "fix: handle response.function_call_arguments.done in codex→claude streaming translator" by closing compatibility gaps and preventing regressions in adjacent providers.
 - Status: `planned`
@@ -94,16 +94,16 @@
 - Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
 
 ### CPB-0112 – Harden "不能正确统计minimax-m2.5/kimi-k2.5的Token" with clearer validation, safer defaults, and defensive fallbacks.
-- Status: `planned`
+- Status: `implemented`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1607`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
+  - Hardened OpenAI/Responses usage parsing to handle alternate token keys and string-typed values for stream and non-stream responses.
+  - Added regression coverage in `pkg/llmproxy/executor/usage_helpers_test.go` for aliasing, stream parsing, and alternate token formats.
 - Proposed verification commands:
   - `rg -n "CPB-0112" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
+  - `go test ./pkg/llmproxy/executor -run "TestParseOpenAIUsage_WithAlternateFieldsAndStringValues|TestParseOpenAIStreamUsage_WithAlternateFieldsAndStringValues|TestParseOpenAIResponsesUsageDetail_WithAlternateFields" -count=1`
+- Next action: add real minimax/kimi token fixtures to align behavior with provider payload variants in upstream logs.
 
 ### CPB-0113 – Operationalize "速速支持qwen code的qwen3.5" with observability, alerting thresholds, and runbook updates.
 - Status: `planned`

@@ -61,3 +61,11 @@ Dispatch contract per lane:
 - Add/update tests for behavior changes.
 - Run targeted tests for touched packages.
 - Write lane report in `docs/planning/reports/issue-wave-gh-next32-lane-<n>.md`.
+
+Lane report tracking status:
+- `docs/planning/reports/issue-wave-gh-next32-lane-2.md` (created)
+- `docs/planning/reports/issue-wave-gh-next32-lane-3.md` (created)
+- `docs/planning/reports/issue-wave-gh-next32-lane-4.md` (created)
+- `docs/planning/reports/issue-wave-gh-next32-lane-5.md` (created)
+- `docs/planning/reports/issue-wave-gh-next32-lane-6.md` (created)
+- `docs/planning/reports/issue-wave-gh-next32-lane-7.md` (created)
