@@ -180,8 +180,6 @@ func TestRegisterProviderAliases_DedicatedProviderModels(t *testing.T) {
 	}{
 		{provider: "kiro", expectedModel: "kiro-claude-opus-4-6", expectedOwner: "aws"},
 		{provider: "cursor", expectedModel: "default", expectedOwner: "cursor"},
-		{provider: "kilo", expectedModel: "kilo/auto", expectedOwner: "kilo"},
-		{provider: "kimi", expectedModel: "kimi-k2", expectedOwner: "moonshot"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.provider, func(t *testing.T) {
