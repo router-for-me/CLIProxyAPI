@@ -207,6 +207,33 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							} else {
 								log.Warnf("Unknown file name extension '%s' in user message, skip", ext)
 							}
+						case "input_audio":
+							audioData := item.Get("input_audio.data").String()
+							audioFormat := item.Get("input_audio.format").String()
+							if audioData != "" {
+								audioMimeMap := map[string]string{
+									"mp3":       "audio/mpeg",
+									"wav":       "audio/wav",
+									"ogg":       "audio/ogg",
+									"flac":      "audio/flac",
+									"aac":       "audio/aac",
+									"webm":      "audio/webm",
+									"pcm16":     "audio/pcm",
+									"g711_ulaw": "audio/basic",
+									"g711_alaw": "audio/basic",
+								}
+								mimeType := "audio/wav"
+								if audioFormat != "" {
+									if mapped, ok := audioMimeMap[audioFormat]; ok {
+										mimeType = mapped
+									} else {
+										mimeType = "audio/" + audioFormat
+									}
+								}
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mimeType)
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", audioData)
+								p++
+							}
 						}
 					}
 				}
