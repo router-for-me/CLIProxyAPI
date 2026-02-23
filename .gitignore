@@ -44,3 +44,4 @@ _bmad-output/*
 .DS_Store
 ._*
 *.bak
+pkg/llmproxy/api/logs/
