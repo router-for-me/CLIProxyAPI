@@ -305,7 +305,12 @@ func normalizeManagementCallbackPath(rawPath string) string {
 		normalized = "/" + normalized
 	}
 	normalized = path.Clean(normalized)
-	if normalized == "." {
+	// Security: Verify cleaned path is still safe (no open redirect)
+	if normalized == "." || normalized == "" {
+		return "/"
+	}
+	// Prevent open redirect attacks (e.g., //evil.com or http://...)
+	if strings.Contains(normalized, "//") || strings.Contains(normalized, ":/") {
 		return "/"
 	}
 	if !strings.HasPrefix(normalized, "/") {
