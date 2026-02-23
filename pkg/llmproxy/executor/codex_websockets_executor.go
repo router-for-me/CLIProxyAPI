@@ -1297,42 +1297,15 @@ func (e *CodexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 }
 
 func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
-	log.Infof(
-		"codex websockets: upstream connected session=%s auth=%s url=%s",
-		codexLogFingerprint(sessionID),
-		codexLogFingerprint(authID),
-		codexLogFingerprint(wsURL),
-	)
+	log.Info("codex websockets: upstream connected")
 }
 
 func logCodexWebsocketDisconnected(sessionID string, _ string, _ string, reason string, err error) {
 	if err != nil {
-		log.Infof(
-			"codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s err=%v",
-			codexLogFingerprint(sessionID),
-			codexLogFingerprint(authID),
-			codexLogFingerprint(wsURL),
-			strings.TrimSpace(reason),
-			err,
-		)
+		log.Infof("codex websockets: upstream disconnected reason=%s err=%v", strings.TrimSpace(reason), err)
 		return
 	}
-	log.Infof(
-		"codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s",
-		codexLogFingerprint(sessionID),
-		codexLogFingerprint(authID),
-		codexLogFingerprint(wsURL),
-		strings.TrimSpace(reason),
-	)
-}
-
-func codexLogFingerprint(value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(trimmed))
-	return hex.EncodeToString(sum[:8])
+	log.Infof("codex websockets: upstream disconnected reason=%s", strings.TrimSpace(reason))
 }
 
 // CodexAutoExecutor routes Codex requests to the websocket transport only when:
