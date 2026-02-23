@@ -26,7 +26,7 @@ run_matrix_check() {
 create_fake_curl() {
   local output_path="$1"
   local state_file="$2"
-  local status_sequence="$3"
+  local status_sequence="${3:-200}"
 
   cat >"${output_path}" <<'EOF'
 #!/usr/bin/env bash
