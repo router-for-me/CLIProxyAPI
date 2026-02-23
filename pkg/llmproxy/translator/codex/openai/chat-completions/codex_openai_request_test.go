@@ -141,6 +141,20 @@ func TestConvertOpenAIRequestToCodex_UsesVariantFallbackWhenReasoningEffortMissi
 	}
 }
 
+func TestConvertOpenAIRequestToCodex_UsesLegacyFlatReasoningEffortField(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [{"role":"user","content":"hello"}],
+		"reasoning.effort": "low"
+	}`)
+	got := ConvertOpenAIRequestToCodex("gpt-4o", input, false)
+	res := gjson.ParseBytes(got)
+
+	if gotEffort := res.Get("reasoning.effort").String(); gotEffort != "low" {
+		t.Fatalf("expected reasoning.effort to use legacy flat field low, got %s", gotEffort)
+	}
+}
+
 func TestConvertOpenAIRequestToCodex_UsesReasoningEffortBeforeVariant(t *testing.T) {
 	input := []byte(`{
 		"model": "gpt-4o",

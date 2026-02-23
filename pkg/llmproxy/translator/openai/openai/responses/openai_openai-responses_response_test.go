@@ -166,3 +166,130 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneMarkerNoDupli
 		t.Fatalf("expected no events on [DONE] after completion already emitted, got %d", len(doneEvents))
 	}
 }
+
+func extractEventData(event string) string {
+	lines := strings.SplitN(event, "\n", 2)
+	if len(lines) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(lines[1], "data: "))
+}
+
+func findCompletedData(outputs []string) string {
+	for _, output := range outputs {
+		if strings.HasPrefix(output, "event: response.completed") {
+			return extractEventData(output)
+		}
+	}
+	return ""
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_UsesOriginalRequestJSON(t *testing.T) {
+	original := []byte(`{
+		"instructions": "original instructions",
+		"max_output_tokens": 512,
+		"model": "orig-model",
+		"temperature": 0.2
+	}`)
+	request := []byte(`{
+		"instructions": "transformed instructions",
+		"max_output_tokens": 123,
+		"model": "request-model",
+		"temperature": 0.9
+	}`)
+	raw := []byte(`{
+		"id":"chatcmpl-1",
+		"created":1700000000,
+		"model":"gpt-4o-mini",
+		"choices":[{"index":0,"message":{"content":"hello","role":"assistant"}}],
+		"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}
+	}`)
+
+	response := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(nil, "", original, request, raw, nil)
+
+	if got := gjson.Get(response, "instructions").String(); got != "original instructions" {
+		t.Fatalf("response.instructions expected original value, got %q", got)
+	}
+	if got := gjson.Get(response, "max_output_tokens").Int(); got != 512 {
+		t.Fatalf("response.max_output_tokens expected original value, got %d", got)
+	}
+	if got := gjson.Get(response, "model").String(); got != "orig-model" {
+		t.Fatalf("response.model expected original value, got %q", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FallsBackToRequestJSON(t *testing.T) {
+	request := []byte(`{
+		"instructions": "request-only instructions",
+		"max_output_tokens": 333,
+		"model": "request-model",
+		"temperature": 0.8
+	}`)
+	raw := []byte(`{
+		"id":"chatcmpl-1",
+		"created":1700000000,
+		"model":"gpt-4o-mini",
+		"choices":[{"index":0,"message":{"content":"hello","role":"assistant"}}],
+		"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}
+	}`)
+
+	response := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(nil, "", nil, request, raw, nil)
+
+	if got := gjson.Get(response, "instructions").String(); got != "request-only instructions" {
+		t.Fatalf("response.instructions expected request value, got %q", got)
+	}
+	if got := gjson.Get(response, "max_output_tokens").Int(); got != 333 {
+		t.Fatalf("response.max_output_tokens expected request value, got %d", got)
+	}
+	if got := gjson.Get(response, "model").String(); got != "request-model" {
+		t.Fatalf("response.model expected request value, got %q", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_UsesOriginalRequestJSON(t *testing.T) {
+	var state any
+	original := []byte(`{
+		"instructions":"stream original",
+		"max_output_tokens": 512,
+		"model":"orig-stream-model",
+		"temperature": 0.4
+	}`)
+	request := []byte(`{
+		"instructions":"stream transformed",
+		"max_output_tokens": 64,
+		"model":"request-stream-model",
+		"temperature": 0.9
+	}`)
+	first := []byte(`{
+		"id":"chatcmpl-stream",
+		"created":1700000001,
+		"object":"chat.completion.chunk",
+		"choices":[{"index":0,"delta":{"content":"hi"}}]
+	}`)
+	second := []byte(`{
+		"id":"chatcmpl-stream",
+		"created":1700000001,
+		"object":"chat.completion.chunk",
+		"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]
+	}`)
+
+	output := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(nil, "", original, request, first, &state)
+	if len(output) == 0 {
+		t.Fatal("expected first stream chunk to emit events")
+	}
+	output = ConvertOpenAIChatCompletionsResponseToOpenAIResponses(nil, "", original, request, second, &state)
+	completedData := findCompletedData(output)
+	if completedData == "" {
+		t.Fatal("expected response.completed event on final chunk")
+	}
+
+	if got := gjson.Get(completedData, "response.instructions").String(); got != "stream original" {
+		t.Fatalf("response.instructions expected original value, got %q", got)
+	}
+	if got := gjson.Get(completedData, "response.model").String(); got != "orig-stream-model" {
+		t.Fatalf("response.model expected original value, got %q", got)
+	}
+	if got := gjson.Get(completedData, "response.temperature").Float(); got != 0.4 {
+		t.Fatalf("response.temperature expected original value, got %f", got)
+	}
+}
