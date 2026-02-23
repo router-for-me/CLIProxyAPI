@@ -107,3 +107,21 @@ Implemented in this batch:
 Validation evidence:
 
 - `rg -n "CPB-0809|CPB-0810|CPB-0812|CPB-0813|CPB-0816|CPB-0817|CPB-0818|CPB-0819|CPB-0820|CPB-0821|CPB-0822|CPB-0823|CPB-0824|CPB-0825|CPB-0827|CPB-0828|CPB-0830" docs/provider-quickstarts.md docs/troubleshooting.md` → all remaining IDs anchored in docs
+
+## Execution Update (Batch 4 - Code)
+
+- Date: `2026-02-23`
+- Status: completed focused code subset with passing tests.
+- Tracking report: `docs/planning/reports/issue-wave-cpb-0781-0830-implementation-batch-4-code.md`
+
+Implemented in this batch:
+
+- `CPB-0821`: normalize `droid`/`droid-cli`/`droidcli` aliases to `gemini` in login provider resolution and usage provider normalization.
+- `CPB-0818`: centralize GPT-5 family tokenizer detection via shared helper in both executor and runtime-executor token helpers.
+
+Validation evidence:
+
+- `go test ./cmd/cliproxyctl -run 'TestResolveLoginProviderNormalizesDroidAliases|TestCPB0011To0020LaneMRegressionEvidence' -count=1` → `ok`
+- `go test ./pkg/llmproxy/usage -run 'TestNormalizeProviderAliasesDroidToGemini|TestGetProviderMetrics_FiltersKnownProviders' -count=1` → `ok`
+- `go test ./pkg/llmproxy/executor -run 'TestIsGPT5FamilyModel|TestTokenizerForModel' -count=1` → `ok`
+- `go test ./pkg/llmproxy/runtime/executor -run 'TestIsGPT5FamilyModel|TestTokenizerForModel' -count=1` → `ok`
