@@ -211,6 +211,9 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	defer r.mutex.Unlock()
 
 	provider := strings.ToLower(clientProvider)
+	if provider == "github-copilot" {
+		models = normalizeCopilotContextLength(models)
+	}
 	uniqueModelIDs := make([]string, 0, len(models))
 	rawModelIDs := make([]string, 0, len(models))
 	newModels := make(map[string]*ModelInfo, len(models))
@@ -412,6 +415,19 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 
 	log.Debugf("Reconciled client %s (provider %s) models: +%d, -%d", clientID, provider, len(added), len(removed))
 	misc.LogCredentialSeparator()
+}
+
+func normalizeCopilotContextLength(models []*ModelInfo) []*ModelInfo {
+	normalized := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		copyModel := cloneModelInfo(model)
+		copyModel.ContextLength = 128000
+		normalized = append(normalized, copyModel)
+	}
+	return normalized
 }
 
 func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *ModelInfo, now time.Time) {

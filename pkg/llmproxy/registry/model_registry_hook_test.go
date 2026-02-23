@@ -202,3 +202,44 @@ func TestModelRegistryHook_PanicDoesNotAffectRegistry(t *testing.T) {
 		t.Fatal("timeout waiting for OnModelsUnregistered hook call")
 	}
 }
+
+func TestRegisterClient_NormalizesCopilotContextLength(t *testing.T) {
+	r := newTestModelRegistry()
+	hook := &capturingHook{
+		registeredCh:   make(chan registeredCall, 1),
+		unregisteredCh: make(chan unregisteredCall, 1),
+	}
+	r.SetHook(hook)
+
+	r.RegisterClient("client-copilot", "github-copilot", []*ModelInfo{
+		{ID: "gpt-5", ContextLength: 200000},
+		{ID: "gpt-5-mini", ContextLength: 1048576},
+	})
+
+	select {
+	case call := <-hook.registeredCh:
+		for _, model := range call.models {
+			if model.ContextLength != 128000 {
+				t.Fatalf("hook model %q context_length=%d, want 128000", model.ID, model.ContextLength)
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for OnModelsRegistered hook call")
+	}
+
+	registration, ok := r.models["gpt-5"]
+	if !ok || registration == nil || registration.Info == nil {
+		t.Fatal("expected gpt-5 registration info")
+	}
+	if registration.Info.ContextLength != 128000 {
+		t.Fatalf("registry info context_length=%d, want 128000", registration.Info.ContextLength)
+	}
+
+	clientInfo, ok := r.clientModelInfos["client-copilot"]["gpt-5-mini"]
+	if !ok || clientInfo == nil {
+		t.Fatal("expected client model info for gpt-5-mini")
+	}
+	if clientInfo.ContextLength != 128000 {
+		t.Fatalf("client model info context_length=%d, want 128000", clientInfo.ContextLength)
+	}
+}
