@@ -409,6 +409,14 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		}
 		return
 	case "antigravity":
+		existingExecutor, hasExecutor := s.coreManager.Executor("antigravity")
+		if hasExecutor {
+			_, isSDKAntigravity := existingExecutor.(*executor.AntigravityExecutor)
+			if !isSDKAntigravity {
+				// Custom executor already registered — do not overwrite
+				return
+			}
+		}
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
