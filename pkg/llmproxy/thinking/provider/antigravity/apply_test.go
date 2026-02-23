@@ -31,7 +31,7 @@ func TestApplyLevelFormatPreservesExplicitSnakeCaseIncludeThoughts(t *testing.T)
 	}
 }
 
-func TestApplier_ClaudeModeNone_PreservesDisableIntentUnderMinBudget(t *testing.T) {
+func TestApplier_ClaudeModeNone_DoesNotInjectThinkingConfig(t *testing.T) {
 	applier := NewApplier()
 	modelInfo := &registry.ModelInfo{
 		ID: "claude-opus-4-5-thinking",
@@ -51,17 +51,8 @@ func TestApplier_ClaudeModeNone_PreservesDisableIntentUnderMinBudget(t *testing.
 		t.Fatalf("Apply() error = %v", err)
 	}
 
-	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() {
-		t.Fatalf("expected thinkingConfig to be preserved for mode none")
-	}
-	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Exists() {
-		t.Fatalf("expected includeThoughts to exist")
-	}
-	if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
-		t.Fatalf("expected includeThoughts=false for mode none")
-	}
-	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 1024 {
-		t.Fatalf("thinkingBudget=%d, want 1024", got)
+	if gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() {
+		t.Fatalf("expected no thinkingConfig injection for mode none")
 	}
 }
 
