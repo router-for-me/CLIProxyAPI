@@ -373,7 +373,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 			if httpResp.StatusCode == 429 {
 				if idx+1 < len(models) {
-					log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
+					log.Debug("gemini cli executor: rate limited, retrying with next model")
 				} else {
 					log.Debug("gemini cli executor: rate limited, no additional fallback model")
 				}
