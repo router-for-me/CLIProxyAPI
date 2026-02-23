@@ -267,6 +267,12 @@ tasks:
         go test "${test_packages[@]}"
       - task: test:provider-smoke-matrix:test
 
+  quality:pre-push:
+    desc: "Pre-push hook quality gate"
+    deps: [preflight, cache:unlock]
+    cmds:
+      - task: quality:quick:check
+
   quality:shellcheck:
     desc: "Run shellcheck on shell scripts (best-effort, no-op when shellcheck missing)"
     cmds:
