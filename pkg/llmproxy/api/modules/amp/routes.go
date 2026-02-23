@@ -290,14 +290,18 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	// Dynamic models handler - routes to appropriate provider based on path parameter
 	ampModelsHandler := func(c *gin.Context) {
 		providerName := strings.ToLower(c.Param("provider"))
+		channelName := providerName
+		if providerName == "kilocode" {
+			channelName = "kilo"
+		}
 
 		switch providerName {
 		case "anthropic":
 			claudeCodeHandlers.ClaudeModels(c)
 		case "google":
 			geminiHandlers.GeminiModels(c)
-		case "kiro", "cursor", "kilo", "kimi":
-			models := registry.GetStaticModelDefinitionsByChannel(providerName)
+		case "kiro", "cursor", "kilo", "kilocode", "kimi":
+			models := registry.GetStaticModelDefinitionsByChannel(channelName)
 			if models == nil {
 				openaiHandlers.OpenAIModels(c)
 				return

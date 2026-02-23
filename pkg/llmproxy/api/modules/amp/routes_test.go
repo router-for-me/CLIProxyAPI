@@ -179,6 +179,7 @@ func TestRegisterProviderAliases_DedicatedProviderModels(t *testing.T) {
 		expectedOwner string
 	}{
 		{provider: "kiro", expectedModel: "kiro-claude-opus-4-6", expectedOwner: "aws"},
+		{provider: "kilocode", expectedModel: "kilo/auto", expectedOwner: "kilo"},
 		{provider: "cursor", expectedModel: "default", expectedOwner: "cursor"},
 	}
 	for _, tc := range tests {
@@ -242,7 +243,7 @@ func TestRegisterProviderAliases_DedicatedProviderModelsV1(t *testing.T) {
 	m := &AmpModule{}
 	m.registerProviderAliases(r, base, nil)
 
-	tests := []string{"kiro", "cursor"}
+	tests := []string{"kiro", "kilocode", "cursor"}
 	for _, provider := range tests {
 		t.Run(provider, func(t *testing.T) {
 			path := "/api/provider/" + provider + "/v1/models"
