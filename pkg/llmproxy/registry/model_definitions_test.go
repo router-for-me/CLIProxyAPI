@@ -117,3 +117,20 @@ func TestGetQwenModels_IncludesQwen35Alias(t *testing.T) {
 		t.Fatal("expected static lookup for qwen3.5")
 	}
 }
+
+func TestGetOpenAIModels_GPT51Metadata(t *testing.T) {
+	models := GetOpenAIModels()
+	for _, model := range models {
+		if model.ID != "gpt-5.1" {
+			continue
+		}
+		if model.DisplayName != "GPT 5.1" {
+			t.Fatalf("expected gpt-5.1 display name %q, got %q", "GPT 5.1", model.DisplayName)
+		}
+		if model.Description == "" || model.Description == "Stable version of GPT 5, The best model for coding and agentic tasks across domains." {
+			t.Fatalf("expected gpt-5.1 description to explicitly mention version 5.1, got %q", model.Description)
+		}
+		return
+	}
+	t.Fatal("expected gpt-5.1 in OpenAI model definitions")
+}
