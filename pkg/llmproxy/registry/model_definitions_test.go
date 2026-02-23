@@ -8,7 +8,7 @@ func TestGetStaticModelDefinitionsByChannel(t *testing.T) {
 	channels := []string{
 		"claude", "gemini", "vertex", "gemini-cli", "aistudio", "codex",
 		"qwen", "iflow", "github-copilot", "kiro", "amazonq", "cursor",
-		"minimax", "roo", "kilo", "deepseek", "groq", "mistral",
+		"minimax", "roo", "kilo", "kilocode", "deepseek", "groq", "mistral",
 		"siliconflow", "openrouter", "together", "fireworks", "novita",
 		"antigravity",
 	}

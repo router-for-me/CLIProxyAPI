@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestRefreshToken_IncludesGrantTypeAndExtensionHeaders(t *testing.T) {
+func TestRefreshToken_UsesSingleGrantTypeFieldAndExtensionHeaders(t *testing.T) {
 	t.Parallel()
 
 	client := &SSOOIDCClient{
@@ -20,7 +20,6 @@ func TestRefreshToken_IncludesGrantTypeAndExtensionHeaders(t *testing.T) {
 				}
 				bodyStr := string(body)
 				for _, token := range []string{
-					`"grantType":"refresh_token"`,
 					`"grant_type":"refresh_token"`,
 					`"refreshToken":"rt-1"`,
 					`"refresh_token":"rt-1"`,
@@ -29,14 +28,23 @@ func TestRefreshToken_IncludesGrantTypeAndExtensionHeaders(t *testing.T) {
 						t.Fatalf("expected payload to contain %s, got %s", token, bodyStr)
 					}
 				}
+				if strings.Contains(bodyStr, `"grantType":"refresh_token"`) {
+					t.Fatalf("did not expect duplicate grantType field in payload, got %s", bodyStr)
+				}
 
 				for key, want := range map[string]string{
-					"Content-Type":     "application/json",
-					"x-amz-user-agent": idcAmzUserAgent,
-					"User-Agent":       "node",
-					"Connection":       "keep-alive",
-					"Accept-Language":  "*",
-					"sec-fetch-mode":   "cors",
+					"Content-Type":       "application/json",
+					"x-amz-user-agent":   idcAmzUserAgent,
+					"User-Agent":         "node",
+					"Connection":         "keep-alive",
+					"Accept-Language":    "*",
+					"sec-fetch-mode":     "cors",
+					"X-PLATFORM":         idcPlatform,
+					"X-PLATFORM-VERSION": idcDefaultVer,
+					"X-CLIENT-VERSION":   idcDefaultVer,
+					"X-CLIENT-TYPE":      idcClientType,
+					"X-CORE-VERSION":     idcDefaultVer,
+					"X-IS-MULTIROOT":     "false",
 				} {
 					if got := req.Header.Get(key); got != want {
 						t.Fatalf("header %s = %q, want %q", key, got, want)
@@ -61,7 +69,7 @@ func TestRefreshToken_IncludesGrantTypeAndExtensionHeaders(t *testing.T) {
 	}
 }
 
-func TestRefreshTokenWithRegion_UsesRegionHostAndGrantType(t *testing.T) {
+func TestRefreshTokenWithRegion_UsesRegionHostAndSingleGrantType(t *testing.T) {
 	t.Parallel()
 
 	client := &SSOOIDCClient{
@@ -72,15 +80,21 @@ func TestRefreshTokenWithRegion_UsesRegionHostAndGrantType(t *testing.T) {
 					t.Fatalf("read body: %v", err)
 				}
 				bodyStr := string(body)
-				if !strings.Contains(bodyStr, `"grantType":"refresh_token"`) {
-					t.Fatalf("expected grantType in payload, got %s", bodyStr)
-				}
 				if !strings.Contains(bodyStr, `"grant_type":"refresh_token"`) {
 					t.Fatalf("expected grant_type in payload, got %s", bodyStr)
+				}
+				if strings.Contains(bodyStr, `"grantType":"refresh_token"`) {
+					t.Fatalf("did not expect duplicate grantType field in payload, got %s", bodyStr)
 				}
 
 				if got := req.Header.Get("Host"); got != "oidc.eu-west-1.amazonaws.com" {
 					t.Fatalf("Host header = %q, want oidc.eu-west-1.amazonaws.com", got)
+				}
+				if got := req.Header.Get("X-PLATFORM"); got != idcPlatform {
+					t.Fatalf("X-PLATFORM = %q, want %q", got, idcPlatform)
+				}
+				if got := req.Header.Get("X-CLIENT-TYPE"); got != idcClientType {
+					t.Fatalf("X-CLIENT-TYPE = %q, want %q", got, idcClientType)
 				}
 
 				return &http.Response{

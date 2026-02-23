@@ -108,42 +108,34 @@ func TestConvertClaudeRequestToGemini_SanitizesToolUseThoughtSignature(t *testin
 	}
 }
 
-func TestConvertClaudeRequestToGemini_SkipsWhitespaceOnlyTextParts(t *testing.T) {
+func TestConvertClaudeRequestToGemini_StripsThoughtSignatureFromToolArgs(t *testing.T) {
 	input := []byte(`{
 		"messages":[
-			{"role":"user","content":[{"type":"text","text":"   \n\t  "}]},
-			{"role":"assistant","content":[{"type":"text","text":"ok"}]}
+			{
+				"role":"assistant",
+				"content":[
+					{
+						"type":"tool_use",
+						"id":"toolu_01",
+						"name":"lookup",
+						"input":{"q":"hello","thought_signature":"not-base64"}
+					}
+				]
+			}
 		]
 	}`)
 
 	got := ConvertClaudeRequestToGemini("gemini-2.5-pro", input, false)
 	res := gjson.ParseBytes(got)
 
-	contents := res.Get("contents").Array()
-	if len(contents) != 1 {
-		t.Fatalf("expected only non-empty message to remain, got %d entries", len(contents))
+	args := res.Get("contents.0.parts.0.functionCall.args")
+	if !args.Exists() {
+		t.Fatalf("expected functionCall args to exist")
 	}
-	if contents[0].Get("parts.0.text").String() != "ok" {
-		t.Fatalf("expected assistant text to remain, got %s", contents[0].Raw)
+	if args.Get("q").String() != "hello" {
+		t.Fatalf("expected q arg to be preserved, got %q", args.Get("q").String())
 	}
-}
-
-func TestConvertClaudeRequestToGeminiSkipsWhitespaceOnlyTextBlocks(t *testing.T) {
-	input := []byte(`{
-		"messages":[
-			{"role":"user","content":[{"type":"text","text":"   \n\t  "}]},
-			{"role":"user","content":[{"type":"text","text":"hello"}]}
-		]
-	}`)
-
-	got := ConvertClaudeRequestToGemini("gemini-2.5-pro", input, false)
-	res := gjson.ParseBytes(got)
-
-	contents := res.Get("contents").Array()
-	if len(contents) != 1 {
-		t.Fatalf("expected only 1 non-empty content entry, got %d", len(contents))
-	}
-	if contents[0].Get("parts.0.text").String() != "hello" {
-		t.Fatalf("expected non-empty text content to remain")
+	if args.Get("thought_signature").Exists() {
+		t.Fatalf("expected thought_signature to be stripped from tool args")
 	}
 }

@@ -55,3 +55,35 @@ func TestConvertClaudeRequestToCLI_SanitizesToolUseThoughtSignature(t *testing.T
 		t.Fatalf("expected thoughtSignature %q, got %q", geminiCLIClaudeThoughtSignature, part.Get("thoughtSignature").String())
 	}
 }
+
+func TestConvertClaudeRequestToCLI_StripsThoughtSignatureFromToolArgs(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{
+				"role":"assistant",
+				"content":[
+					{
+						"type":"tool_use",
+						"id":"toolu_01",
+						"name":"lookup",
+						"input":{"q":"hello","thought_signature":"not-base64"}
+					}
+				]
+			}
+		]
+	}`)
+
+	got := ConvertClaudeRequestToCLI("gemini-2.5-pro", input, false)
+	res := gjson.ParseBytes(got)
+
+	args := res.Get("request.contents.0.parts.0.functionCall.args")
+	if !args.Exists() {
+		t.Fatalf("expected functionCall args to exist")
+	}
+	if args.Get("q").String() != "hello" {
+		t.Fatalf("expected q arg to be preserved, got %q", args.Get("q").String())
+	}
+	if args.Get("thought_signature").Exists() {
+		t.Fatalf("expected thought_signature to be stripped from tool args")
+	}
+}

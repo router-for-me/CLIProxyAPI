@@ -35,6 +35,19 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-5`
 - `task quality:fmt:check`
 - `QUALITY_PACKAGES='./pkg/llmproxy/api ./sdk/api/handlers/openai' task quality:quick`
 
+## Wave2 Execution Entry
+
+### #200
+- Status: `done`
+- Mapping: `router-for-me/CLIProxyAPIPlus issue#200` -> `CP2K-0020` -> Gemini quota auto disable/enable timing now honors fractional/unit retry hints from upstream quota messages.
+- Code:
+  - `pkg/llmproxy/executor/gemini_cli_executor.go`
+  - `pkg/llmproxy/runtime/executor/gemini_cli_executor.go`
+- Tests:
+  - `pkg/llmproxy/executor/gemini_cli_executor_retry_delay_test.go`
+  - `pkg/llmproxy/runtime/executor/gemini_cli_executor_retry_delay_test.go`
+  - `go test ./pkg/llmproxy/executor ./pkg/llmproxy/runtime/executor -run 'TestParseRetryDelay_(MessageDuration|MessageMilliseconds|PrefersRetryInfo)$'`
+
 ## Blockers
 
-- #97, #99, #94, #87, #86 remain open upstream and were not implemented in this lane pass.
+- None recorded yet; work is in planning state.

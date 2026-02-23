@@ -13,7 +13,6 @@ import (
 	"math/rand"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -937,14 +936,14 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 		}
 	}
 
-	// Fallback: parse from error.message "Your quota will reset after Xs."
+	// Fallback: parse from error.message (supports units like ms/s/m/h with optional decimals)
 	message := gjson.GetBytes(errorBody, "error.message").String()
 	if message != "" {
-		re := regexp.MustCompile(`after\s+(\d+)s\.?`)
+		re := regexp.MustCompile(`after\s+([0-9]+(?:\.[0-9]+)?(?:ms|s|m|h))\.?`)
 		if matches := re.FindStringSubmatch(message); len(matches) > 1 {
-			seconds, err := strconv.Atoi(matches[1])
+			duration, err := time.ParseDuration(matches[1])
 			if err == nil {
-				return new(time.Duration(seconds) * time.Second), nil
+				return &duration, nil
 			}
 		}
 	}
