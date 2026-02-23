@@ -512,10 +512,7 @@ func (s *ObjectTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, err
 	}
 	if auth.Attributes != nil {
 		if path := strings.TrimSpace(auth.Attributes["path"]); path != "" {
-			if filepath.IsAbs(path) {
-				return path, nil
-			}
-			return filepath.Join(s.authDir, path), nil
+			return s.ensureManagedAuthPath(path)
 		}
 	}
 	fileName := strings.TrimSpace(auth.FileName)
@@ -528,7 +525,7 @@ func (s *ObjectTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, err
 	if !strings.HasSuffix(strings.ToLower(fileName), ".json") {
 		fileName += ".json"
 	}
-	return filepath.Join(s.authDir, fileName), nil
+	return s.ensureManagedAuthPath(fileName)
 }
 
 func (s *ObjectTokenStore) resolveDeletePath(id string) (string, error) {
@@ -536,21 +533,47 @@ func (s *ObjectTokenStore) resolveDeletePath(id string) (string, error) {
 	if id == "" {
 		return "", fmt.Errorf("object store: id is empty")
 	}
-	// Absolute paths are honored as-is; callers must ensure they point inside the mirror.
-	if filepath.IsAbs(id) {
-		return id, nil
-	}
-	// Treat any non-absolute id (including nested like "team/foo") as relative to the mirror authDir.
-	// Normalize separators and guard against path traversal.
 	clean := filepath.Clean(filepath.FromSlash(id))
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("object store: invalid auth identifier %s", id)
 	}
-	// Ensure .json suffix.
 	if !strings.HasSuffix(strings.ToLower(clean), ".json") {
 		clean += ".json"
 	}
-	return filepath.Join(s.authDir, clean), nil
+	return s.ensureManagedAuthPath(clean)
+}
+
+func (s *ObjectTokenStore) ensureManagedAuthPath(path string) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("object store: store not initialized")
+	}
+	authDir := strings.TrimSpace(s.authDir)
+	if authDir == "" {
+		return "", fmt.Errorf("object store: auth directory not configured")
+	}
+	absAuthDir, err := filepath.Abs(authDir)
+	if err != nil {
+		return "", fmt.Errorf("object store: resolve auth directory: %w", err)
+	}
+	candidate := strings.TrimSpace(path)
+	if candidate == "" {
+		return "", fmt.Errorf("object store: auth path is empty")
+	}
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(absAuthDir, filepath.FromSlash(candidate))
+	}
+	absCandidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("object store: resolve auth path %q: %w", path, err)
+	}
+	rel, err := filepath.Rel(absAuthDir, absCandidate)
+	if err != nil {
+		return "", fmt.Errorf("object store: compute relative auth path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("object store: path %q escapes auth directory", path)
+	}
+	return absCandidate, nil
 }
 
 func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
