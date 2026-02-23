@@ -66,6 +66,9 @@ func TestSocialAuthClient_WebCallbackServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("startWebCallbackServer failed: %v", err)
 	}
+	if !strings.HasPrefix(redirectURI, "http://localhost:") || !strings.Contains(redirectURI, "/oauth/callback") {
+		t.Fatalf("redirect URI = %q, want http://localhost:<port>/oauth/callback", redirectURI)
+	}
 
 	// Give server a moment to start
 	time.Sleep(500 * time.Millisecond)
@@ -91,6 +94,9 @@ func TestSocialAuthClient_WebCallbackServer(t *testing.T) {
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
 	redirectURI2, resultChan2, _ := client.startWebCallbackServer(ctx2, "good")
+	if !strings.HasPrefix(redirectURI2, "http://localhost:") || !strings.Contains(redirectURI2, "/oauth/callback") {
+		t.Fatalf("redirect URI (second server) = %q, want http://localhost:<port>/oauth/callback", redirectURI2)
+	}
 
 	// Give server a moment to start
 	time.Sleep(500 * time.Millisecond)
