@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 )
@@ -44,11 +45,15 @@ type QwenTokenStorage struct {
 func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "qwen"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
+	path, err := validateTokenFilePath(authFilePath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
@@ -60,4 +65,22 @@ func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to write token to file: %w", err)
 	}
 	return nil
+}
+
+func validateTokenFilePath(authFilePath string) (string, error) {
+	trimmed := strings.TrimSpace(authFilePath)
+	if trimmed == "" {
+		return "", fmt.Errorf("failed to write token: auth file path is empty")
+	}
+	segments := strings.Split(filepath.ToSlash(trimmed), "/")
+	for _, segment := range segments {
+		if segment == ".." {
+			return "", fmt.Errorf("failed to write token: auth file path traversal is not allowed")
+		}
+	}
+	clean := filepath.Clean(trimmed)
+	if clean == "." {
+		return "", fmt.Errorf("failed to write token: auth file path is invalid")
+	}
+	return clean, nil
 }

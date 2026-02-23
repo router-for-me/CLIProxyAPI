@@ -47,3 +47,17 @@ func TestVertexCredentialStorage_NilChecks(t *testing.T) {
 		t.Error("expected error for empty service account")
 	}
 }
+
+func TestVertexCredentialStorage_SaveTokenToFile_RejectsTraversalPath(t *testing.T) {
+	s := &VertexCredentialStorage{
+		ServiceAccount: map[string]any{
+			"project_id":   "test-project",
+			"client_email": "test@example.com",
+		},
+	}
+
+	err := s.SaveTokenToFile("../vertex-token.json")
+	if err == nil {
+		t.Fatal("expected traversal path to be rejected")
+	}
+}

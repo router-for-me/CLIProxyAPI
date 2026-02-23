@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // KiroTokenStorage holds the persistent token data for Kiro authentication.
@@ -39,7 +40,11 @@ type KiroTokenStorage struct {
 
 // SaveTokenToFile persists the token storage to the specified file path.
 func (s *KiroTokenStorage) SaveTokenToFile(authFilePath string) error {
-	dir := filepath.Dir(authFilePath)
+	path, err := validateTokenPath(authFilePath)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
@@ -49,11 +54,29 @@ func (s *KiroTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to marshal token storage: %w", err)
 	}
 
-	if err := os.WriteFile(authFilePath, data, 0600); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("failed to write token file: %w", err)
 	}
 
 	return nil
+}
+
+func validateTokenPath(authFilePath string) (string, error) {
+	trimmed := strings.TrimSpace(authFilePath)
+	if trimmed == "" {
+		return "", fmt.Errorf("failed to write token file: auth file path is empty")
+	}
+	segments := strings.Split(filepath.ToSlash(trimmed), "/")
+	for _, segment := range segments {
+		if segment == ".." {
+			return "", fmt.Errorf("failed to write token file: auth file path traversal is not allowed")
+		}
+	}
+	clean := filepath.Clean(trimmed)
+	if clean == "." {
+		return "", fmt.Errorf("failed to write token file: auth file path is invalid")
+	}
+	return clean, nil
 }
 
 // LoadFromFile loads token storage from the specified file path.
