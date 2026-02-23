@@ -840,10 +840,10 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 			auth.ModelStates = existing.ModelStates
 		}
 		auth.Runtime = existing.Runtime
-		_, err := h.authManager.Update(ctx, auth)
+		_, err = h.authManager.Update(ctx, auth)
 		return err
 	}
-	_, err := h.authManager.Register(ctx, auth)
+	_, err = h.authManager.Register(ctx, auth)
 	return err
 }
 
