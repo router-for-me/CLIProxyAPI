@@ -554,45 +554,20 @@ func (s *PostgresStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error)
 	}
 	if auth.Attributes != nil {
 		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
-			return p, nil
+			return s.resolveManagedAuthPath(p)
 		}
 	}
 	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
-		if filepath.IsAbs(fileName) {
-			return fileName, nil
-		}
-		return filepath.Join(s.authDir, fileName), nil
+		return s.resolveManagedAuthPath(fileName)
 	}
 	if auth.ID == "" {
 		return "", fmt.Errorf("postgres store: missing id")
 	}
-	if filepath.IsAbs(auth.ID) {
-		return auth.ID, nil
-	}
-	return filepath.Join(s.authDir, filepath.FromSlash(auth.ID)), nil
+	return s.resolveManagedAuthPath(auth.ID)
 }
 
 func (s *PostgresStore) resolveDeletePath(id string) (string, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return "", fmt.Errorf("postgres store: id is empty")
-	}
-	if filepath.IsAbs(id) {
-		return "", fmt.Errorf("postgres store: absolute paths are not allowed: %s", id)
-	}
-	clean := filepath.Clean(filepath.FromSlash(id))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("postgres store: invalid auth identifier %s", id)
-	}
-	path := filepath.Join(s.authDir, clean)
-	rel, err := filepath.Rel(s.authDir, path)
-	if err != nil {
-		return "", fmt.Errorf("postgres store: compute relative path: %w", err)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("postgres store: resolved path escapes auth directory")
-	}
-	return path, nil
+	return s.resolveManagedAuthPath(id)
 }
 
 func (s *PostgresStore) relativeAuthID(path string) (string, error) {
@@ -630,6 +605,30 @@ func (s *PostgresStore) absoluteAuthPath(id string) (string, error) {
 		return "", fmt.Errorf("postgres store: resolved auth path escapes auth directory")
 	}
 	return path, nil
+}
+
+func (s *PostgresStore) resolveManagedAuthPath(candidate string) (string, error) {
+	trimmed := strings.TrimSpace(candidate)
+	if trimmed == "" {
+		return "", fmt.Errorf("postgres store: auth path is empty")
+	}
+
+	var resolved string
+	if filepath.IsAbs(trimmed) {
+		resolved = filepath.Clean(trimmed)
+	} else {
+		resolved = filepath.Join(s.authDir, filepath.FromSlash(trimmed))
+		resolved = filepath.Clean(resolved)
+	}
+
+	rel, err := filepath.Rel(s.authDir, resolved)
+	if err != nil {
+		return "", fmt.Errorf("postgres store: compute relative path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("postgres store: path %q outside managed directory", candidate)
+	}
+	return resolved, nil
 }
 
 func (s *PostgresStore) fullTableName(name string) string {

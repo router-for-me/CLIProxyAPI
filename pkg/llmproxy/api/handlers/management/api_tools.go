@@ -156,6 +156,10 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid url"})
 		return
 	}
+	if errValidateURL := validateAPICallURL(parsedURL); errValidateURL != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errValidateURL.Error()})
+		return
+	}
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
@@ -292,6 +296,29 @@ func firstNonEmptyString(values ...*string) string {
 		}
 	}
 	return ""
+}
+
+func validateAPICallURL(parsedURL *url.URL) error {
+	if parsedURL == nil {
+		return fmt.Errorf("invalid url")
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsedURL.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("unsupported url scheme")
+	}
+	host := strings.TrimSpace(parsedURL.Hostname())
+	if host == "" {
+		return fmt.Errorf("invalid url host")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return fmt.Errorf("target host is not allowed")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("target host is not allowed")
+		}
+	}
+	return nil
 }
 
 func tokenValueForAuth(auth *coreauth.Auth) string {

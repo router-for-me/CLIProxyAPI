@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
+
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 func TestSyncAuthFromDatabase_PreservesLocalOnlyFiles(t *testing.T) {
@@ -78,6 +81,42 @@ func TestSyncAuthFromDatabase_ContinuesOnPathConflict(t *testing.T) {
 	}
 	if string(got) != `{"token":"db-healthy"}` {
 		t.Fatalf("unexpected healthy mirrored content: %s", got)
+	}
+}
+
+func TestPostgresStoreSave_RejectsPathOutsideAuthDir(t *testing.T) {
+	t.Parallel()
+
+	store, db := newSQLitePostgresStore(t)
+	t.Cleanup(func() { _ = db.Close() })
+
+	auth := &cliproxyauth.Auth{
+		ID:       "outside.json",
+		FileName: "../../outside.json",
+		Metadata: map[string]any{"type": "kiro"},
+	}
+	_, err := store.Save(context.Background(), auth)
+	if err == nil {
+		t.Fatalf("expected save to reject path traversal")
+	}
+	if !strings.Contains(err.Error(), "outside managed directory") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPostgresStoreDelete_RejectsAbsolutePathOutsideAuthDir(t *testing.T) {
+	t.Parallel()
+
+	store, db := newSQLitePostgresStore(t)
+	t.Cleanup(func() { _ = db.Close() })
+
+	outside := filepath.Join(filepath.Dir(store.authDir), "outside.json")
+	err := store.Delete(context.Background(), outside)
+	if err == nil {
+		t.Fatalf("expected delete to reject absolute path outside auth dir")
+	}
+	if !strings.Contains(err.Error(), "outside managed directory") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

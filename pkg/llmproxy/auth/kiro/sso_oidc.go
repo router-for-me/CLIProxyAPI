@@ -53,7 +53,7 @@ const (
 var (
 	ErrAuthorizationPending = errors.New("authorization_pending")
 	ErrSlowDown             = errors.New("slow_down")
-	oidcRegionPattern       = regexp.MustCompile(`^[a-z0-9-]+$`)
+	awsRegionPattern        = regexp.MustCompile(`^[a-z]{2}(?:-[a-z0-9]+)+-\d+$`)
 )
 
 // SSOOIDCClient handles AWS SSO OIDC authentication.
@@ -106,6 +106,17 @@ func getOIDCEndpoint(region string) string {
 		region = defaultIDCRegion
 	}
 	return fmt.Sprintf("https://oidc.%s.amazonaws.com", region)
+}
+
+func validateIDCRegion(region string) (string, error) {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		return defaultIDCRegion, nil
+	}
+	if !awsRegionPattern.MatchString(region) {
+		return "", fmt.Errorf("invalid region %q", region)
+	}
+	return region, nil
 }
 
 func buildIDCRefreshPayload(clientID, clientSecret, refreshToken string) map[string]string {
@@ -186,7 +197,11 @@ func promptSelect(prompt string, options []string) int {
 
 // RegisterClientWithRegion registers a new OIDC client with AWS using a specific region.
 func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region string) (*RegisterClientResponse, error) {
-	endpoint := getOIDCEndpoint(region)
+	validatedRegion, err := validateIDCRegion(region)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := getOIDCEndpoint(validatedRegion)
 
 	payload := map[string]interface{}{
 		"clientName": "Kiro IDE",
@@ -233,7 +248,11 @@ func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region str
 
 // StartDeviceAuthorizationWithIDC starts the device authorization flow for IDC.
 func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, clientID, clientSecret, startURL, region string) (*StartDeviceAuthResponse, error) {
-	endpoint := getOIDCEndpoint(region)
+	validatedRegion, err := validateIDCRegion(region)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := getOIDCEndpoint(validatedRegion)
 
 	payload := map[string]string{
 		"clientId":     clientID,
