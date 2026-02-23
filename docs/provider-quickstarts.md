@@ -762,6 +762,30 @@ When users report AiStudio-facing errors, run a deterministic triage:
 
 Keep this flow provider-agnostic so the same checklist works for Gemini/Codex/OpenAI-compatible paths.
 
+## RooCode alias + `T.match` quick probe (`CPB-0784`, `CPB-0785`)
+
+Use this when RooCode-style clients fail fast with frontend-side `undefined is not an object (evaluating 'T.match')`.
+
+```bash
+# Ensure RooCode aliases normalize to the Roo provider
+cliproxyctl login --provider roocode --json --config ./config.yaml | jq '{ok,provider:.details.provider,provider_input:.details.provider_input}'
+
+# Verify Roo models are visible to the same client key used by the failing UI
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer <client-key>" | jq -r '.data[].id' | rg '^roo/'
+
+# Run one non-stream canary before retrying the UI flow
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer <client-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"roo/roo-cline-v3.7-thinking","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
+```
+
+Expected:
+- `provider` resolves to `roo` even when input is `roocode` or `roo-code`.
+- At least one `roo/*` model appears from `/v1/models`.
+- Non-stream canary succeeds before stream/UI retries.
+
 ## Global Alias + Model Capability Safety (`CPB-0698`, `CPB-0699`)
 
 Before shipping a global alias change:

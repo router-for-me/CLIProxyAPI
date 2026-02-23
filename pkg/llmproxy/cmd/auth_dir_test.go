@@ -33,6 +33,8 @@ func TestEnsureAuthDir_RejectsTooPermissiveDir(t *testing.T) {
 		t.Fatalf("ensureAuthDir(%q) expected error", authDir)
 	} else if !strings.Contains(err.Error(), "too permissive") {
 		t.Fatalf("ensureAuthDir(%q) error = %q, want too permissive", authDir, err)
+	} else if !strings.Contains(err.Error(), "chmod 700") {
+		t.Fatalf("ensureAuthDir(%q) error = %q, want chmod guidance", authDir, err)
 	}
 }
 

@@ -34,7 +34,7 @@ func ensureAuthDir(cfgAuthDir string, provider string) (string, error) {
 
 	mode := info.Mode().Perm()
 	if mode&0o077 != 0 {
-		return "", fmt.Errorf("%s auth-dir %q mode %04o is too permissive; use chmod 700", provider, authDir, mode)
+		return "", fmt.Errorf("%s auth-dir %q mode %04o is too permissive; run: chmod 700 %q", provider, authDir, mode, authDir)
 	}
 
 	return authDir, nil

@@ -554,6 +554,8 @@ func TestResolveLoginProviderAliasAndValidation(t *testing.T) {
 		{in: "ampcode", want: "amp"},
 		{in: "github-copilot", want: "copilot"},
 		{in: "kilocode", want: "kilo"},
+		{in: "roocode", want: "roo"},
+		{in: "roo-code", want: "roo"},
 		{in: "openai-compatible", want: "factory-api"},
 		{in: "claude", want: "claude"},
 		{in: "unknown-provider", wantErr: true},

@@ -20,6 +20,7 @@ if [ ! -d "${AUTH_DIR}" ]; then
     echo "[docker-init] Creating auth directory: ${AUTH_DIR}"
     mkdir -p "${AUTH_DIR}"
 fi
+chmod 700 "${AUTH_DIR}"
 
 # Create logs directory if it doesn't exist
 if [ ! -d "${LOGS_DIR}" ]; then

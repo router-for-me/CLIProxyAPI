@@ -148,6 +148,10 @@ func normalizeProvider(provider string) string {
 		return "kilo"
 	case "kilocode":
 		return "kilo"
+	case "roo-code":
+		return "roo"
+	case "roocode":
+		return "roo"
 	case "factoryapi":
 		return "factory-api"
 	case "openai-compatible":
@@ -436,8 +440,8 @@ func runDev(args []string, stdout io.Writer, stderr io.Writer, now func() time.T
 
 	path := strings.TrimSpace(file)
 	details := map[string]any{
-		"profile_file":         path,
-		"hint":                fmt.Sprintf("process-compose -f %s up", path),
+		"profile_file":             path,
+		"hint":                     fmt.Sprintf("process-compose -f %s up", path),
 		"tool_failure_remediation": gemini3ProPreviewToolUsageRemediationHint(path),
 	}
 	info, err := os.Stat(path)
