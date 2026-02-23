@@ -294,6 +294,39 @@ func TestPutConfigYAML(t *testing.T) {
 	}
 }
 
+func TestPutConfigYAMLReadOnlyWriteAppliesRuntimeConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(tmpFile, []byte("debug: false"), 0o644); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	origWriteConfigFile := writeConfigFile
+	writeConfigFile = func(path string, data []byte) error {
+		return &os.PathError{Op: "open", Path: path, Err: syscall.EROFS}
+	}
+	t.Cleanup(func() { writeConfigFile = origWriteConfigFile })
+
+	h := &Handler{configFilePath: tmpFile, cfg: &config.Config{}}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("PUT", "/", strings.NewReader("debug: true"))
+
+	h.PutConfigYAML(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"persisted":false`) {
+		t.Fatalf("expected persisted=false in response body, got %s", w.Body.String())
+	}
+	if h.cfg == nil || !h.cfg.Debug {
+		t.Fatalf("expected runtime config to be applied despite read-only write")
+	}
+}
+
 func TestGetLogs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tmpDir, _ := os.MkdirTemp("", "logtest")
