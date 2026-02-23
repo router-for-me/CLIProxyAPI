@@ -1,8 +1,6 @@
 package diff
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"sort"
 	"strings"
 
@@ -113,9 +111,8 @@ func SummarizeVertexModels(models []config.VertexCompatModel) VertexModelsSummar
 		return VertexModelsSummary{}
 	}
 	sort.Strings(names)
-	sum := sha256.Sum256([]byte(strings.Join(names, "|")))
 	return VertexModelsSummary{
-		hash:  hex.EncodeToString(sum[:]),
+		hash:  strings.Join(names, "|"),
 		count: len(names),
 	}
 }

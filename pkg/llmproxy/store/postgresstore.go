@@ -489,7 +489,11 @@ func (s *PostgresStore) syncAuthFile(ctx context.Context, relID, path string) er
 	return s.persistAuth(ctx, relID, data)
 }
 
-func (s *PostgresStore) upsertAuthRecord(ctx context.Context, relID, path string) error {
+func (s *PostgresStore) upsertAuthRecord(ctx context.Context, relID, _ string) error {
+	path, err := s.absoluteAuthPath(relID)
+	if err != nil {
+		return fmt.Errorf("postgres store: resolve auth path: %w", err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("postgres store: read auth file: %w", err)
@@ -569,10 +573,26 @@ func (s *PostgresStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error)
 }
 
 func (s *PostgresStore) resolveDeletePath(id string) (string, error) {
-	if strings.ContainsRune(id, os.PathSeparator) || filepath.IsAbs(id) {
-		return id, nil
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("postgres store: id is empty")
 	}
-	return filepath.Join(s.authDir, filepath.FromSlash(id)), nil
+	if filepath.IsAbs(id) {
+		return "", fmt.Errorf("postgres store: absolute paths are not allowed: %s", id)
+	}
+	clean := filepath.Clean(filepath.FromSlash(id))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("postgres store: invalid auth identifier %s", id)
+	}
+	path := filepath.Join(s.authDir, clean)
+	rel, err := filepath.Rel(s.authDir, path)
+	if err != nil {
+		return "", fmt.Errorf("postgres store: compute relative path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("postgres store: resolved path escapes auth directory")
+	}
+	return path, nil
 }
 
 func (s *PostgresStore) relativeAuthID(path string) (string, error) {
@@ -598,7 +618,7 @@ func (s *PostgresStore) absoluteAuthPath(id string) (string, error) {
 		return "", fmt.Errorf("postgres store: store not initialized")
 	}
 	clean := filepath.Clean(filepath.FromSlash(id))
-	if strings.HasPrefix(clean, "..") {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("postgres store: invalid auth identifier %s", id)
 	}
 	path := filepath.Join(s.authDir, clean)

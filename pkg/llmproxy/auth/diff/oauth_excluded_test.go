@@ -98,6 +98,16 @@ func TestSummarizeVertexModels(t *testing.T) {
 	}
 }
 
+func TestSummarizeVertexModels_UsesCanonicalJoinedSignature(t *testing.T) {
+	summary := SummarizeVertexModels([]config.VertexCompatModel{
+		{Name: "m1"},
+		{Alias: "alias"},
+	})
+	if summary.hash != "alias|m1" {
+		t.Fatalf("expected canonical joined signature, got %q", summary.hash)
+	}
+}
+
 func expectContains(t *testing.T, list []string, target string) {
 	t.Helper()
 	for _, entry := range list {
