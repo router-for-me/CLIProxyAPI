@@ -4,13 +4,10 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
-import (
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-)
+import internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 
-// SDKConfig is an alias to the SDK's SDKConfig, ensuring type compatibility
-// across pkg/llmproxy/config and sdk/config.
-type SDKConfig = sdkconfig.SDKConfig
+// SDKConfig is an alias to internal/config.SDKConfig.
+type SDKConfig = internalconfig.SDKConfig
 
-// StreamingConfig is an alias to the SDK's StreamingConfig, ensuring type compatibility.
-type StreamingConfig = sdkconfig.StreamingConfig
+// StreamingConfig is an alias to internal/config.StreamingConfig.
+type StreamingConfig = internalconfig.StreamingConfig
