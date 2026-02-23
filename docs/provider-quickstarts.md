@@ -503,3 +503,309 @@ curl -sS http://localhost:8317/v0/management/config \
 ```
 
 If (1) is empty while auth is valid, check prefix rules and alias mapping first, then restart and re-read `/v1/models`.
+
+## Copilot Unlimited Mode Compatibility (`CPB-0691`)
+
+Use this validation when enabling `copilot-unlimited-mode` for Copilot API compatibility:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/responses \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"copilot/gpt-5.1-copilot","input":[{"role":"user","content":[{"type":"input_text","text":"compat probe"}]}]}' | jq '{id,model,usage}'
+```
+
+Expected:
+- Response completes without chat/responses shape mismatch.
+- `usage` is populated for rate/alert instrumentation.
+
+## OpenAI->Anthropic Event Ordering Guard (`CPB-0692`, `CPB-0694`)
+
+Streaming translation now enforces `message_start` before any `content_block_start` event.
+Use this focused test command when validating event ordering regressions:
+
+```bash
+go test ./pkg/llmproxy/translator/openai/claude -run 'TestEnsureMessageStartBeforeContentBlocks' -count=1
+```
+
+## Gemini Long-Output 429 Observability + Runtime Refresh (`CPB-0693`, `CPB-0696`)
+
+For long-output Gemini runs that intermittently return `429`, collect these probes in order:
+
+```bash
+# non-stream probe
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/flash","messages":[{"role":"user","content":"long output observability probe"}],"stream":false}' | jq
+
+# stream parity probe
+curl -N -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/flash","messages":[{"role":"user","content":"long output streaming probe"}],"stream":true}'
+```
+
+If config or model aliases were changed, restart only the affected service process and re-run both probes before broad rollout.
+
+## AiStudio Error DX Triage (`CPB-0695`)
+
+When users report AiStudio-facing errors, run a deterministic triage:
+
+1. Verify model exposure with `/v1/models`.
+2. Run one non-stream call.
+3. Run one stream call using identical model and prompt.
+4. Capture HTTP status plus upstream provider error payload.
+
+Keep this flow provider-agnostic so the same checklist works for Gemini/Codex/OpenAI-compatible paths.
+
+## Global Alias + Model Capability Safety (`CPB-0698`, `CPB-0699`)
+
+Before shipping a global alias change:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq '.data[] | {id,capabilities}'
+```
+
+Expected:
+- Aliases resolve to concrete model IDs.
+- Capability metadata stays visible (`capabilities` field remains populated for discovery clients).
+
+## Load-Balance Naming + Distribution Check (`CPB-0700`)
+
+Use consistent account labels/prefix names and verify distribution with repeated calls:
+
+```bash
+for i in $(seq 1 12); do
+  curl -sS -X POST http://localhost:8317/v1/responses \
+    -H "Authorization: Bearer demo-client-key" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"codex/codex-latest","stream":false,"input":[{"role":"user","content":[{"type":"input_text","text":"distribution probe"}]}]}' \
+    | jq -r '"req=\($i) id=\(.id // "none") total=\(.usage.total_tokens // 0)"'
+done
+```
+
+If calls cluster on one account, inspect credential health and prefix ownership before introducing retry/failover policy changes.
+
+## Mac Logs Visibility (`CPB-0711`)
+
+When users report `Issue with enabling logs in Mac settings`, validate log emission first:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude/claude-sonnet-4-6","messages":[{"role":"user","content":"ping"}]}' | jq '.choices[0].message.content'
+
+ls -lah logs | sed -n '1,20p'
+tail -n 40 logs/server.log
+```
+
+Expected: request appears in `logs/server.log` and no OS-level permission errors are present. If permission is denied, re-run install with a writable logs directory.
+
+## Thinking configuration (`CPB-0712`)
+
+For Claude and Codex parity checks, use explicit reasoning controls:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude/claude-opus-4-6-thinking","messages":[{"role":"user","content":"solve this"}],"stream":false,"reasoning_effort":"high"}' | jq '.choices[0].message.content'
+
+curl -sS -X POST http://localhost:8317/v1/responses \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"codex/codex-latest","input":[{"role":"user","content":[{"type":"input_text","text":"solve this"}]}],"reasoning_effort":"high"}' | jq '.output_text'
+```
+
+Expected: reasoning fields are accepted, and the reply completes without switching clients.
+
+## gpt-5 Codex model discovery (`CPB-0713`)
+
+Verify the low/medium/high variants are exposed before rollout:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^gpt-5-codex-(low|medium|high)$'
+```
+
+If any IDs are missing, reload auth/profile config and confirm provider key scope.
+
+## Mac/GUI Gemini privilege flow (`CPB-0714`)
+
+For the `CLI settings privilege` repro in Gemini flows, confirm end-to-end with the same payload used by the client:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/flash","messages":[{"role":"user","content":"permission check"}],"stream":false}' | jq '.choices[0].message.content'
+```
+
+Expected: no interactive browser auth is required during normal request path.
+
+## Images with Antigravity (`CPB-0715`)
+
+When validating image requests, include a one-shot probe:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude/antigravity-gpt-5-2","messages":[{"role":"user","content":[{"type":"text","text":"analyze image"},{"type":"image","source":{"type":"url","url":"https://example.com/sample.png"}}]}]}' | jq '.choices[0].message.content'
+```
+
+Expected: image bytes are normalized and request succeeds or returns provider-specific validation with actionable details.
+
+## `explore` tool workflow (`CPB-0716`)
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude/claude-opus-4-5-thinking","messages":[{"role":"user","content":"what files changed"}],"tools":[{"type":"function","function":{"name":"explore","description":"check project files","parameters":{"type":"object","properties":{}}}}],"stream":false}' | jq '.choices[0].message'
+```
+
+Expected: tool invocation path preserves request shape and returns tool payloads (or structured errors) consistently.
+
+## Antigravity status and error parity (`CPB-0717`, `CPB-0719`)
+
+Use a paired probe set for API 400 class failures:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"antigravity/gpt-5","messages":[{"role":"user","content":"quick parity probe"}],"stream":false}' | jq '.error.status_code? // .error.type // .'
+
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq '{data_count:(.data|length),data:(.data|map(.id))}'
+```
+
+Expected: malformed/unsupported payloads return deterministic messages and no silent fallback.
+
+## `functionResponse`/`tool_use` stability (`CPB-0718`, `CPB-0720`)
+
+Run translator-focused regression checks after code changes:
+
+```bash
+go test ./pkg/llmproxy/translator/antigravity/gemini -run 'TestParseFunctionResponseRawSkipsEmpty|TestFixCLIToolResponseSkipsEmptyFunctionResponse|TestFixCLIToolResponse' -count=1
+go test ./pkg/llmproxy/translator/antigravity/claude -run 'TestConvertClaudeRequestToAntigravity_ToolUsePreservesMalformedInput' -count=1
+```
+
+Expected: empty `functionResponse` content is not propagated as invalid JSON, and malformed tool args retain the `functionCall` block instead of dropping the tool interaction.
+
+## Antigravity thinking-block + tool schema guardrails (`CPB-0731`, `CPB-0735`, `CPB-0742`, `CPB-0746`)
+
+Use this when Claude/Antigravity returns `400` with `thinking` or `input_schema` complaints.
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model":"claude/claude-opus-4-5-thinking",
+    "messages":[{"role":"user","content":"ping"}],
+    "tools":[{"type":"function","function":{"name":"read_file","description":"read","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],
+    "thinking":{"type":"enabled","budget_tokens":1024},
+    "max_tokens":2048,
+    "stream":false
+  }' | jq
+```
+
+Expected:
+- Request succeeds without `max_tokens must be greater than thinking.budget_tokens`.
+- Tool schema is accepted without `tools.0.custom.input_schema: Field required`.
+- If failure persists, lower `thinking.budget_tokens` and re-check `/v1/models` for thinking-capable alias.
+
+## Antigravity parity + model mapping (`CPB-0743`, `CPB-0744`)
+
+Use this when Antigravity traffic is inconsistent between CLI tooling and API clients.
+
+1) Validate CLI coverage matrix:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^antigravity/'
+```
+
+2) Run CLI parity request for a model you expect to work:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"antigravity/gpt-5","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq '.id,.model,.choices[0].message.content'
+```
+
+3) Add or update Amp model mappings for deterministic fallback:
+
+```yaml
+ampcode:
+  force-model-mappings: true
+  model-mappings:
+    - from: "claude-opus-4-5-thinking"
+      to: "gemini-claude-opus-4-5-thinking"
+      params:
+        custom_model: "iflow/tab"
+        enable_search: true
+```
+
+4) Confirm params are injected and preserved:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-opus-4-5-thinking","messages":[{"role":"user","content":"mapping probe"}],"stream":false}' | jq
+```
+
+Expected:
+- `/v1/models` includes expected Antigravity IDs.
+- Mapping request succeeds even if source model has no local providers.
+- Injected params appear in debug/trace payloads (or equivalent internal request logs) when verbose/request logging is enabled.
+
+## Gemini OpenAI-compat parser probe (`CPB-0748`)
+
+Use this quick probe when clients fail parsing Gemini responses due to non-standard fields:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini/flash","messages":[{"role":"user","content":"return a short answer"}],"stream":false}' \
+  | jq '{id,object,model,choices,usage,error}'
+```
+
+Expected: payload shape is OpenAI-compatible (`choices[0].message.content`) and does not require provider-specific fields in downstream parsers.
+
+## Codex reasoning effort normalization (`CPB-0764`)
+
+Validate `xhigh` behavior and nested `reasoning.effort` compatibility:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"codex/codex-latest","messages":[{"role":"user","content":"reasoning check"}],"reasoning":{"effort":"x-high"},"stream":false}' | jq
+```
+
+Expected: reasoning config is accepted; no fallback parse errors from nested/variant effort fields.
+
+## Structured output quick probe (`CPB-0778`)
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model":"codex/codex-latest",
+    "messages":[{"role":"user","content":"Return JSON with status"}],
+    "response_format":{"type":"json_schema","json_schema":{"name":"status_reply","strict":true,"schema":{"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}}},
+    "stream":false
+  }' | jq
+```
+
+Expected: translated request preserves `text.format.schema` and response remains JSON-compatible.

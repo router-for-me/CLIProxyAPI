@@ -183,6 +183,76 @@ func TestModelMapper_UpdateMappings_SkipsInvalid(t *testing.T) {
 	}
 }
 
+func TestModelMapper_MapModelWithParams_ReturnsConfigParams(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-client-params", "claude", []*registry.ModelInfo{
+		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+	})
+	defer reg.UnregisterClient("test-client-params")
+
+	mappings := []config.AmpModelMapping{
+		{
+			From: "alias",
+			To:   "claude-sonnet-4",
+			Params: map[string]interface{}{
+				"custom_model":    "iflow/tab",
+				"enable_tab_mode": true,
+			},
+		},
+	}
+
+	mapper := NewModelMapper(mappings)
+	gotModel, gotParams := mapper.MapModelWithParams("alias")
+	if gotModel != "claude-sonnet-4" {
+		t.Fatalf("expected claude-sonnet-4, got %s", gotModel)
+	}
+	if gotParams == nil {
+		t.Fatalf("expected params to be returned")
+	}
+	if gotParams["custom_model"] != "iflow/tab" {
+		t.Fatalf("expected custom_model param, got %v", gotParams["custom_model"])
+	}
+	if gotParams["enable_tab_mode"] != true {
+		t.Fatalf("expected enable_tab_mode=true, got %v", gotParams["enable_tab_mode"])
+	}
+}
+
+func TestModelMapper_MapModelWithParams_ReturnsCopiedMap(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-client-params-copy", "claude", []*registry.ModelInfo{
+		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+	})
+	defer reg.UnregisterClient("test-client-params-copy")
+
+	mappings := []config.AmpModelMapping{
+		{
+			From: "alias-copy",
+			To:   "claude-sonnet-4",
+			Params: map[string]interface{}{
+				"custom_model": "iflow/tab",
+			},
+		},
+	}
+
+	mapper := NewModelMapper(mappings)
+	gotModel, gotParams := mapper.MapModelWithParams("alias-copy")
+	if gotModel != "claude-sonnet-4" {
+		t.Fatalf("expected claude-sonnet-4, got %s", gotModel)
+	}
+	if gotParams["custom_model"] != "iflow/tab" {
+		t.Fatalf("expected custom_model param, got %v", gotParams["custom_model"])
+	}
+	gotParams["custom_model"] = "modified"
+
+	gotModel2, gotParams2 := mapper.MapModelWithParams("alias-copy")
+	if gotModel2 != "claude-sonnet-4" {
+		t.Fatalf("expected claude-sonnet-4 second call, got %s", gotModel2)
+	}
+	if gotParams2["custom_model"] != "iflow/tab" {
+		t.Fatalf("expected copied map from internal state, got %v", gotParams2["custom_model"])
+	}
+}
+
 func TestModelMapper_GetMappings_ReturnsCopy(t *testing.T) {
 	mappings := []config.AmpModelMapping{
 		{From: "model-a", To: "model-b"},
