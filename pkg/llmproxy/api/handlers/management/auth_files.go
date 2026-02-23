@@ -626,7 +626,12 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			return
 		}
 		if errReg := h.registerAuthFromFile(ctx, dst, data); errReg != nil {
-			c.JSON(500, gin.H{"error": errReg.Error()})
+			// Path traversal or other validation errors should return 400
+			if strings.Contains(errReg.Error(), "escapes") || strings.Contains(errReg.Error(), "traversal") {
+				c.JSON(400, gin.H{"error": "invalid auth file path"})
+			} else {
+				c.JSON(500, gin.H{"error": errReg.Error()})
+			}
 			return
 		}
 		c.JSON(200, gin.H{"status": "ok"})
@@ -657,7 +662,12 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	if err = h.registerAuthFromFile(ctx, dst, data); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		// Path traversal or other validation errors should return 400
+		if strings.Contains(err.Error(), "escapes") || strings.Contains(err.Error(), "traversal") {
+			c.JSON(400, gin.H{"error": "invalid auth file path"})
+		} else {
+			c.JSON(500, gin.H{"error": err.Error()})
+		}
 		return
 	}
 	c.JSON(200, gin.H{"status": "ok"})

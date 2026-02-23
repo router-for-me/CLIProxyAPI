@@ -800,6 +800,19 @@ func geminiCLIClientMetadata() string {
 	return "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
 }
 
+// normalizeGeminiCLIModel normalizes Gemini CLI model names.
+// Maps gemini-3.* versions to their gemini-2.5-* equivalents.
+func normalizeGeminiCLIModel(model string) string {
+	switch model {
+	case "gemini-3-pro", "gemini-3.1-pro":
+		return "gemini-2.5-pro"
+	case "gemini-3-flash", "gemini-3.1-flash":
+		return "gemini-2.5-flash"
+	default:
+		return model
+	}
+}
+
 // cliPreviewFallbackOrder returns preview model candidates for a base model.
 func cliPreviewFallbackOrder(model string) []string {
 	switch model {

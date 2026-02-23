@@ -8,12 +8,6 @@ import (
 	"testing"
 )
 
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return fn(req)
-}
-
 func TestRefreshToken_UsesSingleGrantTypeFieldAndExtensionHeaders(t *testing.T) {
 	t.Parallel()
 
