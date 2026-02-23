@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
 )
@@ -23,8 +23,7 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 	proxyURL, errParse := url.Parse(cfg.ProxyURL)
 	if errParse == nil {
 		// Handle different proxy schemes.
-		switch proxyURL.Scheme {
-		case "socks5":
+		if proxyURL.Scheme == "socks5" {
 			// Configure SOCKS5 proxy with optional authentication.
 			var proxyAuth *proxy.Auth
 			if proxyURL.User != nil {
@@ -43,7 +42,7 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 					return dialer.Dial(network, addr)
 				},
 			}
-		case "http", "https":
+		} else if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
 			// Configure HTTP or HTTPS proxy.
 			transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
 		}
