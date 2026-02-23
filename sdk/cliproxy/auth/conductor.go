@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -1654,6 +1655,30 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+
+	// If a specific auth is pinned, use only that auth.
+	pinnedAuthID := ""
+	if opts.Metadata != nil {
+		if v, ok := opts.Metadata[cliproxyexecutor.PinnedAuthMetadataKey]; ok {
+			if id, ok := v.(string); ok {
+				pinnedAuthID = strings.TrimSpace(id)
+			}
+		}
+	}
+	if pinnedAuthID != "" {
+		filtered := make([]*Auth, 0, len(candidates))
+		for _, c := range candidates {
+			if c.ID == pinnedAuthID {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) == 0 {
+			m.mu.RUnlock()
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: fmt.Sprintf("pinned auth %q not found", pinnedAuthID)}
+		}
+		candidates = filtered
+	}
+
 	selected, errPick := m.selector.Pick(ctx, "mixed", model, opts, candidates)
 	if errPick != nil {
 		m.mu.RUnlock()
