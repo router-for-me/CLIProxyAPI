@@ -16,11 +16,11 @@
 | Lane 5 | CP2K-0051,0052,0053,0054,0056 | Completed; auth watcher hardening + quickstart/runbook additions |
 | Lane 6 | CP2K-0059,0060,0062,0063,0064 | Completed; troubleshooting matrix/test coverage updates |
 
-## Undefined Placeholder Audit
+## Placeholder Token Audit
 
-- Requested issue: generated phase docs showing malformed placeholders like `undefinedBKM-*`.
-- Audit in this repo/worktree: no malformed placeholder tokens found.
-- Found `undefined` only as literal issue text/context in historical reports and compiler diagnostics.
+- Requested issue: generated phase docs showing malformed placeholders such as unresolved backmatter IDs.
+- Audit in this repo/worktree: no malformed tokens like `undefinedBKM-*` were found.
+- Remaining `undefined` strings are literal error-context text in historical reports and compiler diagnostics, not template placeholders.
 
 ## Key Changes Included
 
@@ -53,4 +53,3 @@
 
 - Known unrelated blockers in baseline:
   - package-level compile drift around `normalizeGeminiCLIModel` in unrelated executor tests.
-
