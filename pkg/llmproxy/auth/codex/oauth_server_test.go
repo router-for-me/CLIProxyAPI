@@ -113,12 +113,27 @@ func TestIsValidURL(t *testing.T) {
 	}{
 		{"https://example.com", true},
 		{"http://example.com", true},
+		{" https://example.com/path?q=1 ", true},
 		{"javascript:alert(1)", false},
 		{"ftp://example.com", false},
+		{"https://example.com\" onclick=\"alert(1)", false},
+		{"https://", false},
 	}
 	for _, tc := range cases {
 		if isValidURL(tc.url) != tc.want {
 			t.Errorf("isValidURL(%q) = %v, want %v", tc.url, isValidURL(tc.url), tc.want)
 		}
+	}
+}
+
+func TestGenerateSuccessHTML_EscapesPlatformURL(t *testing.T) {
+	server := NewOAuthServer(1459)
+	malicious := `https://example.com" onclick="alert(1)`
+	got := server.generateSuccessHTML(true, malicious)
+	if strings.Contains(got, malicious) {
+		t.Fatalf("expected malicious URL to be escaped in HTML output")
+	}
+	if !strings.Contains(got, "https://example.com&#34; onclick=&#34;alert(1)") {
+		t.Fatalf("expected escaped URL in HTML output, got: %s", got)
 	}
 }
