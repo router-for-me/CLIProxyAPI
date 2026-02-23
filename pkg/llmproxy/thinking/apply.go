@@ -126,10 +126,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			}).Debug("thinking: model does not support thinking, stripping config |")
 			return StripThinkingConfig(body, providerFormat), nil
 		}
-		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    baseModel,
-		}).Debug("thinking: model does not support thinking, passthrough |")
+		log.Debug("thinking: model does not support thinking, passthrough |")
 		return body, nil
 	}
 

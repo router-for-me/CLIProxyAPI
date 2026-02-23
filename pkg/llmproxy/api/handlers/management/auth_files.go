@@ -136,6 +136,11 @@ func isWebUIRequest(c *gin.Context) bool {
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
+	targetURL, errTarget := validateCallbackForwarderTarget(targetBase)
+	if errTarget != nil {
+		return nil, fmt.Errorf("invalid callback target: %w", errTarget)
+	}
+
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
 	if prev != nil {
@@ -154,16 +159,16 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		target := targetBase
+		target := *targetURL
 		if raw := r.URL.RawQuery; raw != "" {
-			if strings.Contains(target, "?") {
-				target = target + "&" + raw
+			if target.RawQuery != "" {
+				target.RawQuery = target.RawQuery + "&" + raw
 			} else {
-				target = target + "?" + raw
+				target.RawQuery = raw
 			}
 		}
 		w.Header().Set("Cache-Control", "no-store")
-		http.Redirect(w, r, target, http.StatusFound)
+		http.Redirect(w, r, target.String(), http.StatusFound)
 	})
 
 	srv := &http.Server{
@@ -193,6 +198,38 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	log.Infof("callback forwarder for %s listening on %s", provider, addr)
 
 	return forwarder, nil
+}
+
+func validateCallbackForwarderTarget(targetBase string) (*url.URL, error) {
+	trimmed := strings.TrimSpace(targetBase)
+	if trimmed == "" {
+		return nil, fmt.Errorf("target cannot be empty")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("parse target: %w", err)
+	}
+	if !parsed.IsAbs() {
+		return nil, fmt.Errorf("target must be absolute")
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, fmt.Errorf("target scheme %q is not allowed", parsed.Scheme)
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" {
+		return nil, fmt.Errorf("target host is required")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() {
+			return nil, fmt.Errorf("target host must be loopback")
+		}
+		return parsed, nil
+	}
+	if host != "localhost" {
+		return nil, fmt.Errorf("target host must be localhost or loopback")
+	}
+	return parsed, nil
 }
 
 func stopCallbackForwarder(port int) {
