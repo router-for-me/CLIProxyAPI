@@ -34,8 +34,9 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-4`
 - Notes: lane-started
 
 ### #101
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: targeted amp provider-route probe returns no deterministic failing fixture in this tree.
+  - Evidence: `go test ./pkg/llmproxy/api/modules/amp -run 'TestProviderRoutes_ModelsList' -count=1` (`[no tests to run]`)
 
 ## Focused Checks
 
