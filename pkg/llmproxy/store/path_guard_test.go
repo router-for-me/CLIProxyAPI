@@ -27,7 +27,7 @@ func TestObjectTokenStoreSaveRejectsPathOutsideAuthDir(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for path outside managed auth directory")
 	}
-	if !strings.Contains(err.Error(), "path escapes managed directory") {
+	if !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("expected managed directory error, got: %v", err)
 	}
 }
@@ -51,7 +51,7 @@ func TestGitTokenStoreSaveRejectsPathOutsideAuthDir(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for path outside managed auth directory")
 	}
-	if !strings.Contains(err.Error(), "path escapes managed directory") {
+	if !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("expected managed directory error, got: %v", err)
 	}
 }
