@@ -1,64 +1,41 @@
 # CLIProxyAPI++ (KooshaPari Fork)
 
-**Forked and enhanced from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)**
-
-Multi-provider LLM proxy with unified OpenAI-compatible API, third-party auth, SDK generation, and enterprise features.
-
----
-
-## What is CLIProxyAPI++?
-
-CLIProxyAPI++ provides a unified API gateway that translates OpenAI-compatible requests to any LLM provider:
-
-```
-Client (OpenAI format) → CLIProxyAPI++ → OpenAI, Anthropic, Google, AWS, Ollama, etc.
-```
-
-### Key Capabilities
-
-| Capability | Description |
-|------------|-------------|
-| **Multi-Provider Routing** | Single endpoint for OpenAI, Anthropic, Google, AWS Bedrock, Ollama, Kiro, GitHub Copilot |
-| **OAuth Authentication** | Built-in OAuth flows for Kiro (AWS CodeWhisperer) and GitHub Copilot |
-| **Rate Limiting** | Token bucket algorithm with per-provider limits |
-| **Metrics & Monitoring** | Prometheus metrics, cost tracking, latency monitoring |
-| **SDK Generation** | Auto-generated Python and Go SDKs |
-
----
+This repository works with Claude and other AI agents as autonomous software engineers.
 
 ## Quick Start
 
-### Docker
-
 ```bash
-mkdir -p ~/cli-proxy && cd ~/cli-proxy
+# Docker
+docker run -p 8317:8317 eceasy/cli-proxy-api-plus:latest
 
-cat > docker-compose.yml << 'EOF'
-services:
-  cli-proxy-api:
-    image: eceasy/cli-proxy-api-plus:latest
-    ports:
-      - "8317:8317"
-    volumes:
-      - ./config.yaml:/CLIProxyAPI/config.yaml
-EOF
-
-curl -o config.yaml https://raw.githubusercontent.com/KooshaPari/cliproxyapi-plusplus/main/config.example.yaml
-docker compose up -d
-```
-
-### From Source
-
-```bash
+# Or build from source
 go build -o cliproxy ./cmd/cliproxy
 ./cliproxy --config config.yaml
+
+# Health check
+curl http://localhost:8317/health
 ```
 
----
+## Multi-Provider Routing
 
-## Configuration
+Route OpenAI-compatible requests to any provider:
 
-### Provider Setup
+```bash
+# List models
+curl http://localhost:8317/v1/models
+
+# Chat completion (OpenAI)
+curl -X POST http://localhost:8317/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
+
+# Chat completion (Anthropic)
+curl -X POST http://localhost:8317/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-3-5-sonnet", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+### Provider Configuration
 
 ```yaml
 providers:
@@ -75,21 +52,10 @@ providers:
     base_url: http://localhost:11434
 ```
 
-### Rate Limiting
-
-```yaml
-rate_limit:
-  requests_per_minute: 60
-  tokens_per_minute: 100000
-  cooldown_seconds: 30
-```
-
----
-
 ## Supported Providers
 
-| Provider | Auth Type | Status |
-|----------|-----------|--------|
+| Provider | Auth | Status |
+|----------|------|--------|
 | OpenAI | API Key | ✅ |
 | Anthropic | API Key | ✅ |
 | Azure OpenAI | API Key/OAuth | ✅ |
@@ -100,109 +66,134 @@ rate_limit:
 | Ollama | Local | ✅ |
 | LM Studio | Local | ✅ |
 
----
-
-## API Endpoints
-
-### OpenAI-Compatible
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /v1/chat/completions` | Chat completions |
-| `POST /v1/completions` | Text completions |
-| `GET /v1/models` | List available models |
-
-### Management
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | Health check |
-| `GET /metrics` | Prometheus metrics |
-| `GET /v1/providers` | Provider status |
-| `POST /v1/providers/{provider}/refresh` | Refresh credentials |
-
----
-
-## SDKs
-
-### Python
-
-```python
-from cliproxy import CliproxyClient
-
-client = CliproxyClient(
-    base_url="http://localhost:8317",
-    api_key="your-api-key"
-)
-
-response = client.chat.completions.create(
-    model="gpt-4o",
-    messages=[{"role": "user", "content": "Hello!"}]
-)
-```
-
-### Go
-
-```go
-package main
-
-import (
-    "github.com/KooshaPari/cliproxy-sdk-go/client"
-)
-
-func main() {
-    c := client.New("http://localhost:8317", "your-api-key")
-    resp, _ := c.Chat.Completions(&.ChatCompletionRequest{
-        Model: "gpt-4o",
-        Messages: []map[string]string{{"role": "user", "content": "Hello!"}},
-    })
-}
-```
-
----
-
-## Architecture
-
-```
-┌──────────────┐     ┌─────────────────┐     ┌────────────┐
-│   Clients    │────▶│   CLIProxy++     │────▶│  Providers │
-│ (thegent,   │     │  (this repo)    │     │ (OpenAI,   │
-│  agentapi)   │     │                 │     │  Anthropic,│
-└──────────────┘     └─────────────────┘     │  AWS, etc) │
-                         │                   └────────────┘
-                         ▼
-                  ┌─────────────────┐
-                  │   SDK Gen       │
-                  │ (Python, Go)     │
-                  └─────────────────┘
-```
-
----
-
 ## Documentation
 
-- [Start Here](docs/start-here.md) - Getting started guide
-- [Provider Usage](docs/provider-usage.md) - Provider configuration
-- [Provider Quickstarts](docs/provider-quickstarts.md) - 5-minute setup per provider
-- [API Reference](docs/api/) - Full API documentation
-- [SDK Usage](docs/sdk-usage.md) - SDK guides
+- `docs/start-here.md` - Getting started guide
+- `docs/provider-usage.md` - Provider configuration
+- `docs/provider-quickstarts.md` - Per-provider guides
+- `docs/api/` - API reference
+- `docs/sdk-usage.md` - SDK guides
+
+## Environment
+
+```bash
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-..."
+export CLIPROXY_PORT=8317
+```
 
 ---
 
 ## Development Philosophy
 
 ### Extend, Never Duplicate
+
 - NEVER create a v2 file. Refactor the original.
 - NEVER create a new class if an existing one can be made generic.
 - NEVER create custom implementations when an OSS library exists.
+- Before writing ANY new code: search the codebase for existing patterns.
 
 ### Primitives First
+
 - Build generic building blocks before application logic.
 - A provider interface + registry is better than N isolated classes.
+- Template strings > hardcoded messages. Config-driven > code-driven.
 
 ### Research Before Implementing
+
 - Check pkg.go.dev for existing libraries.
 - Search GitHub for 80%+ implementations to fork/adapt.
+
+---
+
+## Library Preferences (DO NOT REINVENT)
+
+| Need | Use | NOT |
+|------|-----|-----|
+| HTTP router | chi | custom router |
+| Logging | zerolog | fmt.Print |
+| Config | viper | manual env parsing |
+| Validation | go-playground/validator | manual if/else |
+| Rate limiting | golang.org/x/time/rate | custom limiter |
+
+---
+
+## Code Quality Non-Negotiables
+
+- Zero new lint suppressions without inline justification
+- All new code must pass: go fmt, go vet, golint
+- Max function: 40 lines
+- No placeholder TODOs in committed code
+
+### Go-Specific Rules
+
+- Use `go fmt` for formatting
+- Use `go vet` for linting
+- Use `golangci-lint` for comprehensive linting
+- All public APIs must have godoc comments
+
+---
+
+## Verifiable Constraints
+
+| Metric | Threshold | Enforcement |
+|--------|-----------|-------------|
+| Tests | 80% coverage | CI gate |
+| Lint | 0 errors | golangci-lint |
+| Security | 0 critical | trivy scan |
+
+---
+
+## Domain-Specific Patterns
+
+### What CLIProxyAPI++ Is
+
+CLIProxyAPI++ is an **OpenAI-compatible API gateway** that translates client requests to multiple upstream LLM providers. The core domain is: provide a single API surface that routes to heterogeneous providers with auth, rate limiting, and metrics.
+
+### Key Interfaces
+
+| Interface | Responsibility | Location |
+|-----------|---------------|----------|
+| **Router** | Request routing to providers | `pkg/llmproxy/router/` |
+| **Provider** | Provider abstraction | `pkg/llmproxy/providers/` |
+| **Auth** | Credential management | `pkg/llmproxy/auth/` |
+| **Rate Limiter** | Throttling | `pkg/llmproxy/ratelimit/` |
+
+### Request Flow
+
+```
+1. Client Request → Router
+2. Router → Auth Validation
+3. Auth → Provider Selection
+4. Provider → Upstream API
+5. Response ← Provider
+6. Metrics → Response
+```
+
+### Common Anti-Patterns to Avoid
+
+- **Hardcoded provider URLs** -- Use configuration
+- **Blocking on upstream** -- Use timeouts and circuit breakers
+- **No fallbacks** -- Implement provider failover
+- **Missing metrics** -- Always track latency/cost
+
+---
+
+## Kush Ecosystem
+
+This project is part of the Kush multi-repo system:
+
+```
+kush/
+├── thegent/         # Agent orchestration
+├── agentapi++/      # HTTP API for coding agents
+├── cliproxy++/     # LLM proxy (this repo)
+├── tokenledger/     # Token and cost tracking
+├── 4sgm/           # Python tooling workspace
+├── civ/             # Deterministic simulation
+├── parpour/         # Spec-first planning
+└── pheno-sdk/       # Python SDK
+```
 
 ---
 
