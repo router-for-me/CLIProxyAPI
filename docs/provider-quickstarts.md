@@ -100,6 +100,42 @@ curl -N -X POST http://localhost:8317/v1/chat/completions \
 
 If Opus 4.6 is missing from `/v1/models`, verify provider alias mapping and prefix ownership before routing production traffic.
 
+Opus 4.5 quickstart sanity check:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude/claude-opus-4-5-20251101","messages":[{"role":"user","content":"ping opus 4.5"}],"stream":false}' | jq '.choices[0].message.content'
+```
+
+Opus 4.5 streaming parity check:
+
+```bash
+curl -N -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude/claude-opus-4-5","messages":[{"role":"user","content":"stream opus 4.5"}],"stream":true}'
+```
+
+If Opus 4.5 is missing from `/v1/models`, confirm alias routing is active (`ampcode.model-mappings`) and use a mapped model that is visible for the current API key.
+
+### Nano Banana probe (`CPB-0786`)
+
+Use this to validate Nano Banana alias/model visibility and request flow before enabling broad rollout.
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg 'banana|nano|nano-banana|nanobanana'
+
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-nano-banana","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
+```
+
+If the model list does not expose Nano Banana in your account, re-check prefix ownership and mapped aliases in `v1/models` first.
+
 ## 2) Codex
 
 `config.yaml`:
