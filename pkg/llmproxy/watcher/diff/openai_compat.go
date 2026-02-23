@@ -1,7 +1,8 @@
 package diff
 
 import (
-	"crypto/sha256"
+	"crypto/hmac"
+	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 )
+
+const openAICompatSignatureHashKey = "watcher-openai-compat-signature:v1"
 
 // DiffOpenAICompatibility produces human-readable change descriptions.
 func DiffOpenAICompatibility(oldList, newList []config.OpenAICompatibility) []string {
@@ -178,6 +181,7 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
-	return hex.EncodeToString(sum[:])
+	hasher := hmac.New(sha512.New, []byte(openAICompatSignatureHashKey))
+	hasher.Write([]byte(strings.Join(parts, "|")))
+	return hex.EncodeToString(hasher.Sum(nil))
 }
