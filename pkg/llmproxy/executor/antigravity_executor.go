@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -213,7 +214,13 @@ attemptLoop:
 					}
 					if attempt+1 < attempts {
 						delay := antigravityNoCapacityRetryDelay(attempt)
-						log.Debugf("antigravity executor: no capacity for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+						log.Debugf(
+							"antigravity executor: no capacity for model fingerprint=%s, retrying in %s (attempt %d/%d)",
+							antigravityModelFingerprint(baseModel),
+							delay,
+							attempt+1,
+							attempts,
+						)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return resp, errWait
 						}
@@ -256,6 +263,15 @@ attemptLoop:
 	}
 
 	return resp, err
+}
+
+func antigravityModelFingerprint(model string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:8])
 }
 
 // executeClaudeNonStream performs a claude non-streaming request to the Antigravity API.

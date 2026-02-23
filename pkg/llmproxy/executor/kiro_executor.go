@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1653,7 +1655,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	if strings.Contains(modelLower, "sonnet") {
 		// Check for specific version patterns
 		if strings.Contains(modelLower, "3-7") || strings.Contains(modelLower, "3.7") {
-			log.Debugf("kiro: unknown Sonnet 3.7 model '%s', mapping to claude-3-7-sonnet-20250219", model)
+			log.Debugf("kiro: unknown Sonnet 3.7 model fingerprint=%s, mapping to claude-3-7-sonnet-20250219", kiroModelFingerprint(model))
 			return "claude-3-7-sonnet-20250219"
 		}
 		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
@@ -1680,8 +1682,17 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	}
 
 	// Final fallback to Sonnet 4.5 (most commonly used model)
-	log.Warnf("kiro: unknown model '%s', falling back to claude-sonnet-4.5", model)
+	log.Warnf("kiro: unknown model fingerprint=%s, falling back to claude-sonnet-4.5", kiroModelFingerprint(model))
 	return "claude-sonnet-4.5"
+}
+
+func kiroModelFingerprint(model string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:8])
 }
 
 // EventStreamError represents an Event Stream processing error
