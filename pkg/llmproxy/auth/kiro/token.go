@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 )
 
 // KiroTokenStorage holds the persistent token data for Kiro authentication.
@@ -66,20 +68,109 @@ func cleanTokenPath(path, scope string) (string, error) {
 	if trimmed == "" {
 		return "", fmt.Errorf("%s: auth file path is empty", scope)
 	}
-	clean := filepath.Clean(filepath.FromSlash(trimmed))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+	normalizedInput := filepath.FromSlash(trimmed)
+	safe, err := misc.ResolveSafeFilePath(normalizedInput)
+	if err != nil {
 		return "", fmt.Errorf("%s: auth file path is invalid", scope)
 	}
-	abs, err := filepath.Abs(clean)
+
+	baseDir, absPath, err := normalizePathWithinBase(safe)
 	if err != nil {
-		return "", fmt.Errorf("%s: resolve auth file path: %w", scope, err)
+		return "", fmt.Errorf("%s: auth file path is invalid", scope)
+	}
+	if err := denySymlinkPath(baseDir, absPath); err != nil {
+		return "", fmt.Errorf("%s: auth file path is invalid", scope)
+	}
+	return absPath, nil
+}
+
+func normalizePathWithinBase(path string) (string, string, error) {
+	cleanPath := filepath.Clean(path)
+	if cleanPath == "." || cleanPath == ".." {
+		return "", "", fmt.Errorf("path is invalid")
+	}
+
+	var (
+		baseDir string
+		absPath string
+		err     error
+	)
+
+	if filepath.IsAbs(cleanPath) {
+		absPath = filepath.Clean(cleanPath)
+		baseDir = filepath.Clean(filepath.Dir(absPath))
+	} else {
+		baseDir, err = os.Getwd()
+		if err != nil {
+			return "", "", fmt.Errorf("resolve working directory: %w", err)
+		}
+		baseDir, err = filepath.Abs(baseDir)
+		if err != nil {
+			return "", "", fmt.Errorf("resolve base directory: %w", err)
+		}
+		absPath = filepath.Clean(filepath.Join(baseDir, cleanPath))
+	}
+
+	if !pathWithinBase(baseDir, absPath) {
+		return "", "", fmt.Errorf("path escapes base directory")
+	}
+	return filepath.Clean(baseDir), filepath.Clean(absPath), nil
+}
+
+func pathWithinBase(baseDir, path string) bool {
+	rel, err := filepath.Rel(baseDir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+func denySymlinkPath(baseDir, targetPath string) error {
+	if !pathWithinBase(baseDir, targetPath) {
+		return fmt.Errorf("path escapes base directory")
+	}
+	rel, err := filepath.Rel(baseDir, targetPath)
+	if err != nil {
+		return fmt.Errorf("resolve relative path: %w", err)
+	}
+	if rel == "." {
+		return nil
+	}
+	current := filepath.Clean(baseDir)
+	for _, component := range strings.Split(rel, string(os.PathSeparator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, errStat := os.Lstat(current)
+		if errStat != nil {
+			if os.IsNotExist(errStat) {
+				return nil
+			}
+			return fmt.Errorf("stat path: %w", errStat)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlink is not allowed in auth file path")
+		}
+	}
+	return nil
+}
+
+func cleanAuthPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve auth file path: %w", err)
 	}
 	return filepath.Clean(abs), nil
 }
 
 // LoadFromFile loads token storage from the specified file path.
 func LoadFromFile(authFilePath string) (*KiroTokenStorage, error) {
-	data, err := os.ReadFile(authFilePath)
+	cleanPath, err := cleanTokenPath(authFilePath, "kiro token")
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(cleanPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token file: %w", err)
 	}

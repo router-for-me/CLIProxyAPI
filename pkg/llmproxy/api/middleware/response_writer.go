@@ -162,11 +162,11 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	// If streaming, initialize streaming log writer
 	if w.isStreaming && w.logger.IsEnabled() {
 		streamWriter, err := w.logger.LogStreamingRequest(
-			w.requestInfo.URL,
-			w.requestInfo.Method,
+			sanitizeForLogging(w.requestInfo.URL),
+			sanitizeForLogging(w.requestInfo.Method),
 			w.requestInfo.Headers,
 			w.requestInfo.Body,
-			w.requestInfo.RequestID,
+			sanitizeForLogging(w.requestInfo.RequestID),
 		)
 		if err == nil {
 			w.streamWriter = streamWriter
@@ -391,14 +391,17 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	if w.requestInfo == nil {
 		return nil
 	}
+	safeURL := sanitizeForLogging(w.requestInfo.URL)
+	safeMethod := sanitizeForLogging(w.requestInfo.Method)
+	safeRequestID := sanitizeForLogging(w.requestInfo.RequestID)
 	requestHeaders := sanitizeRequestHeaders(http.Header(w.requestInfo.Headers))
 
 	if loggerWithOptions, ok := w.logger.(interface {
 		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
 	}); ok {
 		return loggerWithOptions.LogRequestWithOptions(
-			w.requestInfo.URL,
-			w.requestInfo.Method,
+			safeURL,
+			safeMethod,
 			requestHeaders,
 			redactLoggedBody(requestBody),
 			statusCode,
@@ -408,15 +411,15 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 			redactLoggedBody(apiResponseBody),
 			apiResponseErrors,
 			forceLog,
-			w.requestInfo.RequestID,
+			safeRequestID,
 			w.requestInfo.Timestamp,
 			apiResponseTimestamp,
 		)
 	}
 
 	return w.logger.LogRequest(
-		w.requestInfo.URL,
-		w.requestInfo.Method,
+		safeURL,
+		safeMethod,
 		requestHeaders,
 		redactLoggedBody(requestBody),
 		statusCode,
@@ -425,7 +428,7 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 		redactLoggedBody(apiRequestBody),
 		redactLoggedBody(apiResponseBody),
 		apiResponseErrors,
-		w.requestInfo.RequestID,
+		safeRequestID,
 		w.requestInfo.Timestamp,
 		apiResponseTimestamp,
 	)

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/sha512"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -59,8 +59,6 @@ const (
 	quotaBackoffBase      = time.Second
 	quotaBackoffMax       = 30 * time.Minute
 )
-
-const authLogRefHashKey = "conductor-auth-ref:v1"
 
 var quotaCooldownDisabled atomic.Bool
 
@@ -796,6 +794,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
 		}(execCtx, auth.Clone(), provider, streamResult.Chunks)
+		// Invoke the selected auth callback if provided in the options metadata.
+		if callback, ok := opts.Metadata[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string)); ok && callback != nil {
+			callback(auth.ID)
+		}
 		return &cliproxyexecutor.StreamResult{
 			Headers: streamResult.Headers,
 			Chunks:  out,
@@ -1497,7 +1499,11 @@ func isRequestInvalidError(err error) bool {
 	if status != http.StatusBadRequest {
 		return false
 	}
-	return strings.Contains(err.Error(), "invalid_request_error")
+	lowerMsg := strings.ToLower(err.Error())
+	if strings.Contains(lowerMsg, "validation_required") {
+		return false
+	}
+	return strings.Contains(lowerMsg, "invalid_request_error")
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
@@ -2163,10 +2169,9 @@ func authLogRef(auth *Auth) string {
 	if identifier == "" {
 		return "provider=" + provider + " auth_id_hash=none"
 	}
-	hasher := hmac.New(sha512.New, []byte(authLogRefHashKey))
-	_, _ = hasher.Write([]byte(identifier))
-	logRef := hex.EncodeToString(hasher.Sum(nil))
-	return "provider=" + provider + " auth_id_hash=" + logRef[:32]
+	mac := hmac.New(sha256.New, []byte("cliproxy-auth-log-ref-v1"))
+	_, _ = mac.Write([]byte(identifier))
+	return "provider=" + provider + " auth_id_hash=" + hex.EncodeToString(mac.Sum(nil)[:6])
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.
