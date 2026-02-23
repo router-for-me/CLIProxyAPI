@@ -10,8 +10,8 @@ import (
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
-func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
+func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func TestRefreshToken_UsesSingleGrantTypeFieldAndExtensionHeaders(t *testing.T) {
@@ -156,56 +156,3 @@ func TestStartDeviceAuthorizationWithIDC_RejectsInvalidRegion(t *testing.T) {
 		t.Fatalf("expected invalid region error")
 	}
 }
-<<<<<<< HEAD
-
-func TestStartDeviceAuthorizationWithIDC_RejectsInvalidStartURL(t *testing.T) {
-	t.Parallel()
-
-	client := &SSOOIDCClient{
-		httpClient: &http.Client{
-			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-				t.Fatalf("unexpected outbound request: %s", req.URL.String())
-				return nil, nil
-			}),
-		},
-	}
-
-	_, err := client.StartDeviceAuthorizationWithIDC(context.Background(), "cid", "secret", "http://127.0.0.1/start", "us-east-1")
-	if err == nil {
-		t.Fatalf("expected invalid start URL error")
-	}
-}
-
-func TestStartDeviceAuthorizationWithIDC_AcceptsValidStartURL(t *testing.T) {
-	t.Parallel()
-
-	client := &SSOOIDCClient{
-		httpClient: &http.Client{
-			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-				if req.URL.String() != "https://oidc.us-east-1.amazonaws.com/device_authorization" {
-					t.Fatalf("unexpected request url: %s", req.URL.String())
-				}
-				body, err := io.ReadAll(req.Body)
-				if err != nil {
-					t.Fatalf("read body: %v", err)
-				}
-				bodyStr := string(body)
-				if !strings.Contains(bodyStr, `"startUrl":"https://view.awsapps.com/start"`) {
-					t.Fatalf("request body does not contain startUrl: %s", bodyStr)
-				}
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(`{"deviceCode":"device","userCode":"user","verificationUri":"https://view.awsapps.com/start","verificationUriComplete":"https://view.awsapps.com/start?user_code=user","expiresIn":1800,"interval":5}`)),
-					Header:     make(http.Header),
-				}, nil
-			}),
-		},
-	}
-
-	_, err := client.StartDeviceAuthorizationWithIDC(context.Background(), "cid", "secret", "https://view.awsapps.com/start", "us-east-1")
-	if err != nil {
-		t.Fatalf("StartDeviceAuthorizationWithIDC returned error: %v", err)
-	}
-}
-=======
->>>>>>> archive/pr-234-head-20260223

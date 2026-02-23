@@ -17,10 +17,6 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-<<<<<<< HEAD
-=======
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
->>>>>>> archive/pr-234-head-20260223
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/buildinfo"
@@ -30,10 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/store"
-<<<<<<< HEAD
 	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator"
-=======
->>>>>>> archive/pr-234-head-20260223
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
@@ -295,7 +288,6 @@ func main() {
 	if deployEnv == "cloud" {
 		isCloudDeploy = true
 	}
-
 	// Determine and load the configuration file.
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
 	var configFilePath string
