@@ -1,0 +1,10 @@
+./byteorder.go
+./cpu.go
+./cpu_arm64.go
+./cpu_gc_arm64.go
+./cpu_other_arm64.go
+./endian_little.go
+./parse.go
+./runtime_auxv.go
+./runtime_auxv_go121.go
+./cpu_arm64.s

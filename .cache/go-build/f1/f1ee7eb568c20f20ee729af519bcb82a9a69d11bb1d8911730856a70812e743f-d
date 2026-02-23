@@ -1,0 +1,16 @@
+./antigravity.go
+./claude.go
+./codex.go
+./errors.go
+./filestore.go
+./gemini.go
+./github_copilot.go
+./iflow.go
+./interfaces.go
+./kilo.go
+./kimi.go
+./kiro.go
+./manager.go
+./qwen.go
+./refresh_registry.go
+./store_registry.go

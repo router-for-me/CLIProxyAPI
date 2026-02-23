@@ -1,0 +1,3 @@
+./malloc.go
+./scan.go
+./sizeclasses.go

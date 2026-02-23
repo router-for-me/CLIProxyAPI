@@ -1,0 +1,9 @@
+./cast.go
+./cmac.go
+./ctrkdf.go
+./gcm.go
+./gcm_asm.go
+./gcm_generic.go
+./gcm_nonces.go
+./ghash.go
+./gcm_arm64.s

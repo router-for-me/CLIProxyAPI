@@ -14,10 +14,14 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: "Home", link: "/" },
+      { text: "Start Here", link: "/start-here" },
+      { text: "Tutorials", link: "/tutorials/" },
+      { text: "How-to", link: "/how-to/" },
+      { text: "Explanation", link: "/explanation/" },
       { text: "Getting Started", link: "/getting-started" },
       { text: "Providers", link: "/provider-usage" },
       { text: "Provider Catalog", link: "/provider-catalog" },
-      { text: "Planning", link: "/planning/" },
+      { text: "Operations", link: "/operations/" },
       { text: "Reference", link: "/routing-reference" },
       { text: "API", link: "/api/" },
       { text: "Docsets", link: "/docsets/" }

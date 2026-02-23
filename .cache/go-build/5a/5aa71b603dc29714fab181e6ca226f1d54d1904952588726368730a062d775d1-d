@@ -1,0 +1,7 @@
+./cast.go
+./hashes.go
+./keccakf.go
+./sha3.go
+./sha3_arm64.go
+./shake.go
+./sha3_arm64.s

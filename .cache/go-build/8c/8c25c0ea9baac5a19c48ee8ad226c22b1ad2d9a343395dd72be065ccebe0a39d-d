@@ -1,0 +1,4 @@
+./canonmap.go
+./clone.go
+./doc.go
+./handle.go

@@ -1,0 +1,11 @@
+./aes.go
+./aes_asm.go
+./aes_generic.go
+./cast.go
+./cbc.go
+./cbc_noasm.go
+./const.go
+./ctr.go
+./ctr_asm.go
+./aes_arm64.s
+./ctr_arm64.s

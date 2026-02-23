@@ -1,0 +1,6 @@
+./bitreader.go
+./bitwriter.go
+./compress.go
+./decompress.go
+./decompress_generic.go
+./huff0.go

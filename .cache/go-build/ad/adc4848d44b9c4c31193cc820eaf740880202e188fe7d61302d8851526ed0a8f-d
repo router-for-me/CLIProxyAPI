@@ -1,0 +1,5 @@
+./darwin.go
+./debug_darwin.go
+./debug_kqueue.go
+./internal.go
+./unix2.go

@@ -1,0 +1,2 @@
+./capi_darwin_arm64.go
+./errno_darwin_arm64.go

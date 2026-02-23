@@ -1,0 +1,16 @@
+./abi.go
+./abi_arm64.go
+./bounds.go
+./compiletype.go
+./escape.go
+./funcpc.go
+./iface.go
+./map.go
+./rangefuncconsts.go
+./runtime.go
+./stack.go
+./switch.go
+./symtab.go
+./type.go
+./abi_test.s
+./stub.s

@@ -1,0 +1,5 @@
+./decode.go
+./decode_other.go
+./encode.go
+./encode_other.go
+./snappy.go

@@ -1,0 +1,16 @@
+./archive.go
+./audio.go
+./binary.go
+./database.go
+./document.go
+./font.go
+./ftyp.go
+./geo.go
+./image.go
+./magic.go
+./ms_office.go
+./ogg.go
+./text.go
+./text_csv.go
+./video.go
+./zip.go

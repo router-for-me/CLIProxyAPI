@@ -1,0 +1,5 @@
+./endpoint_compat.go
+./openai_handlers.go
+./openai_images_handlers.go
+./openai_responses_handlers.go
+./openai_responses_websocket.go

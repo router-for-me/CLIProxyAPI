@@ -1,0 +1,6 @@
+./config.go
+./config_generated.go
+./oauth_model_alias_migration.go
+./provider_registry_generated.go
+./sdk_config.go
+./vertex_compat.go

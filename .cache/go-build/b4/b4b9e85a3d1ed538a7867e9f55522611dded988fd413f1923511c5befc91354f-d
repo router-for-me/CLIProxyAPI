@@ -1,0 +1,14 @@
+./atob.go
+./atoc.go
+./atof.go
+./atofeisel.go
+./atoi.go
+./ctoa.go
+./decimal.go
+./deps.go
+./ftoa.go
+./ftoadbox.go
+./ftoafixed.go
+./itoa.go
+./math.go
+./pow10tab.go

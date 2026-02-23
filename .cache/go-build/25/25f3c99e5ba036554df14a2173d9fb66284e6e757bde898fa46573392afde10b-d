@@ -1,0 +1,12 @@
+./data.go
+./html.go
+./json.go
+./msgpack.go
+./protobuf.go
+./reader.go
+./redirect.go
+./render.go
+./text.go
+./toml.go
+./xml.go
+./yaml.go

@@ -1,0 +1,4 @@
+./hashes.go
+./legacy_hash.go
+./legacy_keccakf.go
+./shake.go

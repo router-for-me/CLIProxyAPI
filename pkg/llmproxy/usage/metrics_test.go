@@ -77,6 +77,20 @@ func TestGetProviderMetrics_FiltersKnownProviders(t *testing.T) {
 	}
 }
 
+func TestNormalizeProviderAliasesDroidToGemini(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"droid-main":    "gemini",
+		"droidcli-prod": "gemini",
+		"gemini-live":   "gemini",
+	}
+	for input, want := range cases {
+		if got := normalizeProvider(input); got != want {
+			t.Fatalf("normalizeProvider(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestGetProviderMetrics_IncludesKiroAndCursor(t *testing.T) {
 	stats := GetRequestStatistics()
 	ctx := context.Background()

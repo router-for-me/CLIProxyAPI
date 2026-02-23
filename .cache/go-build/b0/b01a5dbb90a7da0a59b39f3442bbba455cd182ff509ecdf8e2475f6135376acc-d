@@ -1,0 +1,13 @@
+./counters_supported.go
+./coverage.go
+./encoding.go
+./fuzz.go
+./mem.go
+./minimize.go
+./mutator.go
+./mutators_byteslice.go
+./pcg.go
+./queue.go
+./sys_posix.go
+./trace.go
+./worker.go

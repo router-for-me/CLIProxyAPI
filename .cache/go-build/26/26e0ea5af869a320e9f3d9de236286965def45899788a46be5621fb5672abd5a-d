@@ -1,0 +1,5 @@
+./chacha20poly1305.go
+./chacha20poly1305_generic.go
+./chacha20poly1305_noasm.go
+./fips140only_go1.26.go
+./xchacha20poly1305.go

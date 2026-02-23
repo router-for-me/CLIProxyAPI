@@ -1,0 +1,2 @@
+./capi_darwin_arm64.go
+./termios_darwin_arm64.go

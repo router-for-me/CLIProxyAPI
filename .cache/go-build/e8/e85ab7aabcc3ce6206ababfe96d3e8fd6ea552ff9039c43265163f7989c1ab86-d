@@ -1,0 +1,4 @@
+./exec.go
+./exec_unix.go
+./lookpath.go
+./lp_unix.go

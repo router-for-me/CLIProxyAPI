@@ -1,0 +1,6 @@
+./bitreader.go
+./bitwriter.go
+./bytereader.go
+./compress.go
+./decompress.go
+./fse.go

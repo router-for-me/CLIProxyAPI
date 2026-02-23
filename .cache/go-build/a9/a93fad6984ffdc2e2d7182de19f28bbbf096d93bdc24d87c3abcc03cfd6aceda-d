@@ -1,0 +1,8 @@
+./auth_diff.go
+./config_diff.go
+./diff_generated.go
+./model_hash.go
+./models_summary.go
+./oauth_excluded.go
+./oauth_model_alias.go
+./openai_compat.go

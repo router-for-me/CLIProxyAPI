@@ -1,0 +1,6 @@
+./cgo_listgroups_unix.go
+./cgo_lookup_syscall.go
+./cgo_lookup_unix.go
+./getgrouplist_syscall.go
+./lookup.go
+./user.go

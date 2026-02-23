@@ -1,0 +1,5 @@
+./match.go
+./path.go
+./path_unix.go
+./symlink.go
+./symlink_unix.go

@@ -1,0 +1,5 @@
+./fastclock.go
+./match.go
+./regexp.go
+./replace.go
+./runner.go

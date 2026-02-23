@@ -1,0 +1,17 @@
+./backup.go
+./conn.go
+./convert.go
+./doc.go
+./driver.go
+./error.go
+./fcntl.go
+./mutex.go
+./nodmesg.go
+./pre_update_hook.go
+./result.go
+./rows.go
+./rulimit.go
+./sqlite.go
+./stmt.go
+./tx.go
+./vtab.go

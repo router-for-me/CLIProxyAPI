@@ -152,6 +152,12 @@ func normalizeProvider(provider string) string {
 		return "roo"
 	case "roocode":
 		return "roo"
+	case "droid":
+		return "gemini"
+	case "droid-cli":
+		return "gemini"
+	case "droidcli":
+		return "gemini"
 	case "factoryapi":
 		return "factory-api"
 	case "openai-compatible":

@@ -1,0 +1,4 @@
+./md5.go
+./md5block.go
+./md5block_decl.go
+./md5block_arm64.s

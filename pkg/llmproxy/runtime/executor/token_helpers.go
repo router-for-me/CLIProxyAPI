@@ -73,11 +73,7 @@ func tokenizerForModel(model string) (*TokenizerWrapper, error) {
 	switch {
 	case sanitized == "":
 		enc, err = tokenizer.Get(tokenizer.Cl100kBase)
-	case strings.HasPrefix(sanitized, "gpt-5.2"):
-		enc, err = tokenizer.ForModel(tokenizer.GPT5)
-	case strings.HasPrefix(sanitized, "gpt-5.1"):
-		enc, err = tokenizer.ForModel(tokenizer.GPT5)
-	case strings.HasPrefix(sanitized, "gpt-5"):
+	case isGPT5FamilyModel(sanitized):
 		enc, err = tokenizer.ForModel(tokenizer.GPT5)
 	case strings.HasPrefix(sanitized, "gpt-4.1"):
 		enc, err = tokenizer.ForModel(tokenizer.GPT41)
@@ -101,6 +97,10 @@ func tokenizerForModel(model string) (*TokenizerWrapper, error) {
 		return nil, err
 	}
 	return &TokenizerWrapper{Codec: enc, AdjustmentFactor: 1.0}, nil
+}
+
+func isGPT5FamilyModel(sanitized string) bool {
+	return strings.HasPrefix(sanitized, "gpt-5")
 }
 
 // countOpenAIChatTokens approximates prompt tokens for OpenAI chat completions payloads.

@@ -1,0 +1,13 @@
+./cert_pool.go
+./constraints.go
+./oid.go
+./parser.go
+./pem_decrypt.go
+./pkcs1.go
+./pkcs8.go
+./root.go
+./root_darwin.go
+./sec1.go
+./verify.go
+./x509.go
+./x509_string.go

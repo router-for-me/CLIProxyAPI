@@ -1,0 +1,3 @@
+./mac_noasm.go
+./poly1305.go
+./sum_generic.go

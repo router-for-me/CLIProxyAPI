@@ -1,0 +1,12 @@
+./abi.go
+./badlinkname.go
+./deepequal.go
+./float32reg_generic.go
+./iter.go
+./makefunc.go
+./map.go
+./swapper.go
+./type.go
+./value.go
+./visiblefields.go
+./asm_arm64.s

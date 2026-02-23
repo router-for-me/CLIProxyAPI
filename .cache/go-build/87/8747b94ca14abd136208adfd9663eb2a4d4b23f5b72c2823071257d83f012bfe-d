@@ -1,0 +1,4 @@
+./defs.go
+./hooks.go
+./mutex.go
+./sqlite_darwin_arm64.go

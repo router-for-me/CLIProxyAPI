@@ -1,0 +1,9 @@
+./nistec.go
+./p224.go
+./p224_sqrt.go
+./p256_asm.go
+./p256_ordinv.go
+./p256_table.go
+./p384.go
+./p521.go
+./p256_asm_arm64.s

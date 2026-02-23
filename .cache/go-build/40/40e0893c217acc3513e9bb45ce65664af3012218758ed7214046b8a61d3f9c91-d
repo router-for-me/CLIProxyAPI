@@ -1,0 +1,10 @@
+./common.go
+./compact.go
+./compose.go
+./coverage.go
+./language.go
+./lookup.go
+./match.go
+./parse.go
+./tables.go
+./tags.go

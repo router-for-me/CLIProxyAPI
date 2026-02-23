@@ -1,0 +1,6 @@
+./aead.go
+./aead_fips140v1.26.go
+./hpke.go
+./kdf.go
+./kem.go
+./pq.go

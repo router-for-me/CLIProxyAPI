@@ -1,0 +1,8 @@
+./group.go
+./map.go
+./runtime.go
+./runtime_fast32.go
+./runtime_fast64.go
+./runtime_faststr.go
+./table.go
+./table_debug.go

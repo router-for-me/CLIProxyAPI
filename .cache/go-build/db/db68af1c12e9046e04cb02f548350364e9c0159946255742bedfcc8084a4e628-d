@@ -1,0 +1,4 @@
+./arith_decl.go
+./fermat.go
+./fft.go
+./scan.go

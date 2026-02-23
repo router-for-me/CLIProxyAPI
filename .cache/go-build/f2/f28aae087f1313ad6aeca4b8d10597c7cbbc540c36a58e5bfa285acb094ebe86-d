@@ -1,0 +1,3 @@
+./goarch.go
+./goarch_arm64.go
+./zgoarch_arm64.go

@@ -1,0 +1,9 @@
+./format.go
+./fs.go
+./glob.go
+./readdir.go
+./readfile.go
+./readlink.go
+./stat.go
+./sub.go
+./walk.go

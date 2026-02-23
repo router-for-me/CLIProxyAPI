@@ -1,0 +1,4 @@
+./sha1.go
+./sha1block.go
+./sha1block_arm64.go
+./sha1block_arm64.s
