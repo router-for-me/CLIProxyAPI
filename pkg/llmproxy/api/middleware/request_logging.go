@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -133,7 +134,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 
 		// Restore the body for the actual request processing
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-		body = bodyBytes
+		body = sanitizeLoggedPayloadBytes(bodyBytes)
 	}
 
 	return &RequestInfo{
@@ -176,4 +177,65 @@ func shouldLogRequest(path string) bool {
 	}
 
 	return true
+}
+
+func sanitizeLoggedPayloadBytes(payload []byte) []byte {
+	if len(payload) == 0 {
+		return nil
+	}
+
+	var parsed any
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		return bytes.Clone(payload)
+	}
+
+	redacted := sanitizeJSONPayloadValue(parsed)
+	out, err := json.Marshal(redacted)
+	if err != nil {
+		return bytes.Clone(payload)
+	}
+
+	return out
+}
+
+func sanitizeJSONPayloadValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		redacted := make(map[string]any, len(typed))
+		for k, v := range typed {
+			if isSensitivePayloadKey(k) {
+				redacted[k] = "[REDACTED]"
+				continue
+			}
+			redacted[k] = sanitizeJSONPayloadValue(v)
+		}
+		return redacted
+	case []any:
+		items := make([]any, len(typed))
+		for i, item := range typed {
+			items[i] = sanitizeJSONPayloadValue(item)
+		}
+		return items
+	default:
+		return typed
+	}
+}
+
+func isSensitivePayloadKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	if strings.HasPrefix(normalized, "x_") {
+		normalized = strings.TrimPrefix(normalized, "x_")
+	}
+
+	if normalized == "authorization" || normalized == "token" || normalized == "secret" || normalized == "password" {
+		return true
+	}
+	if strings.Contains(normalized, "api_key") || strings.Contains(normalized, "apikey") {
+		return true
+	}
+	if strings.Contains(normalized, "access_token") || strings.Contains(normalized, "refresh_token") || strings.Contains(normalized, "id_token") {
+		return true
+	}
+	return false
 }

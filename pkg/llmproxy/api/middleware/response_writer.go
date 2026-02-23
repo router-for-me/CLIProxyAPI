@@ -355,7 +355,7 @@ func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return data
+	return sanitizeLoggedPayloadBytes(data)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
@@ -367,7 +367,7 @@ func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return data
+	return sanitizeLoggedPayloadBytes(data)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {
@@ -387,17 +387,17 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 			switch value := bodyOverride.(type) {
 			case []byte:
 				if len(value) > 0 {
-					return bytes.Clone(value)
+					return sanitizeLoggedPayloadBytes(value)
 				}
 			case string:
 				if strings.TrimSpace(value) != "" {
-					return []byte(value)
+					return sanitizeLoggedPayloadBytes([]byte(value))
 				}
 			}
 		}
 	}
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
-		return w.requestInfo.Body
+		return sanitizeLoggedPayloadBytes(w.requestInfo.Body)
 	}
 	return nil
 }
