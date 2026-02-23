@@ -85,7 +85,13 @@ This runbook is for operators who care about provider uptime, quota health, and 
 - Check model filters (`models`, `excluded-models`) and prefix constraints.
 - Verify upstream provider currently serves requested model.
 
-<<<<<<< HEAD
+### Port `8317` Becomes Unreachable
+
+- Verify listener state: `lsof -iTCP:8317 -sTCP:LISTEN`.
+- Run local and remote `/health` checks to isolate host-level reachability vs process crash.
+- Ensure service is supervised (`systemd`/container restart policy) with restart-on-failure.
+- Add synthetic health checks so idle/network policy regressions are detected before user traffic impact.
+
 ### `502 unknown provider for model ...`
 
 - Primary check:
@@ -102,20 +108,6 @@ This runbook is for operators who care about provider uptime, quota health, and 
   - Verify exact model ID and alias route in `/v1/models`.
 - Mitigation:
   - Route temporarily to a known-good fallback alias while normalizing request shape.
-### Port `8317` Becomes Unreachable
-
-- Verify listener state: `lsof -iTCP:8317 -sTCP:LISTEN`.
-- Run local and remote `/health` checks to isolate host-level reachability vs process crash.
-- Ensure service is supervised (`systemd`/container restart policy) with restart-on-failure.
-- Add synthetic health checks so idle/network policy regressions are detected before user traffic impact.
-=======
-### Port `8317` Becomes Unreachable
-
-- Verify listener state: `lsof -iTCP:8317 -sTCP:LISTEN`.
-- Run local and remote `/health` checks to isolate host-level reachability vs process crash.
-- Ensure service is supervised (`systemd`/container restart policy) with restart-on-failure.
-- Add synthetic health checks so idle/network policy regressions are detected before user traffic impact.
->>>>>>> 9ef2290b (wave(v3-l3): cpb-0126..0135 triage + thinking diagnostics)
 
 ### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
 

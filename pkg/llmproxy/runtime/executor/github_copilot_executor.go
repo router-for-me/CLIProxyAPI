@@ -872,6 +872,8 @@ type githubCopilotResponsesStreamToolState struct {
 	Index int
 	ID    string
 	Name  string
+	// HasReceivedArgumentsDelta tracks whether function_call_arguments.delta has been observed for this tool.
+	HasReceivedArgumentsDelta bool
 }
 
 type githubCopilotResponsesStreamState struct {
@@ -1134,6 +1136,7 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) []st
 		inputDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
 		inputDelta, _ = sjson.Set(inputDelta, "index", tool.Index)
 		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", partial)
+		tool.HasReceivedArgumentsDelta = true
 		results = append(results, "event: content_block_delta\ndata: "+inputDelta+"\n\n")
 	case "response.function_call_arguments.delta":
 		// Copilot sends tool call arguments via this event type (not response.output_item.delta).
@@ -1151,6 +1154,22 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) []st
 		inputDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
 		inputDelta, _ = sjson.Set(inputDelta, "index", tool.Index)
 		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", partial)
+		tool.HasReceivedArgumentsDelta = true
+		results = append(results, "event: content_block_delta\ndata: "+inputDelta+"\n\n")
+	case "response.function_call_arguments.done":
+		itemID := gjson.GetBytes(payload, "item_id").String()
+		outputIndex := int(gjson.GetBytes(payload, "output_index").Int())
+		tool := resolveTool(itemID, outputIndex)
+		if tool == nil || tool.HasReceivedArgumentsDelta {
+			break
+		}
+		arguments := gjson.GetBytes(payload, "arguments").String()
+		if arguments == "" {
+			break
+		}
+		inputDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
+		inputDelta, _ = sjson.Set(inputDelta, "index", tool.Index)
+		inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", arguments)
 		results = append(results, "event: content_block_delta\ndata: "+inputDelta+"\n\n")
 	case "response.output_item.done":
 		if gjson.GetBytes(payload, "item.type").String() != "function_call" {
