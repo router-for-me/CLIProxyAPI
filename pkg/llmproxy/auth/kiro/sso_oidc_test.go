@@ -31,12 +31,18 @@ func TestRefreshToken_IncludesGrantTypeAndExtensionHeaders(t *testing.T) {
 				}
 
 				for key, want := range map[string]string{
-					"Content-Type":     "application/json",
-					"x-amz-user-agent": idcAmzUserAgent,
-					"User-Agent":       "node",
-					"Connection":       "keep-alive",
-					"Accept-Language":  "*",
-					"sec-fetch-mode":   "cors",
+					"Content-Type":       "application/json",
+					"x-amz-user-agent":   idcAmzUserAgent,
+					"User-Agent":         "node",
+					"Connection":         "keep-alive",
+					"Accept-Language":    "*",
+					"sec-fetch-mode":     "cors",
+					"X-PLATFORM":         idcPlatform,
+					"X-PLATFORM-VERSION": idcDefaultVer,
+					"X-CLIENT-VERSION":   idcDefaultVer,
+					"X-CLIENT-TYPE":      idcClientType,
+					"X-CORE-VERSION":     idcDefaultVer,
+					"X-IS-MULTIROOT":     "false",
 				} {
 					if got := req.Header.Get(key); got != want {
 						t.Fatalf("header %s = %q, want %q", key, got, want)
@@ -81,6 +87,12 @@ func TestRefreshTokenWithRegion_UsesRegionHostAndGrantType(t *testing.T) {
 
 				if got := req.Header.Get("Host"); got != "oidc.eu-west-1.amazonaws.com" {
 					t.Fatalf("Host header = %q, want oidc.eu-west-1.amazonaws.com", got)
+				}
+				if got := req.Header.Get("X-PLATFORM"); got != idcPlatform {
+					t.Fatalf("X-PLATFORM = %q, want %q", got, idcPlatform)
+				}
+				if got := req.Header.Get("X-CLIENT-TYPE"); got != idcClientType {
+					t.Fatalf("X-CLIENT-TYPE = %q, want %q", got, idcClientType)
 				}
 
 				return &http.Response{

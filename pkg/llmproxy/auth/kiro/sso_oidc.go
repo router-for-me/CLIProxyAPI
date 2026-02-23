@@ -47,6 +47,9 @@ const (
 
 	// IDC token refresh headers (matching Kiro IDE behavior)
 	idcAmzUserAgent = "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE"
+	idcPlatform     = "darwin"
+	idcClientType   = "extension"
+	idcDefaultVer   = "0.0.0"
 )
 
 // Sentinel errors for OIDC token polling
@@ -145,6 +148,12 @@ func applyIDCRefreshHeaders(req *http.Request, region string) {
 	req.Header.Set("sec-fetch-mode", "cors")
 	req.Header.Set("User-Agent", "node")
 	req.Header.Set("Accept-Encoding", "br, gzip, deflate")
+	req.Header.Set("X-PLATFORM", idcPlatform)
+	req.Header.Set("X-PLATFORM-VERSION", idcDefaultVer)
+	req.Header.Set("X-CLIENT-VERSION", idcDefaultVer)
+	req.Header.Set("X-CLIENT-TYPE", idcClientType)
+	req.Header.Set("X-CORE-VERSION", idcDefaultVer)
+	req.Header.Set("X-IS-MULTIROOT", "false")
 }
 
 // promptInput prompts the user for input with an optional default value.
