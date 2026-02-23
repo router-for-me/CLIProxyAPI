@@ -249,6 +249,47 @@ func TestTranslateGitHubCopilotResponsesStreamToClaude_TextLifecycle(t *testing.
 	}
 }
 
+func TestTranslateGitHubCopilotResponsesStreamToClaude_FunctionCallArgumentsDoneWithoutDelta(t *testing.T) {
+	t.Parallel()
+	var param any
+
+	added := translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call-1","name":"sum","id":"fc-1"},"output_index":0}`), &param)
+	if len(added) == 0 {
+		t.Fatalf("output_item.added events = %#v", added)
+	}
+
+	done := translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.function_call_arguments.done","item_id":"fc-1","output_index":0,"arguments":"{\"a\":1}"}`), &param)
+	if len(done) != 1 {
+		t.Fatalf("expected one event for function_call_arguments.done, got %d: %#v", len(done), done)
+	}
+	if !strings.Contains(done[0], `"input_json_delta"`) {
+		t.Fatalf("expected function call argument delta event, got %q", done[0])
+	}
+	if !strings.Contains(done[0], `\"a\":1`) {
+		t.Fatalf("expected done arguments payload, got %q", done[0])
+	}
+}
+
+func TestTranslateGitHubCopilotResponsesStreamToClaude_DeduplicatesFunctionCallArgumentsDone(t *testing.T) {
+	t.Parallel()
+	var param any
+
+	added := translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call-1","name":"sum","id":"fc-1"},"output_index":0}`), &param)
+	if len(added) == 0 {
+		t.Fatalf("output_item.added events = %#v", added)
+	}
+
+	delta := translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.function_call_arguments.delta","item_id":"fc-1","output_index":0,"delta":"{\"a\":1"}`), &param)
+	if len(delta) != 1 || !strings.Contains(delta[0], `"input_json_delta"`) {
+		t.Fatalf("expected delta event, got %#v", delta)
+	}
+
+	done := translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.function_call_arguments.done","item_id":"fc-1","output_index":0,"arguments":"{\"a\":1}"}`), &param)
+	if len(done) != 0 {
+		t.Fatalf("expected no event after delta completion, got %d: %#v", len(done), done)
+	}
+}
+
 // --- Tests for X-Initiator detection logic (Problem L) ---
 
 func TestApplyHeaders_XInitiator_UserOnly(t *testing.T) {

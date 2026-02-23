@@ -2817,6 +2817,17 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue: "low",
 			expectErr:   false,
 		},
+		// Case 122: OpenAI-Response to gpt-5-codex, variant=high → high
+		{
+			name:        "122",
+			from:        "openai-response",
+			to:          "github-copilot",
+			model:       "gpt-5-codex",
+			inputJSON:   `{"model":"gpt-5-codex","input":[{"role":"user","content":"hi"}],"variant":"high"}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
 	}
 
 	runThinkingTests(t, cases)

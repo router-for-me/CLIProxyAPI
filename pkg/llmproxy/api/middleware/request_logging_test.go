@@ -14,11 +14,15 @@ import (
 type mockRequestLogger struct {
 	enabled bool
 	logged  bool
+	headers map[string][]string
+	body    []byte
 }
 
 func (m *mockRequestLogger) IsEnabled() bool { return m.enabled }
 func (m *mockRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
 	m.logged = true
+	m.headers = requestHeaders
+	m.body = body
 	return nil
 }
 func (m *mockRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (logging.StreamingLogWriter, error) {
@@ -79,9 +83,14 @@ func TestRequestLoggingMiddleware(t *testing.T) {
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(`{"test":true}`)))
+		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set("X-Api-Key", "super-secret")
 		router.ServeHTTP(w, req)
 		if !logger.logged {
 			t.Errorf("should have logged the request")
+		}
+		if got := logger.headers["Authorization"]; len(got) != 1 || got[0] != "[redacted]" {
+			t.Fatalf("authorization header should be redacted, got %#v", got)
 		}
 	})
 }

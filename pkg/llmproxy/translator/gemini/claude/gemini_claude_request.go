@@ -78,8 +78,14 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				contentsResult.ForEach(func(_, contentResult gjson.Result) bool {
 					switch contentResult.Get("type").String() {
 					case "text":
+						text := contentResult.Get("text").String()
+						// Skip empty text parts to avoid Gemini API error:
+						// "required oneof field 'data' must have one initialized field"
+						if text == "" {
+							return true
+						}
 						part := `{"text":""}`
-						part, _ = sjson.Set(part, "text", contentResult.Get("text").String())
+						part, _ = sjson.Set(part, "text", text)
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 
 					case "tool_use":
@@ -116,10 +122,14 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
 				}
 			} else if contentsResult.Type == gjson.String {
-				part := `{"text":""}`
-				part, _ = sjson.Set(part, "text", contentsResult.String())
-				contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
-				out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
+				text := contentsResult.String()
+				// Skip empty text parts to avoid Gemini API error
+				if text != "" {
+					part := `{"text":""}`
+					part, _ = sjson.Set(part, "text", text)
+					contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+					out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
+				}
 			}
 			return true
 		})

@@ -173,7 +173,20 @@ Kiro IAM login hints:
 - Keep one auth file per account to avoid accidental overwrite during relogin.
 - If you rotate accounts often, run browser login in incognito mode.
 
-## 6) MiniMax
+## 7) iFlow
+
+Validation (`glm-4.7`):
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/glm-4.7","messages":[{"role":"user","content":"ping"}],"stream":false}' | jq
+```
+
+If you see `406`, verify model exposure in `/v1/models`, retry non-stream, and then compare headers/payload shape against known-good requests.
+
+## 8) MiniMax
 
 `config.yaml`:
 

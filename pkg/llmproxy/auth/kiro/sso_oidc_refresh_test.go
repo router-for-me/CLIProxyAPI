@@ -50,7 +50,7 @@ func TestRefreshTokenWithRegion_PreservesOriginalRefreshTokenWhenMissing(t *test
 
 	got, err := c.RefreshTokenWithRegion(context.Background(), "cid", "secret", "original-refresh", "us-east-1", "https://example.start")
 	if err != nil {
-		t.Fatalf("RefreshTokenWithRegion error: %v", err)
+		t.Fatalf("RefreshToken error: %v", err)
 	}
 	if got.AccessToken != "new-access" {
 		t.Fatalf("AccessToken = %q, want %q", got.AccessToken, "new-access")

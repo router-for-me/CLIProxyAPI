@@ -2,7 +2,7 @@
 Version: dev
 URL: /v1/responses
 Method: POST
-Timestamp: 2026-02-22T05:40:07.033319-07:00
+Timestamp: 2026-02-22T17:22:13.084728-07:00
 
 === HEADERS ===
 
@@ -10,14 +10,14 @@ Timestamp: 2026-02-22T05:40:07.033319-07:00
 {}
 
 === API RESPONSE ===
-Timestamp: 2026-02-22T05:40:07.033586-07:00
+Timestamp: 2026-02-22T17:22:13.08527-07:00
 {"error":{"message":"unknown provider for model","type":"server_error","code":"internal_server_error"}}
 
 === RESPONSE ===
 Status: 502
-Access-Control-Allow-Origin: *
 Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
 Access-Control-Allow-Headers: *
 Content-Type: application/json
+Access-Control-Allow-Origin: *
 
 {"error":{"message":"unknown provider for model","type":"server_error","code":"internal_server_error"}}

@@ -1,4 +1,5 @@
 import { defineConfig } from "vitepress";
+import { contentTabsPlugin } from "./plugins/content-tabs";
 
 const repo = process.env.GITHUB_REPOSITORY?.split("/")[1] ?? "cliproxyapi-plusplus";
 const isCI = process.env.GITHUB_ACTIONS === "true";
@@ -71,5 +72,11 @@ export default defineConfig({
     socialLinks: [
       { icon: "github", link: "https://github.com/kooshapari/cliproxyapi-plusplus" }
     ]
+  },
+
+  markdown: {
+    config: (md) => {
+      md.use(contentTabsPlugin)
+    }
   }
 });

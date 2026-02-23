@@ -158,11 +158,23 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	}
 
 	if !hasThinkingConfig(config) {
-		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    modelInfo.ID,
-		}).Debug("thinking: no config found, passthrough |")
-		return body, nil
+		// Force thinking for thinking models even without explicit config
+		// Models with "thinking" in their name should have thinking enabled by default
+		if isForcedThinkingModel(modelInfo.ID, model) {
+			config = ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    modelInfo.ID,
+				"mode":     config.Mode,
+				"forced":   true,
+			}).Debug("thinking: forced thinking for thinking model |")
+		} else {
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    modelInfo.ID,
+			}).Debug("thinking: no config found, passthrough |")
+			return body, nil
+		}
 	}
 
 	// 5. Validate and normalize configuration
@@ -535,4 +547,12 @@ func extractIFlowConfig(body []byte) ThinkingConfig {
 	}
 
 	return ThinkingConfig{}
+}
+
+// isForcedThinkingModel checks if a model should have thinking forced on.
+// Models with "thinking" in their name (like claude-opus-4-6-thinking) should
+// have thinking enabled by default even without explicit budget.
+func isForcedThinkingModel(modelID, fullModelName string) bool {
+	return strings.Contains(strings.ToLower(modelID), "thinking") ||
+		strings.Contains(strings.ToLower(fullModelName), "thinking")
 }

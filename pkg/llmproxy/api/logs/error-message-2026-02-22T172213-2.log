@@ -2,7 +2,7 @@
 Version: dev
 URL: /message
 Method: POST
-Timestamp: 2026-02-22T04:38:48.912576-07:00
+Timestamp: 2026-02-22T17:22:13.093051-07:00
 
 === HEADERS ===
 Content-Type: application/json
@@ -12,9 +12,9 @@ Content-Type: application/json
 
 === RESPONSE ===
 Status: 501
-Access-Control-Allow-Headers: *
 Content-Type: application/json; charset=utf-8
 Access-Control-Allow-Origin: *
 Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: *
 
 {"capability":"pause","error":"unsupported capability","instructions":"Use capability labels continue, resume, ask, exec, or max.","session_id":"","status":"failed"}

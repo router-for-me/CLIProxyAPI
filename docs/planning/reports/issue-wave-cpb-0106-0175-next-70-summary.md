@@ -7,9 +7,10 @@
 
 ## Wave status (initialized)
 
-- All items currently marked `planned` pending implementation/fix validation.
-- No direct implementation changes were applied in this step.
-- Primary next step: convert planned items into concrete fixtures + implementation tasks with per-item verification commands.
+- Status at this pass:
+  - CPB-0106 is now `implemented` with fixture-backed variant-only parity tests in `pkg/llmproxy/executor`.
+  - CPB-0107..CPB-0115 remain `planned` in Lane-1.
+- Primary next step: proceed to CPB-0107 and apply the same fixture/test pattern before updating lane progress.
 
 - `docs/planning/reports/issue-wave-cpb-0106-0175-lane-1.md` for `CPB-0106`..`CPB-0115`
 - `docs/planning/reports/issue-wave-cpb-0106-0175-lane-2.md` for `CPB-0116`..`CPB-0125`
@@ -18,4 +19,3 @@
 - `docs/planning/reports/issue-wave-cpb-0106-0175-lane-5.md` for `CPB-0146`..`CPB-0155`
 - `docs/planning/reports/issue-wave-cpb-0106-0175-lane-6.md` for `CPB-0156`..`CPB-0165`
 - `docs/planning/reports/issue-wave-cpb-0106-0175-lane-7.md` for `CPB-0166`..`CPB-0175`
-

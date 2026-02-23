@@ -165,6 +165,7 @@ We maintain strict quality gates to preserve the "hardened" status of the projec
 4.  **Daily QOL flow**:
    - `task quality:fmt` to auto-format all Go files.
    - `task quality:quick` for a fast local loop (format + selected tests; set `QUALITY_PACKAGES` to scope).
+   - `task quality:quick:fix` for an auto-fix quick loop (format all + staged format/lint + quick checks).
    - `QUALITY_PACKAGES='./pkg/...' task quality:quick` for package-scoped smoke.
    - `task quality:fmt-staged` for staged file format + lint before commit.
    - `task quality:ci` for PR-scope non-mutating checks (fmt/vet/staticcheck/lint diff).

@@ -220,6 +220,14 @@ tasks:
       - task: quality:fmt:check
       - task: quality:quick:check
 
+  quality:quick:fix:
+    desc: "Run local quick quality fix flow (auto-format + staged lint + quick checks)"
+    deps: [preflight, cache:unlock]
+    cmds:
+      - task: quality:fmt
+      - task: quality:fmt-staged
+      - task: quality:quick:check
+
   quality:quick:check:
     desc: "Fast non-mutating quality checks (fmt check + changed lint + targeted tests)"
     deps: [preflight, cache:unlock]
