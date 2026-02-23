@@ -5,6 +5,7 @@ package registry
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"fmt"
 	"sort"
@@ -696,8 +697,9 @@ func logSafeRegistryID(raw string) string {
 	if trimmed == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(trimmed))
-	return fmt.Sprintf("id_%x", sum[:6])
+	mac := hmac.New(sha256.New, []byte("cliproxy-model-registry-v1"))
+	mac.Write([]byte(trimmed))
+	return fmt.Sprintf("id_%x", mac.Sum(nil)[:6])
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.

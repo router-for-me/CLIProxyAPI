@@ -5,6 +5,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -1343,8 +1344,9 @@ func sanitizeCodexSessionID(raw string) string {
 	if trimmed == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(trimmed))
-	return fmt.Sprintf("sess_%x", sum[:6])
+	mac := hmac.New(sha256.New, []byte("cliproxy-codex-session-v1"))
+	mac.Write([]byte(trimmed))
+	return fmt.Sprintf("sess_%x", mac.Sum(nil)[:6])
 }
 
 // CodexAutoExecutor routes Codex requests to the websocket transport only when:
