@@ -9,6 +9,7 @@
 - `task quality:fmt-staged:check` — Check formatting and lint staged/diff files (PR-safe, non-mutating).
 - `task quality:quick` — Fast loop (`QUALITY_PACKAGES` scoped optional), readonly.
 - `task quality:quick:check` — Fast non-mutating quality loop (`quality:fmt:check` + `lint:changed` + targeted tests).
+- `task quality:quick:fix` — Auto-fix format, then run `quality:quick:check`.
 - `task quality:quick:all` — Run `quality:quick` locally, then run `QUALITY_PARENT_TASK` in sibling cliproxy repositories (`QUALITY_PARENT_TASK=quality:quick` by default).
 - `task lint` — Run `golangci-lint` across all packages.
 - `task lint:changed` — Run `golangci-lint` on changed/staged Go files.
@@ -28,7 +29,7 @@
 ## Recommended local sequence
 
 1. `task quality:fmt:check`
-2. `task quality:quick`
+2. `task quality:quick:fix` (or `task quality:quick` for readonly)
 3. `task lint:changed`
 4. `task quality:vet` (or `task quality:staticcheck` when needed)
 5. `task test` (or `task test:unit`)
