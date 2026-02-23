@@ -204,6 +204,16 @@ func HideAPIKey(apiKey string) string {
 	return apiKey
 }
 
+// RedactAPIKey completely redacts an API key for secure logging.
+// Unlike HideAPIKey which shows partial characters, this returns "[REDACTED]"
+// to satisfy strict security scanning requirements.
+func RedactAPIKey(apiKey string) string {
+	if apiKey == "" {
+		return ""
+	}
+	return "[REDACTED]"
+}
+
 // maskAuthorizationHeader masks the Authorization header value while preserving the auth type prefix.
 // Common formats: "Bearer <token>", "Basic <credentials>", "ApiKey <key>", etc.
 // It preserves the prefix (e.g., "Bearer ") and only masks the token/credential part.
