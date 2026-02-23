@@ -19,7 +19,7 @@ func NormalizeCookie(raw string) (string, error) {
 	if !strings.HasSuffix(combined, ";") {
 		combined += ";"
 	}
-	if !strings.Contains(combined, "BXAuth=") {
+	if ExtractBXAuth(combined) == "" {
 		return "", fmt.Errorf("cookie missing BXAuth field")
 	}
 	return combined, nil
@@ -45,8 +45,12 @@ func ExtractBXAuth(cookie string) string {
 	parts := strings.Split(cookie, ";")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "BXAuth=") {
-			return strings.TrimPrefix(part, "BXAuth=")
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(key), "BXAuth") {
+			return strings.TrimSpace(value)
 		}
 	}
 	return ""

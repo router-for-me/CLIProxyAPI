@@ -41,7 +41,11 @@ func DoIFlowCookieAuth(cfg *config.Config, options *LoginOptions) {
 
 	// Check for duplicate BXAuth before authentication
 	bxAuth := iflow.ExtractBXAuth(cookie)
-	if existingFile, err := iflow.CheckDuplicateBXAuth(cfg.AuthDir, bxAuth); err != nil {
+	authDir := "."
+	if cfg != nil && cfg.AuthDir != "" {
+		authDir = cfg.AuthDir
+	}
+	if existingFile, err := iflow.CheckDuplicateBXAuth(authDir, bxAuth); err != nil {
 		fmt.Printf("Failed to check duplicate: %v\n", err)
 		return
 	} else if existingFile != "" {
@@ -93,6 +97,15 @@ func promptForCookie(promptFn func(string) (string, error)) (string, error) {
 
 // getAuthFilePath returns the auth file path for the given provider and email
 func getAuthFilePath(cfg *config.Config, provider, email string) string {
+	authDir := "."
+	if cfg != nil && cfg.AuthDir != "" {
+		authDir = cfg.AuthDir
+	}
+
 	fileName := iflow.SanitizeIFlowFileName(email)
-	return fmt.Sprintf("%s/%s-%s-%d.json", cfg.AuthDir, provider, fileName, time.Now().Unix())
+	if fileName == "" {
+		fileName = "account"
+	}
+
+	return filepath.Join(authDir, fmt.Sprintf("%s-%s-%d.json", provider, fileName, time.Now().Unix()))
 }
