@@ -57,6 +57,15 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 | `/v1/responses/compact` fails or hangs | Wrong endpoint/mode expectations (streaming not supported for compact) | Retry with non-stream `POST /v1/responses/compact` and inspect JSON `object` field | Use compact only in non-stream mode; for streaming flows keep `/v1/responses` or `/v1/chat/completions` |
 | MCP memory tools fail (`tool not found`, invalid params, or empty result) | MCP server missing memory tool registration or request schema mismatch | Run `tools/list` then one minimal `tools/call` against the same MCP endpoint | Enable/register memory tools, align `tools/call` arguments to server schema, then repeat `tools/list` and `tools/call` smoke tests |
 
+## `gemini-3-pro-preview` Tool-Use Triage
+
+- Use this flow when tool calls to `gemini-3-pro-preview` return unexpected `400/500` patterns and non-stream canaries work:
+  - `touch config.yaml`
+  - `process-compose -f examples/process-compose.dev.yaml down`
+  - `process-compose -f examples/process-compose.dev.yaml up`
+  - `curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer <client-key>" | jq '.data[].id' | rg 'gemini-3-pro-preview'`
+  - `curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer <client-key>" -H "Content-Type: application/json" -d '{"model":"gemini-3-pro-preview","messages":[{"role":"user","content":"ping"}],"stream":false}'`
+
 Use this matrix as an issue-entry checklist:
 
 ```bash

@@ -436,8 +436,9 @@ func runDev(args []string, stdout io.Writer, stderr io.Writer, now func() time.T
 
 	path := strings.TrimSpace(file)
 	details := map[string]any{
-		"profile_file": path,
-		"hint":         fmt.Sprintf("process-compose -f %s up", path),
+		"profile_file":         path,
+		"hint":                fmt.Sprintf("process-compose -f %s up", path),
+		"tool_failure_remediation": gemini3ProPreviewToolUsageRemediationHint(path),
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -468,8 +469,21 @@ func runDev(args []string, stdout io.Writer, stderr io.Writer, now func() time.T
 	} else {
 		_, _ = fmt.Fprintf(stdout, "dev profile ok: %s\n", path)
 		_, _ = fmt.Fprintf(stdout, "run: process-compose -f %s up\n", path)
+		_, _ = fmt.Fprintf(stdout, "tool-failure triage hint: %s\n", gemini3ProPreviewToolUsageRemediationHint(path))
 	}
 	return 0
+}
+
+func gemini3ProPreviewToolUsageRemediationHint(profilePath string) string {
+	profilePath = strings.TrimSpace(profilePath)
+	if profilePath == "" {
+		profilePath = "examples/process-compose.dev.yaml"
+	}
+	return fmt.Sprintf(
+		"for gemini-3-pro-preview tool-use failures: touch config.yaml; process-compose -f %s down; process-compose -f %s up; curl -sS http://localhost:8317/v1/models -H \"Authorization: Bearer <client-key>\" | jq '.data[].id' | rg 'gemini-3-pro-preview'; curl -sS -X POST http://localhost:8317/v1/chat/completions -H \"Authorization: Bearer <client-key>\" -H \"Content-Type: application/json\" -d '{\"model\":\"gemini-3-pro-preview\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"stream\":false}'",
+		profilePath,
+		profilePath,
+	)
 }
 
 func renderError(stdout io.Writer, stderr io.Writer, jsonOutput bool, now func() time.Time, command string, err error) int {

@@ -31,10 +31,17 @@
   - Added CPB-0786 Nano Banana probe section in `docs/provider-quickstarts.md`.
   - The section includes model-list and request probes with fallback guidance for alias visibility.
 
-## Remaining in this window
-
 ### CPB-0783
-- Dev/runtime refresh for `gemini-3-pro-preview` workflow refresh.
+- Focus: Add deterministic recovery guidance for `gemini-3-pro-preview` tool-use failures.
+- Code changes:
+  - `cmd/cliproxyctl/main.go` now emits `tool_failure_remediation` in `dev --json` details.
+  - Added `gemini3ProPreviewToolUsageRemediationHint` helper with a deterministic touch/down/up/model-check/canary sequence.
+- Validation:
+  - `go test ./cmd/cliproxyctl -run TestRunDevHintIncludesGeminiToolUsageRemediation`
+- Docs changes:
+  - Added the same deterministic recovery sequence to `docs/install.md` and `docs/troubleshooting.md`.
+
+## Remaining in this window
 
 ### CPB-0784
 - RooCode compatibility to shared provider-agnostic pattern.
@@ -56,6 +63,6 @@
 
 ## Read-Only Validation
 
-- `rg -n "CPB-0781|CPB-0782|CPB-0786" docs/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.md docs/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
+- `rg -n "CPB-0781|CPB-0782|CPB-0783|CPB-0786" docs/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.md docs/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
 - `go test ./pkg/llmproxy/runtime/executor -run "CodexWebsocketHeaders" -count=1`
 - `rg -n "Opus 4.5|Nano Banana|CPB-0786" docs/provider-quickstarts.md`

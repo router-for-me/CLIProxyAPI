@@ -102,6 +102,20 @@ touch config.yaml
 curl -sS http://localhost:8317/health
 ```
 
+For `gemini-3-pro-preview` tool-use failures, follow the deterministic recovery flow before further edits:
+
+```bash
+touch config.yaml
+process-compose -f examples/process-compose.dev.yaml down
+process-compose -f examples/process-compose.dev.yaml up
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer <client-key>" | jq '.data[].id' | rg 'gemini-3-pro-preview'
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer <client-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3-pro-preview","messages":[{"role":"user","content":"ping"}],"stream":false}'
+```
+
 For binary installs, use this quick update flow instead of full reinstall:
 
 ```bash

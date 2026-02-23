@@ -221,6 +221,32 @@ func TestRunLoginJSON429IncludesHint(t *testing.T) {
 	}
 }
 
+func TestRunDevHintIncludesGeminiToolUsageRemediation(t *testing.T) {
+	t.Setenv("CLIPROXY_CONFIG", "")
+	var out bytes.Buffer
+	profile := filepath.Join(t.TempDir(), "process-compose.dev.yaml")
+	if err := os.WriteFile(profile, []byte("version: '0.5'\n"), 0o644); err != nil {
+		t.Fatalf("write dev profile: %v", err)
+	}
+	fixedNow := func() time.Time {
+		return time.Date(2026, 2, 23, 16, 17, 18, 0, time.UTC)
+	}
+
+	run([]string{"dev", "--json", "--file", profile}, &out, &bytes.Buffer{}, fixedNow, commandExecutor{})
+	var payload map[string]any
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode JSON output: %v", err)
+	}
+	if payload["command"] != "dev" || payload["ok"] != true {
+		t.Fatalf("unexpected envelope: %#v", payload)
+	}
+	details := payload["details"].(map[string]any)
+	hint := fmt.Sprintf("%v", details["tool_failure_remediation"])
+	if !strings.Contains(hint, "gemini-3-pro-preview") {
+		t.Fatalf("tool_failure_remediation missing expected model id: %q", hint)
+	}
+}
+
 func TestRunDoctorJSONWithFixCreatesConfigFromTemplate(t *testing.T) {
 	fixedNow := func() time.Time {
 		return time.Date(2026, 2, 23, 11, 12, 13, 0, time.UTC)
