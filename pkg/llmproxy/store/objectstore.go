@@ -168,6 +168,10 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 	if path == "" {
 		return "", fmt.Errorf("object store: missing file path attribute for %s", auth.ID)
 	}
+	path, err = ensurePathWithinDir(path, s.authDir, "object store")
+	if err != nil {
+		return "", err
+	}
 
 	if auth.Disabled {
 		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {

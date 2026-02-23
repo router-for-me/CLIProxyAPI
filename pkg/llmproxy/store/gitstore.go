@@ -225,6 +225,10 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 	if path == "" {
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
 	}
+	path, err = ensurePathWithinDir(path, s.baseDirSnapshot(), "auth filestore")
+	if err != nil {
+		return "", err
+	}
 
 	if auth.Disabled {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
