@@ -111,6 +111,9 @@ func resolveOpenAIModelsURL(baseURL string, attrs map[string]string) string {
 		if modelsURL := strings.TrimSpace(attrs["models_url"]); modelsURL != "" {
 			return modelsURL
 		}
+		if modelsEndpoint := strings.TrimSpace(attrs["models_endpoint"]); modelsEndpoint != "" {
+			return resolveOpenAIModelsEndpointURL(baseURL, modelsEndpoint)
+		}
 	}
 
 	trimmedBaseURL := strings.TrimRight(strings.TrimSpace(baseURL), "/")
@@ -132,6 +135,34 @@ func resolveOpenAIModelsURL(baseURL string, attrs map[string]string) string {
 	}
 
 	return trimmedBaseURL + "/v1/models"
+}
+
+func resolveOpenAIModelsEndpointURL(baseURL, modelsEndpoint string) string {
+	modelsEndpoint = strings.TrimSpace(modelsEndpoint)
+	if modelsEndpoint == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(modelsEndpoint); err == nil && parsed.IsAbs() {
+		return modelsEndpoint
+	}
+
+	trimmedBaseURL := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if trimmedBaseURL == "" {
+		return modelsEndpoint
+	}
+
+	if strings.HasPrefix(modelsEndpoint, "/") {
+		baseParsed, err := url.Parse(trimmedBaseURL)
+		if err == nil && baseParsed.Scheme != "" && baseParsed.Host != "" {
+			baseParsed.Path = modelsEndpoint
+			baseParsed.RawQuery = ""
+			baseParsed.Fragment = ""
+			return baseParsed.String()
+		}
+		return trimmedBaseURL + modelsEndpoint
+	}
+
+	return trimmedBaseURL + "/" + strings.TrimLeft(modelsEndpoint, "/")
 }
 
 func isVersionSegment(segment string) bool {
