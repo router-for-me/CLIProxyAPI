@@ -76,7 +76,7 @@ func (ts *ClaudeTokenStorage) SaveTokenToFile(authFilePath string) error {
 	}
 	misc.LogSavingCredentials(safePath)
 	ts.Type = "claude"
-	safePath, err := sanitizeTokenFilePath(authFilePath)
+	safePath, err = sanitizeTokenFilePath(authFilePath)
 	if err != nil {
 		return err
 	}

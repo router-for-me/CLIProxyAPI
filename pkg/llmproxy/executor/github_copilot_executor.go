@@ -545,9 +545,6 @@ func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte
 	return body
 }
 
-// CloseExecutionSession implements ProviderExecutor.
-func (e *GitHubCopilotExecutor) CloseExecutionSession(sessionID string) {}
-
 func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, model string) bool {
 	if sourceFormat.String() == "openai-response" {
 		return true
