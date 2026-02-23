@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"html"
 	"net/http"
 	"strings"
 	"time"
@@ -161,11 +162,11 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	// If streaming, initialize streaming log writer
 	if w.isStreaming && w.logger.IsEnabled() {
 		streamWriter, err := w.logger.LogStreamingRequest(
-			w.requestInfo.URL,
-			w.requestInfo.Method,
+			sanitizeForLogging(w.requestInfo.URL),
+			sanitizeForLogging(w.requestInfo.Method),
 			w.requestInfo.Headers,
 			w.requestInfo.Body,
-			w.requestInfo.RequestID,
+			sanitizeForLogging(w.requestInfo.RequestID),
 		)
 		if err == nil {
 			w.streamWriter = streamWriter
@@ -339,7 +340,7 @@ func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return data
+	return redactLoggedBody(data)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
@@ -351,7 +352,7 @@ func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
 	if !ok || len(data) == 0 {
 		return nil
 	}
-	return data
+	return redactLoggedBody(data)
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {
@@ -371,17 +372,17 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 			switch value := bodyOverride.(type) {
 			case []byte:
 				if len(value) > 0 {
-					return bytes.Clone(value)
+					return redactLoggedBody(bytes.Clone(value))
 				}
 			case string:
 				if strings.TrimSpace(value) != "" {
-					return []byte(value)
+					return redactLoggedBody([]byte(value))
 				}
 			}
 		}
 	}
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
-		return w.requestInfo.Body
+		return redactLoggedBody(w.requestInfo.Body)
 	}
 	return nil
 }
@@ -390,14 +391,17 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	if w.requestInfo == nil {
 		return nil
 	}
+	safeURL := sanitizeForLogging(w.requestInfo.URL)
+	safeMethod := sanitizeForLogging(w.requestInfo.Method)
+	safeRequestID := sanitizeForLogging(w.requestInfo.RequestID)
 	requestHeaders := sanitizeRequestHeaders(http.Header(w.requestInfo.Headers))
 
 	if loggerWithOptions, ok := w.logger.(interface {
 		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
 	}); ok {
 		return loggerWithOptions.LogRequestWithOptions(
-			w.requestInfo.URL,
-			w.requestInfo.Method,
+			safeURL,
+			safeMethod,
 			requestHeaders,
 			redactLoggedBody(requestBody),
 			statusCode,
@@ -407,15 +411,15 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 			redactLoggedBody(apiResponseBody),
 			apiResponseErrors,
 			forceLog,
-			w.requestInfo.RequestID,
+			safeRequestID,
 			w.requestInfo.Timestamp,
 			apiResponseTimestamp,
 		)
 	}
 
 	return w.logger.LogRequest(
-		w.requestInfo.URL,
-		w.requestInfo.Method,
+		safeURL,
+		safeMethod,
 		requestHeaders,
 		redactLoggedBody(requestBody),
 		statusCode,
@@ -424,10 +428,14 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 		redactLoggedBody(apiRequestBody),
 		redactLoggedBody(apiResponseBody),
 		apiResponseErrors,
-		w.requestInfo.RequestID,
+		safeRequestID,
 		w.requestInfo.Timestamp,
 		apiResponseTimestamp,
 	)
+}
+
+func sanitizeForLogging(value string) string {
+	return html.EscapeString(strings.TrimSpace(value))
 }
 
 func redactLoggedBody(body []byte) []byte {
@@ -435,5 +443,5 @@ func redactLoggedBody(body []byte) []byte {
 		return nil
 	}
 	sum := sha256.Sum256(body)
-	return []byte(fmt.Sprintf("[redacted body len=%d sha256=%x]", len(body), sum[:8]))
+	return []byte(fmt.Sprintf("[REDACTED] len=%d sha256=%x", len(body), sum[:8]))
 }

@@ -1,9 +1,10 @@
 package auth
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -132,8 +133,10 @@ func stableAuthIndex(seed string) string {
 	if seed == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(seed))
-	return hex.EncodeToString(sum[:])
+	mac := hmac.New(sha256.New, []byte("cliproxy-auth-index-v1"))
+	_, _ = mac.Write([]byte(seed))
+	sum := mac.Sum(nil)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 // EnsureIndex returns a stable index derived from the auth file name or API key.
