@@ -201,11 +201,11 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	}
 
 	log.WithFields(log.Fields{
-		"provider": providerFormat,
-		"model":    modelInfo.ID,
-		"mode":     validated.Mode,
-		"budget":   validated.Budget,
-		"level":    validated.Level,
+		"provider": redactLogText(providerFormat),
+		"model":    redactLogText(modelInfo.ID),
+		"mode":     redactLogMode(validated.Mode),
+		"budget":   redactLogInt(validated.Budget),
+		"level":    redactLogLevel(validated.Level),
 	}).Debug("thinking: processed config to apply |")
 
 	// 6. Apply configuration using provider-specific applier
@@ -246,9 +246,9 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 
 	// Unknown suffix format - return empty config
 	log.WithFields(log.Fields{
-		"provider":   provider,
-		"model":      model,
-		"raw_suffix": rawSuffix,
+		"provider":   redactLogText(provider),
+		"model":      redactLogText(model),
+		"raw_suffix": redactLogText(rawSuffix),
 	}).Debug("thinking: unknown suffix format, treating as no config |")
 	return ThinkingConfig{}
 }
@@ -274,8 +274,8 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 
 	if !hasThinkingConfig(config) {
 		log.WithFields(log.Fields{
-			"model":    modelID,
-			"provider": toFormat,
+			"model":    redactLogText(modelID),
+			"provider": redactLogText(toFormat),
 		}).Debug("thinking: user-defined model, passthrough (no config) |")
 		return body, nil
 	}
@@ -283,18 +283,18 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 	applier := GetProviderApplier(toFormat)
 	if applier == nil {
 		log.WithFields(log.Fields{
-			"model":    modelID,
-			"provider": toFormat,
+			"model":    redactLogText(modelID),
+			"provider": redactLogText(toFormat),
 		}).Debug("thinking: user-defined model, passthrough (unknown provider) |")
 		return body, nil
 	}
 
 	log.WithFields(log.Fields{
-		"provider": toFormat,
-		"model":    modelID,
-		"mode":     config.Mode,
-		"budget":   config.Budget,
-		"level":    config.Level,
+		"provider": redactLogText(toFormat),
+		"model":    redactLogText(modelID),
+		"mode":     redactLogMode(config.Mode),
+		"budget":   redactLogInt(config.Budget),
+		"level":    redactLogLevel(config.Level),
 	}).Debug("thinking: applying config for user-defined model (skip validation)")
 
 	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
