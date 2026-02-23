@@ -1,8 +1,6 @@
 package diff
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -178,6 +176,5 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
-	return hex.EncodeToString(sum[:])
+	return strings.Join(parts, "|")
 }

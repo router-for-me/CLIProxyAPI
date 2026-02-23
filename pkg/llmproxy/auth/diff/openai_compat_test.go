@@ -163,6 +163,26 @@ func TestOpenAICompatSignature_StableAndNormalized(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatSignature_DoesNotIncludeRawAPIKeyMaterial(t *testing.T) {
+	entry := config.OpenAICompatibility{
+		Name: "provider",
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+			{APIKey: "super-secret-key"},
+			{APIKey: "another-secret-key"},
+		},
+	}
+	sig := openAICompatSignature(entry)
+	if sig == "" {
+		t.Fatal("expected non-empty signature")
+	}
+	if strings.Contains(sig, "super-secret-key") || strings.Contains(sig, "another-secret-key") {
+		t.Fatalf("signature must not include API key values: %q", sig)
+	}
+	if !strings.Contains(sig, "api_keys=2") {
+		t.Fatalf("expected signature to keep api key count, got %q", sig)
+	}
+}
+
 func TestCountOpenAIModelsSkipsBlanks(t *testing.T) {
 	models := []config.OpenAICompatibilityModel{
 		{Name: "m1"},

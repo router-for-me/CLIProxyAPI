@@ -162,14 +162,26 @@ func (s *FileTokenStore) Delete(ctx context.Context, id string) error {
 }
 
 func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
-	if strings.ContainsRune(id, os.PathSeparator) || filepath.IsAbs(id) {
-		return id, nil
-	}
 	dir := s.baseDirSnapshot()
 	if dir == "" {
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
-	return filepath.Join(dir, id), nil
+	if filepath.IsAbs(id) {
+		return "", fmt.Errorf("auth filestore: absolute paths are not allowed: %s", id)
+	}
+	clean := filepath.Clean(filepath.FromSlash(id))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("auth filestore: invalid auth identifier %s", id)
+	}
+	path := filepath.Join(dir, clean)
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return "", fmt.Errorf("auth filestore: compute relative path failed: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("auth filestore: resolved path escapes base directory")
+	}
+	return path, nil
 }
 
 func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
