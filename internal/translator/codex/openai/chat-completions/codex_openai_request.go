@@ -53,9 +53,21 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// 	out, _ = sjson.Set(out, "max_output_tokens", v.Value())
 	// }
 
-	// Map reasoning effort
+	// Map reasoning effort (with variant as fallback for Claude-style clients)
 	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
 		out, _ = sjson.Set(out, "reasoning.effort", v.Value())
+	} else if v := gjson.GetBytes(rawJSON, "variant"); v.Exists() {
+		// variant is used by some clients (e.g., OpenWork) as alternative to reasoning_effort
+		// Map variant values: high/x-high -> high, medium -> medium, low/minimal -> low
+		variant := v.String()
+		switch variant {
+		case "high", "x-high", "xhigh":
+			out, _ = sjson.Set(out, "reasoning.effort", "high")
+		case "low", "minimal":
+			out, _ = sjson.Set(out, "reasoning.effort", "low")
+		default:
+			out, _ = sjson.Set(out, "reasoning.effort", "medium")
+		}
 	} else {
 		out, _ = sjson.Set(out, "reasoning.effort", "medium")
 	}
