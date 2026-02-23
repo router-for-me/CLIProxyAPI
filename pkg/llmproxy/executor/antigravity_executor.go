@@ -905,6 +905,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		if base == "" {
 			base = buildBaseURL(e.cfg, auth)
 		}
+		base, err = sanitizeAntigravityBaseURL(base)
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
 
 		var requestURL strings.Builder
 		requestURL.WriteString(base)
@@ -1528,6 +1532,16 @@ func resolveHost(base string) string {
 		return parsed.Host
 	}
 	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
+}
+
+func sanitizeAntigravityBaseURL(base string) (string, error) {
+	normalized := strings.TrimSuffix(strings.TrimSpace(base), "/")
+	switch normalized {
+	case antigravityBaseURLDaily, antigravitySandboxBaseURLDaily, antigravityBaseURLProd:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("antigravity executor: unsupported base url %q", base)
+	}
 }
 
 func resolveUserAgent(auth *cliproxyauth.Auth) string {
