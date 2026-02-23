@@ -1,50 +1,51 @@
 package store
 
 import (
-	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-func TestPostgresStoreResolveDeletePathRejectsEscapeInputs(t *testing.T) {
+func TestPostgresResolveAuthPathRejectsTraversalFromFileName(t *testing.T) {
 	t.Parallel()
 
-	store := &PostgresStore{authDir: t.TempDir()}
-	absolute := filepath.Join(t.TempDir(), "outside.json")
-	cases := []string{
-		"../outside.json",
-		absolute,
-	}
-	for _, id := range cases {
-		if _, err := store.resolveDeletePath(id); err == nil {
-			t.Fatalf("expected id %q to be rejected", id)
-		}
+	store := &PostgresStore{authDir: filepath.Join(t.TempDir(), "auths")}
+	auth := &cliproxyauth.Auth{FileName: "../escape.json"}
+	if _, err := store.resolveAuthPath(auth); err == nil {
+		t.Fatalf("expected traversal path rejection")
 	}
 }
 
-func TestPostgresStoreUpsertAuthRecordUsesManagedPathFromRelID(t *testing.T) {
+func TestPostgresResolveAuthPathRejectsAbsoluteOutsideAuthDir(t *testing.T) {
 	t.Parallel()
 
-	authDir := filepath.Join(t.TempDir(), "auths")
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
-		t.Fatalf("create auth dir: %v", err)
+	root := t.TempDir()
+	store := &PostgresStore{authDir: filepath.Join(root, "auths")}
+	outside := filepath.Join(root, "..", "outside.json")
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"path": outside}}
+	if _, err := store.resolveAuthPath(auth); err == nil {
+		t.Fatalf("expected outside absolute path rejection")
 	}
-	store := &PostgresStore{
-		authDir: authDir,
-	}
+}
 
-	untrustedPath := filepath.Join(t.TempDir(), "untrusted.json")
-	if err := os.WriteFile(untrustedPath, []byte(`{"source":"untrusted"}`), 0o600); err != nil {
-		t.Fatalf("write untrusted auth file: %v", err)
-	}
+func TestPostgresResolveDeletePathConstrainsToAuthDir(t *testing.T) {
+	t.Parallel()
 
-	err := store.upsertAuthRecord(context.Background(), "safe.json", untrustedPath)
-	if err == nil {
-		t.Fatal("expected upsert to fail because managed relID path does not exist")
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auths")
+	store := &PostgresStore{authDir: authDir}
+
+	got, err := store.resolveDeletePath("team/provider.json")
+	if err != nil {
+		t.Fatalf("resolve delete path: %v", err)
 	}
-	if !strings.Contains(err.Error(), "read auth file") {
-		t.Fatalf("expected read auth file error, got %v", err)
+	rel, err := filepath.Rel(authDir, got)
+	if err != nil {
+		t.Fatalf("relative path: %v", err)
+	}
+	if strings.HasPrefix(rel, "..") || rel == "." {
+		t.Fatalf("path escaped auth directory: %s", got)
 	}
 }

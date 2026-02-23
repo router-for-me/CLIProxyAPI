@@ -550,20 +550,57 @@ func (s *PostgresStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error)
 	}
 	if auth.Attributes != nil {
 		if p := strings.TrimSpace(auth.Attributes["path"]); p != "" {
-			return s.resolveManagedAuthPath(p)
+			return s.ensureManagedAuthPath(p)
 		}
 	}
 	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
-		return s.resolveManagedAuthPath(fileName)
+		return s.ensureManagedAuthPath(fileName)
 	}
 	if auth.ID == "" {
 		return "", fmt.Errorf("postgres store: missing id")
 	}
-	return s.resolveManagedAuthPath(auth.ID)
+	return s.ensureManagedAuthPath(auth.ID)
 }
 
 func (s *PostgresStore) resolveDeletePath(id string) (string, error) {
-	return s.resolveManagedAuthPath(id)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("postgres store: id is empty")
+	}
+	return s.ensureManagedAuthPath(id)
+}
+
+func (s *PostgresStore) ensureManagedAuthPath(path string) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("postgres store: store not initialized")
+	}
+	authDir := strings.TrimSpace(s.authDir)
+	if authDir == "" {
+		return "", fmt.Errorf("postgres store: auth directory not configured")
+	}
+	absAuthDir, err := filepath.Abs(authDir)
+	if err != nil {
+		return "", fmt.Errorf("postgres store: resolve auth directory: %w", err)
+	}
+	candidate := strings.TrimSpace(path)
+	if candidate == "" {
+		return "", fmt.Errorf("postgres store: auth path is empty")
+	}
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(absAuthDir, filepath.FromSlash(candidate))
+	}
+	absCandidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("postgres store: resolve auth path %q: %w", path, err)
+	}
+	rel, err := filepath.Rel(absAuthDir, absCandidate)
+	if err != nil {
+		return "", fmt.Errorf("postgres store: compute relative auth path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("postgres store: path %q outside managed directory", path)
+	}
+	return absCandidate, nil
 }
 
 func (s *PostgresStore) relativeAuthID(path string) (string, error) {
