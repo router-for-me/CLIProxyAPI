@@ -1,16 +1,9 @@
 name: VitePress Pages
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "package.json"
   push:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "package.json"
+    branches-ignore:
+      - "gh-pages"
   workflow_dispatch:
 
 concurrency:
@@ -49,14 +42,12 @@ jobs:
         run: test -f docs/.vitepress/dist/index.html
 
       - name: Upload pages artifact
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/.vitepress/dist/
 
   deploy:
     name: Deploy Pages
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:
