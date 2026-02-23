@@ -66,8 +66,8 @@ var RequiredFieldsByTool = map[string][]string{
 	// Ampcode-compatible Bash tool uses "cmd", while other clients commonly use "command".
 	// Accept either key to avoid false truncation detection loops.
 	"Bash":        {"command", "cmd"},
-	"execute":     {"command"},
-	"run_command": {"command"},
+	"execute":     {"command", "cmd"},
+	"run_command": {"command", "cmd"},
 }
 
 // DetectTruncation checks if the tool use input appears to be truncated.

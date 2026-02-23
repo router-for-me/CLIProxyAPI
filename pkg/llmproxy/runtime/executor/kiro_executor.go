@@ -638,6 +638,18 @@ func formatKiroSuspendedStatusMessage(respBody []byte) string {
 	return "account suspended by upstream Kiro endpoint: " + string(respBody) + "; re-auth this Kiro entry or use another auth index"
 }
 
+func isKiroSuspendedOrBannedResponse(respBody string) bool {
+	if strings.TrimSpace(respBody) == "" {
+		return false
+	}
+	lowerBody := strings.ToLower(respBody)
+	return strings.Contains(lowerBody, "temporarily_suspended") ||
+		strings.Contains(lowerBody, "suspended") ||
+		strings.Contains(lowerBody, "account_banned") ||
+		strings.Contains(lowerBody, "account banned") ||
+		strings.Contains(lowerBody, "banned")
+}
+
 // Execute sends the request to Kiro API and returns the response.
 // Supports automatic token refresh on 401/403 errors.
 func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -945,8 +957,8 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 				respBodyStr := string(respBody)
 
-				// Check for SUSPENDED status - return immediately without retry
-				if strings.Contains(respBodyStr, "SUSPENDED") || strings.Contains(respBodyStr, "TEMPORARILY_SUSPENDED") {
+				// Check for suspended/banned status - return immediately without retry
+				if isKiroSuspendedOrBannedResponse(respBodyStr) {
 					// Set long cooldown for suspended accounts
 					rateLimiter.CheckAndMarkSuspended(tokenKey, respBodyStr)
 					cooldownMgr.SetCooldown(tokenKey, kiroauth.LongCooldown, kiroauth.CooldownReasonSuspended)
@@ -1381,8 +1393,8 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 				respBodyStr := string(respBody)
 
-				// Check for SUSPENDED status - return immediately without retry
-				if strings.Contains(respBodyStr, "SUSPENDED") || strings.Contains(respBodyStr, "TEMPORARILY_SUSPENDED") {
+				// Check for suspended/banned status - return immediately without retry
+				if isKiroSuspendedOrBannedResponse(respBodyStr) {
 					// Set long cooldown for suspended accounts
 					rateLimiter.CheckAndMarkSuspended(tokenKey, respBodyStr)
 					cooldownMgr.SetCooldown(tokenKey, kiroauth.LongCooldown, kiroauth.CooldownReasonSuspended)

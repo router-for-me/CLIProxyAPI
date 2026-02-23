@@ -35,6 +35,22 @@ func TestResolveOpenAIModelsURL(t *testing.T) {
 			},
 			want: "https://custom.example.com/models",
 		},
+		{
+			name:    "ModelsEndpointPathOverrideUsesBaseHost",
+			baseURL: "https://api.z.ai/api/coding/paas/v4",
+			attrs: map[string]string{
+				"models_endpoint": "/api/coding/paas/v4/models",
+			},
+			want: "https://api.z.ai/api/coding/paas/v4/models",
+		},
+		{
+			name:    "ModelsEndpointAbsoluteURLOverrideWins",
+			baseURL: "https://api.z.ai/api/coding/paas/v4",
+			attrs: map[string]string{
+				"models_endpoint": "https://custom.example.com/models",
+			},
+			want: "https://custom.example.com/models",
+		},
 	}
 
 	for _, tc := range testCases {

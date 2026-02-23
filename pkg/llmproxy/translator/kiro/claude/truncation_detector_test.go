@@ -51,6 +51,27 @@ func TestDetectTruncation(t *testing.T) {
 	if info6.IsTruncated {
 		t.Errorf("expected no truncation for Bash cmd alias, got %v", info6)
 	}
+
+	// 7. execute cmd alias compatibility
+	parsed7 := map[string]interface{}{"cmd": "ls -la"}
+	info7 := DetectTruncation("execute", "c3", `{"cmd":"ls -la"}`, parsed7)
+	if info7.IsTruncated {
+		t.Errorf("expected no truncation for execute cmd alias, got %v", info7)
+	}
+
+	// 8. run_command cmd alias compatibility
+	parsed8 := map[string]interface{}{"cmd": "pwd"}
+	info8 := DetectTruncation("run_command", "c4", `{"cmd":"pwd"}`, parsed8)
+	if info8.IsTruncated {
+		t.Errorf("expected no truncation for run_command cmd alias, got %v", info8)
+	}
+
+	// 9. command tool still truncates when both command aliases are missing
+	parsed9 := map[string]interface{}{"path": "/tmp"}
+	info9 := DetectTruncation("execute", "c5", `{"path":"/tmp"}`, parsed9)
+	if !info9.IsTruncated || info9.TruncationType != TruncationTypeMissingFields {
+		t.Errorf("expected missing_fields truncation when command aliases are absent, got %v", info9)
+	}
 }
 
 func TestBuildSoftFailureToolResult(t *testing.T) {

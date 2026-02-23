@@ -55,3 +55,13 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-2`
 ## Blockers
 
 - #160 blocked on missing deterministic reproduction fixture for duplicate-output stream bug in current repo state.
+
+## Wave2 Lane 2 Entry - #241
+
+- Issue: `#241` copilot context length should always be `128K`
+- Status: `implemented`
+- Mapping:
+  - normalization at runtime registration: `pkg/llmproxy/registry/model_registry.go`
+  - regression coverage: `pkg/llmproxy/registry/model_registry_hook_test.go`
+- Tests:
+  - `go test ./pkg/llmproxy/registry -run 'TestRegisterClient_NormalizesCopilotContextLength|TestGetGitHubCopilotModels' -count=1`
