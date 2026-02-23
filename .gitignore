@@ -56,3 +56,7 @@ _bmad-output/*
 server
 server
 cli-proxy-api-plus-integration-test
+
+boardsync
+releasebatch
+.cache
