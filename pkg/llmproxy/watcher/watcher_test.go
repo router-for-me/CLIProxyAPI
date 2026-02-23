@@ -858,6 +858,29 @@ func TestHandleEventAuthWriteTriggersUpdate(t *testing.T) {
 	}
 }
 
+func TestIsWriteOnlyAuthEvent(t *testing.T) {
+	tests := []struct {
+		name string
+		op   fsnotify.Op
+		want bool
+	}{
+		{name: "write only", op: fsnotify.Write, want: true},
+		{name: "create only", op: fsnotify.Create, want: false},
+		{name: "remove only", op: fsnotify.Remove, want: false},
+		{name: "rename only", op: fsnotify.Rename, want: false},
+		{name: "create plus write", op: fsnotify.Create | fsnotify.Write, want: false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isWriteOnlyAuthEvent(tt.op); got != tt.want {
+				t.Fatalf("isWriteOnlyAuthEvent(%v) = %v, want %v", tt.op, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandleEventRemoveDebounceSkips(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")

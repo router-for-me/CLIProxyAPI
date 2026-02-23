@@ -261,6 +261,36 @@ func TestTranslateGitHubCopilotResponsesStreamToClaude_TextLifecycle(t *testing.
 	}
 }
 
+func TestTranslateGitHubCopilotResponses_Parity_TextAndToolAcrossStreamModes(t *testing.T) {
+	t.Parallel()
+
+	nonStream := []byte(`{"id":"resp_3","model":"gpt-5-codex","output":[{"type":"message","content":[{"type":"output_text","text":"hello parity"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"sum","arguments":"{\"a\":1}"}],"usage":{"input_tokens":5,"output_tokens":7}}`)
+	out := translateGitHubCopilotResponsesNonStreamToClaude(nonStream)
+
+	if gjson.Get(out, "content.0.type").String() != "text" || gjson.Get(out, "content.0.text").String() != "hello parity" {
+		t.Fatalf("non-stream text mapping mismatch: %s", out)
+	}
+	if gjson.Get(out, "content.1.type").String() != "tool_use" || gjson.Get(out, "content.1.name").String() != "sum" {
+		t.Fatalf("non-stream tool mapping mismatch: %s", out)
+	}
+
+	var param any
+	_ = translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.created","response":{"id":"resp_3","model":"gpt-5-codex"}}`), &param)
+	textDelta := strings.Join(translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.output_text.delta","delta":"hello parity"}`), &param), "")
+	toolAdded := strings.Join(translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"sum","id":"fc_1"},"output_index":1}`), &param), "")
+	toolDone := strings.Join(translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":1,"arguments":"{\"a\":1}"}`), &param), "")
+
+	if !strings.Contains(textDelta, `"type":"text_delta"`) || !strings.Contains(textDelta, "hello parity") {
+		t.Fatalf("stream text mapping mismatch: %s", textDelta)
+	}
+	if !strings.Contains(toolAdded, `"type":"tool_use"`) || !strings.Contains(toolAdded, `"name":"sum"`) {
+		t.Fatalf("stream tool start mismatch: %s", toolAdded)
+	}
+	if !strings.Contains(toolDone, `"type":"input_json_delta"`) || !strings.Contains(toolDone, `\"a\":1`) {
+		t.Fatalf("stream tool args mismatch: %s", toolDone)
+	}
+}
+
 // --- Tests for X-Initiator detection logic (Problem L) ---
 
 func TestApplyHeaders_XInitiator_UserOnly(t *testing.T) {

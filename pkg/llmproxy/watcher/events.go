@@ -132,7 +132,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 				return
 			}
-			log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
+			logAuthFileChange(event.Op, filepath.Base(event.Name))
 			w.addOrUpdateClient(event.Name)
 			return
 		}
@@ -140,7 +140,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			log.Debugf("ignoring remove for unknown auth file: %s", filepath.Base(event.Name))
 			return
 		}
-		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
+		logAuthFileChange(event.Op, filepath.Base(event.Name))
 		w.removeClient(event.Name)
 		return
 	}
@@ -149,9 +149,21 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 			return
 		}
-		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
+		logAuthFileChange(event.Op, filepath.Base(event.Name))
 		w.addOrUpdateClient(event.Name)
 	}
+}
+
+func logAuthFileChange(op fsnotify.Op, baseName string) {
+	if isWriteOnlyAuthEvent(op) {
+		log.Debugf("auth file changed (%s): %s, processing incrementally", op.String(), baseName)
+		return
+	}
+	log.Infof("auth file changed (%s): %s, processing incrementally", op.String(), baseName)
+}
+
+func isWriteOnlyAuthEvent(op fsnotify.Op) bool {
+	return op&fsnotify.Write != 0 && op&^fsnotify.Write == 0
 }
 
 func (w *Watcher) isKiroIDETokenFile(path string) bool {
