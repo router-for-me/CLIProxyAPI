@@ -1176,6 +1176,29 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				OwnedBy:     antigravityAuthType,
 				Type:        antigravityAuthType,
 			}
+
+			// Build input modalities from upstream capability flags.
+			inputModalities := []string{"TEXT"}
+			if modelData.Get("supportsImages").Bool() {
+				inputModalities = append(inputModalities, "IMAGE")
+			}
+			if modelData.Get("supportsVideo").Bool() {
+				inputModalities = append(inputModalities, "VIDEO")
+			}
+			modelInfo.SupportedInputModalities = inputModalities
+			modelInfo.SupportedOutputModalities = []string{"TEXT"}
+
+			// Token limits from upstream.
+			if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
+				modelInfo.InputTokenLimit = int(maxTok)
+			}
+			if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
+				modelInfo.OutputTokenLimit = int(maxOut)
+			}
+
+			// Supported generation methods (Gemini v1beta convention).
+			modelInfo.SupportedGenerationMethods = []string{"generateContent", "countTokens"}
+
 			// Look up Thinking support from static config using upstream model name.
 			if modelCfg != nil {
 				if modelCfg.Thinking != nil {
