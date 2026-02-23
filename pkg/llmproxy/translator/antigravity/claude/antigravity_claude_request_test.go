@@ -449,6 +449,25 @@ func TestConvertClaudeRequestToAntigravity_GenerationConfig(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_MaxTokensClamped(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-3-5-sonnet-20240620",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "hello"}]}
+		],
+		"max_tokens": 128000
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+	maxOutput := gjson.GetBytes(output, "request.generationConfig.maxOutputTokens")
+	if !maxOutput.Exists() {
+		t.Fatal("maxOutputTokens should exist")
+	}
+	if maxOutput.Int() != 64000 {
+		t.Fatalf("expected maxOutputTokens to be clamped to 64000, got %d", maxOutput.Int())
+	}
+}
+
 // ============================================================================
 // Trailing Unsigned Thinking Block Removal
 // ============================================================================

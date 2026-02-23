@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/cache"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
@@ -37,6 +38,7 @@ import (
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	enableThoughtTranslate := true
 	rawJSON := inputRawJSON
+	modelOverrides := registry.GetAntigravityModelConfig()
 
 	// system instruction
 	systemInstructionJSON := ""
@@ -406,7 +408,14 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.Set(out, "request.generationConfig.topK", v.Num)
 	}
 	if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() && v.Type == gjson.Number {
-		out, _ = sjson.Set(out, "request.generationConfig.maxOutputTokens", v.Num)
+		maxTokens := v.Int()
+		if override, ok := modelOverrides[modelName]; ok && override.MaxCompletionTokens > 0 {
+			limit := int64(override.MaxCompletionTokens)
+			if maxTokens > limit {
+				maxTokens = limit
+			}
+		}
+		out, _ = sjson.Set(out, "request.generationConfig.maxOutputTokens", maxTokens)
 	}
 
 	outBytes := []byte(out)

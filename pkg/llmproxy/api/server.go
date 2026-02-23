@@ -341,8 +341,11 @@ func (s *Server) setupRoutes() {
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
 
-	// WebSocket endpoint for /v1/responses/ws (Codex streaming)
-	s.AttachWebsocketRoute("/v1/responses/ws", ResponsesWebSocketHandler())
+	// WebSocket endpoint for /v1/responses/ws (Codex streaming).
+	// This route can be rollout-gated from config.
+	if s.cfg == nil || s.cfg.IsResponsesWebsocketEnabled() {
+		s.AttachWebsocketRoute("/v1/responses/ws", ResponsesWebSocketHandler())
+	}
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")

@@ -1,6 +1,8 @@
 package ratelimit
 
 import (
+	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -158,38 +160,38 @@ func MaskCredential(credentialID string) string {
 // This is useful for loading from YAML/JSON.
 func ParseRateLimitConfigFromMap(m map[string]interface{}) RateLimitConfig {
 	var cfg RateLimitConfig
-	if v, ok := m["rpm"]; ok {
-		switch val := v.(type) {
-		case int:
-			cfg.RPM = val
-		case float64:
-			cfg.RPM = int(val)
+
+	apply := func(canonical string, value interface{}) {
+		parsed, ok := parseIntValue(value)
+		if !ok {
+			return
+		}
+		switch canonical {
+		case "rpm":
+			cfg.RPM = parsed
+		case "tpm":
+			cfg.TPM = parsed
+		case "rpd":
+			cfg.RPD = parsed
+		case "tpd":
+			cfg.TPD = parsed
 		}
 	}
-	if v, ok := m["tpm"]; ok {
-		switch val := v.(type) {
-		case int:
-			cfg.TPM = val
-		case float64:
-			cfg.TPM = int(val)
+
+	for key, value := range m {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		switch normalized {
+		case "rpm", "requests_per_minute", "requestsperminute":
+			apply("rpm", value)
+		case "tpm", "tokens_per_minute", "tokensperminute":
+			apply("tpm", value)
+		case "rpd", "requests_per_day", "requestsperday":
+			apply("rpd", value)
+		case "tpd", "tokens_per_day", "tokensperday":
+			apply("tpd", value)
 		}
 	}
-	if v, ok := m["rpd"]; ok {
-		switch val := v.(type) {
-		case int:
-			cfg.RPD = val
-		case float64:
-			cfg.RPD = int(val)
-		}
-	}
-	if v, ok := m["tpd"]; ok {
-		switch val := v.(type) {
-		case int:
-			cfg.TPD = val
-		case float64:
-			cfg.TPD = int(val)
-		}
-	}
+
 	if v, ok := m["wait-on-limit"]; ok {
 		if val, ok := v.(bool); ok {
 			cfg.WaitOnLimit = val
@@ -206,4 +208,29 @@ func ParseRateLimitConfigFromMap(m map[string]interface{}) RateLimitConfig {
 		}
 	}
 	return cfg
+}
+
+func parseIntValue(v interface{}) (int, bool) {
+	switch val := v.(type) {
+	case int:
+		return val, true
+	case int64:
+		return int(val), true
+	case float64:
+		return int(val), true
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	case json.Number:
+		parsed, err := val.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(parsed), true
+	default:
+		return 0, false
+	}
 }

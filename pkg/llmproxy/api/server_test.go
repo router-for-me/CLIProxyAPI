@@ -125,6 +125,9 @@ func TestServer_SetupRoutes_IsIdempotent(t *testing.T) {
 	if got := countRoute(http.MethodGet, "/v1/metrics/providers"); got != 1 {
 		t.Fatalf("expected 1 GET /v1/metrics/providers route, got %d", got)
 	}
+	if got := countRoute(http.MethodGet, "/v1/responses/ws"); got != 1 {
+		t.Fatalf("expected 1 GET /v1/responses/ws route, got %d", got)
+	}
 
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -132,6 +135,24 @@ func TestServer_SetupRoutes_IsIdempotent(t *testing.T) {
 		}
 	}()
 	s.setupRoutes()
+}
+
+func TestServer_SetupRoutes_ResponsesWebsocketFlag(t *testing.T) {
+	disabled := false
+	cfg := &config.Config{
+		Debug:                     true,
+		ResponsesWebsocketEnabled: &disabled,
+	}
+	s := NewServer(cfg, nil, nil, "config.yaml")
+	if s == nil {
+		t.Fatal("NewServer returned nil")
+	}
+
+	for _, r := range s.engine.Routes() {
+		if r.Method == http.MethodGet && r.Path == "/v1/responses/ws" {
+			t.Fatalf("expected /v1/responses/ws to be disabled by config flag")
+		}
+	}
 }
 
 func TestServer_SetupRoutes_DuplicateInvocationPreservesRouteCount(t *testing.T) {

@@ -85,6 +85,10 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
+	// ResponsesWebsocketEnabled gates the dedicated /v1/responses/ws route rollout.
+	// Nil means enabled (default behavior).
+	ResponsesWebsocketEnabled *bool `yaml:"responses-websocket-enabled,omitempty" json:"responses-websocket-enabled,omitempty"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -990,6 +994,15 @@ func (cfg *Config) OAuthUpstreamURL(channel string) string {
 		return ""
 	}
 	return strings.TrimSpace(cfg.OAuthUpstream[key])
+}
+
+// IsResponsesWebsocketEnabled returns true when the dedicated responses websocket
+// route should be mounted. Default is enabled when unset.
+func (cfg *Config) IsResponsesWebsocketEnabled() bool {
+	if cfg == nil || cfg.ResponsesWebsocketEnabled == nil {
+		return true
+	}
+	return *cfg.ResponsesWebsocketEnabled
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
