@@ -1,7 +1,5 @@
 package auth
 
-import "net/http"
-
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.
@@ -26,21 +24,9 @@ func (e *Error) Error() string {
 }
 
 // StatusCode implements optional status accessor for manager decision making.
-// Returns HTTP 503 Service Unavailable for credential availability issues to
-// distinguish from internal server errors (500).
 func (e *Error) StatusCode() int {
 	if e == nil {
 		return 0
 	}
-	if e.HTTPStatus > 0 {
-		return e.HTTPStatus
-	}
-	// Default to 503 for auth availability issues to distinguish from 500 internal errors.
-	// This allows clients to implement proper fallback/retry logic.
-	switch e.Code {
-	case "auth_not_found", "provider_not_found", "executor_not_found":
-		return http.StatusServiceUnavailable
-	default:
-		return 0
-	}
+	return e.HTTPStatus
 }

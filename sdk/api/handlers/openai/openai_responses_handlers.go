@@ -10,23 +10,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"mime"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
-<<<<<<< HEAD
-	constant "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
-	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/openai/openai/responses"
-=======
+	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
-	constant "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
->>>>>>> archive/pr-234-head-20260223
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -54,7 +44,7 @@ func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIR
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *OpenAIResponsesAPIHandler) HandlerType() string {
-	return constant.OpenaiResponse
+	return OpenaiResponse
 }
 
 // Models returns the OpenAIResponses-compatible model metadata supported by this handler.
@@ -81,12 +71,17 @@ func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
-	rawJSON, err := readAndValidateOpenAIResponsesJSONRequest(c)
+	rawJSON, err := c.GetRawData()
+	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: *err})
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
 		return
 	}
-	rawJSON = sanitizeOpenAIResponsesRequest(rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -113,12 +108,16 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 }
 
 func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
-	rawJSON, err := readAndValidateOpenAIResponsesJSONRequest(c)
+	rawJSON, err := c.GetRawData()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: *err})
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
 		return
 	}
-	rawJSON = sanitizeOpenAIResponsesRequest(rawJSON)
 
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
@@ -183,7 +182,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponseViaChat(c *gin.Con
 
 	modelName := gjson.GetBytes(chatJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, constant.OpenAI, modelName, chatJSON, "")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, OpenAI, modelName, chatJSON, "")
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -286,61 +285,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	}
 }
 
-func readAndValidateOpenAIResponsesJSONRequest(c *gin.Context) ([]byte, *handlers.ErrorDetail) {
-	rawJSON, err := c.GetRawData()
-	if err != nil {
-		return nil, &handlers.ErrorDetail{
-			Message: fmt.Sprintf("Invalid request: %v", err),
-			Type:    "invalid_request_error",
-		}
-	}
-
-	if len(strings.TrimSpace(string(rawJSON))) == 0 {
-		return nil, &handlers.ErrorDetail{
-			Message: "Invalid request: expected JSON body",
-			Type:    "invalid_request_error",
-		}
-	}
-
-	if !gjson.ValidBytes(rawJSON) {
-		return nil, &handlers.ErrorDetail{
-			Message: "Invalid request: malformed JSON body",
-			Type:    "invalid_request_error",
-		}
-	}
-
-	contentType := strings.TrimSpace(c.GetHeader("Content-Type"))
-	if contentType != "" {
-		mediaType, _, parseErr := mime.ParseMediaType(contentType)
-		if parseErr != nil {
-			mediaType = strings.Split(contentType, ";")[0]
-		}
-		mediaType = strings.ToLower(strings.TrimSpace(mediaType))
-		if mediaType != "" && mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json") {
-			return nil, &handlers.ErrorDetail{
-				Message: "Invalid request: Content-Type must be application/json",
-				Type:    "invalid_request_error",
-			}
-		}
-	}
-
-	c.Request.Body = io.NopCloser(bytes.NewReader(rawJSON))
-	return rawJSON, nil
-}
-
-func sanitizeOpenAIResponsesRequest(rawJSON []byte) []byte {
-	// OpenAI Responses SDK clients may send top-level "user" for abuse monitoring.
-	// Downstream providers commonly reject it, so strip it at the boundary.
-	if !gjson.GetBytes(rawJSON, "user").Exists() {
-		return rawJSON
-	}
-	updated, err := sjson.DeleteBytes(rawJSON, "user")
-	if err != nil {
-		return rawJSON
-	}
-	return updated
-}
-
 func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Context, originalResponsesJSON, chatJSON []byte) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -355,7 +299,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponseViaChat(c *gin.Contex
 
 	modelName := gjson.GetBytes(chatJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, constant.OpenAI, modelName, chatJSON, "")
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, OpenAI, modelName, chatJSON, "")
 	var param any
 
 	setSSEHeaders := func() {

@@ -16,9 +16,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
+	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -46,7 +46,7 @@ func NewClaudeCodeAPIHandler(apiHandlers *handlers.BaseAPIHandler) *ClaudeCodeAP
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *ClaudeCodeAPIHandler) HandlerType() string {
-	return constant.Claude
+	return Claude
 }
 
 // Models returns a list of models supported by this handler.
@@ -75,7 +75,6 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 		})
 		return
 	}
-	rawJSON = sanitizeClaudeRequest(rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -105,7 +104,6 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 		})
 		return
 	}
-	rawJSON = sanitizeClaudeRequest(rawJSON)
 
 	c.Header("Content-Type", "application/json")
 
@@ -144,7 +142,6 @@ func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"object":   "list",
 		"data":     models,
 		"has_more": false,
 		"first_id": firstID,

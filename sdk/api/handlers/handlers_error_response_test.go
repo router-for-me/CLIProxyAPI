@@ -6,25 +6,11 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
-
-type retryAfterError struct {
-	msg        string
-	retryAfter *time.Duration
-}
-
-func (e retryAfterError) Error() string {
-	return e.msg
-}
-
-func (e retryAfterError) RetryAfter() *time.Duration {
-	return e.retryAfter
-}
 
 func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -78,56 +64,5 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 	if got := recorder.Header().Values("X-Request-Id"); !reflect.DeepEqual(got, []string{"new-1", "new-2"}) {
 		t.Fatalf("X-Request-Id = %#v, want %#v", got, []string{"new-1", "new-2"})
-	}
-}
-
-func TestWriteErrorResponse_RetryAfterFromError(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-
-	delay := 7 * time.Second
-	handler := NewBaseAPIHandlers(nil, nil)
-	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
-		StatusCode: http.StatusTooManyRequests,
-		Error: retryAfterError{
-			msg:        "rate limit",
-			retryAfter: &delay,
-		},
-	})
-
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
-	}
-	if got := recorder.Header().Get("Retry-After"); got != "7" {
-		t.Fatalf("Retry-After = %q, want %q", got, "7")
-	}
-}
-
-func TestWriteErrorResponse_AddonRetryAfterTakesPrecedence(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-
-	delay := 7 * time.Second
-	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil)
-	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
-		StatusCode: http.StatusTooManyRequests,
-		Error: retryAfterError{
-			msg:        "rate limit",
-			retryAfter: &delay,
-		},
-		Addon: http.Header{
-			"Retry-After": {"30"},
-		},
-	})
-
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
-	}
-	if got := recorder.Header().Get("Retry-After"); got != "30" {
-		t.Fatalf("Retry-After = %q, want %q", got, "30")
 	}
 }

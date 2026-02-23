@@ -17,19 +17,19 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-	configaccess "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/cmd"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/store"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/tui"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
+	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -63,13 +63,6 @@ func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
 	}
 }
 
-func validateKiroIncognitoFlags(useIncognito, noIncognito bool) error {
-	if useIncognito && noIncognito {
-		return fmt.Errorf("flags --incognito and --no-incognito are mutually exclusive")
-	}
-	return nil
-}
-
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
@@ -78,7 +71,6 @@ func main() {
 
 	// Command-line flags to control the application's behavior.
 	var login bool
-	var setup bool
 	var codexLogin bool
 	var claudeLogin bool
 	var qwenLogin bool
@@ -95,16 +87,6 @@ func main() {
 	var kiroAWSAuthCode bool
 	var kiroImport bool
 	var githubCopilotLogin bool
-	var rooLogin bool
-	var minimaxLogin bool
-	var deepseekLogin bool
-	var groqLogin bool
-	var mistralLogin bool
-	var siliconflowLogin bool
-	var openrouterLogin bool
-	var togetherLogin bool
-	var fireworksLogin bool
-	var novitaLogin bool
 	var projectID string
 	var vertexImport string
 	var configPath string
@@ -116,7 +98,6 @@ func main() {
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
-	flag.BoolVar(&setup, "setup", false, "Run guided provider setup wizard")
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
@@ -135,16 +116,6 @@ func main() {
 	flag.BoolVar(&kiroAWSAuthCode, "kiro-aws-authcode", false, "Login to Kiro using AWS Builder ID (authorization code flow, better UX)")
 	flag.BoolVar(&kiroImport, "kiro-import", false, "Import Kiro token from Kiro IDE (~/.aws/sso/cache/kiro-auth-token.json)")
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
-	flag.BoolVar(&rooLogin, "roo-login", false, "Login to Roo Code (runs roo auth login)")
-	flag.BoolVar(&minimaxLogin, "minimax-login", false, "MiniMax config instructions (add minimax: block with api-key)")
-	flag.BoolVar(&deepseekLogin, "deepseek-login", false, "Login to DeepSeek using API key (stored in auth-dir)")
-	flag.BoolVar(&groqLogin, "groq-login", false, "Login to Groq using API key (stored in auth-dir)")
-	flag.BoolVar(&mistralLogin, "mistral-login", false, "Login to Mistral using API key (stored in auth-dir)")
-	flag.BoolVar(&siliconflowLogin, "siliconflow-login", false, "Login to SiliconFlow using API key (stored in auth-dir)")
-	flag.BoolVar(&openrouterLogin, "openrouter-login", false, "Login to OpenRouter using API key (stored in auth-dir)")
-	flag.BoolVar(&togetherLogin, "together-login", false, "Login to Together AI using API key (stored in auth-dir)")
-	flag.BoolVar(&fireworksLogin, "fireworks-login", false, "Login to Fireworks AI using API key (stored in auth-dir)")
-	flag.BoolVar(&novitaLogin, "novita-login", false, "Login to Novita AI using API key (stored in auth-dir)")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -288,6 +259,7 @@ func main() {
 	if deployEnv == "cloud" {
 		isCloudDeploy = true
 	}
+
 	// Determine and load the configuration file.
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
 	var configFilePath string
@@ -441,7 +413,7 @@ func main() {
 			log.Errorf("failed to get working directory: %v", err)
 			return
 		}
-		configFilePath = resolveDefaultConfigPath(wd, isCloudDeploy)
+		configFilePath = filepath.Join(wd, "config.yaml")
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 	}
 	if err != nil {
@@ -497,15 +469,6 @@ func main() {
 	options := &cmd.LoginOptions{
 		NoBrowser:    noBrowser,
 		CallbackPort: oauthCallbackPort,
-		ConfigPath:   configFilePath,
-	}
-
-	kiroAuthFlow := kiroLogin || kiroGoogleLogin || kiroAWSLogin || kiroAWSAuthCode
-	if kiroAuthFlow {
-		if err := validateKiroIncognitoFlags(useIncognito, noIncognito); err != nil {
-			log.Error(err)
-			return
-		}
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.
@@ -527,8 +490,6 @@ func main() {
 	if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport)
-	} else if setup {
-		cmd.DoSetupWizard(cfg, &cmd.SetupOptions{ConfigPath: configFilePath})
 	} else if login {
 		// Handle Google/Gemini login
 		cmd.DoLogin(cfg, projectID, options)
@@ -578,26 +539,6 @@ func main() {
 		cmd.DoKiroAWSAuthCodeLogin(cfg, options)
 	} else if kiroImport {
 		cmd.DoKiroImport(cfg, options)
-	} else if rooLogin {
-		cmd.DoRooLogin(cfg, options)
-	} else if minimaxLogin {
-		cmd.DoMinimaxLogin(cfg, options)
-	} else if deepseekLogin {
-		cmd.DoDeepSeekLogin(cfg, options)
-	} else if groqLogin {
-		cmd.DoGroqLogin(cfg, options)
-	} else if mistralLogin {
-		cmd.DoMistralLogin(cfg, options)
-	} else if siliconflowLogin {
-		cmd.DoSiliconFlowLogin(cfg, options)
-	} else if openrouterLogin {
-		cmd.DoOpenRouterLogin(cfg, options)
-	} else if togetherLogin {
-		cmd.DoTogetherLogin(cfg, options)
-	} else if fireworksLogin {
-		cmd.DoFireworksLogin(cfg, options)
-	} else if novitaLogin {
-		cmd.DoNovitaLogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
@@ -679,15 +620,15 @@ func main() {
 				}
 			}
 		} else {
-			// Start the main proxy service
-			managementasset.StartAutoUpdater(context.Background(), configFilePath)
+      // Start the main proxy service
+      managementasset.StartAutoUpdater(context.Background(), configFilePath)
 
-			if cfg.AuthDir != "" {
-				kiro.InitializeAndStart(cfg.AuthDir, cfg)
-				defer kiro.StopGlobalRefreshManager()
-			}
+      if cfg.AuthDir != "" {
+        kiro.InitializeAndStart(cfg.AuthDir, cfg)
+        defer kiro.StopGlobalRefreshManager()
+      }
 
-			cmd.StartService(cfg, configFilePath, password)
+      cmd.StartService(cfg, configFilePath, password)
 		}
 	}
 }

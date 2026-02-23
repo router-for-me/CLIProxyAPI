@@ -14,7 +14,7 @@ import (
     "errors"
     "time"
 
-    "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+    "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
     "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 )
 ```
@@ -42,23 +42,6 @@ if err := svc.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 ```
 
 The service manages config/auth watching, background token refresh, and graceful shutdown. Cancel the context to stop it.
-
-## Integration Contract (In-Process First, HTTP Fallback)
-
-Recommended order for external integrations:
-
-1. Use `sdk/cliproxy` in-process when you control the runtime.
-2. Fall back to HTTP (`/v1/*`) when process boundaries require network calls.
-
-Practical capability negotiation:
-
-- Probe `/health` first.
-- Probe `/v1/models` with the intended client key.
-- If management is enabled in your deployment, probe `/v0/management/config` for config-shape compatibility.
-- Capture runtime version/build metadata from `/health` when available and gate advanced features on known-compatible versions.
-- For codex 5.3 families, explicitly confirm `gpt-5.3-codex` (and optionally `gpt-5.3-codex-spark`) appears in `/v1/models` before enabling codex-specific request paths.
-
-This keeps integration non-subprocess by default while preserving an HTTP fallback path for remote workers.
 
 ## Server Options (middleware, routes, logs)
 
@@ -92,14 +75,6 @@ These options mirror the internals used by the CLI server.
 - Management endpoints are mounted only when `remote-management.secret-key` is set in `config.yaml`.
 - Remote access additionally requires `remote-management.allow-remote: true`.
 - See MANAGEMENT_API.md for endpoints. Your embedded server exposes them under `/v0/management` on the configured port.
-
-## Provider Metrics
-
-The proxy exposes a metrics endpoint for routing optimization (cost, latency, throughput):
-
-- `GET /v1/metrics/providers`: Returns per-provider rolling statistics.
-
-This endpoint is used by `thegent` to implement routing policies like `cheapest` or `fastest`.
 
 ## Using the Core Auth Manager
 
