@@ -204,7 +204,8 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
   - [CHANGELOG](./CHANGELOG.md)
   - [Changelog Process](./docs/guides/CHANGELOG_PROCESS.md)
   - [Changelog Entry Template](./docs/guides/CHANGELOG_ENTRY_TEMPLATE.md)
-- **[Feature Changes in ++](./docs/FEATURE_CHANGES_PLUSPLUS.md)** — Detailed list of `++` differences and impacts.
+  - [Project Setup Style](./docs/guides/PROJECT_SETUP_STYLE.md)
+- **[Feature Changes in ++](./docs/FEATURE_CHANGES_PLUSPLUS.md)** — Comprehensive list of `++` differences and impacts.
 - **[Docs README](./docs/README.md)** — Core docs map.
 
 ---

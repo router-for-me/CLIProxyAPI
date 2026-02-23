@@ -1,6 +1,6 @@
 # Changelog Entry Template
 
-Use this under `## [Unreleased]`:
+Copy this into `CHANGELOG.md` under `## [Unreleased]`:
 
 ```md
 ### Added
@@ -23,5 +23,5 @@ Use this under `## [Unreleased]`:
 ```
 
 Guidelines:
-- Start with impact, not implementation details.
-- Prefer one bullet per behavior change.
+- Describe behavior change, not implementation internals.
+- Keep one bullet per externally visible change.

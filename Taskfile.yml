@@ -17,6 +17,18 @@ tasks:
       - task --list
     silent: true
 
+  check:
+    desc: "Canonical full-project check"
+    cmds:
+      - task: quality
+
+  release:prep:
+    desc: "Canonical release preparation checks"
+    cmds:
+      - task: changelog:check
+      - task: quality:release-lint
+      - task: quality:ci
+
   # -- Build & Run --
   build:
     desc: "Build the cliproxyapi++ binary"
