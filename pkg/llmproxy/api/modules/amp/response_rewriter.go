@@ -25,11 +25,22 @@ func NewResponseRewriter(w gin.ResponseWriter, originalModel string) *ResponseRe
 	return &ResponseRewriter{
 		ResponseWriter: w,
 		body:           &bytes.Buffer{},
-		originalModel:  originalModel,
+		originalModel:  sanitizeModelIDForResponse(originalModel),
 	}
 }
 
 const maxBufferedResponseBytes = 2 * 1024 * 1024 // 2MB safety cap
+
+func sanitizeModelIDForResponse(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ""
+	}
+	if strings.ContainsAny(modelID, "<>\r\n\x00") {
+		return ""
+	}
+	return modelID
+}
 
 func looksLikeSSEChunk(data []byte) bool {
 	// Fallback detection: some upstreams may omit/lie about Content-Type, causing SSE to be buffered.

@@ -1,13 +1,16 @@
 package diff
 
 import (
-	"crypto/sha256"
+	"crypto/hmac"
+	"crypto/sha512"
 	"encoding/hex"
 	"sort"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 )
+
+const vertexModelsSummaryHashKey = "watcher-vertex-models-summary:v1"
 
 type GeminiModelsSummary struct {
 	hash  string
@@ -113,9 +116,10 @@ func SummarizeVertexModels(models []config.VertexCompatModel) VertexModelsSummar
 		return VertexModelsSummary{}
 	}
 	sort.Strings(names)
-	sum := sha256.Sum256([]byte(strings.Join(names, "|")))
+	hasher := hmac.New(sha512.New, []byte(vertexModelsSummaryHashKey))
+	hasher.Write([]byte(strings.Join(names, "|")))
 	return VertexModelsSummary{
-		hash:  hex.EncodeToString(sum[:]),
+		hash:  hex.EncodeToString(hasher.Sum(nil)),
 		count: len(names),
 	}
 }

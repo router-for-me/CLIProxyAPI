@@ -205,3 +205,17 @@ func TestConfigSanitizePayloadRules_InvalidRawJSONDropped(t *testing.T) {
 		t.Fatalf("expected invalid override-raw JSON rule dropped, got %d", len(cfg.Payload.OverrideRaw))
 	}
 }
+
+func TestCheckedPathLengthPlusOne(t *testing.T) {
+	if got := checkedPathLengthPlusOne(4); got != 5 {
+		t.Fatalf("expected 5, got %d", got)
+	}
+
+	maxInt := int(^uint(0) >> 1)
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for overflow path length")
+		}
+	}()
+	_ = checkedPathLengthPlusOne(maxInt)
+}

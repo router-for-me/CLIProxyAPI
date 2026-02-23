@@ -5,6 +5,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -96,5 +97,8 @@ func ResponsesWebSocketHandler() http.Handler {
 }
 
 func writeWSError(conn *websocket.Conn, err error) {
-	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"error":"`+err.Error()+`"}`))
+	payload, _ := json.Marshal(map[string]string{
+		"error": err.Error(),
+	})
+	_ = conn.WriteMessage(websocket.TextMessage, payload)
 }

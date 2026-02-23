@@ -25,13 +25,17 @@ type IFlowTokenStorage struct {
 
 // SaveTokenToFile serialises the token storage to disk.
 func (ts *IFlowTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
+	safePath, err := misc.ResolveSafeFilePath(authFilePath)
+	if err != nil {
+		return fmt.Errorf("invalid token file path: %w", err)
+	}
+	misc.LogSavingCredentials(safePath)
 	ts.Type = "iflow"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0o700); err != nil {
+	if err = os.MkdirAll(filepath.Dir(safePath), 0o700); err != nil {
 		return fmt.Errorf("iflow token: create directory failed: %w", err)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := os.Create(safePath)
 	if err != nil {
 		return fmt.Errorf("iflow token: create file failed: %w", err)
 	}

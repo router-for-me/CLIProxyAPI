@@ -3,6 +3,7 @@ package vertex
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -45,5 +46,21 @@ func TestVertexCredentialStorage_NilChecks(t *testing.T) {
 	err = s.SaveTokenToFile("path")
 	if err == nil {
 		t.Error("expected error for empty service account")
+	}
+}
+
+func TestVertexCredentialStorage_SaveTokenToFileRejectsTraversalPath(t *testing.T) {
+	t.Parallel()
+
+	s := &VertexCredentialStorage{
+		ServiceAccount: map[string]any{"project_id": "p"},
+	}
+
+	err := s.SaveTokenToFile("../vertex.json")
+	if err == nil {
+		t.Fatal("expected error for traversal path")
+	}
+	if !strings.Contains(err.Error(), "auth file path is invalid") {
+		t.Fatalf("expected invalid path error, got %v", err)
 	}
 }

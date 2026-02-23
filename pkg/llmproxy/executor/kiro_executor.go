@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1645,7 +1647,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 
 	// Check for Haiku variants
 	if strings.Contains(modelLower, "haiku") {
-		log.Debugf("kiro: unknown Haiku model '%s', mapping to claude-haiku-4.5", model)
+		log.Debug("kiro: unknown haiku variant, mapping to claude-haiku-4.5")
 		return "claude-haiku-4.5"
 	}
 
@@ -1653,35 +1655,40 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	if strings.Contains(modelLower, "sonnet") {
 		// Check for specific version patterns
 		if strings.Contains(modelLower, "3-7") || strings.Contains(modelLower, "3.7") {
-			log.Debugf("kiro: unknown Sonnet 3.7 model '%s', mapping to claude-3-7-sonnet-20250219", model)
+			log.Debug("kiro: unknown sonnet 3.7 variant, mapping to claude-3-7-sonnet-20250219")
 			return "claude-3-7-sonnet-20250219"
 		}
 		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
-			log.Debugf("kiro: unknown Sonnet 4.6 model '%s', mapping to claude-sonnet-4.6", model)
+			log.Debug("kiro: unknown sonnet 4.6 variant, mapping to claude-sonnet-4.6")
 			return "claude-sonnet-4.6"
 		}
 		if strings.Contains(modelLower, "4-5") || strings.Contains(modelLower, "4.5") {
-			log.Debugf("kiro: unknown Sonnet 4.5 model '%s', mapping to claude-sonnet-4.5", model)
+			log.Debug("kiro: unknown Sonnet 4.5 model, mapping to claude-sonnet-4.5")
 			return "claude-sonnet-4.5"
 		}
-		// Default to Sonnet 4
-		log.Debugf("kiro: unknown Sonnet model '%s', mapping to claude-sonnet-4", model)
-		return "claude-sonnet-4"
-	}
 
 	// Check for Opus variants
 	if strings.Contains(modelLower, "opus") {
 		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
-			log.Debugf("kiro: unknown Opus 4.6 model '%s', mapping to claude-opus-4.6", model)
+			log.Debug("kiro: unknown Opus 4.6 model, mapping to claude-opus-4.6")
 			return "claude-opus-4.6"
 		}
-		log.Debugf("kiro: unknown Opus model '%s', mapping to claude-opus-4.5", model)
+		log.Debug("kiro: unknown opus variant, mapping to claude-opus-4.5")
 		return "claude-opus-4.5"
 	}
 
 	// Final fallback to Sonnet 4.5 (most commonly used model)
-	log.Warnf("kiro: unknown model '%s', falling back to claude-sonnet-4.5", model)
+	log.Warn("kiro: unknown model variant, falling back to claude-sonnet-4.5")
 	return "claude-sonnet-4.5"
+}
+
+func kiroModelFingerprint(model string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:8])
 }
 
 // EventStreamError represents an Event Stream processing error

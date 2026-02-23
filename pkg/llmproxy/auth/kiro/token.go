@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // KiroTokenStorage holds the persistent token data for Kiro authentication.
@@ -39,7 +40,11 @@ type KiroTokenStorage struct {
 
 // SaveTokenToFile persists the token storage to the specified file path.
 func (s *KiroTokenStorage) SaveTokenToFile(authFilePath string) error {
-	dir := filepath.Dir(authFilePath)
+	cleanPath, err := cleanTokenPath(authFilePath, "kiro token")
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(cleanPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
@@ -49,11 +54,27 @@ func (s *KiroTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to marshal token storage: %w", err)
 	}
 
-	if err := os.WriteFile(authFilePath, data, 0600); err != nil {
+	if err := os.WriteFile(cleanPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write token file: %w", err)
 	}
 
 	return nil
+}
+
+func cleanTokenPath(path, scope string) (string, error) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s: auth file path is empty", scope)
+	}
+	clean := filepath.Clean(filepath.FromSlash(trimmed))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%s: auth file path is invalid", scope)
+	}
+	abs, err := filepath.Abs(clean)
+	if err != nil {
+		return "", fmt.Errorf("%s: resolve auth file path: %w", scope, err)
+	}
+	return filepath.Clean(abs), nil
 }
 
 // LoadFromFile loads token storage from the specified file path.

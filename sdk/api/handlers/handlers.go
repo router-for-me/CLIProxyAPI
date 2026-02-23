@@ -501,7 +501,7 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 
 	if existing, exists := c.Get("API_RESPONSE"); exists {
 		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
-			combined := make([]byte, 0, len(existingBytes)+len(data)+1)
+			combined := make([]byte, 0, len(existingBytes))
 			combined = append(combined, existingBytes...)
 			if existingBytes[len(existingBytes)-1] != '\n' {
 				combined = append(combined, '\n')

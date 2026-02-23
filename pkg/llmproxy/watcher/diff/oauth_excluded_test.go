@@ -1,6 +1,8 @@
 package diff
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
@@ -95,6 +97,21 @@ func TestSummarizeVertexModels(t *testing.T) {
 	}
 	if blank := SummarizeVertexModels([]config.VertexCompatModel{{Name: " "}}); blank.count != 0 || blank.hash != "" {
 		t.Fatalf("expected blank model ignored, got %+v", blank)
+	}
+}
+
+func TestSummarizeVertexModels_DoesNotUseLegacySHA256(t *testing.T) {
+	summary := SummarizeVertexModels([]config.VertexCompatModel{
+		{Name: "m1"},
+		{Name: "m2"},
+	})
+	if summary.hash == "" {
+		t.Fatal("expected non-empty hash")
+	}
+
+	legacy := sha256.Sum256([]byte("m1|m2"))
+	if summary.hash == hex.EncodeToString(legacy[:]) {
+		t.Fatalf("expected vertex hash to differ from legacy sha256")
 	}
 }
 
