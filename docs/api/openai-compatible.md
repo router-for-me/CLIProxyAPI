@@ -105,6 +105,19 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   }' | jq
 ```
 
+### Claude OpenAI-Compat Troubleshooting Decision Tree
+
+1. `GET /v1/models` does not show target Claude model/alias:
+   Check `oauth-model-alias` and provider prefix mapping, then reload config and re-check `/v1/models`.
+1. Non-stream request fails with `400` schema/field error:
+   Remove provider-specific fields, keep strict OpenAI chat shape (`model`, `messages`, `stream`), and retry.
+1. Non-stream passes but stream fails or hangs:
+   Confirm ingress does not buffer SSE, then compare first SSE chunk against non-stream content for the same prompt.
+1. Tool-enabled call fails while plain chat works:
+   Retry without tools, then add one tool with minimal JSON schema to isolate tool format incompatibility.
+1. Stream/non-stream output differs materially:
+   Capture payload + model + first SSE chunks and compare conversion path before opening traffic wider.
+
 ## Common Failure Modes
 
 - `401`: missing/invalid client API key.

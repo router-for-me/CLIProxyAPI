@@ -312,6 +312,26 @@ kiro:
     prefix: "kiro"
 ```
 
+Multi-account setup/auth/model/sanity flow (`#108` scope):
+
+1. Set one auth file per account and explicit prefixes (for example `auths/kiro-work.json`, `auths/kiro-personal.json`) to avoid token overwrite.
+2. Run Kiro login with default incognito mode (do not pass `--no-incognito` unless you intentionally reuse one browser session).
+3. Validate model visibility for the same client key:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^kiro/'
+```
+
+4. Run one non-stream canary request before stream rollout:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"kiro/claude-opus-4-5","messages":[{"role":"user","content":"quick canary"}],"stream":false}' | jq '.choices[0].finish_reason'
+```
+
 Validation:
 
 ```bash

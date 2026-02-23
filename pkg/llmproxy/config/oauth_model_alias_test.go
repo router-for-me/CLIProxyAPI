@@ -105,6 +105,9 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultKiroAliases(t *testing.T) {
 	if len(cfg.OAuthModelAlias["codex"]) != 1 {
 		t.Fatal("expected codex aliases to be preserved")
 	}
+	if len(cfg.OAuthModelAlias["github-copilot"]) == 0 {
+		t.Fatal("expected default github-copilot aliases to be injected")
+	}
 }
 
 func TestSanitizeOAuthModelAlias_DoesNotOverrideUserKiroAliases(t *testing.T) {
@@ -181,5 +184,19 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultKiroWhenEmpty(t *testing.T) {
 	kiroAliases := cfg.OAuthModelAlias["kiro"]
 	if len(kiroAliases) == 0 {
 		t.Fatal("expected default kiro aliases to be injected when OAuthModelAlias is nil")
+	}
+	copilotAliases := cfg.OAuthModelAlias["github-copilot"]
+	if len(copilotAliases) == 0 {
+		t.Fatal("expected default github-copilot aliases to be injected when OAuthModelAlias is nil")
+	}
+	aliasSet := make(map[string]bool)
+	for _, a := range copilotAliases {
+		aliasSet[a.Alias] = true
+	}
+	if !aliasSet["claude-opus-4-6"] {
+		t.Fatal("expected default github-copilot alias claude-opus-4-6")
+	}
+	if !aliasSet["claude-sonnet-4-6"] {
+		t.Fatal("expected default github-copilot alias claude-sonnet-4-6")
 	}
 }

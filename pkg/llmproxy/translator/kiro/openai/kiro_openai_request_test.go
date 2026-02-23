@@ -269,6 +269,29 @@ func TestToolResultsAtEndOfConversation(t *testing.T) {
 	}
 }
 
+func TestNormalizeOrigin_MapsKnownLegacyOrigins(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "kiro cli legacy", in: "KIRO_CLI", want: "CLI"},
+		{name: "amazon q alias", in: "AMAZON_Q", want: "CLI"},
+		{name: "kiro ide legacy", in: "KIRO_IDE", want: "AI_EDITOR"},
+		{name: "kiro ai editor legacy", in: "KIRO_AI_EDITOR", want: "AI_EDITOR"},
+		{name: "passthrough", in: "CUSTOM_ORIGIN", want: "CUSTOM_ORIGIN"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeOrigin(tc.in)
+			if got != tc.want {
+				t.Fatalf("normalizeOrigin(%q)=%q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestToolResultsFollowedByAssistant verifies handling when tool results are followed
 // by an assistant message (no intermediate user message).
 // This is the pattern from LiteLLM translation of Anthropic format where:
