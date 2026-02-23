@@ -170,6 +170,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, body)
+	if err = validateOpenAICompatJSON(body); err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
 	reporter.publish(ctx, parseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
@@ -284,6 +288,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 			if !bytes.HasPrefix(line, []byte("data:")) {
 				continue
+			}
+			if err := validateOpenAICompatJSON(bytes.Clone(line)); err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: err}
+				return
 			}
 
 			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".

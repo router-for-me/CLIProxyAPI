@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/buildinfo"
@@ -26,7 +27,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/store"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"

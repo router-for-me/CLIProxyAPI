@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 
 	// Import provider packages to trigger init() registration of ProviderAppliers
 	_ "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking/provider/antigravity"

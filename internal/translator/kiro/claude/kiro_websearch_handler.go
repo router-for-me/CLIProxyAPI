@@ -18,89 +18,15 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// McpRequest represents a JSON-RPC 2.0 request to Kiro MCP API
-type McpRequest struct {
-	ID      string    `json:"id"`
-	JSONRPC string    `json:"jsonrpc"`
-	Method  string    `json:"method"`
-	Params  McpParams `json:"params"`
-}
-
-// McpParams represents MCP request parameters
-type McpParams struct {
-	Name      string       `json:"name"`
-	Arguments McpArguments `json:"arguments"`
-}
-
-// McpArgumentsMeta represents the _meta field in MCP arguments
-type McpArgumentsMeta struct {
-	IsValid        bool       `json:"_isValid"`
-	ActivePath     []string   `json:"_activePath"`
-	CompletedPaths [][]string `json:"_completedPaths"`
-}
-
-// McpArguments represents MCP request arguments
-type McpArguments struct {
-	Query string            `json:"query"`
-	Meta  *McpArgumentsMeta `json:"_meta,omitempty"`
-}
-
-// McpResponse represents a JSON-RPC 2.0 response from Kiro MCP API
-type McpResponse struct {
-	Error   *McpError  `json:"error,omitempty"`
-	ID      string     `json:"id"`
-	JSONRPC string     `json:"jsonrpc"`
-	Result  *McpResult `json:"result,omitempty"`
-}
-
-// McpError represents an MCP error
-type McpError struct {
-	Code    *int    `json:"code,omitempty"`
-	Message *string `json:"message,omitempty"`
-}
-
-// McpResult represents MCP result
-type McpResult struct {
-	Content []McpContent `json:"content"`
-	IsError bool         `json:"isError"`
-}
-
-// McpContent represents MCP content item
-type McpContent struct {
-	ContentType string `json:"type"`
-	Text        string `json:"text"`
-}
-
-// WebSearchResults represents parsed search results
-type WebSearchResults struct {
-	Results      []WebSearchResult `json:"results"`
-	TotalResults *int              `json:"totalResults,omitempty"`
-	Query        *string           `json:"query,omitempty"`
-	Error        *string           `json:"error,omitempty"`
-}
-
-// WebSearchResult represents a single search result
-type WebSearchResult struct {
-	Title                string  `json:"title"`
-	URL                  string  `json:"url"`
-	Snippet              *string `json:"snippet,omitempty"`
-	PublishedDate        *int64  `json:"publishedDate,omitempty"`
-	ID                   *string `json:"id,omitempty"`
-	Domain               *string `json:"domain,omitempty"`
-	MaxVerbatimWordLimit *int    `json:"maxVerbatimWordLimit,omitempty"`
-	PublicDomain         *bool   `json:"publicDomain,omitempty"`
-}
-
 // Cached web_search tool description fetched from MCP tools/list.
 // Uses atomic.Pointer[sync.Once] for lock-free reads with retry-on-failure:
 // - sync.Once prevents race conditions and deduplicates concurrent calls
 // - On failure, a fresh sync.Once is swapped in to allow retry on next call
 // - On success, sync.Once stays "done" forever — zero overhead for subsequent calls
 var (
-	cachedToolDescription atomic.Value // stores string
-	toolDescOnce          atomic.Pointer[sync.Once]
-	fallbackFpOnce        sync.Once
-	fallbackFp            *kiroauth.Fingerprint
+	toolDescOnce   atomic.Pointer[sync.Once]
+	fallbackFpOnce sync.Once
+	fallbackFp     *kiroauth.Fingerprint
 )
 
 func init() {
@@ -169,15 +95,6 @@ func FetchToolDescription(mcpEndpoint, authToken string, httpClient *http.Client
 		// web_search tool not found in response
 		toolDescOnce.Store(&sync.Once{}) // allow retry
 	})
-}
-
-// GetWebSearchDescription returns the cached web_search tool description,
-// or empty string if not yet fetched. Lock-free via atomic.Value.
-func GetWebSearchDescription() string {
-	if v := cachedToolDescription.Load(); v != nil {
-		return v.(string)
-	}
-	return ""
 }
 
 // WebSearchHandler handles web search requests via Kiro MCP API
@@ -323,21 +240,3 @@ func (h *WebSearchHandler) CallMcpAPI(request *McpRequest) (*McpResponse, error)
 }
 
 // ParseSearchResults extracts WebSearchResults from MCP response
-func ParseSearchResults(response *McpResponse) *WebSearchResults {
-	if response == nil || response.Result == nil || len(response.Result.Content) == 0 {
-		return nil
-	}
-
-	content := response.Result.Content[0]
-	if content.ContentType != "text" {
-		return nil
-	}
-
-	var results WebSearchResults
-	if err := json.Unmarshal([]byte(content.Text), &results); err != nil {
-		log.Warnf("kiro/websearch: failed to parse search results: %v", err)
-		return nil
-	}
-
-	return &results
-}
