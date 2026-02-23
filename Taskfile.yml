@@ -356,12 +356,18 @@ tasks:
     cmds:
       - task: preflight
       - task: quality:docs-open-items-parity
+      - task: quality:docs-phase-placeholders
       - ./.github/scripts/release-lint.sh
 
   quality:docs-open-items-parity:
     desc: "Prevent stale status drift in fragmented open-items report"
     cmds:
       - ./.github/scripts/check-open-items-fragmented-parity.sh
+
+  quality:docs-phase-placeholders:
+    desc: "Reject unresolved placeholder-like tokens in planning reports"
+    cmds:
+      - ./.github/scripts/check-phase-doc-placeholder-tokens.sh
 
   test:smoke:
     desc: "Run smoke tests for startup and control-plane surfaces"
