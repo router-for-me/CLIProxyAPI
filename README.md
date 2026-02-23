@@ -1,4 +1,4 @@
-# cliproxyapi++ 🚀
+# cliproxyapi++
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/KooshaPari/cliproxyapi-plusplus)](https://goreportcard.com/report/github.com/KooshaPari/cliproxyapi-plusplus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -7,13 +7,13 @@
 
 English | [中文](README_CN.md)
 
-**cliproxyapi++** is the definitive high-performance, security-hardened fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). Designed with a "Defense in Depth" philosophy and a "Library-First" architecture, it provides an OpenAI-compatible interface for proprietary LLMs with enterprise-grade stability.
+**cliproxyapi++** is a fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) focused on operational controls, auth lifecycle handling, and reusable proxy components. It provides an OpenAI-compatible interface for proprietary LLMs and follows a defense-in-depth and library-first architecture.
 
 ---
 
-## 🏆 Deep Dive: The `++` Advantage
+## Project Overview
 
-Why choose **cliproxyapi++** over the mainline? While the mainline focus is on open-source stability, the `++` variant is built for high-scale, production environments where security, automated lifecycle management, and broad provider support are critical.
+This section compares baseline capabilities across mainline, `+`, and `++` variants.
 
 Full feature-by-feature change reference:
 
@@ -24,48 +24,48 @@ Full feature-by-feature change reference:
 | Capability | Mainline | CLIProxyAPI+ | **cliproxyapi++** | Granular Notes |
 | :--- | :---: | :---: | :---: | :--- |
 | **OpenAI-compatible proxy endpoints** | ✅ | ✅ | ✅ | `chat/completions`, `responses`, `models` surfaces available. |
-| **Provider registry breadth** | ✅ | ✅ | ✅ | Direct + aggregator providers supported in all variants, with broader operational polish in `++`. |
+| **Provider registry breadth** | ✅ | ✅ | ✅ | Direct + aggregator providers supported in all variants, with additional provider operations surfaces in `++`. |
 | **Model aliasing / mapping layer** | ⚠️ | ✅ | ✅ | `++` emphasizes unified mapping behavior across heterogeneous upstreams. |
 | **Management API (`/v0/*`)** | ⚠️ | ✅ | ✅ | Operational controls and inspection endpoints available in `+` and `++`. |
 | **Web management UI** | ❌ | ✅ | ✅ | `++` keeps UI while hardening operational/auth flows behind it. |
 | **Kiro web OAuth flow** | ❌ | ⚠️ | ✅ | `++` includes dedicated `/v0/oauth/kiro` browser-based login surface. |
 | **GitHub Copilot OAuth/device auth depth** | ❌ | ⚠️ | ✅ | `++` adds full lifecycle handling and richer session semantics. |
-| **Advanced multi-provider auth set** | ❌ | ⚠️ | ✅ | Kiro/Copilot/Roo/Kilo/MiniMax/Cursor auth paths integrated in `++`. |
+| **Multi-provider auth set** | ❌ | ⚠️ | ✅ | Kiro/Copilot/Roo/Kilo/MiniMax/Cursor auth paths integrated in `++`. |
 | **Background token refresh worker** | ❌ | ❌ | ✅ | Auto-refresh before expiry to reduce auth-related downtime. |
 | **Credential lifecycle visibility** | ❌ | ⚠️ | ✅ | `++` provides richer auth file/account surfaces for operations. |
 | **Quota-aware provider handling** | ❌ | ⚠️ | ✅ | `++` includes cooldown and provider-state driven routing behavior. |
-| **Rate limiting + intelligent cooldown** | ❌ | ❌ | ✅ | Provider-level cooling/rotation behavior aimed at production resilience. |
-| **Failure isolation / route continuity** | ⚠️ | ⚠️ | ✅ | `++` biases toward continuing service via provider-aware routing controls. |
+| **Rate limiting + cooldown** | ❌ | ❌ | ✅ | Provider-level cooling/rotation behavior for rate limit handling. |
+| **Failure isolation / route continuity** | ⚠️ | ⚠️ | ✅ | `++` routes around unavailable providers when alternatives are configured. |
 | **Core code importability** | ❌ | ❌ | ✅ | Mainline/+ keep `internal/`; `++` exposes reusable `pkg/llmproxy`. |
 | **Library-first architecture** | ⚠️ | ⚠️ | ✅ | Translation/proxy logic packaged for embedding into other Go services. |
-| **Security controls (path guard, hardened base, fingerprinting)** | Basic | Basic | ✅ | Defense-in-depth additions for CI governance and runtime posture. |
-| **Container supply-chain posture** | Basic | Basic | ✅ | Hardened Docker base plus signed/multi-arch release workflow. |
+| **Security controls (path guard, hardened base, fingerprinting)** | Basic | Basic | ✅ | Added controls for CI governance and runtime posture. |
+| **Container supply-chain posture** | Basic | Basic | ✅ | Docker hardening plus signed multi-arch release workflow. |
 | **CI quality gates (strict lint/test/governance)** | Basic | Basic | ✅ | Expanded automation and stricter release validation in `++`. |
-| **Operational observability surfaces** | ⚠️ | ✅ | ✅ | Logs, usage, provider metrics and management views strengthened in `++`. |
-| **Production-readiness target** | Community baseline | Enhanced fork | **Enterprise-grade** | `++` is tuned for long-running agent-heavy deployments. |
+| **Operational observability surfaces** | ⚠️ | ✅ | ✅ | Logs, usage, provider metrics, and management views are expanded in `++`. |
+| **Production-readiness target** | Community baseline | Enhanced fork | Agent-heavy deployment target | `++` targets long-running agent-heavy deployments. |
 
 ---
 
-## 🔍 Technical Differences & Hardening
+## Technical Differences
 
 ### 1. Architectural Evolution: `pkg/llmproxy`
 Unlike the mainline which keeps its core logic in `internal/` (preventing external Go projects from importing it), **cliproxyapi++** has refactored its entire translation and proxying engine into a clean, public `pkg/llmproxy` library.
 *   **Reusability**: Import the proxy logic directly into your own Go applications.
 *   **Decoupling**: Configuration management is strictly separated from execution logic.
 
-### 2. Enterprise Authentication & Lifecycle
-*   **Full GitHub Copilot Integration**: Not just an API wrapper. `++` includes a full OAuth device flow, per-credential quota tracking, and intelligent session management.
-*   **Kiro (AWS CodeWhisperer) 2.0**: A custom-built web UI (`/v0/oauth/kiro`) for browser-based AWS Builder ID and Identity Center logins.
-*   **Background Token Refresh**: A dedicated worker service monitors tokens and automatically refreshes them 10 minutes before expiration, ensuring zero downtime for your agents.
+### 2. Authentication & Lifecycle Management
+*   **GitHub Copilot integration**: `++` includes OAuth device flow support, per-credential quota tracking, and session handling.
+*   **Kiro (AWS CodeWhisperer) login flow**: A web UI (`/v0/oauth/kiro`) supports AWS Builder ID and Identity Center logins.
+*   **Background token refresh**: A worker service monitors tokens and refreshes them 10 minutes before expiration.
 
-### 3. Security Hardening ("Defense in Depth")
+### 3. Security Controls
 *   **Path Guard**: A custom GitHub Action workflow (`pr-path-guard`) that prevents any unauthorized changes to critical `internal/translator/` logic during PRs.
 *   **Device Fingerprinting**: Generates unique, immutable device identifiers to satisfy strict provider security checks and prevent account flagging.
 *   **Hardened Docker Base**: Built on a specific, audited Alpine 3.22.0 layer with minimal packages, reducing the potential attack surface.
 
-### 4. High-Scale Operations
-*   **Intelligent Cooldown**: Automated "cooling" mechanism that detects provider-side rate limits and intelligently pauses requests to specific providers while routing others.
-*   **Unified Model Converter**: A sophisticated mapping layer that allows you to request `claude-3-5-sonnet` and have the proxy automatically handle the specific protocol requirements of the target provider (Vertex, AWS, Anthropic, etc.).
+### 4. Operations
+*   **Cooldown**: Automated mechanism that detects provider-side rate limits and pauses requests to specific providers while routing others.
+*   **Unified model converter**: Mapping layer that translates requested models (for example `claude-3-5-sonnet`) to provider-specific requirements (Vertex, AWS, Anthropic, etc.).
 
 ---
 
@@ -158,7 +158,7 @@ The proxy provides two main API surfaces:
 
 ## 🤝 Contributing
 
-We maintain strict quality gates to preserve the "hardened" status of the project:
+We maintain strict quality gates:
 1.  **Linting**: Must pass `golangci-lint` with zero warnings.
 2.  **Coverage**: All new translator logic MUST include unit tests.
 3.  **Governance**: Changes to core `pkg/` logic require a corresponding Issue discussion.
@@ -204,7 +204,7 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
   - [CHANGELOG](./CHANGELOG.md)
   - [Changelog Process](./docs/guides/CHANGELOG_PROCESS.md)
   - [Changelog Entry Template](./docs/guides/CHANGELOG_ENTRY_TEMPLATE.md)
-- **[Feature Changes in ++](./docs/FEATURE_CHANGES_PLUSPLUS.md)** — Comprehensive list of `++` differences and impacts.
+- **[Feature Changes in ++](./docs/FEATURE_CHANGES_PLUSPLUS.md)** — Detailed list of `++` differences and impacts.
 - **[Docs README](./docs/README.md)** — Core docs map.
 
 ---
@@ -234,6 +234,5 @@ Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
 ---
 
 <p align="center">
-  <b>Hardened AI Infrastructure for the Modern Agentic Stack.</b><br>
-  Built with ❤️ by the community.
+  <b>OpenAI-compatible proxy infrastructure for agentic workloads.</b>
 </p>
