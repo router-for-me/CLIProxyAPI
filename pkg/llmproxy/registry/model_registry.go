@@ -671,7 +671,7 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	}
 	delete(registration.SuspendedClients, clientID)
 	registration.LastUpdated = time.Now()
-	log.Debugf("Resumed client %s for model %s", clientID, modelID)
+	log.Debug("Resumed suspended client for model")
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.

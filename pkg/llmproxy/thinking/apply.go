@@ -147,13 +147,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	} else {
 		config = extractThinkingConfig(body, providerFormat)
 		if hasThinkingConfig(config) {
-			log.WithFields(log.Fields{
-				"provider": providerFormat,
-				"model":    modelInfo.ID,
-				"mode":     config.Mode,
-				"budget":   config.Budget,
-				"level":    config.Level,
-			}).Debug("thinking: original config from request |")
+			log.WithField("provider", providerFormat).Debug("thinking: request includes thinking config |")
 		}
 	}
 
