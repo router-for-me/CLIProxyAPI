@@ -109,7 +109,6 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			created, _ = sjson.Set(created, "sequence_number", nextSeq())
 			created, _ = sjson.Set(created, "response.id", st.ResponseID)
 			created, _ = sjson.Set(created, "response.created_at", st.CreatedAt)
-			created, _ = sjson.Set(created, "response.model", modelName)
 			out = append(out, emitEvent("response.created", created))
 			// response.in_progress
 			inprog := `{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress"}}`
@@ -413,14 +412,19 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		if st.ReasoningBuf.Len() > 0 {
 			reasoningTokens = int64(st.ReasoningBuf.Len() / 4)
 		}
-		completed, _ = sjson.Set(completed, "response.usage.input_tokens", st.InputTokens)
-		completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", 0)
-		completed, _ = sjson.Set(completed, "response.usage.output_tokens", st.OutputTokens)
-		if reasoningTokens > 0 {
-			completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
+		usagePresent := st.UsageSeen || reasoningTokens > 0
+		if usagePresent {
+			completed, _ = sjson.Set(completed, "response.usage.input_tokens", st.InputTokens)
+			completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", 0)
+			completed, _ = sjson.Set(completed, "response.usage.output_tokens", st.OutputTokens)
+			if reasoningTokens > 0 {
+				completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
+			}
+			total := st.InputTokens + st.OutputTokens
+			if total > 0 || st.UsageSeen {
+				completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
+			}
 		}
-		total := st.InputTokens + st.OutputTokens
-		completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
 		out = append(out, emitEvent("response.completed", completed))
 	}
 

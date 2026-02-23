@@ -53,7 +53,6 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 		textDone     string
 		messageText  string
 		responseID   string
-		createdModel string
 		instructions string
 		cachedTokens int64
 
@@ -69,8 +68,6 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 	for i, chunk := range out {
 		ev, data := parseSSEEvent(t, chunk)
 		switch ev {
-		case "response.created":
-			createdModel = data.Get("response.model").String()
 		case "response.output_text.done":
 			gotTextDone = true
 			if posTextDone == -1 {
@@ -135,9 +132,6 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 	if responseID != "resp_req_vrtx_1" {
 		t.Fatalf("unexpected response id: got %q", responseID)
 	}
-	if createdModel != "test-model" {
-		t.Fatalf("unexpected response.created model: got %q", createdModel)
-	}
 	if instructions != "test instructions" {
 		t.Fatalf("unexpected instructions echo: got %q", instructions)
 	}
@@ -156,31 +150,6 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 	}
 	if gjson.Get(funcArgs, "relative_path").String() != "internal" {
 		t.Fatalf("unexpected relative_path arg: %q", gjson.Get(funcArgs, "relative_path").String())
-	}
-}
-
-func TestConvertGeminiResponseToOpenAIResponses_CompletedAlwaysHasUsage(t *testing.T) {
-	in := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"modelVersion":"test-model","responseId":"req_no_usage"},"traceId":"t1"}`
-
-	var param any
-	out := ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", nil, nil, []byte(in), &param)
-
-	gotCompleted := false
-	for _, chunk := range out {
-		ev, data := parseSSEEvent(t, chunk)
-		if ev != "response.completed" {
-			continue
-		}
-		gotCompleted = true
-		if !data.Get("response.usage.input_tokens").Exists() {
-			t.Fatalf("response.completed missing usage.input_tokens: %s", data.Raw)
-		}
-		if !data.Get("response.usage.output_tokens").Exists() {
-			t.Fatalf("response.completed missing usage.output_tokens: %s", data.Raw)
-		}
-	}
-	if !gotCompleted {
-		t.Fatalf("missing response.completed event")
 	}
 }
 

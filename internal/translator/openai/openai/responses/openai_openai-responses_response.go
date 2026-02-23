@@ -153,7 +153,6 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		created, _ = sjson.Set(created, "sequence_number", nextSeq())
 		created, _ = sjson.Set(created, "response.id", st.ResponseID)
 		created, _ = sjson.Set(created, "response.created_at", st.Created)
-		created, _ = sjson.Set(created, "response.model", modelName)
 		out = append(out, emitRespEvent("response.created", created))
 
 		inprog := `{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress"}}`
@@ -579,17 +578,19 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				if gjson.Get(outputsWrapper, "arr.#").Int() > 0 {
 					completed, _ = sjson.SetRaw(completed, "response.output", gjson.Get(outputsWrapper, "arr").Raw)
 				}
-				completed, _ = sjson.Set(completed, "response.usage.input_tokens", st.PromptTokens)
-				completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
-				completed, _ = sjson.Set(completed, "response.usage.output_tokens", st.CompletionTokens)
-				if st.ReasoningTokens > 0 {
-					completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", st.ReasoningTokens)
+				if st.UsageSeen {
+					completed, _ = sjson.Set(completed, "response.usage.input_tokens", st.PromptTokens)
+					completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
+					completed, _ = sjson.Set(completed, "response.usage.output_tokens", st.CompletionTokens)
+					if st.ReasoningTokens > 0 {
+						completed, _ = sjson.Set(completed, "response.usage.output_tokens_details.reasoning_tokens", st.ReasoningTokens)
+					}
+					total := st.TotalTokens
+					if total == 0 {
+						total = st.PromptTokens + st.CompletionTokens
+					}
+					completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
 				}
-				total := st.TotalTokens
-				if total == 0 {
-					total = st.PromptTokens + st.CompletionTokens
-				}
-				completed, _ = sjson.Set(completed, "response.usage.total_tokens", total)
 				out = append(out, emitRespEvent("response.completed", completed))
 			}
 
