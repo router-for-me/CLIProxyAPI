@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,6 +64,19 @@ func TestGeminiTokenStorage_SaveAndLoad(t *testing.T) {
 
 	if len(data) == 0 {
 		t.Fatal("saved file is empty")
+	}
+}
+
+func TestGeminiTokenStorage_SaveTokenToFile_RejectsTraversalPath(t *testing.T) {
+	ts := &GeminiTokenStorage{Token: "raw-token-data"}
+	badPath := t.TempDir() + "/../gemini-token.json"
+
+	err := ts.SaveTokenToFile(badPath)
+	if err == nil {
+		t.Fatal("expected error for traversal path")
+	}
+	if !strings.Contains(err.Error(), "invalid token file path") {
+		t.Fatalf("expected invalid path error, got %v", err)
 	}
 }
 
