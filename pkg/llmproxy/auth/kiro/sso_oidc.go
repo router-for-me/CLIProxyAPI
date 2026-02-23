@@ -377,7 +377,7 @@ func normalizeOIDCRegion(region string) (string, error) {
 	if trimmed == "" {
 		return defaultIDCRegion, nil
 	}
-	if !oidcRegionPattern.MatchString(trimmed) {
+	if !awsRegionPattern.MatchString(trimmed) {
 		return "", fmt.Errorf("invalid OIDC region %q", region)
 	}
 	return trimmed, nil
