@@ -8,7 +8,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -319,39 +318,16 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				fn := t.Get("function")
 				if fn.Exists() && fn.IsObject() {
 					fnRaw := fn.Raw
-					if fn.Get("parameters").Exists() {
-						renamed, errRename := util.RenameKey(fnRaw, "parameters", "parametersJsonSchema")
-						if errRename != nil {
-							log.Warnf("Failed to rename parameters for tool '%s': %v", fn.Get("name").String(), errRename)
-							var errSet error
-							fnRaw, errSet = sjson.Set(fnRaw, "parametersJsonSchema.type", "object")
-							if errSet != nil {
-								log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
-								continue
-							}
-							fnRaw, errSet = sjson.SetRaw(fnRaw, "parametersJsonSchema.properties", `{}`)
-							if errSet != nil {
-								log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
-								continue
-							}
-						} else {
-							fnRaw = renamed
-						}
-					} else {
-						var errSet error
-						fnRaw, errSet = sjson.Set(fnRaw, "parametersJsonSchema.type", "object")
-						if errSet != nil {
-							log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
-							continue
-						}
-						fnRaw, errSet = sjson.SetRaw(fnRaw, "parametersJsonSchema.properties", `{}`)
-						if errSet != nil {
-							log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
-							continue
-						}
+					params := fn.Get("parameters")
+					if !params.Exists() {
+						params = fn.Get("parametersJsonSchema")
 					}
+					strict := fn.Get("strict").Exists() && fn.Get("strict").Bool()
+					schema := common.NormalizeOpenAIFunctionSchemaForGemini(params, strict)
+					fnRaw, _ = sjson.Delete(fnRaw, "parameters")
+					fnRaw, _ = sjson.Delete(fnRaw, "parametersJsonSchema")
 					fnRaw, _ = sjson.Delete(fnRaw, "strict")
-					fnRaw = common.SanitizeParametersJSONSchemaForGemini(fnRaw)
+					fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema", schema)
 					if !hasFunction {
 						functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", []byte("[]"))
 					}

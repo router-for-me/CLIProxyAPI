@@ -7,34 +7,51 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-2`
 
 ### #169
 - Status: `pending`
-- Notes: lane-started
+- Notes: not selected in this pass; kept pending while lane A closed five higher-confidence runtime/code items first.
 
 ### #165
-- Status: `pending`
-- Notes: lane-started
+- Status: `implemented`
+- Notes: tightened Kiro quota diagnostics/compatibility in management handler:
+  - `auth_index` query now accepts aliases: `authIndex`, `AuthIndex`, `index`
+  - error payloads now include `auth_index` and token-resolution detail when available
+  - tests added/updated in `pkg/llmproxy/api/handlers/management/api_tools_test.go`
 
 ### #163
-- Status: `pending`
-- Notes: lane-started
+- Status: `implemented`
+- Notes: hardened malformed/legacy tool-call argument normalization for Kiro OpenAI translation:
+  - non-object JSON arguments preserved as `{ "value": ... }`
+  - non-JSON arguments preserved as `{ "raw": "<literal>" }`
+  - focused regression added in `pkg/llmproxy/translator/kiro/openai/kiro_openai_request_test.go`
 
 ### #158
-- Status: `pending`
-- Notes: lane-started
+- Status: `implemented`
+- Notes: improved OAuth upstream key compatibility normalization:
+  - channel normalization now handles underscore/space variants (`github_copilot` -> `github-copilot`)
+  - sanitation + lookup use the same normalization helper
+  - coverage extended in `pkg/llmproxy/config/oauth_upstream_test.go`
 
 ### #160
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: blocked pending a reproducible failing fixture on duplicate-output streaming path.
+  - Current stream/tool-link normalization tests already cover ambiguous/missing call ID and duplicate-reasoning guardrails in `pkg/llmproxy/runtime/executor/kimi_executor_test.go`.
+  - No deterministic regression sample in this repo currently maps to a safe, bounded code delta without speculative behavior changes.
 
 ### #149
-- Status: `pending`
-- Notes: lane-started
+- Status: `implemented`
+- Notes: hardened Kiro IDC token-refresh path:
+  - prevents invalid fallback to social OAuth refresh when IDC client credentials are missing
+  - returns actionable remediation text (`--kiro-aws-login` / `--kiro-aws-authcode` / re-import guidance)
+  - regression added in `sdk/auth/kiro_refresh_test.go`
 
 ## Focused Checks
 
-- `task quality:fmt:check` (baseline)
-- `QUALITY_PACKAGES='./pkg/llmproxy/api ./sdk/api/handlers/openai' task quality:quick`
+- `go test ./pkg/llmproxy/config -run 'OAuthUpstream' -count=1`
+- `go test ./pkg/llmproxy/translator/kiro/openai -run 'BuildAssistantMessageFromOpenAI' -count=1`
+- `go test ./sdk/auth -run 'KiroRefresh' -count=1`
+- `go test ./pkg/llmproxy/api/handlers/management -run 'GetKiroQuotaWithChecker' -count=1`
+- `go vet ./...`
+- `task quality:quick` (started; fmt/preflight/lint and many package tests passed, long-running suite still active in shared environment session)
 
 ## Blockers
 
-- None recorded yet; work is in planning state.
-
+- #160 blocked on missing deterministic reproduction fixture for duplicate-output stream bug in current repo state.

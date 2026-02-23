@@ -94,8 +94,16 @@ func GeminiTokenCount(ctx context.Context, count int64) string {
 // When returning standard Gemini API format, we must restore the original name.
 func restoreUsageMetadata(chunk []byte) []byte {
 	if cpaUsage := gjson.GetBytes(chunk, "cpaUsageMetadata"); cpaUsage.Exists() {
-		chunk, _ = sjson.SetRawBytes(chunk, "usageMetadata", []byte(cpaUsage.Raw))
+		if !gjson.GetBytes(chunk, "usageMetadata").Exists() {
+			chunk, _ = sjson.SetRawBytes(chunk, "usageMetadata", []byte(cpaUsage.Raw))
+		}
 		chunk, _ = sjson.DeleteBytes(chunk, "cpaUsageMetadata")
+	}
+	if cpaUsage := gjson.GetBytes(chunk, "response.cpaUsageMetadata"); cpaUsage.Exists() {
+		if !gjson.GetBytes(chunk, "response.usageMetadata").Exists() {
+			chunk, _ = sjson.SetRawBytes(chunk, "response.usageMetadata", []byte(cpaUsage.Raw))
+		}
+		chunk, _ = sjson.DeleteBytes(chunk, "response.cpaUsageMetadata")
 	}
 	return chunk
 }

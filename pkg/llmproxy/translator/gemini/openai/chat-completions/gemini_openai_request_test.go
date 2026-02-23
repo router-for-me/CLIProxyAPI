@@ -86,3 +86,31 @@ func TestConvertOpenAIRequestToGeminiSkipsEmptyAssistantMessage(t *testing.T) {
 		t.Fatalf("expected only user entries, got %s", res.Get("contents").Raw)
 	}
 }
+
+func TestConvertOpenAIRequestToGeminiStrictToolSchemaSetsClosedObject(t *testing.T) {
+	input := []byte(`{
+		"model":"gemini-2.5-pro",
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[
+			{
+				"type":"function",
+				"function":{
+					"name":"save_note",
+					"description":"Save a note",
+					"strict":true,
+					"parameters":{"type":"object","properties":{"note":{"type":"string"}}}
+				}
+			}
+		]
+	}`)
+
+	got := ConvertOpenAIRequestToGemini("gemini-2.5-pro", input, false)
+	res := gjson.ParseBytes(got)
+
+	if !res.Get("tools.0.functionDeclarations.0.parametersJsonSchema.additionalProperties").Exists() {
+		t.Fatalf("expected additionalProperties to be set for strict schema")
+	}
+	if res.Get("tools.0.functionDeclarations.0.parametersJsonSchema.additionalProperties").Bool() {
+		t.Fatalf("expected additionalProperties=false for strict schema")
+	}
+}

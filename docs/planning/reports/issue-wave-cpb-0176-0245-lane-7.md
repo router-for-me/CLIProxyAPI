@@ -8,8 +8,8 @@
 
 ## Status Snapshot
 
-- `planned`: 5
-- `implemented`: 0
+- `planned`: 3
+- `implemented`: 2
 - `in_progress`: 5
 - `blocked`: 0
 
@@ -88,16 +88,22 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0242 – Harden "[Feature request] Support nested object parameter mapping in payload config" with clearer validation, safer defaults, and defensive fallbacks.
-- Status: `planned`
+- Status: `implemented`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1384`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
+  - Added payload-rule path validation across `payload.default`, `payload.override`, `payload.filter`, `payload.default-raw`, and `payload.override-raw`.
+  - Added regression tests covering valid nested paths, invalid path rejection, and invalid raw-JSON rejection.
+- Implemented changes:
+  - `pkg/llmproxy/config/config.go`
+  - `pkg/llmproxy/config/config_test.go`
+- Verification commands:
   - `rg -n "CPB-0242" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - `go test ./pkg/llmproxy/config`
+- Outcome:
+  - Payload rules with malformed nested paths are now dropped during config sanitization.
+  - Valid nested-object paths continue to work and remain covered by tests.
+  - `go test ./pkg/llmproxy/config` passed.
 
 ### CPB-0243 – Operationalize "Claude authentication failed in v6.7.41 (works in v6.7.25)" with observability, alerting thresholds, and runbook updates.
 - Status: `planned`
@@ -112,16 +118,19 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0244 – Convert "Question: Does load balancing work with 2 Codex accounts for the Responses API?" into a provider-agnostic pattern and codify in shared translation utilities.
-- Status: `planned`
+- Status: `implemented`
 - Theme: `responses-and-chat-compat`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1382`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
+  - Extended provider quickstart docs with copy-paste two-account Codex `/v1/responses` load-balancing validation loop.
+  - Added explicit troubleshooting decision steps for mixed account health, model visibility mismatch, and stream/non-stream parity checks.
+- Implemented changes:
+  - `docs/provider-quickstarts.md`
+- Verification commands:
   - `rg -n "CPB-0244" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - `rg -n "Codex Responses load-balancing quickstart|Question: Does load balancing work with 2 Codex accounts" docs/provider-quickstarts.md`
+- Outcome:
+  - Load-balancing quickstart and troubleshooting are now documented in one place for Codex Responses operators.
 
 ### CPB-0245 – Add DX polish around "登陆提示“登录失败: 访问被拒绝，权限不足”" through improved command ergonomics and faster feedback loops.
 - Status: `planned`
@@ -138,7 +147,10 @@
 ## Evidence & Commands Run
 
 - `rg -n "CPB-0176|CPB-0245" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`
-- No repository code changes were performed in this lane in this pass; planning only.
+- `rg -n "CPB-0236|CPB-0237|CPB-0238|CPB-0239|CPB-0240|CPB-0241|CPB-0242|CPB-0243|CPB-0244|CPB-0245" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
+- `go test ./pkg/llmproxy/config ./pkg/llmproxy/executor -run 'TestConfigSanitizePayloadRules|TestCodexExecutor_Compact'` (expected partial failure: pre-existing unrelated compile error in `pkg/llmproxy/executor/claude_executor_test.go` about `CacheUserID`)
+- `go test ./pkg/llmproxy/config` (pass)
+- `rg -n "Codex Responses load-balancing quickstart|Question: Does load balancing work with 2 Codex accounts" docs/provider-quickstarts.md`
 
 ## Next Actions
-- Move item by item from `planned` to `implemented` only when regression tests and code updates are committed.
+- Continue lane-7 execution for remaining `in_progress` / `planned` items with the same pattern: concrete code/doc changes, targeted Go tests, and per-item evidence.

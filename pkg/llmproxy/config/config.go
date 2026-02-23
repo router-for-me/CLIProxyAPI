@@ -85,6 +85,10 @@ type Config struct {
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
+	// ResponsesWebsocketEnabled gates the dedicated /v1/responses/ws route rollout.
+	// Nil means enabled (default behavior).
+	ResponsesWebsocketEnabled *bool `yaml:"responses-websocket-enabled,omitempty" json:"responses-websocket-enabled,omitempty"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -836,8 +840,41 @@ func (cfg *Config) SanitizePayloadRules() {
 	if cfg == nil {
 		return
 	}
+	cfg.Payload.Default = sanitizePayloadRules(cfg.Payload.Default, "default")
+	cfg.Payload.Override = sanitizePayloadRules(cfg.Payload.Override, "override")
+	cfg.Payload.Filter = sanitizePayloadFilterRules(cfg.Payload.Filter, "filter")
 	cfg.Payload.DefaultRaw = sanitizePayloadRawRules(cfg.Payload.DefaultRaw, "default-raw")
 	cfg.Payload.OverrideRaw = sanitizePayloadRawRules(cfg.Payload.OverrideRaw, "override-raw")
+}
+
+func sanitizePayloadRules(rules []PayloadRule, section string) []PayloadRule {
+	if len(rules) == 0 {
+		return rules
+	}
+	out := make([]PayloadRule, 0, len(rules))
+	for i := range rules {
+		rule := rules[i]
+		if len(rule.Params) == 0 {
+			continue
+		}
+		invalid := false
+		for path := range rule.Params {
+			if payloadPathInvalid(path) {
+				log.WithFields(log.Fields{
+					"section":    section,
+					"rule_index": i + 1,
+					"param":      path,
+				}).Warn("payload rule dropped: invalid parameter path")
+				invalid = true
+				break
+			}
+		}
+		if invalid {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
 }
 
 func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule {
@@ -852,6 +889,15 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		}
 		invalid := false
 		for path, value := range rule.Params {
+			if payloadPathInvalid(path) {
+				log.WithFields(log.Fields{
+					"section":    section,
+					"rule_index": i + 1,
+					"param":      path,
+				}).Warn("payload rule dropped: invalid parameter path")
+				invalid = true
+				break
+			}
 			raw, ok := payloadRawString(value)
 			if !ok {
 				continue
@@ -873,6 +919,44 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		out = append(out, rule)
 	}
 	return out
+}
+
+func sanitizePayloadFilterRules(rules []PayloadFilterRule, section string) []PayloadFilterRule {
+	if len(rules) == 0 {
+		return rules
+	}
+	out := make([]PayloadFilterRule, 0, len(rules))
+	for i := range rules {
+		rule := rules[i]
+		if len(rule.Params) == 0 {
+			continue
+		}
+		invalid := false
+		for _, path := range rule.Params {
+			if payloadPathInvalid(path) {
+				log.WithFields(log.Fields{
+					"section":    section,
+					"rule_index": i + 1,
+					"param":      path,
+				}).Warn("payload filter rule dropped: invalid parameter path")
+				invalid = true
+				break
+			}
+		}
+		if invalid {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
+}
+
+func payloadPathInvalid(path string) bool {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return true
+	}
+	return strings.HasPrefix(p, ".") || strings.HasSuffix(p, ".") || strings.Contains(p, "..")
 }
 
 func payloadRawString(value any) ([]byte, bool) {
@@ -966,7 +1050,7 @@ func (cfg *Config) SanitizeOAuthUpstream() {
 	}
 	out := make(map[string]string, len(cfg.OAuthUpstream))
 	for rawChannel, rawURL := range cfg.OAuthUpstream {
-		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		channel := normalizeOAuthUpstreamChannel(rawChannel)
 		if channel == "" {
 			continue
 		}
@@ -985,11 +1069,34 @@ func (cfg *Config) OAuthUpstreamURL(channel string) string {
 	if cfg == nil || len(cfg.OAuthUpstream) == 0 {
 		return ""
 	}
-	key := strings.ToLower(strings.TrimSpace(channel))
+	key := normalizeOAuthUpstreamChannel(channel)
 	if key == "" {
 		return ""
 	}
 	return strings.TrimSpace(cfg.OAuthUpstream[key])
+}
+
+func normalizeOAuthUpstreamChannel(channel string) string {
+	key := strings.TrimSpace(strings.ToLower(channel))
+	if key == "" {
+		return ""
+	}
+	key = strings.ReplaceAll(key, "_", "-")
+	key = strings.ReplaceAll(key, " ", "-")
+	key = strings.ReplaceAll(key, ".", "-")
+	key = strings.ReplaceAll(key, "/", "-")
+	key = strings.Trim(key, "-")
+	key = strings.Join(strings.FieldsFunc(key, func(r rune) bool { return r == '-' }), "-")
+	return key
+}
+
+// IsResponsesWebsocketEnabled returns true when the dedicated responses websocket
+// route should be mounted. Default is enabled when unset.
+func (cfg *Config) IsResponsesWebsocketEnabled() bool {
+	if cfg == nil || cfg.ResponsesWebsocketEnabled == nil {
+		return true
+	}
+	return *cfg.ResponsesWebsocketEnabled
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
@@ -1308,13 +1415,14 @@ func (cfg *Config) ApplyEnvOverrides() {
 	// CLIPROXY_ROUTING_STRATEGY - Routing strategy (round-robin/fill-first)
 	if val := os.Getenv("CLIPROXY_ROUTING_STRATEGY"); val != "" {
 		normalized := strings.ToLower(strings.TrimSpace(val))
-		if normalized == "round-robin" || normalized == "roundrobin" || normalized == "rr" {
+		switch normalized {
+		case "round-robin", "roundrobin", "rr":
 			cfg.Routing.Strategy = "round-robin"
 			log.Info("Applied CLIPROXY_ROUTING_STRATEGY override: round-robin")
-		} else if normalized == "fill-first" || normalized == "fillfirst" || normalized == "ff" {
+		case "fill-first", "fillfirst", "ff":
 			cfg.Routing.Strategy = "fill-first"
 			log.Info("Applied CLIPROXY_ROUTING_STRATEGY override: fill-first")
-		} else {
+		default:
 			log.WithField("value", val).Warn("Invalid CLIPROXY_ROUTING_STRATEGY value, ignoring")
 		}
 	}

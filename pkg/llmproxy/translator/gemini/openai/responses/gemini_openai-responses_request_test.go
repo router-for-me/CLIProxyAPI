@@ -120,3 +120,32 @@ func TestConvertOpenAIResponsesRequestToGeminiHandlesNullableTypeArrays(t *testi
 		t.Fatalf("expected content.type not to be stringified type array, got %q", contentType.String())
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToGeminiStrictSchemaClosesAdditionalProperties(t *testing.T) {
+	input := []byte(`{
+		"model":"gemini-2.0-flash",
+		"input":"hello",
+		"tools":[
+			{
+				"type":"function",
+				"name":"write_file",
+				"description":"write file content",
+				"strict":true,
+				"parameters":{
+					"type":"object",
+					"properties":{"path":{"type":"string"}}
+				}
+			}
+		]
+	}`)
+
+	got := ConvertOpenAIResponsesRequestToGemini("gemini-2.0-flash", input, false)
+	res := gjson.ParseBytes(got)
+
+	if !res.Get("tools.0.functionDeclarations.0.parametersJsonSchema.additionalProperties").Exists() {
+		t.Fatalf("expected strict schema to set additionalProperties")
+	}
+	if res.Get("tools.0.functionDeclarations.0.parametersJsonSchema.additionalProperties").Bool() {
+		t.Fatalf("expected additionalProperties=false for strict schema")
+	}
+}

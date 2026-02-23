@@ -9,23 +9,25 @@
 ## Status Snapshot
 
 - `planned`: 0
-- `implemented`: 0
-- `in_progress`: 10
+- `implemented`: 2
+- `in_progress`: 8
 - `blocked`: 0
 
 ## Per-Item Status
 
 ### CPB-0206 – Expand docs and examples for "Feature request: Add support for claude opus 4.6" with copy-paste quickstart and troubleshooting section.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `install-and-ops`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1439`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0206" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+- Delivered:
+  - Added explicit Opus 4.6 non-stream quickstart sanity request.
+  - Added Opus 4.6 streaming parity check command.
+  - Added troubleshooting matrix entry for missing/invalid `claude-opus-4-6` mapping with concrete diagnostics and remediation.
+- Files:
+  - `docs/provider-quickstarts.md`
+  - `docs/troubleshooting.md`
+- Verification commands:
+  - `rg -n "Opus 4.6 quickstart sanity check|claude-opus-4-6|streaming parity check" docs/provider-quickstarts.md docs/troubleshooting.md`
 
 ### CPB-0207 – Define non-subprocess integration path related to "Feature request: Add support for perplexity" (Go bindings surface + HTTP fallback contract + version negotiation).
 - Status: `in_progress`
@@ -40,16 +42,18 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0208 – Refactor implementation behind "iflow kimi-k2.5 无法正常统计消耗的token数，一直是0" to reduce complexity and isolate transformation boundaries.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `thinking-and-reasoning`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1437`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0208" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+- Delivered:
+  - Added usage total-token fallback aggregation when top-level `usage.total_tokens` is `0`/missing.
+  - Added detail-level token normalization for both nested `tokens.*` and flat fields (`prompt_tokens`, `completion_tokens`, etc.).
+  - Added focused unit tests for fallback resolution and breakdown merging behavior.
+- Files:
+  - `pkg/llmproxy/tui/usage_tab.go`
+  - `pkg/llmproxy/tui/usage_tab_test.go`
+- Verification commands:
+  - `go test ./pkg/llmproxy/tui -run 'TestResolveUsageTotalTokens|TestUsageTokenBreakdown' -count=1`
 
 ### CPB-0209 – Port relevant thegent-managed flow implied by "[BUG] Invalid JSON payload with large requests (~290KB) - truncated body" into first-class cliproxy Go CLI command(s) with interactive setup support.
 - Status: `in_progress`
@@ -137,8 +141,9 @@
 
 ## Evidence & Commands Run
 
-- `rg -n "CPB-0176|CPB-0245" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`
-- No repository code changes were performed in this lane in this pass; planning only.
+- `rg -n "Opus 4.6 quickstart sanity check|claude-opus-4-6|streaming parity check" docs/provider-quickstarts.md docs/troubleshooting.md`
+- `go test ./pkg/llmproxy/tui -run 'TestResolveUsageTotalTokens|TestUsageTokenBreakdown' -count=1`
+- `go test ./pkg/llmproxy/util -run 'TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields' -count=1`
 
 ## Next Actions
-- Move item by item from `planned` to `implemented` only when regression tests and code updates are committed.
+- Continue CPB-0207..0215 remaining `in_progress` items with same pattern: concrete code/docs change + focused test evidence.

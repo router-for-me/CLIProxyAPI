@@ -74,6 +74,19 @@ This runbook is for operators who care about provider uptime, quota health, and 
   - Alert when canary success rate drops or `4xx` translation errors spike for that scenario.
   - Route impacted traffic to a known-good provider prefix while triaging translator output.
 
+### Stream/Non-Stream Usage Parity Check
+
+- Goal: confirm token usage fields are consistent between stream and non-stream responses for the same prompt.
+- Commands:
+  - Non-stream:
+    - `curl -sS http://localhost:8317/v1/responses -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" -d '{"model":"gpt-5.1-codex","input":[{"role":"user","content":"ping"}],"stream":false}' | tee /tmp/nonstream.json | jq '{input_tokens: .usage.input_tokens, output_tokens: .usage.output_tokens, total_tokens: .usage.total_tokens}'`
+  - Stream (extract terminal usage event):
+    - `curl -sN http://localhost:8317/v1/responses -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" -d '{"model":"gpt-5.1-codex","input":[{"role":"user","content":"ping"}],"stream":true}' | rg '^data:' | sed 's/^data: //' | jq -c 'select(.usage? != null) | {input_tokens: (.usage.input_tokens // .usage.prompt_tokens), output_tokens: (.usage.output_tokens // .usage.completion_tokens), total_tokens: .usage.total_tokens}' | tail -n 1 | tee /tmp/stream-usage.json`
+  - Compare:
+    - `diff -u <(jq -S . /tmp/nonstream.json | jq '{input_tokens: .usage.input_tokens, output_tokens: .usage.output_tokens, total_tokens: .usage.total_tokens}') <(jq -S . /tmp/stream-usage.json)`
+- Pass criteria:
+  - `diff` is empty, or any difference is explainable by provider-side truncation/stream interruption.
+
 ### Copilot Spark Mismatch (`gpt-5.3-codex-spark`)
 
 - Symptom: plus/team users get `400/404 model_not_found` for `gpt-5.3-codex-spark`.

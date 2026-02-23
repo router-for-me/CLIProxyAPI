@@ -80,6 +80,132 @@ func TestLoadConfigOptional_DirectoryPath(t *testing.T) {
 	}
 }
 
+func TestConfigSanitizePayloadRules_ValidNestedPathsPreserved(t *testing.T) {
+	cfg := &Config{
+		Payload: PayloadConfig{
+			Default: []PayloadRule{
+				{
+					Params: map[string]any{
+						"response_format.json_schema.schema.properties.output.type": "string",
+					},
+				},
+			},
+			Override: []PayloadRule{
+				{
+					Params: map[string]any{
+						"metadata.flags.enable_nested_mapping": true,
+					},
+				},
+			},
+			Filter: []PayloadFilterRule{
+				{
+					Params: []string{"metadata.debug.internal"},
+				},
+			},
+			DefaultRaw: []PayloadRule{
+				{
+					Params: map[string]any{
+						"tool_choice": `{"type":"function","name":"route_to_primary"}`,
+					},
+				},
+			},
+		},
+	}
+
+	cfg.SanitizePayloadRules()
+
+	if len(cfg.Payload.Default) != 1 {
+		t.Fatalf("expected default rules preserved, got %d", len(cfg.Payload.Default))
+	}
+	if len(cfg.Payload.Override) != 1 {
+		t.Fatalf("expected override rules preserved, got %d", len(cfg.Payload.Override))
+	}
+	if len(cfg.Payload.Filter) != 1 {
+		t.Fatalf("expected filter rules preserved, got %d", len(cfg.Payload.Filter))
+	}
+	if len(cfg.Payload.DefaultRaw) != 1 {
+		t.Fatalf("expected default-raw rules preserved, got %d", len(cfg.Payload.DefaultRaw))
+	}
+}
+
+func TestConfigSanitizePayloadRules_InvalidPathDropped(t *testing.T) {
+	cfg := &Config{
+		Payload: PayloadConfig{
+			Default: []PayloadRule{
+				{
+					Params: map[string]any{
+						".invalid.path": "x",
+					},
+				},
+			},
+			Override: []PayloadRule{
+				{
+					Params: map[string]any{
+						"metadata..invalid": true,
+					},
+				},
+			},
+			Filter: []PayloadFilterRule{
+				{
+					Params: []string{"metadata.invalid."},
+				},
+			},
+			DefaultRaw: []PayloadRule{
+				{
+					Params: map[string]any{
+						".raw.invalid": `{"ok":true}`,
+					},
+				},
+			},
+		},
+	}
+
+	cfg.SanitizePayloadRules()
+
+	if len(cfg.Payload.Default) != 0 {
+		t.Fatalf("expected invalid default rule dropped, got %d", len(cfg.Payload.Default))
+	}
+	if len(cfg.Payload.Override) != 0 {
+		t.Fatalf("expected invalid override rule dropped, got %d", len(cfg.Payload.Override))
+	}
+	if len(cfg.Payload.Filter) != 0 {
+		t.Fatalf("expected invalid filter rule dropped, got %d", len(cfg.Payload.Filter))
+	}
+	if len(cfg.Payload.DefaultRaw) != 0 {
+		t.Fatalf("expected invalid default-raw rule dropped, got %d", len(cfg.Payload.DefaultRaw))
+	}
+}
+
+func TestConfigSanitizePayloadRules_InvalidRawJSONDropped(t *testing.T) {
+	cfg := &Config{
+		Payload: PayloadConfig{
+			DefaultRaw: []PayloadRule{
+				{
+					Params: map[string]any{
+						"tool_choice": `{"type":`,
+					},
+				},
+			},
+			OverrideRaw: []PayloadRule{
+				{
+					Params: map[string]any{
+						"metadata.labels": []byte(`{"env":"prod"`),
+					},
+				},
+			},
+		},
+	}
+
+	cfg.SanitizePayloadRules()
+
+	if len(cfg.Payload.DefaultRaw) != 0 {
+		t.Fatalf("expected invalid default-raw JSON rule dropped, got %d", len(cfg.Payload.DefaultRaw))
+	}
+	if len(cfg.Payload.OverrideRaw) != 0 {
+		t.Fatalf("expected invalid override-raw JSON rule dropped, got %d", len(cfg.Payload.OverrideRaw))
+	}
+}
+
 func TestCheckedPathLengthPlusOne(t *testing.T) {
 	if got := checkedPathLengthPlusOne(4); got != 5 {
 		t.Fatalf("expected 5, got %d", got)

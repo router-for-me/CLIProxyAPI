@@ -324,6 +324,94 @@ func TestConvertOpenAIResponsesRequestToCodex_UsesVariantAsReasoningEffortFallba
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_CPB0228_InputStringNormalizedToInputList(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5-codex",
+		"input": "Summarize this request",
+		"stream": false
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5-codex", inputJSON, false)
+	outputStr := string(output)
+
+	input := gjson.Get(outputStr, "input")
+	if !input.IsArray() {
+		t.Fatalf("expected input to be normalized to an array, got %s", input.Type.String())
+	}
+	if got := len(input.Array()); got != 1 {
+		t.Fatalf("expected one normalized input message, got %d", got)
+	}
+	if got := gjson.Get(outputStr, "input.0.type").String(); got != "message" {
+		t.Fatalf("expected input.0.type=message, got %q", got)
+	}
+	if got := gjson.Get(outputStr, "input.0.role").String(); got != "user" {
+		t.Fatalf("expected input.0.role=user, got %q", got)
+	}
+	if got := gjson.Get(outputStr, "input.0.content.0.type").String(); got != "input_text" {
+		t.Fatalf("expected input.0.content.0.type=input_text, got %q", got)
+	}
+	if got := gjson.Get(outputStr, "input.0.content.0.text").String(); got != "Summarize this request" {
+		t.Fatalf("expected input text preserved, got %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_CPB0228_PreservesCompactionFieldsWithStringInput(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5-codex",
+		"input": "continue",
+		"previous_response_id": "resp_prev_1",
+		"prompt_cache_key": "cache_abc",
+		"safety_identifier": "safe_123"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5-codex", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "previous_response_id").String(); got != "resp_prev_1" {
+		t.Fatalf("expected previous_response_id to be preserved, got %q", got)
+	}
+	if got := gjson.Get(outputStr, "prompt_cache_key").String(); got != "cache_abc" {
+		t.Fatalf("expected prompt_cache_key to be preserved, got %q", got)
+	}
+	if got := gjson.Get(outputStr, "safety_identifier").String(); got != "safe_123" {
+		t.Fatalf("expected safety_identifier to be preserved, got %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_CPB0225_ConversationIDAliasMapsToPreviousResponseID(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5-codex",
+		"input": "continue",
+		"conversation_id": "resp_alias_1"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5-codex", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "previous_response_id").String(); got != "resp_alias_1" {
+		t.Fatalf("expected conversation_id alias to map to previous_response_id, got %q", got)
+	}
+	if gjson.Get(outputStr, "conversation_id").Exists() {
+		t.Fatalf("expected conversation_id alias to be removed after normalization")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_CPB0225_PrefersPreviousResponseIDOverAlias(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5-codex",
+		"input": "continue",
+		"previous_response_id": "resp_primary",
+		"conversation_id": "resp_alias"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5-codex", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "previous_response_id").String(); got != "resp_primary" {
+		t.Fatalf("expected previous_response_id to win over conversation_id alias, got %q", got)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToCodex_UsesReasoningEffortOverVariant(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.2",

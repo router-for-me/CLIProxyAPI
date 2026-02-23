@@ -115,3 +115,36 @@ func TestRefreshTokensProviderErrorPayload(t *testing.T) {
 		t.Fatalf("expected provider message in error, got %v", err)
 	}
 }
+
+func TestRefreshTokensProviderErrorPayloadNon200(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"code":    "500",
+			"message": "server busy",
+			"data":    nil,
+		})
+	}))
+	defer ts.Close()
+
+	client := &http.Client{
+		Transport: &rewriteTransport{
+			target: ts.URL,
+			base:   http.DefaultTransport,
+		},
+	}
+
+	auth := NewIFlowAuth(nil, client)
+	_, err := auth.RefreshTokens(context.Background(), "expired-refresh")
+	if err == nil {
+		t.Fatalf("expected refresh error, got nil")
+	}
+	if !strings.Contains(err.Error(), "provider rejected token request") {
+		t.Fatalf("expected provider rejection error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "code=500") || !strings.Contains(err.Error(), "server busy") {
+		t.Fatalf("expected code/message in error, got %v", err)
+	}
+}

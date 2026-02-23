@@ -341,8 +341,11 @@ func (s *Server) setupRoutes() {
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
 
-	// WebSocket endpoint for /v1/responses/ws (Codex streaming)
-	s.AttachWebsocketRoute("/v1/responses/ws", ResponsesWebSocketHandler())
+	// WebSocket endpoint for /v1/responses/ws (Codex streaming).
+	// This route can be rollout-gated from config.
+	if s.cfg == nil || s.cfg.IsResponsesWebsocketEnabled() {
+		s.AttachWebsocketRoute("/v1/responses/ws", ResponsesWebSocketHandler())
+	}
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
@@ -1112,9 +1115,7 @@ func (s *Server) startSHMSyncLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := usage.SyncToSHM(shmPath); err != nil {
-				// log.Errorf("Failed to sync metrics to SHM: %v", err)
-			}
+			_ = usage.SyncToSHM(shmPath)
 		case <-s.shmStop:
 			return
 		}

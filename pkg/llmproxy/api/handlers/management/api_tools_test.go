@@ -289,6 +289,9 @@ func TestGetKiroQuotaWithChecker_Success(t *testing.T) {
 	if got["quota_exhausted"] != false {
 		t.Fatalf("quota_exhausted = %v, want false", got["quota_exhausted"])
 	}
+	if got["auth_index"] != auth.Index {
+		t.Fatalf("auth_index = %v, want %s", got["auth_index"], auth.Index)
+	}
 }
 
 func TestGetKiroQuotaWithChecker_MissingProfileARN(t *testing.T) {
@@ -322,6 +325,108 @@ func TestGetKiroQuotaWithChecker_MissingProfileARN(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "profile arn not found") {
 		t.Fatalf("unexpected response body: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "auth_index") {
+		t.Fatalf("expected auth_index in missing-profile response, got: %s", rec.Body.String())
+	}
+}
+
+func TestGetKiroQuotaWithChecker_IndexAliasLookup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "kiro-index-alias.json",
+		FileName: "kiro-index-alias.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"access_token": "token-1",
+			"profile_arn":  "arn:aws:codewhisperer:us-east-1:123:profile/test",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	auth.EnsureIndex()
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota?index="+url.QueryEscape(auth.Index), nil)
+
+	h := &Handler{authManager: manager}
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{
+		usage: &kiroauth.UsageQuotaResponse{
+			UsageBreakdownList: []kiroauth.UsageBreakdownExtended{
+				{
+					ResourceType:              "AGENTIC_REQUEST",
+					UsageLimitWithPrecision:   100,
+					CurrentUsageWithPrecision: 50,
+				},
+			},
+		},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestGetKiroQuotaWithChecker_AuthIDAliasLookup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "kiro-auth-id-alias.json",
+		FileName: "kiro-auth-id-alias.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"access_token": "token-1",
+			"profile_arn":  "arn:aws:codewhisperer:us-east-1:123:profile/test",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota?auth_id="+url.QueryEscape(auth.ID), nil)
+
+	h := &Handler{authManager: manager}
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{
+		usage: &kiroauth.UsageQuotaResponse{
+			UsageBreakdownList: []kiroauth.UsageBreakdownExtended{
+				{
+					ResourceType:              "AGENTIC_REQUEST",
+					UsageLimitWithPrecision:   100,
+					CurrentUsageWithPrecision: 10,
+				},
+			},
+		},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestGetKiroQuotaWithChecker_MissingCredentialIncludesRequestedIndex(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &Handler{}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota?auth_index=missing-index", nil)
+
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "missing-index") {
+		t.Fatalf("expected requested auth_index in response, got: %s", rec.Body.String())
 	}
 }
 

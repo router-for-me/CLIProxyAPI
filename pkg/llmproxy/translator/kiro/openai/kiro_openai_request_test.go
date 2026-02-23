@@ -425,3 +425,30 @@ func TestBuildAssistantMessageFromOpenAI_DefaultContentWhenOnlyToolCalls(t *test
 		t.Fatalf("expected tool name %q, got %q", "Read", got.ToolUses[0].Name)
 	}
 }
+
+func TestBuildAssistantMessageFromOpenAI_PreservesNonObjectToolArguments(t *testing.T) {
+	msg := gjson.Parse(`{
+		"role":"assistant",
+		"content":"",
+		"tool_calls":[
+			{"id":"call_array","type":"function","function":{"name":"Search","arguments":"[\"a\",\"b\"]"}},
+			{"id":"call_null","type":"function","function":{"name":"LookupNull","arguments":"null"}},
+			{"id":"call_raw","type":"function","function":{"name":"Lookup","arguments":"not-json"}}
+		]
+	}`)
+
+	got := buildAssistantMessageFromOpenAI(msg)
+	if len(got.ToolUses) != 3 {
+		t.Fatalf("expected three tool uses, got %d", len(got.ToolUses))
+	}
+
+	if arr, ok := got.ToolUses[0].Input["value"].([]interface{}); !ok || len(arr) != 2 {
+		t.Fatalf("expected array arguments to be preserved under value, got %#v", got.ToolUses[0].Input)
+	}
+	if len(got.ToolUses[1].Input) != 0 {
+		t.Fatalf("expected null tool arguments to map to empty object, got %#v", got.ToolUses[1].Input)
+	}
+	if raw := got.ToolUses[2].Input["raw"]; raw != "not-json" {
+		t.Fatalf("expected raw argument fallback, got %#v", got.ToolUses[2].Input)
+	}
+}

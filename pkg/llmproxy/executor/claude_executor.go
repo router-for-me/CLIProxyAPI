@@ -819,10 +819,16 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 		})
 	}
 
-	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
+	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
+	if toolChoiceType == "tool" || toolChoiceType == "function" {
 		name := gjson.GetBytes(body, "tool_choice.name").String()
 		if name != "" && !strings.HasPrefix(name, prefix) && !builtinTools[name] {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", prefix+name)
+		}
+
+		functionName := gjson.GetBytes(body, "tool_choice.function.name").String()
+		if functionName != "" && !strings.HasPrefix(functionName, prefix) && !builtinTools[functionName] {
+			body, _ = sjson.SetBytes(body, "tool_choice.function.name", prefix+functionName)
 		}
 	}
 
@@ -1029,17 +1035,24 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 	return nil
 }
 
+func nextFakeUserID(apiKey string, useCache bool) string {
+	if useCache && apiKey != "" {
+		return cachedUserID(apiKey)
+	}
+	return generateFakeUserID()
+}
+
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
-func injectFakeUserID(payload []byte) []byte {
+func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	metadata := gjson.GetBytes(payload, "metadata")
 	if !metadata.Exists() {
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateFakeUserID())
+		payload, _ = sjson.SetBytes(payload, "metadata.user_id", nextFakeUserID(apiKey, useCache))
 		return payload
 	}
 
 	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if existingUserID == "" || !isValidUserID(existingUserID) {
-		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateFakeUserID())
+		payload, _ = sjson.SetBytes(payload, "metadata.user_id", nextFakeUserID(apiKey, useCache))
 	}
 	return payload
 }
@@ -1115,8 +1128,10 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		payload = checkSystemInstructionsWithMode(payload, strictMode)
 	}
 
-	// Inject fake user ID
-	payload = injectFakeUserID(payload)
+	// Reuse a stable fake user ID when a matching ClaudeKey cloak config exists.
+	// This keeps consistent metadata across model variants for the same credential.
+	apiKey, _ := claudeCreds(auth)
+	payload = injectFakeUserID(payload, apiKey, cloakCfg != nil)
 
 	// Apply sensitive word obfuscation
 	if len(sensitiveWords) > 0 {

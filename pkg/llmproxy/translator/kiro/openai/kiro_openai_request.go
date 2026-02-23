@@ -699,12 +699,7 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 			toolUseID := tc.Get("id").String()
 			toolName := tc.Get("function.name").String()
 			toolArgs := tc.Get("function.arguments").String()
-
-			var inputMap map[string]interface{}
-			if err := json.Unmarshal([]byte(toolArgs), &inputMap); err != nil {
-				log.Debugf("kiro-openai: failed to parse tool arguments: %v", err)
-				inputMap = make(map[string]interface{})
-			}
+			inputMap := parseToolArgumentsToMap(toolArgs)
 
 			toolUses = append(toolUses, KiroToolUse{
 				ToolUseID: toolUseID,
@@ -730,6 +725,28 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 		Content:  finalContent,
 		ToolUses: toolUses,
 	}
+}
+
+func parseToolArgumentsToMap(toolArgs string) map[string]interface{} {
+	trimmed := strings.TrimSpace(toolArgs)
+	if trimmed == "" {
+		return map[string]interface{}{}
+	}
+
+	var inputMap map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &inputMap); err == nil {
+		return inputMap
+	}
+
+	var raw interface{}
+	if err := json.Unmarshal([]byte(trimmed), &raw); err == nil {
+		if raw == nil {
+			return map[string]interface{}{}
+		}
+		return map[string]interface{}{"value": raw}
+	}
+
+	return map[string]interface{}{"raw": trimmed}
 }
 
 // buildFinalContent builds the final content with system prompt

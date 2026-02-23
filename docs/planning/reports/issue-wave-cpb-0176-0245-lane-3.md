@@ -9,8 +9,8 @@
 ## Status Snapshot
 
 - `planned`: 0
-- `implemented`: 0
-- `in_progress`: 10
+- `implemented`: 2
+- `in_progress`: 8
 - `blocked`: 0
 
 ## Per-Item Status
@@ -88,16 +88,17 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0202 – Harden "API Error" with clearer validation, safer defaults, and defensive fallbacks.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `responses-and-chat-compat`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1445`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0202" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - Hardened error envelope validation so arbitrary JSON error payloads without top-level `error` are normalized into OpenAI-compatible error format.
+  - Added regression tests to lock expected behavior for passthrough envelope JSON vs non-envelope JSON wrapping.
+- Verification commands:
+  - `go test ./sdk/api/handlers -run 'TestBuildErrorResponseBody|TestWriteErrorResponse' -count=1`
+- Evidence:
+  - `sdk/api/handlers/handlers.go`
+  - `sdk/api/handlers/handlers_build_error_response_test.go`
 
 ### CPB-0203 – Add process-compose/HMR refresh workflow tied to "Unable to use GPT 5.3 codex (model_not_found)" so local config and runtime can be reloaded deterministically.
 - Status: `in_progress`
@@ -124,21 +125,27 @@
 - Next action: add reproducible payload/regression case, then implement in assigned workstream.
 
 ### CPB-0205 – Add DX polish around "The requested model 'gpt-5.3-codex' does not exist." through improved command ergonomics and faster feedback loops.
-- Status: `in_progress`
+- Status: `implemented`
 - Theme: `responses-and-chat-compat`
 - Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1441`
 - Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires implementation-ready acceptance criteria and target-path verification before execution.
-- Proposed verification commands:
-  - `rg -n "CPB-0205" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/api ./pkg/llmproxy/thinking`  (if implementation touches those surfaces)
-- Next action: add reproducible payload/regression case, then implement in assigned workstream.
+  - Improved `404 model_not_found` error messaging to append a deterministic discovery hint (`GET /v1/models`) when upstream/translated message indicates unknown model.
+  - Added regression coverage for `gpt-5.3-codex does not exist` path to ensure hint remains present.
+- Verification commands:
+  - `go test ./sdk/api/handlers -run 'TestBuildErrorResponseBody|TestWriteErrorResponse' -count=1`
+  - `go test ./sdk/api/handlers/openai -run 'TestHandleErrorAsOpenAIError' -count=1`
+- Evidence:
+  - `sdk/api/handlers/handlers.go`
+  - `sdk/api/handlers/handlers_build_error_response_test.go`
 
 ## Evidence & Commands Run
 
 - `rg -n "CPB-0176|CPB-0245" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`
-- No repository code changes were performed in this lane in this pass; planning only.
+- `gofmt -w sdk/api/handlers/handlers.go sdk/api/handlers/handlers_build_error_response_test.go`
+- `go test ./sdk/api/handlers -run 'TestBuildErrorResponseBody|TestWriteErrorResponse' -count=1`
+  - Result: `ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers	1.651s`
+- `go test ./sdk/api/handlers/openai -run 'TestHandleErrorAsOpenAIError' -count=1`
+  - Result: `ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai	1.559s [no tests to run]`
 
 ## Next Actions
-- Move item by item from `planned` to `implemented` only when regression tests and code updates are committed.
+- Continue CPB-0196/0197/0198/0199/0200/0201/0203/0204 with issue-grounded repro cases and targeted package tests per item.

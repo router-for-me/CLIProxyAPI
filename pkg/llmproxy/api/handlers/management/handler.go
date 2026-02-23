@@ -302,7 +302,11 @@ func isReadOnlyConfigWriteError(err error) bool {
 	if errors.Is(err, syscall.EROFS) {
 		return true
 	}
-	return strings.Contains(strings.ToLower(err.Error()), "read-only file system")
+	normalized := strings.ToLower(err.Error())
+	return strings.Contains(normalized, "read-only file system") ||
+		strings.Contains(normalized, "read-only filesystem") ||
+		strings.Contains(normalized, "read only file system") ||
+		strings.Contains(normalized, "read only filesystem")
 }
 
 // Helper methods for simple types
