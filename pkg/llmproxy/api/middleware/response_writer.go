@@ -388,6 +388,7 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	if w.requestInfo == nil {
 		return nil
 	}
+	requestHeaders := sanitizeRequestHeaders(http.Header(w.requestInfo.Headers))
 
 	if loggerWithOptions, ok := w.logger.(interface {
 		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
@@ -395,7 +396,7 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 		return loggerWithOptions.LogRequestWithOptions(
 			w.requestInfo.URL,
 			w.requestInfo.Method,
-			w.requestInfo.Headers,
+			requestHeaders,
 			requestBody,
 			statusCode,
 			headers,
@@ -413,7 +414,7 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	return w.logger.LogRequest(
 		w.requestInfo.URL,
 		w.requestInfo.Method,
-		w.requestInfo.Headers,
+		requestHeaders,
 		requestBody,
 		statusCode,
 		headers,

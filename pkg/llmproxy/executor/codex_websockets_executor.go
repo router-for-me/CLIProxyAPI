@@ -1298,12 +1298,12 @@ func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
 	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL))
 }
 
-func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
+func logCodexWebsocketDisconnected(sessionID string, _ string, _ string, reason string, err error) {
 	if err != nil {
-		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s err=%v", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL), strings.TrimSpace(reason), err)
+		log.Infof("codex websockets: upstream disconnected session=%s reason=%s err=%v", strings.TrimSpace(sessionID), strings.TrimSpace(reason), err)
 		return
 	}
-	log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL), strings.TrimSpace(reason))
+	log.Infof("codex websockets: upstream disconnected session=%s reason=%s", strings.TrimSpace(sessionID), strings.TrimSpace(reason))
 }
 
 // CodexAutoExecutor routes Codex requests to the websocket transport only when:
