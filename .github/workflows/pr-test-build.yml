@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  quality-ci:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

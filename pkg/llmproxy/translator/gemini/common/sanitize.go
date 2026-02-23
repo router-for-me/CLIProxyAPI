@@ -33,6 +33,12 @@ func SanitizeToolSearchForGemini(raw string) string {
 	return deleteJSONKeys(raw, "defer_loading", "deferLoading")
 }
 
+// SanitizeOpenAIInputForGemini strips known incompatible thought-signature keys
+// that can leak from cross-provider histories into Gemini request payloads.
+func SanitizeOpenAIInputForGemini(raw string) string {
+	return deleteJSONKeys(raw, "thought_signature", "thoughtSignature")
+}
+
 // NormalizeOpenAIFunctionSchemaForGemini builds a Gemini-safe parametersJsonSchema
 // from OpenAI function schema inputs and enforces a deterministic root shape.
 func NormalizeOpenAIFunctionSchemaForGemini(params gjson.Result, strict bool) string {

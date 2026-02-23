@@ -10,12 +10,24 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-4`
 - Notes: lane-started
 
 ### #115
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: provider-side AWS/Identity Center lock/suspension behavior cannot be deterministically fixed in local proxy code; only safer operator guidance can be provided.
+- Code surface validated:
+  - `pkg/llmproxy/cmd/kiro_login.go`
+  - `pkg/llmproxy/cmd/kiro_login_test.go`
+- Acceptance command:
+  - `go test ./pkg/llmproxy/cmd -run 'KiroLogin|AWS|AuthCode' -count=1`
+  - Result: `ok   github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/cmd`
 
 ### #111
-- Status: `pending`
-- Notes: lane-started
+- Status: `done`
+- Notes: callback bind/access failure remediation (`--oauth-callback-port <free-port>`) is implemented and validated.
+- Code surface validated:
+  - `sdk/auth/antigravity.go`
+  - `sdk/auth/antigravity_error_test.go`
+- Acceptance command:
+  - `go test ./sdk/auth -run 'Antigravity|Callback|OAuth' -count=1`
+  - Result: `ok   github.com/router-for-me/CLIProxyAPI/v6/sdk/auth`
 
 ### #102
 - Status: `pending`
@@ -27,10 +39,9 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-4`
 
 ## Focused Checks
 
-- `task quality:fmt:check`
-- `QUALITY_PACKAGES='./pkg/llmproxy/api ./sdk/api/handlers/openai' task quality:quick`
+- `go test ./pkg/llmproxy/cmd -run 'KiroLogin|AWS|AuthCode' -count=1`
+- `go test ./sdk/auth -run 'Antigravity|Callback|OAuth' -count=1`
 
 ## Blockers
 
-- None recorded yet; work is in planning state.
-
+- #115 blocked by upstream account policy/lock behavior outside deterministic local-code control.

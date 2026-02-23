@@ -65,6 +65,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
+	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_tokens")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
@@ -125,14 +126,35 @@ func removeItemReferences(rawJSON []byte) []byte {
 	}
 
 	filtered := make([]string, 0, len(inputResult.Array()))
+	changed := false
 	for _, item := range inputResult.Array() {
 		if item.Get("type").String() == "item_reference" {
+			changed = true
 			continue
 		}
-		filtered = append(filtered, item.Raw)
+		itemRaw := item.Raw
+		if item.Get("type").String() == "message" {
+			content := item.Get("content")
+			if content.IsArray() {
+				kept := "[]"
+				contentChanged := false
+				for _, part := range content.Array() {
+					if part.Get("type").String() == "item_reference" {
+						contentChanged = true
+						continue
+					}
+					kept, _ = sjson.SetRaw(kept, "-1", part.Raw)
+				}
+				if contentChanged {
+					changed = true
+					itemRaw, _ = sjson.SetRaw(itemRaw, "content", kept)
+				}
+			}
+		}
+		filtered = append(filtered, itemRaw)
 	}
 
-	if len(filtered) == len(inputResult.Array()) {
+	if !changed {
 		return rawJSON
 	}
 

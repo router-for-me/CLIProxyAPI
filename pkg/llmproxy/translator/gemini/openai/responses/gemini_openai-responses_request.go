@@ -11,7 +11,7 @@ import (
 const geminiResponsesThoughtSignature = "skip_thought_signature_validator"
 
 func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := []byte(common.SanitizeOpenAIInputForGemini(string(inputRawJSON)))
 
 	// Note: modelName and stream parameters are part of the fixed method signature
 	_ = modelName // Unused but required by interface
@@ -202,8 +202,11 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						switch contentType {
 						case "input_text", "output_text":
 							if text := contentItem.Get("text"); text.Exists() {
-								partJSON = `{"text":""}`
-								partJSON, _ = sjson.Set(partJSON, "text", text.String())
+								textValue := text.String()
+								if strings.TrimSpace(textValue) != "" {
+									partJSON = `{"text":""}`
+									partJSON, _ = sjson.Set(partJSON, "text", textValue)
+								}
 							}
 						case "input_image":
 							imageURL := contentItem.Get("image_url").String()
@@ -247,6 +250,10 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 					flush()
 				} else if contentArray.Type == gjson.String {
+					contentText := contentArray.String()
+					if strings.TrimSpace(contentText) == "" {
+						continue
+					}
 					effRole := "user"
 					if itemRole != "" {
 						switch strings.ToLower(itemRole) {
@@ -259,7 +266,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 					one := `{"role":"","parts":[{"text":""}]}`
 					one, _ = sjson.Set(one, "role", effRole)
-					one, _ = sjson.Set(one, "parts.0.text", contentArray.String())
+					one, _ = sjson.Set(one, "parts.0.text", contentText)
 					out, _ = sjson.SetRaw(out, "contents.-1", one)
 				}
 			case "function_call":

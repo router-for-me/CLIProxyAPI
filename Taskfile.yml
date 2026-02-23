@@ -83,6 +83,11 @@ tasks:
       - go test -json ./... > "{{.TEST_REPORT_DIR}}/test-baseline.json"
       - go test ./... > "{{.TEST_REPORT_DIR}}/test-baseline.txt"
 
+  changelog:check:
+    desc: "Verify CHANGELOG.md contains an Unreleased heading"
+    cmds:
+      - rg -q '^## \[Unreleased\]' CHANGELOG.md
+
   # -- Testing & Quality --
   test:
     desc: "Run all Go tests"

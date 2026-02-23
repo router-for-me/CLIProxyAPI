@@ -179,6 +179,10 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** for more details.
 
 ## 📚 Documentation
 
+- **Release Notes and Process:**
+  - [Changelog](./CHANGELOG.md)
+  - [Changelog Process](./docs/guides/CHANGELOG_PROCESS.md)
+  - [Changelog Entry Template](./docs/reference/CHANGELOG_ENTRY_TEMPLATE.md)
 - **Provider Docs (new focus):**
   - [Provider Usage](./docs/provider-usage.md)
   - [Provider Catalog](./docs/provider-catalog.md)

@@ -24,6 +24,25 @@ func TestSetupOptions_ContainsCursorLogin(t *testing.T) {
 	}
 }
 
+func TestSetupOptions_ContainsPromotedProviders(t *testing.T) {
+	options := setupOptions()
+	found := map[string]bool{
+		"Cline API key login":   false,
+		"AMP API key login":     false,
+		"Factory API key login": false,
+	}
+	for _, option := range options {
+		if _, ok := found[option.label]; ok {
+			found[option.label] = true
+		}
+	}
+	for label, ok := range found {
+		if !ok {
+			t.Fatalf("expected setup options to include %q", label)
+		}
+	}
+}
+
 func TestPrintPostCheckSummary_IncludesCursorProviderCount(t *testing.T) {
 	cfg := &config.Config{
 		CursorKey: []config.CursorKey{{CursorAPIURL: defaultCursorAPIURL}},

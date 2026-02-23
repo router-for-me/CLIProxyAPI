@@ -307,6 +307,53 @@ func TestConvertOpenAIResponsesRequestToCodex_RemovesItemReferenceInputItems(t *
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_RemovesNestedItemReferenceContentParts(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "hello"},
+					{"type": "item_reference", "id": "msg_123"},
+					{"type": "input_text", "text": "world"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	content := gjson.Get(outputStr, "input.0.content")
+	if !content.IsArray() {
+		t.Fatalf("expected message content array")
+	}
+	if got := len(content.Array()); got != 2 {
+		t.Fatalf("expected 2 content parts after filtering item_reference, got %d", got)
+	}
+	if got := gjson.Get(outputStr, "input.0.content.0.type").String(); got != "input_text" {
+		t.Fatalf("expected input.0.content.0.type=input_text, got %s", got)
+	}
+	if got := gjson.Get(outputStr, "input.0.content.1.type").String(); got != "input_text" {
+		t.Fatalf("expected input.0.content.1.type=input_text, got %s", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_DeletesMaxTokensField(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"max_tokens": 128,
+		"input": [{"type":"message","role":"user","content":"hello"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	if got := gjson.GetBytes(output, "max_tokens"); got.Exists() {
+		t.Fatalf("expected max_tokens to be removed, got %s", got.Raw)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToCodex_UsesVariantAsReasoningEffortFallback(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.2",

@@ -6,8 +6,12 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-3`
 ## Per-Issue Status
 
 ### #147
-- Status: `pending`
-- Notes: lane-started
+- Status: `done`
+- Notes: ARM64 deployment guidance already present and validated.
+- Code/docs surface:
+  - `docs/install.md`
+- Acceptance command:
+  - `rg -n "platform linux/arm64|uname -m|arm64" docs/install.md`
 
 ### #146
 - Status: `pending`
@@ -18,23 +22,35 @@ Worktree: `cliproxyapi-plusplus-wave-cpb-3`
 - Notes: lane-started
 
 ### #136
-- Status: `pending`
-- Notes: lane-started
+- Status: `blocked`
+- Notes: low-risk refresh hardening exists, but full "no manual refresh needed" closure requires dedicated product status surface/API workflow not present in this repo lane.
+- Code surface validated:
+  - `pkg/llmproxy/auth/kiro/sso_oidc.go`
+- Acceptance command:
+  - `go test ./pkg/llmproxy/auth/kiro -run 'RefreshToken|SSOOIDC|Token|OAuth' -count=1`
+  - Result: `ok   github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro`
 
 ### #133
 - Status: `pending`
 - Notes: lane-started
 
 ### #129
-- Status: `pending`
-- Notes: lane-started
+- Status: `done`
+- Notes: cloud deploy config-path fallback support is present and passing focused package tests.
+- Code surface validated:
+  - `cmd/server/config_path.go`
+  - `cmd/server/config_path_test.go`
+  - `cmd/server/main.go`
+- Acceptance command:
+  - `go test ./cmd/server -count=1`
+  - Result: `ok   github.com/router-for-me/CLIProxyAPI/v6/cmd/server`
 
 ## Focused Checks
 
-- `task quality:fmt:check`
-- `QUALITY_PACKAGES='./pkg/llmproxy/api ./sdk/api/handlers/openai' task quality:quick`
+- `rg -n "platform linux/arm64|uname -m|arm64" docs/install.md`
+- `go test ./pkg/llmproxy/auth/kiro -run 'RefreshToken|SSOOIDC|Token|OAuth' -count=1`
+- `go test ./cmd/server -count=1`
 
 ## Blockers
 
-- None recorded yet; work is in planning state.
-
+- #136 requires a dedicated status surface/workflow (API/UI behavior) to fully remove manual refresh expectations.
