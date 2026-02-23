@@ -420,6 +420,7 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 
 	// Check if this chunk has any meaningful content
 	hasContent := false
+	hasFinishReason := false
 	hasUsage := root.Get("usage").Exists()
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
 		chatChoices.ForEach(func(_, choice gjson.Result) bool {
@@ -433,6 +434,7 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 			// Also check for finish_reason to ensure we don't skip final chunks
 			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "" && finishReason.String() != "null" {
 				hasContent = true
+				hasFinishReason = true
 				return false // Break out of forEach
 			}
 			return true
@@ -499,9 +501,13 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 		out, _ = sjson.SetRaw(out, "choices", string(choicesJSON))
 	}
 
-	// Copy usage if present
+	// Only copy usage if:
+	// 1. This is NOT a terminal finish chunk (hasFinishReason=false), OR
+	// 2. This is a usage-only chunk (no choices)
 	if usage := root.Get("usage"); usage.Exists() {
-		out, _ = sjson.SetRaw(out, "usage", usage.Raw)
+		if !hasFinishReason || len(choices) == 0 {
+			out, _ = sjson.SetRaw(out, "usage", usage.Raw)
+		}
 	}
 
 	return []byte(out)
