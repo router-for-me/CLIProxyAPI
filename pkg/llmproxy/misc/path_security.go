@@ -2,7 +2,10 @@ package misc
 
 import (
 	"fmt"
+<<<<<<< HEAD
 	"net/url"
+=======
+>>>>>>> archive/pr-234-head-20260223
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +17,7 @@ func ResolveSafeFilePath(path string) (string, error) {
 	if trimmed == "" {
 		return "", fmt.Errorf("path is empty")
 	}
+<<<<<<< HEAD
 	normalized, err := normalizePathForTraversalCheck(trimmed)
 	if err != nil {
 		return "", fmt.Errorf("path contains invalid encoding: %w", err)
@@ -22,6 +26,12 @@ func ResolveSafeFilePath(path string) (string, error) {
 		return "", fmt.Errorf("path traversal is not allowed")
 	}
 	cleaned := filepath.Clean(normalized)
+=======
+	if hasPathTraversalComponent(trimmed) {
+		return "", fmt.Errorf("path traversal is not allowed")
+	}
+	cleaned := filepath.Clean(trimmed)
+>>>>>>> archive/pr-234-head-20260223
 	if cleaned == "." {
 		return "", fmt.Errorf("path is invalid")
 	}
@@ -38,6 +48,7 @@ func ResolveSafeFilePathInDir(baseDir, fileName string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("file name is empty")
 	}
+<<<<<<< HEAD
 	normalized, err := normalizePathForTraversalCheck(name)
 	if err != nil {
 		return "", fmt.Errorf("file name contains invalid encoding: %w", err)
@@ -49,6 +60,15 @@ func ResolveSafeFilePathInDir(baseDir, fileName string) (string, error) {
 		return "", fmt.Errorf("file name must not contain traversal components")
 	}
 	cleanName := filepath.Clean(normalized)
+=======
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return "", fmt.Errorf("file name must not contain path separators")
+	}
+	if hasPathTraversalComponent(name) {
+		return "", fmt.Errorf("file name must not contain traversal components")
+	}
+	cleanName := filepath.Clean(name)
+>>>>>>> archive/pr-234-head-20260223
 	if cleanName == "." || cleanName == ".." {
 		return "", fmt.Errorf("file name is invalid")
 	}
@@ -76,6 +96,7 @@ func hasPathTraversalComponent(path string) bool {
 	}
 	return false
 }
+<<<<<<< HEAD
 
 func normalizePathForTraversalCheck(path string) (string, error) {
 	normalized := path
@@ -91,3 +112,5 @@ func normalizePathForTraversalCheck(path string) (string, error) {
 	}
 	return strings.ReplaceAll(normalized, "\\", "/"), nil
 }
+=======
+>>>>>>> archive/pr-234-head-20260223

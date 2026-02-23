@@ -18,6 +18,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+<<<<<<< HEAD
 // McpRequest represents a JSON-RPC 2.0 request to Kiro MCP API
 type McpRequest struct {
 	ID      string    `json:"id"`
@@ -91,16 +92,24 @@ type WebSearchResult struct {
 	PublicDomain         *bool   `json:"publicDomain,omitempty"`
 }
 
+=======
+>>>>>>> archive/pr-234-head-20260223
 // Cached web_search tool description fetched from MCP tools/list.
 // Uses atomic.Pointer[sync.Once] for lock-free reads with retry-on-failure:
 // - sync.Once prevents race conditions and deduplicates concurrent calls
 // - On failure, a fresh sync.Once is swapped in to allow retry on next call
 // - On success, sync.Once stays "done" forever — zero overhead for subsequent calls
 var (
+<<<<<<< HEAD
 	cachedToolDescription atomic.Value // stores string
 	toolDescOnce          atomic.Pointer[sync.Once]
 	fallbackFpOnce        sync.Once
 	fallbackFp            *kiroauth.Fingerprint
+=======
+	toolDescOnce   atomic.Pointer[sync.Once]
+	fallbackFpOnce sync.Once
+	fallbackFp     *kiroauth.Fingerprint
+>>>>>>> archive/pr-234-head-20260223
 )
 
 func init() {
@@ -171,6 +180,7 @@ func FetchToolDescription(mcpEndpoint, authToken string, httpClient *http.Client
 	})
 }
 
+<<<<<<< HEAD
 // GetWebSearchDescription returns the cached web_search tool description,
 // or empty string if not yet fetched. Lock-free via atomic.Value.
 func GetWebSearchDescription() string {
@@ -180,6 +190,8 @@ func GetWebSearchDescription() string {
 	return ""
 }
 
+=======
+>>>>>>> archive/pr-234-head-20260223
 // WebSearchHandler handles web search requests via Kiro MCP API
 type WebSearchHandler struct {
 	McpEndpoint string
@@ -323,6 +335,7 @@ func (h *WebSearchHandler) CallMcpAPI(request *McpRequest) (*McpResponse, error)
 }
 
 // ParseSearchResults extracts WebSearchResults from MCP response
+<<<<<<< HEAD
 func ParseSearchResults(response *McpResponse) *WebSearchResults {
 	if response == nil || response.Result == nil || len(response.Result.Content) == 0 {
 		return nil
@@ -341,3 +354,5 @@ func ParseSearchResults(response *McpResponse) *WebSearchResults {
 
 	return &results
 }
+=======
+>>>>>>> archive/pr-234-head-20260223

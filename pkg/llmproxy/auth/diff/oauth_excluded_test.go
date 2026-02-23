@@ -103,9 +103,14 @@ func TestSummarizeVertexModels_UsesCanonicalJoinedSignature(t *testing.T) {
 		{Name: "m1"},
 		{Alias: "alias"},
 	})
+<<<<<<< HEAD
 	want := hashJoined([]string{"alias", "m1"})
 	if summary.hash != want {
 		t.Fatalf("expected canonical hash signature %q, got %q", want, summary.hash)
+=======
+	if summary.hash != "alias|m1" {
+		t.Fatalf("expected canonical joined signature, got %q", summary.hash)
+>>>>>>> archive/pr-234-head-20260223
 	}
 }
 

@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+<<<<<<< HEAD
+=======
+	"net/http"
+>>>>>>> archive/pr-234-head-20260223
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +19,32 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 )
 
+<<<<<<< HEAD
+=======
+func projectRoot(t *testing.T) string {
+	t.Helper()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	current := filepath.Clean(cwd)
+	for i := 0; i < 8; i++ {
+		if _, err := os.Stat(filepath.Join(current, "go.mod")); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return filepath.Clean(cwd)
+}
+
+>>>>>>> archive/pr-234-head-20260223
 func TestRunSetupJSONResponseShape(t *testing.T) {
 	t.Setenv("CLIPROXY_CONFIG", "")
 	fixedNow := func() time.Time {
@@ -139,6 +169,93 @@ func TestRunLoginJSONRequiresProvider(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
+=======
+func TestRunLogin429HintPrinted(t *testing.T) {
+	t.Setenv("CLIPROXY_CONFIG", "")
+	fixedNow := func() time.Time {
+		return time.Date(2026, 2, 23, 10, 11, 12, 0, time.UTC)
+	}
+	exec := commandExecutor{
+		setup: func(_ *config.Config, _ *cliproxycmd.SetupOptions) {},
+		login: func(_ *config.Config, _ string, _ string, _ *cliproxycmd.LoginOptions) error {
+			return statusErrorStub{code: http.StatusTooManyRequests}
+		},
+		doctor: func(_ string) (map[string]any, error) { return map[string]any{}, nil },
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"login", "--provider", "claude"}, &stdout, &stderr, fixedNow, exec)
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+	text := stderr.String()
+	if !strings.Contains(text, "HTTP 429") {
+		t.Fatalf("stderr missing rate limit hint: %q", text)
+	}
+	if !strings.Contains(text, "cliproxyctl doctor") {
+		t.Fatalf("stderr missing recovery suggestion: %q", text)
+	}
+}
+
+func TestRunLoginJSON429IncludesHint(t *testing.T) {
+	t.Setenv("CLIPROXY_CONFIG", "")
+	fixedNow := func() time.Time {
+		return time.Date(2026, 2, 23, 13, 14, 15, 0, time.UTC)
+	}
+	exec := commandExecutor{
+		setup: func(_ *config.Config, _ *cliproxycmd.SetupOptions) {},
+		login: func(_ *config.Config, _ string, _ string, _ *cliproxycmd.LoginOptions) error {
+			return statusErrorStub{code: http.StatusTooManyRequests}
+		},
+		doctor: func(_ string) (map[string]any, error) { return map[string]any{}, nil },
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"login", "--json", "--provider", "claude"}, &stdout, &stderr, fixedNow, exec)
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode JSON output: %v", err)
+	}
+	details, ok := payload["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("details missing or wrong type: %#v", payload["details"])
+	}
+	if got, ok := details["hint"].(string); !ok || got != rateLimitHintMessage {
+		t.Fatalf("details.hint = %#v, want %q", details["hint"], rateLimitHintMessage)
+	}
+}
+
+func TestRunDevHintIncludesGeminiToolUsageRemediation(t *testing.T) {
+	t.Setenv("CLIPROXY_CONFIG", "")
+	var out bytes.Buffer
+	profile := filepath.Join(t.TempDir(), "process-compose.dev.yaml")
+	if err := os.WriteFile(profile, []byte("version: '0.5'\n"), 0o644); err != nil {
+		t.Fatalf("write dev profile: %v", err)
+	}
+	fixedNow := func() time.Time {
+		return time.Date(2026, 2, 23, 16, 17, 18, 0, time.UTC)
+	}
+
+	run([]string{"dev", "--json", "--file", profile}, &out, &bytes.Buffer{}, fixedNow, commandExecutor{})
+	var payload map[string]any
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode JSON output: %v", err)
+	}
+	if payload["command"] != "dev" || payload["ok"] != true {
+		t.Fatalf("unexpected envelope: %#v", payload)
+	}
+	details := payload["details"].(map[string]any)
+	hint := fmt.Sprintf("%v", details["tool_failure_remediation"])
+	if !strings.Contains(hint, "gemini-3-pro-preview") {
+		t.Fatalf("tool_failure_remediation missing expected model id: %q", hint)
+	}
+}
+
+>>>>>>> archive/pr-234-head-20260223
 func TestRunDoctorJSONWithFixCreatesConfigFromTemplate(t *testing.T) {
 	fixedNow := func() time.Time {
 		return time.Date(2026, 2, 23, 11, 12, 13, 0, time.UTC)
@@ -279,6 +396,10 @@ func TestRunDoctorJSONFixReadOnlyRemediation(t *testing.T) {
 
 func TestCPB0011To0020LaneJRegressionEvidence(t *testing.T) {
 	t.Parallel()
+<<<<<<< HEAD
+=======
+	root := projectRoot(t)
+>>>>>>> archive/pr-234-head-20260223
 	cases := []struct {
 		id          string
 		description string
@@ -295,6 +416,7 @@ func TestCPB0011To0020LaneJRegressionEvidence(t *testing.T) {
 		{"CPB-0020", "metadata naming board entries are tracked"},
 	}
 	requiredPaths := map[string]string{
+<<<<<<< HEAD
 		"CPB-0012": filepath.Join("..", "..", "pkg", "llmproxy", "util", "claude_model_test.go"),
 		"CPB-0013": filepath.Join("..", "..", "pkg", "llmproxy", "translator", "openai", "openai", "responses", "openai_openai-responses_request_test.go"),
 		"CPB-0014": filepath.Join("..", "..", "pkg", "llmproxy", "util", "provider.go"),
@@ -302,6 +424,15 @@ func TestCPB0011To0020LaneJRegressionEvidence(t *testing.T) {
 		"CPB-0017": filepath.Join("..", "..", "docs", "provider-quickstarts.md"),
 		"CPB-0018": filepath.Join("..", "..", "pkg", "llmproxy", "executor", "github_copilot_executor_test.go"),
 		"CPB-0020": filepath.Join("..", "..", "docs", "planning", "CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv"),
+=======
+		"CPB-0012": filepath.Join(root, "pkg", "llmproxy", "util", "claude_model_test.go"),
+		"CPB-0013": filepath.Join(root, "pkg", "llmproxy", "translator", "openai", "openai", "responses", "openai_openai-responses_request_test.go"),
+		"CPB-0014": filepath.Join(root, "pkg", "llmproxy", "util", "provider.go"),
+		"CPB-0015": filepath.Join(root, "pkg", "llmproxy", "executor", "kimi_executor_test.go"),
+		"CPB-0017": filepath.Join(root, "docs", "provider-quickstarts.md"),
+		"CPB-0018": filepath.Join(root, "pkg", "llmproxy", "executor", "github_copilot_executor_test.go"),
+		"CPB-0020": filepath.Join(root, "docs", "planning", "CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv"),
+>>>>>>> archive/pr-234-head-20260223
 	}
 
 	for _, tc := range cases {
@@ -345,6 +476,10 @@ func TestCPB0011To0020LaneJRegressionEvidence(t *testing.T) {
 
 func TestCPB0001To0010LaneIRegressionEvidence(t *testing.T) {
 	t.Parallel()
+<<<<<<< HEAD
+=======
+	root := projectRoot(t)
+>>>>>>> archive/pr-234-head-20260223
 	cases := []struct {
 		id          string
 		description string
@@ -361,12 +496,21 @@ func TestCPB0001To0010LaneIRegressionEvidence(t *testing.T) {
 		{"CPB-0010", "readme/frontmatter is present"},
 	}
 	requiredPaths := map[string]string{
+<<<<<<< HEAD
 		"CPB-0001": filepath.Join("..", "..", "cmd", "cliproxyctl", "main.go"),
 		"CPB-0004": filepath.Join("..", "..", "docs", "provider-quickstarts.md"),
 		"CPB-0005": filepath.Join("..", "..", "docs", "troubleshooting.md"),
 		"CPB-0008": filepath.Join("..", "..", "pkg", "llmproxy", "translator", "openai", "openai", "responses", "openai_openai-responses_request_test.go"),
 		"CPB-0009": filepath.Join("..", "..", "test", "thinking_conversion_test.go"),
 		"CPB-0010": filepath.Join("..", "..", "README.md"),
+=======
+		"CPB-0001": filepath.Join(root, "cmd", "cliproxyctl", "main.go"),
+		"CPB-0004": filepath.Join(root, "docs", "provider-quickstarts.md"),
+		"CPB-0005": filepath.Join(root, "docs", "troubleshooting.md"),
+		"CPB-0008": filepath.Join(root, "pkg", "llmproxy", "translator", "openai", "openai", "responses", "openai_openai-responses_request_test.go"),
+		"CPB-0009": filepath.Join(root, "test", "thinking_conversion_test.go"),
+		"CPB-0010": filepath.Join(root, "README.md"),
+>>>>>>> archive/pr-234-head-20260223
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -444,6 +588,11 @@ func TestResolveLoginProviderAliasAndValidation(t *testing.T) {
 		{in: "ampcode", want: "amp"},
 		{in: "github-copilot", want: "copilot"},
 		{in: "kilocode", want: "kilo"},
+<<<<<<< HEAD
+=======
+		{in: "roocode", want: "roo"},
+		{in: "roo-code", want: "roo"},
+>>>>>>> archive/pr-234-head-20260223
 		{in: "openai-compatible", want: "factory-api"},
 		{in: "claude", want: "claude"},
 		{in: "unknown-provider", wantErr: true},
@@ -546,6 +695,25 @@ func TestSupportedProvidersSortedAndStable(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
+=======
+func TestResolveLoginProviderNormalizesDroidAliases(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{"droid", "droid-cli", "droidcli"} {
+		got, details, err := resolveLoginProvider(input)
+		if err != nil {
+			t.Fatalf("resolveLoginProvider(%q) returned error: %v", input, err)
+		}
+		if got != "gemini" {
+			t.Fatalf("resolveLoginProvider(%q) = %q, want %q", input, got, "gemini")
+		}
+		if details["provider_supported"] != true {
+			t.Fatalf("expected provider_supported=true for %q, details=%#v", input, details)
+		}
+	}
+}
+
+>>>>>>> archive/pr-234-head-20260223
 func TestCPB0011To0020LaneMRegressionEvidence(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -614,7 +782,12 @@ func TestCPB0011To0020LaneMRegressionEvidence(t *testing.T) {
 		{
 			id: "CPB-0017",
 			fn: func(t *testing.T) {
+<<<<<<< HEAD
 				if _, err := os.Stat(filepath.Join("..", "..", "docs", "provider-quickstarts.md")); err != nil {
+=======
+				root := projectRoot(t)
+				if _, err := os.Stat(filepath.Join(root, "docs", "provider-quickstarts.md")); err != nil {
+>>>>>>> archive/pr-234-head-20260223
 					t.Fatalf("provider quickstarts doc missing: %v", err)
 				}
 			},
@@ -660,3 +833,14 @@ func TestCPB0011To0020LaneMRegressionEvidence(t *testing.T) {
 type assertErr string
 
 func (e assertErr) Error() string { return string(e) }
+<<<<<<< HEAD
+=======
+
+type statusErrorStub struct {
+	code int
+}
+
+func (s statusErrorStub) Error() string { return fmt.Sprintf("status %d", s.code) }
+
+func (s statusErrorStub) StatusCode() int { return s.code }
+>>>>>>> archive/pr-234-head-20260223

@@ -30,8 +30,13 @@ func TestLocaleKeyParity(t *testing.T) {
 }
 
 func TestTabNameParity(t *testing.T) {
+<<<<<<< HEAD
 	if len(zhCNTabNames) != len(enTabNames) {
 		t.Fatalf("zhCN/en tab name count mismatch: got zhCN=%d en=%d", len(zhCNTabNames), len(enTabNames))
+=======
+	if len(zhTabNames) != len(enTabNames) {
+		t.Fatalf("zh/en tab name count mismatch: got zh=%d en=%d", len(zhTabNames), len(enTabNames))
+>>>>>>> archive/pr-234-head-20260223
 	}
 	if len(faTabNames) != len(enTabNames) {
 		t.Fatalf("fa/en tab name count mismatch: got fa=%d en=%d", len(faTabNames), len(enTabNames))

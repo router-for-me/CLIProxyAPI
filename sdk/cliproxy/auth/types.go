@@ -133,9 +133,13 @@ func stableAuthIndex(seed string) string {
 	if seed == "" {
 		return ""
 	}
+<<<<<<< HEAD
 	mac := hmac.New(sha256.New, []byte("cliproxy-auth-index-v1"))
 	_, _ = mac.Write([]byte(seed))
 	sum := mac.Sum(nil)
+=======
+	sum := sha256.Sum256([]byte(seed))
+>>>>>>> archive/pr-234-head-20260223
 	return fmt.Sprintf("%x", sum[:])
 }
 

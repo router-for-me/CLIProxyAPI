@@ -67,8 +67,11 @@ curl -sS http://localhost:8317/v1/metrics/providers | jq
 - [Provider Catalog](/provider-catalog)
 - [Provider Operations](/provider-operations)
 - [Routing and Models Reference](/routing-reference)
+<<<<<<< HEAD
 
 ## Recent Lane-Scoped Quickstarts
 
 - [Opus 4.5 Quickstart (CPB-0782)](/features/providers/cpb-0782-opus-4-5-quickstart.md)
 - [Nano Banana Quickstart (CPB-0786)](/features/providers/cpb-0786-nano-banana-quickstart.md)
+=======
+>>>>>>> archive/pr-234-head-20260223

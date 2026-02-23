@@ -1,0 +1,3 @@
+./constant_time.go
+./dit.go
+./xor.go

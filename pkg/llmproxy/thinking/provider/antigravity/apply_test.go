@@ -31,6 +31,7 @@ func TestApplyLevelFormatPreservesExplicitSnakeCaseIncludeThoughts(t *testing.T)
 	}
 }
 
+<<<<<<< HEAD
 func TestApplier_ClaudeModeNone_DoesNotInjectThinkingConfig(t *testing.T) {
 	applier := NewApplier()
 	modelInfo := &registry.ModelInfo{
@@ -53,10 +54,36 @@ func TestApplier_ClaudeModeNone_DoesNotInjectThinkingConfig(t *testing.T) {
 
 	if gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() {
 		t.Fatalf("expected no thinkingConfig injection for mode none")
+=======
+func TestApplier_ClaudeModeNone_PreservesDisableIntentUnderMinBudget(t *testing.T) {
+	a := NewApplier()
+	body := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"includeThoughts":true}}}}`)
+	cfg := thinking.ThinkingConfig{Mode: thinking.ModeNone, Budget: 0}
+	model := &registry.ModelInfo{
+		ID:                  "claude-sonnet-4-5",
+		MaxCompletionTokens: 4096,
+		Thinking:            &registry.ThinkingSupport{Min: 1024},
+	}
+
+	out, err := a.Apply(body, cfg, model)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	res := gjson.ParseBytes(out)
+	if !res.Get("request.generationConfig.thinkingConfig").Exists() {
+		t.Fatalf("expected thinkingConfig to remain for ModeNone")
+	}
+	if got := res.Get("request.generationConfig.thinkingConfig.includeThoughts").Bool(); got {
+		t.Fatalf("expected includeThoughts=false for ModeNone")
+	}
+	if got := res.Get("request.generationConfig.thinkingConfig.thinkingBudget").Int(); got < 1024 {
+		t.Fatalf("expected budget clamped to min >= 1024, got %d", got)
+>>>>>>> archive/pr-234-head-20260223
 	}
 }
 
 func TestApplier_ClaudeBudgetBelowMin_RemovesThinkingConfigForNonNoneModes(t *testing.T) {
+<<<<<<< HEAD
 	applier := NewApplier()
 	modelInfo := &registry.ModelInfo{
 		ID: "claude-opus-4-5-thinking",
@@ -158,5 +185,23 @@ func TestApplier_ClaudeBudgetCapRespectsExistingMaxOutputTokens(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 3500 {
 		t.Fatalf("maxOutputTokens should remain user-provided: got %d", got)
+=======
+	a := NewApplier()
+	body := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"includeThoughts":true}}}}`)
+	cfg := thinking.ThinkingConfig{Mode: thinking.ModeBudget, Budget: 1}
+	model := &registry.ModelInfo{
+		ID:                  "claude-sonnet-4-5",
+		MaxCompletionTokens: 4096,
+		Thinking:            &registry.ThinkingSupport{Min: 1024},
+	}
+
+	out, err := a.Apply(body, cfg, model)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	res := gjson.ParseBytes(out)
+	if res.Get("request.generationConfig.thinkingConfig").Exists() {
+		t.Fatalf("expected thinkingConfig removed for non-ModeNone min-budget violation")
+>>>>>>> archive/pr-234-head-20260223
 	}
 }

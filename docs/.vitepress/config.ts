@@ -6,6 +6,7 @@ const isCI = process.env.GITHUB_ACTIONS === "true";
 const docsBase = isCI ? `/${repo}/` : "/";
 const faviconHref = `${docsBase}favicon.ico`;
 
+<<<<<<< HEAD
 // Supported locales: en, zh-CN, zh-TW, fa, fa-Latn
 const locales = {
   root: {
@@ -40,11 +41,16 @@ const locales = {
   }
 };
 
+=======
+>>>>>>> archive/pr-234-head-20260223
 export default defineConfig({
   title: "cliproxy++",
   description: "cliproxyapi-plusplus documentation",
   base: docsBase,
+<<<<<<< HEAD
   locales,
+=======
+>>>>>>> archive/pr-234-head-20260223
   head: [
     ["link", { rel: "icon", href: faviconHref }]
   ],
@@ -54,6 +60,7 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: "Home", link: "/" },
+<<<<<<< HEAD
       { text: "Getting Started", link: "/getting-started" },
       { text: "Providers", link: "/provider-usage" },
       { text: "Provider Catalog", link: "/provider-catalog" },
@@ -71,6 +78,19 @@ export default defineConfig({
           { text: "Pinglish", link: "/fa-Latn/" }
         ]
       }
+=======
+      { text: "Start Here", link: "/start-here" },
+      { text: "Tutorials", link: "/tutorials/" },
+      { text: "How-to", link: "/how-to/" },
+      { text: "Explanation", link: "/explanation/" },
+      { text: "Getting Started", link: "/getting-started" },
+      { text: "Providers", link: "/provider-usage" },
+      { text: "Provider Catalog", link: "/provider-catalog" },
+      { text: "Operations", link: "/operations/" },
+      { text: "Reference", link: "/routing-reference" },
+      { text: "API", link: "/api/" },
+      { text: "Docsets", link: "/docsets/" }
+>>>>>>> archive/pr-234-head-20260223
     ],
     sidebar: [
       {

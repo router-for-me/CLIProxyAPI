@@ -150,6 +150,7 @@ func TestStartDeviceAuthorizationWithIDC_RejectsInvalidRegion(t *testing.T) {
 		t.Fatalf("expected invalid region error")
 	}
 }
+<<<<<<< HEAD
 
 func TestStartDeviceAuthorizationWithIDC_RejectsInvalidStartURL(t *testing.T) {
 	t.Parallel()
@@ -200,3 +201,5 @@ func TestStartDeviceAuthorizationWithIDC_AcceptsValidStartURL(t *testing.T) {
 		t.Fatalf("StartDeviceAuthorizationWithIDC returned error: %v", err)
 	}
 }
+=======
+>>>>>>> archive/pr-234-head-20260223

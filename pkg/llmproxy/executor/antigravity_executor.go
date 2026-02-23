@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -914,10 +915,19 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		base := strings.TrimSuffix(baseURL, "/")
 		if base == "" {
 			base = buildBaseURL(e.cfg, auth)
+<<<<<<< HEAD
+<<<<<<<< HEAD:pkg/llmproxy/executor/antigravity_executor.go
+=======
+>>>>>>> archive/pr-234-head-20260223
 		}
 		base, err = sanitizeAntigravityBaseURL(base)
 		if err != nil {
 			return cliproxyexecutor.Response{}, err
+<<<<<<< HEAD
+========
+>>>>>>>> archive/pr-234-head-20260223:pkg/llmproxy/runtime/executor/antigravity_executor.go
+=======
+>>>>>>> archive/pr-234-head-20260223
 		}
 
 		var requestURL strings.Builder
@@ -1404,6 +1414,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	if useAntigravitySchema {
 		payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
+		payloadStr = util.DeleteKeysByName(payloadStr, "$ref", "$defs")
 	} else {
 		payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
 	}
@@ -1539,7 +1550,17 @@ func resolveHost(base string) string {
 		return ""
 	}
 	if parsed.Host != "" {
-		return parsed.Host
+		hostname := parsed.Hostname()
+		if hostname == "" {
+			return ""
+		}
+		if ip := net.ParseIP(hostname); ip != nil {
+			return ""
+		}
+		if parsed.Port() != "" {
+			return net.JoinHostPort(hostname, parsed.Port())
+		}
+		return hostname
 	}
 	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 }
@@ -1611,6 +1632,12 @@ func antigravityErrorMessage(statusCode int, body []byte) string {
 		!strings.Contains(lower, "permission_denied") {
 		return msg
 	}
+<<<<<<< HEAD
+=======
+	if strings.Contains(lower, "hint: the current google project/account does not have a gemini code assist license") {
+		return msg
+	}
+>>>>>>> archive/pr-234-head-20260223
 	return msg + "\nHint: The current Google project/account does not have a Gemini Code Assist license. Re-run --antigravity-login with a licensed account/project, or switch providers."
 }
 
@@ -1723,11 +1750,27 @@ func generateSessionID() string {
 func generateStableSessionID(payload []byte) string {
 	contents := gjson.GetBytes(payload, "request.contents")
 	if contents.IsArray() {
+		candidates := make([]string, 0)
 		for _, content := range contents.Array() {
 			if content.Get("role").String() == "user" {
-				text := content.Get("parts.0.text").String()
-				if text != "" {
-					h := sha256.Sum256([]byte(text))
+				if parts := content.Get("parts"); parts.IsArray() {
+					for _, part := range parts.Array() {
+						text := strings.TrimSpace(part.Get("text").String())
+						if text != "" {
+							candidates = append(candidates, text)
+						}
+					}
+				}
+				if len(candidates) > 0 {
+					normalized := strings.Join(candidates, "\n")
+					h := sha256.Sum256([]byte(normalized))
+					n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
+					return "-" + strconv.FormatInt(n, 10)
+				}
+
+				contentRaw := strings.TrimSpace(content.Raw)
+				if contentRaw != "" {
+					h := sha256.Sum256([]byte(contentRaw))
 					n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
 					return "-" + strconv.FormatInt(n, 10)
 				}

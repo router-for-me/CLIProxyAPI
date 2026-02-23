@@ -2,7 +2,11 @@ package executor
 
 import (
 	"crypto/hmac"
+<<<<<<< HEAD
 	"crypto/sha256"
+=======
+	"crypto/sha512"
+>>>>>>> archive/pr-234-head-20260223
 	"encoding/hex"
 	"os"
 	"sync"
@@ -26,6 +30,7 @@ const userIDCacheHashFallback = "executor-user-id-cache:hmac-sha256-v1"
 const (
 	userIDTTL                = time.Hour
 	userIDCacheCleanupPeriod = 15 * time.Minute
+	userIDCacheHashKey       = "executor-user-id-cache:v1"
 )
 
 func startUserIDCacheCleanup() {
@@ -50,6 +55,7 @@ func purgeExpiredUserIDs() {
 }
 
 func userIDCacheKey(apiKey string) string {
+<<<<<<< HEAD
 	hasher := hmac.New(sha256.New, userIDCacheHashKey)
 	_, _ = hasher.Write([]byte(apiKey))
 	return hex.EncodeToString(hasher.Sum(nil))
@@ -60,6 +66,11 @@ func resolveUserIDCacheHashKey() []byte {
 		return []byte(env)
 	}
 	return []byte(userIDCacheHashFallback)
+=======
+	hasher := hmac.New(sha512.New, []byte(userIDCacheHashKey))
+	_, _ = hasher.Write([]byte(apiKey))
+	return hex.EncodeToString(hasher.Sum(nil))
+>>>>>>> archive/pr-234-head-20260223
 }
 
 func cachedUserID(apiKey string) string {

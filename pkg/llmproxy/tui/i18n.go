@@ -1,6 +1,7 @@
 package tui
 
 // i18n provides a simple internationalization system for the TUI.
+<<<<<<< HEAD
 // Supported locales: "en" (English), "zh-CN" (Simplified Chinese),
 // "zh-TW" (Traditional Chinese), "fa" (Farsi/Persian), "fa-Latn" (Farsi Pinglish).
 
@@ -9,6 +10,12 @@ var currentLocale = "en"
 // All supported locales for the 5-option system
 var supportedLocales = []string{"en", "zh-CN", "zh-TW", "fa", "fa-Latn"}
 
+=======
+// Supported locales: "zh" (Chinese), "en" (English), "fa" (Farsi).
+
+var currentLocale = "en"
+
+>>>>>>> archive/pr-234-head-20260223
 // SetLocale changes the active locale.
 func SetLocale(locale string) {
 	if _, ok := locales[locale]; ok {
@@ -21,6 +28,7 @@ func CurrentLocale() string {
 	return currentLocale
 }
 
+<<<<<<< HEAD
 // ToggleLocale rotates through en -> zh-CN -> zh-TW -> fa -> fa-Latn -> en.
 func ToggleLocale() {
 	currentIdx := 0
@@ -36,6 +44,18 @@ func ToggleLocale() {
 // SupportedLocales returns all supported locale codes.
 func SupportedLocales() []string {
 	return supportedLocales
+=======
+// ToggleLocale rotates through en -> zh -> fa.
+func ToggleLocale() {
+	switch currentLocale {
+	case "en":
+		currentLocale = "zh"
+	case "zh":
+		currentLocale = "fa"
+	default:
+		currentLocale = "en"
+	}
+>>>>>>> archive/pr-234-head-20260223
 }
 
 // T returns the translated string for the given key.
@@ -55,25 +75,38 @@ func T(key string) string {
 }
 
 var locales = map[string]map[string]string{
+<<<<<<< HEAD
 	"en":      enStrings,
 	"zh-CN":   zhCNStrings,
 	"zh-TW":   zhTWStrings,
 	"fa":      faStrings,
 	"fa-Latn": faLatnStrings,
+=======
+	"zh": zhStrings,
+	"en": enStrings,
+	"fa": faStrings,
+>>>>>>> archive/pr-234-head-20260223
 }
 
 // ──────────────────────────────────────────
 // Tab names
 // ──────────────────────────────────────────
+<<<<<<< HEAD
 var zhCNTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "使用统计", "日志"}
 var zhTWTabNames = []string{"儀表板", "配置", "認證檔案", "API 金鑰", "OAuth", "使用統計", "日誌"}
 var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
 var faTabNames = []string{"داشبورد", "پیکربندی", "فایل\u200cهای احراز هویت", "کلیدهای API", "OAuth", "کاربرد", "لاگ\u200cها"}
 var faLatnTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
+=======
+var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "使用统计", "日志"}
+var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
+var faTabNames = []string{"داشبورد", "پیکربندی", "فایل\u200cهای احراز هویت", "کلیدهای API", "OAuth", "کاربرد", "لاگ\u200cها"}
+>>>>>>> archive/pr-234-head-20260223
 
 // TabNames returns tab names in the current locale.
 func TabNames() []string {
 	switch currentLocale {
+<<<<<<< HEAD
 	case "zh-CN":
 		return zhCNTabNames
 	case "zh-TW":
@@ -82,12 +115,22 @@ func TabNames() []string {
 		return faTabNames
 	case "fa-Latn":
 		return faLatnTabNames
+=======
+	case "zh":
+		return zhTabNames
+	case "fa":
+		return faTabNames
+>>>>>>> archive/pr-234-head-20260223
 	default:
 		return enTabNames
 	}
 }
 
+<<<<<<< HEAD
 var zhCNStrings = map[string]string{
+=======
+var zhStrings = map[string]string{
+>>>>>>> archive/pr-234-head-20260223
 	// ── Common ──
 	"loading":      "加载中...",
 	"refresh":      "刷新",
@@ -539,6 +582,7 @@ var faStrings = map[string]string{
 	"logs_help":        " [a] پیمایش خودکار • [c] پاکسازی • [1] همه [2] info+ [3] warn+ [4] error • [↑↓] پیمایش",
 	"logs_waiting":     "  در انتظار خروجی لاگ...",
 }
+<<<<<<< HEAD
 
 var faLatnStrings = map[string]string{ // Farsi in Latin/Pinglish script
 	// ── Common ──
@@ -841,3 +885,5 @@ var zhTWStrings = map[string]string{ // Traditional Chinese
 	"logs_help":        " [a] 自動捲動 • [c] 清除 • [1] 全部 [2] info+ [3] warn+ [4] error • [↑↓] 捲動",
 	"logs_waiting":     "  等待日誌輸出...",
 }
+=======
+>>>>>>> archive/pr-234-head-20260223

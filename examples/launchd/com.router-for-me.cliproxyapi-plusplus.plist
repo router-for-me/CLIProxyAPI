@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.router-for-me.cliproxyapi-plusplus</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/opt/homebrew/bin/cliproxyapi++</string>
+      <string>--config</string>
+      <string>/opt/homebrew/etc/cliproxyapi/config.yaml</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/opt/homebrew/etc/cliproxyapi</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+      <key>Crashed</key>
+      <true/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/opt/homebrew/var/log/cliproxyapi-plusplus.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/opt/homebrew/var/log/cliproxyapi-plusplus.err</string>
+  </dict>
+</plist>

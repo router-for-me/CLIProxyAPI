@@ -177,5 +177,9 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	if len(parts) == 0 {
 		return ""
 	}
+<<<<<<< HEAD
 	return hashString(strings.Join(parts, "|"))
+=======
+	return strings.Join(parts, "|")
+>>>>>>> archive/pr-234-head-20260223
 }

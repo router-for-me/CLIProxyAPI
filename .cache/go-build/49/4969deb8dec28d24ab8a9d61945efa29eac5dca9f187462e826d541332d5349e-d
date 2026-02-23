@@ -1,0 +1,3 @@
+./chacha8.go
+./chacha8_generic.go
+./chacha8_arm64.s

@@ -285,10 +285,13 @@ func (s *FileTokenStore) resolveManagedPath(candidate string) (string, error) {
 	if trimmed == "" {
 		return "", fmt.Errorf("auth filestore: path is empty")
 	}
+<<<<<<< HEAD
 	cleanCandidate, err := misc.ResolveSafeFilePath(trimmed)
 	if err != nil {
 		return "", fmt.Errorf("auth filestore: resolve candidate path: %w", err)
 	}
+=======
+>>>>>>> archive/pr-234-head-20260223
 	baseDir := s.baseDirSnapshot()
 	if baseDir == "" {
 		return "", fmt.Errorf("auth filestore: directory not configured")
@@ -300,9 +303,15 @@ func (s *FileTokenStore) resolveManagedPath(candidate string) (string, error) {
 
 	var resolved string
 	if filepath.IsAbs(trimmed) {
+<<<<<<< HEAD
 		resolved = filepath.Clean(filepath.FromSlash(cleanCandidate))
 	} else {
 		resolved = filepath.Join(absBase, filepath.FromSlash(cleanCandidate))
+=======
+		resolved = filepath.Clean(trimmed)
+	} else {
+		resolved = filepath.Join(absBase, filepath.FromSlash(trimmed))
+>>>>>>> archive/pr-234-head-20260223
 		resolved = filepath.Clean(resolved)
 	}
 	rel, err := filepath.Rel(absBase, resolved)

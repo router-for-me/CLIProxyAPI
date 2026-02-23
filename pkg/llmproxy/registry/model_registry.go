@@ -663,7 +663,11 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 	registration.SuspendedClients[clientID] = reason
 	registration.LastUpdated = time.Now()
 	if reason != "" {
+<<<<<<< HEAD
 		log.Debugf("Suspended client %s for model %s (reason provided)", logSafeRegistryID(clientID), logSafeRegistryID(modelID))
+=======
+		log.Debugf("Suspended client %s for model %s (reason provided)", clientID, modelID)
+>>>>>>> archive/pr-234-head-20260223
 	} else {
 		log.Debug("Suspended client for model")
 	}
@@ -690,6 +694,7 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	delete(registration.SuspendedClients, clientID)
 	registration.LastUpdated = time.Now()
 	log.Debug("Resumed suspended client for model")
+<<<<<<< HEAD
 }
 
 func logSafeRegistryID(raw string) string {
@@ -700,6 +705,8 @@ func logSafeRegistryID(raw string) string {
 	mac := hmac.New(sha256.New, []byte("cliproxy-model-registry-v1"))
 	mac.Write([]byte(trimmed))
 	return fmt.Sprintf("id_%x", mac.Sum(nil)[:6])
+=======
+>>>>>>> archive/pr-234-head-20260223
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.

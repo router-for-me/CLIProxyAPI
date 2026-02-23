@@ -105,6 +105,7 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   }' | jq
 ```
 
+<<<<<<< HEAD
 ### Claude OpenAI-Compat Troubleshooting Decision Tree
 
 1. `GET /v1/models` does not show target Claude model/alias:
@@ -118,6 +119,8 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 1. Stream/non-stream output differs materially:
    Capture payload + model + first SSE chunks and compare conversion path before opening traffic wider.
 
+=======
+>>>>>>> archive/pr-234-head-20260223
 ## Common Failure Modes
 
 - `401`: missing/invalid client API key.

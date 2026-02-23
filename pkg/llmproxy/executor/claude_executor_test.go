@@ -46,6 +46,33 @@ func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 	}
 }
 
+func TestExtractAndRemoveBetas_AcceptsLegacyAnthropicBeta(t *testing.T) {
+	input := []byte(`{
+		"betas": ["prompt-caching-2024-07-31", "thinking-2025-09-01"],
+		"anthropic_beta": "interleaved-thinking-2025-05-14",
+		"messages": [{"role":"user","content":"hi"}]
+	}`)
+
+	got, out := extractAndRemoveBetas(input)
+
+	expected := []string{"prompt-caching-2024-07-31", "thinking-2025-09-01", "interleaved-thinking-2025-05-14"}
+	if len(got) != len(expected) {
+		t.Fatalf("got %v, want %v", got, expected)
+	}
+	for i := range expected {
+		if got[i] != expected[i] {
+			t.Fatalf("got index %d = %q, want %q", i, got[i], expected[i])
+		}
+	}
+
+	if gjson.GetBytes(out, "betas").Exists() {
+		t.Fatal("betas should be removed from body")
+	}
+	if gjson.GetBytes(out, "anthropic_beta").Exists() {
+		t.Fatal("anthropic_beta should be removed from body")
+	}
+}
+
 func TestApplyClaudeToolPrefix_SkipsBuiltinTools(t *testing.T) {
 	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"my_custom_tool","input_schema":{"type":"object"}}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")
@@ -163,6 +190,38 @@ func TestApplyClaudeToolPrefix_ToolChoiceFunctionName(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
+=======
+func TestDisableThinkingIfToolChoiceForced(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "tool_choice_any", body: `{"tool_choice":{"type":"any"},"thinking":{"budget_tokens":1024}}`},
+		{name: "tool_choice_tool", body: `{"tool_choice":{"type":"tool","name":"Read"},"thinking":{"budget_tokens":1024}}`},
+		{name: "tool_choice_function", body: `{"tool_choice":{"type":"function","function":{"name":"Read"}},"thinking":{"budget_tokens":1024}}`},
+		{name: "tool_choice_auto", body: `{"tool_choice":{"type":"auto"},"thinking":{"budget_tokens":1024}}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := disableThinkingIfToolChoiceForced([]byte(tc.body))
+			hasThinking := gjson.GetBytes(out, "thinking").Exists()
+			switch tc.name {
+			case "tool_choice_any", "tool_choice_tool", "tool_choice_function":
+				if hasThinking {
+					t.Fatalf("thinking should be removed, got %s", string(out))
+				}
+			case "tool_choice_auto":
+				if !hasThinking {
+					t.Fatalf("thinking should be preserved, got %s", string(out))
+				}
+			}
+		})
+	}
+}
+
+>>>>>>> archive/pr-234-head-20260223
 func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")

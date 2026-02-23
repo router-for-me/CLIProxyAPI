@@ -103,11 +103,16 @@ func TestFileTokenStoreSave_RejectsPathOutsideBaseDir(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected save to reject path traversal")
 	}
+<<<<<<< HEAD
 	if !strings.Contains(err.Error(), "escapes base directory") && !strings.Contains(err.Error(), "path traversal") {
+=======
+	if !strings.Contains(err.Error(), "escapes base directory") {
+>>>>>>> archive/pr-234-head-20260223
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
+<<<<<<< HEAD
 func TestFileTokenStoreSave_RejectsEncodedAndWindowsTraversalPath(t *testing.T) {
 	t.Parallel()
 
@@ -127,6 +132,8 @@ func TestFileTokenStoreSave_RejectsEncodedAndWindowsTraversalPath(t *testing.T) 
 	}
 }
 
+=======
+>>>>>>> archive/pr-234-head-20260223
 func TestFileTokenStoreDelete_RejectsAbsolutePathOutsideBaseDir(t *testing.T) {
 	t.Parallel()
 

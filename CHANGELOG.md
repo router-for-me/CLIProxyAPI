@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Changed
+<<<<<<< HEAD
+=======
+- Support multiple aliases for a single upstream model in OAuth model alias configuration, preserving compatibility while allowing same upstream model name with distinct aliases.
+>>>>>>> archive/pr-234-head-20260223
 
 ### Deprecated
 

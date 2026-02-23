@@ -3,8 +3,15 @@ package qwen
 import (
 	"context"
 	"encoding/json"
+<<<<<<< HEAD
 	"net/http"
 	"net/http/httptest"
+=======
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+>>>>>>> archive/pr-234-head-20260223
 	"strings"
 	"testing"
 )
@@ -21,6 +28,26 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return t.base.RoundTrip(newReq)
 }
 
+<<<<<<< HEAD
+=======
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header: map[string][]string{
+			"Content-Type": {"application/json"},
+		},
+		Body:   io.NopCloser(strings.NewReader(body)),
+		Status: strconv.Itoa(status) + " " + http.StatusText(status),
+	}
+}
+
+>>>>>>> archive/pr-234-head-20260223
 func TestInitiateDeviceFlow(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -83,6 +110,56 @@ func TestRefreshTokens(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
+=======
+func TestPollForTokenUsesInjectedHTTPClient(t *testing.T) {
+	defaultTransport := http.DefaultTransport
+	defer func() {
+		http.DefaultTransport = defaultTransport
+	}()
+	defaultCalled := 0
+	http.DefaultTransport = roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+		defaultCalled++
+		return jsonResponse(http.StatusOK, `{"access_token":"default-access","token_type":"Bearer","expires_in":3600}`), nil
+	})
+
+	customCalled := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		customCalled++
+		_ = r
+		w.Header().Set("Content-Type", "application/json")
+		resp := QwenTokenResponse{
+			AccessToken:  "custom-access",
+			RefreshToken: "custom-refresh",
+			ExpiresIn:    3600,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	auth := NewQwenAuth(nil, &http.Client{
+		Transport: &rewriteTransport{
+			target: ts.URL,
+			base:   defaultTransport,
+		},
+	})
+	resp, err := auth.PollForToken("device-code", "code-verifier")
+	if err != nil {
+		t.Fatalf("PollForToken failed: %v", err)
+	}
+
+	if customCalled != 1 {
+		t.Fatalf("expected custom client to be used exactly once, got %d", customCalled)
+	}
+	if defaultCalled != 0 {
+		t.Fatalf("did not expect default transport to be used, got %d", defaultCalled)
+	}
+	if resp.AccessToken != "custom-access" {
+		t.Fatalf("got access token %q, want %q", resp.AccessToken, "custom-access")
+	}
+}
+
+>>>>>>> archive/pr-234-head-20260223
 func TestQwenTokenStorageSaveTokenToFileRejectsTraversalPath(t *testing.T) {
 	t.Parallel()
 

@@ -16,10 +16,17 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+<<<<<<< HEAD
 	constant "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/openai/openai/responses"
+=======
+	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
+	constant "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
+>>>>>>> archive/pr-234-head-20260223
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"

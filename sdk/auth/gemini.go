@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/gemini"
@@ -10,6 +11,14 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+type geminiAuthClient interface {
+	GetAuthenticatedClient(ctx context.Context, ts *gemini.GeminiTokenStorage, cfg *config.Config, opts *gemini.WebLoginOptions) (*http.Client, error)
+}
+
+var newGeminiAuthClient = func() geminiAuthClient {
+	return gemini.NewGeminiAuth()
+}
 
 // GeminiAuthenticator implements the login flow for Google Gemini CLI accounts.
 type GeminiAuthenticator struct{}
@@ -43,7 +52,7 @@ func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		ts.ProjectID = opts.ProjectID
 	}
 
-	geminiAuth := gemini.NewGeminiAuth()
+	geminiAuth := newGeminiAuthClient()
 	_, err := geminiAuth.GetAuthenticatedClient(ctx, &ts, cfg, &gemini.WebLoginOptions{
 		NoBrowser:    opts.NoBrowser,
 		CallbackPort: opts.CallbackPort,

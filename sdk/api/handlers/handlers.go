@@ -518,6 +518,10 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if errMsg := h.authManagerUnavailableError(); errMsg != nil {
+		return nil, nil, errMsg
+	}
+
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -564,6 +568,10 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if errMsg := h.authManagerUnavailableError(); errMsg != nil {
+		return nil, nil, errMsg
+	}
+
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -611,6 +619,13 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	if errMsg := h.authManagerUnavailableError(); errMsg != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
+	}
+
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -861,6 +876,16 @@ func replaceHeader(dst http.Header, src http.Header) {
 	}
 }
 
+func (h *BaseAPIHandler) authManagerUnavailableError() *interfaces.ErrorMessage {
+	if h == nil || h.AuthManager == nil {
+		return &interfaces.ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable,
+			Error:      fmt.Errorf("auth manager unavailable: auth file missing or not loaded"),
+		}
+	}
+	return nil
+}
+
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
 func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
 	status := http.StatusInternalServerError
@@ -875,6 +900,19 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 			c.Writer.Header().Del(key)
 			for _, value := range values {
 				c.Writer.Header().Add(key, value)
+			}
+		}
+	}
+	if msg != nil && msg.Error != nil {
+		if rae, ok := msg.Error.(interface{ RetryAfter() *time.Duration }); ok && rae != nil {
+			if retryAfter := rae.RetryAfter(); retryAfter != nil && *retryAfter > 0 {
+				if c.Writer.Header().Get("Retry-After") == "" {
+					seconds := int(retryAfter.Seconds())
+					if seconds < 1 {
+						seconds = 1
+					}
+					c.Writer.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+				}
 			}
 		}
 	}

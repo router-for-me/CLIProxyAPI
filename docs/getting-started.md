@@ -20,6 +20,10 @@ mkdir -p ~/cliproxy && cd ~/cliproxy
 curl -fsSL -o config.yaml \
   https://raw.githubusercontent.com/KooshaPari/cliproxyapi-plusplus/main/config.example.yaml
 mkdir -p auths logs
+<<<<<<< HEAD
+=======
+chmod 700 auths
+>>>>>>> archive/pr-234-head-20260223
 ```
 
 ## 2. Configure the Minimum Required Settings
@@ -39,6 +43,10 @@ Notes:
 
 - `api-keys` protects `/v1/*` endpoints (client-facing auth).
 - `auth-dir` is where provider credentials are loaded from.
+<<<<<<< HEAD
+=======
+- Keep `auth-dir` at mode `0700` (`chmod 700 <auth-dir>`) so login/token writes pass security checks.
+>>>>>>> archive/pr-234-head-20260223
 
 ## 3. Add One Provider Credential
 

@@ -3,7 +3,10 @@ package auth
 import (
 	"bytes"
 	"context"
+<<<<<<< HEAD
 	"crypto/hmac"
+=======
+>>>>>>> archive/pr-234-head-20260223
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -2195,9 +2198,14 @@ func authLogRef(auth *Auth) string {
 	if identifier == "" {
 		return "provider=" + provider + " auth_id_hash=none"
 	}
+<<<<<<< HEAD
 	mac := hmac.New(sha256.New, []byte("cliproxy-auth-log-ref-v1"))
 	_, _ = mac.Write([]byte(identifier))
 	return "provider=" + provider + " auth_id_hash=" + hex.EncodeToString(mac.Sum(nil)[:6])
+=======
+	sum := sha256.Sum256([]byte(identifier))
+	return "provider=" + provider + " auth_id_hash=" + hex.EncodeToString(sum[:6])
+>>>>>>> archive/pr-234-head-20260223
 }
 
 // InjectCredentials delegates per-provider HTTP request preparation when supported.

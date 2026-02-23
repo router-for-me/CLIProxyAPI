@@ -160,6 +160,10 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errResolve.Error()})
 		return
 	}
+	if errValidateURL := validateAPICallURL(parsedURL); errValidateURL != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errValidateURL.Error()})
+		return
+	}
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
@@ -339,9 +343,12 @@ func validateAPICallURL(parsedURL *url.URL) error {
 	if scheme != "http" && scheme != "https" {
 		return fmt.Errorf("unsupported url scheme")
 	}
+<<<<<<< HEAD
 	if parsedURL.User != nil {
 		return fmt.Errorf("target host is not allowed")
 	}
+=======
+>>>>>>> archive/pr-234-head-20260223
 	host := strings.TrimSpace(parsedURL.Hostname())
 	if host == "" {
 		return fmt.Errorf("invalid url host")
@@ -357,6 +364,7 @@ func validateAPICallURL(parsedURL *url.URL) error {
 	return nil
 }
 
+<<<<<<< HEAD
 func sanitizeAPICallURL(raw string) (string, *url.URL, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -393,6 +401,8 @@ func validateResolvedHostIPs(host string) error {
 	return nil
 }
 
+=======
+>>>>>>> archive/pr-234-head-20260223
 func tokenValueForAuth(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -1303,6 +1313,7 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 	quotaURL, errQuotaURL := copilotQuotaURLFromTokenURL(originalURL)
 	if errQuotaURL != nil {
 		log.WithError(errQuotaURL).Debug("enrichCopilotTokenResponse: rejected token URL for quota request")
+<<<<<<< HEAD
 		return response
 	}
 	parsedQuotaURL, errParseQuotaURL := url.Parse(quotaURL)
@@ -1313,6 +1324,8 @@ func (h *Handler) enrichCopilotTokenResponse(ctx context.Context, response apiCa
 		return response
 	}
 	if errResolve := validateResolvedHostIPs(parsedQuotaURL.Hostname()); errResolve != nil {
+=======
+>>>>>>> archive/pr-234-head-20260223
 		return response
 	}
 
@@ -1461,9 +1474,12 @@ func copilotQuotaURLFromTokenURL(originalURL string) (string, error) {
 	if errParse != nil {
 		return "", errParse
 	}
+<<<<<<< HEAD
 	if parsedURL.User != nil {
 		return "", fmt.Errorf("unsupported host %q", parsedURL.Hostname())
 	}
+=======
+>>>>>>> archive/pr-234-head-20260223
 	host := strings.ToLower(parsedURL.Hostname())
 	if parsedURL.Scheme != "https" {
 		return "", fmt.Errorf("unsupported scheme %q", parsedURL.Scheme)

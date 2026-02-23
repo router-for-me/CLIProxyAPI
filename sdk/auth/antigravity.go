@@ -237,6 +237,23 @@ func formatAntigravityCallbackServerError(port int, err error) string {
 	return raw
 }
 
+<<<<<<< HEAD
+=======
+func shouldFallbackToEphemeralCallbackPort(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "address already in use") ||
+		strings.Contains(lower, "forbidden by its access permissions") ||
+		strings.Contains(lower, "permission denied") ||
+		strings.Contains(lower, "access permissions")
+}
+
+>>>>>>> archive/pr-234-head-20260223
 type callbackResult struct {
 	Code  string
 	Error string
@@ -250,7 +267,15 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 	addr := fmt.Sprintf(":%d", port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, 0, nil, err
+		if port > 0 && shouldFallbackToEphemeralCallbackPort(err) {
+			fallbackListener, fallbackErr := net.Listen("tcp", ":0")
+			if fallbackErr != nil {
+				return nil, 0, nil, err
+			}
+			listener = fallbackListener
+		} else {
+			return nil, 0, nil, err
+		}
 	}
 	port = listener.Addr().(*net.TCPAddr).Port
 	resultCh := make(chan callbackResult, 1)

@@ -108,6 +108,7 @@ func TestParseOpenAIResponsesUsageDetail_WithAlternateFields(t *testing.T) {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 3)
 	}
 }
+<<<<<<< HEAD
 
 func TestParseOpenAIUsage_PrefersCompletionTokensWhenOutputTokensZero(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":12,"output_tokens":0,"completion_tokens":9}}`)
@@ -133,3 +134,5 @@ func TestParseOpenAIStreamUsage_PrefersCompletionTokensWhenOutputTokensZero(t *t
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 12)
 	}
 }
+=======
+>>>>>>> archive/pr-234-head-20260223

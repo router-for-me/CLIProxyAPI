@@ -391,19 +391,29 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	if w.requestInfo == nil {
 		return nil
 	}
+<<<<<<< HEAD
 	safeURL := sanitizeForLogging(w.requestInfo.URL)
 	safeMethod := sanitizeForLogging(w.requestInfo.Method)
 	safeRequestID := sanitizeForLogging(w.requestInfo.RequestID)
+=======
+>>>>>>> archive/pr-234-head-20260223
 	requestHeaders := sanitizeRequestHeaders(http.Header(w.requestInfo.Headers))
 
 	if loggerWithOptions, ok := w.logger.(interface {
 		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
 	}); ok {
 		return loggerWithOptions.LogRequestWithOptions(
+<<<<<<< HEAD
 			safeURL,
 			safeMethod,
 			requestHeaders,
 			redactLoggedBody(requestBody),
+=======
+			w.requestInfo.URL,
+			w.requestInfo.Method,
+			requestHeaders,
+			requestBody,
+>>>>>>> archive/pr-234-head-20260223
 			statusCode,
 			headers,
 			redactLoggedBody(body),
@@ -418,10 +428,17 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 	}
 
 	return w.logger.LogRequest(
+<<<<<<< HEAD
 		safeURL,
 		safeMethod,
 		requestHeaders,
 		redactLoggedBody(requestBody),
+=======
+		w.requestInfo.URL,
+		w.requestInfo.Method,
+		requestHeaders,
+		requestBody,
+>>>>>>> archive/pr-234-head-20260223
 		statusCode,
 		headers,
 		redactLoggedBody(body),

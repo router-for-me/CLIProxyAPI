@@ -9,7 +9,10 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+<<<<<<< HEAD
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
+=======
+>>>>>>> archive/pr-234-head-20260223
 	log "github.com/sirupsen/logrus"
 )
 
@@ -205,6 +208,7 @@ func doGenericAPIKeyLogin(cfg *config.Config, options *LoginOptions, providerNam
 		return
 	}
 
+<<<<<<< HEAD
 	authDir := strings.TrimSpace(cfg.AuthDir)
 	if authDir == "" {
 		home, err := os.UserHomeDir()
@@ -219,6 +223,11 @@ func doGenericAPIKeyLogin(cfg *config.Config, options *LoginOptions, providerNam
 
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		log.Errorf("%s: failed to create auth dir %s: %v", providerName, authDir, err)
+=======
+	authDir, err := ensureAuthDir(strings.TrimSpace(cfg.AuthDir), providerName)
+	if err != nil {
+		log.Errorf("%s: %v", providerName, err)
+>>>>>>> archive/pr-234-head-20260223
 		return
 	}
 
@@ -234,6 +243,7 @@ func doGenericAPIKeyLogin(cfg *config.Config, options *LoginOptions, providerNam
 		return
 	}
 
+<<<<<<< HEAD
 	tokenFileRef := tokenPath
 	if home, err := os.UserHomeDir(); err == nil {
 		defaultAuth := filepath.Join(home, ".cli-proxy-api")
@@ -243,6 +253,9 @@ func doGenericAPIKeyLogin(cfg *config.Config, options *LoginOptions, providerNam
 			tokenFileRef = "~/" + filepath.ToSlash(rel)
 		}
 	}
+=======
+	tokenFileRef := authDirTokenFileRef(authDir, fileName)
+>>>>>>> archive/pr-234-head-20260223
 
 	updateConfig(tokenFileRef)
 

@@ -126,7 +126,10 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			}).Debug("thinking: model does not support thinking, stripping config |")
 			return StripThinkingConfig(body, providerFormat), nil
 		}
+<<<<<<< HEAD
 		// nolint:gosec // false positive: logging model name, not secret
+=======
+>>>>>>> archive/pr-234-head-20260223
 		log.Debug("thinking: model does not support thinking, passthrough |")
 		return body, nil
 	}
@@ -153,14 +156,20 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		// Models with "thinking" in their name should have thinking enabled by default
 		if isForcedThinkingModel(modelInfo.ID, model) {
 			config = ThinkingConfig{Mode: ModeAuto, Budget: -1}
+<<<<<<< HEAD
 			// nolint:gosec // false positive: logging model name, not secret
+=======
+>>>>>>> archive/pr-234-head-20260223
 			log.WithFields(log.Fields{
 				"provider": providerFormat,
 				"mode":     config.Mode,
 				"forced":   true,
 			}).Debug("thinking: forced thinking for thinking model |")
 		} else {
+<<<<<<< HEAD
 			// nolint:gosec // false positive: logging model name, not secret
+=======
+>>>>>>> archive/pr-234-head-20260223
 			log.WithFields(log.Fields{
 				"provider": providerFormat,
 				"model":    modelInfo.ID,

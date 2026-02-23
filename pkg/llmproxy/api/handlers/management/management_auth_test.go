@@ -42,6 +42,7 @@ func TestListAuthFiles(t *testing.T) {
 		t.Errorf("expected at least one auth file, got 0, body: %s", w.Body.String())
 	}
 }
+<<<<<<< HEAD
 
 func TestListAuthFiles_IncludesKiroTypeFromDiskMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -90,3 +91,5 @@ func TestListAuthFiles_IncludesKiroTypeFromDiskMetadata(t *testing.T) {
 		t.Fatalf("expected kiro auth file entry in response")
 	}
 }
+=======
+>>>>>>> archive/pr-234-head-20260223

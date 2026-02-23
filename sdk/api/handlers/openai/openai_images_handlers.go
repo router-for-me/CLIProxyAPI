@@ -153,7 +153,12 @@ func (h *OpenAIImagesAPIHandler) ImageGenerations(c *gin.Context) {
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
 	// Convert provider response to OpenAI Images format
+<<<<<<< HEAD
 	openAIResponse := h.convertToOpenAIFormat(resp, modelName, prompt)
+=======
+	responseFormat := gjson.GetBytes(rawJSON, "response_format").String()
+	openAIResponse := h.convertToOpenAIFormat(resp, modelName, prompt, responseFormat)
+>>>>>>> archive/pr-234-head-20260223
 
 	c.JSON(http.StatusOK, openAIResponse)
 	cliCancel()
@@ -260,12 +265,20 @@ func (h *OpenAIImagesAPIHandler) determineHandlerType(modelName string) string {
 }
 
 // convertToOpenAIFormat converts provider response to OpenAI Images API response format.
+<<<<<<< HEAD
 func (h *OpenAIImagesAPIHandler) convertToOpenAIFormat(resp []byte, modelName string, originalPrompt string) *ImageGenerationResponse {
+=======
+func (h *OpenAIImagesAPIHandler) convertToOpenAIFormat(resp []byte, modelName string, originalPrompt string, responseFormat string) *ImageGenerationResponse {
+>>>>>>> archive/pr-234-head-20260223
 	created := time.Now().Unix()
 
 	// Check if this is a Gemini-style response
 	if h.isGeminiImageModel(modelName) {
+<<<<<<< HEAD
 		return h.convertGeminiToOpenAI(resp, created, originalPrompt)
+=======
+		return h.convertGeminiToOpenAI(resp, created, originalPrompt, responseFormat)
+>>>>>>> archive/pr-234-head-20260223
 	}
 
 	// Try to parse as OpenAI-style response directly
@@ -287,7 +300,11 @@ func (h *OpenAIImagesAPIHandler) convertToOpenAIFormat(resp []byte, modelName st
 }
 
 // convertGeminiToOpenAI converts Gemini image response to OpenAI Images format.
+<<<<<<< HEAD
 func (h *OpenAIImagesAPIHandler) convertGeminiToOpenAI(resp []byte, created int64, originalPrompt string) *ImageGenerationResponse {
+=======
+func (h *OpenAIImagesAPIHandler) convertGeminiToOpenAI(resp []byte, created int64, originalPrompt string, responseFormat string) *ImageGenerationResponse {
+>>>>>>> archive/pr-234-head-20260223
 	response := &ImageGenerationResponse{
 		Created: created,
 		Data:    []ImageData{},
@@ -304,12 +321,24 @@ func (h *OpenAIImagesAPIHandler) convertGeminiToOpenAI(resp []byte, created int6
 				mimeType := inlineData.Get("mimeType").String()
 
 				if data != "" {
+<<<<<<< HEAD
 					// Build data URL
 					imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
 					response.Data = append(response.Data, ImageData{
 						URL:           imageURL,
 						RevisedPrompt: originalPrompt,
 					})
+=======
+					image := ImageData{
+						RevisedPrompt: originalPrompt,
+					}
+					if responseFormat == "b64_json" {
+						image.B64JSON = data
+					} else {
+						image.URL = fmt.Sprintf("data:%s;base64,%s", mimeType, data)
+					}
+					response.Data = append(response.Data, image)
+>>>>>>> archive/pr-234-head-20260223
 				}
 			}
 		}

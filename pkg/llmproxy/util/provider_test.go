@@ -4,6 +4,10 @@ import (
 	"reflect"
 	"testing"
 
+<<<<<<< HEAD
+=======
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+>>>>>>> archive/pr-234-head-20260223
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 )
 
@@ -44,3 +48,55 @@ func TestGetProviderName_ProviderPinnedModel(t *testing.T) {
 		t.Fatalf("GetProviderName() = %v, want %v", got, want)
 	}
 }
+<<<<<<< HEAD
+=======
+
+func TestIsOpenAICompatibilityAlias_MatchesAliasAndNameCaseInsensitive(t *testing.T) {
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name: "compat-a",
+				Models: []config.OpenAICompatibilityModel{
+					{Name: "gpt-5.2", Alias: "gpt-5.2-codex"},
+				},
+			},
+		},
+	}
+
+	if !IsOpenAICompatibilityAlias("gpt-5.2-codex", cfg) {
+		t.Fatal("expected alias lookup to return true")
+	}
+	if !IsOpenAICompatibilityAlias("GPT-5.2", cfg) {
+		t.Fatal("expected name lookup to return true")
+	}
+	if IsOpenAICompatibilityAlias("gpt-4.1", cfg) {
+		t.Fatal("unexpected alias hit for unknown model")
+	}
+}
+
+func TestGetOpenAICompatibilityConfig_MatchesAliasAndName(t *testing.T) {
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name: "compat-a",
+				Models: []config.OpenAICompatibilityModel{
+					{Name: "gpt-5.2", Alias: "gpt-5.2-codex"},
+				},
+			},
+		},
+	}
+
+	compat, model := GetOpenAICompatibilityConfig("gpt-5.2-codex", cfg)
+	if compat == nil || model == nil {
+		t.Fatal("expected alias lookup to resolve compat config")
+	}
+
+	compatByName, modelByName := GetOpenAICompatibilityConfig("GPT-5.2", cfg)
+	if compatByName == nil || modelByName == nil {
+		t.Fatal("expected name lookup to resolve compat config")
+	}
+	if modelByName.Alias != "gpt-5.2-codex" {
+		t.Fatalf("resolved model alias = %q, want gpt-5.2-codex", modelByName.Alias)
+	}
+}
+>>>>>>> archive/pr-234-head-20260223

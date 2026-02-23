@@ -1,0 +1,8 @@
+./atomic_arm64.go
+./doc.go
+./stubs.go
+./types.go
+./types_64bit.go
+./unaligned.go
+./xchg8.go
+./atomic_arm64.s

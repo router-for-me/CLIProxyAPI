@@ -113,6 +113,9 @@ func TestMigrateOAuthModelAlias_ConvertsAntigravityModels(t *testing.T) {
 	if !strings.Contains(content, "rev19-uic3-1p") {
 		t.Fatal("expected gemini-2.5-computer-use-preview-10-2025 to be converted to rev19-uic3-1p")
 	}
+	if strings.Contains(content, `alias: "gemini-2.5-computer-use-preview-10-2025"`) {
+		t.Fatal("expected deprecated antigravity alias not to be injected into oauth-model-alias defaults")
+	}
 	if !strings.Contains(content, "gemini-3-pro-high") {
 		t.Fatal("expected gemini-3-pro-preview to be converted to gemini-3-pro-high")
 	}
@@ -176,6 +179,9 @@ port: 8080
 	}
 	if !strings.Contains(content, "rev19-uic3-1p") {
 		t.Fatal("expected default antigravity aliases to include rev19-uic3-1p")
+	}
+	if strings.Contains(content, `alias: "gemini-2.5-computer-use-preview-10-2025"`) {
+		t.Fatal("expected deprecated antigravity alias not to be included in default config")
 	}
 }
 

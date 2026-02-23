@@ -3,7 +3,11 @@
 ## Scope
 
 - Planned batch: `CPB-0541` through `CPB-0590` (50 items).
+<<<<<<< HEAD
 - Status: documented, no implementation yet in this pass.
+=======
+- Status: lane-E closeout report added for `CPB-0581..0590`; remaining slices stay planning-only.
+>>>>>>> archive/pr-234-head-20260223
 
 ## Lane Index
 - `docs/planning/reports/issue-wave-cpb-0541-0590-lane-1.md` (`CPB-0541`..`CPB-0545`)
@@ -16,6 +20,10 @@
 - `docs/planning/reports/issue-wave-cpb-0541-0590-lane-8.md` (`CPB-0576`..`CPB-0580`)
 - `docs/planning/reports/issue-wave-cpb-0541-0590-lane-9.md` (`CPB-0581`..`CPB-0585`)
 - `docs/planning/reports/issue-wave-cpb-0541-0590-lane-10.md` (`CPB-0586`..`CPB-0590`)
+<<<<<<< HEAD
+=======
+- `docs/planning/reports/issue-wave-cpb-0581-0590-lane-e-implementation-2026-02-23.md` (`CPB-0581`..`CPB-0590`, implementation evidence)
+>>>>>>> archive/pr-234-head-20260223
 
 ## Artifacts and Inputs
 - Source board: `docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`

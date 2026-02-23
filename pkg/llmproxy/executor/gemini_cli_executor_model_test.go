@@ -1,6 +1,28 @@
 package executor
 
+<<<<<<< HEAD
 import "testing"
+=======
+import (
+	"strings"
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
+	"github.com/tidwall/gjson"
+)
+
+func normalizeGeminiCLIModel(model string) string {
+	model = strings.TrimSpace(strings.ToLower(model))
+	switch {
+	case strings.HasPrefix(model, "gemini-3") && strings.Contains(model, "-pro"):
+		return "gemini-2.5-pro"
+	case strings.HasPrefix(model, "gemini-3-flash"):
+		return "gemini-2.5-flash"
+	default:
+		return model
+	}
+}
+>>>>>>> archive/pr-234-head-20260223
 
 func TestNormalizeGeminiCLIModel(t *testing.T) {
 	t.Parallel()
@@ -27,3 +49,23 @@ func TestNormalizeGeminiCLIModel(t *testing.T) {
 		})
 	}
 }
+<<<<<<< HEAD
+=======
+
+func TestApplyGeminiThinkingForAttemptModelUsesRequestSuffix(t *testing.T) {
+	t.Parallel()
+
+	rawPayload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}}`)
+	requestSuffix := thinking.ParseSuffix("gemini-2.5-pro(2048)")
+
+	translated, err := applyGeminiThinkingForAttempt(rawPayload, requestSuffix, "gemini-2.5-pro", "gemini", "gemini-cli", "gemini-cli")
+	if err != nil {
+		t.Fatalf("applyGeminiThinkingForAttempt() error = %v", err)
+	}
+
+	budget := gjson.GetBytes(translated, "request.generationConfig.thinkingConfig.thinkingBudget")
+	if !budget.Exists() || budget.Int() != 2048 {
+		t.Fatalf("expected thinking budget 2048, got %q", budget.String())
+	}
+}
+>>>>>>> archive/pr-234-head-20260223

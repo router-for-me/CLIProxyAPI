@@ -150,6 +150,93 @@ func TestCodexAuth_RefreshTokens(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
+=======
+func TestCodexAuth_RefreshTokens_rateLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate_limit_exceeded"}`))
+	}))
+	defer server.Close()
+
+	mockClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			mockReq, _ := http.NewRequest(req.Method, server.URL, req.Body)
+			return http.DefaultClient.Do(mockReq)
+		}),
+	}
+
+	auth := &CodexAuth{httpClient: mockClient}
+	_, err := auth.RefreshTokens(context.Background(), "old_refresh")
+	if err == nil {
+		t.Fatal("expected RefreshTokens to fail")
+	}
+	se, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("expected status-capable error, got %T", err)
+	}
+	if got := se.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
+func TestCodexAuth_RefreshTokens_serviceUnavailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`service temporarily unavailable`))
+	}))
+	defer server.Close()
+
+	mockClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			mockReq, _ := http.NewRequest(req.Method, server.URL, req.Body)
+			return http.DefaultClient.Do(mockReq)
+		}),
+	}
+
+	auth := &CodexAuth{httpClient: mockClient}
+	_, err := auth.RefreshTokens(context.Background(), "old_refresh")
+	if err == nil {
+		t.Fatal("expected RefreshTokens to fail")
+	}
+	se, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("expected status-capable error, got %T", err)
+	}
+	if got := se.StatusCode(); got != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+}
+
+func TestCodexAuth_RefreshTokensWithRetry_preservesStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`service temporarily unavailable`))
+	}))
+	defer server.Close()
+
+	mockClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			mockReq, _ := http.NewRequest(req.Method, server.URL, req.Body)
+			return http.DefaultClient.Do(mockReq)
+		}),
+	}
+
+	auth := &CodexAuth{httpClient: mockClient}
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "old_refresh", 1)
+	if err == nil {
+		t.Fatal("expected RefreshTokensWithRetry to fail")
+	}
+	se, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("expected status-capable error, got %T", err)
+	}
+	if got := se.StatusCode(); got != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+}
+
+>>>>>>> archive/pr-234-head-20260223
 func TestCodexAuth_CreateTokenStorage(t *testing.T) {
 	auth := &CodexAuth{}
 	bundle := &CodexAuthBundle{

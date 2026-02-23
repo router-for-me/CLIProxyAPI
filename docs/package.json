@@ -9,8 +9,11 @@
   },
   "devDependencies": {
     "vitepress": "^1.6.4"
+<<<<<<< HEAD
   },
   "overrides": {
     "esbuild": "^0.25.0"
+=======
+>>>>>>> archive/pr-234-head-20260223
   }
 }

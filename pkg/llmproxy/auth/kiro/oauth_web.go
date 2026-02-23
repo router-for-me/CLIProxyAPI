@@ -354,32 +354,17 @@ func (h *OAuthWebHandler) pollForToken(ctx context.Context, session *webAuthSess
 
 // saveTokenToFile saves the token data to the auth directory
 func (h *OAuthWebHandler) saveTokenToFile(tokenData *KiroTokenData) {
-	// Get auth directory from config or use default
 	authDir := ""
-	if h.cfg != nil && h.cfg.AuthDir != "" {
-		var err error
-		authDir, err = util.ResolveAuthDir(h.cfg.AuthDir)
-		if err != nil {
-			log.Errorf("OAuth Web: failed to resolve auth directory: %v", err)
-		}
+	var err error
+	if h.cfg != nil {
+		authDir, err = resolveKiroAuthDir(h.cfg.AuthDir)
+	} else {
+		authDir, err = resolveKiroAuthDir("")
 	}
-
-	// Fall back to default location
-	if authDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Errorf("OAuth Web: failed to get home directory: %v", err)
-			return
-		}
-		authDir = filepath.Join(home, ".cli-proxy-api")
-	}
-
-	// Create directory if not exists
-	if err := os.MkdirAll(authDir, 0700); err != nil {
-		log.Errorf("OAuth Web: failed to create auth directory: %v", err)
+	if err != nil {
+		log.Errorf("OAuth Web: failed to resolve auth directory: %v", err)
 		return
 	}
-
 	// Generate filename using the unified function
 	fileName := GenerateTokenFileName(tokenData)
 
@@ -408,6 +393,24 @@ func (h *OAuthWebHandler) saveTokenToFile(tokenData *KiroTokenData) {
 	}
 
 	log.Infof("OAuth Web: token saved to %s", authFilePath)
+}
+
+func resolveKiroAuthDir(cfgAuthDir string) (string, error) {
+	authDir, err := util.ResolveAuthDirOrDefault(cfgAuthDir)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(authDir, 0700); err != nil {
+		return "", fmt.Errorf("create auth-dir %q: %w", authDir, err)
+	}
+	info, err := os.Stat(authDir)
+	if err != nil {
+		return "", err
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return "", fmt.Errorf("auth-dir %q mode %04o is too permissive; use chmod 700", authDir, mode)
+	}
+	return authDir, nil
 }
 
 func (h *OAuthWebHandler) ssoClient(session *webAuthSession) *SSOOIDCClient {
@@ -762,25 +765,19 @@ func (h *OAuthWebHandler) handleImportToken(c *gin.Context) {
 // for the automatic 30-second check and 20-minute-before-expiry refresh cycle.
 // Uses the same refresh logic as kiro_executor.Refresh for consistency.
 func (h *OAuthWebHandler) handleManualRefresh(c *gin.Context) {
-	authDir := ""
-	if h.cfg != nil && h.cfg.AuthDir != "" {
-		var err error
-		authDir, err = util.ResolveAuthDir(h.cfg.AuthDir)
-		if err != nil {
-			log.Errorf("OAuth Web: failed to resolve auth directory: %v", err)
+	authDir, err := resolveKiroAuthDir(func() string {
+		if h.cfg == nil {
+			return ""
 		}
-	}
-
-	if authDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"success": false,
-				"error":   "Failed to get home directory",
-			})
-			return
-		}
-		authDir = filepath.Join(home, ".cli-proxy-api")
+		return h.cfg.AuthDir
+	}())
+	if err != nil {
+		log.Errorf("OAuth Web: failed to resolve auth directory: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to resolve auth directory: %v", err),
+		})
+		return
 	}
 
 	// Find all kiro token files in the auth directory

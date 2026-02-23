@@ -1,0 +1,8 @@
+./cpu.go
+./cpu_arm64.go
+./cpu_arm64_darwin.go
+./cpu_darwin.go
+./cpu_no_name.go
+./datacache_unsupported.go
+./cpu.s
+./cpu_arm64.s

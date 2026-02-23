@@ -43,6 +43,7 @@ func defaultKiroAliases() []OAuthModelAlias {
 	}
 }
 
+<<<<<<< HEAD
 // defaultGitHubCopilotAliases returns default OAuth aliases for GitHub Copilot
 // Claude Opus/Sonnet 4.6 models. These aliases preserve the widely used dashed
 // variant expected by existing clients.
@@ -53,11 +54,13 @@ func defaultGitHubCopilotAliases() []OAuthModelAlias {
 	}
 }
 
+=======
+>>>>>>> archive/pr-234-head-20260223
 // defaultAntigravityAliases returns the default oauth-model-alias configuration
 // for the antigravity channel when neither field exists.
 func defaultAntigravityAliases() []OAuthModelAlias {
 	return []OAuthModelAlias{
-		{Name: "rev19-uic3-1p", Alias: "gemini-2.5-computer-use-preview-10-2025"},
+		{Name: "rev19-uic3-1p", Alias: "rev19-uic3-1p"},
 		{Name: "gemini-3-pro-image", Alias: "gemini-3-pro-image-preview"},
 		{Name: "gemini-3-pro-high", Alias: "gemini-3-pro-preview"},
 		{Name: "gemini-3-flash", Alias: "gemini-3-flash-preview"},
@@ -66,6 +69,14 @@ func defaultAntigravityAliases() []OAuthModelAlias {
 		{Name: "claude-opus-4-5-thinking", Alias: "gemini-claude-opus-4-5-thinking"},
 		{Name: "claude-opus-4-6-thinking", Alias: "gemini-claude-opus-thinking"},
 		{Name: "claude-opus-4-6-thinking", Alias: "gemini-claude-opus-4-6-thinking"},
+	}
+}
+
+// defaultGitHubCopilotAliases returns the default oauth-model-alias configuration
+// for the github-copilot channel.
+func defaultGitHubCopilotAliases() []OAuthModelAlias {
+	return []OAuthModelAlias{
+		{Name: "claude-opus-4.6", Alias: "claude-opus-4-6", Fork: true},
 	}
 }
 

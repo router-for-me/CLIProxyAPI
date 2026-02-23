@@ -1414,7 +1414,12 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 	if channel == "" || len(cfg.OAuthModelAlias) == 0 {
 		return models
 	}
-	aliases := cfg.OAuthModelAlias[channel]
+	aliases, hasChannel := cfg.OAuthModelAlias[channel]
+	if !hasChannel && strings.EqualFold(channel, "github-copilot") {
+		aliases = []config.OAuthModelAlias{
+			{Name: "claude-opus-4.6", Alias: "claude-opus-4-6"},
+		}
+	}
 	if len(aliases) == 0 {
 		return models
 	}

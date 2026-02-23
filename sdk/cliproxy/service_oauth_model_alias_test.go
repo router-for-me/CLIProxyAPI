@@ -94,7 +94,6 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 func TestApplyOAuthModelAlias_DefaultGitHubCopilotAliasViaSanitize(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.SanitizeOAuthModelAlias()
-
 	models := []*ModelInfo{
 		{ID: "claude-opus-4.6", Name: "models/claude-opus-4.6"},
 	}

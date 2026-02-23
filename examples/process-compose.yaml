@@ -1,0 +1,26 @@
+version: "0.5"
+
+environment:
+  - CLIPROXY_HOST=0.0.0.0
+  - CLIPROXY_PORT=8317
+  - CLIPROXY_LOG_LEVEL=${CLIPROXY_LOG_LEVEL:-info}
+
+processes:
+  cliproxy:
+    command: "go run ./cmd/server --config ./config.example.yaml"
+    working_dir: "."
+    environment:
+      - CLIPROXY_HOST=${CLIPROXY_HOST}
+      - CLIPROXY_PORT=${CLIPROXY_PORT}
+      - CLIPROXY_LOG_LEVEL=${CLIPROXY_LOG_LEVEL}
+    availability:
+      restart: always
+      max_restarts: 10
+    readiness_probe:
+      http_get:
+        host: 127.0.0.1
+        port: 8317
+        path: /health
+      initial_delay_seconds: 2
+      period_seconds: 3
+      timeout_seconds: 2

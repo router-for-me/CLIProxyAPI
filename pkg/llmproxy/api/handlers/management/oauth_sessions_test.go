@@ -21,17 +21,33 @@ func TestWriteOAuthCallbackFile_WritesInsideAuthDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve auth dir: %v", err)
 	}
+<<<<<<< HEAD
 	// Resolve symlinks to match what sanitizeOAuthCallbackPath does
 	authDirResolved, err := filepath.EvalSymlinks(authDirAbs)
 	if err != nil {
 		t.Fatalf("resolve symlinks: %v", err)
 	}
+=======
+>>>>>>> archive/pr-234-head-20260223
 	filePathAbs, err := filepath.Abs(filePath)
 	if err != nil {
 		t.Fatalf("resolve callback path: %v", err)
 	}
+<<<<<<< HEAD
 	prefix := authDirResolved + string(os.PathSeparator)
 	if filePathAbs != authDirResolved && !strings.HasPrefix(filePathAbs, prefix) {
+=======
+	resolvedAuthDir, err := filepath.EvalSymlinks(authDirAbs)
+	if err == nil {
+		authDirAbs = resolvedAuthDir
+	}
+	resolvedCallbackDir, err := filepath.EvalSymlinks(filepath.Dir(filePathAbs))
+	if err == nil {
+		filePathAbs = filepath.Join(resolvedCallbackDir, filepath.Base(filePathAbs))
+	}
+	prefix := authDirAbs + string(os.PathSeparator)
+	if filePathAbs != authDirAbs && !strings.HasPrefix(filePathAbs, prefix) {
+>>>>>>> archive/pr-234-head-20260223
 		t.Fatalf("callback path escaped auth dir: %q", filePathAbs)
 	}
 

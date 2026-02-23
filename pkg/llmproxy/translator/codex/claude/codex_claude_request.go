@@ -11,7 +11,10 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
+<<<<<<< HEAD:pkg/llmproxy/translator/codex/claude/codex_claude_request.go
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/util"
+=======
+>>>>>>> archive/pr-234-head-20260223:internal/translator/codex/claude/codex_claude_request.go
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

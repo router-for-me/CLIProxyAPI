@@ -10,7 +10,10 @@ This docs site is organized by onboarding guides, API reference, and audience-sp
 - [Provider Quickstarts](./provider-quickstarts.md)
 - [Provider Catalog](./provider-catalog.md)
 - [Provider Operations](./provider-operations.md)
+<<<<<<< HEAD
 - [ARM64 Docker Provider Quickstart](./guides/quick-start/ARM64_DOCKER_PROVIDER_QUICKSTART.md)
+=======
+>>>>>>> archive/pr-234-head-20260223
 - [Routing and Models](./routing-reference.md)
 - [Troubleshooting](./troubleshooting.md)
 

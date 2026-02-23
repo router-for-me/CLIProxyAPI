@@ -299,9 +299,9 @@ func (s *ObjectTokenStore) PersistAuthFiles(ctx context.Context, _ string, paths
 		if trimmed == "" {
 			continue
 		}
-		abs := trimmed
-		if !filepath.IsAbs(abs) {
-			abs = filepath.Join(s.authDir, trimmed)
+		abs, err := s.ensureManagedAuthPath(trimmed)
+		if err != nil {
+			return err
 		}
 		if err := s.uploadAuth(ctx, abs); err != nil {
 			return err
