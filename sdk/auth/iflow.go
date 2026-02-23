@@ -172,7 +172,7 @@ waitForCallback:
 		"api_key":       tokenStorage.APIKey,
 		"access_token":  tokenStorage.AccessToken,
 		"refresh_token": tokenStorage.RefreshToken,
-		"expired":       tokenStorage.Expire,
+		"expires_at":    tokenStorage.Expire,
 	}
 
 	fmt.Println("iFlow authentication successful")

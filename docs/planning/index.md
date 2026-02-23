@@ -15,6 +15,7 @@ This section tracks source-linked execution boards and import artifacts.
 ## Sprint & Audit Artifacts
 
 - [70-Item Sprint Plan](./issue-wave-gh-35-2026-02-22.md)
+- [Code Scanning Remediation WBS (139 alerts)](./issue-wave-codescan-0139-2026-02-23.md)
 - [Next 35-Item CPB Wave (CPB-0246..0280)](./issue-wave-cpb-0246-0280-2026-02-22.md)
 - [Next 35-Item CPB Wave (CPB-0281..0315)](./issue-wave-cpb-0281-0315-2026-02-22.md)
 - [Next 35-Item CPB Wave (CPB-0316..0350)](./issue-wave-cpb-0316-0350-2026-02-22.md)

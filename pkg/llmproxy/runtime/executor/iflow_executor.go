@@ -349,7 +349,7 @@ func (e *IFlowExecutor) refreshCookieBased(ctx context.Context, auth *cliproxyau
 	// Get current expiry time from metadata
 	var currentExpire string
 	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["expired"].(string); ok {
+		if v, ok := auth.Metadata["expires_at"].(string); ok {
 			currentExpire = strings.TrimSpace(v)
 		}
 	}
@@ -377,7 +377,7 @@ func (e *IFlowExecutor) refreshCookieBased(ctx context.Context, auth *cliproxyau
 		auth.Metadata = make(map[string]any)
 	}
 	auth.Metadata["api_key"] = keyData.APIKey
-	auth.Metadata["expired"] = keyData.ExpireTime
+	auth.Metadata["expires_at"] = keyData.ExpireTime
 	auth.Metadata["type"] = "iflow"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
 	auth.Metadata["cookie"] = cookie
@@ -431,7 +431,7 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 	if tokenData.APIKey != "" {
 		auth.Metadata["api_key"] = tokenData.APIKey
 	}
-	auth.Metadata["expired"] = tokenData.Expire
+	auth.Metadata["expires_at"] = tokenData.Expire
 	auth.Metadata["type"] = "iflow"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
 

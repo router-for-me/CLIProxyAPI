@@ -198,6 +198,16 @@ Kiro IAM login hints:
 
 ## 7) iFlow
 
+OAuth + model visibility quickstart:
+
+```bash
+# 1) Ensure iFlow auth exists and is loaded
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | rg '^iflow/'
+```
+
+If only non-CLI iFlow models are visible after OAuth login, route requests strictly to the model IDs returned by `/v1/models` and avoid hardcoding upstream-only aliases.
+
 Validation (`glm-4.7`):
 
 ```bash
@@ -208,6 +218,22 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
 ```
 
 If you see `406`, verify model exposure in `/v1/models`, retry non-stream, and then compare headers/payload shape against known-good requests.
+
+Stream/non-stream parity probe (for usage and request counting):
+
+```bash
+# Non-stream
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/glm-4.7","messages":[{"role":"user","content":"usage parity non-stream"}],"stream":false}' | jq '.usage'
+
+# Stream (expects usage in final stream summary or server-side request accounting)
+curl -N -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"iflow/glm-4.7","messages":[{"role":"user","content":"usage parity stream"}],"stream":true}' | tail -n 5
+```
 
 ## 8) MiniMax
 
@@ -254,6 +280,31 @@ curl -sS -X POST http://localhost:8317/v1/chat/completions \
   -H "Authorization: Bearer demo-client-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"mlx/your-local-model","messages":[{"role":"user","content":"hello"}]}' | jq
+```
+
+## 10) Amp Routing Through CLIProxyAPI
+
+Use explicit base URL and key so Amp traffic does not bypass the proxy:
+
+```bash
+export OPENAI_API_BASE="http://127.0.0.1:8317/v1"
+export OPENAI_API_KEY="demo-client-key"
+```
+
+Sanity check before Amp requests:
+
+```bash
+curl -sS http://localhost:8317/v1/models \
+  -H "Authorization: Bearer demo-client-key" | jq -r '.data[].id' | head -n 20
+```
+
+If Amp still does not route through CLIProxyAPI, run one direct canary call to verify the same env is active in the Amp process:
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions \
+  -H "Authorization: Bearer demo-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.3-codex","messages":[{"role":"user","content":"amp-route-check"}]}' | jq '.id,.model'
 ```
 
 ## Related

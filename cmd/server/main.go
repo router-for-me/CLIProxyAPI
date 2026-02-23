@@ -368,7 +368,9 @@ func main() {
 		}
 		printConfigCandidates(selected, candidates)
 		fmt.Printf("Selected: %s\n", selected)
-		fmt.Fprintf(os.Stdout, "Template: %s\n", filepath.Join(wd, "config.example.yaml"))
+		if _, err := fmt.Fprintf(os.Stdout, "Template: %s\n", filepath.Join(wd, "config.example.yaml")); err != nil {
+			log.Errorf("failed to print config template path: %v", err)
+		}
 		return
 	}
 
