@@ -1,100 +1,181 @@
-# CLIProxyAPI Plus
+# CLIProxyAPI++ (KooshaPari Fork)
 
-English | [Chinese](README_CN.md)
+**Forked and enhanced from [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)**
 
-This is the Plus version of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), adding support for third-party providers on top of the mainline project.
+Multi-provider LLM proxy with unified OpenAI-compatible API, third-party auth, SDK generation, and enterprise features.
 
-All third-party provider support is maintained by community contributors; CLIProxyAPI does not provide technical support. Please contact the corresponding community maintainer if you need assistance.
+## Overview
 
-The Plus release stays in lockstep with the mainline features.
+CLIProxyAPI++ provides a unified API gateway for multiple LLM providers with:
+- OpenAI-compatible endpoints
+- Third-party provider support (Kiro, GitHub Copilot, Ollama)
+- OAuth authentication flows
+- Built-in rate limiting and metrics
+- SDK auto-generation
 
-## Differences from the Mainline
-
-- Added GitHub Copilot support (OAuth login), provided by [em4go](https://github.com/em4go/CLIProxyAPI/tree/feature/github-copilot-auth)
-- Added Kiro (AWS CodeWhisperer) support (OAuth login), provided by [fuko2935](https://github.com/fuko2935/CLIProxyAPI/tree/feature/kiro-integration), [Ravens2121](https://github.com/Ravens2121/CLIProxyAPIPlus/)
-
-## New Features (Plus Enhanced)
-
-- **OAuth Web Authentication**: Browser-based OAuth login for Kiro with beautiful web UI
-- **Rate Limiter**: Built-in request rate limiting to prevent API abuse
-- **Background Token Refresh**: Automatic token refresh 10 minutes before expiration
-- **Metrics & Monitoring**: Request metrics collection for monitoring and debugging
-- **Device Fingerprint**: Device fingerprint generation for enhanced security
-- **Cooldown Management**: Smart cooldown mechanism for API rate limits
-- **Usage Checker**: Real-time usage monitoring and quota management
-- **Model Converter**: Unified model name conversion across providers
-- **UTF-8 Stream Processing**: Improved streaming response handling
-
-## Kiro Authentication
-
-### Web-based OAuth Login
-
-Access the Kiro OAuth web interface at:
+## Architecture
 
 ```
-http://your-server:8080/v0/oauth/kiro
+┌──────────────┐     ┌─────────────────┐     ┌────────────┐
+│   Clients    │────▶│   CLIProxy++     │────▶│  Providers │
+│ (thegent,   │     │  (this repo)    │     │ (OpenAI,   │
+│  agentapi)   │     │                 │     │  Anthropic,│
+└──────────────┘     └─────────────────┘     │  AWS, etc) │
+                         │                   └────────────┘
+                         ▼
+                  ┌─────────────────┐
+                  │   SDK Gen      │
+                  │ (Python, Go)   │
+                  └─────────────────┘
 ```
 
-This provides a browser-based OAuth flow for Kiro (AWS CodeWhisperer) authentication with:
-- AWS Builder ID login
-- AWS Identity Center (IDC) login
-- Token import from Kiro IDE
+## Quick Start
 
-## Quick Deployment with Docker
-
-### One-Command Deployment
+### Docker
 
 ```bash
-# Create deployment directory
 mkdir -p ~/cli-proxy && cd ~/cli-proxy
 
-# Create docker-compose.yml
 cat > docker-compose.yml << 'EOF'
 services:
   cli-proxy-api:
     image: eceasy/cli-proxy-api-plus:latest
-    container_name: cli-proxy-api-plus
     ports:
       - "8317:8317"
     volumes:
       - ./config.yaml:/CLIProxyAPI/config.yaml
-      - ./auths:/root/.cli-proxy-api
-      - ./logs:/CLIProxyAPI/logs
     restart: unless-stopped
 EOF
 
-# Download example config
-curl -o config.yaml https://raw.githubusercontent.com/router-for-me/CLIProxyAPIPlus/main/config.example.yaml
-
-# Pull and start
-docker compose pull && docker compose up -d
+curl -o config.yaml https://raw.githubusercontent.com/KooshaPari/cliproxyapi-plusplus/main/config.example.yaml
+docker compose up -d
 ```
 
-### Configuration
+### From Source
 
-Edit `config.yaml` before starting:
+```bash
+# Build
+go build -o cliproxy ./cmd/cliproxy
+
+# Run
+./cliproxy --config config.yaml
+```
+
+## Configuration
 
 ```yaml
-# Basic configuration example
 server:
   port: 8317
 
-# Add your provider configurations here
+providers:
+  openai:
+    api_key: ${OPENAI_API_KEY}
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY}
+  kiro:
+    enabled: true
+  github_copilot:
+    enabled: true
+
+rate_limit:
+  requests_per_minute: 60
+  tokens_per_minute: 100000
 ```
 
-### Update to Latest Version
+## Features
+
+### Provider Support
+
+| Provider | Auth | Status |
+|----------|------|--------|
+| OpenAI | API Key | ✅ |
+| Anthropic | API Key | ✅ |
+| Azure OpenAI | API Key/OAuth | ✅ |
+| Google Gemini | API Key | ✅ |
+| AWS Bedrock | IAM | ✅ |
+| Kiro (CodeWhisperer) | OAuth | ✅ |
+| GitHub Copilot | OAuth | ✅ |
+| Ollama | Local | ✅ |
+
+### Authentication
+
+- **API Key** - Standard OpenAI-style
+- **OAuth** - Kiro, GitHub Copilot via web flow
+- **AWS IAM** - Bedrock credentials
+
+### Rate Limiting
+
+- Token bucket algorithm
+- Per-provider limits
+- Cooldown management
+- Usage quotas
+
+### Observability
+
+- Request/response logging
+- Cost tracking
+- Latency metrics
+- Error rate monitoring
+
+## Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/chat/completions` | Chat completions |
+| `POST /v1/completions` | Text completions |
+| `GET /v1/models` | List models |
+| `GET /health` | Health check |
+| `GET /metrics` | Prometheus metrics |
+
+## SDKs
+
+Auto-generated SDKs for:
+
+- **Python** - `pip install cliproxy-sdk`
+- **Go** - `go get github.com/KooshaPari/cliproxy-sdk-go`
+
+## Integration
+
+### With thegent
+
+```yaml
+# thegent config
+llm:
+  provider: cliproxy
+  base_url: http://localhost:8317/v1
+  api_key: ${CLIPROXY_API_KEY}
+```
+
+### With agentapi
 
 ```bash
-cd ~/cli-proxy
-docker compose pull && docker compose up -d
+agentapi --cliproxy http://localhost:8317
 ```
 
-## Contributing
+## Development
 
-This project only accepts pull requests that relate to third-party provider support. Any pull requests unrelated to third-party provider support will be rejected.
+```bash
+# Lint
+go fmt ./...
+go vet ./...
 
-If you need to submit any non-third-party provider changes, please open them against the [mainline](https://github.com/router-for-me/CLIProxyAPI) repository.
+# Test
+go test ./...
+
+# Generate SDKs
+./scripts/generate_sdks.sh
+```
+
+## Fork Differences
+
+This fork includes:
+
+- ✅ SDK auto-generation workflow
+- ✅ Enhanced OpenAPI spec
+- ✅ Python client SDK (`pkg/sdk/python`)
+- ✅ Go client SDK (`pkg/sdk/go`)
+- ✅ Integration with tokenledger for cost tracking
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License - see LICENSE file
