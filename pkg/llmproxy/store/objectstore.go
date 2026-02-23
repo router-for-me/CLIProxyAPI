@@ -536,9 +536,8 @@ func (s *ObjectTokenStore) resolveDeletePath(id string) (string, error) {
 	if id == "" {
 		return "", fmt.Errorf("object store: id is empty")
 	}
-	// Absolute paths are honored as-is; callers must ensure they point inside the mirror.
 	if filepath.IsAbs(id) {
-		return id, nil
+		return "", fmt.Errorf("object store: absolute paths are not allowed: %s", id)
 	}
 	// Treat any non-absolute id (including nested like "team/foo") as relative to the mirror authDir.
 	// Normalize separators and guard against path traversal.
@@ -550,7 +549,15 @@ func (s *ObjectTokenStore) resolveDeletePath(id string) (string, error) {
 	if !strings.HasSuffix(strings.ToLower(clean), ".json") {
 		clean += ".json"
 	}
-	return filepath.Join(s.authDir, clean), nil
+	path := filepath.Join(s.authDir, clean)
+	rel, err := filepath.Rel(s.authDir, path)
+	if err != nil {
+		return "", fmt.Errorf("object store: compute relative path: %w", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("object store: resolved path escapes auth directory")
+	}
+	return path, nil
 }
 
 func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
