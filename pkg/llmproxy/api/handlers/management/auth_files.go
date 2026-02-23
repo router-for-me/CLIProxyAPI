@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -243,14 +244,34 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 	if h == nil || h.cfg == nil || h.cfg.Port <= 0 {
 		return "", fmt.Errorf("server port is not configured")
 	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
+	path = normalizeManagementCallbackPath(path)
 	scheme := "http"
 	if h.cfg.TLS.Enable {
 		scheme = "https"
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
+}
+
+func normalizeManagementCallbackPath(rawPath string) string {
+	normalized := strings.TrimSpace(rawPath)
+	normalized = strings.ReplaceAll(normalized, "\\", "/")
+	if idx := strings.IndexAny(normalized, "?#"); idx >= 0 {
+		normalized = normalized[:idx]
+	}
+	if normalized == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(normalized, "/") {
+		normalized = "/" + normalized
+	}
+	normalized = path.Clean(normalized)
+	if normalized == "." {
+		return "/"
+	}
+	if !strings.HasPrefix(normalized, "/") {
+		return "/" + normalized
+	}
+	return normalized
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {

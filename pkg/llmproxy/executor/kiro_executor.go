@@ -1657,7 +1657,7 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 			return "claude-3-7-sonnet-20250219"
 		}
 		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
-			log.Debugf("kiro: unknown Sonnet 4.6 model '%s', mapping to claude-sonnet-4.6", model)
+			log.Debug("kiro: unknown Sonnet 4.6 model, mapping to claude-sonnet-4.6")
 			return "claude-sonnet-4.6"
 		}
 		if strings.Contains(modelLower, "4-5") || strings.Contains(modelLower, "4.5") {
