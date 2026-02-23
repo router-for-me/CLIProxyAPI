@@ -1,3 +1,27 @@
+---
+layout: home
+
+hero:
+  name: cliproxyapi++
+  text: OpenAI-Compatible Multi-Provider Gateway
+  tagline: One API surface for routing across heterogeneous model providers
+  actions:
+    - theme: brand
+      text: Start Here
+      link: /start-here
+    - theme: alt
+      text: API Index
+      link: /api/
+
+features:
+  - title: Provider Routing
+    details: Unified `/v1/*` compatibility across multiple upstream providers
+  - title: Operations Ready
+    details: Health, metrics, and management endpoints for runtime control
+  - title: Structured Docs
+    details: Start Here, Tutorials, How-to, Reference, Explanation, and API lanes
+---
+
 # cliproxyapi++ Docs
 
 `cliproxyapi++` is an OpenAI-compatible proxy that routes one client API surface to multiple upstream providers.
