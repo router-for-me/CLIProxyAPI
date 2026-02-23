@@ -1,151 +1,38 @@
-# Issue Wave CPB-0106..0175 Lane 1 Report
+# Wave V3 Lane 1 Report (CPB-0106..CPB-0115)
 
+Worktree: `cliproxyapi-plusplus-wave-cpb3-1`  
+Branch: `workstream-cpbv3-1`  
+Date: 2026-02-22
 
+## Implemented quick wins
 
-## Scope
+- Streaming troubleshooting and reproducible curl checks:
+  - `docs/troubleshooting.md`
+  - Covers CPB-0106 and supports CPB-0111 diagnostics.
+- Qwen model visibility troubleshooting flow:
+  - `docs/provider-quickstarts.md`
+  - Supports CPB-0110 and CPB-0113 operator path.
 
-- Lane: lane-1
-- Worktree: `/Users/kooshapari/temp-PRODVERCEL/485/kush/cliproxyapi-plusplus-wave-cpb3-1`
-- Window: `CPB-0106` to `CPB-0115`
+## Item disposition
 
-## Status Snapshot
+| Item | Disposition | Notes |
+| --- | --- | --- |
+| CPB-0106 | implemented | Added copy-paste stream diagnosis flow and expected behavior checks. |
+| CPB-0107 | planned | Requires test-matrix expansion for hybrid routing scenarios. |
+| CPB-0108 | deferred | JetBrains support requires product-surface decision outside this lane. |
+| CPB-0109 | planned | Rollout safety needs auth-flow feature flag design. |
+| CPB-0110 | implemented | Added Qwen model visibility verification path and remediation steps. |
+| CPB-0111 | planned | Translator parity tests should be added in code-focused wave. |
+| CPB-0112 | planned | Token-accounting regression fixtures needed for Minimax/Kimi. |
+| CPB-0113 | implemented | Added operational checks to validate qwen3.5 exposure to clients. |
+| CPB-0114 | planned | CLI extraction requires explicit command/API contract first. |
+| CPB-0115 | planned | Integration surface design (Go bindings + HTTP fallback) still pending. |
 
-- `in_progress`: 10/10 items reviewed
-- `planned`: 7
-- `partial`: 0
-- `implemented`: 3
-- `blocked`: 0
+## Validation
 
-## Per-Item Status
+- `rg -n 'Claude Code Appears Non-Streaming|Qwen Model Visibility Check' docs/troubleshooting.md docs/provider-quickstarts.md`
 
-### CPB-0106 – Expand docs and examples for "[BUG] claude code 接入 cliproxyapi 使用时，模型的输出没有呈现流式，而是一下子蹦出来回答结果" with copy-paste quickstart and troubleshooting section.
-- Status: `implemented`
-- Theme: `responses-and-chat-compat`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1620`
-- Rationale:
-  - Fixture and parity tests were added for variant-only OpenWork payloads in:
-    - `pkg/llmproxy/executor/codex_executor_cpb0106_test.go`
-    - `pkg/llmproxy/executor/testdata/cpb-0106-variant-only-openwork-chat-completions.json`
-  - Tests confirm variant-only mapping to `reasoning.effort=high` for both `Execute` and `ExecuteStream`.
-- Proposed verification commands:
-  - `rg -n "CPB-0106" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/executor -run TestCodexExecutor_VariantOnlyRequest -count=1`
-  - `go test ./pkg/llmproxy/translator/codex/openai/responses -count=1`
-- Next action: move to CPB-0107 in lane-1 and apply the same parity pattern.
+## Next actions
 
-### CPB-0107 – Add QA scenarios for "[Feature Request] Session-Aware Hybrid Routing Strategy" including stream/non-stream parity and edge-case payloads.
-- Status: `planned`
-- Theme: `oauth-and-authentication`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1617`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0107" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
-
-### CPB-0108 – Refactor implementation behind "Any Plans to support Jetbrains IDE?" to reduce complexity and isolate transformation boundaries.
-- Status: `planned`
-- Theme: `responses-and-chat-compat`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1615`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0108" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
-
-### CPB-0109 – Ensure rollout safety for "[bug] codex oauth登录流程失败" via feature flags, staged defaults, and migration notes.
-- Status: `planned`
-- Theme: `provider-model-registry`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1612`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0109" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
-
-### CPB-0110 – Standardize metadata and naming conventions touched by "qwen auth 里获取到了 qwen3.5，但是 ai 客户端获取不到这个模型" across both repos.
-- Status: `implemented`
-- Theme: `oauth-and-authentication`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1611`
-- Rationale:
-  - Added explicit `qwen3.5` static model alias to ensure client model listings expose the expected identifier without removing existing `coder-model`.
-  - Added regression coverage in `pkg/llmproxy/registry/model_definitions_test.go` for alias visibility and lookup.
-- Proposed verification commands:
-  - `rg -n "CPB-0110" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/registry -run TestGetQwenModels_IncludesQwen35Alias -count=1`
-- Next action: coordinate parity check with upstream auth source once available.
-
-### CPB-0111 – Follow up on "fix: handle response.function_call_arguments.done in codex→claude streaming translator" by closing compatibility gaps and preventing regressions in adjacent providers.
-- Status: `planned`
-- Theme: `responses-and-chat-compat`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1609`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0111" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
-
-### CPB-0112 – Harden "不能正确统计minimax-m2.5/kimi-k2.5的Token" with clearer validation, safer defaults, and defensive fallbacks.
-- Status: `implemented`
-- Theme: `thinking-and-reasoning`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1607`
-- Rationale:
-  - Hardened OpenAI/Responses usage parsing to handle alternate token keys and string-typed values for stream and non-stream responses.
-  - Added regression coverage in `pkg/llmproxy/executor/usage_helpers_test.go` for aliasing, stream parsing, and alternate token formats.
-- Proposed verification commands:
-  - `rg -n "CPB-0112" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/executor -run "TestParseOpenAIUsage_WithAlternateFieldsAndStringValues|TestParseOpenAIStreamUsage_WithAlternateFieldsAndStringValues|TestParseOpenAIResponsesUsageDetail_WithAlternateFields" -count=1`
-- Next action: add real minimax/kimi token fixtures to align behavior with provider payload variants in upstream logs.
-
-### CPB-0113 – Operationalize "速速支持qwen code的qwen3.5" with observability, alerting thresholds, and runbook updates.
-- Status: `planned`
-- Theme: `general-polish`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1603`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0113" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
-
-### CPB-0114 – Port relevant thegent-managed flow implied by "[Feature Request] Antigravity channel should support routing claude-haiku-4-5-20251001 model (used by Claude Code pre-flight checks)" into first-class cliproxy Go CLI command(s) with interactive setup support.
-- Status: `planned`
-- Theme: `go-cli-extraction`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1596`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0114" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
-
-### CPB-0115 – Define non-subprocess integration path related to "希望为提供商添加请求优先级功能，最好是以模型为基础来进行请求" (Go bindings surface + HTTP fallback contract + version negotiation).
-- Status: `planned`
-- Theme: `integration-api-bindings`
-- Source: `https://github.com/router-for-me/CLIProxyAPI/issues/1594`
-- Rationale:
-  - Item remains `proposed` in the 1000-item execution board.
-  - Requires targeted fixture capture and acceptance-path parity tests before safe implementation.
-- Proposed verification commands:
-  - `rg -n "CPB-0115" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv docs/planning/CLIPROXYAPI_2000_ITEM_EXECUTION_BOARD_2026-02-22.csv`
-  - `go test ./pkg/llmproxy/... ./cmd/... ./sdk/...` (after implementation or fixture updates).
-- Next action: create minimal reproducible payload/regression case and implement in the assigned `cpb3-1` worktree.
-
-## Evidence & Commands Run
-
-- `rg -n "CPB-0106|CPB-0175" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.csv`
-- No repository code changes were performed in this lane pass; reports only.
-
-## Next Actions
-
-- Move item by item from `planned` to `implemented` only when fixture + tests + code/docs change are committed.
+1. Add translator tests for CPB-0111 (`response.function_call_arguments.done`) in next code lane.
+2. Define a single auth rollout flag contract for CPB-0109 before implementing flow changes.
