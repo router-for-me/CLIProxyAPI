@@ -116,12 +116,8 @@ Validation evidence:
 
 Implemented in this batch:
 
-- `CPB-0821`: normalize `droid`/`droid-cli`/`droidcli` aliases to `gemini` in login provider resolution and usage provider normalization.
-- `CPB-0818`: centralize GPT-5 family tokenizer detection via shared helper in both executor and runtime-executor token helpers.
+- `CPB-0810`: corrected `gpt-5.1` static metadata to use version-accurate display/description text for OpenAI/Copilot-facing model surfaces.
 
 Validation evidence:
 
-- `go test ./cmd/cliproxyctl -run 'TestResolveLoginProviderNormalizesDroidAliases|TestCPB0011To0020LaneMRegressionEvidence' -count=1` → `ok`
-- `go test ./pkg/llmproxy/usage -run 'TestNormalizeProviderAliasesDroidToGemini|TestGetProviderMetrics_FiltersKnownProviders' -count=1` → `ok`
-- `go test ./pkg/llmproxy/executor -run 'TestIsGPT5FamilyModel|TestTokenizerForModel' -count=1` → `ok`
-- `go test ./pkg/llmproxy/runtime/executor -run 'TestIsGPT5FamilyModel|TestTokenizerForModel' -count=1` → `ok`
+- `go test ./pkg/llmproxy/registry -run 'TestGetOpenAIModels_GPT51Metadata|TestGetGitHubCopilotModels|TestGetStaticModelDefinitionsByChannel' -count=1` → `ok`
