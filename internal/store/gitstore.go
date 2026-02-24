@@ -617,14 +617,23 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 	} else if errRewrite := s.rewriteHeadAsSingleCommit(repo, headRef.Name(), commitHash, message, signature); errRewrite != nil {
 		return errRewrite
 	}
-	s.maybeRunGC(repo)
-	if err = repo.Push(&git.PushOptions{Auth: s.gitAuth(), Force: true}); err != nil {
+	if err = s.pushWithRecover(repo); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			return nil
 		}
 		return fmt.Errorf("git token store: push: %w", err)
 	}
+	s.maybeRunGC(repo)
 	return nil
+}
+
+func (s *GitTokenStore) pushWithRecover(repo *git.Repository) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic recovered in go-git push: %v", r)
+		}
+	}()
+	return repo.Push(&git.PushOptions{Auth: s.gitAuth(), Force: true})
 }
 
 // rewriteHeadAsSingleCommit rewrites the current branch tip to a single-parentless commit and leaves history squashed.
