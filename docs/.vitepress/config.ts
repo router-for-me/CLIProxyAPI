@@ -1,22 +1,27 @@
 import { defineConfig } from "vitepress";
 import { contentTabsPlugin } from "./plugins/content-tabs";
 
+// Import shared base config
+import baseConfig from "../../../docs-hub/.vitepress/base.config";
+
 const repo = process.env.GITHUB_REPOSITORY?.split("/")[1] ?? "cliproxyapi-plusplus";
 const isCI = process.env.GITHUB_ACTIONS === "true";
 const docsBase = isCI ? `/${repo}/` : "/";
-const faviconHref = `${docsBase}favicon.ico`;
 
 export default defineConfig({
+  ...baseConfig,
+  // Ensure dead links are ignored (for localhost links in docs)
+  ignoreDeadLinks: true,
+  cleanUrls: true,
+  // Project-specific overrides
   title: "cliproxy++",
   description: "cliproxyapi-plusplus documentation",
   base: docsBase,
   head: [
-    ["link", { rel: "icon", href: faviconHref }]
+    ["link", { rel: "icon", href: `${docsBase}favicon.ico` }]
   ],
-  cleanUrls: true,
-  ignoreDeadLinks: true,
-  lastUpdated: true,
   themeConfig: {
+    ...baseConfig.themeConfig,
     nav: [
       { text: "Home", link: "/" },
       { text: "Start Here", link: "/start-here" },
@@ -63,9 +68,6 @@ export default defineConfig({
         ]
       }
     ],
-    search: {
-      provider: "local"
-    },
     footer: {
       message: "MIT Licensed",
       copyright: "Copyright © KooshaPari"
@@ -74,9 +76,6 @@ export default defineConfig({
       pattern:
         "https://github.com/kooshapari/cliproxyapi-plusplus/edit/main/docs/:path",
       text: "Edit this page on GitHub"
-    },
-    outline: {
-      level: [2, 3]
     },
     socialLinks: [
       { icon: "github", link: "https://github.com/kooshapari/cliproxyapi-plusplus" }
