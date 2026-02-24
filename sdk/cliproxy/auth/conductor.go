@@ -1828,9 +1828,7 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 // every few seconds and triggers refresh operations when required.
 // Only one loop is kept alive; starting a new one cancels the previous run.
 func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duration) {
-	if interval <= 0 || interval > refreshCheckInterval {
-		interval = refreshCheckInterval
-	} else {
+	if interval <= 0 {
 		interval = refreshCheckInterval
 	}
 	if m.refreshCancel != nil {
