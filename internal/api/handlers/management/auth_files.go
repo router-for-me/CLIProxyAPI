@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
+	githubauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/github"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
@@ -396,6 +397,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			entry["account"] = account
 		}
 	}
+	h.enrichGithubAccountEntry(context.Background(), auth, entry)
 	if !auth.CreatedAt.IsZero() {
 		entry["created_at"] = auth.CreatedAt
 	}
@@ -486,6 +488,77 @@ func authEmail(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+func (h *Handler) enrichGithubAccountEntry(ctx context.Context, auth *coreauth.Auth, entry gin.H) {
+	if h == nil || auth == nil || entry == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "github") {
+		return
+	}
+	if email, ok := entry["email"].(string); ok && strings.TrimSpace(email) != "" {
+		return
+	}
+
+	accessToken := ""
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["access_token"].(string); ok {
+			accessToken = strings.TrimSpace(v)
+		}
+	}
+	if accessToken == "" && auth.Attributes != nil {
+		accessToken = strings.TrimSpace(auth.Attributes["api_key"])
+	}
+	if accessToken == "" && auth.Storage != nil {
+		switch ts := auth.Storage.(type) {
+		case *githubauth.GithubTokenStorage:
+			if ts != nil {
+				accessToken = strings.TrimSpace(ts.AccessToken)
+			}
+		}
+	}
+	if accessToken == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	authSvc := githubauth.NewGithubAuth(h.cfg)
+	info, err := authSvc.FetchUserInfo(ctx, accessToken)
+	if err != nil {
+		return
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = map[string]any{}
+	}
+	if info.Email != "" {
+		auth.Metadata["email"] = info.Email
+		entry["email"] = info.Email
+	}
+	if info.Login != "" {
+		auth.Metadata["login"] = info.Login
+	}
+	if info.Name != "" {
+		auth.Metadata["name"] = info.Name
+	}
+
+	identifier := strings.TrimSpace(info.Email)
+	if identifier == "" {
+		identifier = strings.TrimSpace(info.Login)
+	}
+	if identifier != "" {
+		entry["account_type"] = "oauth"
+		entry["account"] = identifier
+		label, _ := entry["label"].(string)
+		if strings.TrimSpace(label) == "" || strings.EqualFold(strings.TrimSpace(label), "GitHub Copilot User") || strings.EqualFold(strings.TrimSpace(label), "github") {
+			entry["label"] = identifier
+		}
+	}
 }
 
 func authAttribute(auth *coreauth.Auth, key string) string {
@@ -1788,6 +1861,98 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
+func (h *Handler) RequestGithubCopilotToken(c *gin.Context) {
+	ctx := context.Background()
+
+	fmt.Println("Initializing GitHub Copilot authentication...")
+
+	state := fmt.Sprintf("ghc-%d", time.Now().UnixNano())
+	githubAuth := githubauth.NewGithubAuth(h.cfg)
+
+	deviceFlow, errStartDeviceFlow := githubAuth.StartDeviceFlow(ctx)
+	if errStartDeviceFlow != nil {
+		log.Errorf("Failed to start GitHub device flow: %v", errStartDeviceFlow)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device flow"})
+		return
+	}
+
+	authURL := deviceFlow.VerificationURI
+	if authURL == "" {
+		authURL = "https://github.com/login/device"
+	}
+
+	RegisterOAuthSession(state, "github")
+
+	go func() {
+		fmt.Printf("Waiting for GitHub authentication... User code: %s\n", deviceFlow.UserCode)
+		tokenData, errWait := githubAuth.WaitForAuthorization(ctx, deviceFlow)
+		if errWait != nil {
+			SetOAuthSessionError(state, "Authentication failed")
+			fmt.Printf("GitHub authentication failed: %v\n", errWait)
+			return
+		}
+
+		userInfo, errUserInfo := githubAuth.FetchUserInfo(ctx, tokenData.AccessToken)
+		if errUserInfo != nil {
+			log.Warnf("github: failed to fetch user profile, continue with token only: %v", errUserInfo)
+		}
+
+		tokenStorage := githubAuth.CreateTokenStorage(tokenData)
+
+		metadata := map[string]any{
+			"type":         "github",
+			"access_token": tokenData.AccessToken,
+			"token_type":   tokenData.TokenType,
+			"scope":        tokenData.Scope,
+			"timestamp":    time.Now().UnixMilli(),
+		}
+		label := "GitHub Copilot User"
+		if userInfo != nil {
+			if email := strings.TrimSpace(userInfo.Email); email != "" {
+				metadata["email"] = email
+				label = email
+			}
+			if login := strings.TrimSpace(userInfo.Login); login != "" {
+				metadata["login"] = login
+				if label == "GitHub Copilot User" {
+					label = login
+				}
+			}
+			if name := strings.TrimSpace(userInfo.Name); name != "" {
+				metadata["name"] = name
+			}
+		}
+
+		fileName := fmt.Sprintf("github-%d.json", time.Now().UnixMilli())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "github",
+			FileName: fileName,
+			Label:    label,
+			Storage:  tokenStorage,
+			Metadata: metadata,
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save GitHub authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("GitHub authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use GitHub Copilot services through this CLI")
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("github")
+	}()
+
+	c.JSON(200, gin.H{
+		"status":    "ok",
+		"url":       authURL,
+		"state":     state,
+		"user_code": deviceFlow.UserCode,
+	})
 }
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
