@@ -90,8 +90,6 @@ func TestConfigSynthesizer_SynthesizeMore(t *testing.T) {
 				FireworksKey:   []config.FireworksKey{{APIKey: "fw1"}},
 				NovitaKey:      []config.NovitaKey{{APIKey: "no1"}},
 				MiniMaxKey:     []config.MiniMaxKey{{APIKey: "mm1"}},
-				RooKey:         []config.RooKey{{APIKey: "ro1"}},
-				KiloKey:        []config.KiloKey{{APIKey: "ki1"}},
 			},
 			VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "vx1", BaseURL: "http://vx"}},
 		},

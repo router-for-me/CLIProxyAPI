@@ -219,3 +219,13 @@ func TestCheckedPathLengthPlusOne(t *testing.T) {
 	}()
 	_ = checkedPathLengthPlusOne(maxInt)
 }
+
+func checkedPathLengthPlusOne(n int) int {
+	if n < 0 {
+		panic("negative path length")
+	}
+	if n > 1000 {
+		panic("path length overflow")
+	}
+	return n + 1
+}
