@@ -163,6 +163,11 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 	}
 }
 
+// NewFileRequestLoggerWithOptions creates a new file-based request logger with configurable error log retention.
+func NewFileRequestLoggerWithOptions(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int) *FileRequestLogger {
+	return NewFileRequestLogger(enabled, logsDir, configDir, errorLogsMaxFiles)
+}
+
 // IsEnabled returns whether request logging is currently enabled.
 //
 // Returns:

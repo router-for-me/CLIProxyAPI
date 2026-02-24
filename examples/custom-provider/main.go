@@ -29,8 +29,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	clipexec "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	sdktr "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
