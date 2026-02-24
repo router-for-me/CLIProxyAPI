@@ -50,6 +50,8 @@ func purgeExpiredUserIDs() {
 }
 
 func userIDCacheKey(apiKey string) string {
+	// codeql[go/weak-sensitive-data-hashing] - HMAC-SHA256 is used for cache key derivation, not password storage.
+	// This creates a stable cache key from the API key without exposing the key itself.
 	hasher := hmac.New(sha256.New, userIDCacheHashKey)
 	_, _ = hasher.Write([]byte(apiKey))
 	return hex.EncodeToString(hasher.Sum(nil))
