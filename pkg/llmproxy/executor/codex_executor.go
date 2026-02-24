@@ -364,7 +364,20 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		appendAPIResponseChunk(ctx, e.cfg, data)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		// Check for unsupported model errors and provide a clearer message
+		errMsg := string(data)
+		if httpResp.StatusCode == 400 && strings.Contains(errMsg, "not supported") {
+			// Provide a user-friendly error for unsupported models with ChatGPT cookies
+			if strings.Contains(errMsg, "gpt-5.3-codex-spark") || strings.Contains(errMsg, "codex-spark") {
+				err = statusErr{
+					code: httpResp.StatusCode,
+					msg:  "Model gpt-5.3-codex-spark requires a Plus/Team/Enterprise ChatGPT account. Please upgrade your plan or use a different provider. Original error: " + errMsg,
+				}
+				return nil, err
+			}
+		}
+
+		err = statusErr{code: httpResp.StatusCode, msg: errMsg}
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)

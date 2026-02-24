@@ -1,24 +1,30 @@
 name: VitePress Pages
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "package.json"
   push:
     branches: [main]
     paths:
       - "docs/**"
-      - ".github/workflows/vitepress-pages.yml"
+      - "package.json"
   workflow_dispatch:
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
-concurrency:
-  group: cliproxy++-vitepress-pages
-  cancel-in-progress: false
-
 jobs:
   build:
+    name: Build Docs
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,31 +37,35 @@ jobs:
           cache: "npm"
           cache-dependency-path: docs/package.json
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
-      - name: Install docs dependencies
+      - name: Install dependencies
         working-directory: docs
-        run: npm install
+        run: npm install --frozen-lockfile
 
-      - name: Build VitePress site
+      - name: Build docs
         working-directory: docs
         run: npm run docs:build
 
-      - name: Upload Pages artifact
+      - name: Verify built docs
+        run: test -f docs/.vitepress/dist/index.html
+
+      - name: Upload pages artifact
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/.vitepress/dist
+          path: docs/.vitepress/dist/
 
   deploy:
+    name: Deploy Pages
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy to GitHub Pages
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
