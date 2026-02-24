@@ -344,6 +344,9 @@ func (s *Server) setupRoutes() {
 		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
 	}
 
+	// Routing endpoint for thegent Pareto model selection (public, no auth)
+	s.engine.POST("/v1/routing/select", s.mgmt.POSTRoutingSelect)
+
 	// Root endpoint
 	s.engine.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -352,6 +355,7 @@ func (s *Server) setupRoutes() {
 				"POST /v1/chat/completions",
 				"POST /v1/completions",
 				"GET /v1/models",
+				"POST /v1/routing/select",
 			},
 		})
 	})
