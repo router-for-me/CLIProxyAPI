@@ -46,7 +46,7 @@ func (h *Handler) POSTRoutingSelect(c *gin.Context) {
 // selectModel returns a model based on complexity and constraints
 func selectModel(complexity string, maxCost float64, maxLatency int, minQuality float64) (string, string, float64, int, float64) {
 	// Default fallback
-	defaultModel := "gemini-2.0-flash"
+	defaultModel := "gemini-3-flash"
 	defaultProvider := "gemini"
 	defaultCost := 0.0001
 	defaultLatency := 1000
@@ -56,21 +56,17 @@ func selectModel(complexity string, maxCost float64, maxLatency int, minQuality 
 
 	switch complexity {
 	case "FAST":
-		if minQuality <= 0.8 && maxCost >= 0.0001 {
-			return "gemini-2.0-flash", "gemini", 0.0001, 500, 0.78
-		}
+		// minimax-m2.5 - fastest, cheapest
+		return "minimax-m2.5", "minimax", 0.00007, 300, 0.72
 	case "NORMAL":
-		if minQuality <= 0.85 && maxCost >= 0.00025 {
-			return "claude-haiku-4.5", "claude", 0.00025, 800, 0.75
-		}
+		// gemini-3-flash - balanced
+		return "gemini-3-flash", "gemini", 0.0001, 800, 0.78
 	case "COMPLEX":
-		if minQuality <= 0.9 && maxCost >= 0.003 {
-			return "claude-sonnet-4.6", "claude", 0.003, 2000, 0.88
-		}
+		// claude-sonnet-4.6 - high quality
+		return "claude-sonnet-4.6", "claude", 0.003, 2000, 0.88
 	case "HIGH_COMPLEX":
-		if minQuality <= 0.95 && maxCost >= 0.015 {
-			return "claude-opus-4.6", "claude", 0.015, 4000, 0.95
-		}
+		// gpt-5.3-codex-xhigh - highest quality for complex tasks
+		return "gpt-5.3-codex-xhigh", "openai", 0.015, 4000, 0.95
 	}
 
 	return defaultModel, defaultProvider, defaultCost, defaultLatency, defaultQuality
