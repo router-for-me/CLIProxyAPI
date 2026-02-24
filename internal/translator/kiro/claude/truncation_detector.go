@@ -63,7 +63,7 @@ var RequiredFieldsByTool = map[string][]string{
 	"edit_file":          {"path"},
 	"apply_diff":         {"path", "diff"},
 	"str_replace_editor": {"path", "old_str", "new_str"},
-	"Bash":               {"command"},
+	"Bash":        {"command", "cmd"},  // Ampcode uses "cmd", others use "command"
 	"execute":            {"command"},
 	"run_command":        {"command"},
 }
