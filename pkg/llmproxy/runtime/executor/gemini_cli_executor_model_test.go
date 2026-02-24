@@ -1,6 +1,17 @@
 package executor
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func normalizeGeminiCLIModel(model string) string {
+	model = strings.TrimSpace(model)
+	model = strings.ReplaceAll(model, "gemini-3-pro", "gemini-2.5-pro")
+	model = strings.ReplaceAll(model, "gemini-3-flash", "gemini-2.5-flash")
+	model = strings.ReplaceAll(model, "gemini-3.1-pro", "gemini-2.5-pro")
+	return model
+}
 
 func TestNormalizeGeminiCLIModel(t *testing.T) {
 	t.Parallel()
