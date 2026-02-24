@@ -310,6 +310,10 @@ func normalizeManagementCallbackPath(rawPath string) string {
 	if strings.Contains(normalized, "//") || strings.Contains(normalized, ":/") {
 		return "/"
 	}
+	// Security: Ensure path doesn't start with // or \ (could be interpreted as URL)
+	if len(normalized) >= 2 && (normalized[1] == '/' || normalized[1] == '\\') {
+		return "/"
+	}
 	if !strings.HasPrefix(normalized, "/") {
 		return "/" + normalized
 	}

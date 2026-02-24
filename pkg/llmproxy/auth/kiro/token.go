@@ -41,11 +41,13 @@ type KiroTokenStorage struct {
 }
 
 // SaveTokenToFile persists the token storage to the specified file path.
+// The authFilePath is sanitized via cleanTokenPath which validates and normalizes the path.
 func (s *KiroTokenStorage) SaveTokenToFile(authFilePath string) error {
 	cleanPath, err := cleanTokenPath(authFilePath, "kiro token")
 	if err != nil {
 		return err
 	}
+	// codeql[go/path-injection] - cleanPath is sanitized by cleanTokenPath above
 	dir := filepath.Dir(cleanPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)

@@ -128,6 +128,9 @@ func stableAuthIndex(seed string) string {
 	if seed == "" {
 		return ""
 	}
+	// Note: SHA256 is used here to create a stable identifier, not for password hashing.
+	// The seed is typically a filename or non-sensitive identifier.
+	// codeql[go/weak-sensitive-data-hashing] - intentional use for stable ID generation
 	sum := sha256.Sum256([]byte(seed))
 	return hex.EncodeToString(sum[:8])
 }
