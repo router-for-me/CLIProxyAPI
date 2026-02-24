@@ -158,6 +158,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	}
 
 	if !hasThinkingConfig(config) {
+		// codeql[go/clear-text-logging] - provider and model are non-sensitive identifiers
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
 			"model":    modelInfo.ID,

@@ -1290,15 +1290,18 @@ func (e *CodexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 }
 
 func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
-	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL))
+	// codeql[go/clear-text-logging] - authID is a filename/identifier, not a credential; wsURL is sanitized
+	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s", strings.TrimSpace(sessionID), util.RedactAPIKey(strings.TrimSpace(authID)), sanitizeURLForLog(wsURL))
 }
 
 func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
 	if err != nil {
-		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s err=%v", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL), strings.TrimSpace(reason), err)
+		// codeql[go/clear-text-logging] - authID is a filename/identifier, not a credential; wsURL is sanitized
+		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s err=%v", strings.TrimSpace(sessionID), util.RedactAPIKey(strings.TrimSpace(authID)), sanitizeURLForLog(wsURL), strings.TrimSpace(reason), err)
 		return
 	}
-	log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL), strings.TrimSpace(reason))
+	// codeql[go/clear-text-logging] - authID is a filename/identifier, not a credential; wsURL is sanitized
+	log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s reason=%s", strings.TrimSpace(sessionID), util.RedactAPIKey(strings.TrimSpace(authID)), sanitizeURLForLog(wsURL), strings.TrimSpace(reason))
 }
 
 // CodexAutoExecutor routes Codex requests to the websocket transport only when:
@@ -1405,4 +1408,20 @@ func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 	default:
 	}
 	return false
+}
+
+// sanitizeURLForLog removes query parameters that may contain sensitive data from URLs for safe logging.
+func sanitizeURLForLog(rawURL string) string {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "[invalid-url]"
+	}
+	// Clear potentially sensitive query params
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }

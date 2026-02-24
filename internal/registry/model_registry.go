@@ -671,6 +671,7 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	}
 	delete(registration.SuspendedClients, clientID)
 	registration.LastUpdated = time.Now()
+	// codeql[go/clear-text-logging] - clientID and modelID are non-sensitive identifiers
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
 }
 
