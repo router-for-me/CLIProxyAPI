@@ -43,14 +43,15 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-	anthropicCallbackPort   = 54545
-	geminiCallbackPort      = 8085
-	codexCallbackPort       = 1455
-	geminiCLIEndpoint       = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion        = "v1internal"
-	geminiCLIUserAgent      = "google-api-nodejs-client/9.15.1"
-	geminiCLIApiClient      = "gl-node/22.17.0"
-	geminiCLIClientMetadata = "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
+	anthropicCallbackPort     = 54545
+	geminiCallbackPort        = 8085
+	codexCallbackPort         = 1455
+	githubCopilotDefaultLabel = "GitHub Copilot User"
+	geminiCLIEndpoint         = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion          = "v1internal"
+	geminiCLIUserAgent        = "google-api-nodejs-client/9.15.1"
+	geminiCLIApiClient        = "gl-node/22.17.0"
+	geminiCLIClientMetadata   = "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
 )
 
 type callbackForwarder struct {
@@ -555,7 +556,7 @@ func (h *Handler) enrichGithubAccountEntry(ctx context.Context, auth *coreauth.A
 		entry["account_type"] = "oauth"
 		entry["account"] = identifier
 		label, _ := entry["label"].(string)
-		if strings.TrimSpace(label) == "" || strings.EqualFold(strings.TrimSpace(label), "GitHub Copilot User") || strings.EqualFold(strings.TrimSpace(label), "github") {
+		if strings.TrimSpace(label) == "" || strings.EqualFold(strings.TrimSpace(label), githubCopilotDefaultLabel) || strings.EqualFold(strings.TrimSpace(label), "github") {
 			entry["label"] = identifier
 		}
 	}
@@ -1908,7 +1909,7 @@ func (h *Handler) RequestGithubCopilotToken(c *gin.Context) {
 			"scope":        tokenData.Scope,
 			"timestamp":    time.Now().UnixMilli(),
 		}
-		label := "GitHub Copilot User"
+		label := githubCopilotDefaultLabel
 		if userInfo != nil {
 			if email := strings.TrimSpace(userInfo.Email); email != "" {
 				metadata["email"] = email
@@ -1916,7 +1917,7 @@ func (h *Handler) RequestGithubCopilotToken(c *gin.Context) {
 			}
 			if login := strings.TrimSpace(userInfo.Login); login != "" {
 				metadata["login"] = login
-				if label == "GitHub Copilot User" {
+				if label == githubCopilotDefaultLabel {
 					label = login
 				}
 			}

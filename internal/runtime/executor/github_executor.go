@@ -394,11 +394,24 @@ func githubOAuthToken(a *cliproxyauth.Auth) string {
 	if a == nil {
 		return ""
 	}
+
+	// 1) User override in auth attributes.
 	if a.Attributes != nil {
 		if v := strings.TrimSpace(a.Attributes["api_key"]); v != "" {
 			return v
 		}
 	}
+
+	// 2) Structured token storage returned by OAuth login flows.
+	if a.Storage != nil {
+		if data, err := json.Marshal(a.Storage); err == nil {
+			if token := strings.TrimSpace(gjson.GetBytes(data, "access_token").String()); token != "" {
+				return token
+			}
+		}
+	}
+
+	// 3) Metadata fallback.
 	if a.Metadata != nil {
 		if v, ok := a.Metadata["access_token"].(string); ok {
 			return strings.TrimSpace(v)
