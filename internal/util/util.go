@@ -125,3 +125,12 @@ func WritablePath() string {
 	}
 	return ""
 }
+
+// RedactAPIKey completely redacts an API key for secure logging.
+// It returns "[REDACTED]" for any non-empty key, or an empty string for empty input.
+func RedactAPIKey(apiKey string) string {
+	if apiKey == "" {
+		return ""
+	}
+	return "[REDACTED]"
+}
