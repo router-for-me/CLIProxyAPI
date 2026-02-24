@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/copilot"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/browser"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -40,7 +40,7 @@ func (a GitHubCopilotAuthenticator) Login(ctx context.Context, cfg *config.Confi
 		opts = &LoginOptions{}
 	}
 
-	authSvc := copilot.NewCopilotAuth(cfg)
+	authSvc := copilot.NewCopilotAuth(cfg, nil)
 
 	// Start the device flow
 	fmt.Println("Starting GitHub Copilot authentication...")
@@ -117,7 +117,7 @@ func RefreshGitHubCopilotToken(ctx context.Context, cfg *config.Config, storage 
 		return fmt.Errorf("no token available")
 	}
 
-	authSvc := copilot.NewCopilotAuth(cfg)
+	authSvc := copilot.NewCopilotAuth(cfg, nil)
 
 	// Validate the token can still get a Copilot API token
 	_, err := authSvc.GetCopilotAPIToken(ctx, storage.AccessToken)
