@@ -19,7 +19,7 @@ func requestContextWithHeader(t *testing.T, idempotencyKey string) context.Conte
 
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ginCtx.Request = req
-	return context.WithValue(context.Background(), ginContextLookupKeyToken, ginCtx)
+	return context.WithValue(context.Background(), "gin", ginCtx)
 }
 
 func TestRequestExecutionMetadata_GeneratesIdempotencyKey(t *testing.T) {
