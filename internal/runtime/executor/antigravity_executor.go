@@ -71,13 +71,33 @@ func cloneAntigravityModels(models []*registry.ModelInfo) []*registry.ModelInfo 
 		if model == nil || strings.TrimSpace(model.ID) == "" {
 			continue
 		}
-		clone := *model
-		out = append(out, &clone)
+		out = append(out, cloneAntigravityModelInfo(model))
 	}
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+func cloneAntigravityModelInfo(model *registry.ModelInfo) *registry.ModelInfo {
+	if model == nil {
+		return nil
+	}
+	clone := *model
+	if len(model.SupportedGenerationMethods) > 0 {
+		clone.SupportedGenerationMethods = append([]string(nil), model.SupportedGenerationMethods...)
+	}
+	if len(model.SupportedParameters) > 0 {
+		clone.SupportedParameters = append([]string(nil), model.SupportedParameters...)
+	}
+	if model.Thinking != nil {
+		thinkingClone := *model.Thinking
+		if len(model.Thinking.Levels) > 0 {
+			thinkingClone.Levels = append([]string(nil), model.Thinking.Levels...)
+		}
+		clone.Thinking = &thinkingClone
+	}
+	return &clone
 }
 
 func storeAntigravityPrimaryModels(models []*registry.ModelInfo) bool {

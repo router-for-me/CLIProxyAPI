@@ -44,7 +44,15 @@ func TestLoadAntigravityPrimaryModels_ReturnsClone(t *testing.T) {
 	resetAntigravityPrimaryModelsCacheForTest()
 	t.Cleanup(resetAntigravityPrimaryModelsCacheForTest)
 
-	if updated := storeAntigravityPrimaryModels([]*registry.ModelInfo{{ID: "gpt-5", DisplayName: "GPT-5"}}); !updated {
+	if updated := storeAntigravityPrimaryModels([]*registry.ModelInfo{{
+		ID:                         "gpt-5",
+		DisplayName:                "GPT-5",
+		SupportedGenerationMethods: []string{"generateContent"},
+		SupportedParameters:        []string{"temperature"},
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"high"},
+		},
+	}}); !updated {
 		t.Fatal("expected model cache update")
 	}
 
@@ -53,6 +61,15 @@ func TestLoadAntigravityPrimaryModels_ReturnsClone(t *testing.T) {
 		t.Fatalf("expected one cached model, got %d", len(got))
 	}
 	got[0].ID = "mutated-id"
+	if len(got[0].SupportedGenerationMethods) > 0 {
+		got[0].SupportedGenerationMethods[0] = "mutated-method"
+	}
+	if len(got[0].SupportedParameters) > 0 {
+		got[0].SupportedParameters[0] = "mutated-parameter"
+	}
+	if got[0].Thinking != nil && len(got[0].Thinking.Levels) > 0 {
+		got[0].Thinking.Levels[0] = "mutated-level"
+	}
 
 	again := loadAntigravityPrimaryModels()
 	if len(again) != 1 {
@@ -60,5 +77,14 @@ func TestLoadAntigravityPrimaryModels_ReturnsClone(t *testing.T) {
 	}
 	if again[0].ID != "gpt-5" {
 		t.Fatalf("expected cached model id to remain %q, got %q", "gpt-5", again[0].ID)
+	}
+	if len(again[0].SupportedGenerationMethods) == 0 || again[0].SupportedGenerationMethods[0] != "generateContent" {
+		t.Fatalf("expected cached generation methods to be unmutated, got %v", again[0].SupportedGenerationMethods)
+	}
+	if len(again[0].SupportedParameters) == 0 || again[0].SupportedParameters[0] != "temperature" {
+		t.Fatalf("expected cached supported parameters to be unmutated, got %v", again[0].SupportedParameters)
+	}
+	if again[0].Thinking == nil || len(again[0].Thinking.Levels) == 0 || again[0].Thinking.Levels[0] != "high" {
+		t.Fatalf("expected cached model thinking levels to be unmutated, got %v", again[0].Thinking)
 	}
 }
