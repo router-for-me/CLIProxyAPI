@@ -53,6 +53,7 @@ _bmad-output/*
 .DS_Store
 ._*
 *.bak
+<<<<<<< HEAD
 server
 server
 cli-proxy-api-plus-integration-test
@@ -60,3 +61,5 @@ cli-proxy-api-plus-integration-test
 boardsync
 releasebatch
 .cache
+=======
+>>>>>>> fix/circular-import-config
