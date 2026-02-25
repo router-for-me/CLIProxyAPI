@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: quality-fmt-staged
+        name: quality-fmt-staged
+        entry: task quality:fmt-staged
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: quality-pre-push
+        name: quality-pre-push
+        entry: task quality:pre-push
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

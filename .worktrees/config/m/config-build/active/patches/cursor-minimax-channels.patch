@@ -1,0 +1,204 @@
+diff --git a/config.example.yaml b/config.example.yaml
+index 94ba38c..65a8beb 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -170,6 +170,28 @@ nonstream-keepalive-interval: 0
+ #    proxy-url: "socks5://proxy.example.com:1080" # optional: proxy override
+ #
++# Cursor (via cursor-api): uses LOGIN PROTOCOL, not static API key.
++# User logs in at cursor.com; token from WorkosCursorSessionToken cookie.
++# cursor-api /build-key converts token to short-lived keys; /tokens/refresh for renewal.
++# See thegent/docs/plans/CLIPROXY_API_AND_THGENT_UNIFIED_PLAN.md
++#cursor:
++#  - token-file: "~/.cursor/session-token.txt" # path to Cursor session token
++#    cursor-api-url: "http://127.0.0.1:3000"   # cursor-api server (default)
++#
++# MiniMax: OAuth (user-code flow) + optional API key. Dedicated block for parity with Kiro.
++# API key: platform.minimax.io; OAuth: OpenClaw minimax-portal-auth (Coding plan).
++# See thegent/docs/plans/CLIPROXY_API_AND_THGENT_UNIFIED_PLAN.md
++#minimax:
++#  - token-file: "~/.minimax/oauth-token.json" # OAuth token (access/refresh)
++#    base-url: "https://api.minimax.io/anthropic" # optional
++#  - api-key: "sk-..." # or API key fallback
++#    base-url: "https://api.minimax.io/anthropic"
++#
+ # OpenAI compatibility providers
+ # openai-compatibility:
+ #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
+@@ -185,6 +207,8 @@ nonstream-keepalive-interval: 0
+ #     models: # The models supported by the provider.
+ #       - name: "moonshotai/kimi-k2:free" # The actual model name.
+ #         alias: "kimi-k2" # The alias used in the API.
++#   # Cursor: use dedicated cursor: block above (login protocol). Do NOT use api-key-entries.
++#   # MiniMax: use dedicated minimax: block above (OAuth + API key). Do NOT use openai-compat only.
+ #
+ # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
+ # vertex-api-key:
+diff --git a/internal/registry/model_definitions.go b/internal/registry/model_definitions.go
+index 30ebe6c..c0c34c6 100644
+--- a/internal/registry/model_definitions.go
++++ b/internal/registry/model_definitions.go
+@@ -21,8 +21,9 @@ import (
+ //   - iflow
+ //   - kiro
+ //   - github-copilot
+-//   - kiro
+ //   - amazonq
++//   - cursor (via cursor-api; use dedicated cursor: block)
++//   - minimax (use dedicated minimax: block; api.minimax.io)
+ //   - antigravity (returns static overrides only)
+ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
+ 	key := strings.ToLower(strings.TrimSpace(channel))
+@@ -49,6 +50,10 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
+ 		return GetKiroModels()
+ 	case "amazonq":
+ 		return GetAmazonQModels()
++	case "cursor":
++		return GetCursorModels()
++	case "minimax":
++		return GetMiniMaxModels()
+ 	case "antigravity":
+ 		cfg := GetAntigravityModelConfig()
+ 		if len(cfg) == 0 {
+@@ -96,6 +101,8 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
+ 		GetGitHubCopilotModels(),
+ 		GetKiroModels(),
+ 		GetAmazonQModels(),
++		GetCursorModels(),
++		GetMiniMaxModels(),
+ 	}
+ 	for _, models := range allModels {
+ 		for _, m := range models {
+@@ -654,3 +661,132 @@ func GetAmazonQModels() []*ModelInfo {
+ 		},
+ 	}
+ }
++
++// GetCursorModels returns model definitions for Cursor via cursor-api (wisdgod).
++// Use dedicated cursor: block in config (token-file, cursor-api-url).
++func GetCursorModels() []*ModelInfo {
++	now := int64(1732752000)
++	return []*ModelInfo{
++		{
++			ID:                  "claude-4.5-opus-high-thinking",
++			Object:              "model",
++			Created:             now,
++			OwnedBy:             "cursor",
++			Type:                "cursor",
++			DisplayName:         "Claude 4.5 Opus High Thinking",
++			Description:         "Anthropic Claude 4.5 Opus via Cursor (cursor-api)",
++			ContextLength:       200000,
++			MaxCompletionTokens: 64000,
++		},
++		{
++			ID:                  "claude-4.5-opus-high",
++			Object:              "model",
++			Created:             now,
++			OwnedBy:             "cursor",
++			Type:                "cursor",
++			DisplayName:         "Claude 4.5 Opus High",
++			Description:         "Anthropic Claude 4.5 Opus via Cursor (cursor-api)",
++			ContextLength:       200000,
++			MaxCompletionTokens: 64000,
++		},
++		{
++			ID:                  "claude-4.5-sonnet-thinking",
++			Object:              "model",
++			Created:             now,
++			OwnedBy:             "cursor",
++			Type:                "cursor",
++			DisplayName:         "Claude 4.5 Sonnet Thinking",
++			Description:         "Anthropic Claude 4.5 Sonnet via Cursor (cursor-api)",
++			ContextLength:       200000,
++			MaxCompletionTokens: 64000,
++		},
++		{
++			ID:                  "claude-4-sonnet",
++			Object:              "model",
++			Created:             now,
++			OwnedBy:             "cursor",
++			Type:                "cursor",
++			DisplayName:         "Claude 4 Sonnet",
++			Description:         "Anthropic Claude 4 Sonnet via Cursor (cursor-api)",
++			ContextLength:       200000,
++			MaxCompletionTokens: 64000,
++		},
++		{
++			ID:                  "gpt-4o",
++			Object:              "model",
++			Created:             now,
++			OwnedBy:             "cursor",
++			Type:                "cursor",
++			DisplayName:         "GPT-4o",
++			Description:         "OpenAI GPT-4o via Cursor (cursor-api)",
++			ContextLength:       128000,
++			MaxCompletionTokens: 16384,
++		},
++		{
++			ID:                  "gpt-5.1-codex",
++			Object:              "model",
++			Created:             now,
++			OwnedBy:             "cursor",
++			Type:                "cursor",
++			DisplayName:         "GPT-5.1 Codex",
++			Description:         "OpenAI GPT-5.1 Codex via Cursor (cursor-api)",
++			ContextLength:       200000,
++			MaxCompletionTokens: 32768,
++		},
++		{
++			ID:                  "default",
++			Object:              "model",
++			Created:             now,
++			OwnedBy:             "cursor",
++			Type:                "cursor",
++			DisplayName:         "Default",
++			Description:         "Cursor server-selected default model",
++			ContextLength:       200000,
++			MaxCompletionTokens: 64000,
++		},
++	}
++}
++
++// GetMiniMaxModels returns model definitions for MiniMax (api.minimax.io).
++// Use dedicated minimax: block in config (OAuth token-file or api-key).
++func GetMiniMaxModels() []*ModelInfo {
++	now := int64(1758672000)
++	return []*ModelInfo{
++		{
++			ID:                  "minimax-m2",
++			Object:              "model",
++			Created:             now,
++			OwnedBy:             "minimax",
++			Type:                "minimax",
++			DisplayName:         "MiniMax M2",
++			Description:         "MiniMax M2 via api.minimax.chat",
++			ContextLength:       128000,
++			MaxCompletionTokens: 32768,
++			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
++		},
++		{
++			ID:                  "minimax-m2.1",
++			Object:              "model",
++			Created:             1766448000,
++			OwnedBy:             "minimax",
++			Type:                "minimax",
++			DisplayName:         "MiniMax M2.1",
++			Description:         "MiniMax M2.1 via api.minimax.chat",
++			ContextLength:       200000,
++			MaxCompletionTokens: 64000,
++			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
++		},
++		{
++			ID:                  "minimax-m2.5",
++			Object:              "model",
++			Created:             1770825600,
++			OwnedBy:             "minimax",
++			Type:                "minimax",
++			DisplayName:         "MiniMax M2.5",
++			Description:         "MiniMax M2.5 via api.minimax.chat",
++			ContextLength:       200000,
++			MaxCompletionTokens: 64000,
++			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
++		},
++	}
++}

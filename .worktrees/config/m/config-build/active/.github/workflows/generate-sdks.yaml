@@ -1,0 +1,75 @@
+name: Generate SDKs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/openapi.yaml'
+      - 'internal/api/**/*.go'
+  workflow_dispatch:
+
+jobs:
+  generate-python-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install OpenAPI Generator
+        run: |
+          npm install @openapitools/openapi-generator-cli -g
+          
+      - name: Generate Python SDK
+        run: |
+          openapi-generator generate \
+            -i api/openapi.yaml \
+            -g python \
+            -o sdk/python \
+            --package-name cliproxyapi \
+            --additional-properties=pythonVersion==3.12,generateSourceCodeOnly=true
+      
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: 'chore: generate Python SDK'
+          title: 'chore: generate Python SDK'
+          body: |
+            Auto-generated Python SDK from OpenAPI spec.
+          branch: sdk/python
+          delete-branch: true
+
+  generate-typescript-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install OpenAPI Generator
+        run: |
+          npm install @openapitools/openapi-generator-cli -g
+          
+      - name: Generate TypeScript SDK
+        run: |
+          openapi-generator generate \
+            -i api/openapi.yaml \
+            -g typescript-fetch \
+            -o sdk/typescript \
+            --additional-properties=typescriptVersion=5.0,npmName=@cliproxy/api
+      
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: 'chore: generate TypeScript SDK'
+          title: 'chore: generate TypeScript SDK'
+          body: |
+            Auto-generated TypeScript SDK from OpenAPI spec.
+          branch: sdk/typescript
+          delete-branch: true

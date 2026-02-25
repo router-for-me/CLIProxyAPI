@@ -1,0 +1,36 @@
+# Git and GitHub folders
+.git/*
+.github/*
+
+# Docker and CI/CD related files
+docker-compose.yml
+.dockerignore
+.gitignore
+.goreleaser.yml
+Dockerfile
+
+# Documentation and license
+docs/*
+README.md
+README_CN.md
+LICENSE
+
+# Runtime data folders (should be mounted as volumes)
+auths/*
+logs/*
+conv/*
+config.yaml
+
+# Development/editor
+bin/*
+.vscode/*
+.claude/*
+.codex/*
+.gemini/*
+.serena/*
+.agent/*
+.agents/*
+.opencode/*
+.bmad/*
+_bmad/*
+_bmad-output/*
