@@ -153,6 +153,16 @@ func (b *Builder) WithLocalManagementPassword(password string) *Builder {
 	return b
 }
 
+// WithPostAuthHook registers a hook to be called after an Auth record is created
+// but before it is persisted to storage.
+func (b *Builder) WithPostAuthHook(hook coreauth.PostAuthHook) *Builder {
+	if hook == nil {
+		return b
+	}
+	b.serverOptions = append(b.serverOptions, api.WithPostAuthHook(hook))
+	return b
+}
+
 // Build validates inputs, applies defaults, and returns a ready-to-run service.
 func (b *Builder) Build() (*Service, error) {
 	if b.cfg == nil {

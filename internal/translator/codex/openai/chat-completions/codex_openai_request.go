@@ -180,7 +180,19 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								msg, _ = sjson.SetRaw(msg, "content.-1", part)
 							}
 						case "file":
-							// Files are not specified in examples; skip for now
+							if role == "user" {
+								fileData := it.Get("file.file_data").String()
+								filename := it.Get("file.filename").String()
+								if fileData != "" {
+									part := `{}`
+									part, _ = sjson.Set(part, "type", "input_file")
+									part, _ = sjson.Set(part, "file_data", fileData)
+									if filename != "" {
+										part, _ = sjson.Set(part, "filename", filename)
+									}
+									msg, _ = sjson.SetRaw(msg, "content.-1", part)
+								}
+							}
 						}
 					}
 				}

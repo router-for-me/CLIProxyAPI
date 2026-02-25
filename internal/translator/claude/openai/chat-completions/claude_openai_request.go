@@ -199,6 +199,21 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
 								}
 							}
+
+						case "file":
+							fileData := part.Get("file.file_data").String()
+							if strings.HasPrefix(fileData, "data:") {
+								semicolonIdx := strings.Index(fileData, ";")
+								commaIdx := strings.Index(fileData, ",")
+								if semicolonIdx != -1 && commaIdx != -1 && commaIdx > semicolonIdx {
+									mediaType := strings.TrimPrefix(fileData[:semicolonIdx], "data:")
+									data := fileData[commaIdx+1:]
+									docPart := `{"type":"document","source":{"type":"base64","media_type":"","data":""}}`
+									docPart, _ = sjson.Set(docPart, "source.media_type", mediaType)
+									docPart, _ = sjson.Set(docPart, "source.data", data)
+									msg, _ = sjson.SetRaw(msg, "content.-1", docPart)
+								}
+							}
 						}
 						return true
 					})
