@@ -39,13 +39,14 @@ func MaskValue(key, value string) string {
 }
 
 // IsSensitiveKey checks if a key name suggests sensitive data
-func IsSensitiveKey(key string) string {
+func IsSensitiveKey(key string) bool {
 	keyLower := strings.ToLower(key)
 	for _, pattern := range SensitiveKeyPatterns {
 		if strings.Contains(keyLower, pattern) {
-			return pattern
+			return true
 		}
-	return ""
+	}
+	return false
 }
 
 // MaskString masks a value showing first/last 4 chars only
@@ -80,7 +81,7 @@ func (s SafeLogField) String() string {
 		str = "****"
 	}
 	
-	if IsSensitiveKey(s.Key) != "" {
+	if IsSensitiveKey(s.Key) {
 		return s.Key + "=" + MaskString(str)
 	}
 	return s.Key + "=" + str
