@@ -16,7 +16,7 @@ import (
 	"time"
 
 	cliproxycmd "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/cmd"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
 )
 
 const responseSchemaVersion = "cliproxyctl.response.v1"
