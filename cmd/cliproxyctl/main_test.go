@@ -559,6 +559,12 @@ func TestResolveLoginProviderNormalizesDroidAliases(t *testing.T) {
 		if details["provider_supported"] != true {
 			t.Fatalf("expected provider_supported=true for %q, details=%#v", input, details)
 		}
+		if details["provider_alias"] != "gemini" {
+			t.Fatalf("expected provider_alias=gemini for %q, details=%#v", input, details)
+		}
+		if details["provider_aliased"] != true {
+			t.Fatalf("expected provider_aliased=true for %q, details=%#v", input, details)
+		}
 	}
 }
 

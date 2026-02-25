@@ -241,9 +241,27 @@ Avoid per-tool aliases for these fields in ops docs to keep telemetry queries de
   - Critical: processed thinking mode mismatch ratio > 5% over 10 minutes.
   - Warn: reasoning token growth > 25% above baseline for fixed-thinking workloads over 10 minutes.
 - Mitigation:
-  - Force explicit thinking-capable model alias for affected workloads.
-  - Reduce rollout blast radius by pinning the model suffix/level per workload class.
-  - Keep one non-stream and one stream canary for each affected client integration.
+- Force explicit thinking-capable model alias for affected workloads.
+- Reduce rollout blast radius by pinning the model suffix/level per workload class.
+- Keep one non-stream and one stream canary for each affected client integration.
+
+### Provider-specific proxy overrides (`CPB-0794`)
+
+- **Goal:** route some providers through a corporate proxy while letting others go direct (for example, Gemini through `socks5://corp-proxy:1080` while Claude works through the default gateway).
+- **Config knobs:** `config.yaml` already exposes `proxy-url` at the root (global egress) and a `proxy-url` field per credential or API key entry. Adding the override looks like:
+
+```yaml
+gemini-api-key:
+  - api-key: "AIzaSy..."
+    proxy-url: "socks5://corp-proxy:1080" # per-provider override
+```
+
+- **Validation steps:**
+  1. `rg -n "proxy-url" config.yaml` (or open `config.example.yaml`) to confirm the override is placed next to the target credential block.
+  2. `cliproxyctl doctor --json | jq '.config.providers | to_entries[] | {provider:.key,credentials:.value}'` to ensure each credential surfaces the intended `proxy_url` value.
+  3. After editing, save the file so the built-in watcher hot-reloads the settings (or run `docker compose restart cliproxyapi-plusplus` for a deterministic reload) and rerun an affected client request while tailing `docker compose logs cliproxyapi-plusplus --follow` to watch for proxy-specific connection errors.
+
+- **Fallback behavior:** When no per-credential override exists, the root `proxy-url` applies; clearing the override (set to empty string) forces a direct connection even if the root proxy is set.
 
 ## Recommended Production Pattern
 

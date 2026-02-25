@@ -10,8 +10,9 @@
 
 - `proposed` in board snapshot: 50/50
 - `triaged with concrete file/test targets in this pass`: 50/50
-- `implemented so far`: 16/50
-- `remaining`: 34/50
+- `implemented so far`: 28/50
+- `remaining`: 22/50
+- `count basis`: resume-scoped verification in this session (Batch 1 + Batch 2 + Resume Scoped 12)
 
 ## Lane Index
 
@@ -117,7 +118,30 @@ Validation evidence:
 Implemented in this batch:
 
 - `CPB-0810`: corrected `gpt-5.1` static metadata to use version-accurate display/description text for OpenAI/Copilot-facing model surfaces.
+- `CPB-0819`: added config-gated `/v1/responses/compact` rollout control (`responses-compact-enabled`) with safe default enabled and explicit disabled behavior tests.
+- `CPB-0820`: added `gpt-5-pro` static model metadata with explicit thinking support for OpenAI/Copilot-facing model lists.
+- `CPB-0821`: tightened droid alias coverage with explicit `provider_alias`/`provider_aliased` assertions and usage telemetry mapping tests.
 
 Validation evidence:
 
-- `go test ./pkg/llmproxy/registry -run 'TestGetOpenAIModels_GPT51Metadata|TestGetGitHubCopilotModels|TestGetStaticModelDefinitionsByChannel' -count=1` → `ok`
+- `go test ./pkg/llmproxy/registry -run 'TestGetOpenAIModels_GPT51Metadata|TestGetOpenAIModels_IncludesGPT5Pro|TestGetGitHubCopilotModels|TestGetStaticModelDefinitionsByChannel' -count=1` → `ok`
+- `go test ./pkg/llmproxy/config -run 'TestIsResponsesCompactEnabled_DefaultTrue|TestIsResponsesCompactEnabled_RespectsToggle' -count=1` → `ok`
+- `go test ./pkg/llmproxy/executor -run 'TestOpenAICompatExecutorCompactPassthrough|TestOpenAICompatExecutorCompactDisabledByConfig' -count=1` → `ok`
+- `go test ./pkg/llmproxy/runtime/executor -run 'TestOpenAICompatExecutorCompactPassthrough|TestOpenAICompatExecutorCompactDisabledByConfig' -count=1` → `ok`
+- `go test ./cmd/cliproxyctl -run 'TestResolveLoginProviderNormalizesDroidAliases' -count=1` → `ok`
+- `go test ./pkg/llmproxy/usage -run 'TestNormalizeProviderAliasesDroidToGemini|TestGetProviderMetrics_MapsDroidAliasToGemini' -count=1` → `ok`
+
+## Execution Update (Resume Scoped 12)
+
+- Date: `2026-02-23`
+- Status: completed next 12-item docs/runbook batch with child-agent split.
+- Tracking report: `docs/planning/reports/issue-wave-cpb-0781-0830-implementation-batch-3-resume-12.md`
+
+Implemented in this batch:
+
+- `CPB-0789`, `CPB-0790`, `CPB-0791`, `CPB-0792`, `CPB-0793`, `CPB-0794`, `CPB-0795`
+- `CPB-0797`, `CPB-0798`, `CPB-0800`, `CPB-0803`, `CPB-0804`
+
+Verification:
+
+- `rg -n "CPB-0789|CPB-0790|CPB-0791|CPB-0792|CPB-0793|CPB-0794|CPB-0795|CPB-0797|CPB-0798|CPB-0800|CPB-0803|CPB-0804" docs/provider-quickstarts.md docs/troubleshooting.md docs/operations/provider-error-runbook.md`

@@ -95,6 +95,10 @@ routing:
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
+# Gates OpenAI-compatible /v1/responses/compact behavior.
+# Default enabled when omitted. Set false for staged rollout / rapid disable.
+# responses-compact-enabled: true
+
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
 

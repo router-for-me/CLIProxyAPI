@@ -1134,24 +1134,43 @@ curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer demo-client-k
 
 Expected: no cross-request leakage in stream translation, feature-flag state is explicit, and Sonnet 4.5 model metadata is consistent.
 
-### Reasoning/cache/compose checks (`CPB-0791`, `CPB-0792`, `CPB-0793`)
+### Reasoning parity probe (`CPB-0791`)
 
 ```bash
 curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"reasoning normalization probe"}],"reasoning":{"effort":"x-high"},"stream":false}' | jq '{model,usage,error}'
-curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"cache token probe"}],"stream":false}' | jq '{usage,error}'
+curl -N -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"reasoning normalization probe"}],"reasoning":{"effort":"x-high"},"stream":true}'
+```
+
+Expected: both non-stream and stream responses return the same reasoning metadata, `usage` totals stay in sync, and no errors drop the `thinking` result when it reaches Gemini/Antigravity.
+
+### Prompt cache guardrails (`CPB-0792`, `CPB-0797`)
+
+```bash
+curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"cache guard probe"}],"stream":false}' | jq '{model,usage,error}'
+curl -sS -X POST http://localhost:8317/v1/chat/completions -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"antigravity/claude-sonnet-4-5-thinking","messages":[{"role":"user","content":"cache guard probe"}],"stream":false}' | jq '{model,usage,error}'
+cliproxyctl doctor --json | jq '.warnings[]? | select(.message | test("cache"; "i"))'
+```
+
+Expected: repeated probes for Gemini and Antigravity stick to the requested model, the `usage` objects always include prompt/completion totals, and no cache-related warnings appear in `cliproxyctl doctor` output.
+
+### Compose health check (`CPB-0793`)
+
+```bash
 docker compose ps
 curl -sS http://localhost:8317/health | jq
 ```
 
-Expected: reasoning normalization is accepted, cache token fields are coherent, and docker-compose startup failures are visible via service state + health checks.
+Expected: all CLIProxyAPI services stay `Up` in `docker compose ps`, and the health endpoint returns a healthy payload so startup errors surface before they block workloads.
 
 ### Proxy/auth/usage checks (`CPB-0794`, `CPB-0795`, `CPB-0797`)
 
 ```bash
 cliproxyctl doctor --json | jq '.auth,.routing,.warnings'
-curl -sS http://localhost:8317/v0/management/auth-files -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.[] | select(.type=="aistudio") | {name,type,disabled}'
+curl -sS http://localhost:8317/v0/management/auth-files -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.[] | select(.type=="aistudio") | {name,type,enabled,auth_index}'
 curl -sS -X PATCH http://localhost:8317/v0/management/auth-files/status -H "X-Management-Secret: ${MANAGEMENT_SECRET}" -H "Content-Type: application/json" -d '{"name":"aistudio-default","enabled":true}' | jq
-curl -sS -X POST http://localhost:8317/v1/responses -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","input":[{"role":"user","content":"usage parity probe"}],"stream":false}' | jq '.usage,.error'
+cliproxyctl doctor --json | jq '.auth_files'
+curl -sS -X POST http://localhost:8317/v1/responses -H "Authorization: Bearer demo-client-key" -H "Content-Type: application/json" -d '{"model":"gemini-2.5-pro","input":[{"role":"user","content":"usage parity probe"}],"stream":false}' | jq '{model,id,usage}'
+curl -sS http://localhost:8317/v0/management/usage -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.providers | to_entries[] | {name:.key, tokens:.value.usage}'
 ```
 
 Expected: per-provider proxy/auth behavior is inspectable, AI Studio auth toggle is controllable, and usage/token metadata is present in non-stream probes.
@@ -1166,6 +1185,30 @@ curl -sS http://localhost:8317/v0/management/usage -H "X-Management-Secret: ${MA
 ```
 
 Expected: setup/login surfaces include manual callback support, and huggingface failures are visible in management logs/usage.
+
+### Antigravity cliproxyctl flow (`CPB-0798`)
+
+```
+cliproxyctl setup --config ./config.yaml
+  (interactive prompt -> choose "Antigravity login" when the list appears)
+cliproxyctl login --provider antigravity --no-browser --oauth-callback-port 51121
+cliproxyctl doctor --json | jq '{auth,warnings,models}'
+curl -sS http://localhost:8317/v1/models -H "Authorization: Bearer demo-client-key" | jq '.data[] | select(.id|test("^antigravity/")) | {id,owned_by,description}'
+```
+
+Expected: `cliproxyctl setup` seeds the auth-dir used by cliproxyctl, the non-browser antigravity login prints the callback URL (copy it into a reachable browser), `cliproxyctl doctor` reports the new auth credentials, and the runtime model catalog exposes every `antigravity/…` entry.
+
+### Manual callback headless OAuth (`CPB-0800`)
+
+```
+cliproxyctl login --provider openai --no-browser --oauth-callback-port 0
+cliproxyctl login --provider gemini --no-browser --oauth-callback-port 0
+cliproxyctl doctor --json | jq '{auth,warnings}'
+curl -sS http://localhost:8317/v0/management/auth-files -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.[] | select(.manual) | {provider,name,status}'
+curl -sS http://localhost:8317/v0/management/logs -H "X-Management-Secret: ${MANAGEMENT_SECRET}" | jq '.entries[]? | select(.message|test("manual callback";"i"))'
+```
+
+Expected: login flows emit a manual callback URL that can be pasted into the reachable browser, doctor validates the newly minted credential, the management auth-files list shows a `manual` entry for the provider, and recent logs surface the manual callback handshake.
 
 ### Codex/Gemini integration parity (`CPB-0804`, `CPB-0805`, `CPB-0807`, `CPB-0808`)
 

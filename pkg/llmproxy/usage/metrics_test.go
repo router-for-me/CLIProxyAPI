@@ -91,6 +91,29 @@ func TestNormalizeProviderAliasesDroidToGemini(t *testing.T) {
 	}
 }
 
+func TestGetProviderMetrics_MapsDroidAliasToGemini(t *testing.T) {
+	stats := GetRequestStatistics()
+	ctx := context.Background()
+
+	stats.Record(ctx, coreusage.Record{
+		Provider: "droid",
+		APIKey:   "droid-cli-primary",
+		Model:    "gemini-2.5-pro",
+		Detail: coreusage.Detail{
+			TotalTokens: 11,
+		},
+	})
+
+	metrics := GetProviderMetrics()
+	geminiMetrics, ok := metrics["gemini"]
+	if !ok {
+		t.Fatal("expected gemini metrics from droid alias input")
+	}
+	if geminiMetrics.RequestCount < 1 {
+		t.Fatalf("expected gemini request count >= 1, got %d", geminiMetrics.RequestCount)
+	}
+}
+
 func TestGetProviderMetrics_IncludesKiroAndCursor(t *testing.T) {
 	stats := GetRequestStatistics()
 	ctx := context.Background()
