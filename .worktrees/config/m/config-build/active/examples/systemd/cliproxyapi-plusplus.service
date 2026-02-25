@@ -1,0 +1,20 @@
+[Unit]
+Description=cliproxyapi++ proxy service
+After=network.target
+
+[Service]
+Type=simple
+Environment=CLIPROXY_CONFIG=/etc/cliproxyapi/config.yaml
+EnvironmentFile=-/etc/default/cliproxyapi
+ExecStart=/usr/local/bin/cliproxyapi++ --config ${CLIPROXY_CONFIG}
+Restart=always
+RestartSec=5
+User=cliproxyapi
+Group=cliproxyapi
+WorkingDirectory=/var/lib/cliproxyapi
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

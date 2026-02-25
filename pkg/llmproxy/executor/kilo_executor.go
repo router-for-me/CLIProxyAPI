@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"

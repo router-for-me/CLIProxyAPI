@@ -68,42 +68,11 @@ providers:
 
 ## Documentation
 
-### Quick Links
-- **[Getting Started](docs/getting-started.md)** - First run and configuration
-- **[Installation](docs/install.md)** - Docker, binary, and source options
-- **[Provider Usage](docs/provider-usage.md)** - Provider strategy and setup
-- **[Provider Quickstarts](docs/provider-quickstarts.md)** - 5-minute success paths per provider
-- **[API Reference](docs/api/)** - OpenAI-compatible and management APIs
-- **[Operations](docs/operations/)** - Health, metrics, and incident workflows
-
-### Documentation Structure
-
-```
-docs/
-├── start-here.md          # Start here guide
-├── getting-started.md     # First run tutorial
-├── install.md            # Installation options
-├── provider-usage.md     # Provider configuration
-├── provider-quickstarts.md # Per-provider guides
-├── provider-catalog.md   # Provider reference
-├── provider-operations.md # Operational runbooks
-├── api/                  # API documentation
-│   ├── openai-compatible.md
-│   ├── management.md
-│   └── operations.md
-├── guides/               # How-to guides
-├── features/             # Feature deep-dives
-├── tutorials/            # Step-by-step tutorials
-├── reference/           # Command and config reference
-└── operations/          # Runbooks and procedures
-```
-
-### GitHub Pages
-
-Documentation is automatically built and deployed via GitHub Actions:
-- **Workflow**: `.github/workflows/docs.yml`
-- **URL**: `https://kooshapari.github.io/cliproxy-plus-plus/` (after first deploy)
-- **Local Dev**: `cd docs && npm run docs:dev`
+- `docs/start-here.md` - Getting started guide
+- `docs/provider-usage.md` - Provider configuration
+- `docs/provider-quickstarts.md` - Per-provider guides
+- `docs/api/` - API reference
+- `docs/sdk-usage.md` - SDK guides
 
 ## Environment
 

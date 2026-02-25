@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 

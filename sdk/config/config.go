@@ -4,7 +4,7 @@
 // so external projects can embed CLIProxyAPI without importing internal packages.
 package config
 
-import llmproxyconfig "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+import llmproxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 
 type SDKConfig = llmproxyconfig.SDKConfig
 type Config = llmproxyconfig.Config

@@ -1,0 +1,603 @@
+package management
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+)
+
+func TestIsAllowedHostOverride(t *testing.T) {
+	t.Parallel()
+
+	parsed, err := url.Parse("https://example.com/path?x=1")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if !isAllowedHostOverride(parsed, "example.com") {
+		t.Fatalf("host override should allow exact hostname")
+	}
+
+	parsedWithPort, err := url.Parse("https://example.com:443/path")
+	if err != nil {
+		t.Fatalf("parse with port: %v", err)
+	}
+	if !isAllowedHostOverride(parsedWithPort, "example.com:443") {
+		t.Fatalf("host override should allow hostname with port")
+	}
+	if isAllowedHostOverride(parsed, "attacker.com") {
+		t.Fatalf("host override should reject non-target host")
+	}
+}
+
+func TestAPICall_RejectsUnsafeHost(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"method":"GET","url":"http://127.0.0.1:8080/ping"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	h := &Handler{}
+	h.APICall(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+type memoryAuthStore struct {
+	mu    sync.Mutex
+	items map[string]*coreauth.Auth
+}
+
+func (s *memoryAuthStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*coreauth.Auth, 0, len(s.items))
+	for _, a := range s.items {
+		out = append(out, a.Clone())
+	}
+	return out, nil
+}
+
+func (s *memoryAuthStore) Save(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	_ = ctx
+	if auth == nil {
+		return "", nil
+	}
+	s.mu.Lock()
+	if s.items == nil {
+		s.items = make(map[string]*coreauth.Auth)
+	}
+	s.items[auth.ID] = auth.Clone()
+	s.mu.Unlock()
+	return auth.ID, nil
+}
+
+func (s *memoryAuthStore) Delete(ctx context.Context, id string) error {
+	_ = ctx
+	s.mu.Lock()
+	delete(s.items, id)
+	s.mu.Unlock()
+	return nil
+}
+
+func TestResolveTokenForAuth_Antigravity_RefreshesExpiredToken(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
+			t.Fatalf("unexpected content-type: %s", ct)
+		}
+		bodyBytes, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		values, err := url.ParseQuery(string(bodyBytes))
+		if err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if values.Get("grant_type") != "refresh_token" {
+			t.Fatalf("unexpected grant_type: %s", values.Get("grant_type"))
+		}
+		if values.Get("refresh_token") != "rt" {
+			t.Fatalf("unexpected refresh_token: %s", values.Get("refresh_token"))
+		}
+		if values.Get("client_id") != antigravityOAuthClientID {
+			t.Fatalf("unexpected client_id: %s", values.Get("client_id"))
+		}
+		if values.Get("client_secret") != antigravityOAuthClientSecret {
+			t.Fatalf("unexpected client_secret")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "new-token",
+			"refresh_token": "rt2",
+			"expires_in":    int64(3600),
+			"token_type":    "Bearer",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	originalURL := antigravityOAuthTokenURL
+	antigravityOAuthTokenURL = srv.URL
+	t.Cleanup(func() { antigravityOAuthTokenURL = originalURL })
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+
+	auth := &coreauth.Auth{
+		ID:       "antigravity-test.json",
+		FileName: "antigravity-test.json",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"type":          "antigravity",
+			"access_token":  "old-token",
+			"refresh_token": "rt",
+			"expires_in":    int64(3600),
+			"timestamp":     time.Now().Add(-2 * time.Hour).UnixMilli(),
+			"expired":       time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := &Handler{authManager: manager}
+	token, err := h.resolveTokenForAuth(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("resolveTokenForAuth: %v", err)
+	}
+	if token != "new-token" {
+		t.Fatalf("expected refreshed token, got %q", token)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 refresh call, got %d", callCount)
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth in manager after update")
+	}
+	if got := tokenValueFromMetadata(updated.Metadata); got != "new-token" {
+		t.Fatalf("expected manager metadata updated, got %q", got)
+	}
+}
+
+func TestResolveTokenForAuth_Antigravity_SkipsRefreshWhenTokenValid(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	originalURL := antigravityOAuthTokenURL
+	antigravityOAuthTokenURL = srv.URL
+	t.Cleanup(func() { antigravityOAuthTokenURL = originalURL })
+
+	auth := &coreauth.Auth{
+		ID:       "antigravity-valid.json",
+		FileName: "antigravity-valid.json",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "ok-token",
+			"expired":      time.Now().Add(30 * time.Minute).Format(time.RFC3339),
+		},
+	}
+	h := &Handler{}
+	token, err := h.resolveTokenForAuth(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("resolveTokenForAuth: %v", err)
+	}
+	if token != "ok-token" {
+		t.Fatalf("expected existing token, got %q", token)
+	}
+	if callCount != 0 {
+		t.Fatalf("expected no refresh calls, got %d", callCount)
+	}
+}
+
+type fakeKiroUsageChecker struct {
+	usage *kiroauth.UsageQuotaResponse
+	err   error
+}
+
+func (f fakeKiroUsageChecker) CheckUsageByAccessToken(_ context.Context, _, _ string) (*kiroauth.UsageQuotaResponse, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.usage, nil
+}
+
+func TestFindKiroAuth_ByIndexAndFallback(t *testing.T) {
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	h := &Handler{authManager: manager}
+
+	other := &coreauth.Auth{ID: "other.json", FileName: "other.json", Provider: "copilot"}
+	kiroA := &coreauth.Auth{ID: "kiro-a.json", FileName: "kiro-a.json", Provider: "kiro"}
+	kiroB := &coreauth.Auth{ID: "kiro-b.json", FileName: "kiro-b.json", Provider: "kiro"}
+	for _, auth := range []*coreauth.Auth{other, kiroA, kiroB} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth: %v", err)
+		}
+	}
+	kiroA.EnsureIndex()
+
+	foundByIndex := h.findKiroAuth(kiroA.Index)
+	if foundByIndex == nil || foundByIndex.ID != kiroA.ID {
+		t.Fatalf("findKiroAuth(index) returned %#v, want %q", foundByIndex, kiroA.ID)
+	}
+
+	foundFallback := h.findKiroAuth("")
+	if foundFallback == nil || foundFallback.Provider != "kiro" {
+		t.Fatalf("findKiroAuth fallback returned %#v, want kiro provider", foundFallback)
+	}
+}
+
+func TestGetKiroQuotaWithChecker_Success(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "kiro-1.json",
+		FileName: "kiro-1.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"access_token": "token-1",
+			"profile_arn":  "arn:aws:codewhisperer:us-east-1:123:profile/test",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	auth.EnsureIndex()
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota?auth_index="+url.QueryEscape(auth.Index), nil)
+
+	h := &Handler{authManager: manager}
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{
+		usage: &kiroauth.UsageQuotaResponse{
+			UsageBreakdownList: []kiroauth.UsageBreakdownExtended{
+				{
+					ResourceType:              "AGENTIC_REQUEST",
+					UsageLimitWithPrecision:   100,
+					CurrentUsageWithPrecision: 25,
+				},
+			},
+		},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got["profile_arn"] != "arn:aws:codewhisperer:us-east-1:123:profile/test" {
+		t.Fatalf("profile_arn = %v", got["profile_arn"])
+	}
+	if got["remaining_quota"] != 75.0 {
+		t.Fatalf("remaining_quota = %v, want 75", got["remaining_quota"])
+	}
+	if got["usage_percentage"] != 25.0 {
+		t.Fatalf("usage_percentage = %v, want 25", got["usage_percentage"])
+	}
+	if got["quota_exhausted"] != false {
+		t.Fatalf("quota_exhausted = %v, want false", got["quota_exhausted"])
+	}
+	if got["auth_index"] != auth.Index {
+		t.Fatalf("auth_index = %v, want %s", got["auth_index"], auth.Index)
+	}
+}
+
+func TestGetKiroQuotaWithChecker_MissingProfileARN(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "kiro-no-profile.json",
+		FileName: "kiro-no-profile.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"access_token": "token-1",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota", nil)
+
+	h := &Handler{authManager: manager}
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{
+		usage: &kiroauth.UsageQuotaResponse{},
+	})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "profile arn not found") {
+		t.Fatalf("unexpected response body: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "auth_index") {
+		t.Fatalf("expected auth_index in missing-profile response, got: %s", rec.Body.String())
+	}
+}
+
+func TestGetKiroQuotaWithChecker_IndexAliasLookup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "kiro-index-alias.json",
+		FileName: "kiro-index-alias.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"access_token": "token-1",
+			"profile_arn":  "arn:aws:codewhisperer:us-east-1:123:profile/test",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	auth.EnsureIndex()
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota?index="+url.QueryEscape(auth.Index), nil)
+
+	h := &Handler{authManager: manager}
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{
+		usage: &kiroauth.UsageQuotaResponse{
+			UsageBreakdownList: []kiroauth.UsageBreakdownExtended{
+				{
+					ResourceType:              "AGENTIC_REQUEST",
+					UsageLimitWithPrecision:   100,
+					CurrentUsageWithPrecision: 50,
+				},
+			},
+		},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestGetKiroQuotaWithChecker_AuthIDAliasLookup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "kiro-auth-id-alias.json",
+		FileName: "kiro-auth-id-alias.json",
+		Provider: "kiro",
+		Metadata: map[string]any{
+			"access_token": "token-1",
+			"profile_arn":  "arn:aws:codewhisperer:us-east-1:123:profile/test",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota?auth_id="+url.QueryEscape(auth.ID), nil)
+
+	h := &Handler{authManager: manager}
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{
+		usage: &kiroauth.UsageQuotaResponse{
+			UsageBreakdownList: []kiroauth.UsageBreakdownExtended{
+				{
+					ResourceType:              "AGENTIC_REQUEST",
+					UsageLimitWithPrecision:   100,
+					CurrentUsageWithPrecision: 10,
+				},
+			},
+		},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestGetKiroQuotaWithChecker_MissingCredentialIncludesRequestedIndex(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &Handler{}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/kiro-quota?auth_index=missing-index", nil)
+
+	h.getKiroQuotaWithChecker(ctx, fakeKiroUsageChecker{})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "missing-index") {
+		t.Fatalf("expected requested auth_index in response, got: %s", rec.Body.String())
+	}
+}
+
+func TestCopilotQuotaURLFromTokenURL_Regression(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		tokenURL  string
+		wantURL   string
+		expectErr bool
+	}{
+		{
+			name:      "github_api",
+			tokenURL:  "https://api.github.com/copilot_internal/v2/token",
+			wantURL:   "https://api.github.com/copilot_pkg/llmproxy/user",
+			expectErr: false,
+		},
+		{
+			name:      "copilot_api",
+			tokenURL:  "https://api.githubcopilot.com/copilot_internal/v2/token",
+			wantURL:   "https://api.githubcopilot.com/copilot_pkg/llmproxy/user",
+			expectErr: false,
+		},
+		{
+			name:      "reject_http",
+			tokenURL:  "http://api.github.com/copilot_internal/v2/token",
+			expectErr: true,
+		},
+		{
+			name:      "reject_untrusted_host",
+			tokenURL:  "https://127.0.0.1/copilot_internal/v2/token",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := copilotQuotaURLFromTokenURL(tt.tokenURL)
+			if tt.expectErr {
+				if err == nil {
+					t.Fatalf("expected error, got url=%q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("copilotQuotaURLFromTokenURL returned error: %v", err)
+			}
+			if got != tt.wantURL {
+				t.Fatalf("copilotQuotaURLFromTokenURL = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestAPICallTransport_AuthProxyMisconfigurationFailsClosed(t *testing.T) {
+	auth := &coreauth.Auth{
+		Provider: "kiro",
+		ProxyURL: "::://invalid-proxy-url",
+	}
+	handler := &Handler{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{
+				ProxyURL: "http://127.0.0.1:65535",
+			},
+		},
+	}
+
+	rt := handler.apiCallTransport(auth)
+	req, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if _, err := rt.RoundTrip(req); err == nil {
+		t.Fatalf("expected fail-closed error for invalid auth proxy")
+	}
+}
+
+func TestAPICallTransport_ConfigProxyMisconfigurationFallsBack(t *testing.T) {
+	handler := &Handler{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{
+				ProxyURL: "://bad-proxy-url",
+			},
+		},
+	}
+
+	rt := handler.apiCallTransport(nil)
+	if _, ok := rt.(*transportFailureRoundTripper); ok {
+		t.Fatalf("expected non-failure transport for invalid config proxy")
+	}
+	if _, ok := rt.(*http.Transport); !ok {
+		t.Fatalf("expected default transport type, got %T", rt)
+	}
+}
+
+func TestCopilotQuotaURLFromTokenURLRegression(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		tokenURL  string
+		wantURL   string
+		expectErr bool
+	}{
+		{
+			name:      "github_api",
+			tokenURL:  "https://api.github.com/copilot_internal/v2/token",
+			wantURL:   "https://api.github.com/copilot_pkg/llmproxy/user",
+			expectErr: false,
+		},
+		{
+			name:      "copilot_api",
+			tokenURL:  "https://api.githubcopilot.com/copilot_internal/v2/token",
+			wantURL:   "https://api.githubcopilot.com/copilot_pkg/llmproxy/user",
+			expectErr: false,
+		},
+		{
+			name:      "reject_http",
+			tokenURL:  "http://api.github.com/copilot_internal/v2/token",
+			expectErr: true,
+		},
+		{
+			name:      "reject_untrusted_host",
+			tokenURL:  "https://127.0.0.1/copilot_internal/v2/token",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := copilotQuotaURLFromTokenURL(tt.tokenURL)
+			if tt.expectErr {
+				if err == nil {
+					t.Fatalf("expected error, got url=%q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("copilotQuotaURLFromTokenURL returned error: %v", err)
+			}
+			if got != tt.wantURL {
+				t.Fatalf("copilotQuotaURLFromTokenURL = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}

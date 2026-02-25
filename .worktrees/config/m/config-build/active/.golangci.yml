@@ -1,0 +1,82 @@
+# golangci-lint configuration
+# https://golangci-lint.run/usage/configuration/
+
+version: 2
+
+run:
+  # Timeout for analysis
+  timeout: 5m
+  
+  # Include test files
+  tests: true
+  
+  # Which dirs to skip: issues from them won't be reported
+  skip-dirs:
+    - vendor
+    - third_party$
+    - builtin$
+  
+  # Which files to skip
+  skip-files:
+    - ".*\\.pb\\.go$"
+
+output:
+  # Print lines of code with issue
+  print-issued-lines: true
+  
+  # Print linter name in the end of issue text
+  print-linter-name: true
+
+linters:
+  # Enable specific linter
+  # https://golangci-lint.run/usage/linters/#enabled-by-default-linters
+  # Note: typecheck is built-in and cannot be enabled/disabled in v2
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+
+linters-settings:
+  errcheck:
+    # Report about not checking of errors in type assertions
+    check-type-assertions: false
+    # Report about assignment of errors to blank identifier
+    check-blank: false
+  
+  govet:
+    # Report about shadowed variables
+    disable:
+      - shadow
+  
+  staticcheck:
+    # Select the Go version to target
+    checks: ["all"]
+
+issues:
+  # List of regexps of issue texts to exclude
+  exclude:
+    - "Error return value of .((os\\.)?std(out|err)\\..*|.*Close|.*Flush|os\\.Remove(All)?|.*print(f|ln)?|os\\.(Un)?Setenv). is not checked"
+  
+  # Excluding configuration per-path, per-linter, per-text and per-source
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - errcheck
+    
+    # Exclude known linters from partially auto-generated files
+    - path: .*\.pb\.go
+      linters:
+        - govet
+        - staticcheck
+
+  # Maximum issues count per one linter
+  max-issues-per-linter: 50
+  
+  # Maximum count of issues with the same text
+  max-same-issues: 3
+  
+  # Show only new issues: if there are unstaged changes or untracked files,
+  # only those changes are analyzed
+  new: false

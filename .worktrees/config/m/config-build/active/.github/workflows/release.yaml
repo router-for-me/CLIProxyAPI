@@ -1,0 +1,39 @@
+name: goreleaser
+
+on:
+  push:
+    # run only against tags
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git fetch --force --tags
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '>=1.26.0'
+          cache: true
+      - name: Generate Build Metadata
+        run: |
+          VERSION=$(git describe --tags --always --dirty)
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
+          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+      - uses: goreleaser/goreleaser-action@v4
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ env.VERSION }}
+          COMMIT: ${{ env.COMMIT }}
+          BUILD_DATE: ${{ env.BUILD_DATE }}

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
@@ -364,20 +364,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		appendAPIResponseChunk(ctx, e.cfg, data)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		// Check for unsupported model errors and provide a clearer message
-		errMsg := string(data)
-		if httpResp.StatusCode == 400 && strings.Contains(errMsg, "not supported") {
-			// Provide a user-friendly error for unsupported models with ChatGPT cookies
-			if strings.Contains(errMsg, "gpt-5.3-codex-spark") || strings.Contains(errMsg, "codex-spark") {
-				err = statusErr{
-					code: httpResp.StatusCode,
-					msg:  "Model gpt-5.3-codex-spark requires a Plus/Team/Enterprise ChatGPT account. Please upgrade your plan or use a different provider. Original error: " + errMsg,
-				}
-				return nil, err
-			}
-		}
-
-		err = statusErr{code: httpResp.StatusCode, msg: errMsg}
+		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)

@@ -13,7 +13,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/wsrelay"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
