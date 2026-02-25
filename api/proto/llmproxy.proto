@@ -1,0 +1,180 @@
+// llmproxy.proto - gRPC service definition for cliproxy++
+//
+// Provides typed RPC interface for LLM operations with:
+// - Unary RPC for simple request/response
+// - Server streaming for response generation
+// - Bidirectional streaming for real-time interactions
+//
+// Usage:
+//   # Generate Go code:
+//   protoc --go_out=. --go-grpc_out=. api/proto/llmproxy.proto
+//
+//   # Generate Python code:
+//   python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. api/proto/llmproxy.proto
+
+syntax = "proto3";
+
+package llmproxy;
+
+option go_package = "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/api/grpc;grpc";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// ============================================================================
+// Core Messages
+// ============================================================================
+
+// Message represents a chat message
+message Message {
+  string role = 1;     // system, user, assistant
+  string content = 2;  // message content
+  string name = 3;     // optional name for multi-user
+}
+
+// ChatRequest is a chat completion request
+message ChatRequest {
+  string model = 1;                         // model identifier
+  repeated Message messages = 2;            // conversation history
+  int32 max_tokens = 3;                     // max output tokens
+  double temperature = 4;                   // sampling temperature
+  double top_p = 5;                         // nucleus sampling
+  repeated string stop = 6;                 // stop sequences
+  double presence_penalty = 7;              // presence penalty
+  double frequency_penalty = 8;             // frequency penalty
+  string user = 9;                          // user identifier
+  bool stream = 10;                         // enable streaming
+  map<string, google.protobuf.Value> extra = 11;  // provider-specific
+}
+
+// ChatResponse is a complete chat completion response
+message ChatResponse {
+  string id = 1;                            // response ID
+  string model = 2;                         // model used
+  repeated Choice choices = 3;              // completion choices
+  Usage usage = 4;                          // token usage
+  google.protobuf.Timestamp created = 5;    // creation timestamp
+  string system_fingerprint = 6;            // system fingerprint
+}
+
+// Choice represents a completion choice
+message Choice {
+  int32 index = 1;                          // choice index
+  Message message = 2;                      // completion message
+  string finish_reason = 3;                 // stop reason
+}
+
+// Usage represents token usage
+message Usage {
+  int32 prompt_tokens = 1;                  // input tokens
+  int32 completion_tokens = 2;              // output tokens
+  int32 total_tokens = 3;                   // total tokens
+}
+
+// StreamChunk represents a streaming response chunk
+message StreamChunk {
+  string id = 1;                            // response ID
+  string model = 2;                         // model used
+  repeated StreamChoice choices = 3;        // streaming choices
+  google.protobuf.Timestamp created = 4;    // creation timestamp
+  string system_fingerprint = 5;            // system fingerprint
+  bool done = 6;                            // final chunk flag
+  Error error = 7;                          // error if any
+}
+
+// StreamChoice represents a streaming choice
+message StreamChoice {
+  int32 index = 1;                          // choice index
+  Delta delta = 2;                          // incremental content
+  string finish_reason = 3;                 // stop reason
+}
+
+// Delta represents incremental content
+message Delta {
+  string role = 1;                          // role if changed
+  string content = 2;                       // content delta
+}
+
+// Error represents an error
+message Error {
+  int32 code = 1;                           // error code
+  string message = 2;                       // error message
+  string type = 3;                          // error type
+}
+
+// HealthCheckRequest for health checking
+message HealthCheckRequest {
+  string service = 1;                       // service name (optional)
+}
+
+// HealthCheckResponse for health status
+message HealthCheckResponse {
+  enum Status {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  Status status = 1;
+  map<string, string> details = 2;
+}
+
+// ModelsRequest for listing models
+message ModelsRequest {
+  string provider = 1;                      // filter by provider (optional)
+}
+
+// ModelsResponse for model list
+message ModelsResponse {
+  repeated Model models = 1;
+}
+
+// Model represents a model
+message Model {
+  string id = 1;                            // model ID
+  string name = 2;                          // display name
+  string provider = 3;                      // provider name
+  int32 context_length = 4;                 // max context
+  repeated string capabilities = 5;         // capabilities
+}
+
+// ============================================================================
+// Service Definition
+// ============================================================================
+
+// LLMProxy provides LLM operations
+service LLMProxy {
+  // Chat performs a chat completion (non-streaming)
+  rpc Chat(ChatRequest) returns (ChatResponse);
+
+  // ChatStream performs a streaming chat completion
+  rpc ChatStream(ChatRequest) returns (stream StreamChunk);
+
+  // ChatBidirectional supports bidirectional streaming
+  // Client can send multiple requests, server streams responses
+  rpc ChatBidirectional(stream ChatRequest) returns (stream StreamChunk);
+
+  // Health checks service health
+  rpc Health(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // ListModels lists available models
+  rpc ListModels(ModelsRequest) returns (ModelsResponse);
+}
+
+// ============================================================================
+// Authentication Messages (for connection pooling)
+// ============================================================================
+
+// AuthRequest for authentication
+message AuthRequest {
+  string provider = 1;                      // provider name
+  string api_key = 2;                       // API key (if applicable)
+  map<string, string> oauth = 3;            // OAuth tokens (if applicable)
+}
+
+// AuthResponse for authentication result
+message AuthResponse {
+  bool success = 1;                         // auth success
+  string session_token = 2;                 // session token for pooling
+  int32 expires_in = 3;                     // token TTL in seconds
+  Error error = 4;                          // error if any
+}
