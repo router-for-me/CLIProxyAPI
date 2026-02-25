@@ -142,11 +142,11 @@ func NewParetoRouter() *ParetoRouter {
 }
 
 // NewParetoRouterWithBenchmarks returns a ParetoRouter with dynamic benchmarks.
-// Pass nil for primary to use fallback-only mode.
-func NewParetoRouterWithBenchmarks(primary benchmarks.BenchmarkProvider) *ParetoRouter {
+// Pass empty string for tokenledgerURL to use fallback-only mode.
+func NewParetoRouterWithBenchmarks(tokenledgerURL string) *ParetoRouter {
 	var store *benchmarks.UnifiedBenchmarkStore
-	if primary != nil {
-		store = benchmarks.NewUnifiedStore(primary)
+	if tokenledgerURL != "" {
+		store = benchmarks.NewUnifiedBenchmarkStore(tokenledgerURL, 3600)
 	} else {
 		store = benchmarks.NewFallbackOnlyStore()
 	}
@@ -182,23 +182,23 @@ func (p *ParetoRouter) buildCandidates(req *RoutingRequest) []*RoutingCandidate 
 		var ok bool
 		
 		if p.benchmarkStore != nil {
-			if c, found := p.benchmarkStore.GetCost(modelID); found {
-				costPer1k = c
-			} else {
-				costPer1k = costPer1kProxy[modelID]
+			// Use unified benchmark store with fallback
+			costPer1k = p.benchmarkStore.GetCost(modelID)
+			latencyMs = p.benchmarkStore.GetLatency(modelID)
+			// If default values, try hardcoded
+			if costPer1k == 1.0 { // Default
+				if c, exists := costPer1kProxy[modelID]; exists {
+					costPer1k = c
+				}
 			}
-			if l, found := p.benchmarkStore.GetLatency(modelID); found {
-				latencyMs = l
-			} else {
-				latencyMs, ok = latencyMsProxy[modelID]
-				if !ok {
-					latencyMs = 2000
+			if latencyMs == 2000 { // Default
+				if l, exists := latencyMsProxy[modelID]; exists {
+					latencyMs = l
 				}
 			}
 		} else {
 			// Fallback to hardcoded maps
 			costPer1k = costPer1kProxy[modelID]
-			var ok bool
 			latencyMs, ok = latencyMsProxy[modelID]
 			if !ok {
 				latencyMs = 2000
