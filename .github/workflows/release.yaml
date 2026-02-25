@@ -1,38 +1,212 @@
-name: goreleaser
+name: Build and Release
 
 on:
   push:
-    # run only against tags
     tags:
-      - fork/v*
-
-permissions:
-  contents: write
+      - 'fork/v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '手动指定版本标签(例如: fork/v6.60.0)'
+        required: true
 
 jobs:
-  goreleaser:
+  build:
+    name: Build Multi-Platform Binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    strategy:
+      matrix:
+        include:
+          # macOS
+          - goos: darwin
+            goarch: amd64
+            output: cli-proxy-api-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            output: cli-proxy-api-darwin-arm64
+          # Linux
+          - goos: linux
+            goarch: amd64
+            output: cli-proxy-api-linux-amd64
+          - goos: linux
+            goarch: arm64
+            output: cli-proxy-api-linux-arm64
+          # Windows
+          - goos: windows
+            goarch: amd64
+            output: cli-proxy-api-windows-amd64.exe
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - run: git fetch --force --tags
-      - uses: actions/setup-go@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version: '>=1.26.0'
+          go-version: '1.26'
           cache: true
-      - name: Generate Build Metadata
+
+      - name: Get version info
+        id: version
         run: |
-          echo VERSION=`git describe --tags --always --dirty` >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - uses: goreleaser/goreleaser-action@v4
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          {
+            echo "version=${VERSION}"
+            echo "commit=${COMMIT}"
+            echo "build_date=${BUILD_DATE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build ${{ matrix.output }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X 'main.Version=${{ steps.version.outputs.version }}' \
+              -X 'main.Commit=${{ steps.version.outputs.commit }}' \
+              -X 'main.BuildDate=${{ steps.version.outputs.build_date }}'" \
+            -o dist/${{ matrix.output }} ./cmd/server/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: dist
+        run: |
+          sha256sum ./* > checksums.txt
+          cat checksums.txt
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")
+
+          echo "## What's Changed" > release_notes.md
+          echo "" >> release_notes.md
+
+          if [ -n "$PREV_TAG" ]; then
+            git log "${PREV_TAG}..${TAG}" --pretty=format:"%h|%s" > commits.txt
+
+            FEATURES=$(grep -E "^[a-f0-9]+\|feat(\(.+\))?:" commits.txt || true)
+            FIXES=$(grep -E "^[a-f0-9]+\|fix(\(.+\))?:" commits.txt || true)
+            REFACTORS=$(grep -E "^[a-f0-9]+\|refactor(\(.+\))?:" commits.txt || true)
+            OTHERS=$(grep -vE "^[a-f0-9]+\|(feat|fix|refactor|docs|test|ci|chore)(\(.+\))?:" commits.txt || true)
+
+            if [ -n "$FEATURES" ]; then
+              echo "### Features" >> release_notes.md
+              echo "$FEATURES" | while IFS='|' read -r hash msg; do
+                echo "- $msg (\`$hash\`)" >> release_notes.md
+              done
+              echo "" >> release_notes.md
+            fi
+
+            if [ -n "$FIXES" ]; then
+              echo "### Bug Fixes" >> release_notes.md
+              echo "$FIXES" | while IFS='|' read -r hash msg; do
+                echo "- $msg (\`$hash\`)" >> release_notes.md
+              done
+              echo "" >> release_notes.md
+            fi
+
+            if [ -n "$REFACTORS" ]; then
+              echo "### Refactors" >> release_notes.md
+              echo "$REFACTORS" | while IFS='|' read -r hash msg; do
+                echo "- $msg (\`$hash\`)" >> release_notes.md
+              done
+              echo "" >> release_notes.md
+            fi
+
+            if [ -n "$OTHERS" ]; then
+              echo "### Other Changes" >> release_notes.md
+              echo "$OTHERS" | while IFS='|' read -r hash msg; do
+                echo "- $msg (\`$hash\`)" >> release_notes.md
+              done
+              echo "" >> release_notes.md
+            fi
+          else
+            echo "Initial release." >> release_notes.md
+            echo "" >> release_notes.md
+          fi
+
+          cat >> release_notes.md <<'NOTESEOF'
+          ---
+
+          ## Download
+
+          | Platform | Arch | File |
+          |----------|------|------|
+          | macOS | Intel | `cli-proxy-api-darwin-amd64` |
+          | macOS | Apple Silicon | `cli-proxy-api-darwin-arm64` |
+          | Linux | x86_64 | `cli-proxy-api-linux-amd64` |
+          | Linux | ARM64 | `cli-proxy-api-linux-arm64` |
+          | Windows | x86_64 | `cli-proxy-api-windows-amd64.exe` |
+
+          **Checksum**: See `checksums.txt` in release assets.
+
+          ## Verify
+
+          ```bash
+          sha256sum -c checksums.txt
+          ```
+          NOTESEOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+          body_path: release_notes.md
+          files: |
+            dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ env.VERSION }}
-          COMMIT: ${{ env.COMMIT }}
-          BUILD_DATE: ${{ env.BUILD_DATE }}
