@@ -4,7 +4,7 @@ on:
   push:
     # run only against tags
     tags:
-      - '*'
+      - fork/v*
 
 permissions:
   contents: write
