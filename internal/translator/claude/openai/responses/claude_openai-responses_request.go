@@ -155,6 +155,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				var textAggregate strings.Builder
 				var partsJSON []string
 				hasImage := false
+				hasFile := false
 				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 					parts.ForEach(func(_, part gjson.Result) bool {
 						ptype := part.Get("type").String()
@@ -207,6 +208,30 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 									hasImage = true
 								}
 							}
+						case "input_file":
+							fileData := part.Get("file_data").String()
+							if fileData != "" {
+								mediaType := "application/octet-stream"
+								data := fileData
+								if strings.HasPrefix(fileData, "data:") {
+									trimmed := strings.TrimPrefix(fileData, "data:")
+									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
+									if len(mediaAndData) == 2 {
+										if mediaAndData[0] != "" {
+											mediaType = mediaAndData[0]
+										}
+										data = mediaAndData[1]
+									}
+								}
+								contentPart := `{"type":"document","source":{"type":"base64","media_type":"","data":""}}`
+								contentPart, _ = sjson.Set(contentPart, "source.media_type", mediaType)
+								contentPart, _ = sjson.Set(contentPart, "source.data", data)
+								partsJSON = append(partsJSON, contentPart)
+								if role == "" {
+									role = "user"
+								}
+								hasFile = true
+							}
 						}
 						return true
 					})
@@ -228,7 +253,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if len(partsJSON) > 0 {
 					msg := `{"role":"","content":[]}`
 					msg, _ = sjson.Set(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage {
+					if len(partsJSON) == 1 && !hasImage && !hasFile {
 						// Preserve legacy behavior for single text content
 						msg, _ = sjson.Delete(msg, "content")
 						textPart := gjson.Parse(partsJSON[0])

@@ -53,19 +53,25 @@ var KnownCommandTools = map[string]bool{
 	"execute_python": true,
 }
 
-// RequiredFieldsByTool maps tool names to their required fields.
-// If any of these fields are missing, the tool input is considered truncated.
-var RequiredFieldsByTool = map[string][]string{
-	"Write":              {"file_path", "content"},
-	"write_to_file":      {"path", "content"},
-	"fsWrite":            {"path", "content"},
-	"create_file":        {"path", "content"},
-	"edit_file":          {"path"},
-	"apply_diff":         {"path", "diff"},
-	"str_replace_editor": {"path", "old_str", "new_str"},
-	"Bash":               {"command"},
-	"execute":            {"command"},
-	"run_command":        {"command"},
+// RequiredFieldsByTool maps tool names to their required field groups.
+// Each outer element is a required group; each inner slice lists alternative field names (OR logic).
+// A group is satisfied when ANY one of its alternatives exists in the parsed input.
+// All groups must be satisfied for the tool input to be considered valid.
+//
+// Example:
+// {{"cmd", "command"}} means the tool needs EITHER "cmd" OR "command".
+// {{"file_path"}, {"content"}} means the tool needs BOTH "file_path" AND "content".
+var RequiredFieldsByTool = map[string][][]string{
+	"Write":              {{"file_path"}, {"content"}},
+	"write_to_file":      {{"path"}, {"content"}},
+	"fsWrite":            {{"path"}, {"content"}},
+	"create_file":        {{"path"}, {"content"}},
+	"edit_file":          {{"path"}},
+	"apply_diff":         {{"path"}, {"diff"}},
+	"str_replace_editor": {{"path"}, {"old_str"}, {"new_str"}},
+	"Bash":               {{"cmd", "command"}},
+	"execute":            {{"command"}},
+	"run_command":        {{"command"}},
 }
 
 // DetectTruncation checks if the tool use input appears to be truncated.
@@ -104,9 +110,9 @@ func DetectTruncation(toolName, toolUseID, rawInput string, parsedInput map[stri
 
 	// Scenario 3: JSON parsed but critical fields are missing
 	if parsedInput != nil {
-		requiredFields, hasRequirements := RequiredFieldsByTool[toolName]
+		requiredGroups, hasRequirements := RequiredFieldsByTool[toolName]
 		if hasRequirements {
-			missingFields := findMissingRequiredFields(parsedInput, requiredFields)
+			missingFields := findMissingRequiredFields(parsedInput, requiredGroups)
 			if len(missingFields) > 0 {
 				info.IsTruncated = true
 				info.TruncationType = TruncationTypeMissingFields
@@ -253,12 +259,21 @@ func extractParsedFieldNames(parsed map[string]interface{}) map[string]string {
 	return fields
 }
 
-// findMissingRequiredFields checks which required fields are missing from the parsed input.
-func findMissingRequiredFields(parsed map[string]interface{}, required []string) []string {
+// findMissingRequiredFields checks which required field groups are unsatisfied.
+// Each group is a slice of alternative field names; the group is satisfied when ANY alternative exists.
+// Returns the list of unsatisfied groups (represented by their alternatives joined with "/").
+func findMissingRequiredFields(parsed map[string]interface{}, requiredGroups [][]string) []string {
 	var missing []string
-	for _, field := range required {
-		if _, exists := parsed[field]; !exists {
-			missing = append(missing, field)
+	for _, group := range requiredGroups {
+		satisfied := false
+		for _, field := range group {
+			if _, exists := parsed[field]; exists {
+				satisfied = true
+				break
+			}
+		}
+		if !satisfied {
+			missing = append(missing, strings.Join(group, "/"))
 		}
 	}
 	return missing
