@@ -100,7 +100,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 		}
 		promptTokenCount := usageResult.Get("promptTokenCount").Int()
 		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-		template, _ = sjson.Set(template, "usage.prompt_tokens", promptTokenCount+thoughtsTokenCount)
+		template, _ = sjson.Set(template, "usage.prompt_tokens", promptTokenCount)
 		if thoughtsTokenCount > 0 {
 			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
 		}
