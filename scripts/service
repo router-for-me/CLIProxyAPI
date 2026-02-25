@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IFS=$'\n\t'
+
+SERVICE_NAME="cliproxyapi-plusplus"
+SERVICE_LABEL="com.router-for-me.cliproxyapi-plusplus"
+SYSTEMD_UNIT="$SERVICE_NAME.service"
+SYSTEMD_DEST="/etc/systemd/system"
+SYSTEMD_ENV="/etc/default/cliproxyapi"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+LAUNCHD_SOURCE="$REPO_ROOT/examples/launchd/$SERVICE_LABEL.plist"
+SYSTEMD_SOURCE="$REPO_ROOT/examples/systemd/$SYSTEMD_UNIT"
+SYSTEMD_ENV_SOURCE="$REPO_ROOT/examples/systemd/cliproxyapi-plusplus.env"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./scripts/service <action> [--config PATH]
+
+Actions:
+  install   register service files and enable on boot
+  remove    disable and remove service files
+  start     start service now
+  stop      stop service now
+  restart   stop then start
+  status    show service status
+
+Options:
+  --config PATH   only used for macOS launchd fallback
+USAGE
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+ensure_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "This action requires root on Linux. Re-run with sudo."
+    exit 1
+  fi
+}
+
+has_brew_formula() {
+  command_exists brew && brew list --formula | grep -qx "cliproxyapi-plusplus"
+}
+
+install_macos() {
+  local cfg="${1:-/opt/homebrew/etc/cliproxyapi/config.yaml}"
+
+  if has_brew_formula; then
+    brew services start cliproxyapi-plusplus
+    return 0
+  fi
+
+  if ! command_exists launchctl || ! command_exists sed; then
+    echo "launchctl and sed are required for fallback launchd setup"
+    exit 1
+  fi
+
+  local prefix
+  local plist_dest="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
+  prefix="$(command_exists brew && brew --prefix || echo /opt/homebrew)"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  sed -e "s#/opt/homebrew#$prefix#g" \
+    -e "s#/opt/homebrew/etc/cliproxyapi/config.yaml#$cfg#g" \
+    "$LAUNCHD_SOURCE" > "$plist_dest"
+  launchctl bootstrap "gui/$(id -u)" "$plist_dest"
+}
+
+remove_macos() {
+  if has_brew_formula; then
+    brew services stop cliproxyapi-plusplus
+    brew services uninstall cliproxyapi-plusplus || true
+    return 0
+  fi
+
+  if command_exists launchctl; then
+    launchctl bootout "gui/$(id -u)" "$SERVICE_LABEL" || true
+  fi
+  rm -f "$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
+}
+
+start_macos() {
+  if has_brew_formula; then
+    brew services start cliproxyapi-plusplus
+    return 0
+  fi
+
+  if command_exists launchctl; then
+    launchctl kickstart -k "gui/$(id -u)/$SERVICE_LABEL"
+  fi
+}
+
+stop_macos() {
+  if has_brew_formula; then
+    brew services stop cliproxyapi-plusplus
+    return 0
+  fi
+
+  if command_exists launchctl; then
+    launchctl stop "$SERVICE_LABEL"
+  fi
+}
+
+status_macos() {
+  if has_brew_formula; then
+    brew services list | grep "cliproxyapi-plusplus"
+    return 0
+  fi
+
+  if command_exists launchctl; then
+    launchctl print "gui/$(id -u)/$SERVICE_LABEL" || true
+  fi
+}
+
+install_linux() {
+  ensure_root
+
+  if ! command_exists systemctl; then
+    echo "systemctl not available"
+    exit 1
+  fi
+  if [ ! -f "$SYSTEMD_SOURCE" ]; then
+    echo "systemd unit template missing: $SYSTEMD_SOURCE"
+    exit 1
+  fi
+
+  mkdir -p "$SYSTEMD_DEST"
+  cp "$SYSTEMD_SOURCE" "$SYSTEMD_DEST/$SYSTEMD_UNIT"
+  if [ -f "$SYSTEMD_ENV_SOURCE" ]; then
+    mkdir -p /etc/default
+    cp "$SYSTEMD_ENV_SOURCE" "$SYSTEMD_ENV"
+  fi
+  systemctl daemon-reload
+  systemctl enable "$SYSTEMD_UNIT"
+}
+
+remove_linux() {
+  ensure_root
+
+  if ! command_exists systemctl; then
+    echo "systemctl not available"
+    exit 1
+  fi
+
+  systemctl disable "$SYSTEMD_UNIT" || true
+  systemctl stop "$SYSTEMD_UNIT" || true
+  rm -f "$SYSTEMD_DEST/$SYSTEMD_UNIT" "$SYSTEMD_ENV"
+  systemctl daemon-reload
+}
+
+start_linux() {
+  ensure_root
+  systemctl start "$SYSTEMD_UNIT"
+}
+
+stop_linux() {
+  ensure_root
+  systemctl stop "$SYSTEMD_UNIT"
+}
+
+status_linux() {
+  if ! command_exists systemctl; then
+    echo "systemctl not available"
+    exit 1
+  fi
+  systemctl status "$SYSTEMD_UNIT" --no-pager
+}
+
+main() {
+  local action="${1:-}"
+  local config_path="/opt/homebrew/etc/cliproxyapi/config.yaml"
+  shift || true
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --config)
+        config_path="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        echo "Unknown option: $1"
+        usage
+        return 1
+        ;;
+    esac
+  done
+
+  if [ -z "$action" ] || [ "$action" = "--help" ] || [ "$action" = "-h" ]; then
+    usage
+    return 0
+  fi
+
+  case "$(uname -s)" in
+    Darwin)
+      case "$action" in
+        install) install_macos "$config_path" ;;
+        remove|uninstall) remove_macos ;;
+        start) start_macos ;;
+        stop) stop_macos ;;
+        restart) stop_macos; start_macos ;;
+        status) status_macos ;;
+        *) usage; exit 1 ;;
+      esac
+      ;;
+    Linux)
+      case "$action" in
+        install) install_linux ;;
+        remove|uninstall) remove_linux ;;
+        start) start_linux ;;
+        stop) stop_linux ;;
+        restart) stop_linux; start_linux ;;
+        status) status_linux ;;
+        *) usage; exit 1 ;;
+      esac
+      ;;
+    *)
+      echo "Unsupported OS: $(uname -s)"
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
