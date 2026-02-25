@@ -13,7 +13,7 @@ ARG BUILD_DATE=unknown
 # 安装交叉编译工具链
 # tonistiigi/xx 提供跨架构编译辅助工具
 COPY --from=tonistiigi/xx:1.6.1 / /
-RUN apk add --no-cache git ca-certificates tzdata clang lld
+RUN apk add --no-cache git ca-certificates tzdata clang lld upx
 
 WORKDIR /app
 
@@ -47,7 +47,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       -X 'main.Commit=${COMMIT}' \
       -X 'main.BuildDate=${BUILD_DATE}'" \
     -o ./CLIProxyAPI ./cmd/server/ && \
-    xx-verify CLIProxyAPI
+    xx-verify CLIProxyAPI && \
+    upx --best --lzma ./CLIProxyAPI
 
 # 运行阶段
 FROM alpine:3.22.0
