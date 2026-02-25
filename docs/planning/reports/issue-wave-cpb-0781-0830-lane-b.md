@@ -75,3 +75,42 @@
 - `rg -n "CPB-0789|CPB-0796" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.md`
 - `rg -n "quickstart|troubleshooting|stream|tool|reasoning|provider" docs/provider-quickstarts.md docs/troubleshooting.md`
 - `go test ./pkg/llmproxy/translator/... -run "TestConvert|TestTranslate" -count=1`
+
+## Execution Update (Batch 3 — 2026-02-23)
+
+- Snapshot:
+  - `implemented`: 8 (`CPB-0789`..`CPB-0796`)
+  - `in_progress`: 0
+
+### Implemented in this update
+
+- `CPB-0789`, `CPB-0790`
+  - Added rollout + Sonnet metadata guidance in quickstart/troubleshooting surfaces.
+  - Evidence:
+    - `docs/provider-quickstarts.md`
+    - `docs/troubleshooting.md`
+
+- `CPB-0791`, `CPB-0792`
+  - Added reasoning parity and prompt-cache guardrail probes.
+  - Evidence:
+    - `docs/provider-quickstarts.md`
+    - `docs/troubleshooting.md`
+
+- `CPB-0793`, `CPB-0794`
+  - Added compose-health and provider proxy behavior checks.
+  - Evidence:
+    - `docs/provider-quickstarts.md`
+    - `docs/troubleshooting.md`
+
+- `CPB-0795`
+  - Added AI Studio auth-file toggle diagnostics (`enabled/auth_index` + doctor snapshot).
+  - Evidence:
+    - `docs/provider-quickstarts.md`
+    - `docs/troubleshooting.md`
+
+- `CPB-0796`
+  - Already implemented in prior execution batch; retained as implemented in lane snapshot.
+
+### Validation
+
+- `rg -n "CPB-0789|CPB-0790|CPB-0791|CPB-0792|CPB-0793|CPB-0794|CPB-0795|CPB-0796" docs/provider-quickstarts.md docs/troubleshooting.md`

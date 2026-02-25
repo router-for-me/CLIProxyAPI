@@ -75,3 +75,37 @@
 - `rg -n "CPB-0797|CPB-0804" docs/planning/CLIPROXYAPI_1000_ITEM_BOARD_2026-02-22.md`
 - `rg -n "quickstart|troubleshooting|stream|tool|reasoning|provider" docs/provider-quickstarts.md docs/troubleshooting.md`
 - `go test ./pkg/llmproxy/translator/... -run "TestConvert|TestTranslate" -count=1`
+
+## Execution Update (Batch 3 — 2026-02-23)
+
+- Snapshot:
+  - `implemented`: 8 (`CPB-0797`..`CPB-0804`)
+  - `in_progress`: 0
+
+### Implemented in this update
+
+- `CPB-0797`
+  - Added token-count diagnostics parity checks in quickstart + troubleshooting matrix.
+  - Evidence:
+    - `docs/provider-quickstarts.md`
+    - `docs/troubleshooting.md`
+
+- `CPB-0798`, `CPB-0800`
+  - Added Antigravity setup/login flow and manual callback headless OAuth guidance.
+  - Evidence:
+    - `docs/provider-quickstarts.md`
+    - `docs/troubleshooting.md`
+
+- `CPB-0803`, `CPB-0804`
+  - Added provider error runbook anchors and troubleshooting action entries.
+  - Evidence:
+    - `docs/operations/provider-error-runbook.md`
+    - `docs/operations/index.md`
+    - `docs/troubleshooting.md`
+
+- `CPB-0799`, `CPB-0801`, `CPB-0802`
+  - Already implemented in prior execution batch; retained as implemented in lane snapshot.
+
+### Validation
+
+- `rg -n "CPB-0797|CPB-0798|CPB-0799|CPB-0800|CPB-0801|CPB-0802|CPB-0803|CPB-0804" docs/provider-quickstarts.md docs/troubleshooting.md docs/operations/provider-error-runbook.md`

@@ -56,3 +56,32 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 		t.Fatalf("payload = %s", string(resp.Payload))
 	}
 }
+
+func TestOpenAICompatExecutorCompactDisabledByConfig(t *testing.T) {
+	disabled := false
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		ResponsesCompactEnabled: &disabled,
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": "https://example.com/v1",
+		"api_key":  "test",
+	}}
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.1-codex-max",
+		Payload: []byte(`{"model":"gpt-5.1-codex-max","input":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+		Stream:       false,
+	})
+	if err == nil {
+		t.Fatal("expected compact-disabled error, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T", err)
+	}
+	if se.StatusCode() != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", se.StatusCode(), http.StatusNotFound)
+	}
+}

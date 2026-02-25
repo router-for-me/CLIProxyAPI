@@ -86,6 +86,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
 	if opts.Alt == "responses/compact" {
+		if e.cfg != nil && !e.cfg.IsResponsesCompactEnabled() {
+			err = statusErr{code: http.StatusNotFound, msg: "/responses/compact disabled by config"}
+			return
+		}
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
 	}
