@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/benchmarks"
 )
 
 // qualityProxy maps known model IDs to their quality scores in [0,1].
@@ -127,17 +129,36 @@ func inferProvider(modelID string) string {
 }
 
 // ParetoRouter selects the Pareto-optimal model for a given RoutingRequest.
-type ParetoRouter struct{}
+type ParetoRouter struct {
+	// benchmarkStore provides dynamic benchmark data with fallback
+	benchmarkStore *benchmarks.UnifiedBenchmarkStore
+}
 
-// NewParetoRouter returns a new ParetoRouter.
+// NewParetoRouter returns a new ParetoRouter with benchmarks integration.
 func NewParetoRouter() *ParetoRouter {
-	return &ParetoRouter{}
+	return &ParetoRouter{
+		benchmarkStore: benchmarks.NewFallbackOnlyStore(),
+	}
+}
+
+// NewParetoRouterWithBenchmarks returns a ParetoRouter with dynamic benchmarks.
+// Pass nil for primary to use fallback-only mode.
+func NewParetoRouterWithBenchmarks(primary benchmarks.BenchmarkProvider) *ParetoRouter {
+	var store *benchmarks.UnifiedBenchmarkStore
+	if primary != nil {
+		store = benchmarks.NewUnifiedStore(primary)
+	} else {
+		store = benchmarks.NewFallbackOnlyStore()
+	}
+	return &ParetoRouter{
+		benchmarkStore: store,
+	}
 }
 
 // SelectModel applies hard constraints, builds the Pareto frontier, and returns
 // the best candidate by quality/cost ratio.
 func (p *ParetoRouter) SelectModel(_ context.Context, req *RoutingRequest) (*RoutingCandidate, error) {
-	allCandidates := buildCandidates(req)
+	allCandidates := p.buildCandidates(req)
 
 	feasible := filterByConstraints(allCandidates, req)
 	if len(feasible) == 0 {
@@ -149,18 +170,43 @@ func (p *ParetoRouter) SelectModel(_ context.Context, req *RoutingRequest) (*Rou
 	return selectFromCandidates(frontier), nil
 }
 
-// buildCandidates constructs RoutingCandidates from the quality/cost proxy tables.
-// Estimated cost is scaled from per-1k-tokens to per-call assuming ~1000 tokens avg.
-func buildCandidates(_ *RoutingRequest) []*RoutingCandidate {
+// buildCandidates constructs RoutingCandidates from benchmark store.
+// Falls back to hardcoded maps if benchmark store unavailable.
+func (p *ParetoRouter) buildCandidates(req *RoutingRequest) []*RoutingCandidate {
 	candidates := make([]*RoutingCandidate, 0, len(qualityProxy))
+	
 	for modelID, quality := range qualityProxy {
-		costPer1k := costPer1kProxy[modelID]
-		// Estimate per-call cost at 1000 token average.
-		estimatedCost := costPer1k * 1.0
-		latencyMs, ok := latencyMsProxy[modelID]
-		if !ok {
-			latencyMs = 2000
+		// Try dynamic benchmarks first, fallback to hardcoded
+		var costPer1k float64
+		var latencyMs int
+		var ok bool
+		
+		if p.benchmarkStore != nil {
+			if c, found := p.benchmarkStore.GetCost(modelID); found {
+				costPer1k = c
+			} else {
+				costPer1k = costPer1kProxy[modelID]
+			}
+			if l, found := p.benchmarkStore.GetLatency(modelID); found {
+				latencyMs = l
+			} else {
+				latencyMs, ok = latencyMsProxy[modelID]
+				if !ok {
+					latencyMs = 2000
+				}
+			}
+		} else {
+			// Fallback to hardcoded maps
+			costPer1k = costPer1kProxy[modelID]
+			var ok bool
+			latencyMs, ok = latencyMsProxy[modelID]
+			if !ok {
+				latencyMs = 2000
+			}
 		}
+		
+		estimatedCost := costPer1k * 1.0 // Scale to per-call
+		
 		candidates = append(candidates, &RoutingCandidate{
 			ModelID:            modelID,
 			Provider:           inferProvider(modelID),
