@@ -60,6 +60,15 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Desktop Version (Windows)
+
+Desktop builds are published in GitHub Releases:
+
+- Download page: [https://github.com/router-for-me/CLIProxyAPI/releases/latest](https://github.com/router-for-me/CLIProxyAPI/releases/latest)
+- Asset name: `CLIProxyAPI-desktop-windows-amd64-<tag>.exe`
+
+If the desktop asset is not visible yet on a fresh release, refresh the release page and wait for the desktop workflow to finish.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
