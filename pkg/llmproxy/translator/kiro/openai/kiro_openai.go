@@ -11,8 +11,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/kiro/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	kirocommon "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/translator/kiro/common"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )

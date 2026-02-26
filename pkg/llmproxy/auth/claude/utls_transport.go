@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	tls "github.com/refraction-networking/utls"
-	pkgconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	pkgconfig "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"

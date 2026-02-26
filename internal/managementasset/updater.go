@@ -17,9 +17,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/util"
+	sdkconfig "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )

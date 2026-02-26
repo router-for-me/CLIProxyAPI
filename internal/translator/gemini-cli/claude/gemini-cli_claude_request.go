@@ -9,7 +9,7 @@ import (
 	"bytes"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/translator/gemini/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

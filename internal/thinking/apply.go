@@ -4,7 +4,7 @@ package thinking
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/registry"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )

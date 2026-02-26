@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreauth "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/auth"
 )
 
 type memoryAuthStore struct {

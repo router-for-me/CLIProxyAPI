@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	kiroauth "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/kiro"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
+	coreauth "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/auth"
 )
 
 func TestIsAllowedHostOverride(t *testing.T) {

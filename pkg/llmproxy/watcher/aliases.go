@@ -2,7 +2,7 @@
 // This allows both "internal/watcher" and "pkg/llmproxy/watcher" import paths to work seamlessly.
 package watcher
 
-import internalwatcher "github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
+import internalwatcher "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/watcher"
 
 // Type aliases for exported types
 type Watcher = internalwatcher.Watcher

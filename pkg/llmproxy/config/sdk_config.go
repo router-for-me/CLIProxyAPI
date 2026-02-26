@@ -4,7 +4,7 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
-import internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+import internalconfig "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
 
 // SDKConfig is an alias to internal/config.SDKConfig.
 type SDKConfig = internalconfig.SDKConfig

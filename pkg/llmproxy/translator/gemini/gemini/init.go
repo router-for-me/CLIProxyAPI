@@ -1,9 +1,9 @@
 package gemini
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/translator"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/translator/translator"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/constant"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/interfaces"
 )
 
 // Register a no-op response translator and a request normalizer for constant.Gemini→constant.Gemini.

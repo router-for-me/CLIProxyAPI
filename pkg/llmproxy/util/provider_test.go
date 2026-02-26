@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/registry"
 )
 
 func TestResolveProviderPinnedModel(t *testing.T) {

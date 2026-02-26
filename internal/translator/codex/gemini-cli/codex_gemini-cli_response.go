@@ -8,7 +8,7 @@ import (
 	"context"
 	"fmt"
 
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/gemini"
+	. "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/translator/codex/gemini"
 	"github.com/tidwall/sjson"
 )
 

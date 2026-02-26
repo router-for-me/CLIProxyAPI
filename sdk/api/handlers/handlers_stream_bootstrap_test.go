@@ -6,10 +6,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/registry"
+	coreauth "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/executor"
+	sdkconfig "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/config"
 )
 
 type failOnceStreamExecutor struct {

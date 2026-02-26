@@ -15,7 +15,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/benchmarks"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/benchmarks"
 )
 
 // qualityProxy maps known model IDs to their quality scores in [0,1].

@@ -15,7 +15,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	geminiopenai "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/gemini/openai/chat-completions"
+	geminiopenai "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/translator/gemini/openai/chat-completions"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

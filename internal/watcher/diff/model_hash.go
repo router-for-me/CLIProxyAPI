@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
 )
 
 // ComputeOpenAICompatModelsHash returns a stable hash for OpenAI-compat models.

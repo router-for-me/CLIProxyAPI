@@ -2,7 +2,7 @@
 // This allows both "internal/registry" and "pkg/llmproxy/registry" import paths to work seamlessly.
 package registry
 
-import internalregistry "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+import internalregistry "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/registry"
 
 // Type aliases for exported types
 type ModelInfo = internalregistry.ModelInfo

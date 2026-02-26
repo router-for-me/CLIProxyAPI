@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/browser"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/term"
 )

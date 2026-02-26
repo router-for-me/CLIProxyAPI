@@ -6,21 +6,21 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
+	_ "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/translator"
 
 	// Import provider packages to trigger init() registration of ProviderAppliers
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/antigravity"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/claude"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/codex"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/gemini"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/geminicli"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/iflow"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/kimi"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/openai"
+	_ "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/thinking/provider/antigravity"
+	_ "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/thinking/provider/claude"
+	_ "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/thinking/provider/codex"
+	_ "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/thinking/provider/gemini"
+	_ "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/thinking/provider/geminicli"
+	_ "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/thinking/provider/iflow"
+	_ "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/thinking/provider/kimi"
+	_ "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/thinking/provider/openai"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/registry"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/thinking"
+	sdktranslator "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

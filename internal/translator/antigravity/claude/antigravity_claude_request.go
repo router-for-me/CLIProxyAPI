@@ -8,10 +8,10 @@ package claude
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/cache"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/thinking"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/translator/gemini/common"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

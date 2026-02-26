@@ -4,7 +4,7 @@
 package interfaces
 
 import (
-	internalinterfaces "github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	internalinterfaces "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/interfaces"
 )
 
 // ErrorMessage is an alias to the internal ErrorMessage, ensuring type compatibility

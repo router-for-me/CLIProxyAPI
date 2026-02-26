@@ -20,8 +20,8 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/runtime/geminicli"
+	coreauth "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/auth"
 )
 
 const defaultAPICallTimeout = 60 * time.Second

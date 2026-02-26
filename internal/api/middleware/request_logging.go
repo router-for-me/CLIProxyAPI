@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/logging"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/util"
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB

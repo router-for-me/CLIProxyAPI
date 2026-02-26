@@ -3,7 +3,7 @@ package diff
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {

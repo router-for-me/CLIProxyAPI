@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/antigravity"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/browser"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/misc"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/util"
+	coreauth "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 

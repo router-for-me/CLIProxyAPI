@@ -24,22 +24,22 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/copilot"
-	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/gemini"
-	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/iflow"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kilo"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kimi"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/qwen"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/antigravity"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/claude"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/codex"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/copilot"
+	geminiAuth "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/gemini"
+	iflowauth "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/iflow"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/kilo"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/kimi"
+	kiroauth "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/kiro"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/qwen"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/interfaces"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/misc"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/registry"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/util"
+	sdkAuth "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/auth"
+	coreauth "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/oauth2"
@@ -2041,7 +2041,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	state := fmt.Sprintf("gh-%d", time.Now().UnixNano())
 
 	// Initialize Copilot auth service
-	// We need to import "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/copilot" first if not present
+	// We need to import "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/copilot" first if not present
 	// Assuming copilot package is imported as "copilot"
 	deviceClient := copilot.NewDeviceFlowClient(h.cfg)
 

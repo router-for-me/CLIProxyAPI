@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/util"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	. "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/constant"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/interfaces"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/util"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )

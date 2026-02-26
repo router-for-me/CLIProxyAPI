@@ -19,9 +19,9 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/runtime/geminicli"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	kiroauth "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/kiro"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/runtime/geminicli"
+	coreauth "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/auth"
 )
 
 const defaultAPICallTimeout = 60 * time.Second

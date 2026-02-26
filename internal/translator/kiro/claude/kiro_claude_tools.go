@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
+	kirocommon "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/translator/kiro/common"
 	log "github.com/sirupsen/logrus"
 )
 

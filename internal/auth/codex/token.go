@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/misc"
 )
 
 // CodexTokenStorage stores OAuth2 token information for OpenAI Codex API authentication.

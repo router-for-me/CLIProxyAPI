@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/misc"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/misc"
 	log "github.com/sirupsen/logrus"
 )
 

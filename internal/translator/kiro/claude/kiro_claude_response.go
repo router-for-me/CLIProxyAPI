@@ -10,10 +10,10 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
+	kirocommon "github.com/kooshapari/cliproxyapi-plusplus/v6/internal/translator/kiro/common"
 )
 
 // generateThinkingSignature generates a signature for thinking content.

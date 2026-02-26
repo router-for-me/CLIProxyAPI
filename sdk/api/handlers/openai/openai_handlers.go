@@ -14,12 +14,12 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/registry"
-	codexconverter "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/codex/openai/chat-completions"
-	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/translator/openai/openai/responses"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	. "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/constant"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/interfaces"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/registry"
+	codexconverter "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/translator/codex/openai/chat-completions"
+	responsesconverter "github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/translator/openai/openai/responses"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

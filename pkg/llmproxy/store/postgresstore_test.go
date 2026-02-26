@@ -10,7 +10,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/kooshapari/cliproxyapi-plusplus/v6/sdk/cliproxy/auth"
 )
 
 func TestSyncAuthFromDatabase_PreservesLocalOnlyFiles(t *testing.T) {

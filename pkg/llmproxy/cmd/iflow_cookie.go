@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/pkg/llmproxy/auth/iflow"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/pkg/llmproxy/auth/iflow"
+	"github.com/kooshapari/cliproxyapi-plusplus/v6/internal/config"
 )
 
 // DoIFlowCookieAuth performs the iFlow cookie-based authentication.
