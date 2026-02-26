@@ -26,6 +26,7 @@ type App struct {
 	serverDone   <-chan struct{}
 	configPath   string
 	proxyURL     string
+	serverPort   int
 }
 
 // NewApp 创建应用实例
@@ -132,6 +133,7 @@ func (a *App) startup(ctx context.Context) {
 	a.serverCancel = cancel
 	a.serverDone = done
 	a.proxyURL = cfg.ProxyURL
+	a.serverPort = cfg.Port
 
 	log.Infof("桌面端服务已启动，端口: %d", cfg.Port)
 
@@ -150,4 +152,11 @@ func (a *App) shutdown(ctx context.Context) {
 	cancel()
 	<-a.serverDone
 	log.Info("代理服务已停止")
+}
+
+func (a *App) GetServerPort() int {
+	if a.serverPort <= 0 {
+		return 8317
+	}
+	return a.serverPort
 }

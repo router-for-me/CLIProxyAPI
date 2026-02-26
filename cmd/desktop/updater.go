@@ -99,23 +99,28 @@ func (a *App) checkForUpdates() {
 	changelog, _ := gitShort(root, "", "log", "--oneline", "--no-decorate", local+".."+remote)
 
 	detail := fmt.Sprintf("后端: %s → %s", local, remote)
-	msg := "检测到新版本：\n\n" + detail
+	msg := "A new desktop update is available.\n\n" + detail
 	if changelog != "" {
-		msg += "\n\n更新记录：\n" + changelog
+		msg += "\n\nChangelog:\n" + changelog
 	}
-	msg += "\n\n是否立即升级？"
+	msg += "\n\nUpgrade now?"
 
 	log.Infof("updater: update available: %s", detail)
 
+	const (
+		upgradeNow = "Upgrade Now"
+		skipUpdate = "Skip"
+	)
+
 	result, err := wailsRuntime.MessageDialog(a.ctx, wailsRuntime.MessageDialogOptions{
 		Type:          wailsRuntime.QuestionDialog,
-		Title:         "CLIProxyAPI 更新",
+		Title:         "CLIProxyAPI Update",
 		Message:       msg,
-		Buttons:       []string{"立即升级", "跳过"},
-		DefaultButton: "立即升级",
-		CancelButton:  "跳过",
+		Buttons:       []string{upgradeNow, skipUpdate},
+		DefaultButton: upgradeNow,
+		CancelButton:  skipUpdate,
 	})
-	if err != nil || (result != "Yes" && result != "立即升级") {
+	if err != nil || result != upgradeNow {
 		log.Infof("updater: user skipped update (result=%q)", result)
 		return
 	}
