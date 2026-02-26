@@ -61,12 +61,26 @@ func gitShort(dir string, proxyURL string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+func hasDesktopToolchain() bool {
+	tools := []string{"git", "go", "wails"}
+	for _, tool := range tools {
+		if _, err := exec.LookPath(tool); err != nil {
+			log.Debugf("updater: missing required tool %q, skip source update", tool)
+			return false
+		}
+	}
+	return true
+}
+
 // checkForUpdates 检查后端仓库是否有更新，有则弹窗询问用户
 // 注意：前端 management.html 由后端 managementasset 包自动从 GitHub Releases 下载，无需单独检查
 func (a *App) checkForUpdates() {
 	root := findProjectRoot()
 	if root == "" {
 		log.Debug("updater: project root not found, skip update check")
+		return
+	}
+	if !hasDesktopToolchain() {
 		return
 	}
 
@@ -99,11 +113,11 @@ func (a *App) checkForUpdates() {
 	changelog, _ := gitShort(root, "", "log", "--oneline", "--no-decorate", local+".."+remote)
 
 	detail := fmt.Sprintf("后端: %s → %s", local, remote)
-	msg := "A new desktop update is available.\n\n" + detail
+	msg := "A desktop source update is available.\n\n" + detail
 	if changelog != "" {
 		msg += "\n\nChangelog:\n" + changelog
 	}
-	msg += "\n\nUpgrade now?"
+	msg += "\n\nThis update requires git/go/wails toolchain on this machine.\nUpgrade now?"
 
 	log.Infof("updater: update available: %s", detail)
 
