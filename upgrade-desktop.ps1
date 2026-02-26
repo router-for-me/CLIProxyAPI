@@ -1,4 +1,4 @@
-# CLIProxyAPI Desktop 一键升级脚本
+﻿# CLIProxyAPI Desktop 一键升级脚本
 # 拉取官方后端最新代码，重新构建桌面 exe
 # management.html 由后端运行时自动从 GitHub Releases 下载，无需手动构建前端
 # 用法: .\upgrade-desktop.ps1
@@ -50,16 +50,16 @@ $configFile = Join-Path $env:APPDATA "CLIProxyAPI-Desktop\config.yaml"
 $proxyUrl = ""
 if (Test-Path $configFile) {
     $configContent = Get-Content $configFile -Raw
-    if ($configContent -match 'proxy-url:\s*"([^"]+)"') {
+    if ($configContent -match '^\s*proxy-url\s*:\s*"([^"]+)"' -or $configContent -match "^\s*proxy-url\s*:\s*'([^']+)'" -or $configContent -match '^\s*proxy-url\s*:\s*(\S+)' ) {
         $proxyUrl = $Matches[1]
     }
 }
 if ($proxyUrl) {
-    Write-Info "使用代理: $proxyUrl"
+    Write-Info "Using proxy: $proxyUrl"
     $env:http_proxy = $proxyUrl
     $env:https_proxy = $proxyUrl
 } else {
-    Write-Info "未检测到代理配置，直连"
+    Write-Info "Proxy not configured; using direct connection"
 }
 
 # ── 等待旧进程退出 ──
