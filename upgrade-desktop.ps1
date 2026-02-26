@@ -50,16 +50,20 @@ $configFile = Join-Path $env:APPDATA "CLIProxyAPI-Desktop\config.yaml"
 $proxyUrl = ""
 if (Test-Path $configFile) {
     $configContent = Get-Content $configFile -Raw
-    if ($configContent -match '^\s*proxy-url\s*:\s*"([^"]+)"' -or $configContent -match "^\s*proxy-url\s*:\s*'([^']+)'" -or $configContent -match '^\s*proxy-url\s*:\s*(\S+)' ) {
+    if (
+        $configContent -match '(?m)^\s*proxy-url\s*:\s*"([^"]+)"(?:\s+#.*)?\s*$' -or
+        $configContent -match "(?m)^\s*proxy-url\s*:\s*'([^']+)'(?:\s+#.*)?\s*$" -or
+        $configContent -match '(?m)^\s*proxy-url\s*:\s*([^\s#]+)(?:\s+#.*)?\s*$'
+    ) {
         $proxyUrl = $Matches[1]
     }
 }
 if ($proxyUrl) {
-    Write-Info "Using proxy: $proxyUrl"
+    Write-Info "使用代理: $proxyUrl"
     $env:http_proxy = $proxyUrl
     $env:https_proxy = $proxyUrl
 } else {
-    Write-Info "Proxy not configured; using direct connection"
+    Write-Info "未检测到代理配置，直连"
 }
 
 # ── 等待旧进程退出 ──
