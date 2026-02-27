@@ -108,7 +108,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + endpoint
+	url := strings.TrimSuffix(baseURL, "/")
+	if !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/responses") && !strings.HasSuffix(url, endpoint) {
+		url += endpoint
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return resp, err
@@ -205,7 +208,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/")
+	if !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/responses") {
+		url += "/chat/completions"
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
