@@ -3,7 +3,6 @@ package responses
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -123,7 +122,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				if name := item.Get("name"); name.Exists() {
-					toolCall, _ = sjson.Set(toolCall, "function.name", util.SanitizeOpenAICompatName(name.String()))
+					toolCall, _ = sjson.Set(toolCall, "function.name", name.String())
 				}
 
 				if arguments := item.Get("arguments"); arguments.Exists() {
@@ -177,7 +176,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			function := `{"name":"","description":"","parameters":{}}`
 
 			if name := tool.Get("name"); name.Exists() {
-				function, _ = sjson.Set(function, "name", util.SanitizeOpenAICompatName(name.String()))
+				function, _ = sjson.Set(function, "name", name.String())
 			}
 
 			if description := tool.Get("description"); description.Exists() {
