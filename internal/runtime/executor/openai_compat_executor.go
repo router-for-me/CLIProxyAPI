@@ -109,7 +109,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	url := strings.TrimSuffix(baseURL, "/")
-	if !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/responses") && !strings.HasSuffix(url, endpoint) {
+	var shouldAppend bool
+	if endpoint == "/chat/completions" {
+		shouldAppend = !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/responses")
+	} else {
+		shouldAppend = !strings.HasSuffix(url, "/chat/completions") && !strings.HasSuffix(url, "/responses") && !strings.HasSuffix(url, endpoint)
+	}
+	if shouldAppend {
 		url += endpoint
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
