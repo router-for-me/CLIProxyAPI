@@ -36,3 +36,37 @@ jobs:
           VERSION: ${{ env.VERSION }}
           COMMIT: ${{ env.COMMIT }}
           BUILD_DATE: ${{ env.BUILD_DATE }}
+
+  desktop-windows:
+    runs-on: windows-latest
+    needs: goreleaser
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '>=1.26.0'
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Wails CLI
+        shell: powershell
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+      - name: Build desktop executable
+        shell: powershell
+        run: .\build-desktop.ps1
+      - name: Prepare desktop asset
+        shell: powershell
+        run: |
+          $source = "cmd\desktop\build\bin\CLIProxyAPI.exe"
+          if (-not (Test-Path $source)) {
+            throw "Desktop executable not found: $source"
+          }
+          $target = "CLIProxyAPI-desktop-windows-amd64-${{ github.ref_name }}.exe"
+          Copy-Item -Path $source -Destination $target -Force
+      - name: Upload desktop asset to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: CLIProxyAPI-desktop-windows-amd64-${{ github.ref_name }}.exe
