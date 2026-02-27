@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -61,55 +62,71 @@ func gitShort(dir string, proxyURL string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func hasDesktopToolchain() bool {
-	tools := []string{"git", "go", "wails"}
-	for _, tool := range tools {
-		if _, err := exec.LookPath(tool); err != nil {
-			log.Debugf("updater: missing required tool %q, skip source update", tool)
-			return false
-		}
+// updaterLog 同时输出到 logrus 和诊断日志文件（GUI 应用无控制台，日志文件便于排查）
+func updaterLog(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	log.Info(msg)
+	logPath := filepath.Join(os.TempDir(), "cliproxyapi_updater.log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return
 	}
-	return true
+	defer f.Close()
+	fmt.Fprintf(f, "[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), msg)
 }
 
 // checkForUpdates 检查后端仓库是否有更新，有则弹窗询问用户
 // 注意：前端 management.html 由后端 managementasset 包自动从 GitHub Releases 下载，无需单独检查
 func (a *App) checkForUpdates() {
+	// 等待 Wails 窗口完全就绪，确保弹窗能正常显示
+	time.Sleep(5 * time.Second)
+
 	root := findProjectRoot()
 	if root == "" {
-		log.Debug("updater: project root not found, skip update check")
-		return
-	}
-	if !hasDesktopToolchain() {
+		updaterLog("updater: project root not found, skip update check")
 		return
 	}
 
-	log.Info("updater: checking for updates...")
-
-	proxy := a.proxyURL
-
-	// 仅检查后端仓库
-	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
+	// 只需 git 即可检查更新；go/wails 由 upgrade-desktop.ps1 自行查找
+	if _, err := exec.LookPath("git"); err != nil {
+		updaterLog("updater: git not found: %v, skip update check", err)
 		return
 	}
-	if _, err := gitShort(root, proxy, "fetch", "origin", "main"); err != nil {
-		log.Debugf("updater: fetch failed: %v", err)
+
+	updaterLog("updater: checking for updates (root=%s, proxy=%q)", root, a.proxyURL)
+
+	if _, err := gitShort(root, a.proxyURL, "fetch", "origin", "main"); err != nil {
+		updaterLog("updater: fetch failed: %v", err)
 		return
 	}
-	local, err := gitShort(root, proxy, "rev-parse", "--short", "HEAD")
+
+	counts, err := gitShort(root, a.proxyURL, "rev-list", "--left-right", "--count", "HEAD...origin/main")
+	if err != nil {
+		updaterLog("updater: rev-list failed: %v", err)
+		return
+	}
+	parts := strings.Fields(counts)
+	if len(parts) != 2 {
+		updaterLog("updater: unexpected rev-list output: %q", counts)
+		return
+	}
+	ahead, err := strconv.Atoi(parts[0])
 	if err != nil {
 		return
 	}
-	remote, err := gitShort(root, proxy, "rev-parse", "--short", "origin/main")
+	behind, err := strconv.Atoi(parts[1])
 	if err != nil {
 		return
 	}
-	if local == remote {
-		log.Info("updater: already up to date")
+
+	if behind <= 0 {
+		updaterLog("updater: already up to date (ahead=%d, behind=%d)", ahead, behind)
 		return
 	}
 
-	// 获取更新日志
+	// 获取版本摘要用于弹窗展示
+	local, _ := gitShort(root, a.proxyURL, "rev-parse", "--short", "HEAD")
+	remote, _ := gitShort(root, a.proxyURL, "rev-parse", "--short", "origin/main")
 	changelog, _ := gitShort(root, "", "log", "--oneline", "--no-decorate", local+".."+remote)
 
 	detail := fmt.Sprintf("后端: %s → %s", local, remote)
@@ -117,28 +134,21 @@ func (a *App) checkForUpdates() {
 	if changelog != "" {
 		msg += "\n\nChangelog:\n" + changelog
 	}
-	msg += "\n\nThis update requires git/go/wails toolchain on this machine.\nUpgrade now?"
+	msg += "\n\nUpgrade now?"
 
-	log.Infof("updater: update available: %s", detail)
-
-	const (
-		upgradeNow = "Upgrade Now"
-		skipUpdate = "Skip"
-	)
+	updaterLog("updater: update available: %s (%d behind)", detail, behind)
 
 	result, err := wailsRuntime.MessageDialog(a.ctx, wailsRuntime.MessageDialogOptions{
-		Type:          wailsRuntime.QuestionDialog,
-		Title:         "CLIProxyAPI Update",
-		Message:       msg,
-		Buttons:       []string{upgradeNow, skipUpdate},
-		DefaultButton: upgradeNow,
-		CancelButton:  skipUpdate,
+		Type:    wailsRuntime.QuestionDialog,
+		Title:   "CLIProxyAPI Update",
+		Message: msg,
 	})
-	if err != nil || result != upgradeNow {
-		log.Infof("updater: user skipped update (result=%q)", result)
+	if err != nil || result != "Yes" {
+		updaterLog("updater: user skipped update (result=%q)", result)
 		return
 	}
 
+	updaterLog("updater: user confirmed upgrade, starting...")
 	a.doUpgradeAndRestart(root)
 }
 

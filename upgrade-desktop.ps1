@@ -9,6 +9,11 @@ param(
     [string]$AutoLaunch = ""
 )
 
+# 设置控制台 UTF-8 编码，避免中文乱码
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+
 $ErrorActionPreference = "Continue"
 $root = $PSScriptRoot
 
@@ -98,15 +103,10 @@ if ($LASTEXITCODE -ne 0) {
     Exit-WithPause 1
 }
 
-$workingTreeDirty = (git status --porcelain 2>$null)
-if ($workingTreeDirty) {
-    Write-Host "检测到本地未提交改动，已取消升级以避免覆盖本地文件。请先提交或暂存后再重试。" -ForegroundColor Red
-    Exit-WithPause 1
-}
-
-# 强制同步到 origin/main（仅在工作区干净时）
+# 强制同步到 origin/main（丢弃所有本地改动）
 Write-Info "同步到最新版本..."
 git reset --hard origin/main
+git clean -fd 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  git reset 失败 (exit code: $LASTEXITCODE)" -ForegroundColor Red
     Exit-WithPause 1

@@ -1,7 +1,26 @@
-import { BrowserOpenURL } from '../wailsjs/runtime/runtime';
+import { GetServerPort } from '../wailsjs/go/main/App';
 
-// Wails 桌面端前端入口 — 自动跳转到后端管理面板
-document.getElementById('app').innerHTML = '<h2>CLIProxyAPI Desktop</h2><p>Loading...</p>';
+// Wails 桌面端前端入口 — 在窗口内加载后端管理面板
+document.getElementById('app').innerHTML =
+  '<h2 style="text-align:center;margin-top:40vh;color:#ccc">CLIProxyAPI Desktop</h2>' +
+  '<p style="text-align:center;color:#888">正在等待服务启动…</p>';
 
-// 使用固定端口：默认配置即 8317。若用户改端口，可直接手动访问对应地址。
-BrowserOpenURL('http://127.0.0.1:8317/management.html');
+async function waitForServerAndNavigate() {
+  const port = await GetServerPort();
+  const url = `http://127.0.0.1:${port}/management.html`;
+
+  // 轮询后端直到可用，最多重试 30 次（约 15 秒）
+  for (let i = 0; i < 30; i++) {
+    try {
+      const resp = await fetch(url, { method: 'HEAD', mode: 'no-cors' });
+      // mode: no-cors 下 resp.type 为 "opaque"，status 为 0，但不抛异常就说明服务已启动
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  window.location.href = url;
+}
+
+waitForServerAndNavigate();
