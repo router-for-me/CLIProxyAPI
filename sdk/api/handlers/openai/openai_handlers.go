@@ -120,6 +120,13 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
 	}
 
+	// Defensive schema hardening:
+	// Ensure tool/function names are compatible with strict upstream OpenAI gateways that enforce
+	// ^[a-zA-Z0-9_-]+$ for any `name` fields (e.g. responses input[].name, tool_calls.function.name).
+	// This prevents 400s like: Invalid 'input[i].name': string does not match pattern.
+	rawJSON = sanitizeOpenAICompatNames(rawJSON)
+	
+
 	if stream {
 		h.handleStreamingResponse(c, rawJSON)
 	} else {
