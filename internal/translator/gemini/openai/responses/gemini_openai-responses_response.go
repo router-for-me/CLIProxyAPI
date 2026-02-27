@@ -531,8 +531,8 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 		// usage mapping
 		if um := root.Get("usageMetadata"); um.Exists() {
-			// input tokens = prompt + thoughts
-			input := um.Get("promptTokenCount").Int() + um.Get("thoughtsTokenCount").Int()
+			// input tokens = prompt only (thoughts go to output)
+			input := um.Get("promptTokenCount").Int()
 			completed, _ = sjson.Set(completed, "response.usage.input_tokens", input)
 			// cached token details: align with OpenAI "cached_tokens" semantics.
 			completed, _ = sjson.Set(completed, "response.usage.input_tokens_details.cached_tokens", um.Get("cachedContentTokenCount").Int())
@@ -737,8 +737,8 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// usage mapping
 	if um := root.Get("usageMetadata"); um.Exists() {
-		// input tokens = prompt + thoughts
-		input := um.Get("promptTokenCount").Int() + um.Get("thoughtsTokenCount").Int()
+		// input tokens = prompt only (thoughts go to output)
+		input := um.Get("promptTokenCount").Int()
 		resp, _ = sjson.Set(resp, "usage.input_tokens", input)
 		// cached token details: align with OpenAI "cached_tokens" semantics.
 		resp, _ = sjson.Set(resp, "usage.input_tokens_details.cached_tokens", um.Get("cachedContentTokenCount").Int())

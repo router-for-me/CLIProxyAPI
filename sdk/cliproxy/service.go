@@ -925,6 +925,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			key = strings.ToLower(strings.TrimSpace(a.Provider))
 		}
 		GlobalModelRegistry().RegisterClient(a.ID, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		if provider == "antigravity" {
+			s.backfillAntigravityModels(a, models)
+		}
 		return
 	}
 
@@ -1067,6 +1070,56 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
+}
+
+func (s *Service) backfillAntigravityModels(source *coreauth.Auth, primaryModels []*ModelInfo) {
+	if s == nil || s.coreManager == nil || len(primaryModels) == 0 {
+		return
+	}
+
+	sourceID := ""
+	if source != nil {
+		sourceID = strings.TrimSpace(source.ID)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	for _, candidate := range s.coreManager.List() {
+		if candidate == nil || candidate.Disabled {
+			continue
+		}
+		candidateID := strings.TrimSpace(candidate.ID)
+		if candidateID == "" || candidateID == sourceID {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(candidate.Provider), "antigravity") {
+			continue
+		}
+		if len(reg.GetModelsForClient(candidateID)) > 0 {
+			continue
+		}
+
+		authKind := strings.ToLower(strings.TrimSpace(candidate.Attributes["auth_kind"]))
+		if authKind == "" {
+			if kind, _ := candidate.AccountInfo(); strings.EqualFold(kind, "api_key") {
+				authKind = "apikey"
+			}
+		}
+		excluded := s.oauthExcludedModels("antigravity", authKind)
+		if candidate.Attributes != nil {
+			if val, ok := candidate.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
+				excluded = strings.Split(val, ",")
+			}
+		}
+
+		models := applyExcludedModels(primaryModels, excluded)
+		models = applyOAuthModelAlias(s.cfg, "antigravity", authKind, models)
+		if len(models) == 0 {
+			continue
+		}
+
+		reg.RegisterClient(candidateID, "antigravity", applyModelPrefixes(models, candidate.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		log.Debugf("antigravity models backfilled for auth %s using primary model list", candidateID)
+	}
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {

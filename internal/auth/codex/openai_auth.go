@@ -71,8 +71,18 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 // It performs an HTTP POST request to the OpenAI token endpoint with the provided
 // authorization code and PKCE verifier.
 func (o *CodexAuth) ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *PKCECodes) (*CodexAuthBundle, error) {
+	return o.ExchangeCodeForTokensWithRedirect(ctx, code, RedirectURI, pkceCodes)
+}
+
+// ExchangeCodeForTokensWithRedirect exchanges an authorization code for tokens using
+// a caller-provided redirect URI. This supports alternate auth flows such as device
+// login while preserving the existing token parsing and storage behavior.
+func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code, redirectURI string, pkceCodes *PKCECodes) (*CodexAuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
+	}
+	if strings.TrimSpace(redirectURI) == "" {
+		return nil, fmt.Errorf("redirect URI is required for token exchange")
 	}
 
 	// Prepare token exchange request
@@ -80,7 +90,7 @@ func (o *CodexAuth) ExchangeCodeForTokens(ctx context.Context, code string, pkce
 		"grant_type":    {"authorization_code"},
 		"client_id":     {ClientID},
 		"code":          {code},
-		"redirect_uri":  {RedirectURI},
+		"redirect_uri":  {strings.TrimSpace(redirectURI)},
 		"code_verifier": {pkceCodes.CodeVerifier},
 	}
 
@@ -266,12 +276,24 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 		if err == nil {
 			return tokenData, nil
 		}
+		if isNonRetryableRefreshErr(err) {
+			log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
+			return nil, err
+		}
 
 		lastErr = err
 		log.Warnf("Token refresh attempt %d failed: %v", attempt+1, err)
 	}
 
 	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+func isNonRetryableRefreshErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(err.Error())
+	return strings.Contains(raw, "refresh_token_reused")
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
