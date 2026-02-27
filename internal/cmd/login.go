@@ -13,7 +13,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -33,7 +33,7 @@ const (
 )
 
 func getGeminiCLIUserAgent() string {
-	return fmt.Sprintf("GeminiCLI/1.0.0/unknown (%s; %s)", runtime.GOOS, runtime.GOARCH)
+	return misc.GeminiCLIUserAgent("")
 }
 
 type projectSelectionRequiredError struct{}

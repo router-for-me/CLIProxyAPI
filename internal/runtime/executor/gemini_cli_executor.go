@@ -12,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -745,12 +744,7 @@ func applyGeminiCLIHeaders(r *http.Request, model string) {
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	if model == "" {
-		model = "unknown"
-	}
-
-	userAgent := fmt.Sprintf("GeminiCLI/1.0.0/%s (%s; %s)", model, runtime.GOOS, runtime.GOARCH)
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", userAgent)
+	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", misc.GeminiCLIUserAgent(model))
 }
 
 // cliPreviewFallbackOrder returns preview model candidates for a base model.

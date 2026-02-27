@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -75,36 +76,9 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		req.Header.Del("Authorization")
 		req.Header.Del("X-Api-Key")
 		req.Header.Del("X-Goog-Api-Key")
-		
-		// Remove proxy tracing headers to avoid upstream detection
-		req.Header.Del("X-Forwarded-For")
-		req.Header.Del("X-Forwarded-Host")
-		req.Header.Del("X-Forwarded-Proto")
-		req.Header.Del("X-Forwarded-Port")
-		req.Header.Del("X-Real-IP")
-		req.Header.Del("Forwarded")
-		req.Header.Del("Via")
 
-		// Remove client identity headers that reveal third-party clients
-		req.Header.Del("X-Title")
-		req.Header.Del("X-Stainless-Lang")
-		req.Header.Del("X-Stainless-Package-Version")
-		req.Header.Del("X-Stainless-Os")
-		req.Header.Del("X-Stainless-Arch")
-		req.Header.Del("X-Stainless-Runtime")
-		req.Header.Del("X-Stainless-Runtime-Version")
-		req.Header.Del("Http-Referer")
-		req.Header.Del("Referer")
-
-		// Remove browser / Chromium fingerprint headers
-		req.Header.Del("Sec-Ch-Ua")
-		req.Header.Del("Sec-Ch-Ua-Mobile")
-		req.Header.Del("Sec-Ch-Ua-Platform")
-		req.Header.Del("Sec-Fetch-Mode")
-		req.Header.Del("Sec-Fetch-Site")
-		req.Header.Del("Sec-Fetch-Dest")
-		req.Header.Del("Priority")
-		req.Header.Del("Accept-Encoding")
+		// Remove proxy, client identity, and browser fingerprint headers
+		misc.ScrubProxyAndFingerprintHeaders(req)
 
 		// Remove query-based credentials if they match the authenticated client API key.
 		// This prevents leaking client auth material to the Amp upstream while avoiding
