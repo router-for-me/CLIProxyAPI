@@ -954,13 +954,15 @@ func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
 		"gemini-3-pro-image":         {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
 		"gemini-3.1-pro-high":        {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
 		"gemini-3-flash":             {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}}},
+		"gemini-3.1-pro-low":         {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
+		"gemini-3.1-flash-image":     {},
 		"claude-sonnet-4-5-thinking": {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-opus-4-5-thinking":   {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-opus-4-6-thinking":   {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
 		"claude-sonnet-4-5":          {MaxCompletionTokens: 64000},
 		"claude-sonnet-4-6":          {MaxCompletionTokens: 64000},
 		"claude-sonnet-4-6-thinking": {Thinking: &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
-		"gpt-oss-120b-medium":        {},
+		"gpt-oss-120b-medium":        {Thinking: &ThinkingSupport{Min: 0, Max: 8192, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 32768},
 		"tab_flash_lite_preview":     {},
 	}
 }

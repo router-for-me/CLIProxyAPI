@@ -46,7 +46,7 @@ const (
 	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
 	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret        = "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"
-	defaultAntigravityAgent        = "antigravity/1.18.4 windows/amd64"
+	defaultAntigravityAgent        = "antigravity/1.19.5 windows/amd64"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
 	systemInstruction              = "<identity> You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding. You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question. The USER will send you requests, which you must always prioritize addressing. Along with each USER request, we will attach additional metadata about their current state, such as what files they have open and where their cursor is. This information may or may not be relevant to the coding task, it is up for you to decide. </identity>"
@@ -1229,7 +1229,8 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				continue
 			}
 			switch modelID {
-			case "chat_20706", "chat_23310", "gemini-2.5-flash-thinking", "gemini-3-pro-low", "gemini-2.5-pro":
+			case "chat_20706", "chat_23310", "gemini-2.5-flash-thinking", "gemini-3-pro-low", "gemini-2.5-pro",
+				"tab_jump_flash_lite_preview", "tab_flash_lite_preview", "gemini-2.5-flash-lite":
 				continue
 			}
 			modelCfg := modelConfig[modelID]
@@ -1470,7 +1471,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	payload = geminiToAntigravity(modelName, payload, projectID)
 	payload, _ = sjson.SetBytes(payload, "model", modelName)
 
-	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-high")
+	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-high") || strings.Contains(modelName, "gemini-3.1-pro")
 	payloadStr := string(payload)
 	paths := make([]string, 0)
 	util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
