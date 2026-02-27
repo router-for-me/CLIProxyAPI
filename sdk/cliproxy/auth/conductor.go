@@ -169,12 +169,12 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:           store,
-		executors:       make(map[string]ProviderExecutor),
-		selector:        selector,
-		hook:            hook,
-		auths:           make(map[string]*Auth),
-		providerOffsets: make(map[string]int),
+		store:            store,
+		executors:        make(map[string]ProviderExecutor),
+		selector:         selector,
+		hook:             hook,
+		auths:            make(map[string]*Auth),
+		providerOffsets:  make(map[string]int),
 		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
 	}
 	// atomic.Value requires non-nil initial value.
@@ -691,14 +691,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
-			m.MarkResult(execCtx, result)
+			m.hook.OnResult(execCtx, result)
 			if isRequestInvalidError(errExec) {
 				return cliproxyexecutor.Response{}, errExec
 			}
 			lastErr = errExec
 			continue
 		}
-		m.MarkResult(execCtx, result)
+		m.hook.OnResult(execCtx, result)
 		return resp, nil
 	}
 }
