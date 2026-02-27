@@ -52,10 +52,9 @@ const (
 )
 
 var (
-	randSource      = rand.New(rand.NewSource(time.Now().UnixNano()))
-	randSourceMutex sync.Mutex
-	// antigravityPrimaryModelsCache keeps the latest non-empty model list fetched
-	// from any antigravity auth. Empty fetches never overwrite this cache.
+	randSource                    = rand.New(rand.NewSource(time.Now().UnixNano()))
+	randSourceMutex               sync.Mutex
+	antigravityExecutorGlobal     *AntigravityExecutor
 	antigravityPrimaryModelsCache struct {
 		mu     sync.RWMutex
 		models []*registry.ModelInfo
@@ -139,7 +138,8 @@ type AntigravityExecutor struct {
 // Returns:
 //   - *AntigravityExecutor: A new Antigravity executor instance
 func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
-	return &AntigravityExecutor{cfg: cfg}
+	antigravityExecutorGlobal = &AntigravityExecutor{cfg: cfg}
+	return antigravityExecutorGlobal
 }
 
 // Identifier returns the executor identifier.
@@ -1241,7 +1241,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 		return auth, errReq
 	}
 	httpReq.Header.Set("Host", "oauth2.googleapis.com")
-	httpReq.Header.Set("User-Agent", defaultAntigravityAgent)
+	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -1532,7 +1532,17 @@ func resolveUserAgent(auth *cliproxyauth.Auth) string {
 			}
 		}
 	}
+	if ua := getAntigravityAgent(); ua != "" {
+		return ua
+	}
 	return defaultAntigravityAgent
+}
+
+func getAntigravityAgent() string {
+	if antigravityExecutorGlobal != nil && antigravityExecutorGlobal.cfg != nil {
+		return antigravityExecutorGlobal.cfg.SDKConfig.AntigravityDefaultAgent
+	}
+	return ""
 }
 
 func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {

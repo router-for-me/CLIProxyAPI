@@ -93,6 +93,10 @@ ws-auth: false
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
 
+# Default User-Agent for Antigravity requests.
+# Options: "antigravity", "antigravity/1.104.0 darwin/arm64", "antigravity/1.18.3 windows/amd64"
+antigravity-default-agent: "antigravity"
+
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
