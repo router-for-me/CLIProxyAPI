@@ -38,7 +38,10 @@ func NewApp() *App {
 func getConfigDir() string {
 	appData := os.Getenv("APPDATA")
 	if appData == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			log.Fatalf("could not determine user home directory: %v", err)
+		}
 		appData = filepath.Join(home, "AppData", "Roaming")
 	}
 	return filepath.Join(appData, "CLIProxyAPI-Desktop")
@@ -114,6 +117,7 @@ func (a *App) startup(ctx context.Context) {
 	// 解析 auth-dir（展开 ~ 等路径）
 	if resolvedAuthDir, err := util.ResolveAuthDir(cfg.AuthDir); err != nil {
 		log.Errorf("failed to resolve auth directory: %v", err)
+		return
 	} else {
 		cfg.AuthDir = resolvedAuthDir
 	}

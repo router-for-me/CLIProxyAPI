@@ -84,7 +84,7 @@ $binDir = Join-Path $root "cmd\desktop\build\bin"
 Stop-DesktopProcess
 Remove-BuildBinExecutables -binDir $binDir
 
-& $wails generate module 2>$null
+& $wails generate module
 & $wails build -clean -ldflags "$ldflags"
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
