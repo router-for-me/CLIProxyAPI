@@ -93,3 +93,81 @@ func TestConvertGeminiRequestToAntigravity_ParallelFunctionCalls(t *testing.T) {
 		}
 	}
 }
+
+func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
+	// When functionResponse contains a "parts" field with inlineData (from Claude
+	// translator's image embedding), fixCLIToolResponse should preserve it as-is.
+	// parseFunctionResponseRaw returns response.Raw for valid JSON objects,
+	// so extra fields like "parts" survive the pipeline.
+	input := `{
+		"model": "claude-opus-4-6-thinking",
+		"request": {
+			"contents": [
+				{
+					"role": "model",
+					"parts": [
+						{
+							"functionCall": {"name": "screenshot", "args": {}}
+						}
+					]
+				},
+				{
+					"role": "function",
+					"parts": [
+						{
+							"functionResponse": {
+								"id": "tool-001",
+								"name": "screenshot",
+								"response": {"result": "Screenshot taken"},
+								"parts": [
+									{"inlineData": {"mimeType": "image/png", "data": "iVBOR"}}
+								]
+							}
+						}
+					]
+				}
+			]
+		}
+	}`
+
+	result, err := fixCLIToolResponse(input)
+	if err != nil {
+		t.Fatalf("fixCLIToolResponse failed: %v", err)
+	}
+
+	// Find the function response content (role=function)
+	contents := gjson.Get(result, "request.contents").Array()
+	var funcContent gjson.Result
+	for _, c := range contents {
+		if c.Get("role").String() == "function" {
+			funcContent = c
+			break
+		}
+	}
+	if !funcContent.Exists() {
+		t.Fatal("function role content should exist in output")
+	}
+
+	// The functionResponse should be preserved with its parts field
+	funcResp := funcContent.Get("parts.0.functionResponse")
+	if !funcResp.Exists() {
+		t.Fatal("functionResponse should exist in output")
+	}
+
+	// Verify the parts field with inlineData is preserved
+	inlineParts := funcResp.Get("parts").Array()
+	if len(inlineParts) != 1 {
+		t.Fatalf("Expected 1 inlineData part in functionResponse.parts, got %d", len(inlineParts))
+	}
+	if inlineParts[0].Get("inlineData.mimeType").String() != "image/png" {
+		t.Errorf("Expected mimeType 'image/png', got '%s'", inlineParts[0].Get("inlineData.mimeType").String())
+	}
+	if inlineParts[0].Get("inlineData.data").String() != "iVBOR" {
+		t.Errorf("Expected data 'iVBOR', got '%s'", inlineParts[0].Get("inlineData.data").String())
+	}
+
+	// Verify response.result is also preserved
+	if funcResp.Get("response.result").String() != "Screenshot taken" {
+		t.Errorf("Expected response.result 'Screenshot taken', got '%s'", funcResp.Get("response.result").String())
+	}
+}
