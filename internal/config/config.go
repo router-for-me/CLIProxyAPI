@@ -75,6 +75,9 @@ type Config struct {
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
+	// ModelFallback configures automatic model fallback when errors occur.
+	ModelFallback ModelFallback `yaml:"model-fallback" json:"model-fallback"`
+
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
@@ -169,6 +172,85 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+}
+
+// ModelFallback configures automatic model fallback behavior when a requested model
+// returns specific errors. It enables the system to transparently retry with alternative
+// model IDs from a configured fallback chain.
+type ModelFallback struct {
+	// Enabled toggles model fallback globally. Default is false (no fallback).
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// MaxAttempts limits the number of model attempts (including the original).
+	// Each attempt may still undergo internal auth/provider rotation. Default is 3.
+	MaxAttempts int `yaml:"max-attempts" json:"max-attempts"`
+
+	// MaxTotalTimeoutMS sets the total time budget in milliseconds for the entire
+	// fallback chain. Default is 15000. Set to -1 to explicitly disable the timeout.
+	MaxTotalTimeoutMS int `yaml:"max-total-timeout-ms" json:"max-total-timeout-ms"`
+
+	// PreserveRequestedModel rewrites the response model field back to the original
+	// requested model name when true. Default is false.
+	PreserveRequestedModel bool `yaml:"preserve-requested-model" json:"preserve-requested-model"`
+
+	// ExposeActualModelHeader adds X-Actual-Model, X-Requested-Model, and
+	// X-Model-Fallback-Attempts response headers when true. Default is false.
+	ExposeActualModelHeader bool `yaml:"expose-actual-model-header" json:"expose-actual-model-header"`
+
+	// TriggerStatusCodes lists HTTP status codes that trigger a model fallback attempt.
+	TriggerStatusCodes []int `yaml:"trigger-status-codes" json:"trigger-status-codes"`
+
+	// NoFallbackStatusCodes lists HTTP status codes that should never trigger fallback.
+	// Takes precedence over TriggerStatusCodes. Default is [400, 401, 403].
+	NoFallbackStatusCodes []int `yaml:"no-fallback-status-codes" json:"no-fallback-status-codes"`
+
+	// AllowNetworkError enables fallback on network-level errors (timeouts, connection refused).
+	AllowNetworkError bool `yaml:"allow-network-error" json:"allow-network-error"`
+
+	// AllowCrossProvider permits fallback to models served by different providers.
+	// Default is false (same provider family only).
+	AllowCrossProvider bool `yaml:"allow-cross-provider" json:"allow-cross-provider"`
+
+	// Stream configures fallback behavior for streaming requests.
+	Stream StreamFallbackConfig `yaml:"stream" json:"stream"`
+
+	// Rules defines static fallback chains: from -> to candidates.
+	Rules []ModelFallbackRule `yaml:"rules" json:"rules"`
+
+	// ModelOverrides provides per-model configuration overrides.
+	ModelOverrides map[string]ModelFallbackOverride `yaml:"model-overrides,omitempty" json:"model-overrides,omitempty"`
+}
+
+// StreamFallbackConfig controls fallback behavior in streaming mode.
+type StreamFallbackConfig struct {
+	// Enabled toggles fallback for streaming requests.
+	// When nil (omitted), inherits from the parent Enabled flag.
+	// When explicitly set to false, stream fallback is disabled even if main fallback is on.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// PreludeOnly restricts stream fallback to pre-first-byte failures only.
+	// When nil (omitted), defaults to true (safe mode).
+	// When explicitly set to false, model fallback may occur after partial data has been sent (experimental).
+	PreludeOnly *bool `yaml:"prelude-only,omitempty" json:"prelude-only,omitempty"`
+}
+
+// ModelFallbackRule defines a single fallback chain: when 'from' model fails,
+// try 'to' models in order.
+type ModelFallbackRule struct {
+	// From is the model that triggers the fallback chain.
+	From string `yaml:"from" json:"from"`
+
+	// To is the ordered list of candidate fallback models.
+	To []string `yaml:"to" json:"to"`
+}
+
+// ModelFallbackOverride provides per-model overrides for fallback behavior.
+type ModelFallbackOverride struct {
+	// MaxAttempts overrides the global max-attempts for this specific model.
+	MaxAttempts int `yaml:"max-attempts,omitempty" json:"max-attempts,omitempty"`
+
+	// To overrides the fallback chain for this specific model.
+	To []string `yaml:"to,omitempty" json:"to,omitempty"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
@@ -633,6 +715,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	// Sanitize model fallback configuration.
+	cfg.SanitizeModelFallback()
+
 	// NOTE: Legacy migration persistence is intentionally disabled together with
 	// startup legacy migration to keep startup read-only for config.yaml.
 	// Re-enable the block below if automatic startup migration is needed again.
@@ -705,6 +790,72 @@ func payloadRawString(value any) ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// SanitizeModelFallback validates and normalizes the model-fallback configuration.
+func (cfg *Config) SanitizeModelFallback() {
+	fb := &cfg.ModelFallback
+	if fb.MaxAttempts <= 0 {
+		fb.MaxAttempts = 3
+	}
+	if fb.MaxAttempts > 10 {
+		fb.MaxAttempts = 10
+	}
+	if fb.MaxTotalTimeoutMS == 0 {
+		fb.MaxTotalTimeoutMS = 15000
+	}
+	if len(fb.TriggerStatusCodes) == 0 {
+		fb.TriggerStatusCodes = []int{404, 408, 429, 500, 502, 503, 504}
+	}
+	if len(fb.NoFallbackStatusCodes) == 0 {
+		fb.NoFallbackStatusCodes = []int{400, 401, 403}
+	}
+	// Stream defaults: nil fields inherit sensible defaults.
+	// *bool allows distinguishing "omitted" from "explicitly set to false".
+	if fb.Stream.Enabled == nil {
+		v := fb.Enabled
+		fb.Stream.Enabled = &v
+	}
+	if fb.Stream.PreludeOnly == nil {
+		v := true
+		fb.Stream.PreludeOnly = &v
+	}
+	// Deduplicate rules: keep last rule per "from" model (case-insensitive to match Plan lookup)
+	seen := make(map[string]int)
+	deduped := make([]ModelFallbackRule, 0, len(fb.Rules))
+	for _, rule := range fb.Rules {
+		rule.From = strings.TrimSpace(rule.From)
+		if rule.From == "" || len(rule.To) == 0 {
+			continue
+		}
+		// Deduplicate and trim "to" models, remove self-references
+		cleanTo := make([]string, 0, len(rule.To))
+		toSeen := make(map[string]struct{})
+		for _, t := range rule.To {
+			t = strings.TrimSpace(t)
+			if t == "" || strings.EqualFold(t, rule.From) {
+				continue
+			}
+			key := strings.ToLower(t)
+			if _, dup := toSeen[key]; dup {
+				continue
+			}
+			toSeen[key] = struct{}{}
+			cleanTo = append(cleanTo, t)
+		}
+		if len(cleanTo) == 0 {
+			continue
+		}
+		rule.To = cleanTo
+		fromKey := strings.ToLower(rule.From)
+		if idx, exists := seen[fromKey]; exists {
+			deduped[idx] = rule
+		} else {
+			seen[fromKey] = len(deduped)
+			deduped = append(deduped, rule)
+		}
+	}
+	fb.Rules = deduped
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
