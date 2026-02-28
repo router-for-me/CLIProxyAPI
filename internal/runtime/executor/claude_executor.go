@@ -126,6 +126,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = normalizeClaudeToolsForAnthropic(body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -176,13 +177,18 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		decodedErrBody, errDecode := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if errDecode != nil {
+			recordAPIResponseError(ctx, e.cfg, errDecode)
+			return resp, errDecode
+		}
+		b, _ := io.ReadAll(decodedErrBody)
+		if errClose := decodedErrBody.Close(); errClose != nil {
+			log.Errorf("response body close error: %v", errClose)
+		}
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
 		return resp, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -267,6 +273,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = normalizeClaudeToolsForAnthropic(body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -317,12 +324,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
+		decodedErrBody, errDecode := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if errDecode != nil {
+			recordAPIResponseError(ctx, e.cfg, errDecode)
+			return nil, errDecode
+		}
+		b, _ := io.ReadAll(decodedErrBody)
+		if errClose := decodedErrBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
@@ -424,6 +436,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
+	body = normalizeClaudeToolsForAnthropic(body)
 
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
@@ -464,11 +477,16 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		if errClose := resp.Body.Close(); errClose != nil {
+		decodedErrBody, errDecode := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
+		if errDecode != nil {
+			recordAPIResponseError(ctx, e.cfg, errDecode)
+			return cliproxyexecutor.Response{}, errDecode
+		}
+		b, _ := io.ReadAll(decodedErrBody)
+		if errClose := decodedErrBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
+		appendAPIResponseChunk(ctx, e.cfg, b)
 		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
@@ -789,13 +807,227 @@ func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
 }
 
+func isClaudeBuiltinToolType(toolType string) bool {
+	toolType = strings.TrimSpace(toolType)
+	switch {
+	case strings.HasPrefix(toolType, "web_search"):
+		return true
+	case toolType == "code_execution":
+		return true
+	case strings.HasPrefix(toolType, "text_editor"):
+		return true
+	case strings.HasPrefix(toolType, "computer"):
+		return true
+	default:
+		return false
+	}
+}
+
+func isClaudeBuiltinTool(tool gjson.Result) bool {
+	if isClaudeBuiltinToolType(tool.Get("type").String()) {
+		return true
+	}
+	return false
+}
+
+func normalizeAnthropicToolSchema(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" || !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
+		return `{"type":"object","properties":{}}`
+	}
+	schema := raw
+	parsed := gjson.Parse(raw)
+	schemaType := strings.TrimSpace(parsed.Get("type").String())
+	if schemaType == "" {
+		schema, _ = sjson.Set(schema, "type", "object")
+	} else if schemaType != "object" {
+		return `{"type":"object","properties":{}}`
+	}
+	parsed = gjson.Parse(schema)
+	properties := parsed.Get("properties")
+	if !properties.Exists() || !properties.IsObject() {
+		schema, _ = sjson.SetRaw(schema, "properties", `{}`)
+	}
+	return schema
+}
+
+func sanitizeAnthropicToolName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		ch := name[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' {
+			b.WriteByte(ch)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	clean := strings.Trim(b.String(), "_-")
+	if clean == "" {
+		return ""
+	}
+	if len(clean) > 64 {
+		clean = clean[:64]
+	}
+	return clean
+}
+
+func uniqueAnthropicToolName(name string, used map[string]struct{}) string {
+	clean := sanitizeAnthropicToolName(name)
+	if clean == "" {
+		return ""
+	}
+	if _, exists := used[clean]; !exists {
+		used[clean] = struct{}{}
+		return clean
+	}
+	for i := 2; i < 1000; i++ {
+		suffix := fmt.Sprintf("_%d", i)
+		baseLimit := 64 - len(suffix)
+		if baseLimit < 1 {
+			return ""
+		}
+		base := clean
+		if len(base) > baseLimit {
+			base = base[:baseLimit]
+		}
+		candidate := base + suffix
+		if _, exists := used[candidate]; !exists {
+			used[candidate] = struct{}{}
+			return candidate
+		}
+	}
+	return ""
+}
+
+func normalizeClaudeToolsForAnthropic(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body
+	}
+
+	normalizedTools := "[]"
+	renameMap := make(map[string]string)
+	usedNames := make(map[string]struct{})
+
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if isClaudeBuiltinTool(tool) {
+			normalizedTools, _ = sjson.SetRaw(normalizedTools, "-1", tool.Raw)
+			if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+				usedNames[name] = struct{}{}
+			}
+			return true
+		}
+
+		originalName := strings.TrimSpace(tool.Get("name").String())
+		if originalName == "" {
+			originalName = strings.TrimSpace(tool.Get("function.name").String())
+		}
+		newName := uniqueAnthropicToolName(originalName, usedNames)
+		if newName == "" {
+			// Skip malformed non-builtin tools that cannot produce a valid name.
+			return true
+		}
+
+		description := strings.TrimSpace(tool.Get("description").String())
+		if description == "" {
+			description = strings.TrimSpace(tool.Get("function.description").String())
+		}
+		if description == "" {
+			description = "Custom tool"
+		}
+
+		schemaRaw := ""
+		if v := tool.Get("input_schema"); v.Exists() {
+			schemaRaw = v.Raw
+		} else if v := tool.Get("parameters"); v.Exists() {
+			schemaRaw = v.Raw
+		} else if v := tool.Get("parametersJsonSchema"); v.Exists() {
+			schemaRaw = v.Raw
+		} else if v := tool.Get("function.parameters"); v.Exists() {
+			schemaRaw = v.Raw
+		} else if v := tool.Get("function.parametersJsonSchema"); v.Exists() {
+			schemaRaw = v.Raw
+		}
+		schema := normalizeAnthropicToolSchema(schemaRaw)
+
+		normalized := `{"name":"","description":"","input_schema":{}}`
+		normalized, _ = sjson.Set(normalized, "name", newName)
+		normalized, _ = sjson.Set(normalized, "description", description)
+		normalized, _ = sjson.SetRaw(normalized, "input_schema", schema)
+		normalizedTools, _ = sjson.SetRaw(normalizedTools, "-1", normalized)
+
+		if originalName != "" && originalName != newName {
+			renameMap[originalName] = newName
+		}
+		return true
+	})
+
+	body, _ = sjson.SetRawBytes(body, "tools", []byte(normalizedTools))
+
+	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
+		name := strings.TrimSpace(gjson.GetBytes(body, "tool_choice.name").String())
+		if mapped, ok := renameMap[name]; ok {
+			body, _ = sjson.SetBytes(body, "tool_choice.name", mapped)
+		}
+	}
+
+	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(msgIndex, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.Exists() || !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(contentIndex, part gjson.Result) bool {
+				switch part.Get("type").String() {
+				case "tool_use":
+					name := strings.TrimSpace(part.Get("name").String())
+					if mapped, ok := renameMap[name]; ok {
+						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
+						body, _ = sjson.SetBytes(body, path, mapped)
+					}
+				case "tool_reference":
+					toolName := strings.TrimSpace(part.Get("tool_name").String())
+					if mapped, ok := renameMap[toolName]; ok {
+						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
+						body, _ = sjson.SetBytes(body, path, mapped)
+					}
+				case "tool_result":
+					nestedContent := part.Get("content")
+					if nestedContent.Exists() && nestedContent.IsArray() {
+						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
+							if nestedPart.Get("type").String() != "tool_reference" {
+								return true
+							}
+							nestedToolName := strings.TrimSpace(nestedPart.Get("tool_name").String())
+							if mapped, ok := renameMap[nestedToolName]; ok {
+								nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
+								body, _ = sjson.SetBytes(body, nestedPath, mapped)
+							}
+							return true
+						})
+					}
+				}
+				return true
+			})
+			return true
+		})
+	}
+
+	return body
+}
+
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 	if prefix == "" {
 		return body
 	}
 
-	// Collect built-in tool names (those with a non-empty "type" field) so we can
-	// skip them consistently in both tools and message history.
+	// Collect built-in tool names so we can skip them consistently in both tools and
+	// message history.
 	builtinTools := map[string]bool{}
 	for _, name := range []string{"web_search", "code_execution", "text_editor", "computer"} {
 		builtinTools[name] = true
@@ -803,9 +1035,9 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
-			// Skip built-in tools (web_search, code_execution, etc.) which have
-			// a "type" field and require their name to remain unchanged.
-			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+			// Skip built-in tools (web_search, code_execution, etc.) which require
+			// their names to remain unchanged.
+			if isClaudeBuiltinTool(tool) {
 				if n := tool.Get("name").String(); n != "" {
 					builtinTools[n] = true
 				}
