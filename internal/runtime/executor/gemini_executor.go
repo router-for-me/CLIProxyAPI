@@ -312,6 +312,11 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
 			filtered := FilterSSEUsageMetadata(line)
+		if err := SanityCheckStreamChunk(filtered); err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
+			out <- cliproxyexecutor.StreamChunk{Err: err}
+			continue
+		}
 			payload := jsonPayload(filtered)
 			if len(payload) == 0 {
 				continue
