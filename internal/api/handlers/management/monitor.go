@@ -1360,7 +1360,7 @@ func (h *Handler) GetMonitorHourlyModels(c *gin.Context) {
 	hourSlots := make([]string, 0, hours)
 	hourIndex := make(map[string]int, hours)
 	for t := cutoff; !t.After(now.Truncate(time.Hour)); t = t.Add(time.Hour) {
-		key := t.Local().Format("2006-01-02T15")
+		key := t.Local().Format("2006-01-02T15:04:05-07:00")
 		hourIndex[key] = len(hourSlots)
 		hourSlots = append(hourSlots, key)
 	}
@@ -1383,7 +1383,7 @@ func (h *Handler) GetMonitorHourlyModels(c *gin.Context) {
 		if !filter.matches(record) {
 			return
 		}
-		hourKey := record.Timestamp.Local().Truncate(time.Hour).Format("2006-01-02T15")
+		hourKey := record.Timestamp.Local().Truncate(time.Hour).Format("2006-01-02T15:04:05-07:00")
 		idx, ok := hourIndex[hourKey]
 		if !ok {
 			return
@@ -1468,7 +1468,7 @@ func (h *Handler) GetMonitorHourlyTokens(c *gin.Context) {
 	hourSlots := make([]string, 0, hours)
 	hourIndex := make(map[string]int, hours)
 	for t := cutoff; !t.After(now.Truncate(time.Hour)); t = t.Add(time.Hour) {
-		key := t.Local().Format("2006-01-02T15")
+		key := t.Local().Format("2006-01-02T15:04:05-07:00")
 		hourIndex[key] = len(hourSlots)
 		hourSlots = append(hourSlots, key)
 	}
@@ -1490,7 +1490,7 @@ func (h *Handler) GetMonitorHourlyTokens(c *gin.Context) {
 		if record.Failed {
 			return
 		}
-		hourKey := record.Timestamp.Local().Truncate(time.Hour).Format("2006-01-02T15")
+		hourKey := record.Timestamp.Local().Truncate(time.Hour).Format("2006-01-02T15:04:05-07:00")
 		idx, ok := hourIndex[hourKey]
 		if !ok {
 			return
