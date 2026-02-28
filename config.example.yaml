@@ -296,6 +296,10 @@ nonstream-keepalive-interval: 0
 #     - "kimi-k2-thinking"
 
 # Optional payload configuration
+# Query paths use gjson/sjson syntax and can include dynamic array selectors (#(...)).
+# Nested selectors are supported in override/override-raw/filter, for example:
+#   messages.#(role=="assistant").content.#(type=="tool_use").name
+# Malformed query paths are ignored (no mutation is applied).
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.
 #     - models:
@@ -328,3 +332,4 @@ nonstream-keepalive-interval: 0
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"
+#         - "messages.#(role==\"assistant\").content.#(type==\"tool_use\")"

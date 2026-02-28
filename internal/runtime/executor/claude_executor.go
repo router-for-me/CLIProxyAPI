@@ -128,6 +128,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body, err = normalizeClaudeToolsForAnthropic(body)
+	if err != nil {
+		return resp, fmt.Errorf("normalize claude tools: %w", err)
+	}
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -187,31 +191,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API).
-		errBody := httpResp.Body
-		if ce := httpResp.Header.Get("Content-Encoding"); ce != "" {
-			var decErr error
-			errBody, decErr = decodeResponseBody(httpResp.Body, ce)
-			if decErr != nil {
-				recordAPIResponseError(ctx, e.cfg, decErr)
-				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
-				logWithRequestID(ctx).Warn(msg)
-				return resp, statusErr{code: httpResp.StatusCode, msg: msg}
-			}
-		}
-		b, readErr := io.ReadAll(errBody)
-		if readErr != nil {
-			recordAPIResponseError(ctx, e.cfg, readErr)
-			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
-			logWithRequestID(ctx).Warn(msg)
-			b = []byte(msg)
-		}
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		if errClose := errBody.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
+		err = e.buildUpstreamStatusErr(ctx, httpResp.StatusCode, httpResp.Header, httpResp.Body)
 		return resp, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -296,6 +276,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body, err = normalizeClaudeToolsForAnthropic(body)
+	if err != nil {
+		return nil, fmt.Errorf("normalize claude tools: %w", err)
+	}
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -352,31 +336,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API).
-		errBody := httpResp.Body
-		if ce := httpResp.Header.Get("Content-Encoding"); ce != "" {
-			var decErr error
-			errBody, decErr = decodeResponseBody(httpResp.Body, ce)
-			if decErr != nil {
-				recordAPIResponseError(ctx, e.cfg, decErr)
-				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
-				logWithRequestID(ctx).Warn(msg)
-				return nil, statusErr{code: httpResp.StatusCode, msg: msg}
-			}
-		}
-		b, readErr := io.ReadAll(errBody)
-		if readErr != nil {
-			recordAPIResponseError(ctx, e.cfg, readErr)
-			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
-			logWithRequestID(ctx).Warn(msg)
-			b = []byte(msg)
-		}
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := errBody.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = e.buildUpstreamStatusErr(ctx, httpResp.StatusCode, httpResp.Header, httpResp.Body)
 		return nil, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -477,6 +437,11 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
+	normalizedBody, errNormalize := normalizeClaudeToolsForAnthropic(body)
+	if errNormalize != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("normalize claude tools: %w", errNormalize)
+	}
+	body = normalizedBody
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
@@ -521,30 +486,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API).
-		errBody := resp.Body
-		if ce := resp.Header.Get("Content-Encoding"); ce != "" {
-			var decErr error
-			errBody, decErr = decodeResponseBody(resp.Body, ce)
-			if decErr != nil {
-				recordAPIResponseError(ctx, e.cfg, decErr)
-				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
-				logWithRequestID(ctx).Warn(msg)
-				return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
-			}
-		}
-		b, readErr := io.ReadAll(errBody)
-		if readErr != nil {
-			recordAPIResponseError(ctx, e.cfg, readErr)
-			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
-			logWithRequestID(ctx).Warn(msg)
-			b = []byte(msg)
-		}
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		if errClose := errBody.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
+		return cliproxyexecutor.Response{}, e.buildUpstreamStatusErr(ctx, resp.StatusCode, resp.Header, resp.Body)
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -568,6 +510,31 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	count := gjson.GetBytes(data, "input_tokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
 	return cliproxyexecutor.Response{Payload: []byte(out), Headers: resp.Header.Clone()}, nil
+}
+
+func (e *ClaudeExecutor) buildUpstreamStatusErr(ctx context.Context, statusCode int, headers http.Header, body io.ReadCloser) error {
+	decodedErrBody, errDecode := decodeResponseBody(body, headers.Get("Content-Encoding"))
+	if errDecode != nil {
+		recordAPIResponseError(ctx, e.cfg, errDecode)
+		return errDecode
+	}
+
+	b, errRead := io.ReadAll(decodedErrBody)
+	if errClose := decodedErrBody.Close(); errClose != nil {
+		log.Errorf("response body close error: %v", errClose)
+	}
+	if errRead != nil {
+		recordAPIResponseError(ctx, e.cfg, errRead)
+		return errRead
+	}
+
+	appendAPIResponseChunk(ctx, e.cfg, b)
+	logWithRequestID(ctx).Debugf(
+		"request error, error status: %d, error message: %s",
+		statusCode,
+		summarizeErrorBody(headers.Get("Content-Type"), b),
+	)
+	return statusErr{code: statusCode, msg: string(b)}
 }
 
 func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -877,13 +844,306 @@ func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
 }
 
+func isClaudeBuiltinToolType(toolType string) bool {
+	toolType = strings.TrimSpace(toolType)
+	switch {
+	case strings.HasPrefix(toolType, "web_search"):
+		return true
+	case toolType == "code_execution":
+		return true
+	case strings.HasPrefix(toolType, "text_editor"):
+		return true
+	case strings.HasPrefix(toolType, "computer"):
+		return true
+	default:
+		return false
+	}
+}
+
+func isClaudeBuiltinTool(tool gjson.Result) bool {
+	return isClaudeBuiltinToolType(tool.Get("type").String())
+}
+
+func normalizeAnthropicToolSchema(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" || !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
+		return `{"type":"object","properties":{}}`
+	}
+
+	schema := raw
+	parsed := gjson.Parse(raw)
+	schemaType := strings.TrimSpace(parsed.Get("type").String())
+	if schemaType == "" {
+		var err error
+		schema, err = sjson.Set(schema, "type", "object")
+		if err != nil {
+			return `{"type":"object","properties":{}}`
+		}
+	} else if schemaType != "object" {
+		return `{"type":"object","properties":{}}`
+	}
+
+	parsed = gjson.Parse(schema)
+	properties := parsed.Get("properties")
+	if !properties.Exists() || !properties.IsObject() {
+		var err error
+		schema, err = sjson.SetRaw(schema, "properties", `{}`)
+		if err != nil {
+			return `{"type":"object","properties":{}}`
+		}
+	}
+	return schema
+}
+
+func sanitizeAnthropicToolName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		ch := name[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' {
+			b.WriteByte(ch)
+			continue
+		}
+		b.WriteByte('_')
+	}
+
+	clean := strings.Trim(b.String(), "_-")
+	if clean == "" {
+		return ""
+	}
+	if len(clean) > 64 {
+		clean = clean[:64]
+	}
+	return clean
+}
+
+const maxToolNameCollisionRetries = 1000
+
+func uniqueAnthropicToolName(name string, used map[string]struct{}) string {
+	clean := sanitizeAnthropicToolName(name)
+	if clean == "" {
+		return ""
+	}
+	if _, exists := used[clean]; !exists {
+		used[clean] = struct{}{}
+		return clean
+	}
+	for i := 2; i < maxToolNameCollisionRetries; i++ {
+		suffix := fmt.Sprintf("_%d", i)
+		baseLimit := 64 - len(suffix)
+		if baseLimit < 1 {
+			return ""
+		}
+		base := clean
+		if len(base) > baseLimit {
+			base = base[:baseLimit]
+		}
+		candidate := base + suffix
+		if _, exists := used[candidate]; !exists {
+			used[candidate] = struct{}{}
+			return candidate
+		}
+	}
+	return ""
+}
+
+func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body, nil
+	}
+
+	normalizedTools := "[]"
+	renameMap := make(map[string]string)
+	usedNames := make(map[string]struct{})
+
+	for _, tool := range tools.Array() {
+		if isClaudeBuiltinTool(tool) {
+			updatedTools, errSet := sjson.SetRaw(normalizedTools, "-1", tool.Raw)
+			if errSet != nil {
+				return body, fmt.Errorf("append built-in tool: %w", errSet)
+			}
+			normalizedTools = updatedTools
+			if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+				usedNames[name] = struct{}{}
+			}
+			continue
+		}
+
+		normalizedTool, originalName, newName, errNormalize := normalizeAnthropicToolEntry(tool, usedNames)
+		if errNormalize != nil {
+			return body, errNormalize
+		}
+		if normalizedTool == "" {
+			continue
+		}
+		updatedTools, errSet := sjson.SetRaw(normalizedTools, "-1", normalizedTool)
+		if errSet != nil {
+			return body, fmt.Errorf("append normalized tool: %w", errSet)
+		}
+		normalizedTools = updatedTools
+		if originalName != "" && originalName != newName {
+			renameMap[originalName] = newName
+		}
+	}
+
+	updatedBody, errSet := sjson.SetRawBytes(body, "tools", []byte(normalizedTools))
+	if errSet != nil {
+		return body, fmt.Errorf("set normalized tools array: %w", errSet)
+	}
+	body = updatedBody
+
+	body, errSet = applyClaudeRenameMap(body, renameMap)
+	if errSet != nil {
+		return body, errSet
+	}
+	return body, nil
+}
+
+func normalizeAnthropicToolEntry(tool gjson.Result, usedNames map[string]struct{}) (normalizedRaw string, originalName string, newName string, err error) {
+	originalName = strings.TrimSpace(tool.Get("name").String())
+	if originalName == "" {
+		originalName = strings.TrimSpace(tool.Get("function.name").String())
+	}
+	newName = uniqueAnthropicToolName(originalName, usedNames)
+	if newName == "" {
+		return "", originalName, "", nil
+	}
+
+	description := strings.TrimSpace(tool.Get("description").String())
+	if description == "" {
+		description = strings.TrimSpace(tool.Get("function.description").String())
+	}
+	if description == "" {
+		description = "Custom tool"
+	}
+
+	schemaRaw := ""
+	schemaPaths := []string{
+		"input_schema",
+		"parameters",
+		"parametersJsonSchema",
+		"function.parameters",
+		"function.parametersJsonSchema",
+	}
+	for _, path := range schemaPaths {
+		if v := tool.Get(path); v.Exists() {
+			schemaRaw = v.Raw
+			break
+		}
+	}
+	schema := normalizeAnthropicToolSchema(schemaRaw)
+
+	normalized := `{"name":"","description":"","input_schema":{}}`
+	normalized, err = sjson.Set(normalized, "name", newName)
+	if err != nil {
+		return "", originalName, newName, fmt.Errorf("set normalized tool name: %w", err)
+	}
+	normalized, err = sjson.Set(normalized, "description", description)
+	if err != nil {
+		return "", originalName, newName, fmt.Errorf("set normalized tool description: %w", err)
+	}
+	normalized, err = sjson.SetRaw(normalized, "input_schema", schema)
+	if err != nil {
+		return "", originalName, newName, fmt.Errorf("set normalized tool schema: %w", err)
+	}
+	return normalized, originalName, newName, nil
+}
+
+func setJSONBytes(body []byte, path string, value string) ([]byte, error) {
+	updatedBody, err := sjson.SetBytes(body, path, value)
+	if err != nil {
+		return body, fmt.Errorf("set %s: %w", path, err)
+	}
+	return updatedBody, nil
+}
+
+func applyClaudeRenameMap(body []byte, renameMap map[string]string) ([]byte, error) {
+	if len(renameMap) == 0 {
+		return body, nil
+	}
+
+	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
+		name := strings.TrimSpace(gjson.GetBytes(body, "tool_choice.name").String())
+		if mapped, ok := renameMap[name]; ok {
+			updatedBody, errSet := setJSONBytes(body, "tool_choice.name", mapped)
+			if errSet != nil {
+				return body, errSet
+			}
+			body = updatedBody
+		}
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, nil
+	}
+
+	for msgIndex, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			continue
+		}
+		for contentIndex, part := range content.Array() {
+			switch part.Get("type").String() {
+			case "tool_use":
+				name := strings.TrimSpace(part.Get("name").String())
+				if mapped, ok := renameMap[name]; ok {
+					path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex, contentIndex)
+					updatedBody, errSet := setJSONBytes(body, path, mapped)
+					if errSet != nil {
+						return body, errSet
+					}
+					body = updatedBody
+				}
+			case "tool_reference":
+				toolName := strings.TrimSpace(part.Get("tool_name").String())
+				if mapped, ok := renameMap[toolName]; ok {
+					path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex, contentIndex)
+					updatedBody, errSet := setJSONBytes(body, path, mapped)
+					if errSet != nil {
+						return body, errSet
+					}
+					body = updatedBody
+				}
+			case "tool_result":
+				nestedContent := part.Get("content")
+				if !nestedContent.Exists() || !nestedContent.IsArray() {
+					continue
+				}
+				for nestedIndex, nestedPart := range nestedContent.Array() {
+					if nestedPart.Get("type").String() != "tool_reference" {
+						continue
+					}
+					nestedToolName := strings.TrimSpace(nestedPart.Get("tool_name").String())
+					if mapped, ok := renameMap[nestedToolName]; ok {
+						nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex, contentIndex, nestedIndex)
+						updatedBody, errSet := setJSONBytes(body, nestedPath, mapped)
+						if errSet != nil {
+							return body, errSet
+						}
+						body = updatedBody
+					}
+				}
+			}
+		}
+	}
+
+	return body, nil
+}
+
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 	if prefix == "" {
 		return body
 	}
 
-	// Collect built-in tool names (those with a non-empty "type" field) so we can
-	// skip them consistently in both tools and message history.
+	// Collect built-in tool names so we can skip them consistently in both tools and
+	// message history.
 	builtinTools := map[string]bool{}
 	for _, name := range []string{"web_search", "code_execution", "text_editor", "computer"} {
 		builtinTools[name] = true
@@ -891,9 +1151,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
-			// Skip built-in tools (web_search, code_execution, etc.) which have
-			// a "type" field and require their name to remain unchanged.
-			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+			if isClaudeBuiltinTool(tool) {
 				if n := tool.Get("name").String(); n != "" {
 					builtinTools[n] = true
 				}
