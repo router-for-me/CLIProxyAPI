@@ -1207,7 +1207,11 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if maxWait <= 0 {
 		return 0, false
 	}
-	if status := statusCodeFromError(err); status == http.StatusOK {
+	status := statusCodeFromError(err)
+	if status == http.StatusOK {
+		return 0, false
+	}
+	if isNonRetryableRequestRetryStatus(status) {
 		return 0, false
 	}
 	if isRequestInvalidError(err) {
@@ -1530,6 +1534,20 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+func isNonRetryableRequestRetryStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, // 401
+		http.StatusPaymentRequired, // 402
+		http.StatusForbidden,       // 403
+		http.StatusNotFound,        // 404
+		http.StatusUnprocessableEntity, // 422
+		http.StatusTooManyRequests: // 429
+		return true
+	default:
+		return false
+	}
 }
 
 // isRequestInvalidError returns true if the error represents a client request
