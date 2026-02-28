@@ -862,10 +862,6 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	if len(payload) == 0 {
 		payload = nil
 	}
-	req := coreexecutor.Request{
-		Model:   normalizedModel,
-		Payload: payload,
-	}
 	opts := coreexecutor.Options{
 		Stream:          true,
 		Alt:             alt,
@@ -970,6 +966,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	modelFallbackRetries = 0
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
+	fallbackHeadersEnabled := rtCfg != nil && rtCfg.ModelFallback.ExposeActualModelHeader
 	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
 	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
 	var upstreamHeaders http.Header
@@ -978,9 +975,12 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		if upstreamHeaders == nil {
 			upstreamHeaders = make(http.Header)
 		}
-		if fallbackAttempts > 0 {
-			fallback.SetFallbackHeaders(upstreamHeaders, normalizedModel, currentModel, fallbackAttempts+1, rtCfg)
+	}
+	if fallbackAttempts > 0 && (passthroughHeadersEnabled || fallbackHeadersEnabled) {
+		if upstreamHeaders == nil {
+			upstreamHeaders = make(http.Header)
 		}
+		fallback.SetFallbackHeaders(upstreamHeaders, normalizedModel, currentModel, fallbackAttempts+1, rtCfg)
 	}
 	chunks := streamResult.Chunks
 	dataChan := make(chan []byte)
@@ -1056,12 +1056,19 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					if !sentPayload {
 						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
-							retryReq := req
-							retryReq.Model = currentModel
-							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, currentProviders, retryReq, opts)
+							retryResult, retryErr := executeStreamForModel(currentModel, currentProviders)
 							if retryErr == nil {
 								if passthroughHeadersEnabled {
+									if upstreamHeaders == nil {
+										upstreamHeaders = make(http.Header)
+									}
 									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+								}
+								if fallbackAttempts > 0 && (passthroughHeadersEnabled || fallbackHeadersEnabled) {
+									if upstreamHeaders == nil {
+										upstreamHeaders = make(http.Header)
+									}
+									fallback.SetFallbackHeaders(upstreamHeaders, normalizedModel, currentModel, fallbackAttempts+1, rtCfg)
 								}
 								chunks = retryResult.Chunks
 								continue outer
@@ -1085,10 +1092,16 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 								if retryErr == nil {
 									bootstrapRetries = 0
 									if passthroughHeadersEnabled {
-										replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
-										if fallbackAttempts > 0 {
-											fallback.SetFallbackHeaders(upstreamHeaders, normalizedModel, currentModel, fallbackAttempts+1, rtCfg)
+										if upstreamHeaders == nil {
+											upstreamHeaders = make(http.Header)
 										}
+										replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+									}
+									if fallbackAttempts > 0 && (passthroughHeadersEnabled || fallbackHeadersEnabled) {
+										if upstreamHeaders == nil {
+											upstreamHeaders = make(http.Header)
+										}
+										fallback.SetFallbackHeaders(upstreamHeaders, normalizedModel, currentModel, fallbackAttempts+1, rtCfg)
 									}
 									chunks = retryResult.Chunks
 									log.WithFields(log.Fields{
@@ -1123,7 +1136,15 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 										modelFallbackRetries = 0
 										bootstrapRetries = 0
 										if passthroughHeadersEnabled {
+											if upstreamHeaders == nil {
+												upstreamHeaders = make(http.Header)
+											}
 											replaceHeader(upstreamHeaders, FilterUpstreamHeaders(fbResult.Headers))
+										}
+										if passthroughHeadersEnabled || fallbackHeadersEnabled {
+											if upstreamHeaders == nil {
+												upstreamHeaders = make(http.Header)
+											}
 											fallback.SetFallbackHeaders(upstreamHeaders, normalizedModel, attemptModel, fi+1, rtCfg)
 										}
 										chunks = fbResult.Chunks
