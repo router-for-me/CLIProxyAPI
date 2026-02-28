@@ -82,14 +82,14 @@ func TestFileTokenStore_PersistsAndRestoresRuntimeState(t *testing.T) {
 	if errUnmarshal := json.Unmarshal(raw, &persisted); errUnmarshal != nil {
 		t.Fatalf("unmarshal persisted JSON: %v", errUnmarshal)
 	}
-	if _, ok := persisted["model_states"]; !ok {
-		t.Fatalf("persisted metadata missing model_states")
+	if _, ok := persisted["runtime_model_states"]; !ok {
+		t.Fatalf("persisted metadata missing runtime_model_states")
 	}
-	if _, ok := persisted["next_retry_after"]; !ok {
-		t.Fatalf("persisted metadata missing next_retry_after")
+	if _, ok := persisted["runtime_next_retry_after"]; !ok {
+		t.Fatalf("persisted metadata missing runtime_next_retry_after")
 	}
-	if _, ok := persisted["quota"]; !ok {
-		t.Fatalf("persisted metadata missing quota")
+	if _, ok := persisted["runtime_quota"]; !ok {
+		t.Fatalf("persisted metadata missing runtime_quota")
 	}
 
 	entries, errList := store.List(context.Background())
@@ -127,4 +127,3 @@ func TestFileTokenStore_PersistsAndRestoresRuntimeState(t *testing.T) {
 		t.Fatalf("model state quota=%+v, want exceeded quota", state.Quota)
 	}
 }
-
