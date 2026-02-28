@@ -428,20 +428,27 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 }
 
 func filterKimiAssistantMessages(msgs []gjson.Result) ([]byte, int, error) {
-	filtered := "[]"
+	var filtered bytes.Buffer
+	filtered.WriteByte('[')
+	kept := 0
 	dropped := 0
 	for _, msg := range msgs {
 		if shouldDropKimiAssistantMessage(msg) {
 			dropped++
 			continue
 		}
-		next, err := sjson.SetRaw(filtered, "-1", msg.Raw)
-		if err != nil {
-			return nil, dropped, fmt.Errorf("kimi executor: failed to append filtered message: %w", err)
+		raw := strings.TrimSpace(msg.Raw)
+		if raw == "" {
+			return nil, dropped, fmt.Errorf("kimi executor: found empty message while filtering")
 		}
-		filtered = next
+		if kept > 0 {
+			filtered.WriteByte(',')
+		}
+		filtered.WriteString(raw)
+		kept++
 	}
-	return []byte(filtered), dropped, nil
+	filtered.WriteByte(']')
+	return filtered.Bytes(), dropped, nil
 }
 
 func shouldDropKimiAssistantMessage(msg gjson.Result) bool {
