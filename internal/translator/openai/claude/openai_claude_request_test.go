@@ -432,8 +432,11 @@ func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 	if got := messages[1].Get("tool_call_id").String(); got != "call_1" {
 		t.Fatalf("Expected tool_call_id %q, got %q", "call_1", got)
 	}
-	if got := messages[1].Get("content").String(); got != "tool ok" {
-		t.Fatalf("Expected tool content %q, got %q", "tool ok", got)
+	if got := messages[1].Get("content.0.type").String(); got != "text" {
+		t.Fatalf("Expected tool content[0].type %q, got %q", "text", got)
+	}
+	if got := messages[1].Get("content.0.text").String(); got != "tool ok" {
+		t.Fatalf("Expected tool content[0].text %q, got %q", "tool ok", got)
 	}
 
 	// User message comes after tool message
@@ -485,6 +488,209 @@ func TestConvertClaudeRequestToOpenAI_ToolResultObjectContent(t *testing.T) {
 	parsed := gjson.Parse(toolContent)
 	if parsed.Get("foo").String() != "bar" {
 		t.Fatalf("Expected tool content JSON foo=bar, got %q", toolContent)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolResultImageURLContent(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_1", "content": [{"type":"text","text":"look"},{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}]}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if messages[1].Get("role").String() != "tool" {
+		t.Fatalf("Expected messages[1] to be tool, got %s", messages[1].Get("role").String())
+	}
+	if got := messages[1].Get("content.0.type").String(); got != "text" {
+		t.Fatalf("Expected content[0].type %q, got %q", "text", got)
+	}
+	if got := messages[1].Get("content.0.text").String(); got != "look" {
+		t.Fatalf("Expected content[0].text %q, got %q", "look", got)
+	}
+	if got := messages[1].Get("content.1.type").String(); got != "image_url" {
+		t.Fatalf("Expected content[1].type %q, got %q", "image_url", got)
+	}
+	if got := messages[1].Get("content.1.image_url.url").String(); got != "https://example.com/a.png" {
+		t.Fatalf("Expected content[1].image_url.url %q, got %q", "https://example.com/a.png", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolResultBase64ImageContent(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_1", "content": [{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}]}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if messages[1].Get("role").String() != "tool" {
+		t.Fatalf("Expected messages[1] to be tool, got %s", messages[1].Get("role").String())
+	}
+	if got := messages[1].Get("content.0.type").String(); got != "image_url" {
+		t.Fatalf("Expected content[0].type %q, got %q", "image_url", got)
+	}
+	if got := messages[1].Get("content.0.image_url.url").String(); got != "data:image/png;base64,QUJD" {
+		t.Fatalf("Expected content[0].image_url.url %q, got %q", "data:image/png;base64,QUJD", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_UserMessageWithBase64Image(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected messages[0].role %q, got %q", "user", got)
+	}
+	if got := messages[0].Get("content.0.type").String(); got != "image_url" {
+		t.Fatalf("Expected content[0].type %q, got %q", "image_url", got)
+	}
+	if got := messages[0].Get("content.0.image_url.url").String(); got != "data:image/png;base64,QUJD" {
+		t.Fatalf("Expected content[0].image_url.url %q, got %q", "data:image/png;base64,QUJD", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_UserMessageWithURLImage(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected messages[0].role %q, got %q", "user", got)
+	}
+	if got := messages[0].Get("content.0.type").String(); got != "image_url" {
+		t.Fatalf("Expected content[0].type %q, got %q", "image_url", got)
+	}
+	if got := messages[0].Get("content.0.image_url.url").String(); got != "https://example.com/a.png" {
+		t.Fatalf("Expected content[0].image_url.url %q, got %q", "https://example.com/a.png", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolResultWithMixedContent(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"tool_result","tool_use_id":"call_1","content":[
+						{"type":"text","text":"look"},
+						{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}},
+						{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}},
+						"tail"
+					]}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[1].Get("role").String(); got != "tool" {
+		t.Fatalf("Expected messages[1].role %q, got %q", "tool", got)
+	}
+
+	if got := messages[1].Get("content.0.type").String(); got != "text" {
+		t.Fatalf("Expected content[0].type %q, got %q", "text", got)
+	}
+	if got := messages[1].Get("content.0.text").String(); got != "look" {
+		t.Fatalf("Expected content[0].text %q, got %q", "look", got)
+	}
+	if got := messages[1].Get("content.1.type").String(); got != "image_url" {
+		t.Fatalf("Expected content[1].type %q, got %q", "image_url", got)
+	}
+	if got := messages[1].Get("content.1.image_url.url").String(); got != "https://example.com/a.png" {
+		t.Fatalf("Expected content[1].image_url.url %q, got %q", "https://example.com/a.png", got)
+	}
+	if got := messages[1].Get("content.2.type").String(); got != "image_url" {
+		t.Fatalf("Expected content[2].type %q, got %q", "image_url", got)
+	}
+	if got := messages[1].Get("content.2.image_url.url").String(); got != "data:image/png;base64,QUJD" {
+		t.Fatalf("Expected content[2].image_url.url %q, got %q", "data:image/png;base64,QUJD", got)
+	}
+	if got := messages[1].Get("content.3.type").String(); got != "text" {
+		t.Fatalf("Expected content[3].type %q, got %q", "text", got)
+	}
+	if got := messages[1].Get("content.3.text").String(); got != "tail" {
+		t.Fatalf("Expected content[3].text %q, got %q", "tail", got)
 	}
 }
 

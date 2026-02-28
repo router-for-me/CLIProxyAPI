@@ -198,6 +198,12 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 									imagePart, _ = sjson.Set(imagePart, "source.data", data)
 									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
 								}
+							} else {
+								if imageURL != "" {
+									imagePart := `{"type":"image","source":{"type":"url","url":""}}`
+									imagePart, _ = sjson.Set(imagePart, "source.url", imageURL)
+									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
+								}
 							}
 
 						case "file":
@@ -262,7 +268,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			case "tool":
 				// Handle tool result messages conversion
 				toolCallID := message.Get("tool_call_id").String()
-				content := message.Get("content").String()
+				content := convertOpenAIToolMessageContentToClaude(contentResult)
 
 				msg := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`
 				msg, _ = sjson.Set(msg, "content.0.tool_use_id", toolCallID)
@@ -328,4 +334,140 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return []byte(out)
+}
+
+func convertOpenAIToolMessageContentToClaude(content gjson.Result) any {
+	if !content.Exists() {
+		return ""
+	}
+
+	if content.Type == gjson.String {
+		return content.String()
+	}
+
+	if content.IsArray() {
+		converted := make([]any, 0, len(content.Array()))
+		content.ForEach(func(_, item gjson.Result) bool {
+			if block, ok := convertOpenAIToolContentPartToClaude(item); ok {
+				converted = append(converted, block)
+				return true
+			}
+
+			if item.Type == gjson.String {
+				converted = append(converted, map[string]any{
+					"type": "text",
+					"text": item.String(),
+				})
+				return true
+			}
+
+			if raw := strings.TrimSpace(item.Raw); raw != "" && raw != "null" {
+				converted = append(converted, map[string]any{
+					"type": "text",
+					"text": raw,
+				})
+			}
+			return true
+		})
+		if len(converted) == 0 {
+			return ""
+		}
+		return converted
+	}
+
+	if content.IsObject() {
+		if block, ok := convertOpenAIToolContentPartToClaude(content); ok {
+			return []any{block}
+		}
+		return content.Raw
+	}
+
+	if raw := strings.TrimSpace(content.Raw); raw != "" && raw != "null" {
+		return raw
+	}
+	return ""
+}
+
+func convertOpenAIToolContentPartToClaude(part gjson.Result) (map[string]any, bool) {
+	partType := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
+
+	switch partType {
+	case "text":
+		return map[string]any{
+			"type": "text",
+			"text": part.Get("text").String(),
+		}, true
+	case "image_url":
+		if imagePart, ok := convertOpenAIImageURLToClaude(extractOpenAIImageURL(part)); ok {
+			return imagePart, true
+		}
+	}
+
+	if text := part.Get("text"); text.Exists() && text.Type == gjson.String {
+		return map[string]any{
+			"type": "text",
+			"text": text.String(),
+		}, true
+	}
+
+	if imagePart, ok := convertOpenAIImageURLToClaude(extractOpenAIImageURL(part)); ok {
+		return imagePart, true
+	}
+
+	return nil, false
+}
+
+func extractOpenAIImageURL(part gjson.Result) string {
+	if url := strings.TrimSpace(part.Get("image_url.url").String()); url != "" {
+		return url
+	}
+	if imageURL := part.Get("image_url"); imageURL.Exists() && imageURL.Type == gjson.String {
+		if url := strings.TrimSpace(imageURL.String()); url != "" {
+			return url
+		}
+	}
+	if url := strings.TrimSpace(part.Get("url").String()); url != "" {
+		return url
+	}
+	return ""
+}
+
+func convertOpenAIImageURLToClaude(imageURL string) (map[string]any, bool) {
+	if imageURL == "" {
+		return nil, false
+	}
+	if mediaType, data, ok := parseBase64DataURL(imageURL); ok {
+		return map[string]any{
+			"type": "image",
+			"source": map[string]any{
+				"type":       "base64",
+				"media_type": mediaType,
+				"data":       data,
+			},
+		}, true
+	}
+
+	return map[string]any{
+		"type": "image",
+		"source": map[string]any{
+			"type": "url",
+			"url":  imageURL,
+		},
+	}, true
+}
+
+func parseBase64DataURL(value string) (mediaType string, data string, ok bool) {
+	if !strings.HasPrefix(value, "data:") {
+		return "", "", false
+	}
+	trimmed := strings.TrimPrefix(value, "data:")
+	parts := strings.SplitN(trimmed, ";base64,", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+		return "", "", false
+	}
+	mediaType = strings.TrimSpace(parts[0])
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	return mediaType, parts[1], true
 }
