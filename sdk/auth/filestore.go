@@ -611,8 +611,6 @@ func parseTimeAny(raw any) (time.Time, bool) {
 				return parsed, true
 			}
 		}
-	case time.Time:
-		return v, true
 	}
 	return time.Time{}, false
 }
