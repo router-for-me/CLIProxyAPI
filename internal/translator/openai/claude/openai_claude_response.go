@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -51,6 +52,8 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	ThinkingContentBlockIndex int
 	// Next available content block index
 	NextContentBlockIndex int
+	// Canonical tool name map from lowercase -> declared request tool name
+	CanonicalToolNameByLower map[string]string
 }
 
 // ToolCallAccumulator holds the state for accumulating tool call data
@@ -58,6 +61,7 @@ type ToolCallAccumulator struct {
 	ID        string
 	Name      string
 	Arguments strings.Builder
+	Started   bool
 }
 
 // ConvertOpenAIResponseToClaude converts OpenAI streaming response format to Anthropic API format.
@@ -89,6 +93,7 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 			TextContentBlockIndex:       -1,
 			ThinkingContentBlockIndex:   -1,
 			NextContentBlockIndex:       0,
+			CanonicalToolNameByLower:    buildCanonicalToolNameByLower(originalRequestRawJSON),
 		}
 	}
 
@@ -105,7 +110,7 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 
 	streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
 	if !streamResult.Exists() || (streamResult.Exists() && streamResult.Type == gjson.False) {
-		return convertOpenAINonStreamingToAnthropic(rawJSON)
+		return convertOpenAINonStreamingToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams).CanonicalToolNameByLower)
 	} else {
 		return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams))
 	}
@@ -215,18 +220,29 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				// Handle function name
 				if function := toolCall.Get("function"); function.Exists() {
 					if name := function.Get("name"); name.Exists() {
-						accumulator.Name = name.String()
+						nameStr := strings.TrimSpace(name.String())
+						if nameStr != "" {
+							accumulator.Name = canonicalizeToolName(nameStr, param.CanonicalToolNameByLower)
+						}
+					}
 
+					// Emit tool_use start exactly once per tool call.
+					// Some OpenAI-compatible streams repeat function.name="" in later chunks;
+					// emitting start repeatedly breaks Claude Code tool execution.
+					if !accumulator.Started && accumulator.Name != "" {
 						stopThinkingContentBlock(param, &results)
-
 						stopTextContentBlock(param, &results)
 
-						// Send content_block_start for tool_use
+						if accumulator.ID == "" {
+							accumulator.ID = fmt.Sprintf("call_%d", index)
+						}
+
 						contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
 						contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "index", blockIndex)
 						contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.id", accumulator.ID)
 						contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.name", accumulator.Name)
 						results = append(results, "event: content_block_start\ndata: "+contentBlockStartJSON+"\n\n")
+						accumulator.Started = true
 					}
 
 					// Handle function arguments
@@ -262,9 +278,25 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 		// Send content_block_stop for any tool calls
 		if !param.ContentBlocksStopped {
-			for index := range param.ToolCallsAccumulator {
+			for _, index := range sortedToolCallIndexes(param.ToolCallsAccumulator) {
 				accumulator := param.ToolCallsAccumulator[index]
 				blockIndex := param.toolContentBlockIndex(index)
+
+				if !accumulator.Started {
+					if strings.TrimSpace(accumulator.Name) == "" {
+						delete(param.ToolCallBlockIndexes, index)
+						continue
+					}
+					if accumulator.ID == "" {
+						accumulator.ID = fmt.Sprintf("call_%d", index)
+					}
+					contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
+					contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "index", blockIndex)
+					contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.id", accumulator.ID)
+					contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.name", accumulator.Name)
+					results = append(results, "event: content_block_start\ndata: "+contentBlockStartJSON+"\n\n")
+					accumulator.Started = true
+				}
 
 				// Send complete input_json_delta with all accumulated arguments
 				if accumulator.Arguments.Len() > 0 {
@@ -326,9 +358,25 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	stopTextContentBlock(param, &results)
 
 	if !param.ContentBlocksStopped {
-		for index := range param.ToolCallsAccumulator {
+		for _, index := range sortedToolCallIndexes(param.ToolCallsAccumulator) {
 			accumulator := param.ToolCallsAccumulator[index]
 			blockIndex := param.toolContentBlockIndex(index)
+
+			if !accumulator.Started {
+				if strings.TrimSpace(accumulator.Name) == "" {
+					delete(param.ToolCallBlockIndexes, index)
+					continue
+				}
+				if accumulator.ID == "" {
+					accumulator.ID = fmt.Sprintf("call_%d", index)
+				}
+				contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
+				contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "index", blockIndex)
+				contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.id", accumulator.ID)
+				contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.name", accumulator.Name)
+				results = append(results, "event: content_block_start\ndata: "+contentBlockStartJSON+"\n\n")
+				accumulator.Started = true
+			}
 
 			if accumulator.Arguments.Len() > 0 {
 				inputDeltaJSON := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
@@ -359,7 +407,7 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 }
 
 // convertOpenAINonStreamingToAnthropic converts OpenAI non-streaming response to Anthropic format
-func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
+func convertOpenAINonStreamingToAnthropic(rawJSON []byte, canonicalToolNameByLower map[string]string) []string {
 	root := gjson.ParseBytes(rawJSON)
 
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
@@ -392,7 +440,8 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 				toolUseBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
 				toolUseBlock, _ = sjson.Set(toolUseBlock, "id", toolCall.Get("id").String())
-				toolUseBlock, _ = sjson.Set(toolUseBlock, "name", toolCall.Get("function.name").String())
+				toolName := canonicalizeToolName(toolCall.Get("function.name").String(), canonicalToolNameByLower)
+				toolUseBlock, _ = sjson.Set(toolUseBlock, "name", toolName)
 
 				argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
 				if argsStr != "" && gjson.Valid(argsStr) {
@@ -531,8 +580,8 @@ func stopTextContentBlock(param *ConvertOpenAIResponseToAnthropicParams, results
 // Returns:
 //   - string: An Anthropic-compatible JSON response.
 func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
+	canonicalToolNameByLower := buildCanonicalToolNameByLower(originalRequestRawJSON)
 
 	root := gjson.ParseBytes(rawJSON)
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
@@ -590,7 +639,8 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 									hasToolCall = true
 									toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
 									toolUse, _ = sjson.Set(toolUse, "id", tc.Get("id").String())
-									toolUse, _ = sjson.Set(toolUse, "name", tc.Get("function.name").String())
+									toolName := canonicalizeToolName(tc.Get("function.name").String(), canonicalToolNameByLower)
+									toolUse, _ = sjson.Set(toolUse, "name", toolName)
 
 									argsStr := util.FixJSON(tc.Get("function.arguments").String())
 									if argsStr != "" && gjson.Valid(argsStr) {
@@ -647,7 +697,8 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 					hasToolCall = true
 					toolUseBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
 					toolUseBlock, _ = sjson.Set(toolUseBlock, "id", toolCall.Get("id").String())
-					toolUseBlock, _ = sjson.Set(toolUseBlock, "name", toolCall.Get("function.name").String())
+					toolName := canonicalizeToolName(toolCall.Get("function.name").String(), canonicalToolNameByLower)
+					toolUseBlock, _ = sjson.Set(toolUseBlock, "name", toolName)
 
 					argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
 					if argsStr != "" && gjson.Valid(argsStr) {
@@ -710,4 +761,50 @@ func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64) {
 	}
 
 	return inputTokens, outputTokens, cachedTokens
+}
+
+func sortedToolCallIndexes(toolCalls map[int]*ToolCallAccumulator) []int {
+	indexes := make([]int, 0, len(toolCalls))
+	for index := range toolCalls {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	return indexes
+}
+
+func buildCanonicalToolNameByLower(originalRequestRawJSON []byte) map[string]string {
+	tools := gjson.GetBytes(originalRequestRawJSON, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return nil
+	}
+
+	out := make(map[string]string)
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		name := strings.TrimSpace(tool.Get("name").String())
+		if name == "" {
+			return true
+		}
+		key := strings.ToLower(name)
+		// Preserve first declaration if collisions only differ by case.
+		if _, exists := out[key]; !exists {
+			out[key] = name
+		}
+		return true
+	})
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func canonicalizeToolName(name string, canonicalToolNameByLower map[string]string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || len(canonicalToolNameByLower) == 0 {
+		return name
+	}
+	if canonical, ok := canonicalToolNameByLower[strings.ToLower(name)]; ok {
+		return canonical
+	}
+	return name
 }
