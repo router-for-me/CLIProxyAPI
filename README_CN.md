@@ -1,6 +1,6 @@
-# CLI 代理 API
+# CLI 代理 API 
 
-[English](README.md) | 中文  
+[English](README.md) | 中文
 
 一个为 CLI 提供 OpenAI/Gemini/Claude/Codex 兼容 API 接口的代理服务器。
 
@@ -32,7 +32,6 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 </tr>
 </tbody>
 </table>
-
 
 ## 功能特性
 
@@ -149,7 +148,7 @@ Windows 托盘应用，基于 PowerShell 脚本实现，不依赖任何第三方
 
 一个面向 CLIProxyAPI 的现代化 Web 管理仪表盘，基于 Next.js、React 和 PostgreSQL 构建。支持实时日志流、结构化配置编辑、API Key 管理、Claude/Gemini/Codex 的 OAuth 提供方集成、使用量分析、容器管理，并可通过配套插件与 OpenCode 同步配置，无需手动编辑 YAML。
 
-> [!NOTE]  
+> [!NOTE]
 > 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
 
 ## 更多选择
@@ -166,7 +165,7 @@ Windows 托盘应用，基于 PowerShell 脚本实现，不依赖任何第三方
 
 OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼容 OpenAI 的端点，具备智能路由、负载均衡、重试及回退机制。通过添加策略、速率限制、缓存和可观测性，确保推理过程既可靠又具备成本意识。
 
-> [!NOTE]  
+> [!NOTE]
 > 如果你开发了 CLIProxyAPI 的移植或衍生项目，请提交 PR 将其添加到此列表中。
 
 ## 许可证
