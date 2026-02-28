@@ -296,6 +296,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
+	translated = sanitizeAntigravityClaudeCompatFields(translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -438,6 +439,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
+	translated = sanitizeAntigravityClaudeCompatFields(translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -830,6 +832,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
+	translated = sanitizeAntigravityClaudeCompatFields(translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -1029,6 +1032,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, err
 	}
 
+	payload = sanitizeAntigravityClaudeCompatFields(payload)
 	payload = deleteJSONField(payload, "project")
 	payload = deleteJSONField(payload, "model")
 	payload = deleteJSONField(payload, "request.safetySettings")
@@ -1711,6 +1715,12 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 		antigravitySandboxBaseURLDaily,
 		// antigravityBaseURLProd,
 	}
+}
+
+func sanitizeAntigravityClaudeCompatFields(body []byte) []byte {
+	body = deleteJSONField(body, "output_config")
+	body = deleteJSONField(body, "request.output_config")
+	return body
 }
 
 func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
