@@ -304,7 +304,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 	}
 
 	out := body
-	droppedOrphanAssistant := 0
 	filteredMessages, dropped, err := filterKimiAssistantMessages(messages.Array())
 	if err != nil {
 		return body, err
@@ -314,7 +313,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 		if err != nil {
 			return body, fmt.Errorf("kimi executor: failed to replace filtered messages: %w", err)
 		}
-		droppedOrphanAssistant = dropped
 		messages = gjson.GetBytes(out, "messages")
 	}
 
@@ -412,10 +410,6 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 			"patched_tool_messages":      patched,
 			"patched_reasoning_messages": patchedReasoning,
 		}).Debug("kimi executor: normalized tool message fields")
-	}
-	if droppedOrphanAssistant > 0 {
-		log.WithField("dropped_assistant_messages", droppedOrphanAssistant).
-			Debug("kimi executor: removed empty assistant messages without tool linkage")
 	}
 	if ambiguous > 0 {
 		log.WithFields(log.Fields{
