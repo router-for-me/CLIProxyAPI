@@ -141,8 +141,9 @@ type authAwareStreamExecutor struct {
 // 2) first fallback model: stream opens but fails before first payload byte,
 // 3) second fallback model: stream succeeds.
 type initialFallbackPreludeChainExecutor struct {
-	mu     sync.Mutex
-	models []string
+	mu              sync.Mutex
+	models          []string
+	requestedModels []string
 }
 
 type invalidJSONStreamExecutor struct{}
@@ -252,9 +253,20 @@ func (e *initialFallbackPreludeChainExecutor) Execute(context.Context, *coreauth
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
 }
 
-func (e *initialFallbackPreludeChainExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *initialFallbackPreludeChainExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	requestedModel := ""
+	if raw, ok := opts.Metadata[coreexecutor.RequestedModelMetadataKey]; ok && raw != nil {
+		switch v := raw.(type) {
+		case string:
+			requestedModel = v
+		case []byte:
+			requestedModel = string(v)
+		}
+	}
+
 	e.mu.Lock()
 	e.models = append(e.models, req.Model)
+	e.requestedModels = append(e.requestedModels, requestedModel)
 	e.mu.Unlock()
 
 	switch req.Model {
@@ -318,6 +330,14 @@ func (e *initialFallbackPreludeChainExecutor) Models() []string {
 	defer e.mu.Unlock()
 	out := make([]string, len(e.models))
 	copy(out, e.models)
+	return out
+}
+
+func (e *initialFallbackPreludeChainExecutor) RequestedModels() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.requestedModels))
+	copy(out, e.requestedModels)
 	return out
 }
 
@@ -538,7 +558,6 @@ func TestExecuteStreamWithAuthManager_InitialFallbackPreludeContinuesChain(t *te
 	if _, err := manager.Register(context.Background(), auth1); err != nil {
 		t.Fatalf("manager.Register(auth1): %v", err)
 	}
-
 	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{
 		{ID: "test-model"},
 		{ID: "test-model-fb1"},
@@ -609,6 +628,175 @@ func TestExecuteStreamWithAuthManager_InitialFallbackPreludeContinuesChain(t *te
 	}
 	if v := upstreamHeaders.Get("X-Upstream-Model"); v != "test-model-fb2" {
 		t.Fatalf("expected upstream headers from final fallback model, got %q", v)
+	}
+}
+
+func TestExecuteStreamWithAuthManager_BootstrapRetryUsesCurrentModelMetadata(t *testing.T) {
+	executor := &initialFallbackPreludeChainExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth1 := &coreauth.Auth{
+		ID:       "auth1",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test1@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("manager.Register(auth1): %v", err)
+	}
+	auth2 := &coreauth.Auth{
+		ID:       "auth2",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test2@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth2); err != nil {
+		t.Fatalf("manager.Register(auth2): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{
+		{ID: "test-model"},
+		{ID: "test-model-fb1"},
+		{ID: "test-model-fb2"},
+	})
+	registry.GetGlobalRegistry().RegisterClient(auth2.ID, auth2.Provider, []*registry.ModelInfo{
+		{ID: "test-model"},
+		{ID: "test-model-fb1"},
+		{ID: "test-model-fb2"},
+	})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+		registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
+	})
+
+	rtCfg := &internalconfig.Config{
+		ModelFallback: internalconfig.ModelFallback{
+			Enabled: true,
+			Rules: []internalconfig.ModelFallbackRule{
+				{
+					From: "test-model",
+					To:   []string{"test-model-fb1", "test-model-fb2"},
+				},
+			},
+		},
+	}
+	rtCfg.SanitizeModelFallback()
+	manager.SetConfig(rtCfg)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			BootstrapRetries: 1,
+		},
+	}, manager)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected error: %+v", msg)
+		}
+	}
+	if string(got) != "ok" {
+		t.Fatalf("expected payload ok, got %q", string(got))
+	}
+
+	models := executor.Models()
+	requestedModels := executor.RequestedModels()
+	if len(models) != len(requestedModels) {
+		t.Fatalf("models/requestedModels length mismatch: %d/%d", len(models), len(requestedModels))
+	}
+	for i := range models {
+		if models[i] != requestedModels[i] {
+			t.Fatalf("attempt[%d] model=%q requested_model=%q, expected equal", i, models[i], requestedModels[i])
+		}
+	}
+}
+
+func TestExecuteStreamWithAuthManager_ExposeFallbackHeadersWithoutPassthrough(t *testing.T) {
+	executor := &initialFallbackPreludeChainExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth1 := &coreauth.Auth{
+		ID:       "auth1",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test1@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("manager.Register(auth1): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{
+		{ID: "test-model"},
+		{ID: "test-model-fb1"},
+		{ID: "test-model-fb2"},
+	})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+	})
+
+	rtCfg := &internalconfig.Config{
+		ModelFallback: internalconfig.ModelFallback{
+			Enabled:                 true,
+			ExposeActualModelHeader: true,
+			Rules: []internalconfig.ModelFallbackRule{
+				{
+					From: "test-model",
+					To:   []string{"test-model-fb1", "test-model-fb2"},
+				},
+			},
+		},
+	}
+	rtCfg.SanitizeModelFallback()
+	manager.SetConfig(rtCfg)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			BootstrapRetries: 0,
+		},
+	}, manager)
+
+	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected error: %+v", msg)
+		}
+	}
+	if string(got) != "ok" {
+		t.Fatalf("expected payload ok, got %q", string(got))
+	}
+
+	if upstreamHeaders == nil {
+		t.Fatalf("expected fallback observability headers even when passthrough is disabled")
+	}
+	if v := upstreamHeaders.Get("X-Actual-Model"); v != "test-model-fb2" {
+		t.Fatalf("X-Actual-Model = %q, want %q", v, "test-model-fb2")
+	}
+	if v := upstreamHeaders.Get("X-Requested-Model"); v != "test-model" {
+		t.Fatalf("X-Requested-Model = %q, want %q", v, "test-model")
+	}
+	if v := upstreamHeaders.Get("X-Model-Fallback-Attempts"); v != "3" {
+		t.Fatalf("X-Model-Fallback-Attempts = %q, want %q", v, "3")
+	}
+	if v := upstreamHeaders.Get("X-Upstream-Model"); v != "" {
+		t.Fatalf("expected no passthrough upstream headers, got X-Upstream-Model=%q", v)
 	}
 }
 

@@ -313,7 +313,7 @@ nonstream-keepalive-interval: 0
 #   allow-network-error: false              # Whether to trigger fallback on network errors
 #   allow-cross-provider: false             # Allow fallback to models from different providers
 #   preserve-requested-model: false         # Rewrite response model field back to original requested model
-#   expose-actual-model-header: false       # Add X-Actual-Model / X-Requested-Model / X-Model-Fallback-Attempts headers
+#   expose-actual-model-header: false       # Add X-Actual-Model / X-Requested-Model / X-Model-Fallback-Attempts headers (independent of passthrough-headers)
 #   stream:                                 # Stream-specific fallback settings
 #     enabled: true                         # Enable stream fallback (auto-inherits from main enabled)
 #     prelude-only: true                    # Only fallback before first byte is sent
