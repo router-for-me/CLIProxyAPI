@@ -6,6 +6,9 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,7 +39,9 @@ type ClaudeExecutor struct {
 	cfg *config.Config
 }
 
-const claudeToolPrefix = "proxy_"
+// claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
+// Previously "proxy_" was used but this is a detectable fingerprint difference.
+const claudeToolPrefix = ""
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
@@ -696,16 +701,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	promptCachingBeta := "prompt-caching-2024-07-31"
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14," + promptCachingBeta
+	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 		baseBetas = val
 		if !strings.Contains(val, "oauth") {
 			baseBetas += ",oauth-2025-04-20"
 		}
-	}
-	if !strings.Contains(baseBetas, promptCachingBeta) {
-		baseBetas += "," + promptCachingBeta
 	}
 
 	// Merge extra betas from request body
@@ -727,8 +728,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.44 / @anthropic-ai/sdk 0.74.0 (captured 2026-02-17).
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Helper-Method", "stream")
+	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime-Version", hdrDefault(hd.RuntimeVersion, "v24.3.0"))
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Package-Version", hdrDefault(hd.PackageVersion, "0.74.0"))
@@ -737,7 +737,18 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Arch", mapStainlessArch())
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Os", mapStainlessOS())
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", hdrDefault(hd.UserAgent, "claude-cli/2.1.44 (external, sdk-cli)"))
+	// For User-Agent, only forward the client's header if it's already a Claude Code client.
+	// Non-Claude-Code clients (e.g. curl, OpenAI SDKs) get the default Claude Code User-Agent
+	// to avoid leaking the real client identity during cloaking.
+	clientUA := ""
+	if ginHeaders != nil {
+		clientUA = ginHeaders.Get("User-Agent")
+	}
+	if isClaudeCodeClient(clientUA) {
+		r.Header.Set("User-Agent", clientUA)
+	} else {
+		r.Header.Set("User-Agent", hdrDefault(hd.UserAgent, "claude-cli/2.1.63 (external, cli)"))
+	}
 	r.Header.Set("Connection", "keep-alive")
 	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {
@@ -771,22 +782,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	system := gjson.GetBytes(payload, "system")
-	claudeCodeInstructions := `[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}]`
-	if system.IsArray() {
-		if gjson.GetBytes(payload, "system.0.text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
-			system.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "text" {
-					claudeCodeInstructions, _ = sjson.SetRaw(claudeCodeInstructions, "-1", part.Raw)
-				}
-				return true
-			})
-			payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
-		}
-	} else {
-		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
-	}
-	return payload
+	return checkSystemInstructionsWithMode(payload, false)
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1060,33 +1056,67 @@ func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	return payload
 }
 
-// checkSystemInstructionsWithMode injects Claude Code system prompt.
-// In strict mode, it replaces all user system messages.
-// In non-strict mode (default), it prepends to existing system messages.
+// generateBillingHeader creates the x-anthropic-billing-header text block that
+// real Claude Code prepends to every system prompt array.
+// Format: x-anthropic-billing-header: cc_version=<ver>.<build>; cc_entrypoint=cli; cch=<hash>;
+func generateBillingHeader(payload []byte) string {
+	// Generate a deterministic cch hash from the payload content (system + messages + tools).
+	// Real Claude Code uses a 5-char hex hash that varies per request.
+	h := sha256.Sum256(payload)
+	cch := hex.EncodeToString(h[:])[:5]
+
+	// Build hash: 3-char hex, matches the pattern seen in real requests (e.g. "a43")
+	buildBytes := make([]byte, 2)
+	_, _ = rand.Read(buildBytes)
+	buildHash := hex.EncodeToString(buildBytes)[:3]
+
+	return fmt.Sprintf("x-anthropic-billing-header: cc_version=2.1.63.%s; cc_entrypoint=cli; cch=%s;", buildHash, cch)
+}
+
+// checkSystemInstructionsWithMode injects Claude Code system prompt to match
+// the real Claude Code request format:
+//   system[0]: billing header (no cache_control)
+//   system[1]: "You are a Claude agent, built on Anthropic's Claude Agent SDK." (with cache_control)
+//   system[2..]: user's system messages (with cache_control on last)
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 	system := gjson.GetBytes(payload, "system")
-	claudeCodeInstructions := `[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}]`
+
+	billingText := generateBillingHeader(payload)
+	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
+	agentBlock := `{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK.","cache_control":{"type":"ephemeral","ttl":"1h"}}`
 
 	if strictMode {
-		// Strict mode: replace all system messages with Claude Code prompt only
-		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
+		// Strict mode: billing header + agent identifier only
+		result := "[" + billingBlock + "," + agentBlock + "]"
+		payload, _ = sjson.SetRawBytes(payload, "system", []byte(result))
 		return payload
 	}
 
-	// Non-strict mode (default): prepend Claude Code prompt to existing system messages
-	if system.IsArray() {
-		if gjson.GetBytes(payload, "system.0.text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
-			system.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "text" {
-					claudeCodeInstructions, _ = sjson.SetRaw(claudeCodeInstructions, "-1", part.Raw)
-				}
-				return true
-			})
-			payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
-		}
-	} else {
-		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
+	// Non-strict mode: billing header + agent identifier + user system messages
+	// Skip if already injected
+	firstText := gjson.GetBytes(payload, "system.0.text").String()
+	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
+		return payload
 	}
+
+	result := "[" + billingBlock + "," + agentBlock
+	if system.IsArray() {
+		system.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" {
+				// Add cache_control with ttl to user system messages if not present
+				partJSON := part.Raw
+				if !part.Get("cache_control").Exists() {
+					partJSON, _ = sjson.Set(partJSON, "cache_control.type", "ephemeral")
+					partJSON, _ = sjson.Set(partJSON, "cache_control.ttl", "1h")
+				}
+				result += "," + partJSON
+			}
+			return true
+		})
+	}
+	result += "]"
+
+	payload, _ = sjson.SetRawBytes(payload, "system", []byte(result))
 	return payload
 }
 
