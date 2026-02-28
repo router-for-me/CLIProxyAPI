@@ -387,7 +387,7 @@ func TestAddOrUpdateClientSkipsUnchanged(t *testing.T) {
 	}
 }
 
-func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
+func TestAddOrUpdateClientUpdatesHashWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")
 	if err := os.WriteFile(authFile, []byte(`{"type":"demo","api_key":"k"}`), 0o644); err != nil {
@@ -406,8 +406,8 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 
 	w.addOrUpdateClient(authFile)
 
-	if got := atomic.LoadInt32(&reloads); got != 1 {
-		t.Fatalf("expected reload callback once, got %d", got)
+	if got := atomic.LoadInt32(&reloads); got != 0 {
+		t.Fatalf("expected no reload callback for auth update, got %d", got)
 	}
 	// Use normalizeAuthPath to match how addOrUpdateClient stores the key
 	normalized := w.normalizeAuthPath(authFile)
@@ -416,7 +416,7 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 	}
 }
 
-func TestRemoveClientRemovesHash(t *testing.T) {
+func TestRemoveClientRemovesHashWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")
 	var reloads int32
@@ -436,8 +436,8 @@ func TestRemoveClientRemovesHash(t *testing.T) {
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected hash to be removed after deletion")
 	}
-	if got := atomic.LoadInt32(&reloads); got != 1 {
-		t.Fatalf("expected reload callback once, got %d", got)
+	if got := atomic.LoadInt32(&reloads); got != 0 {
+		t.Fatalf("expected no reload callback for auth removal, got %d", got)
 	}
 }
 
@@ -631,7 +631,7 @@ func TestStopConfigReloadTimerSafeWhenNil(t *testing.T) {
 	w.stopConfigReloadTimer()
 }
 
-func TestHandleEventRemovesAuthFile(t *testing.T) {
+func TestHandleEventRemovesAuthFileWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "remove.json")
 	if err := os.WriteFile(authFile, []byte(`{"type":"demo"}`), 0o644); err != nil {
@@ -655,8 +655,8 @@ func TestHandleEventRemovesAuthFile(t *testing.T) {
 
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
 
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected reload callback once, got %d", reloads)
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("expected no reload callback for auth removal, got %d", reloads)
 	}
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected hash entry to be removed")
@@ -853,8 +853,8 @@ func TestHandleEventAuthWriteTriggersUpdate(t *testing.T) {
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Write})
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected auth write to trigger reload callback, got %d", reloads)
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("expected auth write to avoid global reload callback, got %d", reloads)
 	}
 }
 
@@ -921,7 +921,7 @@ func TestHandleEventAtomicReplaceUnchangedSkips(t *testing.T) {
 	}
 }
 
-func TestHandleEventAtomicReplaceChangedTriggersUpdate(t *testing.T) {
+func TestHandleEventAtomicReplaceChangedTriggersIncrementalUpdateOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
 	if err := os.MkdirAll(authDir, 0o755); err != nil {
@@ -950,8 +950,8 @@ func TestHandleEventAtomicReplaceChangedTriggersUpdate(t *testing.T) {
 	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = hexString(oldSum[:])
 
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Rename})
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected changed atomic replace to trigger update, got %d", reloads)
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("expected changed atomic replace to avoid global reload, got %d", reloads)
 	}
 }
 
@@ -982,7 +982,7 @@ func TestHandleEventRemoveUnknownFileIgnored(t *testing.T) {
 	}
 }
 
-func TestHandleEventRemoveKnownFileDeletes(t *testing.T) {
+func TestHandleEventRemoveKnownFileDeletesWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
 	if err := os.MkdirAll(authDir, 0o755); err != nil {
@@ -1005,8 +1005,8 @@ func TestHandleEventRemoveKnownFileDeletes(t *testing.T) {
 	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = "hash"
 
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected known remove to trigger reload, got %d", reloads)
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("expected known remove to avoid global reload, got %d", reloads)
 	}
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected known auth hash to be deleted")

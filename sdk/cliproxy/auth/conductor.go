@@ -60,12 +60,13 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
-	quotaBackoffBase      = time.Second
-	quotaBackoffMax       = 30 * time.Minute
+	refreshCheckInterval       = 5 * time.Second
+	refreshMaxConcurrency      = 16
+	refreshPendingBackoff      = time.Minute
+	refreshFailureBackoff      = 5 * time.Minute
+	refreshNonRetryableBackoff = 24 * time.Hour
+	quotaBackoffBase           = time.Second
+	quotaBackoffMax            = 30 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -1567,11 +1568,11 @@ func statusCodeFromResult(err *Error) int {
 func isNonRetryableRequestRetryStatus(status int) bool {
 	switch status {
 	case http.StatusUnauthorized, // 401
-		http.StatusPaymentRequired, // 402
-		http.StatusForbidden,       // 403
-		http.StatusNotFound,        // 404
+		http.StatusPaymentRequired,     // 402
+		http.StatusForbidden,           // 403
+		http.StatusNotFound,            // 404
 		http.StatusUnprocessableEntity, // 422
-		http.StatusTooManyRequests: // 429
+		http.StatusTooManyRequests:     // 429
 		return true
 	default:
 		return false
@@ -2229,7 +2230,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if err != nil {
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+			current.NextRefreshAfter = now.Add(refreshBackoffForError(err))
 			current.LastError = &Error{Message: err.Error()}
 			m.auths[id] = current
 		}
@@ -2249,6 +2250,13 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.LastError = nil
 	updated.UpdatedAt = now
 	_, _ = m.Update(ctx, updated)
+}
+
+func refreshBackoffForError(err error) time.Duration {
+	if util.IsNonRetryableRefreshError(err) {
+		return refreshNonRetryableBackoff
+	}
+	return refreshFailureBackoff
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

@@ -26,13 +26,15 @@ type FileTokenStore struct {
 }
 
 const (
-	metadataKeyStatus       = "status"
-	metadataKeyStatusMsg    = "status_message"
-	metadataKeyUnavailable  = "unavailable"
-	metadataKeyQuota        = "quota"
-	metadataKeyLastError    = "last_error"
-	metadataKeyNextRetry    = "next_retry_after"
-	metadataKeyModelStates  = "model_states"
+	// runtime metadata keys persist transient execution state to disk so that
+	// cooldown/error decisions survive process restarts.
+	metadataKeyStatus      = "runtime_status"
+	metadataKeyStatusMsg   = "runtime_status_message"
+	metadataKeyUnavailable = "runtime_unavailable"
+	metadataKeyQuota       = "runtime_quota"
+	metadataKeyLastError   = "runtime_last_error"
+	metadataKeyNextRetry   = "runtime_next_retry_after"
+	metadataKeyModelStates = "runtime_model_states"
 )
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
@@ -469,6 +471,8 @@ func cloneMetadata(src map[string]any) map[string]any {
 	return dst
 }
 
+// applyRuntimeStateToMetadata stores runtime-only account/model health state into
+// namespaced metadata fields so state can be restored after restart.
 func applyRuntimeStateToMetadata(metadata map[string]any, auth *cliproxyauth.Auth) {
 	if metadata == nil || auth == nil {
 		return
@@ -507,6 +511,8 @@ func applyRuntimeStateToMetadata(metadata map[string]any, auth *cliproxyauth.Aut
 	}
 }
 
+// restoreRuntimeStateFromMetadata restores runtime-only state written by
+// applyRuntimeStateToMetadata to avoid relearning cooldown/error state on startup.
 func restoreRuntimeStateFromMetadata(auth *cliproxyauth.Auth, metadata map[string]any) {
 	if auth == nil || metadata == nil {
 		return
