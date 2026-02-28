@@ -75,6 +75,10 @@ passthrough-headers: false
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
 
+# Maximum number of different credentials to try for one failed request.
+# Set to 0 to keep legacy behavior (try all available credentials).
+max-retry-credentials: 0
+
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 

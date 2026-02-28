@@ -1239,6 +1239,67 @@ func TestReloadConfigFiltersAffectedOAuthProviders(t *testing.T) {
 	}
 }
 
+func TestReloadConfigTriggersCallbackForMaxRetryCredentialsChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	oldCfg := &config.Config{
+		AuthDir:             authDir,
+		MaxRetryCredentials: 0,
+		RequestRetry:        1,
+		MaxRetryInterval:    5,
+	}
+	newCfg := &config.Config{
+		AuthDir:             authDir,
+		MaxRetryCredentials: 2,
+		RequestRetry:        1,
+		MaxRetryInterval:    5,
+	}
+	data, errMarshal := yaml.Marshal(newCfg)
+	if errMarshal != nil {
+		t.Fatalf("failed to marshal config: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(configPath, data, 0o644); errWrite != nil {
+		t.Fatalf("failed to write config: %v", errWrite)
+	}
+
+	callbackCalls := 0
+	callbackMaxRetryCredentials := -1
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(cfg *config.Config) {
+			callbackCalls++
+			if cfg != nil {
+				callbackMaxRetryCredentials = cfg.MaxRetryCredentials
+			}
+		},
+	}
+	w.SetConfig(oldCfg)
+
+	if ok := w.reloadConfig(); !ok {
+		t.Fatal("expected reloadConfig to succeed")
+	}
+
+	if callbackCalls != 1 {
+		t.Fatalf("expected reload callback to be called once, got %d", callbackCalls)
+	}
+	if callbackMaxRetryCredentials != 2 {
+		t.Fatalf("expected callback MaxRetryCredentials=2, got %d", callbackMaxRetryCredentials)
+	}
+
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.config == nil || w.config.MaxRetryCredentials != 2 {
+		t.Fatalf("expected watcher config MaxRetryCredentials=2, got %+v", w.config)
+	}
+}
+
 func TestStartFailsWhenAuthDirMissing(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
