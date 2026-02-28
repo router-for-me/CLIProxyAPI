@@ -14,14 +14,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/fallback"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -287,6 +290,15 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 //   - cfg: The new application configuration
 func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
 
+// runtimeConfig returns the full Config (including model-fallback settings)
+// from the AuthManager's runtime config store.
+func (h *BaseAPIHandler) runtimeConfig() *internalconfig.Config {
+	if h.AuthManager == nil {
+		return nil
+	}
+	return h.AuthManager.RuntimeConfig()
+}
+
 // GetAlt extracts the 'alt' parameter from the request query string.
 // It checks both 'alt' and '$alt' parameters and returns the appropriate value.
 //
@@ -466,20 +478,157 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 }
 
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
-// This path is the only supported execution route.
+// When model fallback is enabled, it attempts alternative models on eligible errors.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
+
+	rtCfg := h.runtimeConfig()
+	if !fallback.IsEnabled(rtCfg) {
+		return h.executeNonStreamOnce(ctx, handlerType, normalizedModel, rawJSON, alt, providers)
+	}
+
+	// Plan fallback chain
+	chain := fallback.Plan(normalizedModel, rtCfg)
+	deadline := fallback.Deadline(rtCfg)
+	triggerAfterRetries := fallback.TriggerAfterRetries(rtCfg)
+	var lastErr *interfaces.ErrorMessage
+	startTime := time.Now()
+	modelRetries := 0
+
+	for i := 0; i < len(chain); {
+		attemptModel := chain[i]
+		// Check total timeout budget
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			log.WithFields(log.Fields{
+				"requested_model":     normalizedModel,
+				"attempt_model":       attemptModel,
+				"attempt_index":       i,
+				"fallback_result":     "timeout",
+				"fallback_elapsed_ms": time.Since(startTime).Milliseconds(),
+			}).Warn("model fallback total timeout exceeded")
+			break
+		}
+
+		// Resolve providers for this attempt model
+		var attemptProviders []string
+		if i == 0 {
+			attemptProviders = providers
+		} else {
+			parsed := thinking.ParseSuffix(attemptModel)
+			attemptProviders = fallback.FilterProviders(thinking.ParseSuffix(normalizedModel).ModelName, parsed.ModelName, rtCfg)
+			if len(attemptProviders) == 0 {
+				log.WithFields(log.Fields{
+					"requested_model": normalizedModel,
+					"attempt_model":   attemptModel,
+					"attempt_index":   i,
+					"fallback_reason": "no_providers",
+				}).Warn("model fallback skipping candidate: no available providers")
+				modelRetries = 0
+				i++
+				continue
+			}
+		}
+
+		data, headers, execErr := h.executeNonStreamOnce(ctx, handlerType, attemptModel, rawJSON, alt, attemptProviders)
+		if execErr == nil {
+			// Success — apply response rewriting and headers
+			if i > 0 {
+				data = fallback.RewriteResponseModel(data, normalizedModel, attemptModel, rtCfg)
+				if headers == nil {
+					headers = make(http.Header)
+				}
+				fallback.SetFallbackHeaders(headers, normalizedModel, attemptModel, i+1, rtCfg)
+				log.WithFields(log.Fields{
+					"requested_model":     normalizedModel,
+					"final_model":         attemptModel,
+					"attempt_index":       i,
+					"fallback_result":     "success",
+					"fallback_elapsed_ms": time.Since(startTime).Milliseconds(),
+				}).Info("model fallback succeeded")
+			}
+			return data, headers, nil
+		}
+
+		lastErr = execErr
+
+		// Classify error for fallback eligibility
+		decision := fallback.Classify(execErr.Error, i, rtCfg)
+		if !decision.ShouldFallback {
+			if modelRetries > 0 {
+				log.WithFields(log.Fields{
+					"requested_model": normalizedModel,
+					"attempt_model":   attemptModel,
+					"attempt_index":   i,
+					"fallback_reason": "armed_by_previous_retry",
+				}).Info("model fallback armed by previous eligible failure, switching candidate")
+				modelRetries = 0
+				i++
+				continue
+			}
+			log.WithFields(log.Fields{
+				"requested_model": normalizedModel,
+				"attempt_model":   attemptModel,
+				"attempt_index":   i,
+				"fallback_reason": decision.Reason,
+				"status_code":     decision.StatusCode,
+			}).Debug("model fallback not triggered")
+			return nil, nil, lastErr
+		}
+
+		if modelRetries < triggerAfterRetries {
+			modelRetries++
+			log.WithFields(log.Fields{
+				"requested_model":       normalizedModel,
+				"attempt_model":         attemptModel,
+				"attempt_index":         i,
+				"fallback_reason":       decision.Reason,
+				"status_code":           decision.StatusCode,
+				"model_retry_count":     modelRetries,
+				"retry_before_fallback": triggerAfterRetries,
+			}).Info("model fallback delayed, retrying current model before switching")
+			continue
+		}
+		modelRetries = 0
+
+		log.WithFields(log.Fields{
+			"requested_model": normalizedModel,
+			"attempt_model":   attemptModel,
+			"attempt_index":   i,
+			"fallback_reason": decision.Reason,
+			"status_code":     decision.StatusCode,
+		}).Info("model fallback triggered, trying next candidate")
+		i++
+	}
+
+	// All attempts exhausted
+	if lastErr == nil {
+		// Timeout hit before any attempt could execute
+		lastErr = &interfaces.ErrorMessage{
+			StatusCode: http.StatusGatewayTimeout,
+			Error:      fmt.Errorf("model fallback timeout: no attempt executed within deadline"),
+		}
+	}
+	log.WithFields(log.Fields{
+		"requested_model":     normalizedModel,
+		"fallback_result":     "exhausted",
+		"fallback_elapsed_ms": time.Since(startTime).Milliseconds(),
+	}).Warn("model fallback chain exhausted")
+	return nil, nil, lastErr
+}
+
+// executeNonStreamOnce performs a single non-streaming execution attempt for a specific model.
+func (h *BaseAPIHandler) executeNonStreamOnce(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, providers []string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
 	}
 	req := coreexecutor.Request{
-		Model:   normalizedModel,
+		Model:   modelName,
 		Payload: payload,
 	}
 	opts := coreexecutor.Options{
@@ -511,21 +660,149 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
 }
 
-// ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
-// This path is the only supported execution route.
+// ExecuteCountWithAuthManager executes a non-streaming token count request via the core auth manager.
+// When model fallback is enabled, it attempts alternative models on eligible errors.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
+
+	rtCfg := h.runtimeConfig()
+	if !fallback.IsEnabled(rtCfg) {
+		return h.executeCountOnce(ctx, handlerType, normalizedModel, rawJSON, alt, providers)
+	}
+
+	chain := fallback.Plan(normalizedModel, rtCfg)
+	deadline := fallback.Deadline(rtCfg)
+	triggerAfterRetries := fallback.TriggerAfterRetries(rtCfg)
+	var lastErr *interfaces.ErrorMessage
+	startTime := time.Now()
+	modelRetries := 0
+
+	for i := 0; i < len(chain); {
+		attemptModel := chain[i]
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			log.WithFields(log.Fields{
+				"requested_model":     normalizedModel,
+				"attempt_model":       attemptModel,
+				"attempt_index":       i,
+				"fallback_result":     "timeout",
+				"fallback_elapsed_ms": time.Since(startTime).Milliseconds(),
+			}).Warn("count model fallback total timeout exceeded")
+			break
+		}
+
+		var attemptProviders []string
+		if i == 0 {
+			attemptProviders = providers
+		} else {
+			parsed := thinking.ParseSuffix(attemptModel)
+			attemptProviders = fallback.FilterProviders(thinking.ParseSuffix(normalizedModel).ModelName, parsed.ModelName, rtCfg)
+			if len(attemptProviders) == 0 {
+				log.WithFields(log.Fields{
+					"requested_model": normalizedModel,
+					"attempt_model":   attemptModel,
+					"attempt_index":   i,
+					"fallback_reason": "no_providers",
+				}).Warn("count model fallback skipping candidate: no available providers")
+				modelRetries = 0
+				i++
+				continue
+			}
+		}
+
+		data, headers, execErr := h.executeCountOnce(ctx, handlerType, attemptModel, rawJSON, alt, attemptProviders)
+		if execErr == nil {
+			if i > 0 {
+				data = fallback.RewriteResponseModel(data, normalizedModel, attemptModel, rtCfg)
+				if headers == nil {
+					headers = make(http.Header)
+				}
+				fallback.SetFallbackHeaders(headers, normalizedModel, attemptModel, i+1, rtCfg)
+				log.WithFields(log.Fields{
+					"requested_model":     normalizedModel,
+					"final_model":         attemptModel,
+					"attempt_index":       i,
+					"fallback_result":     "success",
+					"fallback_elapsed_ms": time.Since(startTime).Milliseconds(),
+				}).Info("count model fallback succeeded")
+			}
+			return data, headers, nil
+		}
+
+		lastErr = execErr
+		decision := fallback.Classify(execErr.Error, i, rtCfg)
+		if !decision.ShouldFallback {
+			if modelRetries > 0 {
+				log.WithFields(log.Fields{
+					"requested_model": normalizedModel,
+					"attempt_model":   attemptModel,
+					"attempt_index":   i,
+					"fallback_reason": "armed_by_previous_retry",
+				}).Info("count model fallback armed by previous eligible failure, switching candidate")
+				modelRetries = 0
+				i++
+				continue
+			}
+			log.WithFields(log.Fields{
+				"requested_model": normalizedModel,
+				"attempt_model":   attemptModel,
+				"attempt_index":   i,
+				"fallback_reason": decision.Reason,
+				"status_code":     decision.StatusCode,
+			}).Debug("count model fallback not triggered")
+			return nil, nil, lastErr
+		}
+
+		if modelRetries < triggerAfterRetries {
+			modelRetries++
+			log.WithFields(log.Fields{
+				"requested_model":       normalizedModel,
+				"attempt_model":         attemptModel,
+				"attempt_index":         i,
+				"fallback_reason":       decision.Reason,
+				"status_code":           decision.StatusCode,
+				"model_retry_count":     modelRetries,
+				"retry_before_fallback": triggerAfterRetries,
+			}).Info("count model fallback delayed, retrying current model before switching")
+			continue
+		}
+		modelRetries = 0
+
+		log.WithFields(log.Fields{
+			"requested_model": normalizedModel,
+			"attempt_model":   attemptModel,
+			"attempt_index":   i,
+			"fallback_reason": decision.Reason,
+			"status_code":     decision.StatusCode,
+		}).Info("count model fallback triggered, trying next candidate")
+		i++
+	}
+	if lastErr == nil {
+		lastErr = &interfaces.ErrorMessage{
+			StatusCode: http.StatusGatewayTimeout,
+			Error:      fmt.Errorf("model fallback timeout: no attempt executed within deadline"),
+		}
+	}
+	log.WithFields(log.Fields{
+		"requested_model":     normalizedModel,
+		"fallback_result":     "exhausted",
+		"fallback_elapsed_ms": time.Since(startTime).Milliseconds(),
+	}).Warn("count model fallback chain exhausted")
+	return nil, nil, lastErr
+}
+
+// executeCountOnce performs a single count execution attempt for a specific model.
+func (h *BaseAPIHandler) executeCountOnce(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, providers []string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
 	}
 	req := coreexecutor.Request{
-		Model:   normalizedModel,
+		Model:   modelName,
 		Payload: payload,
 	}
 	opts := coreexecutor.Options{
@@ -558,7 +835,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 }
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
-// This path is the only supported execution route.
+// When model fallback is enabled, it attempts alternative models on eligible pre-first-byte errors.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
@@ -568,6 +845,17 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, nil, errChan
 	}
+
+	rtCfg := h.runtimeConfig()
+	streamFallbackEnabled := fallback.IsStreamEnabled(rtCfg)
+	var chain []string
+	var deadline time.Time
+	if streamFallbackEnabled {
+		chain = fallback.Plan(normalizedModel, rtCfg)
+		deadline = fallback.Deadline(rtCfg)
+	}
+
+	// Initial stream attempt
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
@@ -585,25 +873,102 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-	if err != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
-		close(errChan)
-		return nil, nil, errChan
+	triggerAfterRetries := fallback.TriggerAfterRetries(rtCfg)
+	currentModel := normalizedModel // Track which model is currently being streamed.
+	currentProviders := providers   // Track providers for the current model.
+	fallbackAttempts := 0           // Chain index of currentModel (0 means original model).
+	modelFallbackRetries := 0       // Retry count before model switching for current model.
+	executeStreamForModel := func(attemptModel string, attemptProviders []string) (*coreexecutor.StreamResult, error) {
+		attemptReq := coreexecutor.Request{Model: attemptModel, Payload: payload}
+		attemptOpts := opts
+		attemptMeta := requestExecutionMetadata(ctx)
+		attemptMeta[coreexecutor.RequestedModelMetadataKey] = attemptModel
+		attemptOpts.Metadata = attemptMeta
+		return h.AuthManager.ExecuteStream(ctx, attemptProviders, attemptReq, attemptOpts)
 	}
+	streamResult, err := executeStreamForModel(currentModel, currentProviders)
+	if err != nil {
+		// Try model fallback on initial connection failure
+		if streamFallbackEnabled && len(chain) > 1 {
+			for {
+				decision := fallback.Classify(err, fallbackAttempts, rtCfg)
+				fallbackArmed := decision.ShouldFallback || modelFallbackRetries > 0
+				if !fallbackArmed {
+					break
+				}
+				if decision.ShouldFallback && modelFallbackRetries < triggerAfterRetries {
+					modelFallbackRetries++
+					retryResult, retryErr := executeStreamForModel(currentModel, currentProviders)
+					if retryErr == nil {
+						streamResult = retryResult
+						err = nil
+						break
+					}
+					err = retryErr
+					continue
+				}
+
+				switched := false
+				for fi := fallbackAttempts + 1; fi < len(chain); fi++ {
+					if !deadline.IsZero() && time.Now().After(deadline) {
+						break
+					}
+					attemptModel := chain[fi]
+					parsed := thinking.ParseSuffix(attemptModel)
+					attemptProviders := fallback.FilterProviders(thinking.ParseSuffix(normalizedModel).ModelName, parsed.ModelName, rtCfg)
+					if len(attemptProviders) == 0 {
+						continue
+					}
+					fbResult, fbErr := executeStreamForModel(attemptModel, attemptProviders)
+					if fbErr == nil {
+						streamResult = fbResult
+						currentModel = attemptModel
+						currentProviders = attemptProviders
+						fallbackAttempts = fi
+						modelFallbackRetries = 0
+						err = nil
+						log.WithFields(log.Fields{
+							"requested_model": normalizedModel,
+							"final_model":     attemptModel,
+							"attempt_index":   fi,
+							"fallback_result": "success",
+						}).Info("stream model fallback succeeded on initial connection")
+						switched = true
+						break
+					}
+					fbDecision := fallback.Classify(fbErr, fi, rtCfg)
+					if !fbDecision.ShouldFallback {
+						err = fbErr
+						break
+					}
+					err = fbErr
+				}
+				if err == nil || switched {
+					break
+				}
+				break
+			}
+		}
+		if err != nil {
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			status := http.StatusInternalServerError
+			if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+				if code := se.StatusCode(); code > 0 {
+					status = code
+				}
+			}
+			var addon http.Header
+			if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+				if hdr := he.Headers(); hdr != nil {
+					addon = hdr.Clone()
+				}
+			}
+			errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+			close(errChan)
+			return nil, nil, errChan
+		}
+	}
+	modelFallbackRetries = 0
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
 	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
@@ -612,6 +977,9 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		upstreamHeaders = cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
 		if upstreamHeaders == nil {
 			upstreamHeaders = make(http.Header)
+		}
+		if fallbackAttempts > 0 {
+			fallback.SetFallbackHeaders(upstreamHeaders, normalizedModel, currentModel, fallbackAttempts+1, rtCfg)
 		}
 	}
 	chunks := streamResult.Chunks
@@ -683,12 +1051,14 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				}
 				if chunk.Err != nil {
 					streamErr := chunk.Err
-					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
-					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
+					// Bootstrap recovery: retry same model before any payload is sent
+					// (auth rotation / transient recovery). Always prelude-only.
 					if !sentPayload {
 						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
-							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+							retryReq := req
+							retryReq.Model = currentModel
+							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, currentProviders, retryReq, opts)
 							if retryErr == nil {
 								if passthroughHeadersEnabled {
 									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
@@ -697,6 +1067,83 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 								continue outer
 							}
 							streamErr = retryErr
+						}
+					}
+
+					// Model fallback: try alternative models.
+					// Gated by PreludeOnly: when true (default), only before first byte;
+					// when false, also after partial data has been sent (experimental).
+					preludeOnly := rtCfg == nil || rtCfg.ModelFallback.Stream.PreludeOnly == nil || *rtCfg.ModelFallback.Stream.PreludeOnly
+					canFallback := !sentPayload || !preludeOnly
+					if canFallback && streamFallbackEnabled && len(chain) > 1 {
+						fbDecision := fallback.Classify(streamErr, fallbackAttempts, rtCfg)
+						fallbackArmed := fbDecision.ShouldFallback || modelFallbackRetries > 0
+						if fallbackArmed {
+							for fbDecision.ShouldFallback && modelFallbackRetries < triggerAfterRetries {
+								modelFallbackRetries++
+								retryResult, retryErr := executeStreamForModel(currentModel, currentProviders)
+								if retryErr == nil {
+									bootstrapRetries = 0
+									if passthroughHeadersEnabled {
+										replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+										if fallbackAttempts > 0 {
+											fallback.SetFallbackHeaders(upstreamHeaders, normalizedModel, currentModel, fallbackAttempts+1, rtCfg)
+										}
+									}
+									chunks = retryResult.Chunks
+									log.WithFields(log.Fields{
+										"requested_model":       normalizedModel,
+										"attempt_model":         currentModel,
+										"attempt_index":         fallbackAttempts,
+										"model_retry_count":     modelFallbackRetries,
+										"retry_before_fallback": triggerAfterRetries,
+									}).Info("stream model fallback delayed, retrying current model before switching")
+									continue outer
+								}
+								streamErr = retryErr
+								fbDecision = fallback.Classify(streamErr, fallbackAttempts, rtCfg)
+							}
+
+							if fbDecision.ShouldFallback || modelFallbackRetries > 0 {
+								for fi := fallbackAttempts + 1; fi < len(chain); fi++ {
+									if !deadline.IsZero() && time.Now().After(deadline) {
+										break
+									}
+									attemptModel := chain[fi]
+									parsed := thinking.ParseSuffix(attemptModel)
+									attemptProviders := fallback.FilterProviders(thinking.ParseSuffix(normalizedModel).ModelName, parsed.ModelName, rtCfg)
+									if len(attemptProviders) == 0 {
+										continue
+									}
+									fbResult, fbErr := executeStreamForModel(attemptModel, attemptProviders)
+									if fbErr == nil {
+										currentModel = attemptModel
+										currentProviders = attemptProviders
+										fallbackAttempts = fi
+										modelFallbackRetries = 0
+										bootstrapRetries = 0
+										if passthroughHeadersEnabled {
+											replaceHeader(upstreamHeaders, FilterUpstreamHeaders(fbResult.Headers))
+											fallback.SetFallbackHeaders(upstreamHeaders, normalizedModel, attemptModel, fi+1, rtCfg)
+										}
+										chunks = fbResult.Chunks
+										log.WithFields(log.Fields{
+											"requested_model": normalizedModel,
+											"attempt_model":   attemptModel,
+											"attempt_index":   fi,
+											"fallback_result": "success",
+										}).Info("stream model fallback succeeded")
+										continue outer
+									}
+									innerDecision := fallback.Classify(fbErr, fi, rtCfg)
+									if !innerDecision.ShouldFallback {
+										streamErr = fbErr
+										break
+									}
+									streamErr = fbErr
+									fallbackAttempts = fi
+								}
+							}
 						}
 					}
 
@@ -723,7 +1170,12 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 						}
 					}
 					sentPayload = true
-					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+					chunkData := cloneBytes(chunk.Payload)
+					// Rewrite model in stream chunks if using a fallback model
+					if currentModel != normalizedModel {
+						chunkData = fallback.RewriteStreamChunkModel(chunkData, normalizedModel, currentModel, rtCfg)
+					}
+					if okSendData := sendData(chunkData); !okSendData {
 						return
 					}
 				}

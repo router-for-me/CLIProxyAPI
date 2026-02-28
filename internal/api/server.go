@@ -592,6 +592,17 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
 		mgmt.PATCH("/routing/strategy", s.mgmt.PutRoutingStrategy)
 
+		mgmt.GET("/model-fallback", s.mgmt.GetModelFallback)
+		mgmt.PUT("/model-fallback", s.mgmt.PutModelFallback)
+		mgmt.PATCH("/model-fallback", s.mgmt.PutModelFallback)
+		mgmt.GET("/model-fallback/enabled", s.mgmt.GetModelFallbackEnabled)
+		mgmt.PUT("/model-fallback/enabled", s.mgmt.PutModelFallbackEnabled)
+		mgmt.PATCH("/model-fallback/enabled", s.mgmt.PutModelFallbackEnabled)
+		mgmt.GET("/model-fallback/rules", s.mgmt.GetModelFallbackRules)
+		mgmt.PUT("/model-fallback/rules", s.mgmt.PutModelFallbackRules)
+		mgmt.PATCH("/model-fallback/rules", s.mgmt.PatchModelFallbackRules)
+		mgmt.DELETE("/model-fallback/rules", s.mgmt.DeleteModelFallbackRules)
+
 		mgmt.GET("/claude-api-key", s.mgmt.GetClaudeKeys)
 		mgmt.PUT("/claude-api-key", s.mgmt.PutClaudeKeys)
 		mgmt.PATCH("/claude-api-key", s.mgmt.PatchClaudeKey)

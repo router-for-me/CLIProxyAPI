@@ -291,6 +291,48 @@ nonstream-keepalive-interval: 0
 #   kimi:
 #     - "kimi-k2-thinking"
 
+# Model error auto-fallback configuration.
+# When a model request fails (e.g., 404, 429, 500), automatically retry with backup model IDs.
+# model-fallback:
+#   enabled: false                          # Master switch (default: false)
+#   max-attempts: 3                         # Maximum fallback attempts per request
+#   trigger-after-retries: 1                # Retry current model N times before switching fallback model (omit to inherit request-retry)
+#   max-total-timeout-ms: 15000             # Total time budget for all fallback attempts (ms, -1 to disable)
+#   trigger-status-codes:                   # HTTP status codes that trigger fallback
+#     - 404
+#     - 408
+#     - 429
+#     - 500
+#     - 502
+#     - 503
+#     - 504
+#   no-fallback-status-codes:               # HTTP status codes that should never trigger fallback
+#     - 400
+#     - 401
+#     - 403
+#   allow-network-error: false              # Whether to trigger fallback on network errors
+#   allow-cross-provider: false             # Allow fallback to models from different providers
+#   preserve-requested-model: false         # Rewrite response model field back to original requested model
+#   expose-actual-model-header: false       # Add X-Actual-Model / X-Requested-Model / X-Model-Fallback-Attempts headers
+#   stream:                                 # Stream-specific fallback settings
+#     enabled: true                         # Enable stream fallback (auto-inherits from main enabled)
+#     prelude-only: true                    # Only fallback before first byte is sent
+#   rules:                                  # Model fallback rules
+#     - from: "claude-sonnet-4"             # Source model
+#       to:                                 # Ordered list of fallback targets
+#         - "claude-sonnet-4-20250514"
+#         - "claude-3.5-sonnet"
+#     - from: "gemini-2.5-pro"
+#       to:
+#         - "gemini-2.5-flash"
+#         - "gemini-2.0-flash"
+#   model-overrides:                        # Per-model overrides (map keyed by model name)
+#     critical-model:
+#       max-attempts: 5
+#       to:
+#         - "fallback-model-a"
+#         - "fallback-model-b"
+
 # Optional payload configuration
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.

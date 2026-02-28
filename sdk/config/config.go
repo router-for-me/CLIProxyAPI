@@ -19,6 +19,10 @@ type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
 type PayloadModelRule = internalconfig.PayloadModelRule
+type ModelFallback = internalconfig.ModelFallback
+type ModelFallbackRule = internalconfig.ModelFallbackRule
+type ModelFallbackOverride = internalconfig.ModelFallbackOverride
+type StreamFallbackConfig = internalconfig.StreamFallbackConfig
 
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey

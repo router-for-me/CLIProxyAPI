@@ -185,6 +185,12 @@ type ModelFallback struct {
 	// Each attempt may still undergo internal auth/provider rotation. Default is 3.
 	MaxAttempts int `yaml:"max-attempts" json:"max-attempts"`
 
+	// TriggerAfterRetries delays model switching until the current model has produced
+	// this many fallback-eligible failures.
+	// When omitted (nil), it inherits top-level request-retry.
+	// Set to 0 for immediate model switch on the first fallback-eligible error.
+	TriggerAfterRetries *int `yaml:"trigger-after-retries,omitempty" json:"trigger-after-retries,omitempty"`
+
 	// MaxTotalTimeoutMS sets the total time budget in milliseconds for the entire
 	// fallback chain. Default is 15000. Set to -1 to explicitly disable the timeout.
 	MaxTotalTimeoutMS int `yaml:"max-total-timeout-ms" json:"max-total-timeout-ms"`
@@ -810,8 +816,30 @@ func (cfg *Config) SanitizeModelFallback() {
 	if len(fb.NoFallbackStatusCodes) == 0 {
 		fb.NoFallbackStatusCodes = []int{400, 401, 403}
 	}
+	if fb.TriggerAfterRetries != nil {
+		v := *fb.TriggerAfterRetries
+		if v < 0 {
+			v = 0
+		}
+		if v > 10 {
+			v = 10
+		}
+		fb.TriggerAfterRetries = &v
+	}
+	// Sanitize model overrides: cap MaxAttempts and normalize keys to lowercase.
+	if len(fb.ModelOverrides) > 0 {
+		normalized := make(map[string]ModelFallbackOverride, len(fb.ModelOverrides))
+		for key, override := range fb.ModelOverrides {
+			if override.MaxAttempts > 10 {
+				override.MaxAttempts = 10
+			}
+			normalized[strings.ToLower(strings.TrimSpace(key))] = override
+		}
+		fb.ModelOverrides = normalized
+	}
 	// Stream defaults: nil fields inherit sensible defaults.
 	// *bool allows distinguishing "omitted" from "explicitly set to false".
+	// Always sync Stream.Enabled with parent Enabled when it was originally nil.
 	if fb.Stream.Enabled == nil {
 		v := fb.Enabled
 		fb.Stream.Enabled = &v
