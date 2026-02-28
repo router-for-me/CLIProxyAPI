@@ -95,3 +95,70 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", state.NextRetryAfter)
 	}
 }
+
+func TestManager_ShouldRetryAfterError_NonRetryableStatuses(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second)
+
+	model := "test-model"
+	next := time.Now().Add(5 * time.Second)
+
+	auth := &Auth{
+		ID:       "auth-429",
+		Provider: "claude",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Unavailable:    true,
+				Status:         StatusError,
+				NextRetryAfter: next,
+			},
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, maxWait := m.retrySettings()
+	testCases := []int{401, 402, 403, 404, 422, 429}
+	for _, status := range testCases {
+		wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: status, Message: "non-retryable"}, 0, []string{"claude"}, model, maxWait)
+		if shouldRetry {
+			t.Fatalf("expected shouldRetry=false for status=%d, got true (wait=%v)", status, wait)
+		}
+		if wait != 0 {
+			t.Fatalf("expected wait=0 for status=%d, got %v", status, wait)
+		}
+	}
+}
+
+func TestManager_ShouldRetryAfterError_RetriesOn408(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second)
+
+	model := "test-model"
+	next := time.Now().Add(5 * time.Second)
+
+	auth := &Auth{
+		ID:       "auth-408",
+		Provider: "claude",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Unavailable:    true,
+				Status:         StatusError,
+				NextRetryAfter: next,
+			},
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, maxWait := m.retrySettings()
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 408, Message: "timeout"}, 0, []string{"claude"}, model, maxWait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true for 408")
+	}
+	if wait <= 0 {
+		t.Fatalf("expected wait>0 for 408, got %v", wait)
+	}
+}
