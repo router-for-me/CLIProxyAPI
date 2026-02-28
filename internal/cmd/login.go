@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -29,10 +30,11 @@ import (
 const (
 	geminiCLIEndpoint       = "https://cloudcode-pa.googleapis.com"
 	geminiCLIVersion        = "v1internal"
-	geminiCLIUserAgent      = "google-api-nodejs-client/9.15.1"
-	geminiCLIApiClient      = "gl-node/22.17.0"
-	geminiCLIClientMetadata = "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
 )
+
+func getGeminiCLIUserAgent() string {
+	return misc.GeminiCLIUserAgent("")
+}
 
 type projectSelectionRequiredError struct{}
 
@@ -409,9 +411,7 @@ func callGeminiCLI(ctx context.Context, httpClient *http.Client, endpoint string
 		return fmt.Errorf("create request: %w", errRequest)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", geminiCLIUserAgent)
-	req.Header.Set("X-Goog-Api-Client", geminiCLIApiClient)
-	req.Header.Set("Client-Metadata", geminiCLIClientMetadata)
+	req.Header.Set("User-Agent", getGeminiCLIUserAgent())
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -630,7 +630,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			return false, fmt.Errorf("failed to create request: %w", errRequest)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", geminiCLIUserAgent)
+		req.Header.Set("User-Agent", getGeminiCLIUserAgent())
 		resp, errDo := httpClient.Do(req)
 		if errDo != nil {
 			return false, fmt.Errorf("failed to execute request: %w", errDo)
@@ -651,7 +651,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			return false, fmt.Errorf("failed to create request: %w", errRequest)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", geminiCLIUserAgent)
+		req.Header.Set("User-Agent", getGeminiCLIUserAgent())
 		resp, errDo = httpClient.Do(req)
 		if errDo != nil {
 			return false, fmt.Errorf("failed to execute request: %w", errDo)

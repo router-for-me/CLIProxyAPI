@@ -14,10 +14,15 @@ var antigravityModelConversionTable = map[string]string{
 	"gemini-3-pro-image-preview":              "gemini-3-pro-image",
 	"gemini-3-pro-preview":                    "gemini-3-pro-high",
 	"gemini-3-flash-preview":                  "gemini-3-flash",
+	"gemini-3.1-pro-preview":                  "gemini-3.1-pro-high",
 	"gemini-claude-sonnet-4-5":                "claude-sonnet-4-5",
 	"gemini-claude-sonnet-4-5-thinking":       "claude-sonnet-4-5-thinking",
 	"gemini-claude-opus-4-5-thinking":         "claude-opus-4-5-thinking",
 	"gemini-claude-opus-4-6-thinking":         "claude-opus-4-6-thinking",
+	"gemini-claude-sonnet-4-6":                "claude-sonnet-4-6",
+	"claude-sonnet-4-5":                       "claude-sonnet-4-6",
+	"claude-sonnet-4-5-thinking":              "claude-sonnet-4-6",
+	"claude-opus-4-5-thinking":                "claude-opus-4-6-thinking",
 }
 
 // defaultAntigravityAliases returns the default oauth-model-alias configuration
@@ -28,9 +33,13 @@ func defaultAntigravityAliases() []OAuthModelAlias {
 		{Name: "gemini-3-pro-image", Alias: "gemini-3-pro-image-preview"},
 		{Name: "gemini-3-pro-high", Alias: "gemini-3-pro-preview"},
 		{Name: "gemini-3-flash", Alias: "gemini-3-flash-preview"},
-		{Name: "claude-sonnet-4-5", Alias: "gemini-claude-sonnet-4-5"},
-		{Name: "claude-sonnet-4-5-thinking", Alias: "gemini-claude-sonnet-4-5-thinking"},
-		{Name: "claude-opus-4-5-thinking", Alias: "gemini-claude-opus-4-5-thinking"},
+		{Name: "gemini-3.1-pro-high", Alias: "gemini-3.1-pro-preview"},
+		{Name: "claude-sonnet-4-6", Alias: "gemini-claude-sonnet-4-5"},
+		{Name: "claude-sonnet-4-6", Alias: "gemini-claude-sonnet-4-5-thinking"},
+		{Name: "claude-sonnet-4-6", Alias: "claude-sonnet-4-5"},
+		{Name: "claude-sonnet-4-6", Alias: "claude-sonnet-4-5-thinking"},
+		{Name: "claude-opus-4-6-thinking", Alias: "gemini-claude-opus-4-5-thinking"},
+		{Name: "claude-opus-4-6-thinking", Alias: "claude-opus-4-5-thinking"},
 		{Name: "claude-opus-4-6-thinking", Alias: "gemini-claude-opus-4-6-thinking"},
 	}
 }
