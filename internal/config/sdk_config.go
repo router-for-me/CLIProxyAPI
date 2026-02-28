@@ -30,6 +30,10 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// AntigravityDefaultAgent specifies the default User-Agent string for Antigravity requests.
+	// Default is "antigravity". Options: "antigravity", "antigravity/1.104.0 darwin/arm64", "antigravity/1.18.3 windows/amd64".
+	AntigravityDefaultAgent string `yaml:"antigravity-default-agent,omitempty" json:"antigravity-default-agent,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
