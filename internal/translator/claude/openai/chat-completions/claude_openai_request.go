@@ -183,27 +183,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							msg, _ = sjson.SetRaw(msg, "content.-1", textPart)
 
 						case "image_url":
-							// Convert OpenAI image format to Claude Code format
-							imageURL := part.Get("image_url.url").String()
-							if strings.HasPrefix(imageURL, "data:") {
-								// Extract base64 data and media type from data URL
-								parts := strings.Split(imageURL, ",")
-								if len(parts) == 2 {
-									mediaTypePart := strings.Split(parts[0], ";")[0]
-									mediaType := strings.TrimPrefix(mediaTypePart, "data:")
-									data := parts[1]
-
-									imagePart := `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
-									imagePart, _ = sjson.Set(imagePart, "source.media_type", mediaType)
-									imagePart, _ = sjson.Set(imagePart, "source.data", data)
-									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
-								}
-							} else {
-								if imageURL != "" {
-									imagePart := `{"type":"image","source":{"type":"url","url":""}}`
-									imagePart, _ = sjson.Set(imagePart, "source.url", imageURL)
-									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
-								}
+							if imagePart, ok := convertOpenAIImageURLToClaude(extractOpenAIImageURL(part)); ok {
+								msg, _ = sjson.Set(msg, "content.-1", imagePart)
 							}
 
 						case "file":

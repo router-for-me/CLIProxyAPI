@@ -17,6 +17,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -106,6 +107,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
+	}
+	if endpoint == "/chat/completions" && shouldForceToolResultString(auth) {
+		translated = forceToolMessageContentToString(translated)
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
@@ -203,6 +207,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
+	}
+	if shouldForceToolResultString(auth) {
+		translated = forceToolMessageContentToString(translated)
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
@@ -380,6 +387,117 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model)
 	return payload
+}
+
+func shouldForceToolResultString(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes["tool_result_force_string"]), "true")
+}
+
+func forceToolMessageContentToString(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	out := payload
+	messages.ForEach(func(index, message gjson.Result) bool {
+		if message.Get("role").String() != "tool" {
+			return true
+		}
+		content := message.Get("content")
+		if !content.Exists() {
+			return true
+		}
+
+		path := fmt.Sprintf("messages.%d.content", int(index.Int()))
+		updated, err := sjson.SetBytes(out, path, toolMessageContentToString(content))
+		if err == nil {
+			out = updated
+		}
+		return true
+	})
+	return out
+}
+
+func toolMessageContentToString(content gjson.Result) string {
+	if !content.Exists() {
+		return ""
+	}
+	if content.Type == gjson.Null {
+		return ""
+	}
+
+	isNullPlaceholder := func(v string) bool {
+		return strings.EqualFold(strings.TrimSpace(v), "null")
+	}
+
+	if content.Type == gjson.String {
+		value := content.String()
+		if isNullPlaceholder(value) {
+			return ""
+		}
+		return value
+	}
+
+	if content.IsArray() {
+		parts := make([]string, 0, len(content.Array()))
+		content.ForEach(func(_, item gjson.Result) bool {
+			appendPart := func(value string) {
+				if strings.TrimSpace(value) == "" || isNullPlaceholder(value) {
+					return
+				}
+				parts = append(parts, value)
+			}
+
+			switch {
+			case item.Type == gjson.String:
+				appendPart(item.String())
+			case item.Get("type").String() == "text":
+				appendPart(item.Get("text").String())
+			case item.Get("type").String() == "image_url":
+				url := strings.TrimSpace(item.Get("image_url.url").String())
+				if url == "" {
+					url = strings.TrimSpace(item.Get("image_url").String())
+				}
+				appendPart(url)
+			case item.Get("text").Exists() && item.Get("text").Type == gjson.String:
+				appendPart(item.Get("text").String())
+			default:
+				appendPart(item.Raw)
+			}
+			return true
+		})
+		return strings.TrimSpace(strings.Join(parts, "\n\n"))
+	}
+
+	if content.IsObject() {
+		if text := strings.TrimSpace(content.Get("text").String()); text != "" {
+			if !isNullPlaceholder(text) {
+				return text
+			}
+		}
+		if url := strings.TrimSpace(content.Get("image_url.url").String()); url != "" {
+			if !isNullPlaceholder(url) {
+				return url
+			}
+		}
+		if imageURL := content.Get("image_url"); imageURL.Exists() && imageURL.Type == gjson.String {
+			if url := strings.TrimSpace(imageURL.String()); url != "" {
+				if !isNullPlaceholder(url) {
+					return url
+				}
+			}
+		}
+		return content.Raw
+	}
+
+	if raw := strings.TrimSpace(content.Raw); raw == "" || isNullPlaceholder(raw) {
+		return ""
+	}
+	return content.Raw
 }
 
 type statusErr struct {
