@@ -35,6 +35,36 @@ func TestAntigravityBuildRequest_SanitizesAntigravityToolSchema(t *testing.T) {
 	assertSchemaSanitizedAndPropertyPreserved(t, params)
 }
 
+func TestSanitizeAntigravityClaudeCompatFields_RemovesOutputConfig(t *testing.T) {
+	input := []byte(`{
+		"output_config":{"effort":"max"},
+		"request":{
+			"output_config":{"effort":"high"},
+			"generationConfig":{"thinkingConfig":{"thinkingBudget":1024}}
+		}
+	}`)
+
+	out := sanitizeAntigravityClaudeCompatFields(input)
+
+	var body map[string]any
+	if err := json.Unmarshal(out, &body); err != nil {
+		t.Fatalf("unmarshal sanitized body error: %v, body=%s", err, string(out))
+	}
+	if _, ok := body["output_config"]; ok {
+		t.Fatalf("top-level output_config should be removed")
+	}
+	req, ok := body["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request missing or invalid type")
+	}
+	if _, ok := req["output_config"]; ok {
+		t.Fatalf("request.output_config should be removed")
+	}
+	if _, ok := req["generationConfig"]; !ok {
+		t.Fatalf("request.generationConfig should be preserved")
+	}
+}
+
 func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any {
 	t.Helper()
 
