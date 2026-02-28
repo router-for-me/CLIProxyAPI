@@ -387,7 +387,7 @@ func TestAddOrUpdateClientSkipsUnchanged(t *testing.T) {
 	}
 }
 
-func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
+func TestAddOrUpdateClientUpdatesHashWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")
 	if err := os.WriteFile(authFile, []byte(`{"type":"demo","api_key":"k"}`), 0o644); err != nil {
@@ -416,7 +416,7 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 	}
 }
 
-func TestRemoveClientRemovesHash(t *testing.T) {
+func TestRemoveClientRemovesHashWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")
 	var reloads int32
@@ -773,7 +773,7 @@ func TestStopConfigReloadTimerSafeWhenNil(t *testing.T) {
 	w.stopConfigReloadTimer()
 }
 
-func TestHandleEventRemovesAuthFile(t *testing.T) {
+func TestHandleEventRemovesAuthFileWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "remove.json")
 	if err := os.WriteFile(authFile, []byte(`{"type":"demo"}`), 0o644); err != nil {
@@ -1063,7 +1063,7 @@ func TestHandleEventAtomicReplaceUnchangedSkips(t *testing.T) {
 	}
 }
 
-func TestHandleEventAtomicReplaceChangedTriggersUpdate(t *testing.T) {
+func TestHandleEventAtomicReplaceChangedTriggersIncrementalUpdateOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
 	if err := os.MkdirAll(authDir, 0o755); err != nil {
@@ -1124,7 +1124,7 @@ func TestHandleEventRemoveUnknownFileIgnored(t *testing.T) {
 	}
 }
 
-func TestHandleEventRemoveKnownFileDeletes(t *testing.T) {
+func TestHandleEventRemoveKnownFileDeletesWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
 	if err := os.MkdirAll(authDir, 0o755); err != nil {

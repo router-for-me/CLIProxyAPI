@@ -202,7 +202,6 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		}
 		w.lastAuthContents[normalized] = &newAuth
 	}
-
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
 	for id, a := range w.fileAuthsByPath[normalized] {
 		oldByID[id] = a
@@ -224,7 +223,6 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 	updates := w.computePerPathUpdatesLocked(oldByID, newByID)
 	w.clientsMutex.Unlock()
-
 	w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
 	w.dispatchAuthUpdates(updates)
 }
@@ -239,10 +237,8 @@ func (w *Watcher) removeClient(path string) {
 	delete(w.lastAuthHashes, normalized)
 	delete(w.lastAuthContents, normalized)
 	delete(w.fileAuthsByPath, normalized)
-
 	updates := w.computePerPathUpdatesLocked(oldByID, map[string]*coreauth.Auth{})
 	w.clientsMutex.Unlock()
-
 	w.persistAuthAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path)
 	w.dispatchAuthUpdates(updates)
 }
