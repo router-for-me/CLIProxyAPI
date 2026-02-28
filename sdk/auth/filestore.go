@@ -561,13 +561,15 @@ func decodeAnyToStruct(raw any, target any) error {
 }
 
 func parseStatusAny(raw any) cliproxyauth.Status {
-	switch v := raw.(type) {
-	case string:
-		switch cliproxyauth.Status(strings.TrimSpace(v)) {
-		case cliproxyauth.StatusUnknown, cliproxyauth.StatusActive, cliproxyauth.StatusPending,
-			cliproxyauth.StatusRefreshing, cliproxyauth.StatusError, cliproxyauth.StatusDisabled:
-			return cliproxyauth.Status(strings.TrimSpace(v))
-		}
+	s, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	status := cliproxyauth.Status(strings.TrimSpace(s))
+	switch status {
+	case cliproxyauth.StatusUnknown, cliproxyauth.StatusActive, cliproxyauth.StatusPending,
+		cliproxyauth.StatusRefreshing, cliproxyauth.StatusError, cliproxyauth.StatusDisabled:
+		return status
 	}
 	return ""
 }
@@ -598,11 +600,10 @@ func parseTimeAny(raw any) (time.Time, bool) {
 		if trimmed == "" {
 			return time.Time{}, false
 		}
-		if parsed, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
-			return parsed, true
-		}
-		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
-			return parsed, true
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+			if parsed, err := time.Parse(layout, trimmed); err == nil {
+				return parsed, true
+			}
 		}
 	case time.Time:
 		return v, true
