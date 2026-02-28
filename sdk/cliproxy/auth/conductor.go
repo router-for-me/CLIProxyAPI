@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -1224,6 +1225,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
+		beforePersistState := persistStateSnapshot(auth)
 		now := time.Now()
 
 		if result.Success {
@@ -1313,7 +1315,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
+		afterPersistState := persistStateSnapshot(auth)
+		if !reflect.DeepEqual(beforePersistState, afterPersistState) {
+			_ = m.persist(ctx, auth)
+		}
 	}
 	m.mu.Unlock()
 
@@ -1467,6 +1472,57 @@ func cloneError(err *Error) *Error {
 		Retryable:  err.Retryable,
 		HTTPStatus: err.HTTPStatus,
 	}
+}
+
+type modelPersistState struct {
+	Status         Status
+	StatusMessage  string
+	Unavailable    bool
+	NextRetryAfter time.Time
+	LastError      *Error
+	Quota          QuotaState
+}
+
+type authPersistState struct {
+	Status         Status
+	StatusMessage  string
+	Unavailable    bool
+	NextRetryAfter time.Time
+	Quota          QuotaState
+	LastError      *Error
+	ModelStates    map[string]modelPersistState
+}
+
+func persistStateSnapshot(auth *Auth) authPersistState {
+	if auth == nil {
+		return authPersistState{}
+	}
+	snapshot := authPersistState{
+		Status:         auth.Status,
+		StatusMessage:  auth.StatusMessage,
+		Unavailable:    auth.Unavailable,
+		NextRetryAfter: auth.NextRetryAfter,
+		Quota:          auth.Quota,
+		LastError:      cloneError(auth.LastError),
+	}
+	if len(auth.ModelStates) == 0 {
+		return snapshot
+	}
+	snapshot.ModelStates = make(map[string]modelPersistState, len(auth.ModelStates))
+	for model, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		snapshot.ModelStates[model] = modelPersistState{
+			Status:         state.Status,
+			StatusMessage:  state.StatusMessage,
+			Unavailable:    state.Unavailable,
+			NextRetryAfter: state.NextRetryAfter,
+			LastError:      cloneError(state.LastError),
+			Quota:          state.Quota,
+		}
+	}
+	return snapshot
 }
 
 func statusCodeFromError(err error) int {
