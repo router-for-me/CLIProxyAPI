@@ -143,9 +143,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	w.clientsMutex.Lock()
-
-	cfg := w.config
-	if cfg == nil {
+	if w.config == nil {
 		log.Error("config is nil, cannot add or update client")
 		w.clientsMutex.Unlock()
 		return
@@ -177,33 +175,23 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 	w.lastAuthContents[normalized] = &newAuth
 
-	w.clientsMutex.Unlock() // Unlock before the callback
+	w.clientsMutex.Unlock()
 
+	// Auth file changes are account-level updates; propagate incrementally via auth updates only.
 	w.refreshAuthState(false)
-
-	if w.reloadCallback != nil {
-		log.Debugf("triggering server update callback after add/update")
-		w.reloadCallback(cfg)
-	}
 	w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
 }
 
 func (w *Watcher) removeClient(path string) {
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()
-
-	cfg := w.config
 	delete(w.lastAuthHashes, normalized)
 	delete(w.lastAuthContents, normalized)
 
-	w.clientsMutex.Unlock() // Release the lock before the callback
+	w.clientsMutex.Unlock()
 
+	// Auth file changes are account-level updates; propagate incrementally via auth updates only.
 	w.refreshAuthState(false)
-
-	if w.reloadCallback != nil {
-		log.Debugf("triggering server update callback after removal")
-		w.reloadCallback(cfg)
-	}
 	w.persistAuthAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path)
 }
 

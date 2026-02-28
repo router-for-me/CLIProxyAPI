@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,12 +60,13 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
-	quotaBackoffBase      = time.Second
-	quotaBackoffMax       = 30 * time.Minute
+	refreshCheckInterval       = 5 * time.Second
+	refreshMaxConcurrency      = 16
+	refreshPendingBackoff      = time.Minute
+	refreshFailureBackoff      = 5 * time.Minute
+	refreshNonRetryableBackoff = 24 * time.Hour
+	quotaBackoffBase           = time.Second
+	quotaBackoffMax            = 30 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -1179,7 +1181,11 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if maxWait <= 0 {
 		return 0, false
 	}
-	if status := statusCodeFromError(err); status == http.StatusOK {
+	status := statusCodeFromError(err)
+	if status == http.StatusOK {
+		return 0, false
+	}
+	if isNonRetryableRequestRetryStatus(status) {
 		return 0, false
 	}
 	if isRequestInvalidError(err) {
@@ -1220,6 +1226,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
+		beforePersistState := persistStateSnapshot(auth)
 		now := time.Now()
 
 		if result.Success {
@@ -1309,7 +1316,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
+		afterPersistState := persistStateSnapshot(auth)
+		if !reflect.DeepEqual(beforePersistState, afterPersistState) {
+			_ = m.persist(ctx, auth)
+		}
 	}
 	m.mu.Unlock()
 
@@ -1465,6 +1475,57 @@ func cloneError(err *Error) *Error {
 	}
 }
 
+type modelPersistState struct {
+	Status         Status
+	StatusMessage  string
+	Unavailable    bool
+	NextRetryAfter time.Time
+	LastError      *Error
+	Quota          QuotaState
+}
+
+type authPersistState struct {
+	Status         Status
+	StatusMessage  string
+	Unavailable    bool
+	NextRetryAfter time.Time
+	Quota          QuotaState
+	LastError      *Error
+	ModelStates    map[string]modelPersistState
+}
+
+func persistStateSnapshot(auth *Auth) authPersistState {
+	if auth == nil {
+		return authPersistState{}
+	}
+	snapshot := authPersistState{
+		Status:         auth.Status,
+		StatusMessage:  auth.StatusMessage,
+		Unavailable:    auth.Unavailable,
+		NextRetryAfter: auth.NextRetryAfter,
+		Quota:          auth.Quota,
+		LastError:      cloneError(auth.LastError),
+	}
+	if len(auth.ModelStates) == 0 {
+		return snapshot
+	}
+	snapshot.ModelStates = make(map[string]modelPersistState, len(auth.ModelStates))
+	for model, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		snapshot.ModelStates[model] = modelPersistState{
+			Status:         state.Status,
+			StatusMessage:  state.StatusMessage,
+			Unavailable:    state.Unavailable,
+			NextRetryAfter: state.NextRetryAfter,
+			LastError:      cloneError(state.LastError),
+			Quota:          state.Quota,
+		}
+	}
+	return snapshot
+}
+
 func statusCodeFromError(err error) int {
 	if err == nil {
 		return 0
@@ -1502,6 +1563,20 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+func isNonRetryableRequestRetryStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, // 401
+		http.StatusPaymentRequired,     // 402
+		http.StatusForbidden,           // 403
+		http.StatusNotFound,            // 404
+		http.StatusUnprocessableEntity, // 422
+		http.StatusTooManyRequests:     // 429
+		return true
+	default:
+		return false
+	}
 }
 
 // isRequestInvalidError returns true if the error represents a client request
@@ -2155,7 +2230,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if err != nil {
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+			current.NextRefreshAfter = now.Add(refreshBackoffForError(err))
 			current.LastError = &Error{Message: err.Error()}
 			m.auths[id] = current
 		}
@@ -2175,6 +2250,13 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.LastError = nil
 	updated.UpdatedAt = now
 	_, _ = m.Update(ctx, updated)
+}
+
+func refreshBackoffForError(err error) time.Duration {
+	if util.IsNonRetryableRefreshError(err) {
+		return refreshNonRetryableBackoff
+	}
+	return refreshFailureBackoff
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
