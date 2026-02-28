@@ -72,7 +72,8 @@ force-model-prefix: false
 # Default is false (disabled).
 passthrough-headers: false
 
-# Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
+# Number of times to retry a request for transient errors (for example: 408, 500, 502, 503, 504).
+# Request-level cooldown retry is skipped for 401, 402, 403, 404, 422, and 429.
 request-retry: 3
 
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
