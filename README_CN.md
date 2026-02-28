@@ -60,6 +60,15 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+## 桌面版（Windows）
+
+桌面版会发布在 GitHub Releases：
+
+- 下载地址：[https://github.com/router-for-me/CLIProxyAPI/releases/latest](https://github.com/router-for-me/CLIProxyAPI/releases/latest)
+- 资产文件名：`CLIProxyAPI-desktop-windows-amd64-<tag>.exe`
+
+如果新发布后暂时看不到桌面版资产，请刷新 Release 页面并等待桌面构建流程完成。
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
