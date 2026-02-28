@@ -304,6 +304,18 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 	}
 
 	out := body
+	filteredMessages, dropped, err := filterKimiAssistantMessages(messages.Array())
+	if err != nil {
+		return body, err
+	}
+	if dropped > 0 {
+		out, err = sjson.SetRawBytes(out, "messages", filteredMessages)
+		if err != nil {
+			return body, fmt.Errorf("kimi executor: failed to replace filtered messages: %w", err)
+		}
+		messages = gjson.GetBytes(out, "messages")
+	}
+
 	pending := make([]string, 0)
 	patched := 0
 	patchedReasoning := 0
@@ -407,6 +419,72 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 	}
 
 	return out, nil
+}
+
+func filterKimiAssistantMessages(msgs []gjson.Result) ([]byte, int, error) {
+	var filtered bytes.Buffer
+	filtered.WriteByte('[')
+	kept := 0
+	dropped := 0
+	for _, msg := range msgs {
+		if shouldDropKimiAssistantMessage(msg) {
+			dropped++
+			continue
+		}
+		raw := strings.TrimSpace(msg.Raw)
+		if raw == "" {
+			return nil, dropped, fmt.Errorf("kimi executor: found empty message while filtering")
+		}
+		if kept > 0 {
+			filtered.WriteByte(',')
+		}
+		filtered.WriteString(raw)
+		kept++
+	}
+	filtered.WriteByte(']')
+	return filtered.Bytes(), dropped, nil
+}
+
+func shouldDropKimiAssistantMessage(msg gjson.Result) bool {
+	if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
+		return false
+	}
+	if hasKimiToolCalls(msg) || hasKimiLegacyFunctionCall(msg) {
+		return false
+	}
+	if strings.TrimSpace(msg.Get("reasoning_content").String()) != "" {
+		return false
+	}
+	return isKimiAssistantContentEmpty(msg.Get("content"))
+}
+
+func hasKimiToolCalls(msg gjson.Result) bool {
+	toolCalls := msg.Get("tool_calls")
+	if !toolCalls.Exists() {
+		return false
+	}
+	if !toolCalls.IsArray() {
+		return true
+	}
+	return len(toolCalls.Array()) > 0
+}
+
+func hasKimiLegacyFunctionCall(msg gjson.Result) bool {
+	functionCall := msg.Get("function_call")
+	return functionCall.Exists() && functionCall.Type != gjson.Null
+}
+
+func isKimiAssistantContentEmpty(content gjson.Result) bool {
+	if !content.Exists() || content.Type == gjson.Null {
+		return true
+	}
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String()) == ""
+	}
+	if content.IsArray() {
+		return len(content.Array()) == 0
+	}
+	return false
 }
 
 func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string) string {
