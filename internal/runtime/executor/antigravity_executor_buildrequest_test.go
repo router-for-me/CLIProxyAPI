@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
 )
 
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
@@ -62,6 +63,38 @@ func TestSanitizeAntigravityClaudeCompatFields_RemovesOutputConfig(t *testing.T)
 	}
 	if _, ok := req["generationConfig"]; !ok {
 		t.Fatalf("request.generationConfig should be preserved")
+	}
+}
+
+func TestClampAntigravityClaudeMaxOutputTokens_ClampsThinkingModel(t *testing.T) {
+	input := []byte(`{"request":{"generationConfig":{"maxOutputTokens":128000}}}`)
+	out := clampAntigravityClaudeMaxOutputTokens("claude-opus-4-6-thinking", input)
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("expected maxOutputTokens=64000, got %d", got)
+	}
+}
+
+func TestClampAntigravityClaudeMaxOutputTokens_PreservesWithinLimit(t *testing.T) {
+	input := []byte(`{"request":{"generationConfig":{"maxOutputTokens":64000}}}`)
+	out := clampAntigravityClaudeMaxOutputTokens("claude-opus-4-6-thinking", input)
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("expected maxOutputTokens=64000, got %d", got)
+	}
+}
+
+func TestClampAntigravityClaudeMaxOutputTokens_PreservesNonThinkingModel(t *testing.T) {
+	input := []byte(`{"request":{"generationConfig":{"maxOutputTokens":128000}}}`)
+	out := clampAntigravityClaudeMaxOutputTokens("claude-opus-4-6", input)
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 128000 {
+		t.Fatalf("expected maxOutputTokens=128000, got %d", got)
+	}
+}
+
+func TestClampAntigravityClaudeMaxOutputTokens_NoopForNonClaude(t *testing.T) {
+	input := []byte(`{"request":{"generationConfig":{"maxOutputTokens":128000}}}`)
+	out := clampAntigravityClaudeMaxOutputTokens("gemini-2.5-pro", input)
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 128000 {
+		t.Fatalf("expected maxOutputTokens=128000, got %d", got)
 	}
 }
 
