@@ -1300,19 +1300,13 @@ func reserveToolNameVariants(used map[string]struct{}, name string) {
 	}
 }
 
-func renameToolNameField(target map[string]any, field string, renameMap map[string]string) {
-	raw, ok := target[field]
-	if !ok {
-		return
-	}
-	name, ok := raw.(string)
-	if !ok {
-		return
-	}
+func renamedToolName(name string, renameMap map[string]string) (string, bool) {
 	name = strings.TrimSpace(name)
-	if mapped, ok := renameMap[name]; ok {
-		target[field] = mapped
+	if name == "" {
+		return "", false
 	}
+	mapped, ok := renameMap[name]
+	return mapped, ok
 }
 
 func applyClaudeRenameMap(body []byte, renameMap map[string]string) ([]byte, error) {
@@ -1320,89 +1314,69 @@ func applyClaudeRenameMap(body []byte, renameMap map[string]string) ([]byte, err
 		return body, nil
 	}
 
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return body, fmt.Errorf("decode payload for tool rename map: %w", err)
-	}
-
-	if toolChoiceRaw, ok := payload["tool_choice"]; ok {
-		if toolChoice, ok := toolChoiceRaw.(map[string]any); ok {
-			if kind, ok := toolChoice["type"].(string); ok && kind == "tool" {
-				renameToolNameField(toolChoice, "name", renameMap)
+	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
+		if mapped, ok := renamedToolName(gjson.GetBytes(body, "tool_choice.name").String(), renameMap); ok {
+			updatedBody, err := sjson.SetBytes(body, "tool_choice.name", mapped)
+			if err != nil {
+				return body, fmt.Errorf("set tool_choice.name: %w", err)
 			}
+			body = updatedBody
 		}
 	}
 
-	messageListRaw, ok := payload["messages"]
-	if !ok {
-		updatedBody, errMarshal := json.Marshal(payload)
-		if errMarshal != nil {
-			return body, fmt.Errorf("encode payload after tool rename map: %w", errMarshal)
-		}
-		return updatedBody, nil
-	}
-	messageList, ok := messageListRaw.([]any)
-	if !ok {
-		updatedBody, errMarshal := json.Marshal(payload)
-		if errMarshal != nil {
-			return body, fmt.Errorf("encode payload after tool rename map: %w", errMarshal)
-		}
-		return updatedBody, nil
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, nil
 	}
 
-	for _, msgRaw := range messageList {
-		msg, ok := msgRaw.(map[string]any)
-		if !ok {
+	for msgIndex, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
 			continue
 		}
-		contentRaw, ok := msg["content"]
-		if !ok {
-			continue
-		}
-		content, ok := contentRaw.([]any)
-		if !ok {
-			continue
-		}
-		for _, partRaw := range content {
-			part, ok := partRaw.(map[string]any)
-			if !ok {
-				continue
-			}
-			partType, _ := part["type"].(string)
-			switch partType {
+		for contentIndex, part := range content.Array() {
+			switch part.Get("type").String() {
 			case "tool_use":
-				renameToolNameField(part, "name", renameMap)
+				if mapped, ok := renamedToolName(part.Get("name").String(), renameMap); ok {
+					path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex, contentIndex)
+					updatedBody, err := sjson.SetBytes(body, path, mapped)
+					if err != nil {
+						return body, fmt.Errorf("set %s: %w", path, err)
+					}
+					body = updatedBody
+				}
 			case "tool_reference":
-				renameToolNameField(part, "tool_name", renameMap)
+				if mapped, ok := renamedToolName(part.Get("tool_name").String(), renameMap); ok {
+					path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex, contentIndex)
+					updatedBody, err := sjson.SetBytes(body, path, mapped)
+					if err != nil {
+						return body, fmt.Errorf("set %s: %w", path, err)
+					}
+					body = updatedBody
+				}
 			case "tool_result":
-				nestedContentRaw, ok := part["content"]
-				if !ok {
+				nestedContent := part.Get("content")
+				if !nestedContent.Exists() || !nestedContent.IsArray() {
 					continue
 				}
-				nestedContent, ok := nestedContentRaw.([]any)
-				if !ok {
-					continue
-				}
-				for _, nestedPartRaw := range nestedContent {
-					nestedPart, ok := nestedPartRaw.(map[string]any)
-					if !ok {
+				for nestedIndex, nestedPart := range nestedContent.Array() {
+					if nestedPart.Get("type").String() != "tool_reference" {
 						continue
 					}
-					nestedType, _ := nestedPart["type"].(string)
-					if nestedType != "tool_reference" {
-						continue
+					if mapped, ok := renamedToolName(nestedPart.Get("tool_name").String(), renameMap); ok {
+						path := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex, contentIndex, nestedIndex)
+						updatedBody, err := sjson.SetBytes(body, path, mapped)
+						if err != nil {
+							return body, fmt.Errorf("set %s: %w", path, err)
+						}
+						body = updatedBody
 					}
-					renameToolNameField(nestedPart, "tool_name", renameMap)
 				}
 			}
 		}
 	}
 
-	updatedBody, errMarshal := json.Marshal(payload)
-	if errMarshal != nil {
-		return body, fmt.Errorf("encode payload after tool rename map: %w", errMarshal)
-	}
-	return updatedBody, nil
+	return body, nil
 }
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 	if prefix == "" {
