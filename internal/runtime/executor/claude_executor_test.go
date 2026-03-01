@@ -572,6 +572,64 @@ func TestNormalizeClaudeToolsForAnthropic_RenameMapUpdatesAllReferenceSites(t *t
 	}
 }
 
+func TestNormalizeClaudeToolsForAnthropic_RenameMapPreservesLargeIntegers(t *testing.T) {
+	input := []byte(`{
+		"request_id": 9007199254740993,
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[
+			{
+				"role":"assistant",
+				"content":[
+					{"type":"tool_use","name":"very bad tool","id":"t1","input":{"large_id":9007199254740995}},
+					{"type":"text","text":"unchanged"}
+				]
+			},
+			{
+				"role":"user",
+				"content":[
+					{"type":"tool_result","tool_use_id":"t1","content":[
+						{"type":"tool_reference","tool_name":"very bad tool"},
+						{"type":"text","text":"meta","data":{"ticket":9223372036854775806}}
+					]}
+				]
+			}
+		],
+		"tools":[
+			{"type":"custom","function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.content.0.tool_name").String(); got != normalizedName {
+		t.Fatalf("messages.1.content.0.content.0.tool_name = %q, want %q", got, normalizedName)
+	}
+
+	// Ensure unrelated large integer values are preserved exactly (no float64 coercion).
+	if got := gjson.GetBytes(out, "request_id").Raw; got != "9007199254740993" {
+		t.Fatalf("request_id raw = %q, want %q", got, "9007199254740993")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.input.large_id").Raw; got != "9007199254740995" {
+		t.Fatalf("messages.0.content.0.input.large_id raw = %q, want %q", got, "9007199254740995")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.content.1.data.ticket").Raw; got != "9223372036854775806" {
+		t.Fatalf("messages.1.content.0.content.1.data.ticket raw = %q, want %q", got, "9223372036854775806")
+	}
+}
+
 func TestNormalizeClaudeToolsForAnthropic_PreservesDuplicateOriginalCustomToolNames(t *testing.T) {
 	input := []byte(`{
 		"tool_choice":{"type":"tool","name":"duplicate tool"},
