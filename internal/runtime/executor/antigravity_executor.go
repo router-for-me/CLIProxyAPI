@@ -218,6 +218,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
+	translated = clampAntigravityClaudeMaxOutputTokens(baseModel, translated)
 	translated = sanitizeAntigravityClaudeCompatFields(translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
@@ -361,6 +362,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
+	translated = clampAntigravityClaudeMaxOutputTokens(baseModel, translated)
 	translated = sanitizeAntigravityClaudeCompatFields(translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
@@ -754,6 +756,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
+	translated = clampAntigravityClaudeMaxOutputTokens(baseModel, translated)
 	translated = sanitizeAntigravityClaudeCompatFields(translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
@@ -954,6 +957,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, err
 	}
 
+	payload = clampAntigravityClaudeMaxOutputTokens(baseModel, payload)
 	payload = sanitizeAntigravityClaudeCompatFields(payload)
 	payload = deleteJSONField(payload, "project")
 	payload = deleteJSONField(payload, "model")
@@ -1610,6 +1614,34 @@ func sanitizeAntigravityClaudeCompatFields(body []byte) []byte {
 	body = deleteJSONField(body, "output_config")
 	body = deleteJSONField(body, "request.output_config")
 	return body
+}
+
+func clampAntigravityClaudeMaxOutputTokens(baseModel string, body []byte) []byte {
+	if !strings.Contains(strings.ToLower(strings.TrimSpace(baseModel)), "claude") {
+		return body
+	}
+
+	current := gjson.GetBytes(body, "request.generationConfig.maxOutputTokens")
+	if !current.Exists() || current.Int() <= 0 {
+		return body
+	}
+
+	maxAllowed := 0
+	if info := registry.LookupModelInfo(baseModel, antigravityAuthType); info != nil && info.MaxCompletionTokens > 0 {
+		maxAllowed = info.MaxCompletionTokens
+	} else if info := registry.LookupStaticModelInfo(baseModel); info != nil && info.MaxCompletionTokens > 0 {
+		maxAllowed = info.MaxCompletionTokens
+	}
+
+	if maxAllowed <= 0 || int(current.Int()) <= maxAllowed {
+		return body
+	}
+
+	clamped, err := sjson.SetBytes(body, "request.generationConfig.maxOutputTokens", maxAllowed)
+	if err != nil {
+		return body
+	}
+	return clamped
 }
 
 func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
