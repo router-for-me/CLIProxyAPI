@@ -980,6 +980,7 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 			return body, errNormalize
 		}
 		if normalizedTool == "" {
+			// Skip malformed non-builtin tools that cannot produce a valid name.
 			continue
 		}
 		updatedTools, errSet := sjson.SetRaw(normalizedTools, "-1", normalizedTool)
