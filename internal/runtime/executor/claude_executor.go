@@ -1140,20 +1140,17 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 
 	normalizedTools := make([]json.RawMessage, 0, len(tools.Array()))
 	renameMap := make(map[string]string)
-	customOriginalNameCounts := make(map[string]int)
+	originalNameCounts := make(map[string]int)
 	usedNames := reservedClaudeBuiltinToolNames()
 	for _, tool := range tools.Array() {
 		if isClaudeBuiltinTool(tool) {
-			continue
-		}
-		if isClaudeExplicitNonCustomTypedTool(tool) {
 			continue
 		}
 		name := anthroToolOriginalName(tool)
 		if name == "" {
 			continue
 		}
-		customOriginalNameCounts[name]++
+		originalNameCounts[name]++
 	}
 
 	for _, tool := range tools.Array() {
@@ -1171,7 +1168,7 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 		}
 
 		originalName := anthroToolOriginalName(tool)
-		if originalName != "" && customOriginalNameCounts[originalName] > 1 {
+		if originalName != "" && originalNameCounts[originalName] > 1 {
 			// Duplicate original names cannot be remapped unambiguously; preserve raw entry.
 			normalizedTools = append(normalizedTools, json.RawMessage(tool.Raw))
 			reserveToolNameVariants(usedNames, originalName)
