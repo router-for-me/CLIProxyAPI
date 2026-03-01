@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -127,7 +128,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body, err = normalizeClaudeToolsForAnthropic(body)
+	if err != nil {
+		if isStatusCodeErr(err) {
+			return resp, err
+		}
+		return resp, fmt.Errorf("normalize claude tools: %w", err)
+	}
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -293,7 +301,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body, err = normalizeClaudeToolsForAnthropic(body)
+	if err != nil {
+		if isStatusCodeErr(err) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("normalize claude tools: %w", err)
+	}
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -473,6 +488,14 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
+	normalizedBody, errNormalize := normalizeClaudeToolsForAnthropic(body)
+	if errNormalize != nil {
+		if isStatusCodeErr(errNormalize) {
+			return cliproxyexecutor.Response{}, errNormalize
+		}
+		return cliproxyexecutor.Response{}, fmt.Errorf("normalize claude tools: %w", errNormalize)
+	}
+	body = normalizedBody
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
@@ -562,6 +585,45 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	count := gjson.GetBytes(data, "input_tokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
 	return cliproxyexecutor.Response{Payload: []byte(out), Headers: resp.Header.Clone()}, nil
+}
+
+func (e *ClaudeExecutor) buildUpstreamStatusErr(ctx context.Context, statusCode int, headers http.Header, body io.ReadCloser) error {
+	decodedErrBody, errDecode := decodeResponseBody(body, headers.Get("Content-Encoding"))
+	if errDecode != nil {
+		recordAPIResponseError(ctx, e.cfg, errDecode)
+		return statusErr{
+			code: statusCode,
+			msg:  fmt.Sprintf("upstream error %d: failed to decode upstream error body: %v", statusCode, errDecode),
+		}
+	}
+
+	b, errRead := io.ReadAll(decodedErrBody)
+	if errClose := decodedErrBody.Close(); errClose != nil {
+		log.Errorf("response body close error: %v", errClose)
+	}
+	if errRead != nil {
+		recordAPIResponseError(ctx, e.cfg, errRead)
+		return statusErr{
+			code: statusCode,
+			msg:  fmt.Sprintf("upstream error %d: failed to read upstream error body: %v", statusCode, errRead),
+		}
+	}
+
+	appendAPIResponseChunk(ctx, e.cfg, b)
+	logWithRequestID(ctx).Debugf(
+		"request error, error status: %d, error message: %s",
+		statusCode,
+		summarizeErrorBody(headers.Get("Content-Type"), b),
+	)
+	return statusErr{code: statusCode, msg: string(b)}
+}
+
+func isStatusCodeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusCarrier interface{ StatusCode() int }
+	return errors.As(err, &statusCarrier)
 }
 
 func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -1052,6 +1114,7 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 
 	normalizedTools := "[]"
 	renameMap := make(map[string]string)
+	customOriginalNames := make(map[string]struct{})
 	usedNames := make(map[string]struct{})
 
 	for _, tool := range tools.Array() {
@@ -1065,6 +1128,17 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 				usedNames[name] = struct{}{}
 			}
 			continue
+		}
+
+		originalName := anthroToolOriginalName(tool)
+		if originalName != "" {
+			if _, exists := customOriginalNames[originalName]; exists {
+				return body, statusErr{
+					code: http.StatusBadRequest,
+					msg:  fmt.Sprintf("normalize claude tools: duplicate custom tool name %q cannot be safely remapped", originalName),
+				}
+			}
+			customOriginalNames[originalName] = struct{}{}
 		}
 
 		normalizedTool, originalName, newName, errNormalize := normalizeAnthropicToolEntry(tool, usedNames)
@@ -1098,11 +1172,16 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 	return body, nil
 }
 
-func normalizeAnthropicToolEntry(tool gjson.Result, usedNames map[string]struct{}) (normalizedRaw string, originalName string, newName string, err error) {
-	originalName = strings.TrimSpace(tool.Get("name").String())
-	if originalName == "" {
-		originalName = strings.TrimSpace(tool.Get("function.name").String())
+func anthroToolOriginalName(tool gjson.Result) string {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		name = strings.TrimSpace(tool.Get("function.name").String())
 	}
+	return name
+}
+
+func normalizeAnthropicToolEntry(tool gjson.Result, usedNames map[string]struct{}) (normalizedRaw string, originalName string, newName string, err error) {
+	originalName = anthroToolOriginalName(tool)
 	newName = uniqueAnthropicToolName(originalName, usedNames)
 	if newName == "" {
 		return "", originalName, "", nil
