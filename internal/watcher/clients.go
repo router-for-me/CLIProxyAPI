@@ -106,7 +106,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 								if a == nil || strings.TrimSpace(a.ID) == "" {
 									continue
 								}
-								pathAuths[a.ID] = a.Clone()
+								pathAuths[a.ID] = a
 							}
 							if len(pathAuths) > 0 {
 								w.fileAuthsByPath[normalizedPath] = pathAuths
@@ -218,7 +218,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		if a == nil || strings.TrimSpace(a.ID) == "" {
 			continue
 		}
-		newByID[a.ID] = a.Clone()
+		newByID[a.ID] = a
 	}
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = newByID
