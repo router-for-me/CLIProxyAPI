@@ -875,6 +875,54 @@ func TestNormalizeClaudeToolsForAnthropic_TreatsExplicitTypedAndCustomNameCollis
 	}
 }
 
+func TestNormalizeClaudeToolsForAnthropic_TreatsBuiltinAndCustomNameCollisionAsAmbiguous(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"web_search","id":"ws1","input":{"n":9007199254740995}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"web_search"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"ws1","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}
+		],
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search","max_uses":5},
+			{"type":"custom","name":"web_search","description":"custom duplicate","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "web_search_20250305" {
+		t.Fatalf("tools.0.type = %q, want %q", got, "web_search_20250305")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "web_search")
+	}
+	if got := gjson.GetBytes(out, "tools.1.type").String(); got != "custom" {
+		t.Fatalf("tools.1.type = %q, want %q", got, "custom")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "web_search" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "web_search")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "web_search" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "web_search")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "web_search" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "web_search")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "web_search" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "web_search")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "web_search" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "web_search")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.input.n").Raw; got != "9007199254740995" {
+		t.Fatalf("messages.0.content.0.input.n = %s, want %s", got, "9007199254740995")
+	}
+}
+
 func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	payload := []byte(`{
 		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
