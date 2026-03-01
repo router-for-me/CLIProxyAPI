@@ -362,6 +362,46 @@ func TestApplyClaudeToolPrefix_PrefixesCustomToolType(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_SkipsExplicitNonCustomTypedToolAndReferences(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"future_tool","name":"future_one","extra":{"a":1}},
+			{"type":"custom","name":"apply_patch","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"future_one"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"future_one","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"future_one"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"future_one"}]}]},
+			{"role":"assistant","content":[{"type":"tool_use","name":"apply_patch","id":"t2","input":{}}]}
+		]
+	}`)
+
+	out := applyClaudeToolPrefix(input, "proxy_")
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "future_one" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "future_one" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "future_one" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "future_one" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "future_one" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "proxy_apply_patch")
+	}
+	if got := gjson.GetBytes(out, "messages.3.content.0.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("messages.3.content.0.name = %q, want %q", got, "proxy_apply_patch")
+	}
+}
+
 func TestNormalizeClaudeToolsForAnthropic_CustomTool(t *testing.T) {
 	input := []byte(`{
 		"tools":[
@@ -1050,6 +1090,42 @@ func TestNormalizeThenPrefix_KeepsCustomNameConsistentWhenSanitizedNameMatchesBu
 	}
 	if got := gjson.GetBytes(prefixed, "messages.1.content.0.tool_name").String(); got != expectedPrefixedName {
 		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, expectedPrefixedName)
+	}
+}
+
+func TestNormalizeThenPrefix_PreservesUnknownExplicitTypedToolName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"future_one"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"future_one","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"future_one"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"future_one"}]}]}
+		],
+		"tools":[
+			{"type":"future_tool","name":"future_one","extra":{"a":1}}
+		]
+	}`)
+
+	normalized, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	prefixed := applyClaudeToolPrefix(normalized, "proxy_")
+
+	if got := gjson.GetBytes(prefixed, "tools.0.name").String(); got != "future_one" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(prefixed, "tool_choice.name").String(); got != "future_one" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(prefixed, "messages.0.content.0.name").String(); got != "future_one" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(prefixed, "messages.1.content.0.tool_name").String(); got != "future_one" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(prefixed, "messages.2.content.0.content.0.tool_name").String(); got != "future_one" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "future_one")
 	}
 }
 

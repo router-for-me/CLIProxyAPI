@@ -1031,6 +1031,11 @@ func isClaudeBuiltinTool(tool gjson.Result) bool {
 	return isClaudeBuiltinToolType(tool.Get("type").String())
 }
 
+func isClaudeExplicitNonCustomTypedTool(tool gjson.Result) bool {
+	toolType := strings.TrimSpace(tool.Get("type").String())
+	return toolType != "" && toolType != "custom" && !isClaudeBuiltinToolType(toolType)
+}
+
 func normalizeAnthropicToolSchema(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "null" || !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
@@ -1141,8 +1146,7 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 		if isClaudeBuiltinTool(tool) {
 			continue
 		}
-		toolType := strings.TrimSpace(tool.Get("type").String())
-		if toolType != "" && toolType != "custom" {
+		if isClaudeExplicitNonCustomTypedTool(tool) {
 			continue
 		}
 		name := anthroToolOriginalName(tool)
@@ -1159,8 +1163,7 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 			continue
 		}
 
-		toolType := strings.TrimSpace(tool.Get("type").String())
-		if toolType != "" && toolType != "custom" {
+		if isClaudeExplicitNonCustomTypedTool(tool) {
 			// Preserve explicit non-custom types as-is for forward compatibility.
 			normalizedTools = append(normalizedTools, json.RawMessage(tool.Raw))
 			reserveToolNameVariants(usedNames, anthroToolOriginalName(tool))
@@ -1406,24 +1409,22 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 		return body
 	}
 
-	// Collect built-in tool names (those with a non-empty "type" field) so we can
-	// skip them consistently in both tools and message history.
-	builtinTools := map[string]bool{}
+	// Collect non-prefixable tool names so we can skip them consistently in both tools and
+	// message history.
+	nonPrefixableToolNames := map[string]bool{}
 	for _, name := range []string{"web_search", "code_execution", "text_editor", "computer"} {
-		builtinTools[name] = true
+		nonPrefixableToolNames[name] = true
 	}
 
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
-			// Skip built-in tools (web_search, code_execution, etc.) which have
-			// a "type" field and require their name to remain unchanged.
-			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
-				if n := tool.Get("name").String(); n != "" {
-					builtinTools[n] = true
+			name := tool.Get("name").String()
+			if isClaudeBuiltinTool(tool) || isClaudeExplicitNonCustomTypedTool(tool) {
+				if name != "" {
+					nonPrefixableToolNames[name] = true
 				}
 				return true
 			}
-			name := tool.Get("name").String()
 			if name == "" || strings.HasPrefix(name, prefix) {
 				return true
 			}
@@ -1435,7 +1436,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 
 	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
 		name := gjson.GetBytes(body, "tool_choice.name").String()
-		if name != "" && !strings.HasPrefix(name, prefix) && !builtinTools[name] {
+		if name != "" && !strings.HasPrefix(name, prefix) && !nonPrefixableToolNames[name] {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", prefix+name)
 		}
 	}
@@ -1451,14 +1452,14 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
-					if name == "" || strings.HasPrefix(name, prefix) || builtinTools[name] {
+					if name == "" || strings.HasPrefix(name, prefix) || nonPrefixableToolNames[name] {
 						return true
 					}
 					path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 					body, _ = sjson.SetBytes(body, path, prefix+name)
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
-					if toolName == "" || strings.HasPrefix(toolName, prefix) || builtinTools[toolName] {
+					if toolName == "" || strings.HasPrefix(toolName, prefix) || nonPrefixableToolNames[toolName] {
 						return true
 					}
 					path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
@@ -1470,7 +1471,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
-								if nestedToolName != "" && !strings.HasPrefix(nestedToolName, prefix) && !builtinTools[nestedToolName] {
+								if nestedToolName != "" && !strings.HasPrefix(nestedToolName, prefix) && !nonPrefixableToolNames[nestedToolName] {
 									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 									body, _ = sjson.SetBytes(body, nestedPath, prefix+nestedToolName)
 								}
