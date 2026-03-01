@@ -10,15 +10,13 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 # ====== 2. 从配置文件中提取端口和管理密钥 ======
+# === 从环境变量获取管理密钥 ===
+get_management_key() {
+    echo "${MANAGEMENT_PASSWORD:-}"
+}
 get_port() {
   PORT=$(grep -E "^port:" "$CONFIG_FILE" 2>/dev/null | sed -E 's/^port: *["'"'"']?([0-9]+)["'"'"']?.*$/\1/')
   echo "${PORT:-8317}"
-}
-
-get_management_key() {
-  # 从配置文件读取 management-api-key
-  KEY=$(grep -E "^management-api-key:" "$CONFIG_FILE" 2>/dev/null | sed -E 's/^management-api-key: *["'"'"']?(.+?)["'"'"']? *$/\1/')
-  echo "$KEY"
 }
 
 # ====== 3. 等待服务就绪 ======
