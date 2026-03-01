@@ -936,6 +936,299 @@ func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
 }
 
+func isClaudeBuiltinToolType(toolType string) bool {
+	toolType = strings.TrimSpace(toolType)
+	switch {
+	case strings.HasPrefix(toolType, "web_search"):
+		return true
+	case toolType == "code_execution":
+		return true
+	case strings.HasPrefix(toolType, "text_editor"):
+		return true
+	case strings.HasPrefix(toolType, "computer"):
+		return true
+	default:
+		return false
+	}
+}
+
+func isClaudeBuiltinTool(tool gjson.Result) bool {
+	return isClaudeBuiltinToolType(tool.Get("type").String())
+}
+
+func normalizeAnthropicToolSchema(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" || !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
+		return `{"type":"object","properties":{}}`
+	}
+
+	schema := raw
+	parsed := gjson.Parse(raw)
+	schemaType := strings.TrimSpace(parsed.Get("type").String())
+	if schemaType == "" {
+		var err error
+		schema, err = sjson.Set(schema, "type", "object")
+		if err != nil {
+			return `{"type":"object","properties":{}}`
+		}
+	} else if schemaType != "object" {
+		return `{"type":"object","properties":{}}`
+	}
+
+	parsed = gjson.Parse(schema)
+	properties := parsed.Get("properties")
+	if !properties.Exists() || !properties.IsObject() {
+		var err error
+		schema, err = sjson.SetRaw(schema, "properties", `{}`)
+		if err != nil {
+			return `{"type":"object","properties":{}}`
+		}
+	}
+	return schema
+}
+
+func sanitizeAnthropicToolName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		ch := name[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' {
+			b.WriteByte(ch)
+			continue
+		}
+		b.WriteByte('_')
+	}
+
+	clean := strings.Trim(b.String(), "_-")
+	if clean == "" {
+		return ""
+	}
+	if len(clean) > 64 {
+		clean = clean[:64]
+	}
+	return clean
+}
+
+const maxToolNameCollisionRetries = 1000
+
+func uniqueAnthropicToolName(name string, used map[string]struct{}) string {
+	clean := sanitizeAnthropicToolName(name)
+	if clean == "" {
+		return ""
+	}
+	if _, exists := used[clean]; !exists {
+		used[clean] = struct{}{}
+		return clean
+	}
+	for i := 2; i < maxToolNameCollisionRetries; i++ {
+		suffix := fmt.Sprintf("_%d", i)
+		baseLimit := 64 - len(suffix)
+		if baseLimit < 1 {
+			return ""
+		}
+		base := clean
+		if len(base) > baseLimit {
+			base = base[:baseLimit]
+		}
+		candidate := base + suffix
+		if _, exists := used[candidate]; !exists {
+			used[candidate] = struct{}{}
+			return candidate
+		}
+	}
+	return ""
+}
+
+func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body, nil
+	}
+
+	normalizedTools := "[]"
+	renameMap := make(map[string]string)
+	usedNames := make(map[string]struct{})
+
+	for _, tool := range tools.Array() {
+		if isClaudeBuiltinTool(tool) {
+			updatedTools, errSet := sjson.SetRaw(normalizedTools, "-1", tool.Raw)
+			if errSet != nil {
+				return body, fmt.Errorf("append built-in tool: %w", errSet)
+			}
+			normalizedTools = updatedTools
+			if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+				usedNames[name] = struct{}{}
+			}
+			continue
+		}
+
+		normalizedTool, originalName, newName, errNormalize := normalizeAnthropicToolEntry(tool, usedNames)
+		if errNormalize != nil {
+			return body, errNormalize
+		}
+		if normalizedTool == "" {
+			// Skip malformed non-builtin tools that cannot produce a valid name.
+			continue
+		}
+		updatedTools, errSet := sjson.SetRaw(normalizedTools, "-1", normalizedTool)
+		if errSet != nil {
+			return body, fmt.Errorf("append normalized tool: %w", errSet)
+		}
+		normalizedTools = updatedTools
+		if originalName != "" && originalName != newName {
+			renameMap[originalName] = newName
+		}
+	}
+
+	updatedBody, errSet := sjson.SetRawBytes(body, "tools", []byte(normalizedTools))
+	if errSet != nil {
+		return body, fmt.Errorf("set normalized tools array: %w", errSet)
+	}
+	body = updatedBody
+
+	body, errSet = applyClaudeRenameMap(body, renameMap)
+	if errSet != nil {
+		return body, errSet
+	}
+	return body, nil
+}
+
+func normalizeAnthropicToolEntry(tool gjson.Result, usedNames map[string]struct{}) (normalizedRaw string, originalName string, newName string, err error) {
+	originalName = strings.TrimSpace(tool.Get("name").String())
+	if originalName == "" {
+		originalName = strings.TrimSpace(tool.Get("function.name").String())
+	}
+	newName = uniqueAnthropicToolName(originalName, usedNames)
+	if newName == "" {
+		return "", originalName, "", nil
+	}
+
+	description := strings.TrimSpace(tool.Get("description").String())
+	if description == "" {
+		description = strings.TrimSpace(tool.Get("function.description").String())
+	}
+	if description == "" {
+		description = "Custom tool"
+	}
+
+	schemaRaw := ""
+	schemaPaths := []string{
+		"input_schema",
+		"parameters",
+		"parametersJsonSchema",
+		"function.parameters",
+		"function.parametersJsonSchema",
+	}
+	for _, path := range schemaPaths {
+		if v := tool.Get(path); v.Exists() {
+			schemaRaw = v.Raw
+			break
+		}
+	}
+	schema := normalizeAnthropicToolSchema(schemaRaw)
+
+	normalized := `{"name":"","description":"","input_schema":{}}`
+	normalized, err = sjson.Set(normalized, "name", newName)
+	if err != nil {
+		return "", originalName, newName, fmt.Errorf("set normalized tool name: %w", err)
+	}
+	normalized, err = sjson.Set(normalized, "description", description)
+	if err != nil {
+		return "", originalName, newName, fmt.Errorf("set normalized tool description: %w", err)
+	}
+	normalized, err = sjson.SetRaw(normalized, "input_schema", schema)
+	if err != nil {
+		return "", originalName, newName, fmt.Errorf("set normalized tool schema: %w", err)
+	}
+	return normalized, originalName, newName, nil
+}
+
+func setJSONBytes(body []byte, path string, value string) ([]byte, error) {
+	updatedBody, err := sjson.SetBytes(body, path, value)
+	if err != nil {
+		return body, fmt.Errorf("set %s: %w", path, err)
+	}
+	return updatedBody, nil
+}
+
+func applyClaudeRenameMap(body []byte, renameMap map[string]string) ([]byte, error) {
+	if len(renameMap) == 0 {
+		return body, nil
+	}
+
+	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
+		name := strings.TrimSpace(gjson.GetBytes(body, "tool_choice.name").String())
+		if mapped, ok := renameMap[name]; ok {
+			updatedBody, errSet := setJSONBytes(body, "tool_choice.name", mapped)
+			if errSet != nil {
+				return body, errSet
+			}
+			body = updatedBody
+		}
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, nil
+	}
+
+	for msgIndex, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			continue
+		}
+		for contentIndex, part := range content.Array() {
+			switch part.Get("type").String() {
+			case "tool_use":
+				name := strings.TrimSpace(part.Get("name").String())
+				if mapped, ok := renameMap[name]; ok {
+					path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex, contentIndex)
+					updatedBody, errSet := setJSONBytes(body, path, mapped)
+					if errSet != nil {
+						return body, errSet
+					}
+					body = updatedBody
+				}
+			case "tool_reference":
+				toolName := strings.TrimSpace(part.Get("tool_name").String())
+				if mapped, ok := renameMap[toolName]; ok {
+					path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex, contentIndex)
+					updatedBody, errSet := setJSONBytes(body, path, mapped)
+					if errSet != nil {
+						return body, errSet
+					}
+					body = updatedBody
+				}
+			case "tool_result":
+				nestedContent := part.Get("content")
+				if !nestedContent.Exists() || !nestedContent.IsArray() {
+					continue
+				}
+				for nestedIndex, nestedPart := range nestedContent.Array() {
+					if nestedPart.Get("type").String() != "tool_reference" {
+						continue
+					}
+					nestedToolName := strings.TrimSpace(nestedPart.Get("tool_name").String())
+					if mapped, ok := renameMap[nestedToolName]; ok {
+						nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex, contentIndex, nestedIndex)
+						updatedBody, errSet := setJSONBytes(body, nestedPath, mapped)
+						if errSet != nil {
+							return body, errSet
+						}
+						body = updatedBody
+					}
+				}
+			}
+		}
+	}
+
+	return body, nil
+}
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 	if prefix == "" {
 		return body

@@ -352,6 +352,143 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_PrefixesCustomToolType(t *testing.T) {
+	input := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	out := applyClaudeToolPrefix(input, "proxy_")
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "proxy_apply_patch")
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_CustomTool(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search"},
+			{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark"}}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "web_search_20250305" {
+		t.Fatalf("tools.0.type = %q, want %q", got, "web_search_20250305")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "apply_patch" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "apply_patch")
+	}
+	if got := gjson.GetBytes(out, "tools.1.description").String(); got != "Custom tool" {
+		t.Fatalf("tools.1.description = %q, want %q", got, "Custom tool")
+	}
+	if got := gjson.GetBytes(out, "tools.1.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.1.input_schema.type = %q, want %q", got, "object")
+	}
+	if got := gjson.GetBytes(out, "tools.1.type"); got.Exists() {
+		t.Fatalf("tools.1.type should be removed, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.1.format"); got.Exists() {
+		t.Fatalf("tools.1.format should be removed, got %s", got.Raw)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_FunctionFallbacks(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"very bad tool","id":"t1","input":{}}]}],
+		"tools":[
+			{"type":"custom","function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if strings.Contains(normalizedName, " ") {
+		t.Fatalf("normalized tool name should be sanitized, got %q", normalizedName)
+	}
+	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "dangerous" {
+		t.Fatalf("tools.0.description = %q, want %q", got, "dangerous")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.0.input_schema.type = %q, want %q", got, "object")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_RenameMapUpdatesAllReferenceSites(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"very bad tool","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"very bad tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"very bad tool"}]}]}
+		],
+		"tools":[
+			{"type":"custom","function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != normalizedName {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != normalizedName {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, normalizedName)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_RejectsNonObjectSchemas(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"custom","name":"array_schema","input_schema":{"type":"array","items":{"type":"string"}}},
+			{"type":"custom","name":"bad_properties","input_schema":{"type":"object","properties":[]}}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.0.input_schema.type = %q, want %q", got, "object")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.properties"); !got.Exists() || !got.IsObject() {
+		t.Fatalf("tools.0.input_schema.properties should be object, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.items"); got.Exists() {
+		t.Fatalf("tools.0.input_schema.items should be removed, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.1.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.1.input_schema.type = %q, want %q", got, "object")
+	}
+	if got := gjson.GetBytes(out, "tools.1.input_schema.properties"); !got.Exists() || !got.IsObject() {
+		t.Fatalf("tools.1.input_schema.properties should be object, got %s", got.Raw)
+	}
+}
 func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	payload := []byte(`{
 		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
