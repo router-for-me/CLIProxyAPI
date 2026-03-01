@@ -74,6 +74,28 @@ func TestClampAntigravityClaudeMaxOutputTokens_ClampsThinkingModel(t *testing.T)
 	}
 }
 
+func TestApplyAntigravityClaudeCompatTransforms_ClampsAndRemovesOutputConfig(t *testing.T) {
+	input := []byte(`{
+		"output_config":{"effort":"max"},
+		"request":{
+			"output_config":{"effort":"high"},
+			"generationConfig":{"maxOutputTokens":128000}
+		}
+	}`)
+
+	out := applyAntigravityClaudeCompatTransforms("claude-opus-4-6-thinking", input)
+
+	if gjson.GetBytes(out, "output_config").Exists() {
+		t.Fatalf("top-level output_config should be removed")
+	}
+	if gjson.GetBytes(out, "request.output_config").Exists() {
+		t.Fatalf("request.output_config should be removed")
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("expected maxOutputTokens=64000, got %d", got)
+	}
+}
+
 func TestClampAntigravityClaudeMaxOutputTokens_PreservesWithinLimit(t *testing.T) {
 	input := []byte(`{"request":{"generationConfig":{"maxOutputTokens":64000}}}`)
 	out := clampAntigravityClaudeMaxOutputTokens("claude-opus-4-6-thinking", input)
@@ -95,6 +117,14 @@ func TestClampAntigravityClaudeMaxOutputTokens_NoopForNonClaude(t *testing.T) {
 	out := clampAntigravityClaudeMaxOutputTokens("gemini-2.5-pro", input)
 	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 128000 {
 		t.Fatalf("expected maxOutputTokens=128000, got %d", got)
+	}
+}
+
+func TestClampAntigravityClaudeMaxOutputTokens_ClampsLargeInt64Value(t *testing.T) {
+	input := []byte(`{"request":{"generationConfig":{"maxOutputTokens":9223372036854775807}}}`)
+	out := clampAntigravityClaudeMaxOutputTokens("claude-opus-4-6-thinking", input)
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("expected maxOutputTokens=64000, got %d", got)
 	}
 }
 
