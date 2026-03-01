@@ -461,6 +461,75 @@ func TestNormalizeClaudeToolsForAnthropic_RenameMapUpdatesAllReferenceSites(t *t
 	}
 }
 
+func TestNormalizeClaudeToolsForAnthropic_RejectsDuplicateOriginalCustomToolNames(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"duplicate tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"duplicate tool","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"duplicate tool"}]}
+		],
+		"tools":[
+			{"type":"custom","name":"duplicate tool","description":"first","input_schema":{"type":"object"}},
+			{"type":"custom","name":"duplicate tool","description":"second","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("expected duplicate custom tool name error")
+	}
+	var status statusErr
+	if !errors.As(err, &status) {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if got := status.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	}
+	if !strings.Contains(err.Error(), `duplicate custom tool name "duplicate tool"`) {
+		t.Fatalf("error = %q, want duplicate tool name message", err.Error())
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_AllowsDistinctOriginalNamesThatSanitizeToSameBase(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"very bad tool","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"very@bad tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":[{"type":"tool_reference","tool_name":"very@bad tool"}]}]}
+		],
+		"tools":[
+			{"type":"custom","name":"very bad tool","description":"first","input_schema":{"type":"object"}},
+			{"type":"custom","name":"very@bad tool","description":"second","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	firstName := gjson.GetBytes(out, "tools.0.name").String()
+	secondName := gjson.GetBytes(out, "tools.1.name").String()
+	if firstName == "" || secondName == "" {
+		t.Fatalf("normalized names should not be empty, got first=%q second=%q", firstName, secondName)
+	}
+	if firstName == secondName {
+		t.Fatalf("normalized names should be unique, got %q", firstName)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != firstName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, firstName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != firstName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, firstName)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != secondName {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, secondName)
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != secondName {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, secondName)
+	}
+}
+
 func TestNormalizeClaudeToolsForAnthropic_RejectsNonObjectSchemas(t *testing.T) {
 	input := []byte(`{
 		"tools":[
@@ -724,16 +793,29 @@ func testClaudeExecutorInvalidCompressedErrorBody(
 	}}
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
+	checkErr := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		var status statusErr
+		if !errors.As(err, &status) {
+			t.Fatalf("%s: expected statusErr, got %T: %v", name, err, err)
+		}
+		if got := status.StatusCode(); got != http.StatusBadRequest {
+			t.Fatalf("%s: status code = %d, want %d", name, got, http.StatusBadRequest)
+		}
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "failed to read upstream error body") {
+			t.Fatalf("%s: expected read failure context, got %q", name, err.Error())
+		}
+		if !strings.Contains(errText, "gzip") && !strings.Contains(errText, "eof") && !strings.Contains(errText, "checksum") {
+			t.Fatalf("%s: expected gzip read failure, got %q", name, err.Error())
+		}
+	}
+
 	err := invoke(executor, auth, payload)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "failed to decode error response body") {
-		t.Fatalf("expected decode failure message, got: %v", err)
-	}
-	if statusProvider, ok := err.(interface{ StatusCode() int }); !ok || statusProvider.StatusCode() != http.StatusBadRequest {
-		t.Fatalf("expected status code 400, got: %v", err)
-	}
+	checkErr(t, "invoke", err)
 }
 
 // TestClaudeExecutor_ExecuteStream_SetsIdentityAcceptEncoding verifies that streaming
@@ -1200,4 +1282,66 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	if blocks[2].Get("text").String() != `Use <xml> tags & "quotes" in output.` {
 		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
 	}
+}
+
+func TestClaudeExecutor_PreservesStatusOnCompressedErrorDecodeFailure(t *testing.T) {
+	invalidGzip := []byte("not-a-gzip-stream")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(invalidGzip)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	checkErr := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		var status statusErr
+		if !errors.As(err, &status) {
+			t.Fatalf("%s: expected statusErr, got %T: %v", name, err, err)
+		}
+		if got := status.StatusCode(); got != http.StatusBadRequest {
+			t.Fatalf("%s: status code = %d, want %d", name, got, http.StatusBadRequest)
+		}
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "failed to decode upstream error body") {
+			t.Fatalf("%s: expected decode failure context, got %q", name, err.Error())
+		}
+		if !strings.Contains(errText, "gzip") {
+			t.Fatalf("%s: expected gzip decode failure details, got %q", name, err.Error())
+		}
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "Execute", err)
+
+	_, err = executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "ExecuteStream", err)
+
+	_, err = executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "CountTokens", err)
 }
