@@ -178,6 +178,7 @@ nonstream-keepalive-interval: 0
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     tool-result-force-string: false # optional (default false): when true, force chat tool message content to string
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:

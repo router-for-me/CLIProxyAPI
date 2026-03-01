@@ -369,6 +369,55 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_ToolResultForceStringAttr(t *testing.T) {
+	tests := []struct {
+		name     string
+		force    bool
+		wantAttr bool
+	}{
+		{name: "default false", force: false, wantAttr: false},
+		{name: "true injects attr", force: true, wantAttr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synth := NewConfigSynthesizer()
+			ctx := &SynthesisContext{
+				Config: &config.Config{
+					OpenAICompatibility: []config.OpenAICompatibility{
+						{
+							Name:                  "OpenRouter",
+							BaseURL:               "https://openrouter.ai/api/v1",
+							ToolResultForceString: tt.force,
+							APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+								{APIKey: "sk-or-v1-test"},
+							},
+						},
+					},
+				},
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			}
+
+			auths, err := synth.Synthesize(ctx)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+
+			_, ok := auths[0].Attributes["tool_result_force_string"]
+			if ok != tt.wantAttr {
+				t.Fatalf("tool_result_force_string exists = %v, want %v", ok, tt.wantAttr)
+			}
+			if tt.wantAttr && auths[0].Attributes["tool_result_force_string"] != "true" {
+				t.Fatalf("tool_result_force_string = %q, want %q", auths[0].Attributes["tool_result_force_string"], "true")
+			}
+		})
+	}
+}
+
 func TestConfigSynthesizer_VertexCompat(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
