@@ -87,9 +87,12 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			if functionDeclarationsResult.Exists() && functionDeclarationsResult.IsArray() {
 				functionDeclarationsResults := functionDeclarationsResult.Array()
 				for j := 0; j < len(functionDeclarationsResults); j++ {
+					// Gemini API expects function_declarations[].parameters (JSON Schema).
+					// Keep/normalize to "parameters" for compatibility, even if clients send "parametersJsonSchema".
 					parametersResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j))
-					if parametersResult.Exists() {
-						strJson, _ := util.RenameKey(string(rawJSON), fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j), fmt.Sprintf("request.tools.%d.function_declarations.%d.parametersJsonSchema", i, j))
+					parametersJSONSchemaResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations.%d.parametersJsonSchema", i, j))
+					if !parametersResult.Exists() && parametersJSONSchemaResult.Exists() {
+						strJson, _ := util.RenameKey(string(rawJSON), fmt.Sprintf("request.tools.%d.function_declarations.%d.parametersJsonSchema", i, j), fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j))
 						rawJSON = []byte(strJson)
 					}
 				}
