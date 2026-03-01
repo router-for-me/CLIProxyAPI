@@ -1,8 +1,7 @@
 // Package kimi implements thinking configuration for Kimi (Moonshot AI) models.
 //
-// Kimi models use the OpenAI-compatible reasoning_effort format with discrete levels
-// (low/medium/high). The provider strips any existing thinking config and applies
-// the unified ThinkingConfig in OpenAI format.
+// Kimi models use the OpenAI-compatible reasoning_effort format for enabled thinking
+// levels, but use thinking.type=disabled when thinking is explicitly turned off.
 package kimi
 
 import (
@@ -17,8 +16,8 @@ import (
 // Applier implements thinking.ProviderApplier for Kimi models.
 //
 // Kimi-specific behavior:
-//   - Output format: reasoning_effort (string: low/medium/high)
-//   - Uses OpenAI-compatible format
+//   - Enabled thinking: reasoning_effort (string levels)
+//   - Disabled thinking: thinking.type="disabled"
 //   - Supports budget-to-level conversion
 type Applier struct{}
 
@@ -35,10 +34,18 @@ func init() {
 
 // Apply applies thinking configuration to Kimi request body.
 //
-// Expected output format:
+// Expected output format (enabled):
 //
 //	{
 //	  "reasoning_effort": "high"
+//	}
+//
+// Expected output format (disabled):
+//
+//	{
+//	  "thinking": {
+//	    "type": "disabled"
+//	  }
 //	}
 func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
@@ -60,8 +67,13 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		}
 		effort = string(config.Level)
 	case thinking.ModeNone:
-		// Kimi uses "none" to disable thinking
-		effort = string(thinking.LevelNone)
+		// Respect clamped fallback level for models that cannot disable thinking.
+		if config.Level != "" && config.Level != thinking.LevelNone {
+			effort = string(config.Level)
+			break
+		}
+		// Kimi requires explicit disabled thinking object.
+		return applyDisabledThinking(body)
 	case thinking.ModeBudget:
 		// Convert budget to level using threshold mapping
 		level, ok := thinking.ConvertBudgetToLevel(config.Budget)
@@ -79,12 +91,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	if effort == "" {
 		return body, nil
 	}
-
-	result, err := sjson.SetBytes(body, "reasoning_effort", effort)
-	if err != nil {
-		return body, fmt.Errorf("kimi thinking: failed to set reasoning_effort: %w", err)
-	}
-	return result, nil
+	return applyReasoningEffort(body, effort)
 }
 
 // applyCompatibleKimi applies thinking config for user-defined Kimi models.
@@ -101,7 +108,9 @@ func applyCompatibleKimi(body []byte, config thinking.ThinkingConfig) ([]byte, e
 		}
 		effort = string(config.Level)
 	case thinking.ModeNone:
-		effort = string(thinking.LevelNone)
+		if config.Level == "" || config.Level == thinking.LevelNone {
+			return applyDisabledThinking(body)
+		}
 		if config.Level != "" {
 			effort = string(config.Level)
 		}
@@ -118,9 +127,33 @@ func applyCompatibleKimi(body []byte, config thinking.ThinkingConfig) ([]byte, e
 		return body, nil
 	}
 
-	result, err := sjson.SetBytes(body, "reasoning_effort", effort)
-	if err != nil {
-		return body, fmt.Errorf("kimi thinking: failed to set reasoning_effort: %w", err)
+	return applyReasoningEffort(body, effort)
+}
+
+func applyReasoningEffort(body []byte, effort string) ([]byte, error) {
+	result, errDeleteThinking := sjson.DeleteBytes(body, "thinking")
+	if errDeleteThinking != nil {
+		return body, fmt.Errorf("kimi thinking: failed to clear thinking object: %w", errDeleteThinking)
+	}
+	result, errSetEffort := sjson.SetBytes(result, "reasoning_effort", effort)
+	if errSetEffort != nil {
+		return body, fmt.Errorf("kimi thinking: failed to set reasoning_effort: %w", errSetEffort)
+	}
+	return result, nil
+}
+
+func applyDisabledThinking(body []byte) ([]byte, error) {
+	result, errDeleteThinking := sjson.DeleteBytes(body, "thinking")
+	if errDeleteThinking != nil {
+		return body, fmt.Errorf("kimi thinking: failed to clear thinking object: %w", errDeleteThinking)
+	}
+	result, errDeleteEffort := sjson.DeleteBytes(result, "reasoning_effort")
+	if errDeleteEffort != nil {
+		return body, fmt.Errorf("kimi thinking: failed to clear reasoning_effort: %w", errDeleteEffort)
+	}
+	result, errSetType := sjson.SetBytes(result, "thinking.type", "disabled")
+	if errSetType != nil {
+		return body, fmt.Errorf("kimi thinking: failed to set thinking.type: %w", errSetType)
 	}
 	return result, nil
 }

@@ -670,6 +670,7 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.
+// If the client has no registered model information, it returns true (no filtering).
 func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
 	modelID = strings.TrimSpace(modelID)
@@ -682,7 +683,7 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 
 	models, exists := r.clientModels[clientID]
 	if !exists || len(models) == 0 {
-		return false
+		return true
 	}
 
 	for _, id := range models {

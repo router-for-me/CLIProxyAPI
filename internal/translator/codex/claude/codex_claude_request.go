@@ -46,15 +46,23 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if systemsResult.IsArray() {
 		systemResults := systemsResult.Array()
 		message := `{"type":"message","role":"developer","content":[]}`
+		contentIndex := 0
 		for i := 0; i < len(systemResults); i++ {
 			systemResult := systemResults[i]
 			systemTypeResult := systemResult.Get("type")
 			if systemTypeResult.String() == "text" {
-				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.type", i), "input_text")
-				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.text", i), systemResult.Get("text").String())
+				text := systemResult.Get("text").String()
+				if strings.HasPrefix(text, "x-anthropic-billing-header: ") {
+					continue
+				}
+				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.type", contentIndex), "input_text")
+				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.text", contentIndex), text)
+				contentIndex++
 			}
 		}
-		template, _ = sjson.SetRaw(template, "input.-1", message)
+		if contentIndex > 0 {
+			template, _ = sjson.SetRaw(template, "input.-1", message)
+		}
 	}
 
 	// Process messages and transform their contents to appropriate formats.
