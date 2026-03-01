@@ -180,8 +180,8 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
 			}
-		case "adaptive":
-			// Keep adaptive as a high level sentinel; ApplyThinking resolves it
+		case "adaptive", "auto":
+			// Keep adaptive/auto as a high level sentinel; ApplyThinking resolves it
 			// to model-specific max capability.
 			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
 			out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
