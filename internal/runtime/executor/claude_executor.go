@@ -487,6 +487,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			log.Errorf("response body close error: %v", errClose)
 		}
 		appendAPIResponseChunk(ctx, e.cfg, b)
+		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", resp.StatusCode, summarizeErrorBody(resp.Header.Get("Content-Type"), b))
 		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
@@ -942,16 +943,18 @@ func normalizeClaudeToolsForAnthropic(body []byte) []byte {
 		}
 
 		schemaRaw := ""
-		if v := tool.Get("input_schema"); v.Exists() {
-			schemaRaw = v.Raw
-		} else if v := tool.Get("parameters"); v.Exists() {
-			schemaRaw = v.Raw
-		} else if v := tool.Get("parametersJsonSchema"); v.Exists() {
-			schemaRaw = v.Raw
-		} else if v := tool.Get("function.parameters"); v.Exists() {
-			schemaRaw = v.Raw
-		} else if v := tool.Get("function.parametersJsonSchema"); v.Exists() {
-			schemaRaw = v.Raw
+		schemaPaths := []string{
+			"input_schema",
+			"parameters",
+			"parametersJsonSchema",
+			"function.parameters",
+			"function.parametersJsonSchema",
+		}
+		for _, path := range schemaPaths {
+			if v := tool.Get(path); v.Exists() {
+				schemaRaw = v.Raw
+				break
+			}
 		}
 		schema := normalizeAnthropicToolSchema(schemaRaw)
 
