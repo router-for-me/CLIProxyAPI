@@ -149,9 +149,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		applyToolPrefixForOAuth:  true,
 	})
 	if err != nil {
-		if isStatusCodeErr(err) {
-			return resp, err
-		}
 		return resp, err
 	}
 	bodyForTranslation := preparedBody.bodyForTranslation
@@ -301,9 +298,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		applyToolPrefixForOAuth:  true,
 	})
 	if err != nil {
-		if isStatusCodeErr(err) {
-			return nil, err
-		}
 		return nil, err
 	}
 	bodyForTranslation := preparedBody.bodyForTranslation
@@ -470,9 +464,6 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		applyToolPrefixForOAuth:  true,
 	})
 	if err != nil {
-		if isStatusCodeErr(err) {
-			return cliproxyexecutor.Response{}, err
-		}
 		return cliproxyexecutor.Response{}, err
 	}
 	body = preparedBody.bodyForUpstream
@@ -1143,9 +1134,6 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 	originalNameCounts := make(map[string]int)
 	usedNames := reservedClaudeBuiltinToolNames()
 	for _, tool := range tools.Array() {
-		if isClaudeBuiltinTool(tool) {
-			continue
-		}
 		name := anthroToolOriginalName(tool)
 		if name == "" {
 			continue
@@ -1326,6 +1314,8 @@ func applyClaudeRenameMap(body []byte, renameMap map[string]string) ([]byte, err
 		return body, nil
 	}
 
+	messagesRaw := messages.Raw
+	messagesChanged := false
 	for msgIndex, msg := range messages.Array() {
 		content := msg.Get("content")
 		if !content.Exists() || !content.IsArray() {
@@ -1335,21 +1325,23 @@ func applyClaudeRenameMap(body []byte, renameMap map[string]string) ([]byte, err
 			switch part.Get("type").String() {
 			case "tool_use":
 				if mapped, ok := renamedToolName(part.Get("name").String(), renameMap); ok {
-					path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex, contentIndex)
-					updatedBody, err := sjson.SetBytes(body, path, mapped)
+					path := fmt.Sprintf("%d.content.%d.name", msgIndex, contentIndex)
+					updatedMessages, err := sjson.Set(messagesRaw, path, mapped)
 					if err != nil {
 						return body, fmt.Errorf("set %s: %w", path, err)
 					}
-					body = updatedBody
+					messagesRaw = updatedMessages
+					messagesChanged = true
 				}
 			case "tool_reference":
 				if mapped, ok := renamedToolName(part.Get("tool_name").String(), renameMap); ok {
-					path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex, contentIndex)
-					updatedBody, err := sjson.SetBytes(body, path, mapped)
+					path := fmt.Sprintf("%d.content.%d.tool_name", msgIndex, contentIndex)
+					updatedMessages, err := sjson.Set(messagesRaw, path, mapped)
 					if err != nil {
 						return body, fmt.Errorf("set %s: %w", path, err)
 					}
-					body = updatedBody
+					messagesRaw = updatedMessages
+					messagesChanged = true
 				}
 			case "tool_result":
 				nestedContent := part.Get("content")
@@ -1361,17 +1353,26 @@ func applyClaudeRenameMap(body []byte, renameMap map[string]string) ([]byte, err
 						continue
 					}
 					if mapped, ok := renamedToolName(nestedPart.Get("tool_name").String(), renameMap); ok {
-						path := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex, contentIndex, nestedIndex)
-						updatedBody, err := sjson.SetBytes(body, path, mapped)
+						path := fmt.Sprintf("%d.content.%d.content.%d.tool_name", msgIndex, contentIndex, nestedIndex)
+						updatedMessages, err := sjson.Set(messagesRaw, path, mapped)
 						if err != nil {
 							return body, fmt.Errorf("set %s: %w", path, err)
 						}
-						body = updatedBody
+						messagesRaw = updatedMessages
+						messagesChanged = true
 					}
 				}
 			}
 		}
 	}
+	if !messagesChanged {
+		return body, nil
+	}
+	updatedBody, err := sjson.SetRawBytes(body, "messages", []byte(messagesRaw))
+	if err != nil {
+		return body, fmt.Errorf("set messages: %w", err)
+	}
+	body = updatedBody
 
 	return body, nil
 }
