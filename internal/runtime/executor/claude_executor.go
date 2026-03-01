@@ -1106,6 +1106,14 @@ func uniqueAnthropicToolName(name string, used map[string]struct{}) string {
 	return ""
 }
 
+func reservedClaudeBuiltinToolNames() map[string]struct{} {
+	reserved := make(map[string]struct{})
+	for _, name := range []string{"web_search", "code_execution", "text_editor", "computer"} {
+		reserved[name] = struct{}{}
+	}
+	return reserved
+}
+
 func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.Exists() || !tools.IsArray() {
@@ -1115,7 +1123,7 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 	normalizedTools := "[]"
 	renameMap := make(map[string]string)
 	customOriginalNames := make(map[string]struct{})
-	usedNames := make(map[string]struct{})
+	usedNames := reservedClaudeBuiltinToolNames()
 
 	for _, tool := range tools.Array() {
 		if isClaudeBuiltinTool(tool) {
@@ -1144,10 +1152,6 @@ func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
 		normalizedTool, originalName, newName, errNormalize := normalizeAnthropicToolEntry(tool, usedNames)
 		if errNormalize != nil {
 			return body, errNormalize
-		}
-		if normalizedTool == "" {
-			// Skip malformed non-builtin tools that cannot produce a valid name.
-			continue
 		}
 		updatedTools, errSet := sjson.SetRaw(normalizedTools, "-1", normalizedTool)
 		if errSet != nil {
@@ -1184,7 +1188,10 @@ func normalizeAnthropicToolEntry(tool gjson.Result, usedNames map[string]struct{
 	originalName = anthroToolOriginalName(tool)
 	newName = uniqueAnthropicToolName(originalName, usedNames)
 	if newName == "" {
-		return "", originalName, "", nil
+		return "", originalName, "", statusErr{
+			code: http.StatusBadRequest,
+			msg:  fmt.Sprintf("normalize claude tools: custom tool name %q cannot be sanitized into a valid Anthropic tool name", originalName),
+		}
 	}
 
 	description := strings.TrimSpace(tool.Get("description").String())
