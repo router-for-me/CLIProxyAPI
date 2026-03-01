@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -518,4 +519,67 @@ func hasTTLOrderingViolation(payload []byte) bool {
 	}
 
 	return violates
+}
+
+func TestClaudeExecutor_Execute_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
+	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
+		_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet-20241022",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+		return err
+	})
+}
+
+func TestClaudeExecutor_ExecuteStream_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
+	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
+		_, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet-20241022",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+		return err
+	})
+}
+
+func TestClaudeExecutor_CountTokens_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
+	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
+		_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet-20241022",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+		return err
+	})
+}
+
+func testClaudeExecutorInvalidCompressedErrorBody(
+	t *testing.T,
+	invoke func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error,
+) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("not-a-valid-gzip-stream"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	err := invoke(executor, auth, payload)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to decode error response body") {
+		t.Fatalf("expected decode failure message, got: %v", err)
+	}
+	if statusProvider, ok := err.(interface{ StatusCode() int }); !ok || statusProvider.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("expected status code 400, got: %v", err)
+	}
 }

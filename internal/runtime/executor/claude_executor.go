@@ -185,14 +185,25 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API)
+		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API).
 		errBody := httpResp.Body
 		if ce := httpResp.Header.Get("Content-Encoding"); ce != "" {
-			if decoded, decErr := decodeResponseBody(httpResp.Body, ce); decErr == nil {
-				errBody = decoded
+			var decErr error
+			errBody, decErr = decodeResponseBody(httpResp.Body, ce)
+			if decErr != nil {
+				recordAPIResponseError(ctx, e.cfg, decErr)
+				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
+				logWithRequestID(ctx).Warn(msg)
+				return resp, statusErr{code: httpResp.StatusCode, msg: msg}
 			}
 		}
-		b, _ := io.ReadAll(errBody)
+		b, readErr := io.ReadAll(errBody)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
+			logWithRequestID(ctx).Warn(msg)
+			b = []byte(msg)
+		}
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
@@ -339,14 +350,25 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API)
+		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API).
 		errBody := httpResp.Body
 		if ce := httpResp.Header.Get("Content-Encoding"); ce != "" {
-			if decoded, decErr := decodeResponseBody(httpResp.Body, ce); decErr == nil {
-				errBody = decoded
+			var decErr error
+			errBody, decErr = decodeResponseBody(httpResp.Body, ce)
+			if decErr != nil {
+				recordAPIResponseError(ctx, e.cfg, decErr)
+				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
+				logWithRequestID(ctx).Warn(msg)
+				return nil, statusErr{code: httpResp.StatusCode, msg: msg}
 			}
 		}
-		b, _ := io.ReadAll(errBody)
+		b, readErr := io.ReadAll(errBody)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
+			logWithRequestID(ctx).Warn(msg)
+			b = []byte(msg)
+		}
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
@@ -497,14 +519,25 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API)
-		errBody := io.ReadCloser(resp.Body)
+		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API).
+		errBody := resp.Body
 		if ce := resp.Header.Get("Content-Encoding"); ce != "" {
-			if decoded, decErr := decodeResponseBody(resp.Body, ce); decErr == nil {
-				errBody = decoded
+			var decErr error
+			errBody, decErr = decodeResponseBody(resp.Body, ce)
+			if decErr != nil {
+				recordAPIResponseError(ctx, e.cfg, decErr)
+				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
+				logWithRequestID(ctx).Warn(msg)
+				return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
 			}
 		}
-		b, _ := io.ReadAll(errBody)
+		b, readErr := io.ReadAll(errBody)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
+			logWithRequestID(ctx).Warn(msg)
+			b = []byte(msg)
+		}
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
