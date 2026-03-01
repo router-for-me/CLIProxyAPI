@@ -561,9 +561,6 @@ func (e *ClaudeExecutor) finalizeClaudeRequestBody(body []byte, reqModel string,
 	}
 	normalizedBody, errNormalize := normalizeClaudeToolsForAnthropic(body)
 	if errNormalize != nil {
-		if isStatusCodeErr(errNormalize) {
-			return claudePreparedBody{}, errNormalize
-		}
 		return claudePreparedBody{}, fmt.Errorf("normalize claude tools: %w", errNormalize)
 	}
 	body = normalizedBody
