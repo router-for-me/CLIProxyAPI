@@ -296,8 +296,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
-	translated = clampAntigravityClaudeMaxOutputTokens(baseModel, translated)
-	translated = sanitizeAntigravityClaudeCompatFields(translated)
+	translated = applyAntigravityClaudeCompatTransforms(baseModel, translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -440,8 +439,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
-	translated = clampAntigravityClaudeMaxOutputTokens(baseModel, translated)
-	translated = sanitizeAntigravityClaudeCompatFields(translated)
+	translated = applyAntigravityClaudeCompatTransforms(baseModel, translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -834,8 +832,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
-	translated = clampAntigravityClaudeMaxOutputTokens(baseModel, translated)
-	translated = sanitizeAntigravityClaudeCompatFields(translated)
+	translated = applyAntigravityClaudeCompatTransforms(baseModel, translated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -1035,8 +1032,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, err
 	}
 
-	payload = clampAntigravityClaudeMaxOutputTokens(baseModel, payload)
-	payload = sanitizeAntigravityClaudeCompatFields(payload)
+	payload = applyAntigravityClaudeCompatTransforms(baseModel, payload)
 	payload = deleteJSONField(payload, "project")
 	payload = deleteJSONField(payload, "model")
 	payload = deleteJSONField(payload, "request.safetySettings")
@@ -1721,6 +1717,12 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	}
 }
 
+func applyAntigravityClaudeCompatTransforms(baseModel string, body []byte) []byte {
+	body = clampAntigravityClaudeMaxOutputTokens(baseModel, body)
+	body = sanitizeAntigravityClaudeCompatFields(body)
+	return body
+}
+
 func sanitizeAntigravityClaudeCompatFields(body []byte) []byte {
 	body = deleteJSONField(body, "output_config")
 	body = deleteJSONField(body, "request.output_config")
@@ -1732,8 +1734,9 @@ func clampAntigravityClaudeMaxOutputTokens(baseModel string, body []byte) []byte
 		return body
 	}
 
-	current := gjson.GetBytes(body, "request.generationConfig.maxOutputTokens")
-	if !current.Exists() || current.Int() <= 0 {
+	currentValue := gjson.GetBytes(body, "request.generationConfig.maxOutputTokens")
+	currentTokens := currentValue.Int()
+	if !currentValue.Exists() || currentTokens <= 0 {
 		return body
 	}
 
@@ -1744,7 +1747,7 @@ func clampAntigravityClaudeMaxOutputTokens(baseModel string, body []byte) []byte
 		maxAllowed = info.MaxCompletionTokens
 	}
 
-	if maxAllowed <= 0 || int(current.Int()) <= maxAllowed {
+	if maxAllowed <= 0 || currentTokens <= int64(maxAllowed) {
 		return body
 	}
 
