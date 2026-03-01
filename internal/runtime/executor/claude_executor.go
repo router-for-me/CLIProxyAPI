@@ -1113,11 +1113,10 @@ func generateBillingHeader(payload []byte) string {
 	return fmt.Sprintf("x-anthropic-billing-header: cc_version=2.1.63.%s; cc_entrypoint=cli; cch=%s;", buildHash, cch)
 }
 
-// checkSystemInstructionsWithMode injects Claude Code system prompt to match
-// the real Claude Code request format:
+// checkSystemInstructionsWithMode injects Claude Code-style system blocks:
 //   system[0]: billing header (no cache_control)
-//   system[1]: "You are a Claude agent, built on Anthropic's Claude Agent SDK." (with cache_control)
-//   system[2..]: user's system messages (with cache_control on last)
+//   system[1]: agent identifier (no cache_control)
+//   system[2..]: user system messages (cache_control added when missing)
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 	system := gjson.GetBytes(payload, "system")
 
