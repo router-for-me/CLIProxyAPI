@@ -5,6 +5,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -369,7 +370,10 @@ func TestNormalizeClaudeToolsForAnthropic_CustomTool(t *testing.T) {
 			{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark"}}
 		]
 	}`)
-	out := normalizeClaudeToolsForAnthropic(input)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
 
 	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "web_search_20250305" {
 		t.Fatalf("tools.0.type = %q, want %q", got, "web_search_20250305")
@@ -399,7 +403,10 @@ func TestNormalizeClaudeToolsForAnthropic_FunctionFallbacks(t *testing.T) {
 			{"type":"custom","function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}}
 		]
 	}`)
-	out := normalizeClaudeToolsForAnthropic(input)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
 	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
 	if normalizedName == "" {
 		t.Fatal("normalized tool name should not be empty")
@@ -421,6 +428,42 @@ func TestNormalizeClaudeToolsForAnthropic_FunctionFallbacks(t *testing.T) {
 	}
 }
 
+func TestNormalizeClaudeToolsForAnthropic_RenameMapUpdatesAllReferenceSites(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"very bad tool","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"very bad tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"very bad tool"}]}]}
+		],
+		"tools":[
+			{"type":"custom","function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != normalizedName {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != normalizedName {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, normalizedName)
+	}
+}
+
 func TestNormalizeClaudeToolsForAnthropic_RejectsNonObjectSchemas(t *testing.T) {
 	input := []byte(`{
 		"tools":[
@@ -428,7 +471,10 @@ func TestNormalizeClaudeToolsForAnthropic_RejectsNonObjectSchemas(t *testing.T) 
 			{"type":"custom","name":"bad_properties","input_schema":{"type":"object","properties":[]}}
 		]
 	}`)
-	out := normalizeClaudeToolsForAnthropic(input)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
 
 	if got := gjson.GetBytes(out, "tools.0.input_schema.type").String(); got != "object" {
 		t.Fatalf("tools.0.input_schema.type = %q, want %q", got, "object")
@@ -539,4 +585,66 @@ func TestClaudeExecutor_DecodesCompressedErrorBodies(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClaudeExecutor_PropagatesCompressedErrorReadFailure(t *testing.T) {
+	errorBody := []byte(`{"error":{"message":"decoded-gzip"}}`)
+	compressed := compressBytesForEncoding(t, "gzip", errorBody)
+	if len(compressed) < 8 {
+		t.Fatalf("compressed gzip payload too small: %d", len(compressed))
+	}
+	truncated := compressed[:len(compressed)-8]
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(truncated)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	checkErr := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		var status statusErr
+		if errors.As(err, &status) {
+			t.Fatalf("%s: expected read/decode error, got statusErr %v", name, status)
+		}
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "gzip") && !strings.Contains(errText, "eof") && !strings.Contains(errText, "checksum") {
+			t.Fatalf("%s: expected gzip read failure, got %q", name, err.Error())
+		}
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "Execute", err)
+
+	_, err = executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "ExecuteStream", err)
+
+	_, err = executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "CountTokens", err)
 }
