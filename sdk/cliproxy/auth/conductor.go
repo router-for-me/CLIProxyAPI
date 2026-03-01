@@ -1240,6 +1240,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	triggerRefreshAuthID := ""
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1277,10 +1278,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				statusCode := statusCodeFromResult(result.Error)
 				switch statusCode {
 				case 401:
-					next := now.Add(30 * time.Minute)
+					// Use a short cooldown so the credential becomes available again
+					// quickly after a background refresh succeeds.
+					next := now.Add(30 * time.Second)
 					state.NextRetryAfter = next
 					suspendReason = "unauthorized"
 					shouldSuspendModel = true
+					triggerRefreshAuthID = result.AuthID
 				case 402, 403:
 					next := now.Add(30 * time.Minute)
 					state.NextRetryAfter = next
@@ -1349,6 +1353,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+
+	// On 401 trigger an immediate background refresh so the credential
+	// is renewed before the short cooldown expires.
+	if triggerRefreshAuthID != "" {
+		go m.refreshAuthWithLimit(context.Background(), triggerRefreshAuthID)
+	}
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
