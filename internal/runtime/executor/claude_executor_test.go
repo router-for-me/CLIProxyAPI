@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/andybalholm/brotli"
+	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -533,7 +534,7 @@ func TestNormalizeClaudeToolsForAnthropic_RenameMapUpdatesAllReferenceSites(t *t
 	}
 }
 
-func TestNormalizeClaudeToolsForAnthropic_RejectsDuplicateOriginalCustomToolNames(t *testing.T) {
+func TestNormalizeClaudeToolsForAnthropic_PreservesDuplicateOriginalCustomToolNames(t *testing.T) {
 	input := []byte(`{
 		"tool_choice":{"type":"tool","name":"duplicate tool"},
 		"messages":[
@@ -546,23 +547,28 @@ func TestNormalizeClaudeToolsForAnthropic_RejectsDuplicateOriginalCustomToolName
 		]
 	}`)
 
-	_, err := normalizeClaudeToolsForAnthropic(input)
-	if err == nil {
-		t.Fatal("expected duplicate custom tool name error")
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
 	}
-	var status statusErr
-	if !errors.As(err, &status) {
-		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "duplicate tool" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "duplicate tool")
 	}
-	if got := status.StatusCode(); got != http.StatusBadRequest {
-		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "duplicate tool" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "duplicate tool")
 	}
-	if !strings.Contains(err.Error(), `duplicate custom tool name "duplicate tool"`) {
-		t.Fatalf("error = %q, want duplicate tool name message", err.Error())
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "duplicate tool" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "duplicate tool")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "duplicate tool" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "duplicate tool")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "duplicate tool" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "duplicate tool")
 	}
 }
 
-func TestNormalizeClaudeToolsForAnthropic_RejectsUnsanitizableCustomToolName(t *testing.T) {
+func TestNormalizeClaudeToolsForAnthropic_PreservesUnsanitizableCustomToolName(t *testing.T) {
 	input := []byte(`{
 		"tool_choice":{"type":"tool","name":"!!!"},
 		"messages":[
@@ -574,19 +580,21 @@ func TestNormalizeClaudeToolsForAnthropic_RejectsUnsanitizableCustomToolName(t *
 		]
 	}`)
 
-	_, err := normalizeClaudeToolsForAnthropic(input)
-	if err == nil {
-		t.Fatal("expected unsanitizable custom tool error")
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
 	}
-	var status statusErr
-	if !errors.As(err, &status) {
-		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "!!!" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "!!!")
 	}
-	if got := status.StatusCode(); got != http.StatusBadRequest {
-		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "!!!" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "!!!")
 	}
-	if !strings.Contains(err.Error(), `custom tool name "!!!" cannot be sanitized`) {
-		t.Fatalf("error = %q, want unsanitizable tool name message", err.Error())
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "!!!" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "!!!")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "!!!" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "!!!")
 	}
 }
 
@@ -694,6 +702,33 @@ func TestNormalizeClaudeToolsForAnthropic_RejectsNonObjectSchemas(t *testing.T) 
 	}
 	if got := gjson.GetBytes(out, "tools.1.input_schema.properties"); !got.Exists() || !got.IsObject() {
 		t.Fatalf("tools.1.input_schema.properties should be object, got %s", got.Raw)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_PreservesUnknownExplicitTypedTool(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"future_tool","name":"future_one","extra":{"a":1}},
+			{"type":"custom","name":"apply patch","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "future_tool" {
+		t.Fatalf("tools.0.type = %q, want %q", got, "future_tool")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "future_one" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "tools.0.extra.a").Int(); got != 1 {
+		t.Fatalf("tools.0.extra.a = %d, want 1", got)
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got == "apply patch" || got == "" {
+		t.Fatalf("tools.1.name = %q, want sanitized non-empty custom name", got)
 	}
 }
 
@@ -814,6 +849,102 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}
 	if hasTTLOrderingViolation(seenBody) {
 		t.Fatalf("count_tokens body still has ttl ordering violations: %s", string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_CountTokens_AppliesThinkingFromModelSuffix(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet(2048)",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if got := gjson.GetBytes(seenBody, "thinking.type").String(); got != "enabled" {
+		t.Fatalf("thinking.type = %q, want %q, body=%s", got, "enabled", string(seenBody))
+	}
+	if got := gjson.GetBytes(seenBody, "thinking.budget_tokens").Int(); got <= 0 {
+		t.Fatalf("thinking.budget_tokens = %d, want > 0, body=%s", got, string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_CountTokens_DisablesThinkingWhenForcedToolChoice(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"tool_choice":{"type":"tool","name":"apply_patch"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet(2048)",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if gjson.GetBytes(seenBody, "thinking").Exists() {
+		t.Fatalf("thinking should be removed for forced tool choice, body=%s", string(seenBody))
+	}
+}
+
+func TestApplyClaudeHeaders_MergesBetasWithDefaultsAndClaude1M(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginReq := httptest.NewRequest(http.MethodPost, "http://localhost/v1/messages", nil)
+	ginReq.Header.Set("Anthropic-Beta", "custom-beta-1,oauth-2025-04-20")
+	ginReq.Header.Set("X-CPA-CLAUDE-1M", "1")
+	ginCtx.Request = ginReq
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	req = req.WithContext(context.WithValue(req.Context(), "gin", ginCtx))
+
+	applyClaudeHeaders(req, &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}, "key-123", false, []string{"beta-from-body", "custom-beta-1"}, &config.Config{})
+
+	got := req.Header.Get("Anthropic-Beta")
+	for _, want := range []string{
+		"custom-beta-1",
+		"oauth-2025-04-20",
+		"beta-from-body",
+		"context-1m-2025-08-07",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Anthropic-Beta = %q, missing %q", got, want)
+		}
+	}
+	if strings.Count(got, "custom-beta-1") != 1 {
+		t.Fatalf("Anthropic-Beta should de-duplicate custom-beta-1, got %q", got)
 	}
 }
 
