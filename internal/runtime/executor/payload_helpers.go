@@ -2,6 +2,7 @@ package executor
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -101,11 +102,14 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			if fullPath == "" {
 				continue
 			}
-			updated, errSet := sjson.SetBytes(out, fullPath, value)
-			if errSet != nil {
-				continue
+			targetPaths := expandPayloadQueryPaths(out, fullPath)
+			for j := range targetPaths {
+				updated, errSet := sjson.SetBytes(out, targetPaths[j], value)
+				if errSet != nil {
+					continue
+				}
+				out = updated
 			}
-			out = updated
 		}
 	}
 	// Apply override raw rules: last write wins per field across all matching rules.
@@ -123,11 +127,14 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			if !ok {
 				continue
 			}
-			updated, errSet := sjson.SetRawBytes(out, fullPath, rawValue)
-			if errSet != nil {
-				continue
+			targetPaths := expandPayloadQueryPaths(out, fullPath)
+			for j := range targetPaths {
+				updated, errSet := sjson.SetRawBytes(out, targetPaths[j], rawValue)
+				if errSet != nil {
+					continue
+				}
+				out = updated
 			}
-			out = updated
 		}
 	}
 	// Apply filter rules: remove matching paths from payload.
@@ -141,14 +148,142 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			if fullPath == "" {
 				continue
 			}
-			updated, errDel := sjson.DeleteBytes(out, fullPath)
-			if errDel != nil {
-				continue
+			targetPaths := expandPayloadQueryPaths(out, fullPath)
+			// Delete in reverse to avoid array index shifts when removing elements.
+			for j := len(targetPaths) - 1; j >= 0; j-- {
+				updated, errDel := sjson.DeleteBytes(out, targetPaths[j])
+				if errDel != nil {
+					continue
+				}
+				out = updated
 			}
-			out = updated
 		}
 	}
 	return out
+}
+
+// expandPayloadQueryPaths resolves one or more gjson array query path segments
+// (#(...)) into concrete sjson mutation paths.
+// If no query segment exists, it returns fullPath.
+func expandPayloadQueryPaths(doc []byte, fullPath string) []string {
+	fullPath = strings.TrimSpace(fullPath)
+	if fullPath == "" {
+		return nil
+	}
+	paths := []string{fullPath}
+	for {
+		expandedAny := false
+		next := make([]string, 0, len(paths))
+		for i := range paths {
+			path := strings.TrimSpace(paths[i])
+			if path == "" {
+				continue
+			}
+			queryStart := strings.Index(path, "#(")
+			if queryStart == -1 {
+				next = append(next, path)
+				continue
+			}
+			queryEnd := payloadQueryEnd(path, queryStart+2)
+			if queryEnd == -1 {
+				continue
+			}
+			matches := expandSinglePayloadQueryPath(doc, path, queryStart, queryEnd)
+			if len(matches) == 0 {
+				continue
+			}
+			next = append(next, matches...)
+			expandedAny = true
+		}
+		if len(next) == 0 {
+			return nil
+		}
+		if !expandedAny {
+			return next
+		}
+		paths = next
+	}
+}
+
+func expandSinglePayloadQueryPath(doc []byte, path string, queryStart, queryEnd int) []string {
+	prefixPath := strings.TrimSuffix(path[:queryStart], ".")
+	suffixPath := ""
+	if queryEnd+1 < len(path) {
+		if path[queryEnd+1] != '.' {
+			return nil
+		}
+		suffixPath = strings.TrimPrefix(path[queryEnd+1:], ".")
+	}
+	queryExpr := strings.TrimSpace(path[queryStart+2 : queryEnd])
+	if queryExpr == "" {
+		return nil
+	}
+
+	arrayNode := gjson.ParseBytes(doc)
+	if prefixPath != "" {
+		arrayNode = gjson.GetBytes(doc, prefixPath)
+	}
+	if !arrayNode.Exists() || !arrayNode.IsArray() {
+		return nil
+	}
+
+	matches := make([]string, 0, len(arrayNode.Array()))
+	arrayNode.ForEach(func(index, item gjson.Result) bool {
+		if !payloadQueryItemMatches(item.Raw, queryExpr) {
+			return true
+		}
+		idx := strconv.FormatInt(index.Int(), 10)
+		basePath := idx
+		if prefixPath != "" {
+			basePath = prefixPath + "." + idx
+		}
+		if suffixPath != "" {
+			basePath += "." + suffixPath
+		}
+		matches = append(matches, basePath)
+		return true
+	})
+	return matches
+}
+
+func payloadQueryEnd(path string, start int) int {
+	inQuote := byte(0)
+	escaped := false
+	for i := start; i < len(path); i++ {
+		ch := path[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if inQuote != 0 {
+			if ch == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			inQuote = ch
+			continue
+		}
+		if ch == ')' {
+			return i
+		}
+	}
+	return -1
+}
+
+func payloadQueryItemMatches(itemRaw, expr string) bool {
+	itemRaw = strings.TrimSpace(itemRaw)
+	if itemRaw == "" || !gjson.Valid(itemRaw) {
+		return false
+	}
+	wrapped := "[" + itemRaw + "]"
+	query := "#(" + expr + ")"
+	return gjson.Get(wrapped, query).Exists()
 }
 
 func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, models []string) bool {
