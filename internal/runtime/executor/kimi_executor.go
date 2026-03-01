@@ -460,7 +460,7 @@ func shouldDropKimiAssistantMessage(msg gjson.Result) bool {
 
 func hasKimiToolCalls(msg gjson.Result) bool {
 	toolCalls := msg.Get("tool_calls")
-	if !toolCalls.Exists() {
+	if !toolCalls.Exists() || toolCalls.Type == gjson.Null {
 		return false
 	}
 	if !toolCalls.IsArray() {
