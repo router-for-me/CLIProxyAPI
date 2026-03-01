@@ -830,6 +830,51 @@ func TestNormalizeClaudeToolsForAnthropic_PreservesUnknownExplicitTypedTool(t *t
 	}
 }
 
+func TestNormalizeClaudeToolsForAnthropic_TreatsExplicitTypedAndCustomNameCollisionAsAmbiguous(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"future_one"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"future_one","id":"t1","input":{"n":9007199254740995}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"future_one"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"future_one"}]}]}
+		],
+		"tools":[
+			{"type":"future_tool","name":"future_one","extra":{"a":1}},
+			{"type":"custom","name":"future_one","description":"custom duplicate","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "future_tool" {
+		t.Fatalf("tools.0.type = %q, want %q", got, "future_tool")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "future_one" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "future_one" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "future_one" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "future_one" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "future_one" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "future_one" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.input.n").Raw; got != "9007199254740995" {
+		t.Fatalf("messages.0.content.0.input.n = %s, want %s", got, "9007199254740995")
+	}
+}
+
 func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	payload := []byte(`{
 		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
