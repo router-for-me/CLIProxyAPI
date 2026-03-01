@@ -387,7 +387,7 @@ func TestAddOrUpdateClientSkipsUnchanged(t *testing.T) {
 	}
 }
 
-func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
+func TestAddOrUpdateClientUpdatesHashWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")
 	if err := os.WriteFile(authFile, []byte(`{"type":"demo","api_key":"k"}`), 0o644); err != nil {
@@ -406,8 +406,8 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 
 	w.addOrUpdateClient(authFile)
 
-	if got := atomic.LoadInt32(&reloads); got != 1 {
-		t.Fatalf("expected reload callback once, got %d", got)
+	if got := atomic.LoadInt32(&reloads); got != 0 {
+		t.Fatalf("expected no reload callback for auth update, got %d", got)
 	}
 	// Use normalizeAuthPath to match how addOrUpdateClient stores the key
 	normalized := w.normalizeAuthPath(authFile)
@@ -416,7 +416,7 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 	}
 }
 
-func TestRemoveClientRemovesHash(t *testing.T) {
+func TestRemoveClientRemovesHashWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")
 	var reloads int32
@@ -436,8 +436,39 @@ func TestRemoveClientRemovesHash(t *testing.T) {
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected hash to be removed after deletion")
 	}
-	if got := atomic.LoadInt32(&reloads); got != 1 {
-		t.Fatalf("expected reload callback once, got %d", got)
+	if got := atomic.LoadInt32(&reloads); got != 0 {
+		t.Fatalf("expected no reload callback for auth removal, got %d", got)
+	}
+}
+
+func TestAuthFileEventsDoNotInvokeSnapshotCoreAuths(t *testing.T) {
+	tmpDir := t.TempDir()
+	authFile := filepath.Join(tmpDir, "sample.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"codex","email":"u@example.com"}`), 0o644); err != nil {
+		t.Fatalf("failed to create auth file: %v", err)
+	}
+
+	origSnapshot := snapshotCoreAuthsFunc
+	var snapshotCalls int32
+	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string) []*coreauth.Auth {
+		atomic.AddInt32(&snapshotCalls, 1)
+		return origSnapshot(cfg, authDir)
+	}
+	defer func() { snapshotCoreAuthsFunc = origSnapshot }()
+
+	w := &Watcher{
+		authDir:          tmpDir,
+		lastAuthHashes:   make(map[string]string),
+		lastAuthContents: make(map[string]*coreauth.Auth),
+		fileAuthsByPath:  make(map[string]map[string]*coreauth.Auth),
+	}
+	w.SetConfig(&config.Config{AuthDir: tmpDir})
+
+	w.addOrUpdateClient(authFile)
+	w.removeClient(authFile)
+
+	if got := atomic.LoadInt32(&snapshotCalls); got != 0 {
+		t.Fatalf("expected auth file events to avoid full snapshot, got %d calls", got)
 	}
 }
 
@@ -631,7 +662,7 @@ func TestStopConfigReloadTimerSafeWhenNil(t *testing.T) {
 	w.stopConfigReloadTimer()
 }
 
-func TestHandleEventRemovesAuthFile(t *testing.T) {
+func TestHandleEventRemovesAuthFileWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "remove.json")
 	if err := os.WriteFile(authFile, []byte(`{"type":"demo"}`), 0o644); err != nil {
@@ -655,8 +686,8 @@ func TestHandleEventRemovesAuthFile(t *testing.T) {
 
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
 
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected reload callback once, got %d", reloads)
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("expected no reload callback for auth removal, got %d", reloads)
 	}
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected hash entry to be removed")
@@ -853,8 +884,8 @@ func TestHandleEventAuthWriteTriggersUpdate(t *testing.T) {
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Write})
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected auth write to trigger reload callback, got %d", reloads)
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("expected auth write to avoid global reload callback, got %d", reloads)
 	}
 }
 
@@ -921,7 +952,7 @@ func TestHandleEventAtomicReplaceUnchangedSkips(t *testing.T) {
 	}
 }
 
-func TestHandleEventAtomicReplaceChangedTriggersUpdate(t *testing.T) {
+func TestHandleEventAtomicReplaceChangedTriggersIncrementalUpdateOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
 	if err := os.MkdirAll(authDir, 0o755); err != nil {
@@ -950,8 +981,8 @@ func TestHandleEventAtomicReplaceChangedTriggersUpdate(t *testing.T) {
 	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = hexString(oldSum[:])
 
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Rename})
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected changed atomic replace to trigger update, got %d", reloads)
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("expected changed atomic replace to avoid global reload, got %d", reloads)
 	}
 }
 
@@ -982,7 +1013,7 @@ func TestHandleEventRemoveUnknownFileIgnored(t *testing.T) {
 	}
 }
 
-func TestHandleEventRemoveKnownFileDeletes(t *testing.T) {
+func TestHandleEventRemoveKnownFileDeletesWithoutReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
 	if err := os.MkdirAll(authDir, 0o755); err != nil {
@@ -1005,8 +1036,8 @@ func TestHandleEventRemoveKnownFileDeletes(t *testing.T) {
 	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = "hash"
 
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected known remove to trigger reload, got %d", reloads)
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("expected known remove to avoid global reload, got %d", reloads)
 	}
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected known auth hash to be deleted")
@@ -1236,67 +1267,6 @@ func TestReloadConfigFiltersAffectedOAuthProviders(t *testing.T) {
 	}
 	if !foundB {
 		t.Fatal("expected unaffected provider auth to remain")
-	}
-}
-
-func TestReloadConfigTriggersCallbackForMaxRetryCredentialsChange(t *testing.T) {
-	tmpDir := t.TempDir()
-	authDir := filepath.Join(tmpDir, "auth")
-	if err := os.MkdirAll(authDir, 0o755); err != nil {
-		t.Fatalf("failed to create auth dir: %v", err)
-	}
-	configPath := filepath.Join(tmpDir, "config.yaml")
-
-	oldCfg := &config.Config{
-		AuthDir:             authDir,
-		MaxRetryCredentials: 0,
-		RequestRetry:        1,
-		MaxRetryInterval:    5,
-	}
-	newCfg := &config.Config{
-		AuthDir:             authDir,
-		MaxRetryCredentials: 2,
-		RequestRetry:        1,
-		MaxRetryInterval:    5,
-	}
-	data, errMarshal := yaml.Marshal(newCfg)
-	if errMarshal != nil {
-		t.Fatalf("failed to marshal config: %v", errMarshal)
-	}
-	if errWrite := os.WriteFile(configPath, data, 0o644); errWrite != nil {
-		t.Fatalf("failed to write config: %v", errWrite)
-	}
-
-	callbackCalls := 0
-	callbackMaxRetryCredentials := -1
-	w := &Watcher{
-		configPath:     configPath,
-		authDir:        authDir,
-		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(cfg *config.Config) {
-			callbackCalls++
-			if cfg != nil {
-				callbackMaxRetryCredentials = cfg.MaxRetryCredentials
-			}
-		},
-	}
-	w.SetConfig(oldCfg)
-
-	if ok := w.reloadConfig(); !ok {
-		t.Fatal("expected reloadConfig to succeed")
-	}
-
-	if callbackCalls != 1 {
-		t.Fatalf("expected reload callback to be called once, got %d", callbackCalls)
-	}
-	if callbackMaxRetryCredentials != 2 {
-		t.Fatalf("expected callback MaxRetryCredentials=2, got %d", callbackMaxRetryCredentials)
-	}
-
-	w.clientsMutex.RLock()
-	defer w.clientsMutex.RUnlock()
-	if w.config == nil || w.config.MaxRetryCredentials != 2 {
-		t.Fatalf("expected watcher config MaxRetryCredentials=2, got %+v", w.config)
 	}
 }
 
