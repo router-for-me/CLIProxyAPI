@@ -175,7 +175,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
 						toolResultJSON := `{"role":"tool","tool_call_id":"","content":""}`
 						toolResultJSON, _ = sjson.Set(toolResultJSON, "tool_call_id", part.Get("tool_use_id").String())
-						toolResultJSON, _ = sjson.Set(toolResultJSON, "content", convertClaudeToolResultContentToString(part.Get("content")))
+						toolResultJSON, _ = sjson.Set(toolResultJSON, "content", convertClaudeToolResultContent(part.Get("content")))
 						toolResults = append(toolResults, toolResultJSON)
 					}
 					return true
@@ -364,6 +364,91 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func convertClaudeToolResultContent(content gjson.Result) any {
+	if !content.Exists() {
+		return ""
+	}
+
+	if content.Type == gjson.String {
+		return content.String()
+	}
+
+	if content.IsArray() {
+		items := make([]any, 0, len(content.Array()))
+		content.ForEach(func(_, item gjson.Result) bool {
+			if converted, ok := convertClaudeToolResultArrayItem(item); ok {
+				items = append(items, converted)
+				return true
+			}
+
+			if item.Type == gjson.String {
+				items = append(items, map[string]any{
+					"type": "text",
+					"text": item.String(),
+				})
+				return true
+			}
+
+			if raw := strings.TrimSpace(item.Raw); raw != "" && raw != "null" {
+				items = append(items, map[string]any{
+					"type": "text",
+					"text": raw,
+				})
+			}
+			return true
+		})
+
+		if len(items) == 0 {
+			return ""
+		}
+		return items
+	}
+
+	if content.IsObject() {
+		if converted, ok := convertClaudeToolResultArrayItem(content); ok {
+			return []any{converted}
+		}
+		return content.Raw
+	}
+
+	if raw := strings.TrimSpace(content.Raw); raw != "" && raw != "null" {
+		return raw
+	}
+	return ""
+}
+
+func convertClaudeToolResultArrayItem(item gjson.Result) (any, bool) {
+	if item.IsObject() {
+		if converted, ok := convertClaudeContentPart(item); ok {
+			return gjson.Parse(converted).Value(), true
+		}
+
+		imageURL := strings.TrimSpace(item.Get("image_url.url").String())
+		if imageURL == "" {
+			if img := item.Get("image_url"); img.Exists() && img.Type == gjson.String {
+				imageURL = strings.TrimSpace(img.String())
+			}
+		}
+		if imageURL != "" {
+			return map[string]any{
+				"type": "image_url",
+				"image_url": map[string]any{
+					"url": imageURL,
+				},
+			}, true
+		}
+
+		if text := item.Get("text"); text.Exists() && text.Type == gjson.String {
+			return map[string]any{
+				"type": "text",
+				"text": text.String(),
+			}, true
+		}
+	}
+
+	return nil, false
 }
 
 func convertClaudeToolResultContentToString(content gjson.Result) string {

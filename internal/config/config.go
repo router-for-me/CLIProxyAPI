@@ -471,6 +471,12 @@ type OpenAICompatibility struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ToolResultForceString controls whether tool response content is forced to string
+	// before sending to this OpenAI-compatible provider.
+	// false (default): preserve structured multimodal content.
+	// true: force tool content to plain string for strict upstream compatibility.
+	ToolResultForceString bool `yaml:"tool-result-force-string,omitempty" json:"tool-result-force-string,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
