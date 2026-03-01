@@ -1094,7 +1094,28 @@ func normalizeAnthropicToolEntry(tool gjson.Result, usedNames map[string]struct{
 	if err != nil {
 		return "", originalName, newName, fmt.Errorf("set normalized tool schema: %w", err)
 	}
+	normalized, err = copyAnthropicCustomToolMetadata(normalized, tool)
+	if err != nil {
+		return "", originalName, newName, err
+	}
 	return normalized, originalName, newName, nil
+}
+
+func copyAnthropicCustomToolMetadata(normalized string, original gjson.Result) (string, error) {
+	// Preserve documented Anthropic custom-tool metadata while removing
+	// wrapper/compat-only fields that are normalized elsewhere.
+	for _, field := range []string{"cache_control", "input_examples", "strict"} {
+		value := original.Get(field)
+		if !value.Exists() {
+			continue
+		}
+		var err error
+		normalized, err = sjson.SetRaw(normalized, field, value.Raw)
+		if err != nil {
+			return normalized, fmt.Errorf("set normalized tool %s: %w", field, err)
+		}
+	}
+	return normalized, nil
 }
 
 func setJSONBytes(body []byte, path string, value string) ([]byte, error) {

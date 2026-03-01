@@ -395,6 +395,44 @@ func TestNormalizeClaudeToolsForAnthropic_CustomTool(t *testing.T) {
 	}
 }
 
+func TestNormalizeClaudeToolsForAnthropic_PreservesDocumentedCustomMetadata(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{
+				"type":"custom",
+				"name":"apply_patch",
+				"cache_control":{"type":"ephemeral","ttl":"1h"},
+				"input_examples":[{"input":{"path":"README.md"}}],
+				"strict":true,
+				"format":{"type":"grammar","syntax":"lark"}
+			}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "apply_patch" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "apply_patch")
+	}
+	if got := gjson.GetBytes(out, "tools.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("tools.0.cache_control.ttl = %q, want %q", got, "1h")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_examples.#").Int(); got != 1 {
+		t.Fatalf("tools.0.input_examples length = %d, want 1", got)
+	}
+	if !gjson.GetBytes(out, "tools.0.strict").Bool() {
+		t.Fatalf("tools.0.strict should be true, body=%s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.type"); got.Exists() {
+		t.Fatalf("tools.0.type should be removed, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.0.format"); got.Exists() {
+		t.Fatalf("tools.0.format should be removed, got %s", got.Raw)
+	}
+}
+
 func TestNormalizeClaudeToolsForAnthropic_FunctionFallbacks(t *testing.T) {
 	input := []byte(`{
 		"tool_choice":{"type":"tool","name":"very bad tool"},
@@ -425,6 +463,37 @@ func TestNormalizeClaudeToolsForAnthropic_FunctionFallbacks(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
 		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_FunctionFallbacksPreserveTopLevelMetadata(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{
+				"type":"custom",
+				"cache_control":{"type":"ephemeral"},
+				"input_examples":[{"input":{"command":"run"}}],
+				"strict":true,
+				"function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}
+			}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "dangerous" {
+		t.Fatalf("tools.0.description = %q, want %q", got, "dangerous")
+	}
+	if got := gjson.GetBytes(out, "tools.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tools.0.cache_control.type = %q, want %q", got, "ephemeral")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_examples.#").Int(); got != 1 {
+		t.Fatalf("tools.0.input_examples length = %d, want 1", got)
+	}
+	if !gjson.GetBytes(out, "tools.0.strict").Bool() {
+		t.Fatalf("tools.0.strict should be true, body=%s", string(out))
 	}
 }
 
@@ -679,6 +748,63 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}
 	if hasTTLOrderingViolation(seenBody) {
 		t.Fatalf("count_tokens body still has ttl ordering violations: %s", string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_Execute_PreservesCustomToolCacheControl(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"tools": [
+			{
+				"type":"custom",
+				"name":"tool_one",
+				"cache_control":{"type":"ephemeral","ttl":"1h"},
+				"input_schema":{"type":"object"}
+			},
+			{
+				"type":"custom",
+				"name":"tool_two",
+				"input_schema":{"type":"object"}
+			}
+		],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "tools.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("tools.0.cache_control.ttl = %q, want %q, body=%s", got, "1h", string(seenBody))
+	}
+	if gjson.GetBytes(seenBody, "tools.1.cache_control").Exists() {
+		t.Fatalf("tools.1.cache_control should not be injected when caller already provided tool cache_control, body=%s", string(seenBody))
+	}
+	if got := countCacheControls(seenBody); got != 1 {
+		t.Fatalf("cache_control count = %d, want 1, body=%s", got, string(seenBody))
 	}
 }
 
