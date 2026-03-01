@@ -562,6 +562,72 @@ func TestNormalizeClaudeToolsForAnthropic_RejectsDuplicateOriginalCustomToolName
 	}
 }
 
+func TestNormalizeClaudeToolsForAnthropic_RejectsUnsanitizableCustomToolName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"!!!"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"!!!","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"!!!"}]}
+		],
+		"tools":[
+			{"type":"custom","name":"!!!","description":"bad","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("expected unsanitizable custom tool error")
+	}
+	var status statusErr
+	if !errors.As(err, &status) {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if got := status.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	}
+	if !strings.Contains(err.Error(), `custom tool name "!!!" cannot be sanitized`) {
+		t.Fatalf("error = %q, want unsanitizable tool name message", err.Error())
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_ReservesBuiltinNamesForCustomTools(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"web search"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"web search","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"web search"}]}
+		],
+		"tools":[
+			{"type":"custom","name":"web search","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if normalizedName == "web_search" {
+		t.Fatalf("custom tool should not normalize to reserved built-in name, got %q", normalizedName)
+	}
+	if !strings.HasPrefix(normalizedName, "web_search_") {
+		t.Fatalf("custom tool should be suffixed off reserved name, got %q", normalizedName)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != normalizedName {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, normalizedName)
+	}
+}
+
 func TestNormalizeClaudeToolsForAnthropic_AllowsDistinctOriginalNamesThatSanitizeToSameBase(t *testing.T) {
 	input := []byte(`{
 		"tool_choice":{"type":"tool","name":"very bad tool"},
@@ -805,6 +871,43 @@ func TestClaudeExecutor_Execute_PreservesCustomToolCacheControl(t *testing.T) {
 	}
 	if got := countCacheControls(seenBody); got != 1 {
 		t.Fatalf("cache_control count = %d, want 1, body=%s", got, string(seenBody))
+	}
+}
+
+func TestNormalizeThenPrefix_KeepsCustomNameConsistentWhenSanitizedNameMatchesBuiltin(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"web search"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"web search","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"web search"}]}
+		],
+		"tools":[
+			{"type":"custom","name":"web search","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	normalized, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	prefixed := applyClaudeToolPrefix(normalized, "proxy_")
+
+	normalizedName := gjson.GetBytes(normalized, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	expectedPrefixedName := "proxy_" + normalizedName
+	if got := gjson.GetBytes(prefixed, "tools.0.name").String(); got != expectedPrefixedName {
+		t.Fatalf("tools.0.name = %q, want %q", got, expectedPrefixedName)
+	}
+	if got := gjson.GetBytes(prefixed, "tool_choice.name").String(); got != expectedPrefixedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, expectedPrefixedName)
+	}
+	if got := gjson.GetBytes(prefixed, "messages.0.content.0.name").String(); got != expectedPrefixedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, expectedPrefixedName)
+	}
+	if got := gjson.GetBytes(prefixed, "messages.1.content.0.tool_name").String(); got != expectedPrefixedName {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, expectedPrefixedName)
 	}
 }
 
