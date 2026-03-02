@@ -80,7 +80,6 @@ func ParseTimeAny(v any) (time.Time, bool) {
 			time.RFC3339Nano,
 			"2006-01-02 15:04:05",
 			"2006-01-02 15:04",
-			"2006-01-02T15:04:05Z07:00",
 		}
 		for _, layout := range layouts {
 			if ts, err := time.Parse(layout, s); err == nil {
@@ -91,6 +90,8 @@ func ParseTimeAny(v any) (time.Time, bool) {
 			return normaliseUnix(unix), true
 		}
 	case float64:
+		return normaliseUnix(int64(value)), true
+	case int:
 		return normaliseUnix(int64(value)), true
 	case int64:
 		return normaliseUnix(value), true
