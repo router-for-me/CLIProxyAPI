@@ -54,6 +54,8 @@ const (
 var (
 	randSource                    = rand.New(rand.NewSource(time.Now().UnixNano()))
 	randSourceMutex               sync.Mutex
+	// antigravityPrimaryModelsCache keeps the latest non-empty model list fetched
+	// from any antigravity auth. Empty fetches never overwrite this cache.
 	antigravityPrimaryModelsCache struct {
 		mu     sync.RWMutex
 		models []*registry.ModelInfo
