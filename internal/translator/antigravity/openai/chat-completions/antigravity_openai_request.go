@@ -34,6 +34,11 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
+	// Let user-provided generationConfig pass through
+	if genConfig := gjson.GetBytes(rawJSON, "generationConfig"); genConfig.Exists() {
+		out, _ = sjson.SetRawBytes(out, "request.generationConfig", []byte(genConfig.Raw))
+	}
+
 	// Apply thinking configuration: convert OpenAI reasoning_effort to Gemini CLI thinkingConfig.
 	// Inline translation-only mapping; capability checks happen later in ApplyThinking.
 	re := gjson.GetBytes(rawJSON, "reasoning_effort")
