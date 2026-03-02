@@ -1809,7 +1809,9 @@ func stripToolsCacheControl(payload []byte) []byte {
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if tool.Get("cache_control").Exists() {
 			path := fmt.Sprintf("tools.%d.cache_control", idx)
-			if updated, err := sjson.DeleteBytes(payload, path); err == nil {
+			if updated, err := sjson.DeleteBytes(payload, path); err != nil {
+				log.Warnf("failed to strip cache_control from tools array at %s: %v", path, err)
+			} else {
 				payload = updated
 			}
 		}
