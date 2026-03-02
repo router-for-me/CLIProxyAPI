@@ -331,3 +331,15 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	set(*body.Value)
 	h.persist(c)
 }
+
+func (h *Handler) updateFloatField(c *gin.Context, set func(float64)) {
+	var body struct {
+		Value *float64 `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	set(*body.Value)
+	h.persist(c)
+}

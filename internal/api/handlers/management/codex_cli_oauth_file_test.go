@@ -1,37 +1,22 @@
 package management
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 func TestDownloadCodexCLIOAuthFile_Success(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	store := &memoryAuthStore{}
-	manager := coreauth.NewManager(store, nil, nil)
-	_, _ = manager.Register(context.Background(), &coreauth.Auth{
-		ID:       "codex-1",
-		Provider: "codex",
-		FileName: "codex-main.json",
-		Metadata: map[string]any{
-			"id_token":      "id-token-1",
-			"access_token":  "access-token-1",
-			"refresh_token": "refresh-token-1",
-			"account_id":    "account-1",
-		},
-	})
-
-	h := &Handler{authManager: manager}
+	h := &Handler{cfg: &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"sk-test-1", "sk-test-2"}}}}
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/codex-cli-oauth-file?name=codex-main.json", nil)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/codex-cli-oauth-file?index=1", nil)
 
 	h.DownloadCodexCLIOAuthFile(c)
 
@@ -42,44 +27,30 @@ func TestDownloadCodexCLIOAuthFile_Success(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("failed to decode payload: %v", err)
 	}
-	if payload.AuthMethod != "chatgpt" {
-		t.Fatalf("expected auth_method chatgpt, got %q", payload.AuthMethod)
+	if payload.AuthMode != "apikey" {
+		t.Fatalf("expected auth_mode apikey, got %q", payload.AuthMode)
 	}
-	if payload.Tokens.IDToken != "id-token-1" || payload.Tokens.AccessToken != "access-token-1" || payload.Tokens.RefreshToken != "refresh-token-1" {
-		t.Fatalf("unexpected token payload: %+v", payload.Tokens)
+	if payload.OpenAIAPIKey != "sk-test-2" {
+		t.Fatalf("expected OPENAI_API_KEY to be selected api key, got %q", payload.OpenAIAPIKey)
+	}
+	if payload.Tokens != nil {
+		t.Fatalf("expected tokens to be omitted for proxy auth payload")
 	}
 }
 
 func TestDownloadCodexCLIOAuthFile_Errors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	store := &memoryAuthStore{}
-	manager := coreauth.NewManager(store, nil, nil)
-	_, _ = manager.Register(context.Background(), &coreauth.Auth{
-		ID:       "claude-1",
-		Provider: "claude",
-		FileName: "claude-main.json",
-	})
-	_, _ = manager.Register(context.Background(), &coreauth.Auth{
-		ID:       "codex-2",
-		Provider: "codex",
-		FileName: "codex-missing.json",
-		Metadata: map[string]any{
-			"access_token": "token-only",
-		},
-	})
-
-	h := &Handler{authManager: manager}
-
 	cases := []struct {
 		name       string
+		handler    *Handler
 		query      string
 		statusCode int
 	}{
-		{name: "missing name", query: "", statusCode: http.StatusBadRequest},
-		{name: "not found", query: "name=missing.json", statusCode: http.StatusNotFound},
-		{name: "wrong provider", query: "name=claude-main.json", statusCode: http.StatusBadRequest},
-		{name: "missing token fields", query: "name=codex-missing.json", statusCode: http.StatusBadRequest},
+		{name: "missing config", handler: &Handler{}, query: "", statusCode: http.StatusServiceUnavailable},
+		{name: "empty api keys", handler: &Handler{cfg: &config.Config{}}, query: "", statusCode: http.StatusBadRequest},
+		{name: "invalid index", handler: &Handler{cfg: &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"sk-test-1"}}}}, query: "index=abc", statusCode: http.StatusBadRequest},
+		{name: "index out of range", handler: &Handler{cfg: &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"sk-test-1"}}}}, query: "index=9", statusCode: http.StatusBadRequest},
 	}
 
 	for _, tc := range cases {
@@ -90,7 +61,7 @@ func TestDownloadCodexCLIOAuthFile_Errors(t *testing.T) {
 			url += "?" + tc.query
 		}
 		c.Request = httptest.NewRequest(http.MethodGet, url, nil)
-		h.DownloadCodexCLIOAuthFile(c)
+		tc.handler.DownloadCodexCLIOAuthFile(c)
 		if rec.Code != tc.statusCode {
 			t.Fatalf("%s: expected %d, got %d body=%s", tc.name, tc.statusCode, rec.Code, rec.Body.String())
 		}

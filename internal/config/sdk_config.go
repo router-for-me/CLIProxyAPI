@@ -20,6 +20,16 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// CodexFreePlanWeight controls the relative weight used when aggregating Codex usage
+	// for accounts reported as plan_type=free. Default is 0.2 when unset or invalid.
+	CodexFreePlanWeight float64 `yaml:"codex-free-plan-weight,omitempty" json:"codex-free-plan-weight,omitempty"`
+
+	// CodexOAuthAvailableTotals configures per-API-key available weekly quota for proxy-issued
+	// Codex CLI OAuth auth.json files. The value at index i applies to api-keys[i].
+	// Unit is team-member weekly standard usage units (for example 5 means 5x team weekly quota).
+	// Missing entries default to the full system total weekly capacity.
+	CodexOAuthAvailableTotals []float64 `yaml:"codex-oauth-available-totals,omitempty" json:"codex-oauth-available-totals,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

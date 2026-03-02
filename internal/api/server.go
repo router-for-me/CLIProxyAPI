@@ -318,7 +318,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
-	s.engine.GET(managementCodexWidgetScriptPath, s.serveManagementCodexWidget)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -328,6 +327,7 @@ func (s *Server) setupRoutes() {
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(s.codexOAuthQuotaMiddleware())
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -342,6 +342,7 @@ func (s *Server) setupRoutes() {
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(s.codexOAuthQuotaMiddleware())
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
@@ -537,6 +538,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+		mgmt.GET("/codex-free-plan-weight", s.mgmt.GetCodexFreePlanWeight)
+		mgmt.PUT("/codex-free-plan-weight", s.mgmt.PutCodexFreePlanWeight)
+		mgmt.PATCH("/codex-free-plan-weight", s.mgmt.PutCodexFreePlanWeight)
+		mgmt.GET("/codex-oauth-available-totals", s.mgmt.GetCodexOAuthAvailableTotals)
+		mgmt.PUT("/codex-oauth-available-totals", s.mgmt.PutCodexOAuthAvailableTotals)
+		mgmt.PATCH("/codex-oauth-available-totals", s.mgmt.PatchCodexOAuthAvailableTotals)
+		mgmt.DELETE("/codex-oauth-available-totals", s.mgmt.DeleteCodexOAuthAvailableTotals)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -691,8 +699,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
-	enhanced := injectManagementCodexWidget(string(data))
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(enhanced))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
@@ -1062,5 +1069,47 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 			log.Errorf("authentication middleware error: %v", err)
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
+	}
+}
+
+func (s *Server) codexOAuthQuotaMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s == nil || s.mgmt == nil || c == nil {
+			c.Next()
+			return
+		}
+
+		rawUA := strings.ToLower(strings.TrimSpace(c.GetHeader("User-Agent")))
+		if !strings.Contains(rawUA, "codex") {
+			c.Next()
+			return
+		}
+
+		rawAPIKey, exists := c.Get("apiKey")
+		if !exists {
+			c.Next()
+			return
+		}
+		apiKey := strings.TrimSpace(fmt.Sprintf("%v", rawAPIKey))
+		if apiKey == "" {
+			c.Next()
+			return
+		}
+
+		exceeded, used, limit, checked := s.mgmt.EvaluateCodexOAuthQuota(c.Request.Context(), apiKey)
+		if !checked || !exceeded {
+			c.Next()
+			return
+		}
+
+		message := fmt.Sprintf("You exceeded your current weekly quota (%.2f/%.2f team-week units). Please try again later.", used, limit)
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error": gin.H{
+				"message": message,
+				"type":    "insufficient_quota",
+				"param":   nil,
+				"code":    "insufficient_quota",
+			},
+		})
 	}
 }

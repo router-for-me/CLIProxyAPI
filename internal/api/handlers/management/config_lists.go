@@ -104,6 +104,66 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 	c.JSON(400, gin.H{"error": "missing index or value"})
 }
 
+func (h *Handler) putFloat64List(c *gin.Context, set func([]float64), after func()) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []float64
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []float64 `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	set(arr)
+	if after != nil {
+		after()
+	}
+	h.persist(c)
+}
+
+func (h *Handler) patchFloat64List(c *gin.Context, target *[]float64, after func()) {
+	var body struct {
+		Index *int     `json:"index"`
+		Value *float64 `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Index == nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	if *body.Index < 0 || *body.Index >= len(*target) {
+		c.JSON(400, gin.H{"error": "index out of range"})
+		return
+	}
+	(*target)[*body.Index] = *body.Value
+	if after != nil {
+		after()
+	}
+	h.persist(c)
+}
+
+func (h *Handler) deleteFromFloat64List(c *gin.Context, target *[]float64, after func()) {
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(*target) {
+			*target = append((*target)[:idx], (*target)[idx+1:]...)
+			if after != nil {
+				after()
+			}
+			h.persist(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing or invalid index"})
+}
+
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
@@ -116,6 +176,41 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+}
+
+func (h *Handler) GetCodexFreePlanWeight(c *gin.Context) {
+	c.JSON(200, gin.H{"codex-free-plan-weight": h.cfg.CodexFreePlanWeight})
+}
+
+func (h *Handler) PutCodexFreePlanWeight(c *gin.Context) {
+	h.updateFloatField(c, func(v float64) {
+		h.cfg.CodexFreePlanWeight = v
+		h.cfg.NormalizeCodexUsageControls()
+	})
+}
+
+func (h *Handler) GetCodexOAuthAvailableTotals(c *gin.Context) {
+	c.JSON(200, gin.H{"codex-oauth-available-totals": h.cfg.CodexOAuthAvailableTotals})
+}
+
+func (h *Handler) PutCodexOAuthAvailableTotals(c *gin.Context) {
+	h.putFloat64List(c, func(v []float64) {
+		h.cfg.CodexOAuthAvailableTotals = append([]float64(nil), v...)
+	}, func() {
+		h.cfg.NormalizeCodexUsageControls()
+	})
+}
+
+func (h *Handler) PatchCodexOAuthAvailableTotals(c *gin.Context) {
+	h.patchFloat64List(c, &h.cfg.CodexOAuthAvailableTotals, func() {
+		h.cfg.NormalizeCodexUsageControls()
+	})
+}
+
+func (h *Handler) DeleteCodexOAuthAvailableTotals(c *gin.Context) {
+	h.deleteFromFloat64List(c, &h.cfg.CodexOAuthAvailableTotals, func() {
+		h.cfg.NormalizeCodexUsageControls()
+	})
 }
 
 // gemini-api-key: []GeminiKey

@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -21,10 +22,10 @@ func TestCodexUsagePollIntervalMatchesCodexCLI(t *testing.T) {
 }
 
 func TestCodexPlanWeight_FreeIsPointTwo(t *testing.T) {
-	if got := codexPlanWeight("free"); got != 0.2 {
+	if got := codexPlanWeight("free", 0.2); got != 0.2 {
 		t.Fatalf("expected free plan weight 0.2, got %v", got)
 	}
-	if got := codexPlanWeight("business"); got != 1.0 {
+	if got := codexPlanWeight("business", 0.2); got != 1.0 {
 		t.Fatalf("expected business plan weight 1.0, got %v", got)
 	}
 }
@@ -57,7 +58,7 @@ func TestAggregateCodexUsage_AppliesFreeWeight(t *testing.T) {
 		},
 	}
 
-	compat, totals, withUsage := aggregateCodexUsage(statuses)
+	compat, totals, withUsage := aggregateCodexUsage(statuses, 0.2)
 	if withUsage != 2 {
 		t.Fatalf("expected withUsage=2, got %d", withUsage)
 	}
@@ -72,6 +73,60 @@ func TestAggregateCodexUsage_AppliesFreeWeight(t *testing.T) {
 	}
 	if totals.PrimaryWindow.ProgressPercent != 16.67 {
 		t.Fatalf("expected weighted progress 16.67, got %.2f", totals.PrimaryWindow.ProgressPercent)
+	}
+}
+
+func TestAggregateCodexUsage_DenominatorIncludesAllCodexAuthFiles(t *testing.T) {
+	statuses := map[string]codexAuthUsageStatus{
+		"free-auth": {
+			PlanType: "free",
+			Status:   "ok",
+			Usage: &codexUsagePayload{
+				PlanType: "free",
+				RateLimit: &codexUsageRateLimit{
+					PrimaryWindow: &codexUsageWindow{
+						UsedPercent: 100,
+					},
+				},
+			},
+		},
+		"business-auth": {
+			PlanType: "business",
+			Status:   "ok",
+			Usage: &codexUsagePayload{
+				PlanType: "business",
+				RateLimit: &codexUsageRateLimit{
+					PrimaryWindow: &codexUsageWindow{
+						UsedPercent: 0,
+					},
+				},
+			},
+		},
+		"no-usage-auth": {
+			PlanType: "business",
+			Status:   "error",
+			Usage:    nil,
+		},
+	}
+
+	_, totals, withUsage := aggregateCodexUsage(statuses, 0.2)
+	if withUsage != 2 {
+		t.Fatalf("expected withUsage=2, got %d", withUsage)
+	}
+	if totals.PrimaryWindow == nil {
+		t.Fatalf("expected primary totals")
+	}
+	if totals.PrimaryWindow.AuthFiles != 3 {
+		t.Fatalf("expected denominator auth_files=3, got %d", totals.PrimaryWindow.AuthFiles)
+	}
+	if totals.PrimaryWindow.TotalPercent != 220 {
+		t.Fatalf("expected weighted total_percent=220, got %d", totals.PrimaryWindow.TotalPercent)
+	}
+	if totals.PrimaryWindow.UsedPercentSum != 20 {
+		t.Fatalf("expected weighted used_percent_sum=20, got %d", totals.PrimaryWindow.UsedPercentSum)
+	}
+	if totals.PrimaryWindow.ProgressPercent != 9.09 {
+		t.Fatalf("expected weighted progress 9.09, got %.2f", totals.PrimaryWindow.ProgressPercent)
 	}
 }
 
@@ -248,8 +303,8 @@ func TestRefreshCodexUsageFromCacheTTL_PollsAllAuthsPerTTL(t *testing.T) {
 	if compat.RateLimit == nil || compat.RateLimit.PrimaryWindow == nil {
 		t.Fatalf("expected aggregated primary window")
 	}
-	if compat.RateLimit.PrimaryWindow.UsedPercent != 40 {
-		t.Fatalf("expected weighted used_percent 40 across cached auths, got %d", compat.RateLimit.PrimaryWindow.UsedPercent)
+	if compat.RateLimit.PrimaryWindow.UsedPercent != 100 {
+		t.Fatalf("expected 5h used_percent forced to 100, got %d", compat.RateLimit.PrimaryWindow.UsedPercent)
 	}
 	if summary.AuthFilesTotal != 3 {
 		t.Fatalf("expected all codex auth files cached, got %d", summary.AuthFilesTotal)
@@ -333,7 +388,7 @@ func TestCodexUsageStatePersistence(t *testing.T) {
 	if summary.SelectedAuthID != "codex-a" {
 		t.Fatalf("expected selected auth codex-a, got %q", summary.SelectedAuthID)
 	}
-	if compat.RateLimit == nil || compat.RateLimit.PrimaryWindow == nil || compat.RateLimit.PrimaryWindow.UsedPercent != 33 {
+	if compat.RateLimit == nil || compat.RateLimit.PrimaryWindow == nil || compat.RateLimit.PrimaryWindow.UsedPercent != 100 {
 		t.Fatalf("unexpected persisted compat payload: %+v", compat)
 	}
 }
@@ -356,6 +411,91 @@ func TestGetCodexUsageCompatDefaultsToGuest(t *testing.T) {
 	}
 	if payload.PlanType != "guest" {
 		t.Fatalf("expected plan_type guest, got %q", payload.PlanType)
+	}
+}
+
+func TestEvaluateCodexOAuthQuota_UsesConfiguredAvailableTotal(t *testing.T) {
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{
+				APIKeys:                   []string{"k1", "k2"},
+				CodexOAuthAvailableTotals: []float64{3.0},
+			},
+		},
+		codexUsageByAuth: make(map[string]codexAuthUsageStatus),
+		codexUsageCompat: defaultCodexUsagePayload(),
+		codexUsageSummary: codexUsageSummaryResponse{
+			Total: codexUsageTotalSummary{
+				PrimaryWindow:   &codexUsageWindowTotals{ProgressPercent: 90},
+				SecondaryWindow: &codexUsageWindowTotals{ProgressPercent: 60, TotalPercent: 600},
+			},
+		},
+	}
+
+	exceeded, progress, limit, checked := h.EvaluateCodexOAuthQuota(context.Background(), "k1")
+	if !checked {
+		t.Fatal("expected checked=true for configured api key")
+	}
+	if !exceeded {
+		t.Fatal("expected exceeded=true when progress exceeds configured limit")
+	}
+	if math.Abs(progress-3.6) > 1e-9 {
+		t.Fatalf("expected used weekly units=3.6, got %v", progress)
+	}
+	if limit != 3 {
+		t.Fatalf("expected configured limit units=3, got %v", limit)
+	}
+
+	exceeded, progress, limit, checked = h.EvaluateCodexOAuthQuota(context.Background(), "k2")
+	if !checked {
+		t.Fatal("expected checked=true for second api key")
+	}
+	if exceeded {
+		t.Fatal("expected exceeded=false with default full quota")
+	}
+	if math.Abs(progress-3.6) > 1e-9 {
+		t.Fatalf("expected used weekly units=3.6, got %v", progress)
+	}
+	if limit != 6 {
+		t.Fatalf("expected default full-system units limit=6, got %v", limit)
+	}
+
+	_, _, _, checked = h.EvaluateCodexOAuthQuota(context.Background(), "k-not-found")
+	if checked {
+		t.Fatal("expected checked=false for unknown api key")
+	}
+}
+
+func TestEvaluateCodexOAuthQuota_IgnoresPrimaryWindow(t *testing.T) {
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{
+				APIKeys:                   []string{"k1"},
+				CodexOAuthAvailableTotals: []float64{2},
+			},
+		},
+		codexUsageByAuth: make(map[string]codexAuthUsageStatus),
+		codexUsageCompat: defaultCodexUsagePayload(),
+		codexUsageSummary: codexUsageSummaryResponse{
+			Total: codexUsageTotalSummary{
+				PrimaryWindow:   &codexUsageWindowTotals{ProgressPercent: 95},
+				SecondaryWindow: &codexUsageWindowTotals{ProgressPercent: 40, TotalPercent: 300},
+			},
+		},
+	}
+
+	exceeded, progress, limit, checked := h.EvaluateCodexOAuthQuota(context.Background(), "k1")
+	if !checked {
+		t.Fatal("expected checked=true")
+	}
+	if exceeded {
+		t.Fatal("expected exceeded=false when only primary(5h) exceeds limit")
+	}
+	if math.Abs(progress-1.2) > 1e-9 {
+		t.Fatalf("expected weekly used units=1.2, got %v", progress)
+	}
+	if limit != 2 {
+		t.Fatalf("expected limit units=2, got %v", limit)
 	}
 }
 

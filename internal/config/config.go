@@ -627,6 +627,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
+	// Normalize Codex usage weighting/available-total controls.
+	cfg.NormalizeCodexUsageControls()
+
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
@@ -647,6 +650,28 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// NormalizeCodexUsageControls clamps and defaults Codex usage control settings.
+func (cfg *Config) NormalizeCodexUsageControls() {
+	if cfg == nil {
+		return
+	}
+	if cfg.CodexFreePlanWeight <= 0 {
+		cfg.CodexFreePlanWeight = 0.2
+	}
+	if len(cfg.CodexOAuthAvailableTotals) == 0 {
+		return
+	}
+	normalized := make([]float64, len(cfg.CodexOAuthAvailableTotals))
+	for i := range cfg.CodexOAuthAvailableTotals {
+		value := cfg.CodexOAuthAvailableTotals[i]
+		if value < 0 {
+			value = 0
+		}
+		normalized[i] = value
+	}
+	cfg.CodexOAuthAvailableTotals = normalized
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.

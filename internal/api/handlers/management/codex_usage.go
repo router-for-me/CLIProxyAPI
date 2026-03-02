@@ -67,6 +67,7 @@ type codexAuthUsageStatus struct {
 	AuthID        string             `json:"auth_id"`
 	FileName      string             `json:"file_name,omitempty"`
 	Email         string             `json:"email,omitempty"`
+	PlanType      string             `json:"plan_type,omitempty"`
 	AccountID     string             `json:"account_id,omitempty"`
 	BaseURL       string             `json:"base_url,omitempty"`
 	PathStyle     string             `json:"path_style,omitempty"`
@@ -140,11 +141,21 @@ func (e *codexUsageHTTPError) Error() string {
 
 type codexWindowAccumulator struct {
 	count                  int
+	denominatorCount       int
 	weightSum              float64
+	denominatorWeightSum   float64
 	usedPercentWeightedSum float64
 	limitWindowWeightedSum float64
 	minResetAfter          int
 	minResetAt             int64
+}
+
+func (a *codexWindowAccumulator) addDenominator(weight float64) {
+	if weight <= 0 {
+		weight = 1
+	}
+	a.denominatorCount++
+	a.denominatorWeightSum += weight
 }
 
 func (a *codexWindowAccumulator) add(window *codexUsageWindow, weight float64) {
@@ -179,22 +190,26 @@ func (a *codexWindowAccumulator) averageWindow() *codexUsageWindow {
 }
 
 func (a *codexWindowAccumulator) totals() *codexUsageWindowTotals {
-	if a == nil || a.count == 0 || a.weightSum <= 0 {
+	if a == nil || a.denominatorCount == 0 || a.denominatorWeightSum <= 0 {
 		return nil
 	}
-	totalPercentFloat := a.weightSum * 100
+	totalPercentFloat := a.denominatorWeightSum * 100
 	totalPercent := int(math.Round(totalPercentFloat))
 	usedPercentSum := int(math.Round(a.usedPercentWeightedSum))
 	progress := 0.0
 	if totalPercentFloat > 0 {
 		progress = (a.usedPercentWeightedSum / totalPercentFloat) * 100
 	}
+	averageUsed := 0
+	if a.denominatorWeightSum > 0 {
+		averageUsed = int(math.Round(a.usedPercentWeightedSum / a.denominatorWeightSum))
+	}
 	return &codexUsageWindowTotals{
-		AuthFiles:           a.count,
+		AuthFiles:           a.denominatorCount,
 		UsedPercentSum:      usedPercentSum,
 		TotalPercent:        totalPercent,
 		RemainingPercentSum: totalPercent - usedPercentSum,
-		AverageUsedPercent:  int(math.Round(a.usedPercentWeightedSum / a.weightSum)),
+		AverageUsedPercent:  averageUsed,
 		ProgressPercent:     math.Round(progress*100) / 100,
 		MinResetAfterSecond: a.minResetAfter,
 		MinResetAt:          a.minResetAt,
@@ -223,6 +238,11 @@ func (a *codexRateLimitAccumulator) add(rate *codexUsageRateLimit, weight float6
 	}
 	a.primaryWindow.add(rate.PrimaryWindow, weight)
 	a.secondaryWindow.add(rate.SecondaryWindow, weight)
+}
+
+func (a *codexRateLimitAccumulator) addDenominator(weight float64) {
+	a.primaryWindow.addDenominator(weight)
+	a.secondaryWindow.addDenominator(weight)
 }
 
 func (a *codexRateLimitAccumulator) averageRateLimit() *codexUsageRateLimit {
@@ -313,6 +333,7 @@ func (h *Handler) refreshCodexUsageFromCacheTTL(ctx context.Context) {
 		status.AuthID = authID
 		status.FileName = strings.TrimSpace(auth.FileName)
 		status.Email = authEmail(auth)
+		status.PlanType = inferCodexPlanType(auth, status)
 		status.AccountID = extractCodexAccountID(auth)
 		if status.Status == "" {
 			status.Status = "skipped"
@@ -363,6 +384,7 @@ func (h *Handler) refreshCodexUsageFromCacheTTL(ctx context.Context) {
 
 		status.Status = "ok"
 		status.Error = ""
+		status.PlanType = strings.TrimSpace(payload.PlanType)
 		copied := payload
 		status.Usage = &copied
 		status.HasUsage = true
@@ -380,7 +402,7 @@ func (h *Handler) updateCodexUsageState(current map[string]codexAuthUsageStatus,
 	if h == nil {
 		return
 	}
-	compatPayload, totalSummary, withUsage := aggregateCodexUsage(current)
+	compatPayload, totalSummary, withUsage := aggregateCodexUsage(current, h.codexFreePlanWeight())
 	authErrors := 0
 	authList := make([]codexAuthUsageStatus, 0, len(current))
 	for _, item := range current {
@@ -428,7 +450,7 @@ func (h *Handler) updateCodexUsageState(current map[string]codexAuthUsageStatus,
 	}
 }
 
-func aggregateCodexUsage(authStatuses map[string]codexAuthUsageStatus) (codexUsagePayload, codexUsageTotalSummary, int) {
+func aggregateCodexUsage(authStatuses map[string]codexAuthUsageStatus, freePlanWeight float64) (codexUsagePayload, codexUsageTotalSummary, int) {
 	compat := defaultCodexUsagePayload()
 	var totals codexUsageTotalSummary
 
@@ -444,16 +466,25 @@ func aggregateCodexUsage(authStatuses map[string]codexAuthUsageStatus) (codexUsa
 	balanceCount := 0
 
 	for _, status := range authStatuses {
+		plan := strings.TrimSpace(status.PlanType)
+		if plan == "" && status.Usage != nil {
+			plan = strings.TrimSpace(status.Usage.PlanType)
+		}
+		weight := codexPlanWeight(plan, freePlanWeight)
+		mainRate.addDenominator(weight)
+
 		if status.Usage == nil {
 			continue
 		}
 		withUsage++
 		usage := status.Usage
-		plan := strings.TrimSpace(usage.PlanType)
-		if plan != "" {
-			planCounts[plan]++
+		usagePlan := strings.TrimSpace(usage.PlanType)
+		if usagePlan == "" {
+			usagePlan = plan
 		}
-		weight := codexPlanWeight(plan)
+		if usagePlan != "" {
+			planCounts[usagePlan]++
+		}
 		mainRate.add(usage.RateLimit, weight)
 
 		if usage.Credits != nil {
@@ -482,12 +513,9 @@ func aggregateCodexUsage(authStatuses map[string]codexAuthUsageStatus) (codexUsa
 			acc.rate.add(item.RateLimit, weight)
 		}
 	}
-
-	if withUsage == 0 {
-		return compat, totals, 0
+	if withUsage > 0 {
+		compat.PlanType = dominantPlanType(planCounts)
 	}
-
-	compat.PlanType = dominantPlanType(planCounts)
 	compat.RateLimit = mainRate.averageRateLimit()
 	totals.PrimaryWindow = mainRate.primaryWindow.totals()
 	totals.SecondaryWindow = mainRate.secondaryWindow.totals()
@@ -552,12 +580,131 @@ func dominantPlanType(planCounts map[string]int) string {
 	return plans[0].plan
 }
 
-func codexPlanWeight(planType string) float64 {
+func codexPlanWeight(planType string, freePlanWeight float64) float64 {
+	if freePlanWeight <= 0 {
+		freePlanWeight = codexFreePlanWeight
+	}
 	switch strings.ToLower(strings.TrimSpace(planType)) {
 	case "free":
-		return codexFreePlanWeight
+		return freePlanWeight
 	default:
 		return 1.0
+	}
+}
+
+func (h *Handler) codexFreePlanWeight() float64 {
+	if h == nil || h.cfg == nil || h.cfg.CodexFreePlanWeight <= 0 {
+		return codexFreePlanWeight
+	}
+	return h.cfg.CodexFreePlanWeight
+}
+
+func (h *Handler) codexOAuthAvailableTotalForAPIKey(apiKey string) (units float64, configured bool, matched bool) {
+	if h == nil || h.cfg == nil {
+		return 0, false, false
+	}
+	key := strings.TrimSpace(apiKey)
+	if key == "" {
+		return 0, false, false
+	}
+	index := -1
+	for i := range h.cfg.APIKeys {
+		if strings.TrimSpace(h.cfg.APIKeys[i]) == key {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return 0, false, false
+	}
+	if index >= len(h.cfg.CodexOAuthAvailableTotals) {
+		return 0, false, true
+	}
+	value := h.cfg.CodexOAuthAvailableTotals[index]
+	if value < 0 {
+		value = 0
+	}
+	return value, true, true
+}
+
+// EvaluateCodexOAuthQuota checks whether an authenticated proxy API key has exceeded
+// its configured available weekly quota for Codex traffic.
+//
+// Quota unit is "team-member weekly standard units".
+func (h *Handler) EvaluateCodexOAuthQuota(ctx context.Context, apiKey string) (exceeded bool, used float64, limit float64, checked bool) {
+	availableUnits, configured, matched := h.codexOAuthAvailableTotalForAPIKey(apiKey)
+	if !matched {
+		return false, 0, 0, false
+	}
+
+	h.refreshCodexUsageFromCacheTTL(ctx)
+	_, summary, _ := h.codexUsageSnapshot()
+	weeklyProgressPercent := 0.0
+	systemWeeklyUnits := 0.0
+	if summary.Total.SecondaryWindow != nil {
+		weeklyProgressPercent = summary.Total.SecondaryWindow.ProgressPercent
+		systemWeeklyUnits = float64(summary.Total.SecondaryWindow.TotalPercent) / 100.0
+		if systemWeeklyUnits < 0 {
+			systemWeeklyUnits = 0
+		}
+	}
+	used = (weeklyProgressPercent / 100.0) * systemWeeklyUnits
+
+	if configured {
+		limit = availableUnits
+		if limit <= 0 {
+			return true, used, 0, true
+		}
+		return used >= limit, used, limit, true
+	}
+
+	// Default behavior: full system capacity as quota.
+	if systemWeeklyUnits <= 0 {
+		return false, used, 0, false
+	}
+	limit = systemWeeklyUnits
+	return used >= limit, used, limit, true
+}
+
+func inferCodexPlanType(auth *coreauth.Auth, status codexAuthUsageStatus) string {
+	if status.Usage != nil {
+		if plan := strings.ToLower(strings.TrimSpace(status.Usage.PlanType)); plan != "" {
+			return plan
+		}
+	}
+	if plan := strings.ToLower(strings.TrimSpace(status.PlanType)); plan != "" {
+		return plan
+	}
+	if auth != nil && auth.Metadata != nil {
+		if raw, ok := auth.Metadata["plan_type"].(string); ok {
+			if plan := strings.ToLower(strings.TrimSpace(raw)); plan != "" {
+				return plan
+			}
+		}
+	}
+	if claims := extractCodexIDTokenClaims(auth); claims != nil {
+		if raw, ok := claims["plan_type"].(string); ok {
+			if plan := strings.ToLower(strings.TrimSpace(raw)); plan != "" {
+				return plan
+			}
+		}
+	}
+	name := ""
+	if auth != nil {
+		name = strings.ToLower(strings.TrimSpace(auth.FileName))
+	}
+	if name == "" {
+		name = strings.ToLower(strings.TrimSpace(status.FileName))
+	}
+	switch {
+	case strings.Contains(name, "-free"):
+		return "free"
+	case strings.Contains(name, "-team"):
+		return "team"
+	case strings.Contains(name, "-business"):
+		return "business"
+	default:
+		return "guest"
 	}
 }
 
@@ -836,6 +983,7 @@ func cloneCodexUsagePayload(payload *codexUsagePayload) codexUsagePayload {
 		clonedRate := *payload.RateLimit
 		clonedRate.PrimaryWindow = cloneCodexUsageWindow(payload.RateLimit.PrimaryWindow)
 		clonedRate.SecondaryWindow = cloneCodexUsageWindow(payload.RateLimit.SecondaryWindow)
+		forceCodexPrimaryWindowFull(clonedRate.PrimaryWindow)
 		cloned.RateLimit = &clonedRate
 	}
 	if payload.Credits != nil {
@@ -864,6 +1012,7 @@ func cloneCodexUsagePayload(payload *codexUsagePayload) codexUsagePayload {
 				clonedRate := *item.RateLimit
 				clonedRate.PrimaryWindow = cloneCodexUsageWindow(item.RateLimit.PrimaryWindow)
 				clonedRate.SecondaryWindow = cloneCodexUsageWindow(item.RateLimit.SecondaryWindow)
+				forceCodexPrimaryWindowFull(clonedRate.PrimaryWindow)
 				copiedItem.RateLimit = &clonedRate
 			}
 			cloned.AdditionalRateLimits = append(cloned.AdditionalRateLimits, copiedItem)
@@ -878,6 +1027,61 @@ func cloneCodexUsageWindow(window *codexUsageWindow) *codexUsageWindow {
 	}
 	cloned := *window
 	return &cloned
+}
+
+func cloneCodexUsageWindowTotals(input *codexUsageWindowTotals) *codexUsageWindowTotals {
+	if input == nil {
+		return nil
+	}
+	cloned := *input
+	return &cloned
+}
+
+func cloneCodexUsageTotalSummary(input codexUsageTotalSummary) codexUsageTotalSummary {
+	out := codexUsageTotalSummary{
+		PrimaryWindow:   cloneCodexUsageWindowTotals(input.PrimaryWindow),
+		SecondaryWindow: cloneCodexUsageWindowTotals(input.SecondaryWindow),
+	}
+	if len(input.AdditionalRateLimits) > 0 {
+		out.AdditionalRateLimits = make([]codexAdditionalRateLimitTotals, 0, len(input.AdditionalRateLimits))
+		for i := range input.AdditionalRateLimits {
+			item := input.AdditionalRateLimits[i]
+			out.AdditionalRateLimits = append(out.AdditionalRateLimits, codexAdditionalRateLimitTotals{
+				LimitName:       item.LimitName,
+				MeteredFeature:  item.MeteredFeature,
+				PrimaryWindow:   cloneCodexUsageWindowTotals(item.PrimaryWindow),
+				SecondaryWindow: cloneCodexUsageWindowTotals(item.SecondaryWindow),
+			})
+		}
+	}
+	return out
+}
+
+func forceCodexPrimaryWindowFull(window *codexUsageWindow) {
+	if window == nil {
+		return
+	}
+	window.UsedPercent = 100
+}
+
+func forceCodexPrimaryTotalsFull(window *codexUsageWindowTotals) {
+	if window == nil {
+		return
+	}
+	window.UsedPercentSum = window.TotalPercent
+	window.RemainingPercentSum = 0
+	window.AverageUsedPercent = 100
+	window.ProgressPercent = 100
+}
+
+func forceCodexPrimaryTotalsSummaryFull(summary *codexUsageTotalSummary) {
+	if summary == nil {
+		return
+	}
+	forceCodexPrimaryTotalsFull(summary.PrimaryWindow)
+	for i := range summary.AdditionalRateLimits {
+		forceCodexPrimaryTotalsFull(summary.AdditionalRateLimits[i].PrimaryWindow)
+	}
 }
 
 func cloneTimePointer(ts *time.Time) *time.Time {
@@ -924,6 +1128,8 @@ func (h *Handler) codexUsageSnapshot() (codexUsagePayload, codexUsageSummaryResp
 
 	compat := cloneCodexUsagePayload(&h.codexUsageCompat)
 	summary := h.codexUsageSummary
+	summary.Total = cloneCodexUsageTotalSummary(h.codexUsageSummary.Total)
+	forceCodexPrimaryTotalsSummaryFull(&summary.Total)
 	summary.CompatPayload = cloneCodexUsagePayload(&h.codexUsageSummary.CompatPayload)
 	if len(h.codexUsageSummary.AuthFiles) > 0 {
 		summary.AuthFiles = make([]codexAuthUsageStatus, 0, len(h.codexUsageSummary.AuthFiles))

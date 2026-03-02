@@ -131,19 +131,21 @@ func TestCodexUsageCompatRoutes(t *testing.T) {
 	}
 }
 
-func TestInjectManagementCodexWidget(t *testing.T) {
-	input := "<html><body><div id='app'></div></body></html>"
-	output := injectManagementCodexWidget(input)
-	if !strings.Contains(output, managementCodexWidgetScriptPath) {
-		t.Fatalf("expected injected script path %s", managementCodexWidgetScriptPath)
-	}
-	if strings.Count(output, managementCodexWidgetScriptPath) != 1 {
-		t.Fatalf("expected single injected script tag")
-	}
+func TestCodexOAuthQuotaMiddleware_ReturnsQuotaExceeded(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.CodexOAuthAvailableTotals = []float64{0}
 
-	again := injectManagementCodexWidget(output)
-	if strings.Count(again, managementCodexWidgetScriptPath) != 1 {
-		t.Fatalf("expected no duplicate injection")
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.106.0")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"insufficient_quota"`) {
+		t.Fatalf("expected insufficient_quota payload, got %s", rr.Body.String())
 	}
 }
 

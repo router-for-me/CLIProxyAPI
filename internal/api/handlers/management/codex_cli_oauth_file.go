@@ -4,12 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 type codexCLITokens struct {
@@ -20,93 +18,61 @@ type codexCLITokens struct {
 }
 
 type codexCLIOAuthFile struct {
-	Tokens     codexCLITokens `json:"tokens"`
-	AuthMethod string         `json:"auth_method,omitempty"`
+	AuthMode     string         `json:"auth_mode,omitempty"`
+	OpenAIAPIKey string         `json:"OPENAI_API_KEY,omitempty"`
+	Tokens       *codexCLITokens `json:"tokens,omitempty"`
+	AuthMethod   string          `json:"auth_method,omitempty"`
 }
 
-func findAuthByNameOrID(manager *coreauth.Manager, name string) *coreauth.Auth {
-	if manager == nil {
-		return nil
+func sanitizeDownloadName(index int) string {
+	if index < 0 {
+		return "cliproxyapi-auth.json"
 	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil
-	}
-	if auth, ok := manager.GetByID(name); ok {
-		return auth
-	}
-	auths := manager.List()
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(auth.FileName), name) || strings.EqualFold(strings.TrimSpace(auth.ID), name) {
-			return auth
-		}
-	}
-	return nil
+	return fmt.Sprintf("cliproxyapi-api-key-%d-auth.json", index+1)
 }
 
-func sanitizeDownloadName(name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "auth.json"
+func normalizeAPIKeyAt(keys []string, index int) string {
+	if index < 0 || index >= len(keys) {
+		return ""
 	}
-	base := filepath.Base(name)
-	base = strings.TrimSuffix(base, filepath.Ext(base))
-	base = strings.TrimSpace(base)
-	if base == "" || base == "." || base == ".." {
-		return "auth.json"
-	}
-	return fmt.Sprintf("codex-cli-%s-auth.json", base)
+	return strings.TrimSpace(keys[index])
 }
 
-// DownloadCodexCLIOAuthFile exports a Codex OAuth auth file in Codex CLI compatible auth.json format.
+// DownloadCodexCLIOAuthFile exports a Codex CLI compatible auth.json file backed by CLIProxyAPI api-keys.
+//
+// This file is intentionally provider-agnostic and acts as a proxy credential for CLIProxyAPI itself:
+//   - access_token carries a configured CLIProxyAPI API key
+//   - id_token / refresh_token / account_id are compatibility placeholders
 func (h *Handler) DownloadCodexCLIOAuthFile(c *gin.Context) {
-	if h == nil || h.authManager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "config unavailable"})
 		return
 	}
 
-	name := strings.TrimSpace(c.Query("name"))
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+	if len(h.cfg.APIKeys) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "api-keys is empty"})
 		return
 	}
 
-	auth := findAuthByNameOrID(h.authManager, name)
-	if auth == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
-		return
-	}
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "auth file is not codex provider"})
-		return
-	}
-
-	idToken := metadataString(auth.Metadata, "id_token")
-	accessToken := metadataString(auth.Metadata, "access_token", "accessToken")
-	refreshToken := metadataString(auth.Metadata, "refresh_token", "refreshToken")
-	if idToken == "" || accessToken == "" || refreshToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "codex oauth token fields are incomplete"})
-		return
-	}
-
-	accountID := metadataString(auth.Metadata, "account_id", "chatgpt_account_id", "chatgptAccountId")
-	if accountID == "" {
-		if claims, err := codex.ParseJWTToken(idToken); err == nil && claims != nil {
-			accountID = strings.TrimSpace(claims.GetAccountID())
+	index := 0
+	if raw := strings.TrimSpace(c.Query("index")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "index must be integer"})
+			return
 		}
+		index = parsed
+	}
+
+	apiKey := normalizeAPIKeyAt(h.cfg.APIKeys, index)
+	if apiKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "api-key not found at index"})
+		return
 	}
 
 	payload := codexCLIOAuthFile{
-		Tokens: codexCLITokens{
-			IDToken:      idToken,
-			AccessToken:  accessToken,
-			RefreshToken: refreshToken,
-			AccountID:    accountID,
-		},
-		AuthMethod: "chatgpt",
+		AuthMode:     "apikey",
+		OpenAIAPIKey: apiKey,
 	}
 
 	raw, err := json.MarshalIndent(payload, "", "  ")
@@ -116,7 +82,7 @@ func (h *Handler) DownloadCodexCLIOAuthFile(c *gin.Context) {
 	}
 	raw = append(raw, '\n')
 
-	fileName := sanitizeDownloadName(auth.FileName)
+	fileName := sanitizeDownloadName(index)
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", fileName))
 	c.Data(http.StatusOK, "application/json", raw)
 }
