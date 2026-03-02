@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -346,5 +347,239 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
 	if got != "web_search" {
 		t.Fatalf("built-in tool_reference should not be prefixed, got %q", got)
+	}
+}
+
+func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
+	payload := []byte(`{
+		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+		"system": [{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}],
+		"messages": [{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]
+	}`)
+
+	out := normalizeCacheControlTTL(payload)
+
+	if got := gjson.GetBytes(out, "tools.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("tools.0.cache_control.ttl = %q, want %q", got, "1h")
+	}
+	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
+		t.Fatalf("messages.0.content.0.cache_control.ttl should be removed after a default-5m block")
+	}
+}
+
+func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) {
+	payload := []byte(`{
+		"tools": [
+			{"name":"t1","cache_control":{"type":"ephemeral"}},
+			{"name":"t2","cache_control":{"type":"ephemeral"}}
+		],
+		"system": [{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":[{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}]}
+		]
+	}`)
+
+	out := enforceCacheControlLimit(payload, 4)
+
+	if got := countCacheControls(out); got != 4 {
+		t.Fatalf("cache_control count = %d, want 4", got)
+	}
+	if gjson.GetBytes(out, "tools.0.cache_control").Exists() {
+		t.Fatalf("tools.0.cache_control should be removed first (non-last tool)")
+	}
+	if !gjson.GetBytes(out, "tools.1.cache_control").Exists() {
+		t.Fatalf("tools.1.cache_control (last tool) should be preserved")
+	}
+	if !gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists() || !gjson.GetBytes(out, "messages.1.content.0.cache_control").Exists() {
+		t.Fatalf("message cache_control blocks should be preserved when non-last tool removal is enough")
+	}
+}
+
+func TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit(t *testing.T) {
+	payload := []byte(`{
+		"tools": [
+			{"name":"t1","cache_control":{"type":"ephemeral"}},
+			{"name":"t2","cache_control":{"type":"ephemeral"}},
+			{"name":"t3","cache_control":{"type":"ephemeral"}},
+			{"name":"t4","cache_control":{"type":"ephemeral"}},
+			{"name":"t5","cache_control":{"type":"ephemeral"}}
+		]
+	}`)
+
+	out := enforceCacheControlLimit(payload, 4)
+
+	if got := countCacheControls(out); got != 4 {
+		t.Fatalf("cache_control count = %d, want 4", got)
+	}
+	if gjson.GetBytes(out, "tools.0.cache_control").Exists() {
+		t.Fatalf("tools.0.cache_control should be removed to satisfy max=4")
+	}
+	if !gjson.GetBytes(out, "tools.4.cache_control").Exists() {
+		t.Fatalf("last tool cache_control should be preserved when possible")
+	}
+}
+
+func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"tools": [
+			{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}},
+			{"name":"t2","cache_control":{"type":"ephemeral"}}
+		],
+		"system": [
+			{"type":"text","text":"s1","cache_control":{"type":"ephemeral","ttl":"1h"}},
+			{"type":"text","text":"s2","cache_control":{"type":"ephemeral","ttl":"1h"}}
+		],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral","ttl":"1h"}}]},
+			{"role":"user","content":[{"type":"text","text":"u2","cache_control":{"type":"ephemeral","ttl":"1h"}}]}
+		]
+	}`)
+
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-haiku-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if len(seenBody) == 0 {
+		t.Fatal("expected count_tokens request body to be captured")
+	}
+	if got := countCacheControls(seenBody); got > 4 {
+		t.Fatalf("count_tokens body has %d cache_control blocks, want <= 4", got)
+	}
+	if hasTTLOrderingViolation(seenBody) {
+		t.Fatalf("count_tokens body still has ttl ordering violations: %s", string(seenBody))
+	}
+}
+
+func hasTTLOrderingViolation(payload []byte) bool {
+	seen5m := false
+	violates := false
+
+	checkCC := func(cc gjson.Result) {
+		if !cc.Exists() || violates {
+			return
+		}
+		ttl := cc.Get("ttl").String()
+		if ttl != "1h" {
+			seen5m = true
+			return
+		}
+		if seen5m {
+			violates = true
+		}
+	}
+
+	tools := gjson.GetBytes(payload, "tools")
+	if tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			checkCC(tool.Get("cache_control"))
+			return !violates
+		})
+	}
+
+	system := gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		system.ForEach(func(_, item gjson.Result) bool {
+			checkCC(item.Get("cache_control"))
+			return !violates
+		})
+	}
+
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if content.IsArray() {
+				content.ForEach(func(_, item gjson.Result) bool {
+					checkCC(item.Get("cache_control"))
+					return !violates
+				})
+			}
+			return !violates
+		})
+	}
+
+	return violates
+}
+
+func TestClaudeExecutor_Execute_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
+	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
+		_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet-20241022",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+		return err
+	})
+}
+
+func TestClaudeExecutor_ExecuteStream_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
+	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
+		_, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet-20241022",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+		return err
+	})
+}
+
+func TestClaudeExecutor_CountTokens_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
+	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
+		_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet-20241022",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+		return err
+	})
+}
+
+func testClaudeExecutorInvalidCompressedErrorBody(
+	t *testing.T,
+	invoke func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error,
+) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("not-a-valid-gzip-stream"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	err := invoke(executor, auth, payload)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to decode error response body") {
+		t.Fatalf("expected decode failure message, got: %v", err)
+	}
+	if statusProvider, ok := err.(interface{ StatusCode() int }); !ok || statusProvider.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("expected status code 400, got: %v", err)
 	}
 }
