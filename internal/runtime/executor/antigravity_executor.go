@@ -54,7 +54,6 @@ const (
 var (
 	randSource                    = rand.New(rand.NewSource(time.Now().UnixNano()))
 	randSourceMutex               sync.Mutex
-	antigravityExecutorGlobal     *AntigravityExecutor
 	antigravityPrimaryModelsCache struct {
 		mu     sync.RWMutex
 		models []*registry.ModelInfo
@@ -138,8 +137,7 @@ type AntigravityExecutor struct {
 // Returns:
 //   - *AntigravityExecutor: A new Antigravity executor instance
 func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
-	antigravityExecutorGlobal = &AntigravityExecutor{cfg: cfg}
-	return antigravityExecutorGlobal
+	return &AntigravityExecutor{cfg: cfg}
 }
 
 // Identifier returns the executor identifier.
@@ -989,7 +987,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
 		httpReq.Header.Set("Accept", "application/json")
 		if host := resolveHost(base); host != "" {
 			httpReq.Host = host
@@ -1094,7 +1092,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+		httpReq.Header.Set("User-Agent", resolveUserAgent(cfg, auth))
 		if host := resolveHost(baseURL); host != "" {
 			httpReq.Host = host
 		}
@@ -1241,7 +1239,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 		return auth, errReq
 	}
 	httpReq.Header.Set("Host", "oauth2.googleapis.com")
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -1408,7 +1406,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Header.Set("User-Agent", resolveUserAgent(e.cfg, auth))
 	if stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
 	} else {
@@ -1519,7 +1517,7 @@ func resolveHost(base string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 }
 
-func resolveUserAgent(auth *cliproxyauth.Auth) string {
+func resolveUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
 	if auth != nil {
 		if auth.Attributes != nil {
 			if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
@@ -1532,17 +1530,12 @@ func resolveUserAgent(auth *cliproxyauth.Auth) string {
 			}
 		}
 	}
-	if ua := getAntigravityAgent(); ua != "" {
-		return ua
+	if cfg != nil {
+		if ua := cfg.SDKConfig.AntigravityDefaultAgent; ua != "" {
+			return ua
+		}
 	}
 	return defaultAntigravityAgent
-}
-
-func getAntigravityAgent() string {
-	if antigravityExecutorGlobal != nil && antigravityExecutorGlobal.cfg != nil {
-		return antigravityExecutorGlobal.cfg.SDKConfig.AntigravityDefaultAgent
-	}
-	return ""
 }
 
 func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
