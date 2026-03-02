@@ -131,6 +131,22 @@ func TestCodexUsageCompatRoutes(t *testing.T) {
 	}
 }
 
+func TestInjectManagementCodexWidget(t *testing.T) {
+	input := "<html><body><div id='app'></div></body></html>"
+	output := injectManagementCodexWidget(input)
+	if !strings.Contains(output, managementCodexWidgetScriptPath) {
+		t.Fatalf("expected injected script path %s", managementCodexWidgetScriptPath)
+	}
+	if strings.Count(output, managementCodexWidgetScriptPath) != 1 {
+		t.Fatalf("expected single injected script tag")
+	}
+
+	again := injectManagementCodexWidget(output)
+	if strings.Count(again, managementCodexWidgetScriptPath) != 1 {
+		t.Fatalf("expected no duplicate injection")
+	}
+}
+
 func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")

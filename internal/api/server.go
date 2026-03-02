@@ -318,6 +318,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET(managementCodexWidgetScriptPath, s.serveManagementCodexWidget)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -627,6 +628,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
+		mgmt.GET("/codex-cli-oauth-file", s.mgmt.DownloadCodexCLIOAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
@@ -683,7 +685,14 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		log.WithError(err).Error("failed to read management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	enhanced := injectManagementCodexWidget(string(data))
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(enhanced))
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {

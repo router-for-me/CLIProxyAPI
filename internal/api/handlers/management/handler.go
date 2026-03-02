@@ -3,7 +3,6 @@
 package management
 
 import (
-	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -77,7 +76,6 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	}
 	h.loadCodexUsageState()
 	h.startAttemptCleanup()
-	h.startCodexUsagePoller()
 	return h
 }
 
@@ -120,10 +118,7 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
-func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
-	h.authManager = manager
-	go h.pollSelectedCodexUsageIfDue(context.Background())
-}
+func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = manager }
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }

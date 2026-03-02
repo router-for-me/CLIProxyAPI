@@ -22,7 +22,6 @@ import (
 
 const (
 	codexUsagePollInterval   = 60 * time.Second
-	codexUsageCheckInterval  = 5 * time.Second
 	codexUsageRequestTimeout = 20 * time.Second
 	codexUsageDefaultBaseURL = "https://chatgpt.com/backend-api"
 	codexFreePlanWeight      = 0.2
@@ -122,6 +121,21 @@ type codexUsagePersistentState struct {
 	CompatPayload  codexUsagePayload               `json:"compat_payload"`
 	Summary        codexUsageSummaryResponse       `json:"summary"`
 	HasData        bool                            `json:"has_data"`
+}
+
+type codexUsageHTTPError struct {
+	StatusCode int
+	Preview    string
+}
+
+func (e *codexUsageHTTPError) Error() string {
+	if e == nil {
+		return "usage request failed"
+	}
+	if strings.TrimSpace(e.Preview) == "" {
+		return fmt.Sprintf("usage request failed: status=%d", e.StatusCode)
+	}
+	return fmt.Sprintf("usage request failed: status=%d body=%s", e.StatusCode, e.Preview)
 }
 
 type codexWindowAccumulator struct {
@@ -233,20 +247,9 @@ func defaultCodexUsagePayload() codexUsagePayload {
 	return codexUsagePayload{PlanType: "guest"}
 }
 
-func (h *Handler) startCodexUsagePoller() {
-	go func() {
-		ticker := time.NewTicker(codexUsageCheckInterval)
-		defer ticker.Stop()
-
-		h.pollSelectedCodexUsageIfDue(context.Background())
-		for {
-			<-ticker.C
-			h.pollSelectedCodexUsageIfDue(context.Background())
-		}
-	}()
-}
-
-func (h *Handler) pollSelectedCodexUsageIfDue(ctx context.Context) {
+// refreshCodexUsageFromCacheTTL updates codex usage cache on demand.
+// It never polls upstream unless a specific auth file cache TTL has expired.
+func (h *Handler) refreshCodexUsageFromCacheTTL(ctx context.Context) {
 	if h == nil {
 		return
 	}
@@ -260,9 +263,6 @@ func (h *Handler) pollSelectedCodexUsageIfDue(ctx context.Context) {
 	}
 
 	selectedAuthID := strings.TrimSpace(manager.SelectedAuthID("codex"))
-	if selectedAuthID == "" {
-		return
-	}
 	h.codexUsageMu.RLock()
 	selectedChanged := strings.TrimSpace(h.codexUsageSelected) != selectedAuthID
 	h.codexUsageMu.RUnlock()
@@ -281,10 +281,6 @@ func (h *Handler) pollSelectedCodexUsageIfDue(ctx context.Context) {
 		}
 		codexAuths[strings.TrimSpace(auth.ID)] = auth
 	}
-	if len(codexAuths) == 0 {
-		return
-	}
-
 	changed := false
 	for authID := range current {
 		if _, ok := codexAuths[authID]; !ok {
@@ -293,69 +289,91 @@ func (h *Handler) pollSelectedCodexUsageIfDue(ctx context.Context) {
 		}
 	}
 
-	auth := codexAuths[selectedAuthID]
-	if auth == nil {
-		return
-	}
-
-	status, ok := current[selectedAuthID]
-	if !ok {
-		status = codexAuthUsageStatus{
-			AuthID: selectedAuthID,
+	if len(codexAuths) == 0 {
+		if changed || selectedChanged {
+			h.updateCodexUsageState(current, selectedAuthID, now, true)
 		}
-	}
-	status.AuthID = selectedAuthID
-	status.FileName = strings.TrimSpace(auth.FileName)
-	status.Email = authEmail(auth)
-	status.AccountID = extractCodexAccountID(auth)
-	if status.Status == "" {
-		status.Status = "skipped"
-	}
-
-	shouldPoll := status.LastPolledAt.IsZero() || now.Sub(status.LastPolledAt) >= codexUsagePollInterval
-	if !shouldPoll {
-		h.updateCodexUsageState(current, selectedAuthID, now, changed || selectedChanged)
 		return
 	}
 
-	token := extractCodexAccessToken(auth)
-	status.LastPolledAt = now
-	if token == "" {
-		status.Status = "error"
-		status.Error = "missing access_token"
-		current[selectedAuthID] = status
+	authIDs := make([]string, 0, len(codexAuths))
+	for authID := range codexAuths {
+		authIDs = append(authIDs, authID)
+	}
+	sort.Strings(authIDs)
+
+	for _, authID := range authIDs {
+		auth := codexAuths[authID]
+		status, ok := current[authID]
+		if !ok {
+			status = codexAuthUsageStatus{
+				AuthID: authID,
+			}
+		}
+		status.AuthID = authID
+		status.FileName = strings.TrimSpace(auth.FileName)
+		status.Email = authEmail(auth)
+		status.AccountID = extractCodexAccountID(auth)
+		if status.Status == "" {
+			status.Status = "skipped"
+		}
+
+		shouldPoll := status.LastPolledAt.IsZero() || now.Sub(status.LastPolledAt) >= codexUsagePollInterval
+		if !shouldPoll {
+			current[authID] = status
+			continue
+		}
+
+		changed = true
+		token := extractCodexAccessToken(auth)
+		status.LastPolledAt = now
+		if token == "" {
+			status.Status = "error"
+			status.Error = "missing access_token"
+			status.Usage = nil
+			status.HasUsage = false
+			status.LastSuccessAt = nil
+			current[authID] = status
+			continue
+		}
+
+		pollCtx := ctx
+		var cancel context.CancelFunc
+		if pollCtx == nil {
+			pollCtx = context.Background()
+		}
+		pollCtx, cancel = context.WithTimeout(pollCtx, codexUsageRequestTimeout)
+		payload, baseURL, pathStyle, err := h.fetchCodexUsagePayload(pollCtx, auth, token, status.AccountID)
+		cancel()
+		status.BaseURL = baseURL
+		status.PathStyle = pathStyle
+		if err != nil {
+			status.Status = "error"
+			status.Error = err.Error()
+			if httpErr, ok := err.(*codexUsageHTTPError); ok && (httpErr.StatusCode == http.StatusUnauthorized || httpErr.StatusCode == http.StatusForbidden) {
+				// Credential is no longer valid; clear stale usage cache for this auth.
+				status.Usage = nil
+				status.HasUsage = false
+				status.LastSuccessAt = nil
+			}
+			current[authID] = status
+			log.WithError(err).Debugf("codex usage poll failed for auth %s", status.AuthID)
+			continue
+		}
+
+		status.Status = "ok"
+		status.Error = ""
+		copied := payload
+		status.Usage = &copied
+		status.HasUsage = true
+		lastSuccess := now
+		status.LastSuccessAt = &lastSuccess
+		current[authID] = status
+	}
+
+	if changed || selectedChanged {
 		h.updateCodexUsageState(current, selectedAuthID, now, true)
-		return
 	}
-
-	pollCtx := ctx
-	var cancel context.CancelFunc
-	if pollCtx == nil {
-		pollCtx = context.Background()
-	}
-	pollCtx, cancel = context.WithTimeout(pollCtx, codexUsageRequestTimeout)
-	payload, baseURL, pathStyle, err := h.fetchCodexUsagePayload(pollCtx, auth, token, status.AccountID)
-	cancel()
-	status.BaseURL = baseURL
-	status.PathStyle = pathStyle
-	if err != nil {
-		status.Status = "error"
-		status.Error = err.Error()
-		current[selectedAuthID] = status
-		log.WithError(err).Debugf("codex usage poll failed for auth %s", status.AuthID)
-		h.updateCodexUsageState(current, selectedAuthID, now, true)
-		return
-	}
-
-	status.Status = "ok"
-	status.Error = ""
-	copied := payload
-	status.Usage = &copied
-	status.HasUsage = true
-	lastSuccess := now
-	status.LastSuccessAt = &lastSuccess
-	current[selectedAuthID] = status
-	h.updateCodexUsageState(current, selectedAuthID, now, true)
 }
 
 func (h *Handler) updateCodexUsageState(current map[string]codexAuthUsageStatus, selectedAuthID string, now time.Time, persist bool) {
@@ -685,7 +703,10 @@ func (h *Handler) fetchCodexUsagePayload(ctx context.Context, auth *coreauth.Aut
 		if len(preview) > 240 {
 			preview = preview[:240]
 		}
-		return payload, baseURL, pathStyle, fmt.Errorf("usage request failed: status=%d body=%s", resp.StatusCode, preview)
+		return payload, baseURL, pathStyle, &codexUsageHTTPError{
+			StatusCode: resp.StatusCode,
+			Preview:    preview,
+		}
 	}
 
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -918,11 +939,8 @@ func (h *Handler) GetCodexUsageCompat(c *gin.Context) {
 		c.JSON(http.StatusOK, defaultCodexUsagePayload())
 		return
 	}
-	compat, _, hasData := h.codexUsageSnapshot()
-	if !hasData {
-		h.pollSelectedCodexUsageIfDue(c.Request.Context())
-		compat, _, _ = h.codexUsageSnapshot()
-	}
+	h.refreshCodexUsageFromCacheTTL(c.Request.Context())
+	compat, _, _ := h.codexUsageSnapshot()
 	c.JSON(http.StatusOK, compat)
 }
 
@@ -931,10 +949,7 @@ func (h *Handler) GetCodexUsageSummary(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "handler not initialized"})
 		return
 	}
-	_, summary, hasData := h.codexUsageSnapshot()
-	if !hasData && summary.UpdatedAt.IsZero() {
-		h.pollSelectedCodexUsageIfDue(c.Request.Context())
-		_, summary, _ = h.codexUsageSnapshot()
-	}
+	h.refreshCodexUsageFromCacheTTL(c.Request.Context())
+	_, summary, _ := h.codexUsageSnapshot()
 	c.JSON(http.StatusOK, summary)
 }

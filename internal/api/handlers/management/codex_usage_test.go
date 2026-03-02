@@ -75,7 +75,7 @@ func TestAggregateCodexUsage_AppliesFreeWeight(t *testing.T) {
 	}
 }
 
-func TestPollSelectedCodexUsageIfDue_PollsOnlySelectedAndPerAuthInterval(t *testing.T) {
+func TestRefreshCodexUsageFromCacheTTL_PollsAllAuthsPerTTL(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	var whamCalls int32
@@ -227,7 +227,7 @@ func TestPollSelectedCodexUsageIfDue_PollsOnlySelectedAndPerAuthInterval(t *test
 	}
 
 	manager.SetSelectedAuthID("codex", "codex-wham")
-	h.pollSelectedCodexUsageIfDue(context.Background())
+	h.refreshCodexUsageFromCacheTTL(context.Background())
 	compat, summary, hasData := h.codexUsageSnapshot()
 
 	if !hasData {
@@ -236,8 +236,8 @@ func TestPollSelectedCodexUsageIfDue_PollsOnlySelectedAndPerAuthInterval(t *test
 	if atomic.LoadInt32(&whamCalls) != 1 {
 		t.Fatalf("expected 1 wham call, got %d", whamCalls)
 	}
-	if atomic.LoadInt32(&apiCalls) != 0 {
-		t.Fatalf("expected 0 api calls before selection switch, got %d", apiCalls)
+	if atomic.LoadInt32(&apiCalls) != 1 {
+		t.Fatalf("expected 1 api call on first refresh, got %d", apiCalls)
 	}
 	if summary.SelectedAuthID != "codex-wham" {
 		t.Fatalf("expected selected auth codex-wham, got %q", summary.SelectedAuthID)
@@ -248,45 +248,48 @@ func TestPollSelectedCodexUsageIfDue_PollsOnlySelectedAndPerAuthInterval(t *test
 	if compat.RateLimit == nil || compat.RateLimit.PrimaryWindow == nil {
 		t.Fatalf("expected aggregated primary window")
 	}
-	if compat.RateLimit.PrimaryWindow.UsedPercent != 20 {
-		t.Fatalf("expected used_percent 20 for selected auth, got %d", compat.RateLimit.PrimaryWindow.UsedPercent)
+	if compat.RateLimit.PrimaryWindow.UsedPercent != 40 {
+		t.Fatalf("expected weighted used_percent 40 across cached auths, got %d", compat.RateLimit.PrimaryWindow.UsedPercent)
 	}
-	if summary.AuthFilesTotal != 1 {
-		t.Fatalf("expected only selected auth cached, got %d", summary.AuthFilesTotal)
+	if summary.AuthFilesTotal != 3 {
+		t.Fatalf("expected all codex auth files cached, got %d", summary.AuthFilesTotal)
 	}
-	if summary.AuthFilesWithUsage != 1 {
-		t.Fatalf("expected 1 auth with usage, got %d", summary.AuthFilesWithUsage)
+	if summary.AuthFilesWithUsage != 2 {
+		t.Fatalf("expected 2 auth with usage, got %d", summary.AuthFilesWithUsage)
 	}
 
-	// Same selected auth within 60s should not poll again.
-	h.pollSelectedCodexUsageIfDue(context.Background())
+	// Within TTL no upstream calls should be issued.
+	h.refreshCodexUsageFromCacheTTL(context.Background())
 	if atomic.LoadInt32(&whamCalls) != 1 {
-		t.Fatalf("expected still 1 wham call due to per-auth interval, got %d", whamCalls)
+		t.Fatalf("expected still 1 wham call due to TTL, got %d", whamCalls)
 	}
-
-	// Switch selected auth: first poll for this auth should run immediately.
-	manager.SetSelectedAuthID("codex", "codex-api")
-	h.pollSelectedCodexUsageIfDue(context.Background())
 	if atomic.LoadInt32(&apiCalls) != 1 {
-		t.Fatalf("expected 1 api call after selection switch, got %d", apiCalls)
+		t.Fatalf("expected still 1 api call due to TTL, got %d", apiCalls)
 	}
 
-	// Switch back quickly: previous wham poll is still within 60s, should be skipped.
-	manager.SetSelectedAuthID("codex", "codex-wham")
-	h.pollSelectedCodexUsageIfDue(context.Background())
-	if atomic.LoadInt32(&whamCalls) != 1 {
-		t.Fatalf("expected wham call count unchanged within interval, got %d", whamCalls)
+	// Selection changes should not trigger upstream requests when TTL is still valid.
+	manager.SetSelectedAuthID("codex", "codex-api")
+	h.refreshCodexUsageFromCacheTTL(context.Background())
+	if atomic.LoadInt32(&apiCalls) != 1 {
+		t.Fatalf("expected api call count unchanged on selection change, got %d", apiCalls)
+	}
+	_, summary, _ = h.codexUsageSnapshot()
+	if summary.SelectedAuthID != "codex-api" {
+		t.Fatalf("expected selected auth codex-api, got %q", summary.SelectedAuthID)
 	}
 
-	// Force wham auth interval to expire, then it should poll again.
+	// Force only wham auth TTL to expire; only wham should be refreshed.
 	h.codexUsageMu.Lock()
 	st := h.codexUsageByAuth["codex-wham"]
 	st.LastPolledAt = time.Now().Add(-61 * time.Second).UTC()
 	h.codexUsageByAuth["codex-wham"] = st
 	h.codexUsageMu.Unlock()
-	h.pollSelectedCodexUsageIfDue(context.Background())
+	h.refreshCodexUsageFromCacheTTL(context.Background())
 	if atomic.LoadInt32(&whamCalls) != 2 {
-		t.Fatalf("expected second wham poll after interval expiry, got %d", whamCalls)
+		t.Fatalf("expected second wham poll after ttl expiry, got %d", whamCalls)
+	}
+	if atomic.LoadInt32(&apiCalls) != 1 {
+		t.Fatalf("expected api call count unchanged when api ttl not expired, got %d", apiCalls)
 	}
 }
 
@@ -353,5 +356,101 @@ func TestGetCodexUsageCompatDefaultsToGuest(t *testing.T) {
 	}
 	if payload.PlanType != "guest" {
 		t.Fatalf("expected plan_type guest, got %q", payload.PlanType)
+	}
+}
+
+func TestRefreshCodexUsageFromCacheTTL_ClearsUsageOnUnauthorized(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var statusCode int32 = http.StatusOK
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/wham/usage" {
+			t.Fatalf("unexpected wham path: %s", r.URL.Path)
+		}
+		if code := int(atomic.LoadInt32(&statusCode)); code != http.StatusOK {
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(codexUsagePayload{
+			PlanType: "plus",
+			RateLimit: &codexUsageRateLimit{
+				PrimaryWindow: &codexUsageWindow{
+					UsedPercent:        25,
+					LimitWindowSeconds: 18000,
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	ctx := context.Background()
+	_, _ = manager.Register(ctx, &coreauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		FileName: "codex-auth.json",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api",
+		},
+		Metadata: map[string]any{
+			"access_token": "token-auth",
+			"account_id":   "acc-auth",
+		},
+	})
+
+	h := &Handler{
+		cfg:              &config.Config{},
+		authManager:      manager,
+		configFilePath:   t.TempDir() + "/config.yaml",
+		codexUsageByAuth: make(map[string]codexAuthUsageStatus),
+		codexUsageCompat: defaultCodexUsagePayload(),
+	}
+
+	manager.SetSelectedAuthID("codex", "codex-auth")
+	h.refreshCodexUsageFromCacheTTL(context.Background())
+	compat, summary, hasData := h.codexUsageSnapshot()
+	if !hasData {
+		t.Fatal("expected hasData=true after successful poll")
+	}
+	if summary.AuthFilesWithUsage != 1 {
+		t.Fatalf("expected withUsage=1 after success, got %d", summary.AuthFilesWithUsage)
+	}
+	if compat.PlanType != "plus" {
+		t.Fatalf("expected plan_type plus after success, got %q", compat.PlanType)
+	}
+
+	atomic.StoreInt32(&statusCode, http.StatusUnauthorized)
+	h.codexUsageMu.Lock()
+	st := h.codexUsageByAuth["codex-auth"]
+	st.LastPolledAt = time.Now().Add(-61 * time.Second).UTC()
+	h.codexUsageByAuth["codex-auth"] = st
+	h.codexUsageMu.Unlock()
+
+	h.refreshCodexUsageFromCacheTTL(context.Background())
+	compat, summary, hasData = h.codexUsageSnapshot()
+	if hasData {
+		t.Fatal("expected hasData=false after unauthorized response clears usage")
+	}
+	if summary.AuthFilesWithUsage != 0 {
+		t.Fatalf("expected withUsage=0 after unauthorized response, got %d", summary.AuthFilesWithUsage)
+	}
+	if compat.PlanType != "guest" {
+		t.Fatalf("expected plan_type guest after usage clear, got %q", compat.PlanType)
+	}
+	authStatus, ok := h.codexUsageByAuthSnapshot()["codex-auth"]
+	if !ok {
+		t.Fatal("expected auth status to remain present")
+	}
+	if authStatus.Status != "error" {
+		t.Fatalf("expected auth status error, got %q", authStatus.Status)
+	}
+	if authStatus.Usage != nil {
+		t.Fatal("expected usage to be nil after unauthorized response")
+	}
+	if authStatus.HasUsage {
+		t.Fatal("expected has_usage=false after unauthorized response")
 	}
 }
