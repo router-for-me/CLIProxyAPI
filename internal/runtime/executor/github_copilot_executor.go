@@ -490,18 +490,46 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
 	r.Header.Set("X-Request-Id", uuid.NewString())
 
 	initiator := "user"
-	if len(body) > 0 {
-		if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
-			for _, msg := range messages.Array() {
-				role := msg.Get("role").String()
-				if role == "assistant" || role == "tool" {
-					initiator = "agent"
-					break
-				}
+	if role := detectLastConversationRole(body); role == "assistant" || role == "tool" {
+		initiator = "agent"
+	}
+	r.Header.Set("X-Initiator", initiator)
+}
+
+func detectLastConversationRole(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+
+	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
+		arr := messages.Array()
+		for i := len(arr) - 1; i >= 0; i-- {
+			if role := arr[i].Get("role").String(); role != "" {
+				return role
 			}
 		}
 	}
-	r.Header.Set("X-Initiator", initiator)
+
+	if inputs := gjson.GetBytes(body, "input"); inputs.Exists() && inputs.IsArray() {
+		arr := inputs.Array()
+		for i := len(arr) - 1; i >= 0; i-- {
+			item := arr[i]
+
+			// Most Responses input items carry a top-level role.
+			if role := item.Get("role").String(); role != "" {
+				return role
+			}
+
+			switch item.Get("type").String() {
+			case "function_call", "function_call_arguments":
+				return "assistant"
+			case "function_call_output", "function_call_response", "tool_result":
+				return "tool"
+			}
+		}
+	}
+
+	return ""
 }
 
 // detectVisionContent checks if the request body contains vision/image content.
