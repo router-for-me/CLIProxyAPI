@@ -160,11 +160,6 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 			}
 		}
 	}
-	if errMsg != nil && isInvalidEncryptedContentError(errMsg) {
-		if sanitized, changed := stripEncryptedReasoningInput(rawJSON); changed {
-			resp, upstreamHeaders, errMsg, selectedAuthID, _ = h.executeNonStreamingWithAffinity(c, sanitized, false)
-		}
-	}
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		return
