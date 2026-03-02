@@ -48,6 +48,13 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	codexUsageMu        sync.RWMutex
+	codexUsagePollMu    sync.Mutex
+	codexUsageByAuth    map[string]codexAuthUsageStatus
+	codexUsageCompat    codexUsagePayload
+	codexUsageSummary   codexUsageSummaryResponse
+	codexUsageHasData   bool
+	codexUsageSelected  string
 }
 
 // NewHandler creates a new management handler instance.
@@ -64,7 +71,10 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+		codexUsageByAuth:    make(map[string]codexAuthUsageStatus),
+		codexUsageCompat:    defaultCodexUsagePayload(),
 	}
+	h.loadCodexUsageState()
 	h.startAttemptCleanup()
 	return h
 }
@@ -313,6 +323,18 @@ func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
 func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	var body struct {
 		Value *string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	set(*body.Value)
+	h.persist(c)
+}
+
+func (h *Handler) updateFloatField(c *gin.Context, set func(float64)) {
+	var body struct {
+		Value *float64 `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})

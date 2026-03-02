@@ -134,6 +134,8 @@ type Manager struct {
 	hook      Hook
 	mu        sync.RWMutex
 	auths     map[string]*Auth
+	// selectedAuthByProvider stores the last auth ID selected by scheduler per provider.
+	selectedAuthByProvider map[string]string
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -170,13 +172,14 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
+		store:                  store,
+		executors:              make(map[string]ProviderExecutor),
+		selector:               selector,
+		hook:                   hook,
+		auths:                  make(map[string]*Auth),
+		selectedAuthByProvider: make(map[string]string),
+		providerOffsets:        make(map[string]int),
+		refreshSemaphore:       make(chan struct{}, refreshMaxConcurrency),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -193,6 +196,43 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 	m.mu.Lock()
 	m.selector = selector
+	m.mu.Unlock()
+}
+
+// SelectedAuthID returns the last scheduler-selected auth ID for the given provider.
+func (m *Manager) SelectedAuthID(provider string) string {
+	if m == nil {
+		return ""
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return strings.TrimSpace(m.selectedAuthByProvider[provider])
+}
+
+// SetSelectedAuthID updates the last scheduler-selected auth ID for a provider.
+// This is primarily intended for integrations that need to pin external state to a specific auth.
+func (m *Manager) SetSelectedAuthID(provider, authID string) {
+	m.setSelectedAuthID(provider, authID)
+}
+
+func (m *Manager) setSelectedAuthID(provider, authID string) {
+	if m == nil {
+		return
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	authID = strings.TrimSpace(authID)
+	if provider == "" || authID == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.selectedAuthByProvider == nil {
+		m.selectedAuthByProvider = make(map[string]string)
+	}
+	m.selectedAuthByProvider[provider] = authID
 	m.mu.Unlock()
 }
 
@@ -622,6 +662,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+		m.setSelectedAuthID(provider, auth.ID)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -684,6 +725,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+		m.setSelectedAuthID(provider, auth.ID)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -746,6 +788,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+		m.setSelectedAuthID(provider, auth.ID)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx

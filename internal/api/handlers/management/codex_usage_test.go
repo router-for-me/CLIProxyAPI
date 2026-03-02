@@ -1,0 +1,540 @@
+package management
+
+import (
+	"context"
+	"encoding/json"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+)
+
+func TestCodexUsagePollIntervalMatchesCodexCLI(t *testing.T) {
+	if codexUsagePollInterval != 60*time.Second {
+		t.Fatalf("expected poll interval 60s, got %s", codexUsagePollInterval)
+	}
+}
+
+func TestCodexPlanWeight_FreeIsPointTwo(t *testing.T) {
+	if got := codexPlanWeight("free", 0.2); got != 0.2 {
+		t.Fatalf("expected free plan weight 0.2, got %v", got)
+	}
+	if got := codexPlanWeight("business", 0.2); got != 1.0 {
+		t.Fatalf("expected business plan weight 1.0, got %v", got)
+	}
+}
+
+func TestAggregateCodexUsage_AppliesFreeWeight(t *testing.T) {
+	statuses := map[string]codexAuthUsageStatus{
+		"free-auth": {
+			Status: "ok",
+			Usage: &codexUsagePayload{
+				PlanType: "free",
+				RateLimit: &codexUsageRateLimit{
+					PrimaryWindow: &codexUsageWindow{
+						UsedPercent:        100,
+						LimitWindowSeconds: 18000,
+					},
+				},
+			},
+		},
+		"business-auth": {
+			Status: "ok",
+			Usage: &codexUsagePayload{
+				PlanType: "business",
+				RateLimit: &codexUsageRateLimit{
+					PrimaryWindow: &codexUsageWindow{
+						UsedPercent:        0,
+						LimitWindowSeconds: 18000,
+					},
+				},
+			},
+		},
+	}
+
+	compat, totals, withUsage := aggregateCodexUsage(statuses, 0.2)
+	if withUsage != 2 {
+		t.Fatalf("expected withUsage=2, got %d", withUsage)
+	}
+	if compat.RateLimit == nil || compat.RateLimit.PrimaryWindow == nil {
+		t.Fatalf("expected primary window in compat payload")
+	}
+	if compat.RateLimit.PrimaryWindow.UsedPercent != 17 {
+		t.Fatalf("expected weighted used_percent=17, got %d", compat.RateLimit.PrimaryWindow.UsedPercent)
+	}
+	if totals.PrimaryWindow == nil {
+		t.Fatalf("expected primary totals")
+	}
+	if totals.PrimaryWindow.ProgressPercent != 16.67 {
+		t.Fatalf("expected weighted progress 16.67, got %.2f", totals.PrimaryWindow.ProgressPercent)
+	}
+}
+
+func TestAggregateCodexUsage_DenominatorIncludesAllCodexAuthFiles(t *testing.T) {
+	statuses := map[string]codexAuthUsageStatus{
+		"free-auth": {
+			PlanType: "free",
+			Status:   "ok",
+			Usage: &codexUsagePayload{
+				PlanType: "free",
+				RateLimit: &codexUsageRateLimit{
+					PrimaryWindow: &codexUsageWindow{
+						UsedPercent: 100,
+					},
+				},
+			},
+		},
+		"business-auth": {
+			PlanType: "business",
+			Status:   "ok",
+			Usage: &codexUsagePayload{
+				PlanType: "business",
+				RateLimit: &codexUsageRateLimit{
+					PrimaryWindow: &codexUsageWindow{
+						UsedPercent: 0,
+					},
+				},
+			},
+		},
+		"no-usage-auth": {
+			PlanType: "business",
+			Status:   "error",
+			Usage:    nil,
+		},
+	}
+
+	_, totals, withUsage := aggregateCodexUsage(statuses, 0.2)
+	if withUsage != 2 {
+		t.Fatalf("expected withUsage=2, got %d", withUsage)
+	}
+	if totals.PrimaryWindow == nil {
+		t.Fatalf("expected primary totals")
+	}
+	if totals.PrimaryWindow.AuthFiles != 3 {
+		t.Fatalf("expected denominator auth_files=3, got %d", totals.PrimaryWindow.AuthFiles)
+	}
+	if totals.PrimaryWindow.TotalPercent != 220 {
+		t.Fatalf("expected weighted total_percent=220, got %d", totals.PrimaryWindow.TotalPercent)
+	}
+	if totals.PrimaryWindow.UsedPercentSum != 20 {
+		t.Fatalf("expected weighted used_percent_sum=20, got %d", totals.PrimaryWindow.UsedPercentSum)
+	}
+	if totals.PrimaryWindow.ProgressPercent != 9.09 {
+		t.Fatalf("expected weighted progress 9.09, got %.2f", totals.PrimaryWindow.ProgressPercent)
+	}
+}
+
+func TestRefreshCodexUsageFromCacheTTL_PollsAllAuthsPerTTL(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var whamCalls int32
+	whamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&whamCalls, 1)
+		if r.URL.Path != "/backend-api/wham/usage" && r.URL.Path != "/wham/usage" {
+			t.Fatalf("unexpected wham path: %s", r.URL.Path)
+		}
+		switch got := r.Header.Get("Authorization"); got {
+		case "Bearer token-wham", "Bearer token-api":
+		default:
+			t.Fatalf("unexpected auth header: %s", got)
+		}
+		switch got := r.Header.Get("ChatGPT-Account-Id"); got {
+		case "acc-wham", "acc-api":
+		default:
+			t.Fatalf("unexpected account id header: %s", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(codexUsagePayload{
+			PlanType: "plus",
+			RateLimit: &codexUsageRateLimit{
+				Allowed:      true,
+				LimitReached: false,
+				PrimaryWindow: &codexUsageWindow{
+					UsedPercent:        20,
+					LimitWindowSeconds: 18000,
+					ResetAfterSeconds:  1200,
+					ResetAt:            1900000000,
+				},
+				SecondaryWindow: &codexUsageWindow{
+					UsedPercent:        40,
+					LimitWindowSeconds: 604800,
+					ResetAfterSeconds:  3600,
+					ResetAt:            1900003600,
+				},
+			},
+			AdditionalRateLimits: []codexUsageAdditionalRateLimit{
+				{
+					LimitName:      "messages",
+					MeteredFeature: "cloud",
+					RateLimit: &codexUsageRateLimit{
+						Allowed:      true,
+						LimitReached: false,
+						PrimaryWindow: &codexUsageWindow{
+							UsedPercent:        10,
+							LimitWindowSeconds: 86400,
+							ResetAfterSeconds:  600,
+							ResetAt:            1900000600,
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer whamServer.Close()
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	ctx := context.Background()
+	_, _ = manager.Register(ctx, &coreauth.Auth{
+		ID:       "codex-wham",
+		Provider: "codex",
+		FileName: "codex-wham.json",
+		Attributes: map[string]string{
+			"base_url": whamServer.URL + "/backend-api",
+		},
+		Metadata: map[string]any{
+			"access_token": "token-wham",
+			"account_id":   "acc-wham",
+			"email":        "wham@example.com",
+		},
+	})
+	_, _ = manager.Register(ctx, &coreauth.Auth{
+		ID:       "codex-api",
+		Provider: "codex",
+		FileName: "codex-api.json",
+		Attributes: map[string]string{
+			"base_url": whamServer.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "token-api",
+			"account_id":   "acc-api",
+			"email":        "api@example.com",
+		},
+	})
+	_, _ = manager.Register(ctx, &coreauth.Auth{
+		ID:       "codex-apikey",
+		Provider: "codex",
+		FileName: "codex-apikey.json",
+		Attributes: map[string]string{
+			"api_key": "sk-test",
+		},
+	})
+
+	h := &Handler{
+		cfg:              &config.Config{},
+		authManager:      manager,
+		configFilePath:   t.TempDir() + "/config.yaml",
+		codexUsageByAuth: make(map[string]codexAuthUsageStatus),
+		codexUsageCompat: defaultCodexUsagePayload(),
+	}
+
+	manager.SetSelectedAuthID("codex", "codex-wham")
+	h.refreshCodexUsageFromCacheTTL(context.Background())
+	compat, summary, hasData := h.codexUsageSnapshot()
+
+	if !hasData {
+		t.Fatal("expected usage data after polling")
+	}
+	if atomic.LoadInt32(&whamCalls) != 2 {
+		t.Fatalf("expected 2 usage calls routed to wham path, got %d", whamCalls)
+	}
+	if summary.SelectedAuthID != "codex-wham" {
+		t.Fatalf("expected selected auth codex-wham, got %q", summary.SelectedAuthID)
+	}
+	if compat.PlanType != "plus" {
+		t.Fatalf("expected plan_type plus, got %q", compat.PlanType)
+	}
+	if compat.RateLimit == nil || compat.RateLimit.PrimaryWindow == nil {
+		t.Fatalf("expected aggregated primary window")
+	}
+	if compat.RateLimit.PrimaryWindow.UsedPercent != 100 {
+		t.Fatalf("expected 5h used_percent forced to 100, got %d", compat.RateLimit.PrimaryWindow.UsedPercent)
+	}
+	if summary.AuthFilesTotal != 3 {
+		t.Fatalf("expected all codex auth files cached, got %d", summary.AuthFilesTotal)
+	}
+	if summary.AuthFilesWithUsage != 2 {
+		t.Fatalf("expected 2 auth with usage, got %d", summary.AuthFilesWithUsage)
+	}
+
+	// Within TTL no upstream calls should be issued.
+	h.refreshCodexUsageFromCacheTTL(context.Background())
+	if atomic.LoadInt32(&whamCalls) != 2 {
+		t.Fatalf("expected still 2 usage calls due to TTL, got %d", whamCalls)
+	}
+
+	// Selection changes should not trigger upstream requests when TTL is still valid.
+	manager.SetSelectedAuthID("codex", "codex-api")
+	h.refreshCodexUsageFromCacheTTL(context.Background())
+	if atomic.LoadInt32(&whamCalls) != 2 {
+		t.Fatalf("expected usage call count unchanged on selection change, got %d", whamCalls)
+	}
+	_, summary, _ = h.codexUsageSnapshot()
+	if summary.SelectedAuthID != "codex-api" {
+		t.Fatalf("expected selected auth codex-api, got %q", summary.SelectedAuthID)
+	}
+
+	// Force only wham auth TTL to expire; only wham should be refreshed.
+	h.codexUsageMu.Lock()
+	st := h.codexUsageByAuth["codex-wham"]
+	st.LastPolledAt = time.Now().Add(-61 * time.Second).UTC()
+	h.codexUsageByAuth["codex-wham"] = st
+	h.codexUsageMu.Unlock()
+	h.refreshCodexUsageFromCacheTTL(context.Background())
+	if atomic.LoadInt32(&whamCalls) != 3 {
+		t.Fatalf("expected one additional wham poll after ttl expiry, got %d", whamCalls)
+	}
+}
+
+func TestCodexUsageStatePersistence(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := tmp + "/config.yaml"
+	h := &Handler{
+		configFilePath:   configPath,
+		codexUsageByAuth: make(map[string]codexAuthUsageStatus),
+		codexUsageCompat: defaultCodexUsagePayload(),
+	}
+	now := time.Now().UTC()
+	h.updateCodexUsageState(map[string]codexAuthUsageStatus{
+		"codex-a": {
+			AuthID:       "codex-a",
+			Status:       "ok",
+			LastPolledAt: now,
+			HasUsage:     true,
+			Usage: &codexUsagePayload{
+				PlanType: "plus",
+				RateLimit: &codexUsageRateLimit{
+					PrimaryWindow: &codexUsageWindow{
+						UsedPercent:        33,
+						LimitWindowSeconds: 18000,
+					},
+				},
+			},
+		},
+	}, "codex-a", now, true)
+
+	h2 := &Handler{
+		configFilePath:   configPath,
+		codexUsageByAuth: make(map[string]codexAuthUsageStatus),
+		codexUsageCompat: defaultCodexUsagePayload(),
+	}
+	h2.loadCodexUsageState()
+	compat, summary, hasData := h2.codexUsageSnapshot()
+	if !hasData {
+		t.Fatal("expected persisted usage data after reload")
+	}
+	if summary.SelectedAuthID != "codex-a" {
+		t.Fatalf("expected selected auth codex-a, got %q", summary.SelectedAuthID)
+	}
+	if compat.RateLimit == nil || compat.RateLimit.PrimaryWindow == nil || compat.RateLimit.PrimaryWindow.UsedPercent != 100 {
+		t.Fatalf("unexpected persisted compat payload: %+v", compat)
+	}
+}
+
+func TestGetCodexUsageCompatDefaultsToGuest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &Handler{}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/codex/usage", nil)
+
+	h.GetCodexUsageCompat(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var payload codexUsagePayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.PlanType != "guest" {
+		t.Fatalf("expected plan_type guest, got %q", payload.PlanType)
+	}
+}
+
+func TestEvaluateCodexOAuthQuota_UsesConfiguredAvailableTotal(t *testing.T) {
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{
+				APIKeys:                   []string{"k1", "k2"},
+				CodexOAuthAvailableTotals: []float64{3.0},
+			},
+		},
+		codexUsageByAuth: make(map[string]codexAuthUsageStatus),
+		codexUsageCompat: defaultCodexUsagePayload(),
+		codexUsageSummary: codexUsageSummaryResponse{
+			Total: codexUsageTotalSummary{
+				PrimaryWindow:   &codexUsageWindowTotals{ProgressPercent: 90},
+				SecondaryWindow: &codexUsageWindowTotals{ProgressPercent: 60, TotalPercent: 600},
+			},
+		},
+	}
+
+	exceeded, progress, limit, checked := h.EvaluateCodexOAuthQuota(context.Background(), "k1")
+	if !checked {
+		t.Fatal("expected checked=true for configured api key")
+	}
+	if !exceeded {
+		t.Fatal("expected exceeded=true when progress exceeds configured limit")
+	}
+	if math.Abs(progress-3.6) > 1e-9 {
+		t.Fatalf("expected used weekly units=3.6, got %v", progress)
+	}
+	if limit != 3 {
+		t.Fatalf("expected configured limit units=3, got %v", limit)
+	}
+
+	exceeded, progress, limit, checked = h.EvaluateCodexOAuthQuota(context.Background(), "k2")
+	if !checked {
+		t.Fatal("expected checked=true for second api key")
+	}
+	if exceeded {
+		t.Fatal("expected exceeded=false with default full quota")
+	}
+	if math.Abs(progress-3.6) > 1e-9 {
+		t.Fatalf("expected used weekly units=3.6, got %v", progress)
+	}
+	if limit != 6 {
+		t.Fatalf("expected default full-system units limit=6, got %v", limit)
+	}
+
+	_, _, _, checked = h.EvaluateCodexOAuthQuota(context.Background(), "k-not-found")
+	if checked {
+		t.Fatal("expected checked=false for unknown api key")
+	}
+}
+
+func TestEvaluateCodexOAuthQuota_IgnoresPrimaryWindow(t *testing.T) {
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{
+				APIKeys:                   []string{"k1"},
+				CodexOAuthAvailableTotals: []float64{2},
+			},
+		},
+		codexUsageByAuth: make(map[string]codexAuthUsageStatus),
+		codexUsageCompat: defaultCodexUsagePayload(),
+		codexUsageSummary: codexUsageSummaryResponse{
+			Total: codexUsageTotalSummary{
+				PrimaryWindow:   &codexUsageWindowTotals{ProgressPercent: 95},
+				SecondaryWindow: &codexUsageWindowTotals{ProgressPercent: 40, TotalPercent: 300},
+			},
+		},
+	}
+
+	exceeded, progress, limit, checked := h.EvaluateCodexOAuthQuota(context.Background(), "k1")
+	if !checked {
+		t.Fatal("expected checked=true")
+	}
+	if exceeded {
+		t.Fatal("expected exceeded=false when only primary(5h) exceeds limit")
+	}
+	if math.Abs(progress-1.2) > 1e-9 {
+		t.Fatalf("expected weekly used units=1.2, got %v", progress)
+	}
+	if limit != 2 {
+		t.Fatalf("expected limit units=2, got %v", limit)
+	}
+}
+
+func TestRefreshCodexUsageFromCacheTTL_ClearsUsageOnUnauthorized(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var statusCode int32 = http.StatusOK
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/wham/usage" {
+			t.Fatalf("unexpected wham path: %s", r.URL.Path)
+		}
+		if code := int(atomic.LoadInt32(&statusCode)); code != http.StatusOK {
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(codexUsagePayload{
+			PlanType: "plus",
+			RateLimit: &codexUsageRateLimit{
+				PrimaryWindow: &codexUsageWindow{
+					UsedPercent:        25,
+					LimitWindowSeconds: 18000,
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	ctx := context.Background()
+	_, _ = manager.Register(ctx, &coreauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		FileName: "codex-auth.json",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api",
+		},
+		Metadata: map[string]any{
+			"access_token": "token-auth",
+			"account_id":   "acc-auth",
+		},
+	})
+
+	h := &Handler{
+		cfg:              &config.Config{},
+		authManager:      manager,
+		configFilePath:   t.TempDir() + "/config.yaml",
+		codexUsageByAuth: make(map[string]codexAuthUsageStatus),
+		codexUsageCompat: defaultCodexUsagePayload(),
+	}
+
+	manager.SetSelectedAuthID("codex", "codex-auth")
+	h.refreshCodexUsageFromCacheTTL(context.Background())
+	compat, summary, hasData := h.codexUsageSnapshot()
+	if !hasData {
+		t.Fatal("expected hasData=true after successful poll")
+	}
+	if summary.AuthFilesWithUsage != 1 {
+		t.Fatalf("expected withUsage=1 after success, got %d", summary.AuthFilesWithUsage)
+	}
+	if compat.PlanType != "plus" {
+		t.Fatalf("expected plan_type plus after success, got %q", compat.PlanType)
+	}
+
+	atomic.StoreInt32(&statusCode, http.StatusUnauthorized)
+	h.codexUsageMu.Lock()
+	st := h.codexUsageByAuth["codex-auth"]
+	st.LastPolledAt = time.Now().Add(-61 * time.Second).UTC()
+	h.codexUsageByAuth["codex-auth"] = st
+	h.codexUsageMu.Unlock()
+
+	h.refreshCodexUsageFromCacheTTL(context.Background())
+	compat, summary, hasData = h.codexUsageSnapshot()
+	if hasData {
+		t.Fatal("expected hasData=false after unauthorized response clears usage")
+	}
+	if summary.AuthFilesWithUsage != 0 {
+		t.Fatalf("expected withUsage=0 after unauthorized response, got %d", summary.AuthFilesWithUsage)
+	}
+	if compat.PlanType != "guest" {
+		t.Fatalf("expected plan_type guest after usage clear, got %q", compat.PlanType)
+	}
+	authStatus, ok := h.codexUsageByAuthSnapshot()["codex-auth"]
+	if !ok {
+		t.Fatal("expected auth status to remain present")
+	}
+	if authStatus.Status != "error" {
+		t.Fatalf("expected auth status error, got %q", authStatus.Status)
+	}
+	if authStatus.Usage != nil {
+		t.Fatal("expected usage to be nil after unauthorized response")
+	}
+	if authStatus.HasUsage {
+		t.Fatal("expected has_usage=false after unauthorized response")
+	}
+}

@@ -155,6 +155,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
+	if err = ensureCodexOAuthToken(auth, apiKey); err != nil {
+		return resp, err
+	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -374,6 +377,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	apiKey, baseURL := codexCreds(auth)
+	if err = ensureCodexOAuthToken(auth, apiKey); err != nil {
+		return nil, err
+	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -874,12 +880,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
 	misc.EnsureHeader(headers, ginHeaders, "User-Agent", codexUserAgent)
 
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
+	isAPIKey := codexIsAPIKeyAuth(auth)
 	if !isAPIKey {
 		headers.Set("Originator", "codex_cli_rs")
 		if auth != nil && auth.Metadata != nil {

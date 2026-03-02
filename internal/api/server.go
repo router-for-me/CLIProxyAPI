@@ -329,6 +329,7 @@ func (s *Server) setupRoutes() {
 	v1.Use(AuthMiddleware(s.accessManager))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+		v1.GET("/backend-api/wham/usage", s.mgmt.GetCodexUsageCompat)
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
@@ -358,6 +359,9 @@ func (s *Server) setupRoutes() {
 			},
 		})
 	})
+	s.engine.GET("/api/codex/usage", AuthMiddleware(s.accessManager), s.mgmt.GetCodexUsageCompat)
+	s.engine.GET("/wham/usage", AuthMiddleware(s.accessManager), s.mgmt.GetCodexUsageCompat)
+	s.engine.GET("/backend-api/wham/usage", AuthMiddleware(s.accessManager), s.mgmt.GetCodexUsageCompat)
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
 
 	// OAuth callback endpoints (reuse main server port)
@@ -487,6 +491,7 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/codex-usage-summary", s.mgmt.GetCodexUsageSummary)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)
@@ -533,6 +538,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+		mgmt.GET("/codex-free-plan-weight", s.mgmt.GetCodexFreePlanWeight)
+		mgmt.PUT("/codex-free-plan-weight", s.mgmt.PutCodexFreePlanWeight)
+		mgmt.PATCH("/codex-free-plan-weight", s.mgmt.PutCodexFreePlanWeight)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -680,7 +688,13 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		log.WithError(err).Error("failed to read management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {

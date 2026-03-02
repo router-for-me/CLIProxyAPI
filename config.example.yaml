@@ -37,6 +37,18 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Weight used for Codex plan_type=free when aggregating usage.
+# Default is 0.2 when omitted.
+codex-free-plan-weight: 0.2
+
+# Per API key available weekly quota for proxy-issued Codex OAuth auth.json files.
+# Unit is team-member weekly standard usage units (e.g. 5 means 5x team weekly quota).
+# Values align with api-keys by index; missing entries default to full system total capacity.
+# codex-oauth-available-totals:
+#   - 5
+#   - 2
+#   - 1
+
 # Enable debug logging
 debug: false
 

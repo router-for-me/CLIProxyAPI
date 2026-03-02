@@ -50,6 +50,9 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 		return nil
 	}
 	apiKey, _ := codexCreds(auth)
+	if err := ensureCodexOAuthToken(auth, apiKey); err != nil {
+		return err
+	}
 	if strings.TrimSpace(apiKey) != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
@@ -84,6 +87,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
+	if err = ensureCodexOAuthToken(auth, apiKey); err != nil {
+		return resp, err
+	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -194,6 +200,9 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
+	if err = ensureCodexOAuthToken(auth, apiKey); err != nil {
+		return resp, err
+	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -284,6 +293,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := codexCreds(auth)
+	if err = ensureCodexOAuthToken(auth, apiKey); err != nil {
+		return nil, err
+	}
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -652,12 +664,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	r.Header.Set("Connection", "Keep-Alive")
 
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
+	isAPIKey := codexIsAPIKeyAuth(auth)
 	if !isAPIKey {
 		r.Header.Set("Originator", "codex_cli_rs")
 		if auth != nil && auth.Metadata != nil {
@@ -707,15 +714,64 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		return "", ""
 	}
 	if a.Attributes != nil {
-		apiKey = a.Attributes["api_key"]
+		apiKey = strings.TrimSpace(a.Attributes["api_key"])
 		baseURL = a.Attributes["base_url"]
 	}
-	if apiKey == "" && a.Metadata != nil {
-		if v, ok := a.Metadata["access_token"].(string); ok {
-			apiKey = v
-		}
+	if codexIsOAuthAuth(a) {
+		return codexMetadataAccessToken(a), strings.TrimSpace(baseURL)
 	}
-	return
+	if apiKey == "" {
+		apiKey = codexMetadataAccessToken(a)
+	}
+	return strings.TrimSpace(apiKey), strings.TrimSpace(baseURL)
+}
+
+func codexMetadataAccessToken(a *cliproxyauth.Auth) string {
+	if a == nil || a.Metadata == nil {
+		return ""
+	}
+	if v, ok := a.Metadata["access_token"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := a.Metadata["accessToken"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+func codexAuthKind(a *cliproxyauth.Auth) string {
+	if a == nil || a.Attributes == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
+}
+
+func codexIsOAuthAuth(a *cliproxyauth.Auth) bool {
+	return codexAuthKind(a) == "oauth"
+}
+
+func codexIsAPIKeyAuth(a *cliproxyauth.Auth) bool {
+	kind := codexAuthKind(a)
+	switch kind {
+	case "oauth":
+		return false
+	case "apikey":
+		return true
+	}
+	if a != nil && a.Attributes != nil {
+		return strings.TrimSpace(a.Attributes["api_key"]) != ""
+	}
+	return false
+}
+
+func ensureCodexOAuthToken(a *cliproxyauth.Auth, token string) error {
+	if !codexIsOAuthAuth(a) {
+		return nil
+	}
+	if strings.TrimSpace(token) != "" {
+		return nil
+	}
+	return statusErr{code: http.StatusUnauthorized, msg: "codex oauth access_token missing"}
 }
 
 func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {

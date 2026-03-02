@@ -375,7 +375,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"provider":       strings.TrimSpace(auth.Provider),
 		"label":          auth.Label,
 		"status":         auth.Status,
-		"status_message": auth.StatusMessage,
+		"status_message": compactStatusMessage(auth.StatusMessage),
 		"disabled":       auth.Disabled,
 		"unavailable":    auth.Unavailable,
 		"runtime_only":   runtimeOnly,
@@ -426,6 +426,59 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		entry["id_token"] = claims
 	}
 	return entry
+}
+
+func compactStatusMessage(raw string) string {
+	message := strings.TrimSpace(raw)
+	if message == "" {
+		return ""
+	}
+
+	if gjson.Valid(message) {
+		status := int(gjson.Get(message, "status").Int())
+		code := strings.TrimSpace(gjson.Get(message, "error.code").String())
+		errMsg := strings.TrimSpace(gjson.Get(message, "error.message").String())
+
+		switch status {
+		case 401:
+			if code != "" {
+				return "unauthorized: " + code
+			}
+			return "unauthorized"
+		case 402, 403:
+			return "payment_required"
+		case 404:
+			return "not_found"
+		case 429:
+			return "quota exhausted"
+		}
+
+		if code != "" {
+			return code
+		}
+		if errMsg != "" {
+			return clipStatusMessage(errMsg, 160)
+		}
+	}
+
+	normalized := strings.ReplaceAll(strings.ReplaceAll(message, "\r\n", "\n"), "\r", "\n")
+	if strings.Count(normalized, "\n") > 1 || len(normalized) > 240 {
+		firstLine := strings.TrimSpace(strings.SplitN(normalized, "\n", 2)[0])
+		if firstLine == "" {
+			firstLine = normalized
+		}
+		return clipStatusMessage(firstLine, 160)
+	}
+
+	return message
+}
+
+func clipStatusMessage(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if s == "" || limit <= 0 || len(s) <= limit {
+		return s
+	}
+	return strings.TrimSpace(s[:limit-3]) + "..."
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -1483,6 +1536,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			Metadata: map[string]any{
 				"email":      tokenStorage.Email,
 				"account_id": tokenStorage.AccountID,
+				"websockets": true,
 			},
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
