@@ -3,6 +3,7 @@ package util
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestParseBoolAny(t *testing.T) {
@@ -64,26 +65,38 @@ func TestParseIntAny(t *testing.T) {
 func TestParseTimeAny(t *testing.T) {
 	t.Parallel()
 
+	base := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
+	baseUnix := base.Unix()
+	baseMillis := base.UnixMilli()
+
 	tests := []struct {
 		name string
 		in   any
+		want time.Time
 		ok   bool
 	}{
-		{name: "rfc3339", in: "2026-03-01T00:00:00Z", ok: true},
-		{name: "unix string", in: "1700000000", ok: true},
-		{name: "float unix", in: 1700000000.0, ok: true},
-		{name: "json number unix", in: json.Number("1700000000"), ok: true},
-		{name: "empty", in: "", ok: false},
-		{name: "invalid", in: "not-time", ok: false},
+		{name: "rfc3339", in: "2023-01-01T00:00:00Z", want: base, ok: true},
+		{name: "unix string seconds", in: "1672531200", want: base, ok: true},
+		{name: "unix string millis", in: "1672531200000", want: base, ok: true},
+		{name: "float unix", in: float64(baseUnix), want: base, ok: true},
+		{name: "int unix", in: int(baseUnix), want: base, ok: true},
+		{name: "int64 unix", in: baseUnix, want: base, ok: true},
+		{name: "json number unix", in: json.Number("1672531200"), want: base, ok: true},
+		{name: "json number millis", in: json.Number("1672531200000"), want: time.UnixMilli(baseMillis), ok: true},
+		{name: "empty", in: "", want: time.Time{}, ok: false},
+		{name: "invalid", in: "not-time", want: time.Time{}, ok: false},
 	}
 
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, ok := ParseTimeAny(tt.in)
+			got, ok := ParseTimeAny(tt.in)
 			if ok != tt.ok {
 				t.Fatalf("ParseTimeAny(%v) ok=%v, want %v", tt.in, ok, tt.ok)
+			}
+			if tt.ok && !got.Equal(tt.want) {
+				t.Fatalf("ParseTimeAny(%v) got=%v, want=%v", tt.in, got, tt.want)
 			}
 		})
 	}

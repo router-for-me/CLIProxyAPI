@@ -97,7 +97,7 @@ func TestParseTimeAny(t *testing.T) {
 		{name: "empty", raw: "", want: false},
 		{name: "invalid", raw: "not-time", want: false},
 		{name: "time type", raw: time.Now(), want: false},
-		{name: "int type", raw: 123, want: false},
+		{name: "int type", raw: 123, want: true},
 	}
 
 	for _, tc := range tests {
