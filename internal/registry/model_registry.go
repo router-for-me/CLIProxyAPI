@@ -47,8 +47,10 @@ type ModelInfo struct {
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// SupportedParameters lists supported parameters
 	SupportedParameters []string `json:"supported_parameters,omitempty"`
-	// SupportedEndpoints lists supported API endpoints (e.g., "/chat/completions", "/responses").
-	SupportedEndpoints []string `json:"supported_endpoints,omitempty"`
+	// SupportedInputModalities lists supported input modalities (e.g., TEXT, IMAGE, VIDEO, AUDIO)
+	SupportedInputModalities []string `json:"supportedInputModalities,omitempty"`
+	// SupportedOutputModalities lists supported output modalities (e.g., TEXT, IMAGE)
+	SupportedOutputModalities []string `json:"supportedOutputModalities,omitempty"`
 
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
@@ -501,8 +503,11 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	if len(model.SupportedParameters) > 0 {
 		copyModel.SupportedParameters = append([]string(nil), model.SupportedParameters...)
 	}
-	if len(model.SupportedEndpoints) > 0 {
-		copyModel.SupportedEndpoints = append([]string(nil), model.SupportedEndpoints...)
+	if len(model.SupportedInputModalities) > 0 {
+		copyModel.SupportedInputModalities = append([]string(nil), model.SupportedInputModalities...)
+	}
+	if len(model.SupportedOutputModalities) > 0 {
+		copyModel.SupportedOutputModalities = append([]string(nil), model.SupportedOutputModalities...)
 	}
 	return &copyModel
 }
@@ -1088,6 +1093,12 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if len(model.SupportedGenerationMethods) > 0 {
 			result["supportedGenerationMethods"] = model.SupportedGenerationMethods
+		}
+		if len(model.SupportedInputModalities) > 0 {
+			result["supportedInputModalities"] = model.SupportedInputModalities
+		}
+		if len(model.SupportedOutputModalities) > 0 {
+			result["supportedOutputModalities"] = model.SupportedOutputModalities
 		}
 		return result
 

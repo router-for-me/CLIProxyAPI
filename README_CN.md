@@ -10,22 +10,13 @@
 
 ## 与主线版本版本差异
 
-- 新增 GitHub Copilot 支持（OAuth 登录），由[em4go](https://github.com/em4go/CLIProxyAPI/tree/feature/github-copilot-auth)提供
-- 新增 Kiro (AWS CodeWhisperer) 支持 (OAuth 登录), 由[fuko2935](https://github.com/fuko2935/CLIProxyAPI/tree/feature/kiro-integration)、[Ravens2121](https://github.com/Ravens2121/CLIProxyAPIPlus/)提供
+[![bigmodel.cn](https://assets.router-for.me/chinese-5.png)](https://www.bigmodel.cn/claude-code?ic=RRVJPB5SII)
 
 ## 新增功能 (Plus 增强版)
 
-- **OAuth Web 认证**: 基于浏览器的 Kiro OAuth 登录，提供美观的 Web UI
-- **请求限流器**: 内置请求限流，防止 API 滥用
-- **后台令牌刷新**: 过期前 10 分钟自动刷新令牌
-- **监控指标**: 请求指标收集，用于监控和调试
-- **设备指纹**: 设备指纹生成，增强安全性
-- **冷却管理**: 智能冷却机制，应对 API 速率限制
-- **用量检查器**: 实时用量监控和配额管理
-- **模型转换器**: 跨供应商的统一模型名称转换
-- **UTF-8 流处理**: 改进的流式响应处理
+GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元，即可在十余款主流AI编码工具如 Claude Code、Cline、Roo Code 中畅享智谱旗舰模型GLM-4.7（受限于算力，目前仅限Pro用户开放），为开发者提供顶尖的编码体验。
 
-## Kiro 认证
+智谱AI为本产品提供了特别优惠，使用以下链接购买可以享受九折优惠：https://www.bigmodel.cn/claude-code?ic=RRVJPB5SII
 
 ### 命令行登录
 

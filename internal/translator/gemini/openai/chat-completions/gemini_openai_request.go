@@ -34,6 +34,11 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
+	// Let user-provided generationConfig pass through
+	if genConfig := gjson.GetBytes(rawJSON, "generationConfig"); genConfig.Exists() {
+		out, _ = sjson.SetRawBytes(out, "generationConfig", []byte(genConfig.Raw))
+	}
+
 	// Apply thinking configuration: convert OpenAI reasoning_effort to Gemini thinkingConfig.
 	// Inline translation-only mapping; capability checks happen later in ApplyThinking.
 	re := gjson.GetBytes(rawJSON, "reasoning_effort")
