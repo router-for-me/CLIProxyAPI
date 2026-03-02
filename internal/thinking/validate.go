@@ -53,7 +53,6 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		return &config, nil
 	}
 
-	allowClampUnsupported := isBudgetBasedProvider(fromFormat) && isLevelBasedProvider(toFormat)
 	strictBudget := !fromSuffix && fromFormat != "" && isSameProviderFamily(fromFormat, toFormat)
 	budgetDerivedFromLevel := false
 
@@ -105,12 +104,9 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 
 	if len(support.Levels) > 0 && config.Mode == ModeLevel {
 		if !isLevelSupported(string(config.Level), support.Levels) {
-			if allowClampUnsupported {
-				config.Level = clampLevel(config.Level, modelInfo, toFormat)
-			}
+			config.Level = clampLevel(config.Level, modelInfo, toFormat)
 			if !isLevelSupported(string(config.Level), support.Levels) {
-				// User explicitly specified an unsupported level - return error
-				// (budget-derived levels may be clamped based on source format)
+				// Clamping failed (unknown level not in standard order) - return error
 				validLevels := normalizeLevels(support.Levels)
 				message := fmt.Sprintf("level %q not supported, valid levels: %s", strings.ToLower(string(config.Level)), strings.Join(validLevels, ", "))
 				return nil, NewThinkingError(ErrLevelNotSupported, message)

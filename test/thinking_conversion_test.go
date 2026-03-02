@@ -73,15 +73,16 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "medium",
 			expectErr:   false,
 		},
-		// Case 3: Specified xhigh → out of range error
+		// Case 3: Specified xhigh → clamped to high (nearest supported level)
 		{
 			name:        "3",
 			from:        "openai",
 			to:          "codex",
 			model:       "level-model(xhigh)",
 			inputJSON:   `{"model":"level-model(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   true,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+			expectErr:   false,
 		},
 		// Case 4: Level none → clamped to minimal (ZeroAllowed=false)
 		{
@@ -384,15 +385,17 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 30: Effort xhigh → not in low/high → error
+		// Case 30: Effort xhigh → clamped to high (nearest in low/high)
 		{
-			name:        "30",
-			from:        "openai",
-			to:          "gemini",
-			model:       "gemini-mixed-model(xhigh)",
-			inputJSON:   `{"model":"gemini-mixed-model(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   true,
+			name:            "30",
+			from:            "openai",
+			to:              "gemini",
+			model:           "gemini-mixed-model(xhigh)",
+			inputJSON:       `{"model":"gemini-mixed-model(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
+			expectValue:     "high",
+			includeThoughts: "true",
+			expectErr:       false,
 		},
 		// Case 31: Effort none → clamped to low (min supported) → includeThoughts=false
 		{
@@ -961,15 +964,16 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "high",
 			expectErr:   false,
 		},
-		// Case 81: OpenAI to OpenAI, level xhigh → out of range error
+		// Case 81: OpenAI to OpenAI, level xhigh → clamped to high
 		{
 			name:        "81",
 			from:        "openai",
 			to:          "openai",
 			model:       "level-model(xhigh)",
 			inputJSON:   `{"model":"level-model(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   true,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+			expectErr:   false,
 		},
 		// Case 82: OpenAI-Response to Codex, level high → passthrough reasoning.effort
 		{
@@ -982,15 +986,16 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "high",
 			expectErr:   false,
 		},
-		// Case 83: OpenAI-Response to Codex, level xhigh → out of range error
+		// Case 83: OpenAI-Response to Codex, level xhigh → clamped to high
 		{
 			name:        "83",
 			from:        "openai-response",
 			to:          "codex",
 			model:       "level-model(xhigh)",
 			inputJSON:   `{"model":"level-model(xhigh)","input":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   true,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+			expectErr:   false,
 		},
 		// Case 84: Gemini to Gemini, budget 8192 → passthrough thinkingBudget
 		{
@@ -1316,6 +1321,18 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
+		// Case 112: Effort medium → not in low/high → clamped to low (issue #1780)
+		{
+			name:            "112",
+			from:            "openai",
+			to:              "gemini",
+			model:           "gemini-mixed-model(medium)",
+			inputJSON:       `{"model":"gemini-mixed-model(medium)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
+			expectValue:     "low",
+			includeThoughts: "true",
+			expectErr:       false,
+		},
 	}
 
 	runThinkingTests(t, cases)
@@ -1355,15 +1372,16 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue: "medium",
 			expectErr:   false,
 		},
-		// Case 3: reasoning_effort=xhigh → out of range error
+		// Case 3: reasoning_effort=xhigh → clamped to high
 		{
 			name:        "3",
 			from:        "openai",
 			to:          "codex",
 			model:       "level-model",
 			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
-			expectField: "",
-			expectErr:   true,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+			expectErr:   false,
 		},
 		// Case 4: reasoning_effort=none → clamped to minimal
 		{
@@ -1666,15 +1684,17 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 30: reasoning_effort=xhigh → error (not in low/high)
+		// Case 30: reasoning_effort=xhigh → clamped to high (nearest in low/high)
 		{
-			name:        "30",
-			from:        "openai",
-			to:          "gemini",
-			model:       "gemini-mixed-model",
-			inputJSON:   `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
-			expectField: "",
-			expectErr:   true,
+			name:            "30",
+			from:            "openai",
+			to:              "gemini",
+			model:           "gemini-mixed-model",
+			inputJSON:       `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
+			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
+			expectValue:     "high",
+			includeThoughts: "true",
+			expectErr:       false,
 		},
 		// Case 31: reasoning_effort=none → clamped to low → includeThoughts=false
 		{
@@ -2243,15 +2263,16 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue: "high",
 			expectErr:   false,
 		},
-		// Case 81: OpenAI to OpenAI, reasoning_effort=xhigh → out of range error
+		// Case 81: OpenAI to OpenAI, reasoning_effort=xhigh → clamped to high
 		{
 			name:        "81",
 			from:        "openai",
 			to:          "openai",
 			model:       "level-model",
 			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
-			expectField: "",
-			expectErr:   true,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+			expectErr:   false,
 		},
 		// Case 82: OpenAI-Response to Codex, reasoning.effort=high → passthrough
 		{
@@ -2264,15 +2285,16 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue: "high",
 			expectErr:   false,
 		},
-		// Case 83: OpenAI-Response to Codex, reasoning.effort=xhigh → out of range error
+		// Case 83: OpenAI-Response to Codex, reasoning.effort=xhigh → clamped to high
 		{
 			name:        "83",
 			from:        "openai-response",
 			to:          "codex",
 			model:       "level-model",
 			inputJSON:   `{"model":"level-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"xhigh"}}`,
-			expectField: "",
-			expectErr:   true,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+			expectErr:   false,
 		},
 		// Case 84: Gemini to Gemini, thinkingBudget=8192 → passthrough
 		{
@@ -2582,6 +2604,18 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			inputJSON:       `{"model":"gemini-budget-model","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}}`,
 			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
 			expectValue:     "8192",
+			includeThoughts: "true",
+			expectErr:       false,
+		},
+		// Case 112: reasoning_effort=medium → not in low/high → clamped to low (issue #1780)
+		{
+			name:            "112",
+			from:            "openai",
+			to:              "gemini",
+			model:           "gemini-mixed-model",
+			inputJSON:       `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"medium"}`,
+			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
+			expectValue:     "low",
 			includeThoughts: "true",
 			expectErr:       false,
 		},
