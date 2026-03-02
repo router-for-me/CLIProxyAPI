@@ -7,6 +7,13 @@ import (
 	"time"
 )
 
+var parseTimeLayouts = []string{
+	time.RFC3339,
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05",
+	"2006-01-02 15:04",
+}
+
 // ParseBoolAny parses common bool encodings from JSON-decoded values.
 func ParseBoolAny(val any) (bool, bool) {
 	switch typed := val.(type) {
@@ -75,13 +82,7 @@ func ParseTimeAny(v any) (time.Time, bool) {
 		if s == "" {
 			return time.Time{}, false
 		}
-		layouts := []string{
-			time.RFC3339,
-			time.RFC3339Nano,
-			"2006-01-02 15:04:05",
-			"2006-01-02 15:04",
-		}
-		for _, layout := range layouts {
+		for _, layout := range parseTimeLayouts {
 			if ts, err := time.Parse(layout, s); err == nil {
 				return ts, true
 			}

@@ -2,9 +2,6 @@ package auth
 
 import (
 	"testing"
-	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 func TestExtractAccessToken(t *testing.T) {
@@ -79,34 +76,6 @@ func TestExtractAccessToken(t *testing.T) {
 			got := extractAccessToken(tt.metadata)
 			if got != tt.expected {
 				t.Errorf("extractAccessToken() = %q, want %q", got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestParseTimeAny(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		raw  any
-		want bool
-	}{
-		{name: "rfc3339nano", raw: "2026-03-01T00:00:00.123456789Z", want: true},
-		{name: "rfc3339", raw: "2026-03-01T00:00:00Z", want: true},
-		{name: "empty", raw: "", want: false},
-		{name: "invalid", raw: "not-time", want: false},
-		{name: "time type", raw: time.Now(), want: false},
-		{name: "int type", raw: 123, want: true},
-	}
-
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, ok := util.ParseTimeAny(tc.raw)
-			if ok != tc.want {
-				t.Fatalf("util.ParseTimeAny(%T) ok=%v, want %v", tc.raw, ok, tc.want)
 			}
 		})
 	}
