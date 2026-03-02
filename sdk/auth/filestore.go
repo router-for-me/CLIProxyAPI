@@ -11,11 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -528,10 +528,10 @@ func restoreRuntimeStateFromMetadata(auth *cliproxyauth.Auth, metadata map[strin
 	if msg, ok := metadata[metadataKeyStatusMsg].(string); ok {
 		auth.StatusMessage = strings.TrimSpace(msg)
 	}
-	if unavailable, okUnavailable := parseBoolAny(metadata[metadataKeyUnavailable]); okUnavailable {
+	if unavailable, okUnavailable := util.ParseBoolAny(metadata[metadataKeyUnavailable]); okUnavailable {
 		auth.Unavailable = unavailable
 	}
-	if nextRetry, okNextRetry := parseTimeAny(metadata[metadataKeyNextRetry]); okNextRetry {
+	if nextRetry, okNextRetry := util.ParseTimeAny(metadata[metadataKeyNextRetry]); okNextRetry {
 		auth.NextRetryAfter = nextRetry
 	}
 
@@ -582,41 +582,6 @@ func parseStatusAny(raw any) cliproxyauth.Status {
 		return status
 	}
 	return ""
-}
-
-func parseBoolAny(raw any) (bool, bool) {
-	switch v := raw.(type) {
-	case bool:
-		return v, true
-	case string:
-		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
-		if err != nil {
-			return false, false
-		}
-		return parsed, true
-	case float64:
-		return v != 0, true
-	case int:
-		return v != 0, true
-	default:
-		return false, false
-	}
-}
-
-func parseTimeAny(raw any) (time.Time, bool) {
-	switch v := raw.(type) {
-	case string:
-		trimmed := strings.TrimSpace(v)
-		if trimmed == "" {
-			return time.Time{}, false
-		}
-		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-			if parsed, err := time.Parse(layout, trimmed); err == nil {
-				return parsed, true
-			}
-		}
-	}
-	return time.Time{}, false
 }
 
 func isQuotaStateZero(state cliproxyauth.QuotaState) bool {

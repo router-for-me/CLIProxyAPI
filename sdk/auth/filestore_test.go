@@ -3,6 +3,8 @@ package auth
 import (
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 func TestExtractAccessToken(t *testing.T) {
@@ -102,9 +104,9 @@ func TestParseTimeAny(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, ok := parseTimeAny(tc.raw)
+			_, ok := util.ParseTimeAny(tc.raw)
 			if ok != tc.want {
-				t.Fatalf("parseTimeAny(%T) ok=%v, want %v", tc.raw, ok, tc.want)
+				t.Fatalf("util.ParseTimeAny(%T) ok=%v, want %v", tc.raw, ok, tc.want)
 			}
 		})
 	}
