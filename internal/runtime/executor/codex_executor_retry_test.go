@@ -76,7 +76,10 @@ func TestParseCodexSSEError(t *testing.T) {
 		if err := json.Unmarshal([]byte(got.msg), &payload); err != nil {
 			t.Fatalf("unmarshal wrapped message: %v", err)
 		}
-		errObj, _ := payload["error"].(map[string]any)
+		errObj, ok := payload["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload['error'] is not of type map[string]any")
+		}
 		if errObj["type"] != "invalid_request_error" {
 			t.Fatalf("error.type = %v, want invalid_request_error", errObj["type"])
 		}
@@ -113,7 +116,10 @@ func TestParseCodexSSEError(t *testing.T) {
 		if err := json.Unmarshal([]byte(got.msg), &payload); err != nil {
 			t.Fatalf("unmarshal wrapped message: %v", err)
 		}
-		errObj, _ := payload["error"].(map[string]any)
+		errObj, ok := payload["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload['error'] is not of type map[string]any")
+		}
 		if errObj["code"] != "context_length_exceeded" {
 			t.Fatalf("error.code = %v, want context_length_exceeded", errObj["code"])
 		}

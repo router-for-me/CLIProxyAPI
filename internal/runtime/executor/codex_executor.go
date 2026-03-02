@@ -730,11 +730,15 @@ func parseCodexSSEError(line []byte) (statusErr, bool) {
 		return statusErr{}, false
 	}
 
+	code := strings.TrimSpace(errorPayload.Get("code").String())
 	message := strings.TrimSpace(errorPayload.Get("message").String())
 	if message == "" {
-		message = strings.TrimSpace(string(line))
+		if code != "" {
+			message = code
+		} else {
+			message = "upstream stream error"
+		}
 	}
-	code := strings.TrimSpace(errorPayload.Get("code").String())
 	errType := strings.TrimSpace(errorPayload.Get("type").String())
 	if errType == "" {
 		errType = "invalid_request_error"
