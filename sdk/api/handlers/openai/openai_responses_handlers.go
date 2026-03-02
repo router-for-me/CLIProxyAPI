@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -146,20 +147,19 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
-	stopKeepAlive()
+	resp, upstreamHeaders, errMsg, selectedAuthID := h.executeNonStreamingWithAffinity(c, rawJSON)
+	if errMsg != nil && isInvalidEncryptedContentError(errMsg) {
+		if sanitized, changed := stripEncryptedReasoningInput(rawJSON); changed {
+			resp, upstreamHeaders, errMsg, selectedAuthID = h.executeNonStreamingWithAffinity(c, sanitized)
+		}
+	}
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
-		cliCancel(errMsg.Error)
 		return
 	}
+	rememberResponsesAuthAffinity(selectedAuthID, resp)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
-	cliCancel()
 }
 
 // handleStreamingResponse handles streaming responses for Gemini models.
@@ -185,6 +185,16 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	selectedAuthID := ""
+	pinnedAuthID := resolvePinnedAuthIDForResponses(rawJSON)
+	if pinnedAuthID != "" {
+		cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
+		selectedAuthID = pinnedAuthID
+	} else {
+		cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+			selectedAuthID = strings.TrimSpace(authID)
+		})
+	}
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
 	setSSEHeaders := func() {
@@ -230,6 +240,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
 			// Write first chunk logic (matching forwardResponsesStream)
+			rememberResponsesAuthAffinityFromSSE(selectedAuthID, chunk)
 			if bytes.HasPrefix(chunk, []byte("event:")) {
 				_, _ = c.Writer.Write([]byte("\n"))
 			}
@@ -238,15 +249,20 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			flusher.Flush()
 
 			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, func(next []byte) {
+				rememberResponsesAuthAffinityFromSSE(selectedAuthID, next)
+			})
 			return
 		}
 	}
 }
 
-func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, onChunk func([]byte)) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
+			if onChunk != nil {
+				onChunk(chunk)
+			}
 			if bytes.HasPrefix(chunk, []byte("event:")) {
 				_, _ = c.Writer.Write([]byte("\n"))
 			}
@@ -272,4 +288,29 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 			_, _ = c.Writer.Write([]byte("\n"))
 		},
 	})
+}
+
+func (h *OpenAIResponsesAPIHandler) executeNonStreamingWithAffinity(c *gin.Context, rawJSON []byte) ([]byte, http.Header, *interfaces.ErrorMessage, string) {
+	modelName := gjson.GetBytes(rawJSON, "model").String()
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	selectedAuthID := ""
+	pinnedAuthID := resolvePinnedAuthIDForResponses(rawJSON)
+	if pinnedAuthID != "" {
+		cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
+		selectedAuthID = pinnedAuthID
+	} else {
+		cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+			selectedAuthID = strings.TrimSpace(authID)
+		})
+	}
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	stopKeepAlive()
+	if errMsg != nil {
+		cliCancel(errMsg.Error)
+		return nil, nil, errMsg, selectedAuthID
+	}
+	cliCancel()
+	return resp, upstreamHeaders, nil, selectedAuthID
 }
