@@ -301,7 +301,7 @@ nonstream-keepalive-interval: 0
 #   enabled: false                          # Master switch (default: false)
 #   max-attempts: 3                         # Maximum fallback attempts per request
 #   trigger-after-retries: 1                # Retry current model N times before switching fallback model (omit to inherit request-retry)
-#   max-total-timeout-ms: 15000             # Total time budget for all fallback attempts (ms, -1 to disable)
+#   max-total-timeout-ms: -1             # Total time budget for all fallback attempts (ms, -1 to disable)
 #   trigger-status-codes:                   # HTTP status codes that trigger fallback
 #     - 404
 #     - 408

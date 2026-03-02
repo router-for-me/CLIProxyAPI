@@ -301,7 +301,7 @@ nonstream-keepalive-interval: 0
 #   enabled: false                          # 总开关（默认: false）
 #   max-attempts: 3                         # 单次请求最多尝试次数（包含原始模型）
 #   trigger-after-retries: 1                # 当前模型先重试 N 次，再切换到回退模型（省略则继承 request-retry）
-#   max-total-timeout-ms: 15000             # 整条回退链路总超时预算（毫秒，-1 表示禁用总超时）
+#   max-total-timeout-ms: -1             # 整条回退链路总超时预算（毫秒，-1 表示禁用总超时）
 #   trigger-status-codes:                   # 触发回退的 HTTP 状态码
 #     - 404
 #     - 408
