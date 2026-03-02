@@ -112,6 +112,25 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 	}
 }
 
+func TestCodexUsageCompatRoutes(t *testing.T) {
+	server := newTestServer(t)
+	paths := []string{"/api/codex/usage", "/wham/usage"}
+
+	for _, path := range paths {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status for %s: got %d, body=%s", path, rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), `"plan_type":"guest"`) {
+			t.Fatalf("expected guest payload for %s, got %s", path, rr.Body.String())
+		}
+	}
+}
+
 func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")

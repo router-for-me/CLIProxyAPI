@@ -358,6 +358,8 @@ func (s *Server) setupRoutes() {
 			},
 		})
 	})
+	s.engine.GET("/api/codex/usage", AuthMiddleware(s.accessManager), s.mgmt.GetCodexUsageCompat)
+	s.engine.GET("/wham/usage", AuthMiddleware(s.accessManager), s.mgmt.GetCodexUsageCompat)
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
 
 	// OAuth callback endpoints (reuse main server port)
@@ -487,6 +489,7 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/codex-usage-summary", s.mgmt.GetCodexUsageSummary)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)

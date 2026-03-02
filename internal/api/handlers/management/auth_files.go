@@ -1483,6 +1483,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			Metadata: map[string]any{
 				"email":      tokenStorage.Email,
 				"account_id": tokenStorage.AccountID,
+				"websockets": true,
 			},
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
