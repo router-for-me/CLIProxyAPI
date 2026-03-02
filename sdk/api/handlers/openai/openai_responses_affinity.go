@@ -166,6 +166,10 @@ func stripEncryptedReasoningInput(rawJSON []byte) ([]byte, bool) {
 	return updated, true
 }
 
+func hasEncryptedReasoningInput(rawJSON []byte) bool {
+	return len(extractReasoningEncryptedFromInput(rawJSON)) > 0
+}
+
 func extractReasoningEncryptedFromInput(rawJSON []byte) []string {
 	input := gjson.GetBytes(rawJSON, "input")
 	if !input.IsArray() {
@@ -287,12 +291,25 @@ func (s *responsesAuthAffinityStore) pruneLocked(now time.Time) {
 	if len(s.byResponseID) <= s.maxEntries && len(s.byEncryptedHash) <= s.maxEntries {
 		return
 	}
-	// Coarse pressure relief: drop all expired first (done above), then clear oldest pressure by resetting maps.
-	// This keeps affinity bounded and avoids unbounded memory growth in long-lived proxies.
+	// Pressure relief: drop expired first (done above), then randomly evict 25%
+	// of entries to stay within bounds. Random eviction is simple and avoids the
+	// thundering-herd effect of clearing the entire map at once.
 	if len(s.byResponseID) > s.maxEntries {
-		s.byResponseID = make(map[string]responsesAuthAffinityEntry, s.maxEntries/2)
+		targetSize := s.maxEntries * 3 / 4
+		for k := range s.byResponseID {
+			if len(s.byResponseID) <= targetSize {
+				break
+			}
+			delete(s.byResponseID, k)
+		}
 	}
 	if len(s.byEncryptedHash) > s.maxEntries {
-		s.byEncryptedHash = make(map[string]responsesAuthAffinityEntry, s.maxEntries/2)
+		targetSize := s.maxEntries * 3 / 4
+		for k := range s.byEncryptedHash {
+			if len(s.byEncryptedHash) <= targetSize {
+				break
+			}
+			delete(s.byEncryptedHash, k)
+		}
 	}
 }

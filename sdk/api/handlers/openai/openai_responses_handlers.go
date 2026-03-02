@@ -147,10 +147,22 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
-	resp, upstreamHeaders, errMsg, selectedAuthID := h.executeNonStreamingWithAffinity(c, rawJSON)
+	resp, upstreamHeaders, errMsg, selectedAuthID, pinnedAuthID := h.executeNonStreamingWithAffinity(c, rawJSON, false)
+	if errMsg != nil && hasEncryptedReasoningInput(rawJSON) {
+		forceUnpinnedRetry := pinnedAuthID != ""
+		invalidEncryptedRetry := isInvalidEncryptedContentError(errMsg)
+		if forceUnpinnedRetry || invalidEncryptedRetry {
+			// If a pinned auth fails for continuation input, retry once with encrypted reasoning removed
+			// and without pinning so round-robin can select another healthy credential/provider.
+			// Also recover explicit invalid_encrypted_content responses in unpinned mode.
+			if sanitized, changed := stripEncryptedReasoningInput(rawJSON); changed {
+				resp, upstreamHeaders, errMsg, selectedAuthID, _ = h.executeNonStreamingWithAffinity(c, sanitized, forceUnpinnedRetry)
+			}
+		}
+	}
 	if errMsg != nil && isInvalidEncryptedContentError(errMsg) {
 		if sanitized, changed := stripEncryptedReasoningInput(rawJSON); changed {
-			resp, upstreamHeaders, errMsg, selectedAuthID = h.executeNonStreamingWithAffinity(c, sanitized)
+			resp, upstreamHeaders, errMsg, selectedAuthID, _ = h.executeNonStreamingWithAffinity(c, sanitized, false)
 		}
 	}
 	if errMsg != nil {
@@ -182,20 +194,28 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		return
 	}
 
-	// New core execution path
-	modelName := gjson.GetBytes(rawJSON, "model").String()
-	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	selectedAuthID := ""
-	pinnedAuthID := resolvePinnedAuthIDForResponses(rawJSON)
-	if pinnedAuthID != "" {
-		cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
-		selectedAuthID = pinnedAuthID
-	} else {
-		cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
-			selectedAuthID = strings.TrimSpace(authID)
-		})
+	startStream := func(payload []byte, forceUnpinned bool) (handlers.APIHandlerCancelFunc, <-chan []byte, http.Header, <-chan *interfaces.ErrorMessage, *string, string) {
+		modelName := gjson.GetBytes(payload, "model").String()
+		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+		selectedAuthID := ""
+		pinnedAuthID := ""
+		if !forceUnpinned {
+			pinnedAuthID = resolvePinnedAuthIDForResponses(payload)
+		}
+		if pinnedAuthID != "" {
+			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
+			selectedAuthID = pinnedAuthID
+		} else {
+			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
+				selectedAuthID = strings.TrimSpace(authID)
+			})
+		}
+		dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, payload, "")
+		return cliCancel, dataChan, upstreamHeaders, errChan, &selectedAuthID, pinnedAuthID
 	}
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+
+	cliCancel, dataChan, upstreamHeaders, errChan, selectedAuthIDPtr, pinnedAuthID := startStream(rawJSON, false)
+	recoveryAttempted := false
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -215,6 +235,28 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				// Err channel closed cleanly; wait for data channel.
 				errChan = nil
 				continue
+			}
+			if !recoveryAttempted && hasEncryptedReasoningInput(rawJSON) {
+				shouldRecover := false
+				forceUnpinned := false
+				if pinnedAuthID != "" {
+					// Pinned turn failed (rate limit, unavailable, etc.); recover by unpinning.
+					shouldRecover = true
+					forceUnpinned = true
+				} else if isInvalidEncryptedContentError(errMsg) {
+					// Unpinned turn still hit encrypted-content mismatch; recover by stripping once.
+					shouldRecover = true
+					forceUnpinned = true
+				}
+				if shouldRecover {
+					if sanitized, changed := stripEncryptedReasoningInput(rawJSON); changed {
+						recoveryAttempted = true
+						rawJSON = sanitized
+						cliCancel(errMsg.Error)
+						cliCancel, dataChan, upstreamHeaders, errChan, selectedAuthIDPtr, pinnedAuthID = startStream(rawJSON, forceUnpinned)
+						continue
+					}
+				}
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
 			h.WriteErrorResponse(c, errMsg)
@@ -240,7 +282,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
 			// Write first chunk logic (matching forwardResponsesStream)
-			rememberResponsesAuthAffinityFromSSE(selectedAuthID, chunk)
+			rememberResponsesAuthAffinityFromSSE(strings.TrimSpace(*selectedAuthIDPtr), chunk)
 			if bytes.HasPrefix(chunk, []byte("event:")) {
 				_, _ = c.Writer.Write([]byte("\n"))
 			}
@@ -250,7 +292,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 
 			// Continue
 			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, func(next []byte) {
-				rememberResponsesAuthAffinityFromSSE(selectedAuthID, next)
+				rememberResponsesAuthAffinityFromSSE(strings.TrimSpace(*selectedAuthIDPtr), next)
 			})
 			return
 		}
@@ -290,11 +332,14 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 	})
 }
 
-func (h *OpenAIResponsesAPIHandler) executeNonStreamingWithAffinity(c *gin.Context, rawJSON []byte) ([]byte, http.Header, *interfaces.ErrorMessage, string) {
+func (h *OpenAIResponsesAPIHandler) executeNonStreamingWithAffinity(c *gin.Context, rawJSON []byte, forceUnpinned bool) ([]byte, http.Header, *interfaces.ErrorMessage, string, string) {
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	selectedAuthID := ""
-	pinnedAuthID := resolvePinnedAuthIDForResponses(rawJSON)
+	pinnedAuthID := ""
+	if !forceUnpinned {
+		pinnedAuthID = resolvePinnedAuthIDForResponses(rawJSON)
+	}
 	if pinnedAuthID != "" {
 		cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 		selectedAuthID = pinnedAuthID
@@ -309,8 +354,8 @@ func (h *OpenAIResponsesAPIHandler) executeNonStreamingWithAffinity(c *gin.Conte
 	stopKeepAlive()
 	if errMsg != nil {
 		cliCancel(errMsg.Error)
-		return nil, nil, errMsg, selectedAuthID
+		return nil, nil, errMsg, selectedAuthID, pinnedAuthID
 	}
 	cliCancel()
-	return resp, upstreamHeaders, nil, selectedAuthID
+	return resp, upstreamHeaders, nil, selectedAuthID, pinnedAuthID
 }

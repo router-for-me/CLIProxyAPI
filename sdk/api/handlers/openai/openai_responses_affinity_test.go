@@ -25,6 +25,13 @@ type invalidEncryptedErr struct {
 func (e invalidEncryptedErr) Error() string   { return e.msg }
 func (e invalidEncryptedErr) StatusCode() int { return http.StatusBadRequest }
 
+type rateLimitedErr struct {
+	msg string
+}
+
+func (e rateLimitedErr) Error() string   { return e.msg }
+func (e rateLimitedErr) StatusCode() int { return http.StatusTooManyRequests }
+
 type responsesAffinityCall struct {
 	authID  string
 	payload string
@@ -33,10 +40,13 @@ type responsesAffinityCall struct {
 type responsesAffinityExecutor struct {
 	mu                         sync.Mutex
 	calls                      []responsesAffinityCall
+	streamCalls                []responsesAffinityCall
 	originAuthID               string
 	responseEncryptedContent   string
 	failWhenEncryptedPresent   bool
 	failWhenEncryptedWrongAuth bool
+	failOriginAfterFirst       bool
+	streamFailOriginAfterFirst bool
 }
 
 func (e *responsesAffinityExecutor) Identifier() string { return "responses-affinity-provider" }
@@ -57,8 +67,16 @@ func (e *responsesAffinityExecutor) Execute(_ context.Context, auth *coreauth.Au
 	originAuth := e.originAuthID
 	failOnAny := e.failWhenEncryptedPresent
 	failOnWrong := e.failWhenEncryptedWrongAuth
+	failOriginAfterFirst := e.failOriginAfterFirst
+	callCount := len(e.calls)
 	respEncrypted := e.responseEncryptedContent
 	e.mu.Unlock()
+
+	if failOriginAfterFirst && originAuth != "" && authID == originAuth && callCount > 1 {
+		return coreexecutor.Response{}, rateLimitedErr{
+			msg: `{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limit_exceeded"}}`,
+		}
+	}
 
 	if len(encrypted) > 0 {
 		if failOnAny || (failOnWrong && originAuth != "" && authID != originAuth) {
@@ -75,8 +93,39 @@ func (e *responsesAffinityExecutor) Execute(_ context.Context, auth *coreauth.Au
 	return coreexecutor.Response{Payload: []byte(respPayload)}, nil
 }
 
-func (e *responsesAffinityExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
-	return nil, errors.New("not implemented")
+func (e *responsesAffinityExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	payload := string(req.Payload)
+
+	e.mu.Lock()
+	e.streamCalls = append(e.streamCalls, responsesAffinityCall{authID: authID, payload: payload})
+	if e.originAuthID == "" {
+		e.originAuthID = authID
+	}
+	originAuth := e.originAuthID
+	failOrigin := e.streamFailOriginAfterFirst
+	respEncrypted := e.responseEncryptedContent
+	e.mu.Unlock()
+
+	if failOrigin && originAuth != "" && authID == originAuth {
+		return nil, rateLimitedErr{
+			msg: `{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limit_exceeded"}}`,
+		}
+	}
+
+	if strings.TrimSpace(respEncrypted) == "" {
+		respEncrypted = "enc-default"
+	}
+
+	ch := make(chan coreexecutor.StreamChunk, 1)
+	ch <- coreexecutor.StreamChunk{
+		Payload: []byte(fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-stream-%s\",\"output\":[{\"type\":\"reasoning\",\"encrypted_content\":\"%s\"}]}}\n\n", authID, respEncrypted)),
+	}
+	close(ch)
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
 
 func (e *responsesAffinityExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -96,6 +145,14 @@ func (e *responsesAffinityExecutor) Calls() []responsesAffinityCall {
 	defer e.mu.Unlock()
 	out := make([]responsesAffinityCall, len(e.calls))
 	copy(out, e.calls)
+	return out
+}
+
+func (e *responsesAffinityExecutor) StreamCalls() []responsesAffinityCall {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]responsesAffinityCall, len(e.streamCalls))
+	copy(out, e.streamCalls)
 	return out
 }
 
@@ -190,5 +247,110 @@ func TestResponsesEncryptedContentRecoveryStripsReasoningInput(t *testing.T) {
 	}
 	if strings.Contains(calls[1].payload, `"encrypted_content":"enc-fallback"`) {
 		t.Fatalf("second attempt should strip encrypted reasoning, payload=%s", calls[1].payload)
+	}
+}
+
+func TestResponsesPinnedAuthFailureFallsBackUnpinned(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponsesAuthAffinityForTests()
+
+	executor := &responsesAffinityExecutor{
+		responseEncryptedContent: "enc-switch",
+		failOriginAfterFirst:     true,
+	}
+	router := setupResponsesAffinityRouter(t, executor, "auth1", "auth2")
+
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"start"}]}]}`))
+	firstReq.Header.Set("Content-Type", "application/json")
+	firstResp := httptest.NewRecorder()
+	router.ServeHTTP(firstResp, firstReq)
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want %d, body=%s", firstResp.Code, http.StatusOK, firstResp.Body.String())
+	}
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":[{"type":"reasoning","encrypted_content":"enc-switch"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`))
+	secondReq.Header.Set("Content-Type", "application/json")
+	secondResp := httptest.NewRecorder()
+	router.ServeHTTP(secondResp, secondReq)
+	if secondResp.Code != http.StatusOK {
+		t.Fatalf("second status = %d, want %d, body=%s", secondResp.Code, http.StatusOK, secondResp.Body.String())
+	}
+
+	calls := executor.Calls()
+	if len(calls) < 3 {
+		t.Fatalf("expected >= 3 calls (initial, pinned fail, unpinned retry), got %d", len(calls))
+	}
+	origin := calls[0].authID
+	sawPinnedEncryptedFailure := false
+	sawUnpinnedStrippedSuccessPath := false
+	for _, call := range calls[1:] {
+		hasEncrypted := strings.Contains(call.payload, `"encrypted_content":"enc-switch"`)
+		if call.authID == origin && hasEncrypted {
+			sawPinnedEncryptedFailure = true
+		}
+		if call.authID != origin && !hasEncrypted {
+			sawUnpinnedStrippedSuccessPath = true
+		}
+	}
+	if !sawPinnedEncryptedFailure {
+		t.Fatalf("expected pinned call with encrypted continuation on origin auth, calls=%v", calls)
+	}
+	if !sawUnpinnedStrippedSuccessPath {
+		t.Fatalf("expected unpinned retry on alternate auth without encrypted continuation, calls=%v", calls)
+	}
+}
+
+func TestResponsesStreamingPinnedAuthFailureFallsBackUnpinned(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponsesAuthAffinityForTests()
+
+	executor := &responsesAffinityExecutor{
+		responseEncryptedContent:   "enc-stream",
+		streamFailOriginAfterFirst: true,
+	}
+	router := setupResponsesAffinityRouter(t, executor, "auth1", "auth2")
+
+	// Seed affinity with a successful non-streaming turn.
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"start"}]}]}`))
+	firstReq.Header.Set("Content-Type", "application/json")
+	firstResp := httptest.NewRecorder()
+	router.ServeHTTP(firstResp, firstReq)
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want %d, body=%s", firstResp.Code, http.StatusOK, firstResp.Body.String())
+	}
+
+	// Streaming continuation with encrypted reasoning should recover by stripping and unpinning.
+	streamReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","stream":true,"input":[{"type":"reasoning","encrypted_content":"enc-stream"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`))
+	streamReq.Header.Set("Content-Type", "application/json")
+	streamResp := httptest.NewRecorder()
+	router.ServeHTTP(streamResp, streamReq)
+	if streamResp.Code != http.StatusOK {
+		t.Fatalf("stream status = %d, want %d, body=%s", streamResp.Code, http.StatusOK, streamResp.Body.String())
+	}
+	if !strings.Contains(streamResp.Body.String(), `"type":"response.completed"`) {
+		t.Fatalf("expected completed SSE event, body=%s", streamResp.Body.String())
+	}
+
+	calls := executor.StreamCalls()
+	if len(calls) < 2 {
+		t.Fatalf("expected >= 2 stream attempts (pinned fail + unpinned retry), got %d", len(calls))
+	}
+	origin := executor.Calls()[0].authID
+	sawPinnedEncryptedFailure := false
+	sawUnpinnedStrippedSuccessPath := false
+	for _, call := range calls {
+		hasEncrypted := strings.Contains(call.payload, `"encrypted_content":"enc-stream"`)
+		if call.authID == origin && hasEncrypted {
+			sawPinnedEncryptedFailure = true
+		}
+		if call.authID != origin && !hasEncrypted {
+			sawUnpinnedStrippedSuccessPath = true
+		}
+	}
+	if !sawPinnedEncryptedFailure {
+		t.Fatalf("expected stream call with encrypted continuation on origin auth, calls=%v", calls)
+	}
+	if !sawUnpinnedStrippedSuccessPath {
+		t.Fatalf("expected stream retry on alternate auth without encrypted continuation, calls=%v", calls)
 	}
 }
