@@ -1531,7 +1531,7 @@ func resolveUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
 		}
 	}
 	if cfg != nil {
-		if ua := cfg.SDKConfig.AntigravityDefaultAgent; ua != "" {
+		if ua := strings.TrimSpace(cfg.SDKConfig.AntigravityDefaultAgent); ua != "" {
 			return ua
 		}
 	}
