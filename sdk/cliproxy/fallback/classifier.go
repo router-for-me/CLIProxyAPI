@@ -54,6 +54,17 @@ func Classify(err error, attemptIndex int, cfg *config.Config) TriggerDecision {
 		}
 	}
 
+	// Auth pool exhaustion/no-available-auth should trigger model fallback.
+	// This commonly happens when the requested model is in cooldown/unavailable
+	// but alternative models in the chain may still be callable.
+	if isAuthAvailabilityError(errMsg) {
+		return TriggerDecision{
+			ShouldFallback: true,
+			Reason:         "auth unavailable",
+			StatusCode:     statusCode,
+		}
+	}
+
 	// Check network errors
 	if fb.AllowNetworkError && isNetworkError(err) {
 		return TriggerDecision{
@@ -107,6 +118,17 @@ func isNetworkError(err error) bool {
 		strings.Contains(errMsg, "connection reset") ||
 		strings.Contains(errMsg, "no such host") ||
 		strings.Contains(errMsg, "i/o timeout")
+}
+
+func isAuthAvailabilityError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	return strings.Contains(errMsg, "auth_unavailable") ||
+		strings.Contains(errMsg, "auth_not_found") ||
+		strings.Contains(errMsg, "no auth available") ||
+		strings.Contains(errMsg, "no auth candidates") ||
+		strings.Contains(errMsg, "selector returned no auth")
 }
 
 // buildCodeSet converts a slice of status codes to a map for O(1) lookup.

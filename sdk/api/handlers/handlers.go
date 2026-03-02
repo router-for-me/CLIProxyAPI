@@ -928,7 +928,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							"final_model":     attemptModel,
 							"attempt_index":   fi,
 							"fallback_result": "success",
-						}).Info("stream model fallback succeeded on initial connection")
+						}).Infof("stream model fallback succeeded on initial connection: %s -> %s", normalizedModel, attemptModel)
 						switched = true
 						break
 					}
@@ -1153,7 +1153,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 											"attempt_model":   attemptModel,
 											"attempt_index":   fi,
 											"fallback_result": "success",
-										}).Info("stream model fallback succeeded")
+										}).Infof("stream model fallback succeeded: %s -> %s", normalizedModel, attemptModel)
 										continue outer
 									}
 									innerDecision := fallback.Classify(fbErr, fi, rtCfg)

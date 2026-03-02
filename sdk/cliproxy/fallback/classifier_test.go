@@ -121,6 +121,25 @@ func TestClassify_NetworkError_NotAllowed(t *testing.T) {
 	}
 }
 
+func TestClassify_AuthUnavailableTriggers(t *testing.T) {
+	cfg := classifierConfig(false)
+	d := Classify(errors.New("auth_unavailable: no auth available"), 0, cfg)
+	if !d.ShouldFallback {
+		t.Fatal("auth_unavailable should trigger fallback")
+	}
+	if d.Reason != "auth unavailable" {
+		t.Errorf("Reason = %q, want 'auth unavailable'", d.Reason)
+	}
+}
+
+func TestClassify_AuthNotFoundTriggers(t *testing.T) {
+	cfg := classifierConfig(false)
+	d := Classify(errors.New("auth_not_found: no auth available"), 0, cfg)
+	if !d.ShouldFallback {
+		t.Fatal("auth_not_found should trigger fallback")
+	}
+}
+
 func TestClassify_Disabled(t *testing.T) {
 	cfg := &config.Config{ModelFallback: config.ModelFallback{Enabled: false}}
 	d := Classify(&statusError{"server error", 500}, 0, cfg)
