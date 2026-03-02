@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +20,7 @@ import (
 const (
 	defaultResponsesAuthAffinityTTL        = 6 * time.Hour
 	defaultResponsesAuthAffinityMaxEntries = 8192
+	defaultResponsesAuthAffinityStoreFile  = "cliproxy_responses_auth_affinity.json"
 )
 
 type responsesAuthAffinityEntry struct {
@@ -23,33 +28,64 @@ type responsesAuthAffinityEntry struct {
 	expiresAt time.Time
 }
 
+type responsesAuthAffinityPersistEntry struct {
+	AuthID    string    `json:"auth_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type responsesAuthAffinitySnapshot struct {
+	Version         int                                          `json:"version"`
+	SavedAt         time.Time                                    `json:"saved_at"`
+	ByResponseID    map[string]responsesAuthAffinityPersistEntry `json:"by_response_id"`
+	ByEncryptedHash map[string]responsesAuthAffinityPersistEntry `json:"by_encrypted_hash"`
+}
+
 type responsesAuthAffinityStore struct {
 	mu              sync.Mutex
 	ttl             time.Duration
 	maxEntries      int
+	persistPath     string
 	byResponseID    map[string]responsesAuthAffinityEntry
 	byEncryptedHash map[string]responsesAuthAffinityEntry
 }
 
 func newResponsesAuthAffinityStore(ttl time.Duration, maxEntries int) *responsesAuthAffinityStore {
+	return newResponsesAuthAffinityStoreWithPersistence(ttl, maxEntries, resolveResponsesAffinityPersistPath())
+}
+
+func newResponsesAuthAffinityStoreWithPersistence(ttl time.Duration, maxEntries int, persistPath string) *responsesAuthAffinityStore {
 	if ttl <= 0 {
 		ttl = defaultResponsesAuthAffinityTTL
 	}
 	if maxEntries <= 0 {
 		maxEntries = defaultResponsesAuthAffinityMaxEntries
 	}
-	return &responsesAuthAffinityStore{
+	store := &responsesAuthAffinityStore{
 		ttl:             ttl,
 		maxEntries:      maxEntries,
+		persistPath:     strings.TrimSpace(persistPath),
 		byResponseID:    make(map[string]responsesAuthAffinityEntry),
 		byEncryptedHash: make(map[string]responsesAuthAffinityEntry),
 	}
+	store.loadFromDisk()
+	return store
+}
+
+func resolveResponsesAffinityPersistPath() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("CLIPROXY_RESPONSES_AFFINITY_PERSIST")), "false") ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("CLIPROXY_RESPONSES_AFFINITY_PERSIST")), "0") {
+		return ""
+	}
+	if explicit := strings.TrimSpace(os.Getenv("CLIPROXY_RESPONSES_AFFINITY_PATH")); explicit != "" {
+		return explicit
+	}
+	return filepath.Join(os.TempDir(), defaultResponsesAuthAffinityStoreFile)
 }
 
 var responsesAuthAffinity = newResponsesAuthAffinityStore(defaultResponsesAuthAffinityTTL, defaultResponsesAuthAffinityMaxEntries)
 
 func resetResponsesAuthAffinityForTests() {
-	responsesAuthAffinity = newResponsesAuthAffinityStore(defaultResponsesAuthAffinityTTL, defaultResponsesAuthAffinityMaxEntries)
+	responsesAuthAffinity = newResponsesAuthAffinityStoreWithPersistence(defaultResponsesAuthAffinityTTL, defaultResponsesAuthAffinityMaxEntries, "")
 }
 
 func resolvePinnedAuthIDForResponses(rawJSON []byte) string {
@@ -123,7 +159,7 @@ func rememberResponsesAuthAffinityFromSSE(authID string, sseChunk []byte) {
 }
 
 func isInvalidEncryptedContentError(errMsg *interfaces.ErrorMessage) bool {
-	if errMsg == nil || errMsg.Error == nil || errMsg.StatusCode != 400 {
+	if errMsg == nil || errMsg.Error == nil || errMsg.StatusCode != http.StatusBadRequest {
 		return false
 	}
 	errText := strings.ToLower(errMsg.Error.Error())
@@ -134,40 +170,57 @@ func isInvalidEncryptedContentError(errMsg *interfaces.ErrorMessage) bool {
 }
 
 func stripEncryptedReasoningInput(rawJSON []byte) ([]byte, bool) {
-	input := gjson.GetBytes(rawJSON, "input")
-	if !input.Exists() || !input.IsArray() {
-		return rawJSON, false
-	}
+	updated := rawJSON
+	changed := false
 
-	items := input.Array()
-	filtered := make([]string, 0, len(items))
-	removed := false
-	for _, item := range items {
-		itemType := strings.TrimSpace(item.Get("type").String())
-		encrypted := strings.TrimSpace(item.Get("encrypted_content").String())
-		if strings.EqualFold(itemType, "reasoning") && encrypted != "" {
-			removed = true
-			continue
+	// Strip reasoning items with encrypted_content from the input array.
+	input := gjson.GetBytes(updated, "input")
+	if input.Exists() && input.IsArray() {
+		items := input.Array()
+		filtered := make([]string, 0, len(items))
+		removedReasoning := false
+		for _, item := range items {
+			itemType := strings.TrimSpace(item.Get("type").String())
+			encrypted := strings.TrimSpace(item.Get("encrypted_content").String())
+			if strings.EqualFold(itemType, "reasoning") && encrypted != "" {
+				removedReasoning = true
+				continue
+			}
+			filtered = append(filtered, item.Raw)
 		}
-		filtered = append(filtered, item.Raw)
-	}
-	if !removed {
-		return rawJSON, false
+		if removedReasoning {
+			rawArray := "[]"
+			if len(filtered) > 0 {
+				rawArray = "[" + strings.Join(filtered, ",") + "]"
+			}
+			if result, err := sjson.SetRawBytes(updated, "input", []byte(rawArray)); err == nil {
+				updated = result
+				changed = true
+			}
+		}
 	}
 
-	rawArray := "[]"
-	if len(filtered) > 0 {
-		rawArray = "[" + strings.Join(filtered, ",") + "]"
+	// Strip previous_response_id: it references server-side conversation state
+	// tied to the original auth/org. Keeping it causes OpenAI to reload stored
+	// reasoning with encrypted content from the original org → same error.
+	if gjson.GetBytes(updated, "previous_response_id").Exists() {
+		if stripped, err := sjson.DeleteBytes(updated, "previous_response_id"); err == nil {
+			updated = stripped
+			changed = true
+		}
 	}
-	updated, errSet := sjson.SetRawBytes(rawJSON, "input", []byte(rawArray))
-	if errSet != nil {
-		return rawJSON, false
-	}
-	return updated, true
+
+	return updated, changed
 }
 
-func hasEncryptedReasoningInput(rawJSON []byte) bool {
-	return len(extractReasoningEncryptedFromInput(rawJSON)) > 0
+// hasEncryptedContentContext returns true when the request carries context
+// tied to a specific auth/org: either inline encrypted reasoning in the input
+// array or a previous_response_id referencing server-side conversation state.
+func hasEncryptedContentContext(rawJSON []byte) bool {
+	if len(extractReasoningEncryptedFromInput(rawJSON)) > 0 {
+		return true
+	}
+	return strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()) != ""
 }
 
 func extractReasoningEncryptedFromInput(rawJSON []byte) []string {
@@ -261,6 +314,7 @@ func (s *responsesAuthAffinityStore) rememberResponseID(responseID, authID strin
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
 	s.byResponseID[responseID] = responsesAuthAffinityEntry{authID: authID, expiresAt: now.Add(s.ttl)}
+	s.persistLocked(now)
 }
 
 func (s *responsesAuthAffinityStore) rememberEncrypted(encrypted, authID string) {
@@ -275,6 +329,7 @@ func (s *responsesAuthAffinityStore) rememberEncrypted(encrypted, authID string)
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
 	s.byEncryptedHash[key] = responsesAuthAffinityEntry{authID: authID, expiresAt: now.Add(s.ttl)}
+	s.persistLocked(now)
 }
 
 func (s *responsesAuthAffinityStore) pruneLocked(now time.Time) {
@@ -312,4 +367,75 @@ func (s *responsesAuthAffinityStore) pruneLocked(now time.Time) {
 			delete(s.byEncryptedHash, k)
 		}
 	}
+}
+
+func (s *responsesAuthAffinityStore) loadFromDisk() {
+	if s == nil || strings.TrimSpace(s.persistPath) == "" {
+		return
+	}
+	data, err := os.ReadFile(s.persistPath)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	var snap responsesAuthAffinitySnapshot
+	if err = json.Unmarshal(data, &snap); err != nil {
+		return
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, entry := range snap.ByResponseID {
+		if strings.TrimSpace(entry.AuthID) == "" || now.After(entry.ExpiresAt) {
+			continue
+		}
+		s.byResponseID[key] = responsesAuthAffinityEntry{
+			authID:    strings.TrimSpace(entry.AuthID),
+			expiresAt: entry.ExpiresAt,
+		}
+	}
+	for key, entry := range snap.ByEncryptedHash {
+		if strings.TrimSpace(entry.AuthID) == "" || now.After(entry.ExpiresAt) {
+			continue
+		}
+		s.byEncryptedHash[key] = responsesAuthAffinityEntry{
+			authID:    strings.TrimSpace(entry.AuthID),
+			expiresAt: entry.ExpiresAt,
+		}
+	}
+}
+
+func (s *responsesAuthAffinityStore) persistLocked(now time.Time) {
+	if s == nil || strings.TrimSpace(s.persistPath) == "" {
+		return
+	}
+	snap := responsesAuthAffinitySnapshot{
+		Version:         1,
+		SavedAt:         now,
+		ByResponseID:    make(map[string]responsesAuthAffinityPersistEntry, len(s.byResponseID)),
+		ByEncryptedHash: make(map[string]responsesAuthAffinityPersistEntry, len(s.byEncryptedHash)),
+	}
+	for key, entry := range s.byResponseID {
+		snap.ByResponseID[key] = responsesAuthAffinityPersistEntry{
+			AuthID:    entry.authID,
+			ExpiresAt: entry.expiresAt,
+		}
+	}
+	for key, entry := range s.byEncryptedHash {
+		snap.ByEncryptedHash[key] = responsesAuthAffinityPersistEntry{
+			AuthID:    entry.authID,
+			ExpiresAt: entry.expiresAt,
+		}
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		return
+	}
+	if err = os.MkdirAll(filepath.Dir(s.persistPath), 0o700); err != nil {
+		return
+	}
+	tmpPath := s.persistPath + ".tmp"
+	if err = os.WriteFile(tmpPath, raw, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmpPath, s.persistPath)
 }

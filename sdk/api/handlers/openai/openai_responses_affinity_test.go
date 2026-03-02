@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -38,15 +40,17 @@ type responsesAffinityCall struct {
 }
 
 type responsesAffinityExecutor struct {
-	mu                         sync.Mutex
-	calls                      []responsesAffinityCall
-	streamCalls                []responsesAffinityCall
-	originAuthID               string
-	responseEncryptedContent   string
-	failWhenEncryptedPresent   bool
-	failWhenEncryptedWrongAuth bool
-	failOriginAfterFirst       bool
-	streamFailOriginAfterFirst bool
+	mu                              sync.Mutex
+	calls                           []responsesAffinityCall
+	streamCalls                     []responsesAffinityCall
+	originAuthID                    string
+	responseEncryptedContent        string
+	failWhenEncryptedPresent        bool
+	failWhenEncryptedWrongAuth      bool
+	failOriginAfterFirst            bool
+	streamFailOriginAfterFirst      bool
+	streamFailOriginAfterFirstChunk bool
+	failWhenPreviousResponseID      bool
 }
 
 func (e *responsesAffinityExecutor) Identifier() string { return "responses-affinity-provider" }
@@ -68,6 +72,7 @@ func (e *responsesAffinityExecutor) Execute(_ context.Context, auth *coreauth.Au
 	failOnAny := e.failWhenEncryptedPresent
 	failOnWrong := e.failWhenEncryptedWrongAuth
 	failOriginAfterFirst := e.failOriginAfterFirst
+	failOnPrevRespID := e.failWhenPreviousResponseID
 	callCount := len(e.calls)
 	respEncrypted := e.responseEncryptedContent
 	e.mu.Unlock()
@@ -75,6 +80,14 @@ func (e *responsesAffinityExecutor) Execute(_ context.Context, auth *coreauth.Au
 	if failOriginAfterFirst && originAuth != "" && authID == originAuth && callCount > 1 {
 		return coreexecutor.Response{}, rateLimitedErr{
 			msg: `{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limit_exceeded"}}`,
+		}
+	}
+
+	// Simulate server-side invalid_encrypted_content when previous_response_id
+	// references a response from a different org (no inline reasoning needed).
+	if failOnPrevRespID && strings.Contains(payload, `"previous_response_id"`) {
+		return coreexecutor.Response{}, invalidEncryptedErr{
+			msg: `{"error":{"message":"The encrypted content could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","code":"invalid_encrypted_content"}}`,
 		}
 	}
 
@@ -107,6 +120,7 @@ func (e *responsesAffinityExecutor) ExecuteStream(_ context.Context, auth *corea
 	}
 	originAuth := e.originAuthID
 	failOrigin := e.streamFailOriginAfterFirst
+	failOriginAfterFirstChunk := e.streamFailOriginAfterFirstChunk
 	respEncrypted := e.responseEncryptedContent
 	e.mu.Unlock()
 
@@ -114,6 +128,20 @@ func (e *responsesAffinityExecutor) ExecuteStream(_ context.Context, auth *corea
 		return nil, rateLimitedErr{
 			msg: `{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limit_exceeded"}}`,
 		}
+	}
+
+	if failOriginAfterFirstChunk && originAuth != "" && authID == originAuth && strings.Contains(payload, `"previous_response_id"`) {
+		ch := make(chan coreexecutor.StreamChunk, 2)
+		ch <- coreexecutor.StreamChunk{
+			Payload: []byte(fmt.Sprintf("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-stream-%s\"}}\n\n", authID)),
+		}
+		ch <- coreexecutor.StreamChunk{
+			Err: invalidEncryptedErr{
+				msg: `{"error":{"message":"The encrypted content could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","code":"invalid_encrypted_content"}}`,
+			},
+		}
+		close(ch)
+		return &coreexecutor.StreamResult{Chunks: ch}, nil
 	}
 
 	if strings.TrimSpace(respEncrypted) == "" {
@@ -250,6 +278,77 @@ func TestResponsesEncryptedContentRecoveryStripsReasoningInput(t *testing.T) {
 	}
 }
 
+func TestResponsesEncryptedContentRecoveryStripsPreviousResponseID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponsesAuthAffinityForTests()
+
+	executor := &responsesAffinityExecutor{
+		responseEncryptedContent: "enc-previd",
+		failWhenEncryptedPresent: true,
+	}
+	router := setupResponsesAffinityRouter(t, executor, "auth1")
+
+	// Request carries both encrypted reasoning and previous_response_id.
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"test-model","previous_response_id":"resp-old","input":[{"type":"reasoning","encrypted_content":"enc-previd"},{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+
+	calls := executor.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2 (retry after stripping)", len(calls))
+	}
+	// First attempt should include both encrypted reasoning and previous_response_id.
+	if !strings.Contains(calls[0].payload, `"previous_response_id":"resp-old"`) {
+		t.Fatalf("first attempt should carry previous_response_id, payload=%s", calls[0].payload)
+	}
+	// Second attempt should strip both encrypted reasoning AND previous_response_id.
+	if strings.Contains(calls[1].payload, `"encrypted_content"`) {
+		t.Fatalf("retry should strip encrypted reasoning, payload=%s", calls[1].payload)
+	}
+	if strings.Contains(calls[1].payload, `"previous_response_id"`) {
+		t.Fatalf("retry should strip previous_response_id, payload=%s", calls[1].payload)
+	}
+}
+
+func TestResponsesPreviousResponseIDOnlyRecovery(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponsesAuthAffinityForTests()
+
+	// Executor fails with invalid_encrypted_content whenever
+	// previous_response_id is present (simulates server-side state mismatch).
+	executor := &responsesAffinityExecutor{
+		responseEncryptedContent:   "enc-prev-only",
+		failWhenPreviousResponseID: true,
+	}
+	router := setupResponsesAffinityRouter(t, executor, "auth1")
+
+	// Request has previous_response_id but NO inline encrypted reasoning.
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"test-model","previous_response_id":"resp-foreign","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+
+	calls := executor.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2 (initial fail + retry after stripping previous_response_id)", len(calls))
+	}
+	if !strings.Contains(calls[0].payload, `"previous_response_id":"resp-foreign"`) {
+		t.Fatalf("first attempt should carry previous_response_id, payload=%s", calls[0].payload)
+	}
+	if strings.Contains(calls[1].payload, `"previous_response_id"`) {
+		t.Fatalf("retry should have stripped previous_response_id, payload=%s", calls[1].payload)
+	}
+}
+
 func TestResponsesPinnedAuthFailureFallsBackUnpinned(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	resetResponsesAuthAffinityForTests()
@@ -352,5 +451,121 @@ func TestResponsesStreamingPinnedAuthFailureFallsBackUnpinned(t *testing.T) {
 	}
 	if !sawUnpinnedStrippedSuccessPath {
 		t.Fatalf("expected stream retry on alternate auth without encrypted continuation, calls=%v", calls)
+	}
+}
+
+func TestResponsesStreamingPreviousResponseIDOnlyPinnedFailureFallsBackUnpinned(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponsesAuthAffinityForTests()
+
+	executor := &responsesAffinityExecutor{
+		responseEncryptedContent:   "enc-stream-prev",
+		streamFailOriginAfterFirst: true,
+	}
+	router := setupResponsesAffinityRouter(t, executor, "auth1", "auth2")
+
+	// Seed affinity with response ID bound to auth1.
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"start"}]}]}`))
+	firstReq.Header.Set("Content-Type", "application/json")
+	firstResp := httptest.NewRecorder()
+	router.ServeHTTP(firstResp, firstReq)
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want %d, body=%s", firstResp.Code, http.StatusOK, firstResp.Body.String())
+	}
+
+	streamReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","stream":true,"previous_response_id":"resp-auth1","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`))
+	streamReq.Header.Set("Content-Type", "application/json")
+	streamResp := httptest.NewRecorder()
+	router.ServeHTTP(streamResp, streamReq)
+	if streamResp.Code != http.StatusOK {
+		t.Fatalf("stream status = %d, want %d, body=%s", streamResp.Code, http.StatusOK, streamResp.Body.String())
+	}
+	if !strings.Contains(streamResp.Body.String(), `"type":"response.completed"`) {
+		t.Fatalf("expected completed SSE event, body=%s", streamResp.Body.String())
+	}
+
+	calls := executor.StreamCalls()
+	if len(calls) < 2 {
+		t.Fatalf("expected >= 2 stream attempts (pinned fail + unpinned retry), got %d", len(calls))
+	}
+	origin := executor.Calls()[0].authID
+	if !strings.Contains(calls[0].payload, `"previous_response_id":"resp-auth1"`) {
+		t.Fatalf("first stream attempt should carry previous_response_id, payload=%s", calls[0].payload)
+	}
+	sawUnpinnedWithoutPreviousResponseID := false
+	for _, call := range calls[1:] {
+		if call.authID != origin && !strings.Contains(call.payload, `"previous_response_id"`) {
+			sawUnpinnedWithoutPreviousResponseID = true
+		}
+	}
+	if !sawUnpinnedWithoutPreviousResponseID {
+		t.Fatalf("expected unpinned retry without previous_response_id, calls=%v", calls)
+	}
+}
+
+func TestResponsesStreamingPostFirstChunkInvalidEncryptedFallsBackWhenNoContentYet(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetResponsesAuthAffinityForTests()
+
+	executor := &responsesAffinityExecutor{
+		responseEncryptedContent:        "enc-stream-post-first",
+		streamFailOriginAfterFirstChunk: true,
+	}
+	router := setupResponsesAffinityRouter(t, executor, "auth1", "auth2")
+
+	// Seed affinity with response ID bound to auth1.
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"start"}]}]}`))
+	firstReq.Header.Set("Content-Type", "application/json")
+	firstResp := httptest.NewRecorder()
+	router.ServeHTTP(firstResp, firstReq)
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want %d, body=%s", firstResp.Code, http.StatusOK, firstResp.Body.String())
+	}
+
+	streamReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","stream":true,"previous_response_id":"resp-auth1","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`))
+	streamReq.Header.Set("Content-Type", "application/json")
+	streamResp := httptest.NewRecorder()
+	router.ServeHTTP(streamResp, streamReq)
+	if streamResp.Code != http.StatusOK {
+		t.Fatalf("stream status = %d, want %d, body=%s", streamResp.Code, http.StatusOK, streamResp.Body.String())
+	}
+	if !strings.Contains(streamResp.Body.String(), `"type":"response.completed"`) {
+		t.Fatalf("expected completed SSE event after recovery, body=%s", streamResp.Body.String())
+	}
+	if strings.Contains(streamResp.Body.String(), `"type":"error"`) {
+		t.Fatalf("did not expect terminal error chunk after successful post-first recovery, body=%s", streamResp.Body.String())
+	}
+
+	calls := executor.StreamCalls()
+	if len(calls) < 2 {
+		t.Fatalf("expected >= 2 stream attempts, got %d", len(calls))
+	}
+	if !strings.Contains(calls[0].payload, `"previous_response_id":"resp-auth1"`) {
+		t.Fatalf("first stream attempt should carry previous_response_id, payload=%s", calls[0].payload)
+	}
+	sawRecoveredRetry := false
+	for _, call := range calls[1:] {
+		if !strings.Contains(call.payload, `"previous_response_id"`) {
+			sawRecoveredRetry = true
+		}
+	}
+	if !sawRecoveredRetry {
+		t.Fatalf("expected recovered retry without previous_response_id, calls=%v", calls)
+	}
+}
+
+func TestResponsesAffinityStorePersistsAcrossRestart(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "responses_affinity.json")
+
+	store := newResponsesAuthAffinityStoreWithPersistence(2*time.Hour, 128, storePath)
+	store.rememberResponseID("resp-persist", "auth-persist")
+	store.rememberEncrypted("enc-persist", "auth-persist")
+
+	reloaded := newResponsesAuthAffinityStoreWithPersistence(2*time.Hour, 128, storePath)
+	if got, ok := reloaded.lookupResponseID("resp-persist"); !ok || got != "auth-persist" {
+		t.Fatalf("lookupResponseID after restart = (%q,%v), want (%q,true)", got, ok, "auth-persist")
+	}
+	if got, ok := reloaded.lookupEncrypted("enc-persist"); !ok || got != "auth-persist" {
+		t.Fatalf("lookupEncrypted after restart = (%q,%v), want (%q,true)", got, ok, "auth-persist")
 	}
 }
