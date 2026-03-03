@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	_ "embed"
 	"errors"
 	"fmt"
 	"net/http"
@@ -41,6 +42,11 @@ import (
 )
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+
+const managementEnhancerScriptTagID = "cpa-oauth-availability-enhancer"
+
+//go:embed management_enhancements.js
+var managementEnhancementsJS string
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -680,7 +686,45 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	content, errRead := os.ReadFile(filePath)
+	if errRead != nil {
+		log.WithError(errRead).Error("failed to read management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+
+	enhanced, errEnhance := injectManagementEnhancements(content)
+	if errEnhance != nil {
+		log.WithError(errEnhance).Warn("failed to inject management enhancements, fallback to original panel")
+		enhanced = content
+	}
+
+	c.Data(http.StatusOK, "text/html; charset=utf-8", enhanced)
+}
+
+func injectManagementEnhancements(content []byte) ([]byte, error) {
+	html := string(content)
+	if strings.TrimSpace(html) == "" {
+		return content, nil
+	}
+	if strings.Contains(html, managementEnhancerScriptTagID) {
+		return content, nil
+	}
+
+	script := strings.TrimSpace(managementEnhancementsJS)
+	if script == "" {
+		return nil, errors.New("management enhancements script is empty")
+	}
+
+	tag := "<script id=\"" + managementEnhancerScriptTagID + "\">\n" + script + "\n</script>"
+	const bodyClose = "</body>"
+	idx := strings.LastIndex(strings.ToLower(html), bodyClose)
+	if idx < 0 {
+		return nil, errors.New("management html missing </body>")
+	}
+
+	enhanced := html[:idx] + tag + html[idx:]
+	return []byte(enhanced), nil
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {

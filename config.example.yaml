@@ -1,101 +1,91 @@
 # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
 # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
 host: ""
-
 # Server port
 port: 8317
-
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
   cert: ""
   key: ""
-
 # Management API settings
 remote-management:
-  # Whether to allow remote (non-localhost) management access.
-  # When false, only localhost can access management endpoints (a key is still required).
+# Whether to allow remote (non-localhost) management access.
+# When false, only localhost can access management endpoints (a key is still required).
   allow-remote: false
-
-  # Management key. If a plaintext value is provided here, it will be hashed on startup.
-  # All management requests (even from localhost) require this key.
-  # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
+# Management key. If a plaintext value is provided here, it will be hashed on startup.
+# All management requests (even from localhost) require this key.
+# Leave empty to disable the Management API entirely (404 for all /v0/management routes).
   secret-key: ""
-
-  # Disable the bundled management control panel asset download and HTTP route when true.
+# Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
-
-  # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
+# GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
-
 # Authentication directory (supports ~ for home directory)
-auth-dir: "~/.cli-proxy-api"
-
+auth-dir: "/home/cxiao/.cli-proxy-api"
 # API keys for authentication
 api-keys:
-  - "your-api-key-1"
+  - "ABC-123456"
   - "your-api-key-2"
   - "your-api-key-3"
-
 # Enable debug logging
 debug: false
-
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false
   addr: "127.0.0.1:8316"
-
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
-
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
-
 # Maximum total size (MB) of log files under the logs directory. When exceeded, the oldest log
 # files are deleted until within the limit. Set to 0 to disable.
 logs-max-total-size-mb: 0
-
 # Maximum number of error log files retained when request logging is disabled.
 # When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 error-logs-max-files: 10
-
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
-
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
-
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
-
 # When true, forward filtered upstream response headers to downstream clients.
 # Default is false (disabled).
 passthrough-headers: false
-
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
-
-# Maximum number of different credentials to try for one failed request.
-# Set to 0 to keep legacy behavior (try all available credentials).
-max-retry-credentials: 0
-
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
-
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
-
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
-
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
-
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
+openai-compatibility:
+  - name: wang
+    base-url: https://wzw.pp.ua
+    api-key-entries:
+      - api-key: sk-3TFYjdjnpG0tMBUbLnAqdNqXYn5DLDnOlsKPcv1SFixlDXkb
+    models:
+      - name: claude-sonnet-4-5
+      - name: glm-5
+      - name: glm-4.7
+  - name: 薄荷
+    base-url: https://x666.me/
+    api-key-entries:
+      - api-key: sk-XUjIoidtYcgAyXB37Q7WF0mlITq6eMHeQzk9adw3R7AGb3ad
+    models:
+      - name: gpt-5.3-codex
+        alias: bohe-gpt-5.3-codex
+      - name: gpt-5.2
+        alias: bohe-gpt-5.2
 
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:

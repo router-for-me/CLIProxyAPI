@@ -46,6 +46,42 @@ func newTestServer(t *testing.T) *Server {
 	return NewServer(cfg, authManager, accessManager, configPath)
 }
 
+func TestInjectManagementEnhancements(t *testing.T) {
+	t.Run("inject_before_body_close", func(t *testing.T) {
+		html := []byte("<html><body><div id=\"root\"></div></body></html>")
+		enhanced, err := injectManagementEnhancements(html)
+		if err != nil {
+			t.Fatalf("injectManagementEnhancements returned error: %v", err)
+		}
+		body := string(enhanced)
+		if !strings.Contains(body, managementEnhancerScriptTagID) {
+			t.Fatalf("expected enhancer tag id %q in html", managementEnhancerScriptTagID)
+		}
+		if !strings.Contains(body, "</script></body>") {
+			t.Fatalf("expected injected script to be placed before </body>, got: %s", body)
+		}
+	})
+
+	t.Run("already_injected_keeps_original", func(t *testing.T) {
+		html := []byte("<html><body><script id=\"" + managementEnhancerScriptTagID + "\"></script></body></html>")
+		enhanced, err := injectManagementEnhancements(html)
+		if err != nil {
+			t.Fatalf("injectManagementEnhancements returned error: %v", err)
+		}
+		if string(enhanced) != string(html) {
+			t.Fatalf("expected html to remain unchanged when enhancer already exists")
+		}
+	})
+
+	t.Run("missing_body_close_returns_error", func(t *testing.T) {
+		html := []byte("<html><body><div id=\"root\"></div></html>")
+		_, err := injectManagementEnhancements(html)
+		if err == nil {
+			t.Fatalf("expected error when </body> is missing")
+		}
+	})
+}
+
 func TestAmpProviderModelRoutes(t *testing.T) {
 	testCases := []struct {
 		name         string

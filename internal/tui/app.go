@@ -227,15 +227,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, nil
 			}
 			prevTab := a.activeTab
+			usageWasInitialized := a.initialized[tabUsage]
 			a.activeTab = (a.activeTab + 1) % len(a.tabs)
-			return a, a.initTabIfNeeded(prevTab)
+			initCmd := a.initTabIfNeeded(prevTab)
+			if a.activeTab == tabUsage && usageWasInitialized {
+				return a, tea.Batch(initCmd, a.usage.Init())
+			}
+			return a, initCmd
 		case "shift+tab":
 			if len(a.tabs) == 0 {
 				return a, nil
 			}
 			prevTab := a.activeTab
+			usageWasInitialized := a.initialized[tabUsage]
 			a.activeTab = (a.activeTab - 1 + len(a.tabs)) % len(a.tabs)
-			return a, a.initTabIfNeeded(prevTab)
+			initCmd := a.initTabIfNeeded(prevTab)
+			if a.activeTab == tabUsage && usageWasInitialized {
+				return a, tea.Batch(initCmd, a.usage.Init())
+			}
+			return a, initCmd
 		}
 	}
 
