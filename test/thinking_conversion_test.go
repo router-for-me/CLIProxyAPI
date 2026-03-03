@@ -34,6 +34,8 @@ type thinkingTestCase struct {
 	inputJSON       string
 	expectField     string
 	expectValue     string
+	expectField2    string
+	expectValue2    string
 	includeThoughts string
 	expectErr       bool
 }
@@ -384,15 +386,17 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 30: Effort xhigh → not in low/high → error
+		// Case 30: Effort xhigh → clamped to high
 		{
-			name:        "30",
-			from:        "openai",
-			to:          "gemini",
-			model:       "gemini-mixed-model(xhigh)",
-			inputJSON:   `{"model":"gemini-mixed-model(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   true,
+			name:            "30",
+			from:            "openai",
+			to:              "gemini",
+			model:           "gemini-mixed-model(xhigh)",
+			inputJSON:       `{"model":"gemini-mixed-model(xhigh)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
+			expectValue:     "high",
+			includeThoughts: "true",
+			expectErr:       false,
 		},
 		// Case 31: Effort none → clamped to low (min supported) → includeThoughts=false
 		{
@@ -1782,15 +1786,17 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 30: reasoning_effort=xhigh → error (not in low/high)
+		// Case 30: reasoning_effort=xhigh → clamped to high
 		{
-			name:        "30",
-			from:        "openai",
-			to:          "gemini",
-			model:       "gemini-mixed-model",
-			inputJSON:   `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
-			expectField: "",
-			expectErr:   true,
+			name:            "30",
+			from:            "openai",
+			to:              "gemini",
+			model:           "gemini-mixed-model",
+			inputJSON:       `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
+			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
+			expectValue:     "high",
+			includeThoughts: "true",
+			expectErr:       false,
 		},
 		// Case 31: reasoning_effort=none → clamped to low → includeThoughts=false
 		{
@@ -2822,9 +2828,8 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 	runThinkingTests(t, cases)
 }
 
-// TestThinkingE2EClaudeAdaptive_Body tests Claude thinking.type=adaptive extended body-only cases.
-// These cases validate that adaptive means "thinking enabled without explicit budget", and
-// cross-protocol conversion should resolve to target-model maximum thinking capability.
+// TestThinkingE2EClaudeAdaptive_Body covers Group 3 cases in docs/thinking-e2e-test-cases.md.
+// It focuses on Claude 4.6 adaptive thinking and effort/level cross-protocol semantics (body-only).
 func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-claude-adaptive-%d", time.Now().UnixNano())
@@ -2833,32 +2838,347 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 	defer reg.UnregisterClient(uid)
 
 	cases := []thinkingTestCase{
-		// A1: Claude adaptive to OpenAI level model -> highest supported level
+		// A subgroup: OpenAI -> Claude (reasoning_effort -> output_config.effort)
 		{
 			name:        "A1",
+			from:        "openai",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"minimal"}`,
+			expectField: "output_config.effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
+		{
+			name:        "A2",
+			from:        "openai",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low"}`,
+			expectField: "output_config.effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
+		{
+			name:        "A3",
+			from:        "openai",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"medium"}`,
+			expectField: "output_config.effort",
+			expectValue: "medium",
+			expectErr:   false,
+		},
+		{
+			name:        "A4",
+			from:        "openai",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
+			expectField: "output_config.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		{
+			name:        "A5",
+			from:        "openai",
+			to:          "claude",
+			model:       "claude-opus-4-6-model",
+			inputJSON:   `{"model":"claude-opus-4-6-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
+			expectField: "output_config.effort",
+			expectValue: "max",
+			expectErr:   false,
+		},
+		{
+			name:        "A6",
+			from:        "openai",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`,
+			expectField: "output_config.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		{
+			name:        "A7",
+			from:        "openai",
+			to:          "claude",
+			model:       "claude-opus-4-6-model",
+			inputJSON:   `{"model":"claude-opus-4-6-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"max"}`,
+			expectField: "output_config.effort",
+			expectValue: "max",
+			expectErr:   false,
+		},
+		{
+			name:        "A8",
+			from:        "openai",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"max"}`,
+			expectField: "output_config.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+
+		// B subgroup: Gemini -> Claude (thinkingLevel/thinkingBudget -> output_config.effort)
+		{
+			name:        "B1",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"minimal"}}}`,
+			expectField: "output_config.effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
+		{
+			name:        "B2",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"low"}}}`,
+			expectField: "output_config.effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
+		{
+			name:        "B3",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"medium"}}}`,
+			expectField: "output_config.effort",
+			expectValue: "medium",
+			expectErr:   false,
+		},
+		{
+			name:        "B4",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}}`,
+			expectField: "output_config.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		{
+			name:        "B5",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-opus-4-6-model",
+			inputJSON:   `{"model":"claude-opus-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"xhigh"}}}`,
+			expectField: "output_config.effort",
+			expectValue: "max",
+			expectErr:   false,
+		},
+		{
+			name:        "B6",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"xhigh"}}}`,
+			expectField: "output_config.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		{
+			name:        "B7",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":512}}}`,
+			expectField: "output_config.effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
+		{
+			name:        "B8",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":1024}}}`,
+			expectField: "output_config.effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
+		{
+			name:        "B9",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}`,
+			expectField: "output_config.effort",
+			expectValue: "medium",
+			expectErr:   false,
+		},
+		{
+			name:        "B10",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":24576}}}`,
+			expectField: "output_config.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		{
+			name:        "B11",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-opus-4-6-model",
+			inputJSON:   `{"model":"claude-opus-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":32768}}}`,
+			expectField: "output_config.effort",
+			expectValue: "max",
+			expectErr:   false,
+		},
+		{
+			name:        "B12",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":32768}}}`,
+			expectField: "output_config.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		{
+			name:        "B13",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}`,
+			expectField: "thinking.type",
+			expectValue: "disabled",
+			expectErr:   false,
+		},
+		{
+			name:        "B14",
+			from:        "gemini",
+			to:          "claude",
+			model:       "claude-sonnet-4-6-model",
+			inputJSON:   `{"model":"claude-sonnet-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":-1}}}`,
+			expectField: "output_config.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+
+		// C subgroup: Claude adaptive + effort cross-protocol conversion
+		{
+			name:        "C1",
 			from:        "claude",
 			to:          "openai",
 			model:       "level-model",
-			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"minimal"}}`,
+			expectField: "reasoning_effort",
+			expectValue: "minimal",
+			expectErr:   false,
+		},
+		{
+			name:        "C2",
+			from:        "claude",
+			to:          "openai",
+			model:       "level-model",
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}}`,
+			expectField: "reasoning_effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
+		{
+			name:        "C3",
+			from:        "claude",
+			to:          "openai",
+			model:       "level-model",
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"}}`,
+			expectField: "reasoning_effort",
+			expectValue: "medium",
+			expectErr:   false,
+		},
+		{
+			name:        "C4",
+			from:        "claude",
+			to:          "openai",
+			model:       "level-model",
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
 			expectField: "reasoning_effort",
 			expectValue: "high",
 			expectErr:   false,
 		},
-		// A2: Claude adaptive to Gemini level subset model -> highest supported level
 		{
-			name:            "A2",
+			name:        "C5",
+			from:        "claude",
+			to:          "openai",
+			model:       "level-model",
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		{
+			name:        "C6",
+			from:        "claude",
+			to:          "openai",
+			model:       "level-model",
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+			expectField: "reasoning_effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		{
+			name:        "C7",
+			from:        "claude",
+			to:          "openai",
+			model:       "no-thinking-model",
+			inputJSON:   `{"model":"no-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
+			expectField: "",
+			expectErr:   false,
+		},
+
+		{
+			name:            "C8",
 			from:            "claude",
 			to:              "gemini",
 			model:           "level-subset-model",
-			inputJSON:       `{"model":"level-subset-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
+			inputJSON:       `{"model":"level-subset-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
 			expectValue:     "high",
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// A3: Claude adaptive to Gemini budget model -> max budget
 		{
-			name:            "A3",
+			name:            "C9",
+			from:            "claude",
+			to:              "gemini",
+			model:           "gemini-budget-model",
+			inputJSON:       `{"model":"gemini-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}}`,
+			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
+			expectValue:     "1024",
+			includeThoughts: "true",
+			expectErr:       false,
+		},
+		{
+			name:            "C10",
+			from:            "claude",
+			to:              "gemini",
+			model:           "gemini-budget-model",
+			inputJSON:       `{"model":"gemini-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"}}`,
+			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
+			expectValue:     "8192",
+			includeThoughts: "true",
+			expectErr:       false,
+		},
+		{
+			name:            "C11",
+			from:            "claude",
+			to:              "gemini",
+			model:           "gemini-budget-model",
+			inputJSON:       `{"model":"gemini-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
+			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
+			expectValue:     "20000",
+			includeThoughts: "true",
+			expectErr:       false,
+		},
+		{
+			name:            "C12",
 			from:            "claude",
 			to:              "gemini",
 			model:           "gemini-budget-model",
@@ -2868,32 +3188,91 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// A4: Claude adaptive to Gemini mixed model -> highest supported level
 		{
-			name:            "A4",
+			name:            "C13",
 			from:            "claude",
 			to:              "gemini",
 			model:           "gemini-mixed-model",
-			inputJSON:       `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
+			inputJSON:       `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
 			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
 			expectValue:     "high",
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// A5: Claude adaptive passthrough for same protocol
+
 		{
-			name:        "A5",
+			name:        "C14",
 			from:        "claude",
-			to:          "claude",
-			model:       "claude-budget-model",
-			inputJSON:   `{"model":"claude-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
-			expectField: "thinking.type",
-			expectValue: "adaptive",
+			to:          "codex",
+			model:       "level-model",
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"minimal"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "minimal",
 			expectErr:   false,
 		},
-		// A6: Claude adaptive to Antigravity budget model -> max budget
 		{
-			name:            "A6",
+			name:        "C15",
+			from:        "claude",
+			to:          "codex",
+			model:       "level-model",
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "low",
+			expectErr:   false,
+		},
+		{
+			name:        "C16",
+			from:        "claude",
+			to:          "codex",
+			model:       "level-model",
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		{
+			name:        "C17",
+			from:        "claude",
+			to:          "codex",
+			model:       "level-model",
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+		{
+			name:        "C18",
+			from:        "claude",
+			to:          "codex",
+			model:       "level-model",
+			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+			expectErr:   false,
+		},
+
+		{
+			name:        "C19",
+			from:        "claude",
+			to:          "iflow",
+			model:       "glm-test",
+			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"minimal"}}`,
+			expectField: "chat_template_kwargs.enable_thinking",
+			expectValue: "true",
+			expectErr:   false,
+		},
+		{
+			name:        "C20",
+			from:        "claude",
+			to:          "iflow",
+			model:       "minimax-test",
+			inputJSON:   `{"model":"minimax-test","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
+			expectField: "reasoning_split",
+			expectValue: "true",
+			expectErr:   false,
+		},
+		{
+			name:            "C21",
 			from:            "claude",
 			to:              "antigravity",
 			model:           "antigravity-budget-model",
@@ -2903,48 +3282,66 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// A7: Claude adaptive to iFlow GLM -> enabled boolean
+
 		{
-			name:        "A7",
-			from:        "claude",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "true",
-			expectErr:   false,
+			name:         "C22",
+			from:         "claude",
+			to:           "claude",
+			model:        "claude-sonnet-4-6-model",
+			inputJSON:    `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"}}`,
+			expectField:  "thinking.type",
+			expectValue:  "adaptive",
+			expectField2: "output_config.effort",
+			expectValue2: "medium",
+			expectErr:    false,
 		},
-		// A8: Claude adaptive to iFlow MiniMax -> enabled boolean
 		{
-			name:        "A8",
-			from:        "claude",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
-			expectField: "reasoning_split",
-			expectValue: "true",
-			expectErr:   false,
+			name:         "C23",
+			from:         "claude",
+			to:           "claude",
+			model:        "claude-opus-4-6-model",
+			inputJSON:    `{"model":"claude-opus-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+			expectField:  "thinking.type",
+			expectValue:  "adaptive",
+			expectField2: "output_config.effort",
+			expectValue2: "max",
+			expectErr:    false,
 		},
-		// A9: Claude adaptive to Codex level model -> highest supported level
 		{
-			name:        "A9",
-			from:        "claude",
-			to:          "codex",
-			model:       "level-model",
-			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
-			expectField: "reasoning.effort",
-			expectValue: "high",
-			expectErr:   false,
+			name:      "C24",
+			from:      "claude",
+			to:        "claude",
+			model:     "claude-opus-4-6-model",
+			inputJSON: `{"model":"claude-opus-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
+			expectErr: true,
 		},
-		// A10: Claude adaptive on non-thinking model should still be stripped
 		{
-			name:        "A10",
-			from:        "claude",
-			to:          "openai",
-			model:       "no-thinking-model",
-			inputJSON:   `{"model":"no-thinking-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
-			expectField: "",
-			expectErr:   false,
+			name:         "C25",
+			from:         "claude",
+			to:           "claude",
+			model:        "claude-sonnet-4-6-model",
+			inputJSON:    `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
+			expectField:  "thinking.type",
+			expectValue:  "adaptive",
+			expectField2: "output_config.effort",
+			expectValue2: "high",
+			expectErr:    false,
+		},
+		{
+			name:      "C26",
+			from:      "claude",
+			to:        "claude",
+			model:     "claude-sonnet-4-6-model",
+			inputJSON: `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+			expectErr: true,
+		},
+		{
+			name:      "C27",
+			from:      "claude",
+			to:        "claude",
+			model:     "claude-sonnet-4-6-model",
+			inputJSON: `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
+			expectErr: true,
 		},
 	}
 
@@ -2998,6 +3395,29 @@ func getTestModels() []*registry.ModelInfo {
 			Type:        "claude",
 			DisplayName: "Claude Budget Model",
 			Thinking:    &registry.ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:                  "claude-sonnet-4-6-model",
+			Object:              "model",
+			Created:             1771372800, // 2026-02-17
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.6 Sonnet",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &registry.ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false, Levels: []string{"low", "medium", "high"}},
+		},
+		{
+			ID:                  "claude-opus-4-6-model",
+			Object:              "model",
+			Created:             1770318000, // 2026-02-05
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.6 Opus",
+			Description:         "Premium model combining maximum intelligence with practical performance",
+			ContextLength:       1000000,
+			MaxCompletionTokens: 128000,
+			Thinking:            &registry.ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false, Levels: []string{"low", "medium", "high", "max"}},
 		},
 		{
 			ID:          "antigravity-budget-model",
@@ -3165,17 +3585,23 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				return
 			}
 
-			val := gjson.GetBytes(body, tc.expectField)
-			if !val.Exists() {
-				t.Fatalf("expected field %s not found, body=%s", tc.expectField, string(body))
+			assertField := func(fieldPath, expected string) {
+				val := gjson.GetBytes(body, fieldPath)
+				if !val.Exists() {
+					t.Fatalf("expected field %s not found, body=%s", fieldPath, string(body))
+				}
+				actualValue := val.String()
+				if val.Type == gjson.Number {
+					actualValue = fmt.Sprintf("%d", val.Int())
+				}
+				if actualValue != expected {
+					t.Fatalf("field %s: expected %q, got %q, body=%s", fieldPath, expected, actualValue, string(body))
+				}
 			}
 
-			actualValue := val.String()
-			if val.Type == gjson.Number {
-				actualValue = fmt.Sprintf("%d", val.Int())
-			}
-			if actualValue != tc.expectValue {
-				t.Fatalf("field %s: expected %q, got %q, body=%s", tc.expectField, tc.expectValue, actualValue, string(body))
+			assertField(tc.expectField, tc.expectValue)
+			if tc.expectField2 != "" {
+				assertField(tc.expectField2, tc.expectValue2)
 			}
 
 			if tc.includeThoughts != "" && (tc.to == "gemini" || tc.to == "gemini-cli" || tc.to == "antigravity") {

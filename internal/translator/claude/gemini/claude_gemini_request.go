@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
@@ -115,24 +116,47 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		// Include thoughts configuration for reasoning process visibility
 		// Translator only does format conversion, ApplyThinking handles model capability validation.
 		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
+			mi := registry.LookupModelInfo(modelName, "claude")
+			supportsAdaptive := mi != nil && mi.Thinking != nil && len(mi.Thinking.Levels) > 0
+			supportsMax := supportsAdaptive && thinking.HasLevel(mi.Thinking.Levels, string(thinking.LevelMax))
+
+			// MapToClaudeEffort normalizes levels (e.g. minimal→low, xhigh→high) to avoid
+			// validation errors since validate treats same-provider unsupported levels as errors.
 			thinkingLevel := thinkingConfig.Get("thinkingLevel")
 			if !thinkingLevel.Exists() {
 				thinkingLevel = thinkingConfig.Get("thinking_level")
 			}
 			if thinkingLevel.Exists() {
 				level := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
-				switch level {
-				case "":
-				case "none":
-					out, _ = sjson.Set(out, "thinking.type", "disabled")
-					out, _ = sjson.Delete(out, "thinking.budget_tokens")
-				case "auto":
-					out, _ = sjson.Set(out, "thinking.type", "enabled")
-					out, _ = sjson.Delete(out, "thinking.budget_tokens")
-				default:
-					if budget, ok := thinking.ConvertLevelToBudget(level); ok {
+				if supportsAdaptive {
+					switch level {
+					case "":
+					case "none":
+						out, _ = sjson.Set(out, "thinking.type", "disabled")
+						out, _ = sjson.Delete(out, "thinking.budget_tokens")
+						out, _ = sjson.Delete(out, "output_config.effort")
+					default:
+						if mapped, ok := thinking.MapToClaudeEffort(level, supportsMax); ok {
+							level = mapped
+						}
+						out, _ = sjson.Set(out, "thinking.type", "adaptive")
+						out, _ = sjson.Delete(out, "thinking.budget_tokens")
+						out, _ = sjson.Set(out, "output_config.effort", level)
+					}
+				} else {
+					switch level {
+					case "":
+					case "none":
+						out, _ = sjson.Set(out, "thinking.type", "disabled")
+						out, _ = sjson.Delete(out, "thinking.budget_tokens")
+					case "auto":
 						out, _ = sjson.Set(out, "thinking.type", "enabled")
-						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+						out, _ = sjson.Delete(out, "thinking.budget_tokens")
+					default:
+						if budget, ok := thinking.ConvertLevelToBudget(level); ok {
+							out, _ = sjson.Set(out, "thinking.type", "enabled")
+							out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+						}
 					}
 				}
 			} else {
@@ -142,16 +166,35 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				}
 				if thinkingBudget.Exists() {
 					budget := int(thinkingBudget.Int())
-					switch budget {
-					case 0:
-						out, _ = sjson.Set(out, "thinking.type", "disabled")
-						out, _ = sjson.Delete(out, "thinking.budget_tokens")
-					case -1:
-						out, _ = sjson.Set(out, "thinking.type", "enabled")
-						out, _ = sjson.Delete(out, "thinking.budget_tokens")
-					default:
-						out, _ = sjson.Set(out, "thinking.type", "enabled")
-						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+					if supportsAdaptive {
+						switch budget {
+						case 0:
+							out, _ = sjson.Set(out, "thinking.type", "disabled")
+							out, _ = sjson.Delete(out, "thinking.budget_tokens")
+							out, _ = sjson.Delete(out, "output_config.effort")
+						default:
+							level, ok := thinking.ConvertBudgetToLevel(budget)
+							if ok {
+								if mapped, okM := thinking.MapToClaudeEffort(level, supportsMax); okM {
+									level = mapped
+								}
+								out, _ = sjson.Set(out, "thinking.type", "adaptive")
+								out, _ = sjson.Delete(out, "thinking.budget_tokens")
+								out, _ = sjson.Set(out, "output_config.effort", level)
+							}
+						}
+					} else {
+						switch budget {
+						case 0:
+							out, _ = sjson.Set(out, "thinking.type", "disabled")
+							out, _ = sjson.Delete(out, "thinking.budget_tokens")
+						case -1:
+							out, _ = sjson.Set(out, "thinking.type", "enabled")
+							out, _ = sjson.Delete(out, "thinking.budget_tokens")
+						default:
+							out, _ = sjson.Set(out, "thinking.type", "enabled")
+							out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+						}
 					}
 				} else if includeThoughts := thinkingConfig.Get("includeThoughts"); includeThoughts.Exists() && includeThoughts.Type == gjson.True {
 					out, _ = sjson.Set(out, "thinking.type", "enabled")

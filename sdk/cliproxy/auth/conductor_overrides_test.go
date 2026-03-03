@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
@@ -115,8 +117,19 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
 	executor := &credentialRetryLimitExecutor{id: "claude"}
 	m.RegisterExecutor(executor)
 
-	auth1 := &Auth{ID: "auth-1", Provider: "claude"}
-	auth2 := &Auth{ID: "auth-2", Provider: "claude"}
+	baseID := uuid.NewString()
+	auth1 := &Auth{ID: baseID + "-auth-1", Provider: "claude"}
+	auth2 := &Auth{ID: baseID + "-auth-2", Provider: "claude"}
+
+	// Auth selection requires that the global model registry knows each credential supports the model.
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "claude", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient(auth2.ID, "claude", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+	})
+
 	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
 		t.Fatalf("register auth1: %v", errRegister)
 	}

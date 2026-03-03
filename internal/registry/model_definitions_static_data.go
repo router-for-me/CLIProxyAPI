@@ -37,7 +37,7 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4.6 Sonnet",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false, Levels: []string{"low", "medium", "high"}},
 		},
 		{
 			ID:                  "claude-opus-4-6",
@@ -49,7 +49,7 @@ func GetClaudeModels() []*ModelInfo {
 			Description:         "Premium model combining maximum intelligence with practical performance",
 			ContextLength:       1000000,
 			MaxCompletionTokens: 128000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false, Levels: []string{"low", "medium", "high", "max"}},
 		},
 		{
 			ID:                  "claude-sonnet-4-6",
