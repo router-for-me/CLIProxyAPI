@@ -50,9 +50,6 @@ func GitHubCopilotAliasesFromModels(modelIDs []string) []OAuthModelAlias {
 			continue
 		}
 		hyphenID := strings.ReplaceAll(id, ".", "-")
-		if hyphenID == id {
-			continue
-		}
 		key := id + "→" + hyphenID
 		if _, ok := seen[key]; ok {
 			continue

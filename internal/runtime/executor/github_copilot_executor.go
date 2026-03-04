@@ -1266,6 +1266,13 @@ func isHTTPSuccess(statusCode int) bool {
 	return statusCode >= 200 && statusCode < 300
 }
 
+const (
+	// defaultCopilotContextLength is the default context window for unknown Copilot models.
+	defaultCopilotContextLength = 128000
+	// defaultCopilotMaxCompletionTokens is the default max output tokens for unknown Copilot models.
+	defaultCopilotMaxCompletionTokens = 16384
+)
+
 // FetchGitHubCopilotModels dynamically fetches available models from the GitHub Copilot API.
 // It exchanges the GitHub access token stored in auth.Metadata for a Copilot API token,
 // then queries the /models endpoint. Falls back to the static registry on any failure.
@@ -1283,13 +1290,7 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 
 	copilotAuth := copilotauth.NewCopilotAuth(cfg)
 
-	apiToken, err := copilotAuth.GetCopilotAPIToken(ctx, accessToken)
-	if err != nil {
-		log.Warnf("github-copilot: failed to get API token for model listing: %v, using static models", err)
-		return registry.GetGitHubCopilotModels()
-	}
-
-	entries, err := copilotAuth.ListModels(ctx, apiToken)
+	entries, err := copilotAuth.ListModelsWithGitHubToken(ctx, accessToken)
 	if err != nil {
 		log.Warnf("github-copilot: failed to fetch dynamic models: %v, using static models", err)
 		return registry.GetGitHubCopilotModels()
@@ -1309,10 +1310,16 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 
 	now := time.Now().Unix()
 	models := make([]*registry.ModelInfo, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if entry.ID == "" {
 			continue
 		}
+		// Deduplicate model IDs to avoid incorrect reference counting.
+		if _, dup := seen[entry.ID]; dup {
+			continue
+		}
+		seen[entry.ID] = struct{}{}
 
 		m := &registry.ModelInfo{
 			ID:      entry.ID,
@@ -1331,11 +1338,6 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 			m.DisplayName = entry.ID
 		}
 
-		// Enrich from capabilities if available
-		if caps, ok := entry.Capabilities["type"].(string); ok && caps != "" {
-			_ = caps // reserved for future use
-		}
-
 		// Merge known metadata from the static fallback list
 		if static, ok := staticMap[entry.ID]; ok {
 			if m.DisplayName == entry.ID && static.DisplayName != "" {
@@ -1349,8 +1351,8 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 		} else {
 			// Sensible defaults for models not in the static list
 			m.Description = entry.ID + " via GitHub Copilot"
-			m.ContextLength = 128000
-			m.MaxCompletionTokens = 16384
+			m.ContextLength = defaultCopilotContextLength
+			m.MaxCompletionTokens = defaultCopilotMaxCompletionTokens
 		}
 
 		models = append(models, m)
