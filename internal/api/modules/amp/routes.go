@@ -306,6 +306,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	provider.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback (no body to check)
 	provider.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
 	provider.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
+	provider.POST("/embeddings", fallbackHandler.WrapHandler(openaiHandlers.Embeddings))
 	provider.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
 
 	// /v1 routes (OpenAI/Claude-compatible endpoints)
@@ -316,6 +317,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 		// OpenAI-compatible endpoints with fallback
 		v1Amp.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
 		v1Amp.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
+		v1Amp.POST("/embeddings", fallbackHandler.WrapHandler(openaiHandlers.Embeddings))
 		v1Amp.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
 
 		// Claude/Anthropic-compatible endpoints with fallback

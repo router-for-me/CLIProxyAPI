@@ -113,6 +113,7 @@ func TestRegisterProviderAliases_AllProvidersRegistered(t *testing.T) {
 		{"/api/provider/google/models", http.MethodGet},
 		{"/api/provider/groq/models", http.MethodGet},
 		{"/api/provider/openai/chat/completions", http.MethodPost},
+		{"/api/provider/openai/embeddings", http.MethodPost},
 		{"/api/provider/anthropic/v1/messages", http.MethodPost},
 		{"/api/provider/google/v1beta/models", http.MethodGet},
 	}
@@ -179,6 +180,7 @@ func TestRegisterProviderAliases_V1Routes(t *testing.T) {
 		{"/api/provider/openai/v1/models", http.MethodGet},
 		{"/api/provider/openai/v1/chat/completions", http.MethodPost},
 		{"/api/provider/openai/v1/completions", http.MethodPost},
+		{"/api/provider/openai/v1/embeddings", http.MethodPost},
 		{"/api/provider/anthropic/v1/messages", http.MethodPost},
 		{"/api/provider/anthropic/v1/messages/count_tokens", http.MethodPost},
 	}

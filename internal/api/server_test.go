@@ -112,6 +112,30 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 	}
 }
 
+func TestServerEmbeddingsRoutesRegistered(t *testing.T) {
+	server := newTestServer(t)
+
+	testCases := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPost, path: "/v1/embeddings"},
+		{method: http.MethodPost, path: "/api/provider/openai/v1/embeddings"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("Authorization", "Bearer test-key")
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			if rr.Code == http.StatusNotFound {
+				t.Fatalf("route %s %s not registered", tc.method, tc.path)
+			}
+		})
+	}
+}
+
 func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")
