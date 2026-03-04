@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -13,6 +14,13 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
 )
+
+type cachedTransport struct {
+	transport *http.Transport
+	err       error
+}
+
+var proxyTransportCache sync.Map
 
 // newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
@@ -56,8 +64,10 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
-	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-		httpClient.Transport = rt
+	if ctx != nil {
+		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+			httpClient.Transport = rt
+		}
 	}
 
 	return httpClient
@@ -75,10 +85,23 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 	if proxyURL == "" {
 		return nil
 	}
+	cacheKey := strings.TrimSpace(proxyURL)
+	if cacheKey == "" {
+		return nil
+	}
+	if cached, ok := proxyTransportCache.Load(cacheKey); ok {
+		if typed, okType := cached.(*cachedTransport); okType {
+			if typed == nil || typed.err != nil {
+				return nil
+			}
+			return typed.transport
+		}
+	}
 
 	parsedURL, errParse := url.Parse(proxyURL)
 	if errParse != nil {
 		log.Errorf("parse proxy URL failed: %v", errParse)
+		proxyTransportCache.Store(cacheKey, &cachedTransport{err: errParse})
 		return nil
 	}
 
@@ -96,21 +119,40 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 		dialer, errSOCKS5 := proxy.SOCKS5("tcp", parsedURL.Host, proxyAuth, proxy.Direct)
 		if errSOCKS5 != nil {
 			log.Errorf("create SOCKS5 dialer failed: %v", errSOCKS5)
+			proxyTransportCache.Store(cacheKey, &cachedTransport{err: errSOCKS5})
 			return nil
 		}
 		// Set up a custom transport using the SOCKS5 dialer
 		transport = &http.Transport{
+			Proxy:                 nil,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return dialer.Dial(network, addr)
 			},
 		}
 	} else if parsedURL.Scheme == "http" || parsedURL.Scheme == "https" {
 		// Configure HTTP or HTTPS proxy
-		transport = &http.Transport{Proxy: http.ProxyURL(parsedURL)}
+		transport = &http.Transport{
+			Proxy:                 http.ProxyURL(parsedURL),
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+		}
 	} else {
 		log.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
+		proxyTransportCache.Store(cacheKey, &cachedTransport{err: url.InvalidHostError(parsedURL.Scheme)})
 		return nil
 	}
+
+	proxyTransportCache.Store(cacheKey, &cachedTransport{transport: transport})
 
 	return transport
 }
