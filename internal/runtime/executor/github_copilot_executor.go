@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -1263,4 +1264,98 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) []st
 // isHTTPSuccess checks if the status code indicates success (2xx).
 func isHTTPSuccess(statusCode int) bool {
 	return statusCode >= 200 && statusCode < 300
+}
+
+// FetchGitHubCopilotModels dynamically fetches available models from the GitHub Copilot API.
+// It exchanges the GitHub access token stored in auth.Metadata for a Copilot API token,
+// then queries the /models endpoint. Falls back to the static registry on any failure.
+func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+	if auth == nil {
+		log.Debug("github-copilot: auth is nil, using static models")
+		return registry.GetGitHubCopilotModels()
+	}
+
+	accessToken := metaStringValue(auth.Metadata, "access_token")
+	if accessToken == "" {
+		log.Debug("github-copilot: no access_token in auth metadata, using static models")
+		return registry.GetGitHubCopilotModels()
+	}
+
+	copilotAuth := copilotauth.NewCopilotAuth(cfg)
+
+	apiToken, err := copilotAuth.GetCopilotAPIToken(ctx, accessToken)
+	if err != nil {
+		log.Warnf("github-copilot: failed to get API token for model listing: %v, using static models", err)
+		return registry.GetGitHubCopilotModels()
+	}
+
+	entries, err := copilotAuth.ListModels(ctx, apiToken)
+	if err != nil {
+		log.Warnf("github-copilot: failed to fetch dynamic models: %v, using static models", err)
+		return registry.GetGitHubCopilotModels()
+	}
+
+	if len(entries) == 0 {
+		log.Debug("github-copilot: API returned no models, using static models")
+		return registry.GetGitHubCopilotModels()
+	}
+
+	// Build a lookup from the static definitions so we can enrich dynamic entries
+	// with known context lengths, thinking support, etc.
+	staticMap := make(map[string]*registry.ModelInfo)
+	for _, m := range registry.GetGitHubCopilotModels() {
+		staticMap[m.ID] = m
+	}
+
+	now := time.Now().Unix()
+	models := make([]*registry.ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		if entry.ID == "" {
+			continue
+		}
+
+		m := &registry.ModelInfo{
+			ID:      entry.ID,
+			Object:  "model",
+			Created: now,
+			OwnedBy: "github-copilot",
+			Type:    "github-copilot",
+		}
+
+		if entry.Created > 0 {
+			m.Created = entry.Created
+		}
+		if entry.Name != "" {
+			m.DisplayName = entry.Name
+		} else {
+			m.DisplayName = entry.ID
+		}
+
+		// Enrich from capabilities if available
+		if caps, ok := entry.Capabilities["type"].(string); ok && caps != "" {
+			_ = caps // reserved for future use
+		}
+
+		// Merge known metadata from the static fallback list
+		if static, ok := staticMap[entry.ID]; ok {
+			if m.DisplayName == entry.ID && static.DisplayName != "" {
+				m.DisplayName = static.DisplayName
+			}
+			m.Description = static.Description
+			m.ContextLength = static.ContextLength
+			m.MaxCompletionTokens = static.MaxCompletionTokens
+			m.SupportedEndpoints = static.SupportedEndpoints
+			m.Thinking = static.Thinking
+		} else {
+			// Sensible defaults for models not in the static list
+			m.Description = entry.ID + " via GitHub Copilot"
+			m.ContextLength = 128000
+			m.MaxCompletionTokens = 16384
+		}
+
+		models = append(models, m)
+	}
+
+	log.Infof("github-copilot: fetched %d models from API", len(models))
+	return models
 }

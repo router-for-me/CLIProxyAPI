@@ -222,6 +222,86 @@ func (c *CopilotAuth) MakeAuthenticatedRequest(ctx context.Context, method, url 
 	return req, nil
 }
 
+// CopilotModelEntry represents a single model entry returned by the Copilot /models API.
+type CopilotModelEntry struct {
+	ID         string                 `json:"id"`
+	Object     string                 `json:"object"`
+	Created    int64                  `json:"created"`
+	OwnedBy   string                 `json:"owned_by"`
+	Name       string                 `json:"name,omitempty"`
+	Version    string                 `json:"version,omitempty"`
+	Capabilities map[string]any       `json:"capabilities,omitempty"`
+	ModelExtra map[string]any         `json:"-"` // catch-all for unknown fields
+}
+
+// CopilotModelsResponse represents the response from the Copilot /models endpoint.
+type CopilotModelsResponse struct {
+	Data   []CopilotModelEntry `json:"data"`
+	Object string              `json:"object"`
+}
+
+// ListModels fetches the list of available models from the Copilot API.
+// It requires a valid Copilot API token (not the GitHub access token).
+func (c *CopilotAuth) ListModels(ctx context.Context, apiToken *CopilotAPIToken) ([]CopilotModelEntry, error) {
+	if apiToken == nil || apiToken.Token == "" {
+		return nil, fmt.Errorf("copilot: api token is required for listing models")
+	}
+
+	modelsURL := copilotAPIEndpoint + "/models"
+	if apiToken.Endpoints.API != "" {
+		modelsURL = apiToken.Endpoints.API + "/models"
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("copilot: failed to create models request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiToken.Token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", copilotUserAgent)
+	req.Header.Set("Editor-Version", copilotEditorVersion)
+	req.Header.Set("Editor-Plugin-Version", copilotPluginVersion)
+	req.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("copilot: models request failed: %w", err)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("copilot list models: close body error: %v", errClose)
+		}
+	}()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("copilot: failed to read models response: %w", err)
+	}
+
+	if !isHTTPSuccess(resp.StatusCode) {
+		return nil, fmt.Errorf("copilot: list models failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var modelsResp CopilotModelsResponse
+	if err = json.Unmarshal(bodyBytes, &modelsResp); err != nil {
+		return nil, fmt.Errorf("copilot: failed to parse models response: %w", err)
+	}
+
+	return modelsResp.Data, nil
+}
+
+// ListModelsWithGitHubToken is a convenience method that exchanges a GitHub access token
+// for a Copilot API token and then fetches the available models.
+func (c *CopilotAuth) ListModelsWithGitHubToken(ctx context.Context, githubAccessToken string) ([]CopilotModelEntry, error) {
+	apiToken, err := c.GetCopilotAPIToken(ctx, githubAccessToken)
+	if err != nil {
+		return nil, fmt.Errorf("copilot: failed to get API token for model listing: %w", err)
+	}
+
+	return c.ListModels(ctx, apiToken)
+}
+
 // buildChatCompletionURL builds the URL for chat completions API.
 func buildChatCompletionURL() string {
 	return copilotAPIEndpoint + "/chat/completions"
