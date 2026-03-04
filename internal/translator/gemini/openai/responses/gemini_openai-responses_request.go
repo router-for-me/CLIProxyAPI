@@ -285,8 +285,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			case "function_call_output":
 				// Handle function call outputs - convert to function message with functionResponse
 				callID := item.Get("call_id").String()
-				// Use .Raw to preserve the JSON encoding (includes quotes for strings)
-				outputRaw := item.Get("output").Str
+				outputResult := item.Get("output")
+				outputRaw := outputResult.Raw
 
 				functionContent := `{"role":"function","parts":[]}`
 				functionResponse := `{"functionResponse":{"name":"","response":{}}}`
@@ -311,12 +311,12 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.id", callID)
 
 				// Set the raw JSON output directly (preserves string encoding)
-				if outputRaw != "" && outputRaw != "null" {
+				if outputResult.Exists() && outputRaw != "" && outputRaw != "null" {
 					output := gjson.Parse(outputRaw)
 					if output.Type == gjson.JSON {
 						functionResponse, _ = sjson.SetRaw(functionResponse, "functionResponse.response.result", output.Raw)
 					} else {
-						functionResponse, _ = sjson.Set(functionResponse, "functionResponse.response.result", outputRaw)
+						functionResponse, _ = sjson.Set(functionResponse, "functionResponse.response.result", outputResult.Value())
 					}
 				}
 				functionContent, _ = sjson.SetRaw(functionContent, "parts.-1", functionResponse)
@@ -407,16 +407,49 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	}
 
 	// Handle stop sequences
-	if stopSequences := root.Get("stop_sequences"); stopSequences.Exists() && stopSequences.IsArray() {
+	stopSequences := root.Get("stop")
+	if !stopSequences.Exists() {
+		stopSequences = root.Get("stop_sequences")
+	}
+	if stopSequences.Exists() {
 		if !gjson.Get(out, "generationConfig").Exists() {
 			out, _ = sjson.SetRaw(out, "generationConfig", `{}`)
 		}
 		var sequences []string
-		stopSequences.ForEach(func(_, seq gjson.Result) bool {
-			sequences = append(sequences, seq.String())
-			return true
-		})
-		out, _ = sjson.Set(out, "generationConfig.stopSequences", sequences)
+		if stopSequences.IsArray() {
+			stopSequences.ForEach(func(_, seq gjson.Result) bool {
+				sequences = append(sequences, seq.String())
+				return true
+			})
+		} else {
+			sequences = append(sequences, stopSequences.String())
+		}
+		if len(sequences) > 0 {
+			out, _ = sjson.Set(out, "generationConfig.stopSequences", sequences)
+		}
+	}
+
+	// Handle tool_choice mapping
+	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+		switch toolChoice.Type {
+		case gjson.String:
+			switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
+			case "auto":
+				out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.mode", "AUTO")
+			case "none":
+				out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.mode", "NONE")
+			case "required":
+				out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.mode", "ANY")
+			}
+		case gjson.JSON:
+			if strings.EqualFold(toolChoice.Get("type").String(), "function") {
+				out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.mode", "ANY")
+				if name := strings.TrimSpace(toolChoice.Get("function.name").String()); name != "" {
+					out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{name})
+				}
+			}
+		default:
+		}
 	}
 
 	// Apply thinking configuration: convert OpenAI Responses API reasoning.effort to Gemini thinkingConfig.

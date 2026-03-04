@@ -227,6 +227,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 									imagePart, _ = sjson.Set(imagePart, "source.data", data)
 									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
 								}
+							} else if imageURL != "" {
+								imagePart := `{"type":"image","source":{"type":"url","url":""}}`
+								imagePart, _ = sjson.Set(imagePart, "source.url", imageURL)
+								msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
 							}
 
 						case "file":

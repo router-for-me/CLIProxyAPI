@@ -588,3 +588,17 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		t.Fatalf("Expected reasoning_content %q, got %q", "t1\n\nt2", got)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_MapStopAlias(t *testing.T) {
+	in := []byte(`{
+		"model":"claude-3-opus",
+		"stop":"END",
+		"messages":[{"role":"user","content":"hello"}]
+	}`)
+
+	out := ConvertClaudeRequestToOpenAI("claude-3-opus", in, false)
+	root := gjson.ParseBytes(out)
+	if got := root.Get("stop").String(); got != "END" {
+		t.Fatalf("stop alias should be mapped, got=%q output=%s", got, string(out))
+	}
+}
