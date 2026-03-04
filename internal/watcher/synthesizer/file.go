@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -71,6 +72,10 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		id := full
 		if rel, errRel := filepath.Rel(ctx.AuthDir, full); errRel == nil && rel != "" {
 			id = rel
+		}
+		// On Windows, normalize ID casing to avoid duplicate auth entries caused by case-insensitive paths.
+		if runtime.GOOS == "windows" {
+			id = strings.ToLower(id)
 		}
 
 		proxyURL := ""

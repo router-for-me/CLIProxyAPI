@@ -10,7 +10,7 @@ The Plus release stays in lockstep with the mainline features.
 
 ## Differences from the Mainline
 
-[![z.ai](https://assets.router-for.me/english-5.png)](https://z.ai/subscribe?ic=8JVLJQFSKB)
+[![z.ai](https://assets.router-for.me/english-5-0.jpg)](https://z.ai/subscribe?ic=8JVLJQFSKB)
 
 ## New Features (Plus Enhanced)
 

@@ -10,7 +10,7 @@
 
 ## 与主线版本版本差异
 
-[![bigmodel.cn](https://assets.router-for.me/chinese-5.png)](https://www.bigmodel.cn/claude-code?ic=RRVJPB5SII)
+[![bigmodel.cn](https://assets.router-for.me/chinese-5-0.jpg)](https://www.bigmodel.cn/claude-code?ic=RRVJPB5SII)
 
 ## 新增功能 (Plus 增强版)
 
