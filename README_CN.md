@@ -60,6 +60,30 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+## 可配置 OAuth 回调域名
+
+默认情况下，OAuth 回调保持现有 localhost 行为不变。
+
+若需要通过公网域名接收 OAuth 回调，可在配置中启用 `oauth-callback`：
+
+```yaml
+oauth-callback:
+  enabled: true
+  external-base-url: "https://cliproxy.example.com"
+  provider-paths:
+    anthropic: "/oauth/callback/anthropic"
+    codex: "/oauth/callback/codex"
+    gemini: "/oauth/callback/gemini"
+    iflow: "/oauth/callback/iflow"
+    antigravity: "/oauth/callback/antigravity"
+```
+
+说明：
+- 关闭时：沿用 localhost 回调流程
+- 开启时：回调地址使用外部域名 + provider 路径
+- provider 控制台中的 redirect URI 必须与配置完全一致
+- 若使用 Nginx，请将 `/oauth/callback/` 反代到 CLIProxyAPI 服务
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

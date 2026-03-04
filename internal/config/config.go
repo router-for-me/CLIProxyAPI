@@ -26,6 +26,8 @@ const (
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	SDKConfig `yaml:",inline"`
+	// OAuthCallback configures optional external OAuth callback URLs and provider paths.
+	OAuthCallback OAuthCallbackConfig `yaml:"oauth-callback" json:"oauth-callback"`
 	// Host is the network host/interface on which the API server will bind.
 	// Default is empty ("") to bind all interfaces (IPv4 + IPv6). Use "127.0.0.1" or "localhost" for local-only access.
 	Host string `yaml:"host" json:"-"`
@@ -162,6 +164,13 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+}
+
+// OAuthCallbackConfig defines optional external OAuth callback settings.
+type OAuthCallbackConfig struct {
+	Enabled         bool              `yaml:"enabled" json:"enabled"`
+	ExternalBaseURL string            `yaml:"external-base-url" json:"external-base-url"`
+	ProviderPaths   map[string]string `yaml:"provider-paths" json:"provider-paths"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.

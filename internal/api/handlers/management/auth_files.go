@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,6 +29,7 @@ import (
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -125,6 +127,27 @@ func isWebUIRequest(c *gin.Context) bool {
 	default:
 		return false
 	}
+}
+
+func isExternalOAuthCallbackMode(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if !cfg.OAuthCallback.Enabled {
+		return false
+	}
+	return strings.TrimSpace(cfg.OAuthCallback.ExternalBaseURL) != ""
+}
+
+func addOrReplaceQueryValue(rawURL, key, value string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set(key, value)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
@@ -1018,17 +1041,29 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	// Initialize Claude auth service
 	anthropicAuth := claude.NewClaudeAuth(h.cfg)
 
-	// Generate authorization URL (then override redirect_uri to reuse server port)
+	redirectURI, err := BuildOAuthRedirectURI(h.cfg, "anthropic", claude.RedirectURI)
+	if err != nil {
+		log.Errorf("Failed to build redirect URI: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build redirect uri"})
+		return
+	}
+
+	// Generate authorization URL (then override redirect_uri to reuse configured callback)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return
 	}
+	if authURL, err = addOrReplaceQueryValue(authURL, "redirect_uri", redirectURI); err != nil {
+		log.Errorf("Failed to apply redirect URI: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to apply redirect uri"})
+		return
+	}
 
 	RegisterOAuthSession(state, "anthropic")
 
-	isWebUI := isWebUIRequest(c)
+	isWebUI := isWebUIRequest(c) && !isExternalOAuthCallbackMode(h.cfg)
 	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/anthropic/callback")
@@ -1102,7 +1137,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		code := strings.Split(rawCode, "#")[0]
 
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
+		bundle, errExchange := anthropicAuth.ExchangeCodeForTokensWithRedirect(ctx, code, state, redirectURI, pkceCodes)
 		if errExchange != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errExchange)
 			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
@@ -1149,11 +1184,18 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 	fmt.Println("Initializing Google authentication...")
 
+	redirectURI, err := BuildOAuthRedirectURI(h.cfg, "gemini", fmt.Sprintf("http://localhost:%d/oauth2callback", geminiAuth.DefaultCallbackPort))
+	if err != nil {
+		log.Errorf("Failed to build redirect URI: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build redirect uri"})
+		return
+	}
+
 	// OAuth2 configuration using exported constants from internal/auth/gemini
 	conf := &oauth2.Config{
 		ClientID:     geminiAuth.ClientID,
 		ClientSecret: geminiAuth.ClientSecret,
-		RedirectURL:  fmt.Sprintf("http://localhost:%d/oauth2callback", geminiAuth.DefaultCallbackPort),
+		RedirectURL:  redirectURI,
 		Scopes:       geminiAuth.Scopes,
 		Endpoint:     google.Endpoint,
 	}
@@ -1164,7 +1206,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 	RegisterOAuthSession(state, "gemini")
 
-	isWebUI := isWebUIRequest(c)
+	isWebUI := isWebUIRequest(c) && !isExternalOAuthCallbackMode(h.cfg)
 	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/google/callback")
@@ -1422,6 +1464,13 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	// Initialize Codex auth service
 	openaiAuth := codex.NewCodexAuth(h.cfg)
 
+	redirectURI, err := BuildOAuthRedirectURI(h.cfg, "codex", codex.RedirectURI)
+	if err != nil {
+		log.Errorf("Failed to build redirect URI: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build redirect uri"})
+		return
+	}
+
 	// Generate authorization URL
 	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
 	if err != nil {
@@ -1429,10 +1478,15 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return
 	}
+	if authURL, err = addOrReplaceQueryValue(authURL, "redirect_uri", redirectURI); err != nil {
+		log.Errorf("Failed to apply redirect URI: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to apply redirect uri"})
+		return
+	}
 
 	RegisterOAuthSession(state, "codex")
 
-	isWebUI := isWebUIRequest(c)
+	isWebUI := isWebUIRequest(c) && !isExternalOAuthCallbackMode(h.cfg)
 	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
@@ -1492,7 +1546,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		log.Debug("Authorization code received, exchanging for tokens...")
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
+		bundle, errExchange := openaiAuth.ExchangeCodeForTokensWithRedirect(ctx, code, redirectURI, pkceCodes)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
 			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
@@ -1558,12 +1612,17 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		return
 	}
 
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
+	redirectURI, err := BuildOAuthRedirectURI(h.cfg, "antigravity", fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort))
+	if err != nil {
+		log.Errorf("Failed to build redirect URI: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build redirect uri"})
+		return
+	}
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	RegisterOAuthSession(state, "antigravity")
 
-	isWebUI := isWebUIRequest(c)
+	isWebUI := isWebUIRequest(c) && !isExternalOAuthCallbackMode(h.cfg)
 	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/antigravity/callback")
@@ -1850,10 +1909,22 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	state := fmt.Sprintf("ifl-%d", time.Now().UnixNano())
 	authSvc := iflowauth.NewIFlowAuth(h.cfg)
 	authURL, redirectURI := authSvc.AuthorizationURL(state, iflowauth.CallbackPort)
+	oauthRedirectURI, err := BuildOAuthRedirectURI(h.cfg, "iflow", redirectURI)
+	if err != nil {
+		log.Errorf("Failed to build redirect URI: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to build redirect uri"})
+		return
+	}
+	if authURL, err = addOrReplaceQueryValue(authURL, "redirect", oauthRedirectURI); err != nil {
+		log.Errorf("Failed to apply redirect URI: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to apply redirect uri"})
+		return
+	}
+	redirectURI = oauthRedirectURI
 
 	RegisterOAuthSession(state, "iflow")
 
-	isWebUI := isWebUIRequest(c)
+	isWebUI := isWebUIRequest(c) && !isExternalOAuthCallbackMode(h.cfg)
 	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/iflow/callback")

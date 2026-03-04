@@ -60,6 +60,30 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Configurable OAuth Callback Domain
+
+By default, OAuth callbacks keep the existing localhost behavior.
+
+If you want to receive OAuth callbacks through a public domain, enable `oauth-callback` in config:
+
+```yaml
+oauth-callback:
+  enabled: true
+  external-base-url: "https://cliproxy.example.com"
+  provider-paths:
+    anthropic: "/oauth/callback/anthropic"
+    codex: "/oauth/callback/codex"
+    gemini: "/oauth/callback/gemini"
+    iflow: "/oauth/callback/iflow"
+    antigravity: "/oauth/callback/antigravity"
+```
+
+Notes:
+- disabled => legacy localhost callback flow
+- enabled => callback URL uses your external domain + provider path
+- provider console redirect URI must match this config exactly
+- if using Nginx, proxy `/oauth/callback/` to CLIProxyAPI service
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

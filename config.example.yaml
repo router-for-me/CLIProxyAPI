@@ -31,6 +31,18 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
+# Optional OAuth callback domain/path override.
+# Disabled by default to preserve existing localhost callback behavior.
+# oauth-callback:
+#   enabled: true
+#   external-base-url: "https://cliproxy.example.com"
+#   provider-paths:
+#     anthropic: "/oauth/callback/anthropic"
+#     codex: "/oauth/callback/codex"
+#     gemini: "/oauth/callback/gemini"
+#     iflow: "/oauth/callback/iflow"
+#     antigravity: "/oauth/callback/antigravity"
+
 # API keys for authentication
 api-keys:
   - "your-api-key-1"
