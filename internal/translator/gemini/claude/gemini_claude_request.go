@@ -85,6 +85,11 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 
 					case "tool_use":
 						functionName := contentResult.Get("name").String()
+						if toolUseID := contentResult.Get("id").String(); toolUseID != "" {
+							if derived := toolNameFromClaudeToolUseID(toolUseID); derived != "" {
+								functionName = derived
+							}
+						}
 						functionArgs := contentResult.Get("input").String()
 						argsResult := gjson.Parse(functionArgs)
 						if argsResult.IsObject() && gjson.Valid(functionArgs) {
@@ -100,10 +105,9 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						if toolCallID == "" {
 							return true
 						}
-						funcName := toolCallID
-						toolCallIDs := strings.Split(toolCallID, "-")
-						if len(toolCallIDs) > 1 {
-							funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
+						funcName := toolNameFromClaudeToolUseID(toolCallID)
+						if funcName == "" {
+							funcName = toolCallID
 						}
 						responseData := contentResult.Get("content").Raw
 						part := `{"functionResponse":{"name":"","response":{"result":""}}}`
@@ -137,6 +141,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				tool, _ = sjson.Delete(tool, "input_examples")
 				tool, _ = sjson.Delete(tool, "type")
 				tool, _ = sjson.Delete(tool, "cache_control")
+				tool, _ = sjson.Delete(tool, "defer_loading")
 				if gjson.Valid(tool) && gjson.Parse(tool).IsObject() {
 					if !hasTools {
 						out, _ = sjson.SetRaw(out, "tools", `[{"functionDeclarations":[]}]`)
@@ -149,6 +154,33 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		})
 		if !hasTools {
 			out, _ = sjson.Delete(out, "tools")
+		}
+	}
+
+	// tool_choice
+	toolChoiceResult := gjson.GetBytes(rawJSON, "tool_choice")
+	if toolChoiceResult.Exists() {
+		toolChoiceType := ""
+		toolChoiceName := ""
+		if toolChoiceResult.IsObject() {
+			toolChoiceType = toolChoiceResult.Get("type").String()
+			toolChoiceName = toolChoiceResult.Get("name").String()
+		} else if toolChoiceResult.Type == gjson.String {
+			toolChoiceType = toolChoiceResult.String()
+		}
+
+		switch toolChoiceType {
+		case "auto":
+			out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.mode", "AUTO")
+		case "none":
+			out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.mode", "NONE")
+		case "any":
+			out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.mode", "ANY")
+		case "tool":
+			out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.mode", "ANY")
+			if toolChoiceName != "" {
+				out, _ = sjson.Set(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{toolChoiceName})
+			}
 		}
 	}
 
@@ -201,4 +233,12 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	result = common.AttachDefaultSafetySettings(result, "safetySettings")
 
 	return result
+}
+
+func toolNameFromClaudeToolUseID(toolUseID string) string {
+	parts := strings.Split(toolUseID, "-")
+	if len(parts) <= 1 {
+		return ""
+	}
+	return strings.Join(parts[0:len(parts)-1], "-")
 }

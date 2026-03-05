@@ -431,6 +431,33 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetRaw(out, "request.tools", toolsJSON)
 	}
 
+	// tool_choice
+	toolChoiceResult := gjson.GetBytes(rawJSON, "tool_choice")
+	if toolChoiceResult.Exists() {
+		toolChoiceType := ""
+		toolChoiceName := ""
+		if toolChoiceResult.IsObject() {
+			toolChoiceType = toolChoiceResult.Get("type").String()
+			toolChoiceName = toolChoiceResult.Get("name").String()
+		} else if toolChoiceResult.Type == gjson.String {
+			toolChoiceType = toolChoiceResult.String()
+		}
+
+		switch toolChoiceType {
+		case "auto":
+			out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.mode", "AUTO")
+		case "none":
+			out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.mode", "NONE")
+		case "any":
+			out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
+		case "tool":
+			out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
+			if toolChoiceName != "" {
+				out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{toolChoiceName})
+			}
+		}
+	}
+
 	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
 	if t := gjson.GetBytes(rawJSON, "thinking"); enableThoughtTranslate && t.Exists() && t.IsObject() {
 		switch t.Get("type").String() {
@@ -441,15 +468,18 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
 			}
 		case "adaptive", "auto":
-			// Adaptive/auto thinking:
-			// - If output_config.effort is present, pass it through as thinkingLevel.
-			// - Otherwise, default to "high".
-			// ApplyThinking later normalizes/clamps and may convert level → budget per target model.
+			// For adaptive thinking:
+			// - If output_config.effort is explicitly present, pass through as thinkingLevel.
+			// - Otherwise, treat it as "enabled with target-model maximum" and emit high.
+			// ApplyThinking handles clamping to target model's supported levels.
 			effort := ""
 			if v := gjson.GetBytes(rawJSON, "output_config.effort"); v.Exists() && v.Type == gjson.String {
 				effort = strings.ToLower(strings.TrimSpace(v.String()))
 			}
 			if effort != "" {
+				if effort == "max" {
+					effort = "high"
+				}
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", effort)
 			} else {
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")

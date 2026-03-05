@@ -34,6 +34,9 @@ type VertexCompatKey struct {
 
 	// Models defines the model configurations including aliases for routing.
 	Models []VertexCompatModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }
 
 func (k VertexCompatKey) GetAPIKey() string  { return k.APIKey }
@@ -74,6 +77,7 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 		}
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 
 		// Sanitize models: remove entries without valid alias
 		sanitizedModels := make([]VertexCompatModel, 0, len(entry.Models))

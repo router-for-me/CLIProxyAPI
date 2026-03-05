@@ -441,6 +441,46 @@ func TestRemoveClientRemovesHash(t *testing.T) {
 	}
 }
 
+func TestTriggerServerUpdateCancelsPendingTimerOnImmediate(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{AuthDir: tmpDir}
+
+	var reloads int32
+	w := &Watcher{
+		reloadCallback: func(*config.Config) {
+			atomic.AddInt32(&reloads, 1)
+		},
+	}
+	w.SetConfig(cfg)
+
+	w.serverUpdateMu.Lock()
+	w.serverUpdateLast = time.Now().Add(-(serverUpdateDebounce - 100*time.Millisecond))
+	w.serverUpdateMu.Unlock()
+	w.triggerServerUpdate(cfg)
+
+	if got := atomic.LoadInt32(&reloads); got != 0 {
+		t.Fatalf("expected no immediate reload, got %d", got)
+	}
+
+	w.serverUpdateMu.Lock()
+	if !w.serverUpdatePend || w.serverUpdateTimer == nil {
+		w.serverUpdateMu.Unlock()
+		t.Fatal("expected a pending server update timer")
+	}
+	w.serverUpdateLast = time.Now().Add(-(serverUpdateDebounce + 10*time.Millisecond))
+	w.serverUpdateMu.Unlock()
+
+	w.triggerServerUpdate(cfg)
+	if got := atomic.LoadInt32(&reloads); got != 1 {
+		t.Fatalf("expected immediate reload once, got %d", got)
+	}
+
+	time.Sleep(250 * time.Millisecond)
+	if got := atomic.LoadInt32(&reloads); got != 1 {
+		t.Fatalf("expected pending timer to be cancelled, got %d reloads", got)
+	}
+}
+
 func TestShouldDebounceRemove(t *testing.T) {
 	w := &Watcher{}
 	path := filepath.Clean("test.json")

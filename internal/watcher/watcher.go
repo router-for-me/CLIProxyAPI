@@ -83,24 +83,7 @@ const (
 	configReloadDebounce     = 150 * time.Millisecond
 	authRemoveDebounceWindow = 1 * time.Second
 	serverUpdateDebounce     = 1 * time.Second
-	minServerUpdateDelay     = 10 * time.Millisecond
-	maxAuthFileSize    int64 = 10 << 20 // 10 MiB
 )
-
-var authSensitiveLogKeywords = []string{
-	"token",
-	"secret",
-	"password",
-	"passwd",
-	"authorization",
-	"bearer",
-	"cookie",
-	"api_key",
-	"apikey",
-	"private_key",
-	"refresh",
-	"session",
-}
 
 // NewWatcher creates a new file watcher instance
 func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config)) (*Watcher, error) {
