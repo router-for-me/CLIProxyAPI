@@ -255,6 +255,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			tool, _ = sjson.SetRaw(tool, "parameters", normalizeToolParameters(toolResult.Get("input_schema").Raw))
 			tool, _ = sjson.Delete(tool, "input_schema")
 			tool, _ = sjson.Delete(tool, "parameters.$schema")
+			// Strip Anthropic-only fields that Codex doesn't understand
+			tool, _ = sjson.Delete(tool, "defer_loading")
+			tool, _ = sjson.Delete(tool, "cache_control")
 			tool, _ = sjson.Set(tool, "strict", false)
 			template, _ = sjson.SetRaw(template, "tools.-1", tool)
 		}
