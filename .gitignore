@@ -54,7 +54,3 @@ _bmad-output/*
 .DS_Store
 ._*
 *.bak
-
-# Build output
-CLIProxyAPIPlus
-CLIProxyAPIPlus.app/
