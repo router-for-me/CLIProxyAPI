@@ -37,6 +37,45 @@ func TestApplyClaudeToolPrefix(t *testing.T) {
 	}
 }
 
+func TestEnforceSystemPromptCount_MergeExtrasIntoSecond(t *testing.T) {
+	input := []byte(`{
+		"system": [
+			{"type":"text","text":"first"},
+			{"type":"text","text":"second"},
+			{"type":"text","text":"third"},
+			{"type":"text","text":"fourth"}
+		]
+	}`)
+
+	out := enforceSystemPromptCount(input, 2)
+
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+		t.Fatalf("system count = %d, want 2", got)
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "first" {
+		t.Fatalf("system.0.text = %q, want %q", got, "first")
+	}
+	if got := gjson.GetBytes(out, "system.1.text").String(); got != "second\n\nthird\n\nfourth" {
+		t.Fatalf("system.1.text = %q, want %q", got, "second\\n\\nthird\\n\\nfourth")
+	}
+}
+
+func TestEnforceSystemPromptCount_PadsEmptyWhenMissing(t *testing.T) {
+	input := []byte(`{"system":[{"type":"text","text":"only-one"}]}`)
+
+	out := enforceSystemPromptCount(input, 2)
+
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+		t.Fatalf("system count = %d, want 2", got)
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "only-one" {
+		t.Fatalf("system.0.text = %q, want %q", got, "only-one")
+	}
+	if got := gjson.GetBytes(out, "system.1.text").String(); got != "" {
+		t.Fatalf("system.1.text = %q, want empty", got)
+	}
+}
+
 func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"alpha"}],"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"beta"},{"type":"tool_reference","tool_name":"proxy_gamma"}]}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")

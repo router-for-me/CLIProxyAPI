@@ -351,6 +351,10 @@ type ClaudeKey struct {
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 
+	// SystemPromptCount forces the outbound system block count when greater than 0.
+	// Extra blocks are merged into the last block and missing blocks are padded.
+	SystemPromptCount int `yaml:"system-prompt-count,omitempty" json:"system-prompt-count,omitempty"`
+
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
 }
@@ -821,6 +825,9 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		if entry.SystemPromptCount < 0 {
+			entry.SystemPromptCount = 0
+		}
 	}
 }
 
