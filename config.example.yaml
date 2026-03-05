@@ -185,8 +185,10 @@ nonstream-keepalive-interval: 0
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #       - api-key: "sk-or-v1-...b781" # without proxy-url
 #     models: # The models supported by the provider.
-#       - name: "moonshotai/kimi-k2:free" # The actual model name.
+#       - name: "moonshotai/kimi-k2:free" # Chat/completions model example.
 #         alias: "kimi-k2" # The alias used in the API.
+#       - name: "baai/bge-m3" # Embeddings model example for POST /v1/embeddings.
+#         alias: "bge-m3"
 
 # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
 # vertex-api-key:
