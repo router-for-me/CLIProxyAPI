@@ -84,13 +84,18 @@ func DetectTruncation(toolName, toolUseID, rawInput string, parsedInput map[stri
 		ParsedFields: make(map[string]string),
 	}
 
-	// Scenario 1: Empty input buffer - no data received at all
+	// Scenario 1: Empty input buffer - only flag as truncation if tool has required fields
+	// Many tools (e.g. TaskList, TaskGet) have no required params, so empty input is valid
 	if strings.TrimSpace(rawInput) == "" {
-		info.IsTruncated = true
-		info.TruncationType = TruncationTypeEmptyInput
-		info.ErrorMessage = "Tool input was completely empty - API response may have been truncated before tool parameters were transmitted"
-		log.Warnf("kiro: truncation detected [%s] for tool %s (ID: %s): empty input buffer",
-			info.TruncationType, toolName, toolUseID)
+		if _, hasRequirements := RequiredFieldsByTool[toolName]; hasRequirements {
+			info.IsTruncated = true
+			info.TruncationType = TruncationTypeEmptyInput
+			info.ErrorMessage = "Tool input was completely empty - API response may have been truncated before tool parameters were transmitted"
+			log.Warnf("kiro: truncation detected [%s] for tool %s (ID: %s): empty input buffer",
+				info.TruncationType, toolName, toolUseID)
+			return info
+		}
+		log.Debugf("kiro: empty input for tool %s (ID: %s) - no required fields, treating as valid", toolName, toolUseID)
 		return info
 	}
 
