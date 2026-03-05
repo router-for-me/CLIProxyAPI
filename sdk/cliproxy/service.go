@@ -872,7 +872,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = registry.GetKimiModels()
     models = applyExcludedModels(models, excluded)
 	case "github-copilot":
-		models = registry.GetGitHubCopilotModels()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		models = executor.FetchGitHubCopilotModels(ctx, a, s.cfg)
 		models = applyExcludedModels(models, excluded)
 	case "kiro":
 		models = s.fetchKiroModels(a)

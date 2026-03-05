@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -220,6 +222,97 @@ func (c *CopilotAuth) MakeAuthenticatedRequest(ctx context.Context, method, url 
 	req.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
 
 	return req, nil
+}
+
+// CopilotModelEntry represents a single model entry returned by the Copilot /models API.
+type CopilotModelEntry struct {
+	ID           string         `json:"id"`
+	Object       string         `json:"object"`
+	Created      int64          `json:"created"`
+	OwnedBy      string         `json:"owned_by"`
+	Name         string         `json:"name,omitempty"`
+	Version      string         `json:"version,omitempty"`
+	Capabilities map[string]any `json:"capabilities,omitempty"`
+}
+
+// CopilotModelsResponse represents the response from the Copilot /models endpoint.
+type CopilotModelsResponse struct {
+	Data   []CopilotModelEntry `json:"data"`
+	Object string              `json:"object"`
+}
+
+// maxModelsResponseSize is the maximum allowed response size from the /models endpoint (2 MB).
+const maxModelsResponseSize = 2 * 1024 * 1024
+
+// allowedCopilotAPIHosts is the set of hosts that are considered safe for Copilot API requests.
+var allowedCopilotAPIHosts = map[string]bool{
+	"api.githubcopilot.com":          true,
+	"api.individual.githubcopilot.com": true,
+	"api.business.githubcopilot.com":   true,
+	"copilot-proxy.githubusercontent.com": true,
+}
+
+// ListModels fetches the list of available models from the Copilot API.
+// It requires a valid Copilot API token (not the GitHub access token).
+func (c *CopilotAuth) ListModels(ctx context.Context, apiToken *CopilotAPIToken) ([]CopilotModelEntry, error) {
+	if apiToken == nil || apiToken.Token == "" {
+		return nil, fmt.Errorf("copilot: api token is required for listing models")
+	}
+
+	// Build models URL, validating the endpoint host to prevent SSRF.
+	modelsURL := copilotAPIEndpoint + "/models"
+	if ep := strings.TrimRight(apiToken.Endpoints.API, "/"); ep != "" {
+		parsed, err := url.Parse(ep)
+		if err == nil && parsed.Scheme == "https" && allowedCopilotAPIHosts[parsed.Host] {
+			modelsURL = ep + "/models"
+		} else {
+			log.Warnf("copilot: ignoring untrusted API endpoint %q, using default", ep)
+		}
+	}
+
+	req, err := c.MakeAuthenticatedRequest(ctx, http.MethodGet, modelsURL, nil, apiToken)
+	if err != nil {
+		return nil, fmt.Errorf("copilot: failed to create models request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("copilot: models request failed: %w", err)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("copilot list models: close body error: %v", errClose)
+		}
+	}()
+
+	// Limit response body to prevent memory exhaustion.
+	limitedReader := io.LimitReader(resp.Body, maxModelsResponseSize)
+	bodyBytes, err := io.ReadAll(limitedReader)
+	if err != nil {
+		return nil, fmt.Errorf("copilot: failed to read models response: %w", err)
+	}
+
+	if !isHTTPSuccess(resp.StatusCode) {
+		return nil, fmt.Errorf("copilot: list models failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var modelsResp CopilotModelsResponse
+	if err = json.Unmarshal(bodyBytes, &modelsResp); err != nil {
+		return nil, fmt.Errorf("copilot: failed to parse models response: %w", err)
+	}
+
+	return modelsResp.Data, nil
+}
+
+// ListModelsWithGitHubToken is a convenience method that exchanges a GitHub access token
+// for a Copilot API token and then fetches the available models.
+func (c *CopilotAuth) ListModelsWithGitHubToken(ctx context.Context, githubAccessToken string) ([]CopilotModelEntry, error) {
+	apiToken, err := c.GetCopilotAPIToken(ctx, githubAccessToken)
+	if err != nil {
+		return nil, fmt.Errorf("copilot: failed to get API token for model listing: %w", err)
+	}
+
+	return c.ListModels(ctx, apiToken)
 }
 
 // buildChatCompletionURL builds the URL for chat completions API.
