@@ -23,7 +23,6 @@ import (
 //   - kiro
 //   - kilo
 //   - github-copilot
-//   - kiro
 //   - amazonq
 //   - antigravity (returns static overrides only)
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {

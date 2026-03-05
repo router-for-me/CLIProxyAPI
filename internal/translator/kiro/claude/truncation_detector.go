@@ -342,7 +342,7 @@ func buildTruncationErrorMessage(toolName, truncationType string, parsedFields m
 	}
 
 	sb.WriteString(" Received ")
-	sb.WriteString(string(rune(len(rawInput))))
+	sb.WriteString(formatInt(len(rawInput)))
 	sb.WriteString(" bytes. Please retry with smaller content chunks.")
 
 	return sb.String()
