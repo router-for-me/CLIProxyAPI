@@ -82,7 +82,8 @@ func parseLastRefreshValue(v any) (time.Time, bool) {
 		if s == "" {
 			return time.Time{}, false
 		}
-		layouts := []string{time.RFC3339, time.RFC3339Nano, "2006-01-02 15:04:05", "2006-01-02T15:04:05Z07:00"}
+
+		layouts := []string{time.RFC3339, time.RFC3339Nano, time.DateTime}
 		for _, layout := range layouts {
 			if ts, err := time.Parse(layout, s); err == nil {
 				return ts.UTC(), true
