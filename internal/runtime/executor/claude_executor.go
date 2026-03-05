@@ -1148,58 +1148,99 @@ func enforceSystemPromptCount(payload []byte, targetCount int) []byte {
 	if targetCount <= 0 {
 		return payload
 	}
+	if targetCount > config.MaxClaudeSystemPromptCount {
+		targetCount = config.MaxClaudeSystemPromptCount
+	}
+
 	root, ok := parsePayloadObject(payload)
 	if !ok {
 		return payload
 	}
 
-	texts := make([]string, 0, targetCount)
-	appendText := func(value any) {
-		switch v := value.(type) {
-		case string:
-			texts = append(texts, v)
-		case map[string]any:
-			if blockType, ok := v["type"].(string); ok && blockType != "" && !strings.EqualFold(blockType, "text") {
-				return
-			}
-			text, ok := v["text"].(string)
-			if !ok {
-				return
-			}
-			texts = append(texts, text)
-		}
-	}
-
+	systemBlocks := make([]any, 0, targetCount)
 	if system, exists := root["system"]; exists {
-		if items, ok := asArray(system); ok {
-			for _, item := range items {
-				appendText(item)
-			}
+		if arr, ok := asArray(system); ok {
+			systemBlocks = append(systemBlocks, arr...)
 		} else {
-			appendText(system)
+			systemBlocks = append(systemBlocks, system)
 		}
 	}
 
-	normalized := make([]string, 0, targetCount)
-	if len(texts) >= targetCount {
-		normalized = append(normalized, texts[:targetCount-1]...)
-		normalized = append(normalized, strings.Join(texts[targetCount-1:], "\n\n"))
-	} else {
-		normalized = append(normalized, texts...)
-		for len(normalized) < targetCount {
-			normalized = append(normalized, "")
+	textValues := make([]string, 0, len(systemBlocks))
+	for _, block := range systemBlocks {
+		if text, ok := extractSystemText(block); ok {
+			textValues = append(textValues, text)
 		}
 	}
 
-	blocks := make([]any, 0, targetCount)
-	for _, text := range normalized {
-		blocks = append(blocks, map[string]any{
+	// Reduce text block count by merging overflow text into the last retained text block.
+	if len(textValues) >= targetCount {
+		mergedText := strings.Join(textValues[targetCount-1:], "\n\n")
+		merged := make([]any, 0, len(systemBlocks)-(len(textValues)-targetCount))
+		textIndex := 0
+		for _, block := range systemBlocks {
+			if _, ok := extractSystemText(block); !ok {
+				merged = append(merged, block)
+				continue
+			}
+			if textIndex < targetCount-1 {
+				merged = append(merged, block)
+			} else if textIndex == targetCount-1 {
+				merged = append(merged, setSystemText(block, mergedText))
+			}
+			textIndex++
+		}
+		root["system"] = merged
+		return marshalPayloadObject(payload, root)
+	}
+
+	// Increase text block count by appending empty text blocks.
+	for len(textValues) < targetCount {
+		systemBlocks = append(systemBlocks, map[string]any{
+			"type": "text",
+			"text": "",
+		})
+		textValues = append(textValues, "")
+	}
+	root["system"] = systemBlocks
+	return marshalPayloadObject(payload, root)
+}
+
+func extractSystemText(block any) (string, bool) {
+	switch v := block.(type) {
+	case string:
+		return v, true
+	case map[string]any:
+		if blockType, ok := v["type"].(string); ok && blockType != "" && !strings.EqualFold(blockType, "text") {
+			return "", false
+		}
+		text, ok := v["text"].(string)
+		if !ok {
+			return "", false
+		}
+		return text, true
+	default:
+		return "", false
+	}
+}
+
+func setSystemText(block any, text string) any {
+	switch v := block.(type) {
+	case string:
+		return text
+	case map[string]any:
+		updated := make(map[string]any, len(v))
+		for key, value := range v {
+			updated[key] = value
+		}
+		updated["text"] = text
+		return updated
+	default:
+		return map[string]any{
 			"type": "text",
 			"text": text,
-		})
+		}
 	}
-	root["system"] = blocks
-	return marshalPayloadObject(payload, root)
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
