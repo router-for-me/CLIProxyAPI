@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -533,6 +534,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+		mgmt.GET("/api-keys/:index/allowed-models", s.mgmt.GetAPIKeyAllowedModels)
+		mgmt.PUT("/api-keys/:index/allowed-models", s.mgmt.PutAPIKeyAllowedModels)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -1039,6 +1042,14 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 				c.Set("accessProvider", result.Provider)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
+					if rawAllowed, ok := result.Metadata["allowed-models"]; ok {
+						var allowed []string
+						if errUnmarshal := json.Unmarshal([]byte(rawAllowed), &allowed); errUnmarshal == nil {
+							if len(allowed) > 0 {
+								c.Set("allowedModels", allowed)
+							}
+						}
+					}
 				}
 			}
 			c.Next()

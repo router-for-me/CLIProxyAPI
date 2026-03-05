@@ -2,6 +2,7 @@ package configaccess
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -30,17 +31,18 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 type provider struct {
 	name string
-	keys map[string]struct{}
+	keys map[string]*sdkconfig.APIKeyEntry
 }
 
-func newProvider(name string, keys []string) *provider {
+func newProvider(name string, keys []sdkconfig.APIKeyEntry) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
 	}
-	keySet := make(map[string]struct{}, len(keys))
+	keySet := make(map[string]*sdkconfig.APIKeyEntry, len(keys))
 	for _, key := range keys {
-		keySet[key] = struct{}{}
+		entry := key
+		keySet[entry.Key] = &entry
 	}
 	return &provider{name: providerName, keys: keySet}
 }
@@ -89,12 +91,16 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
-		if _, ok := p.keys[candidate.value]; ok {
+		if entry, ok := p.keys[candidate.value]; ok {
+			allowedModels := make([]string, 0, len(entry.AllowedModels))
+			allowedModels = append(allowedModels, entry.AllowedModels...)
+			allowedModelsJSON, _ := json.Marshal(allowedModels)
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
 				Metadata: map[string]string{
-					"source": candidate.source,
+					"source":         candidate.source,
+					"allowed-models": string(allowedModelsJSON),
 				},
 			}, nil
 		}
@@ -117,14 +123,14 @@ func extractBearerToken(header string) string {
 	return strings.TrimSpace(parts[1])
 }
 
-func normalizeKeys(keys []string) []string {
+func normalizeKeys(keys []sdkconfig.APIKeyEntry) []sdkconfig.APIKeyEntry {
 	if len(keys) == 0 {
 		return nil
 	}
-	normalized := make([]string, 0, len(keys))
+	normalized := make([]sdkconfig.APIKeyEntry, 0, len(keys))
 	seen := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		trimmedKey := strings.TrimSpace(key)
+	for _, entry := range keys {
+		trimmedKey := strings.TrimSpace(entry.Key)
 		if trimmedKey == "" {
 			continue
 		}
@@ -132,7 +138,10 @@ func normalizeKeys(keys []string) []string {
 			continue
 		}
 		seen[trimmedKey] = struct{}{}
-		normalized = append(normalized, trimmedKey)
+		normalized = append(normalized, sdkconfig.APIKeyEntry{
+			Key:           trimmedKey,
+			AllowedModels: entry.AllowedModels,
+		})
 	}
 	if len(normalized) == 0 {
 		return nil

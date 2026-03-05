@@ -88,7 +88,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	// API keys (redacted) and counts
 	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
 		changes = append(changes, fmt.Sprintf("api-keys count: %d -> %d", len(oldCfg.APIKeys), len(newCfg.APIKeys)))
-	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
+	} else if !reflect.DeepEqual(trimAPIKeyEntries(oldCfg.APIKeys), trimAPIKeyEntries(newCfg.APIKeys)) {
 		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
 	}
 	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
@@ -313,10 +313,20 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	return changes
 }
 
-func trimStrings(in []string) []string {
-	out := make([]string, len(in))
+func trimAPIKeyEntries(in []config.APIKeyEntry) []config.APIKeyEntry {
+	out := make([]config.APIKeyEntry, 0, len(in))
 	for i := range in {
-		out[i] = strings.TrimSpace(in[i])
+		entry := config.APIKeyEntry{Key: strings.TrimSpace(in[i].Key)}
+		if len(in[i].AllowedModels) > 0 {
+			entry.AllowedModels = make([]string, 0, len(in[i].AllowedModels))
+			for _, model := range in[i].AllowedModels {
+				trimmed := strings.TrimSpace(model)
+				if trimmed != "" {
+					entry.AllowedModels = append(entry.AllowedModels, trimmed)
+				}
+			}
+		}
+		out = append(out, entry)
 	}
 	return out
 }

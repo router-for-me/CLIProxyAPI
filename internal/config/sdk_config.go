@@ -4,6 +4,165 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// APIKeyEntry represents a client API key with optional model restrictions.
+type APIKeyEntry struct {
+	Key           string   `yaml:"key" json:"key"`
+	AllowedModels []string `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
+}
+
+// UnmarshalYAML supports both legacy string and object formats.
+func (e *APIKeyEntry) UnmarshalYAML(value *yaml.Node) error {
+	if e == nil {
+		return fmt.Errorf("nil APIKeyEntry")
+	}
+
+	// Legacy format: "api-key-string"
+	if value.Kind == yaml.ScalarNode {
+		var key string
+		if err := value.Decode(&key); err != nil {
+			return err
+		}
+		e.Key = strings.TrimSpace(key)
+		e.AllowedModels = nil
+		return nil
+	}
+
+	// New format: { key: "...", allowed-models: [...] }
+	var raw struct {
+		Key           string   `yaml:"key"`
+		AllowedModels []string `yaml:"allowed-models"`
+	}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*e = APIKeyEntry{Key: strings.TrimSpace(raw.Key), AllowedModels: normalizeStringList(raw.AllowedModels)}
+	return nil
+}
+
+// MarshalYAML writes object format for consistency in management workflows.
+func (e APIKeyEntry) MarshalYAML() (interface{}, error) {
+	return struct {
+		Key           string   `yaml:"key"`
+		AllowedModels []string `yaml:"allowed-models,omitempty"`
+	}{
+		Key:           strings.TrimSpace(e.Key),
+		AllowedModels: normalizeStringList(e.AllowedModels),
+	}, nil
+}
+
+// UnmarshalJSON supports both legacy string and object formats.
+func (e *APIKeyEntry) UnmarshalJSON(data []byte) error {
+	if e == nil {
+		return fmt.Errorf("nil APIKeyEntry")
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*e = APIKeyEntry{}
+		return nil
+	}
+
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var key string
+		if err := json.Unmarshal(data, &key); err != nil {
+			return err
+		}
+		e.Key = strings.TrimSpace(key)
+		e.AllowedModels = nil
+		return nil
+	}
+
+	var raw struct {
+		Key           string   `json:"key"`
+		AllowedModels []string `json:"allowed-models"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*e = APIKeyEntry{Key: strings.TrimSpace(raw.Key), AllowedModels: normalizeStringList(raw.AllowedModels)}
+	return nil
+}
+
+// MarshalJSON writes legacy string format when unrestricted to preserve compatibility.
+func (e APIKeyEntry) MarshalJSON() ([]byte, error) {
+	if len(e.AllowedModels) == 0 {
+		return json.Marshal(strings.TrimSpace(e.Key))
+	}
+	return json.Marshal(struct {
+		Key           string   `json:"key"`
+		AllowedModels []string `json:"allowed-models,omitempty"`
+	}{
+		Key:           strings.TrimSpace(e.Key),
+		AllowedModels: normalizeStringList(e.AllowedModels),
+	})
+}
+
+// IsModelAllowed checks whether a model is allowed by this key's whitelist.
+// Empty AllowedModels means unrestricted.
+// Supports exact model match and provider wildcard syntax: "provider:*".
+func (e APIKeyEntry) IsModelAllowed(model string, providerNames []string) bool {
+	allowed := normalizeStringList(e.AllowedModels)
+	if len(allowed) == 0 {
+		return true
+	}
+
+	trimmedModel := strings.TrimSpace(model)
+	providerSet := make(map[string]struct{}, len(providerNames))
+	for _, provider := range providerNames {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider == "" {
+			continue
+		}
+		providerSet[provider] = struct{}{}
+	}
+
+	for _, item := range allowed {
+		if item == trimmedModel {
+			return true
+		}
+		if strings.HasSuffix(item, ":*") {
+			provider := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(item, ":*")))
+			if provider == "" {
+				continue
+			}
+			if _, ok := providerSet[provider]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeStringList(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -18,7 +177,7 @@ type SDKConfig struct {
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
-	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+	APIKeys []APIKeyEntry `yaml:"api-keys" json:"api-keys"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).

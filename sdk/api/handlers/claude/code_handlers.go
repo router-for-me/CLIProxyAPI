@@ -19,7 +19,9 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -130,6 +132,20 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 	models := h.Models()
+	allowedModels := getAllowedModelsForList(c)
+	if len(allowedModels) > 0 {
+		filtered := make([]map[string]any, 0, len(models))
+		entry := config.APIKeyEntry{AllowedModels: allowedModels}
+		for _, model := range models {
+			modelID, _ := model["id"].(string)
+			providers := util.GetProviderName(modelID)
+			if entry.IsModelAllowed(modelID, providers) {
+				filtered = append(filtered, model)
+			}
+		}
+		models = filtered
+	}
+
 	firstID := ""
 	lastID := ""
 	if len(models) > 0 {
@@ -147,6 +163,18 @@ func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 		"first_id": firstID,
 		"last_id":  lastID,
 	})
+}
+
+func getAllowedModelsForList(c *gin.Context) []string {
+	if c == nil {
+		return nil
+	}
+	if raw, ok := c.Get("allowedModels"); ok {
+		if allowed, ok := raw.([]string); ok && len(allowed) > 0 {
+			return append([]string(nil), allowed...)
+		}
+	}
+	return nil
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.

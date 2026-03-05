@@ -13,11 +13,14 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -61,10 +64,20 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
+	allowedModels := getAllowedModelsForList(c)
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
+	filteredModels := make([]map[string]any, 0, len(allModels))
+	for _, model := range allModels {
+		modelID, _ := model["id"].(string)
+		if len(allowedModels) > 0 {
+			providers := util.GetProviderName(modelID)
+			entry := config.APIKeyEntry{AllowedModels: allowedModels}
+			if !entry.IsModelAllowed(modelID, providers) {
+				continue
+			}
+		}
+
 		filteredModel := map[string]any{
 			"id":     model["id"],
 			"object": model["object"],
@@ -80,13 +93,25 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
-		filteredModels[i] = filteredModel
+		filteredModels = append(filteredModels, filteredModel)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
 		"data":   filteredModels,
 	})
+}
+
+func getAllowedModelsForList(c *gin.Context) []string {
+	if c == nil {
+		return nil
+	}
+	if raw, ok := c.Get("allowedModels"); ok {
+		if allowed, ok := raw.([]string); ok && len(allowed) > 0 {
+			return append([]string(nil), allowed...)
+		}
+	}
+	return nil
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.

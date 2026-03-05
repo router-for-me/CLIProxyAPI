@@ -187,7 +187,7 @@ func TestBuildConfigChangeDetails_NilSafe(t *testing.T) {
 func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	oldCfg := &config.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"a"},
+			APIKeys: []sdkconfig.APIKeyEntry{{Key: "a"}},
 		},
 		AmpCode: config.AmpCode{
 			UpstreamAPIKey: "",
@@ -198,7 +198,7 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	}
 	newCfg := &config.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"a", "b", "c"},
+			APIKeys: []sdkconfig.APIKeyEntry{{Key: "a"}, {Key: "b"}, {Key: "c"}},
 		},
 		AmpCode: config.AmpCode{
 			UpstreamAPIKey: "new-key",
@@ -234,7 +234,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 false,
 			ProxyURL:                   "http://old-proxy",
-			APIKeys:                    []string{"key-1"},
+			APIKeys:                    []sdkconfig.APIKeyEntry{{Key: "key-1"}},
 			ForceModelPrefix:           false,
 			NonStreamKeepAliveInterval: 0,
 		},
@@ -272,7 +272,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 true,
 			ProxyURL:                   "http://new-proxy",
-			APIKeys:                    []string{" key-1 ", "key-2"},
+			APIKeys:                    []sdkconfig.APIKeyEntry{{Key: " key-1 "}, {Key: "key-2"}},
 			ForceModelPrefix:           true,
 			NonStreamKeepAliveInterval: 5,
 		},
@@ -344,7 +344,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: false,
 			ProxyURL:   "http://old-proxy",
-			APIKeys:    []string{" keyA "},
+			APIKeys:    []sdkconfig.APIKeyEntry{{Key: " keyA "}},
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"a"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -397,7 +397,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: true,
 			ProxyURL:   "http://new-proxy",
-			APIKeys:    []string{"keyB"},
+			APIKeys:    []sdkconfig.APIKeyEntry{{Key: "keyB"}},
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"b", "c"}, "p2": {"d"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -530,9 +530,12 @@ func TestBuildConfigChangeDetails_CountBranches(t *testing.T) {
 	expectContains(t, changes, "vertex-api-key count: 0 -> 1")
 }
 
-func TestTrimStrings(t *testing.T) {
-	out := trimStrings([]string{" a ", "b", "  c"})
-	if len(out) != 3 || out[0] != "a" || out[1] != "b" || out[2] != "c" {
-		t.Fatalf("unexpected trimmed strings: %v", out)
+func TestTrimAPIKeyEntries(t *testing.T) {
+	out := trimAPIKeyEntries([]sdkconfig.APIKeyEntry{{Key: " a "}, {Key: "b", AllowedModels: []string{" x ", "", "y"}}, {Key: "  c"}})
+	if len(out) != 3 || out[0].Key != "a" || out[1].Key != "b" || out[2].Key != "c" {
+		t.Fatalf("unexpected trimmed keys: %v", out)
+	}
+	if len(out[1].AllowedModels) != 2 || out[1].AllowedModels[0] != "x" || out[1].AllowedModels[1] != "y" {
+		t.Fatalf("unexpected allowed-models: %v", out[1].AllowedModels)
 	}
 }

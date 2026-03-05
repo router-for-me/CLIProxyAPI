@@ -468,7 +468,7 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(ctx, modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -514,7 +514,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(ctx, modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -561,7 +561,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(ctx, modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -774,7 +774,7 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) getRequestDetails(ctx context.Context, modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -805,9 +805,57 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
 
+	allowedModels := getAllowedModels(ctx)
+	if len(allowedModels) > 0 {
+		entry := config.APIKeyEntry{AllowedModels: allowedModels}
+		if !entry.IsModelAllowed(baseModel, providers) {
+			return nil, "", &interfaces.ErrorMessage{
+				StatusCode: http.StatusForbidden,
+				Error:      fmt.Errorf("model %s is not allowed for this API key", modelName),
+			}
+		}
+	}
+
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func getAllowedModels(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return nil
+	}
+	if direct, exists := ginCtx.Get("allowedModels"); exists {
+		if allowed, ok := direct.([]string); ok && len(allowed) > 0 {
+			return append([]string(nil), allowed...)
+		}
+	}
+	if metadataRaw, exists := ginCtx.Get("accessMetadata"); exists {
+		if metadata, ok := metadataRaw.(map[string]string); ok {
+			raw := strings.TrimSpace(metadata["allowed-models"])
+			if raw == "" || raw == "[]" {
+				return nil
+			}
+			var allowed []string
+			if err := json.Unmarshal([]byte(raw), &allowed); err == nil {
+				out := make([]string, 0, len(allowed))
+				for _, item := range allowed {
+					trimmed := strings.TrimSpace(item)
+					if trimmed != "" {
+						out = append(out, trimmed)
+					}
+				}
+				if len(out) > 0 {
+					return out
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func cloneBytes(src []byte) []byte {

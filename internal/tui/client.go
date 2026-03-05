@@ -240,7 +240,7 @@ func (c *Client) GetLogs(after int64, limit int) ([]string, int64, error) {
 }
 
 // GetAPIKeys fetches the list of API keys.
-// API returns {"api-keys": [...]}.
+// API returns {"api-keys": [...]} where items can be strings or objects.
 func (c *Client) GetAPIKeys() ([]string, error) {
 	wrapper, err := c.getJSON("/v0/management/api-keys")
 	if err != nil {
@@ -250,13 +250,38 @@ func (c *Client) GetAPIKeys() ([]string, error) {
 	if !ok {
 		return nil, nil
 	}
-	raw, err := json.Marshal(arr)
-	if err != nil {
-		return nil, err
+	items, ok := arr.([]any)
+	if !ok {
+		raw, errMarshal := json.Marshal(arr)
+		if errMarshal != nil {
+			return nil, errMarshal
+		}
+		var legacy []string
+		if errUnmarshal := json.Unmarshal(raw, &legacy); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		return legacy, nil
 	}
-	var result []string
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return nil, err
+
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		switch v := item.(type) {
+		case string:
+			trimmed := strings.TrimSpace(v)
+			if trimmed != "" {
+				result = append(result, trimmed)
+			}
+		case map[string]any:
+			for _, key := range []string{"key", "api-key", "apiKey", "Key"} {
+				if rawKey, exists := v[key]; exists {
+					trimmed := strings.TrimSpace(fmt.Sprintf("%v", rawKey))
+					if trimmed != "" {
+						result = append(result, trimmed)
+						break
+					}
+				}
+			}
+		}
 	}
 	return result, nil
 }

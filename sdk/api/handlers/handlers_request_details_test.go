@@ -1,16 +1,20 @@
 package handlers
 
 import (
+	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"golang.org/x/net/context"
 )
 
 func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	modelRegistry := registry.GetGlobalRegistry()
 	now := time.Now().Unix()
 
@@ -100,7 +104,9 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			providers, model, errMsg := handler.getRequestDetails(tt.inputModel)
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx := context.WithValue(context.Background(), "gin", ginCtx)
+			providers, model, errMsg := handler.getRequestDetails(ctx, tt.inputModel)
 			if (errMsg != nil) != tt.wantErr {
 				t.Fatalf("getRequestDetails() error = %v, wantErr %v", errMsg, tt.wantErr)
 			}
@@ -114,5 +120,24 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 				t.Fatalf("getRequestDetails() model = %v, want %v", model, tt.wantModel)
 			}
 		})
+	}
+}
+
+func TestGetRequestDetails_RejectsDisallowedModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+
+	modelRegistry.RegisterClient("test-request-details-disallowed", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro", Created: now + 1}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient("test-request-details-disallowed") })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Set("allowedModels", []string{"claude:*"})
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	_, _, errMsg := handler.getRequestDetails(ctx, "gemini-2.5-pro")
+	if errMsg == nil || errMsg.StatusCode != 403 {
+		t.Fatalf("expected 403 for disallowed model, got %#v", errMsg)
 	}
 }
