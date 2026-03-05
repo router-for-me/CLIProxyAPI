@@ -105,6 +105,12 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// WindowResetAt records when the upstream token quota window resets.
+	WindowResetAt time.Time `json:"window_reset_at,omitempty"`
+	// TokensRemaining is the last observed remaining token count.
+	TokensRemaining int64 `json:"tokens_remaining,omitempty"`
+	// TokensLimit is the total token budget for the current window.
+	TokensLimit int64 `json:"tokens_limit,omitempty"`
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.

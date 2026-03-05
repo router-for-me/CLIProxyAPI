@@ -84,6 +84,18 @@ func quotaCooldownDisabledForAuth(auth *Auth) bool {
 }
 
 // Result captures execution outcome used to adjust auth state.
+// RateLimitHint carries parsed upstream rate limit metadata extracted from
+// response headers. Only the fields needed for routing are included to
+// avoid exposing raw upstream headers to hooks or logs.
+type RateLimitHint struct {
+	// Reset is when the token quota window resets.
+	Reset time.Time
+	// Remaining is the number of tokens left in the current window.
+	Remaining int64
+	// Limit is the total token budget for the current window.
+	Limit int64
+}
+
 type Result struct {
 	// AuthID references the auth that produced this result.
 	AuthID string
@@ -97,6 +109,8 @@ type Result struct {
 	RetryAfter *time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
+	// RateLimit carries parsed rate limit metadata from upstream response headers.
+	RateLimit *RateLimitHint
 }
 
 // Selector chooses an auth candidate for execution.
@@ -658,6 +672,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			lastErr = errExec
 			continue
 		}
+		result.RateLimit = parseRateLimitHint(resp.Headers)
 		m.MarkResult(execCtx, result)
 		return resp, nil
 	}
@@ -720,6 +735,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			lastErr = errExec
 			continue
 		}
+		if hint := parseRateLimitHint(resp.Headers); hint != nil {
+			result.RateLimit = hint
+			m.mu.Lock()
+			if a, ok := m.auths[auth.ID]; ok {
+				applyRateLimitHint(a, hint)
+			}
+			m.mu.Unlock()
+		}
 		m.hook.OnResult(execCtx, result)
 		return resp, nil
 	}
@@ -780,8 +803,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			lastErr = errStream
 			continue
 		}
+		streamRLHint := parseRateLimitHint(streamResult.Headers)
 		out := make(chan cliproxyexecutor.StreamChunk)
-		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk) {
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, rlHint *RateLimitHint) {
 			defer close(out)
 			var failed bool
 			forward := true
@@ -808,9 +832,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 			}
 			if !failed {
-				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
+				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true, RateLimit: rlHint})
 			}
-		}(execCtx, auth.Clone(), provider, streamResult.Chunks)
+		}(execCtx, auth.Clone(), provider, streamResult.Chunks, streamRLHint)
 		return &cliproxyexecutor.StreamResult{
 			Headers: streamResult.Headers,
 			Chunks:  out,
@@ -1265,6 +1289,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearModelQuota = true
 			} else {
 				clearAuthStateOnSuccess(auth, now)
+			}
+			if result.RateLimit != nil {
+				applyRateLimitHint(auth, result.RateLimit)
 			}
 		} else {
 			if result.Model != "" {
@@ -2415,4 +2442,60 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
 	return exec.HttpRequest(ctx, auth, req)
+}
+
+// Rate limit header constants used by Anthropic/Claude API.
+const (
+	headerRateLimitReset     = "anthropic-ratelimit-tokens-reset"
+	headerRateLimitRemaining = "anthropic-ratelimit-tokens-remaining"
+	headerRateLimitLimit     = "anthropic-ratelimit-tokens-limit"
+)
+
+// parseRateLimitHint extracts rate limit metadata from upstream response headers.
+// Returns nil if no relevant headers are present.
+func parseRateLimitHint(headers http.Header) *RateLimitHint {
+	if len(headers) == 0 {
+		return nil
+	}
+	var hint RateLimitHint
+	var found bool
+	if v := headers.Get(headerRateLimitReset); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			hint.Reset = t
+			found = true
+		}
+	}
+	if v := headers.Get(headerRateLimitRemaining); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			hint.Remaining = n
+			found = true
+		}
+	}
+	if v := headers.Get(headerRateLimitLimit); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			hint.Limit = n
+			found = true
+		}
+	}
+	if !found {
+		return nil
+	}
+	return &hint
+}
+
+// applyRateLimitHint writes parsed rate limit data into the auth's quota state.
+// Caller must hold m.mu.
+func applyRateLimitHint(auth *Auth, hint *RateLimitHint) {
+	if hint == nil || auth == nil {
+		return
+	}
+	if !hint.Reset.IsZero() {
+		auth.Quota.WindowResetAt = hint.Reset
+	}
+	if hint.Remaining > 0 {
+		auth.Quota.TokensRemaining = hint.Remaining
+	}
+	if hint.Limit > 0 {
+		auth.Quota.TokensLimit = hint.Limit
+	}
 }

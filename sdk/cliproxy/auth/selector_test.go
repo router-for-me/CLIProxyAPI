@@ -527,3 +527,61 @@ func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *test
 		}
 	}
 }
+
+func TestEarliestResetSelectorPick_PrefersEarliestReset(t *testing.T) {
+	t.Parallel()
+
+	selector := &EarliestResetSelector{}
+	now := time.Now()
+	auths := []*Auth{
+		{ID: "a", Quota: QuotaState{WindowResetAt: now.Add(5 * time.Hour)}},
+		{ID: "b", Quota: QuotaState{WindowResetAt: now.Add(1 * time.Hour)}},
+		{ID: "c", Quota: QuotaState{WindowResetAt: now.Add(3 * time.Hour)}},
+	}
+
+	got, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != "b" {
+		t.Fatalf("Pick() auth.ID = %q, want %q (earliest reset)", got.ID, "b")
+	}
+}
+
+func TestEarliestResetSelectorPick_ColdStartFallsBackToIDOrder(t *testing.T) {
+	t.Parallel()
+
+	selector := &EarliestResetSelector{}
+	auths := []*Auth{
+		{ID: "c"},
+		{ID: "a"},
+		{ID: "b"},
+	}
+
+	got, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != "a" {
+		t.Fatalf("Pick() auth.ID = %q, want %q (ID order fallback)", got.ID, "a")
+	}
+}
+
+func TestEarliestResetSelectorPick_DataPreferredOverNoData(t *testing.T) {
+	t.Parallel()
+
+	selector := &EarliestResetSelector{}
+	now := time.Now()
+	auths := []*Auth{
+		{ID: "a"}, // no rate limit data
+		{ID: "b", Quota: QuotaState{WindowResetAt: now.Add(5 * time.Hour)}},
+	}
+
+	got, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != "b" {
+		t.Fatalf("Pick() auth.ID = %q, want %q (has data should be preferred)", got.ID, "b")
+	}
+}

@@ -420,3 +420,29 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	return false, blockReasonNone, time.Time{}
 }
+
+// EarliestResetSelector picks the credential whose upstream quota window resets
+// soonest ("use perishable quota first"). Credentials that have rate limit data
+// are preferred over those without. When no data is available (cold start), it
+// falls back to ID order (same as FillFirstSelector).
+type EarliestResetSelector struct{}
+
+func (s *EarliestResetSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	if len(auths) == 0 {
+		return nil, &Error{Code: "no_auth_available", Message: "no auths provided"}
+	}
+	sorted := make([]*Auth, len(auths))
+	copy(sorted, auths)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		iHas := !sorted[i].Quota.WindowResetAt.IsZero()
+		jHas := !sorted[j].Quota.WindowResetAt.IsZero()
+		if iHas != jHas {
+			return iHas
+		}
+		if iHas && jHas {
+			return sorted[i].Quota.WindowResetAt.Before(sorted[j].Quota.WindowResetAt)
+		}
+		return sorted[i].ID < sorted[j].ID
+	})
+	return sorted[0], nil
+}
