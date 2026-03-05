@@ -41,6 +41,28 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	rootResult := gjson.ParseBytes(rawJSON)
 	template, _ = sjson.Set(template, "model", modelName)
 
+	// Pre-scan tools array to identify deferred tools and cache their schemas.
+	// This must run before messages processing so tool_reference handling can inject the full schema text.
+	type toolSchemaEntry struct{ description, inputSchema string }
+	toolSchemaMap := map[string]toolSchemaEntry{}
+	deferredToolNames := map[string]bool{}
+	loadedTools := map[string]bool{}
+	if preScanTools := rootResult.Get("tools"); preScanTools.IsArray() {
+		for _, t := range preScanTools.Array() {
+			name := t.Get("name").String()
+			if name == "" {
+				continue
+			}
+			toolSchemaMap[name] = toolSchemaEntry{
+				description: t.Get("description").String(),
+				inputSchema: t.Get("input_schema").Raw,
+			}
+			if t.Get("defer_loading").Bool() {
+				deferredToolNames[name] = true
+			}
+		}
+	}
+
 	// Process system messages and convert them to input content format.
 	systemsResult := rootResult.Get("system")
 	if systemsResult.IsArray() {
@@ -194,6 +216,28 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 									toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.type", toolResultContentIndex), "input_text")
 									toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.text", toolResultContentIndex), contentResults[k].Get("text").String())
 									toolResultContentIndex++
+								} else if toolResultContentType == "tool_reference" {
+									toolName := contentResults[k].Get("tool_name").String()
+									loadedTools[toolName] = true
+									var sb strings.Builder
+									sb.WriteString(fmt.Sprintf("Tool '%s' is now available.", toolName))
+									if entry, ok := toolSchemaMap[toolName]; ok {
+										if entry.description != "" {
+											sb.WriteString("\n\nDescription: ")
+											sb.WriteString(entry.description)
+										}
+										if entry.inputSchema != "" {
+											sb.WriteString("\n\nParameters:\n")
+											if props := gjson.Get(entry.inputSchema, "properties"); props.Exists() {
+												sb.WriteString(props.Raw)
+											} else {
+												sb.WriteString(entry.inputSchema)
+											}
+										}
+									}
+									toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.type", toolResultContentIndex), "input_text")
+									toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.text", toolResultContentIndex), sb.String())
+									toolResultContentIndex++
 								}
 							}
 							if toolResultContent != `[]` {
@@ -234,6 +278,10 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		shortMap := buildShortNameMap(names)
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
+			// Skip deferred tools that have not been loaded via ToolSearch.
+			if toolOriginalName := toolResult.Get("name").String(); deferredToolNames[toolOriginalName] && !loadedTools[toolOriginalName] {
+				continue
+			}
 			// Special handling: map Claude web search tool to Codex web_search
 			if toolResult.Get("type").String() == "web_search_20250305" {
 				// Replace the tool content entirely with {"type":"web_search"}
