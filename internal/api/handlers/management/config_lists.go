@@ -986,9 +986,6 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
-	if entry.SystemPromptCount < 0 {
-		entry.SystemPromptCount = 0
-	}
 	if len(entry.Models) == 0 {
 		return
 	}

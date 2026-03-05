@@ -40,8 +40,8 @@ func TestApplyClaudeToolPrefix(t *testing.T) {
 func TestEnforceSystemPromptCount_MergeExtrasIntoSecond(t *testing.T) {
 	input := []byte(`{
 		"system": [
-			{"type":"text","text":"first"},
-			{"type":"text","text":"second"},
+			{"type":"text","text":"first","cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":"second","cache_control":{"type":"ephemeral","ttl":"1h"}},
 			{"type":"text","text":"third"},
 			{"type":"text","text":"fourth"}
 		]
@@ -58,6 +58,12 @@ func TestEnforceSystemPromptCount_MergeExtrasIntoSecond(t *testing.T) {
 	if got := gjson.GetBytes(out, "system.1.text").String(); got != "second\n\nthird\n\nfourth" {
 		t.Fatalf("system.1.text = %q, want %q", got, "second\\n\\nthird\\n\\nfourth")
 	}
+	if got := gjson.GetBytes(out, "system.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system.0.cache_control.type = %q, want %q", got, "ephemeral")
+	}
+	if got := gjson.GetBytes(out, "system.1.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("system.1.cache_control.ttl = %q, want %q", got, "1h")
+	}
 }
 
 func TestEnforceSystemPromptCount_PadsEmptyWhenMissing(t *testing.T) {
@@ -73,6 +79,32 @@ func TestEnforceSystemPromptCount_PadsEmptyWhenMissing(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "system.1.text").String(); got != "" {
 		t.Fatalf("system.1.text = %q, want empty", got)
+	}
+}
+
+func TestEnforceSystemPromptCount_PreservesNonTextBlocks(t *testing.T) {
+	input := []byte(`{
+		"system": [
+			{"type":"text","text":"first"},
+			{"type":"custom_block","value":"keep-me"},
+			{"type":"text","text":"second"},
+			{"type":"text","text":"third"}
+		]
+	}`)
+
+	out := enforceSystemPromptCount(input, 2)
+
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 3 {
+		t.Fatalf("system count = %d, want 3", got)
+	}
+	if got := gjson.GetBytes(out, "system.1.type").String(); got != "custom_block" {
+		t.Fatalf("system.1.type = %q, want %q", got, "custom_block")
+	}
+	if got := gjson.GetBytes(out, "system.1.value").String(); got != "keep-me" {
+		t.Fatalf("system.1.value = %q, want %q", got, "keep-me")
+	}
+	if got := gjson.GetBytes(out, "system.2.text").String(); got != "second\n\nthird" {
+		t.Fatalf("system.2.text = %q, want %q", got, "second\\n\\nthird")
 	}
 }
 

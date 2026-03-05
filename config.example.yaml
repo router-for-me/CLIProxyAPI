@@ -158,7 +158,7 @@ nonstream-keepalive-interval: 0
 #       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
 #       - "*-thinking"               # wildcard matching suffix (e.g. claude-opus-4-5-thinking)
 #       - "*haiku*"                  # wildcard matching substring (e.g. claude-3-5-haiku-20241022)
-#     system-prompt-count: 2         # optional: force outbound system block count
+#     system-prompt-count: 2         # optional: force outbound text system block count (range: 0..100)
 #     cloak:                         # optional: request cloaking for non-Claude-Code clients
 #       mode: "auto"                 # "auto" (default): cloak only when client is not Claude Code
 #                                    # "always": always apply cloaking

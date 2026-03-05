@@ -21,6 +21,9 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+
+	// MaxClaudeSystemPromptCount bounds Claude system-prompt-count to prevent large allocations.
+	MaxClaudeSystemPromptCount = 100
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -827,6 +830,8 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		if entry.SystemPromptCount < 0 {
 			entry.SystemPromptCount = 0
+		} else if entry.SystemPromptCount > MaxClaudeSystemPromptCount {
+			entry.SystemPromptCount = MaxClaudeSystemPromptCount
 		}
 	}
 }
