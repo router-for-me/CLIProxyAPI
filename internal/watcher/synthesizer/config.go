@@ -319,7 +319,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
-		ApplyAuthExcludedModelsMeta(a, cfg, nil, "apikey")
+		ApplyAuthExcludedModelsMeta(a, cfg, compat.ExcludedModels, "apikey")
 		out = append(out, a)
 	}
 	return out
