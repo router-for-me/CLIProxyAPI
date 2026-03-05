@@ -114,6 +114,7 @@ func (e APIKeyEntry) IsModelAllowed(model string, providerNames []string) bool {
 	}
 
 	trimmedModel := strings.TrimSpace(model)
+	lowerModel := strings.ToLower(trimmedModel)
 	providerSet := make(map[string]struct{}, len(providerNames))
 	for _, provider := range providerNames {
 		provider = strings.ToLower(strings.TrimSpace(provider))
@@ -124,15 +125,22 @@ func (e APIKeyEntry) IsModelAllowed(model string, providerNames []string) bool {
 	}
 
 	for _, item := range allowed {
-		if item == trimmedModel {
+		normalized := strings.ToLower(strings.TrimSpace(item))
+		if normalized == "*" {
 			return true
 		}
-		if strings.HasSuffix(item, ":*") {
-			provider := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(item, ":*")))
+		if normalized == lowerModel {
+			return true
+		}
+		if strings.HasSuffix(normalized, ":*") {
+			provider := strings.TrimSpace(strings.TrimSuffix(normalized, ":*"))
 			if provider == "" {
 				continue
 			}
 			if _, ok := providerSet[provider]; ok {
+				return true
+			}
+			if strings.HasPrefix(lowerModel, provider) {
 				return true
 			}
 		}

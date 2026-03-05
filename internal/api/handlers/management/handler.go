@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
+
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -281,6 +283,7 @@ func (h *Handler) persist(c *gin.Context) bool {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
+	configaccess.Register(&h.cfg.SDKConfig)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true
 }
