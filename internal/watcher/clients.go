@@ -183,7 +183,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 	if w.reloadCallback != nil {
 		log.Debugf("triggering server update callback after add/update")
-		w.reloadCallback(cfg)
+		w.triggerServerUpdate(cfg)
 	}
 	w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
 }
@@ -202,7 +202,7 @@ func (w *Watcher) removeClient(path string) {
 
 	if w.reloadCallback != nil {
 		log.Debugf("triggering server update callback after removal")
-		w.reloadCallback(cfg)
+		w.triggerServerUpdate(cfg)
 	}
 	w.persistAuthAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path)
 }
@@ -302,4 +302,80 @@ func (w *Watcher) persistAuthAsync(message string, paths ...string) {
 			log.Errorf("failed to persist auth changes: %v", err)
 		}
 	}()
+}
+
+func (w *Watcher) stopServerUpdateTimer() {
+	w.serverUpdateMu.Lock()
+	defer w.serverUpdateMu.Unlock()
+	if w.serverUpdateTimer != nil {
+		w.serverUpdateTimer.Stop()
+		w.serverUpdateTimer = nil
+	}
+	w.serverUpdatePend = false
+}
+
+func (w *Watcher) triggerServerUpdate(cfg *config.Config) {
+	if w == nil || w.reloadCallback == nil || cfg == nil {
+		return
+	}
+	if w.stopped.Load() {
+		return
+	}
+
+	now := time.Now()
+
+	w.serverUpdateMu.Lock()
+	if w.serverUpdateLast.IsZero() || now.Sub(w.serverUpdateLast) >= serverUpdateDebounce {
+		w.serverUpdateLast = now
+		if w.serverUpdateTimer != nil {
+			w.serverUpdateTimer.Stop()
+			w.serverUpdateTimer = nil
+		}
+		w.serverUpdatePend = false
+		w.serverUpdateMu.Unlock()
+		w.reloadCallback(cfg)
+		return
+	}
+
+	if w.serverUpdatePend {
+		w.serverUpdateMu.Unlock()
+		return
+	}
+
+	delay := serverUpdateDebounce - now.Sub(w.serverUpdateLast)
+	if delay < 10*time.Millisecond {
+		delay = 10 * time.Millisecond
+	}
+	w.serverUpdatePend = true
+	if w.serverUpdateTimer != nil {
+		w.serverUpdateTimer.Stop()
+		w.serverUpdateTimer = nil
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(delay, func() {
+		if w.stopped.Load() {
+			return
+		}
+		w.clientsMutex.RLock()
+		latestCfg := w.config
+		w.clientsMutex.RUnlock()
+
+		w.serverUpdateMu.Lock()
+		if w.serverUpdateTimer != timer || !w.serverUpdatePend {
+			w.serverUpdateMu.Unlock()
+			return
+		}
+		w.serverUpdateTimer = nil
+		w.serverUpdatePend = false
+		if latestCfg == nil || w.reloadCallback == nil || w.stopped.Load() {
+			w.serverUpdateMu.Unlock()
+			return
+		}
+
+		w.serverUpdateLast = time.Now()
+		w.serverUpdateMu.Unlock()
+		w.reloadCallback(latestCfg)
+	})
+	w.serverUpdateTimer = timer
+	w.serverUpdateMu.Unlock()
 }

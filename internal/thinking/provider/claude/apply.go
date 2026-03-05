@@ -1,8 +1,10 @@
 // Package claude implements thinking configuration scaffolding for Claude models.
 //
-// Claude models use the thinking.budget_tokens format with values in the range
-// 1024-128000. Some Claude models support ZeroAllowed (sonnet-4-5, opus-4-5),
-// while older models do not.
+// Claude models support two thinking control styles:
+//   - Manual thinking: thinking.type="enabled" with thinking.budget_tokens (token budget)
+//   - Adaptive thinking (Claude 4.6): thinking.type="adaptive" with output_config.effort (low/medium/high/max)
+//
+// Some Claude models support ZeroAllowed (sonnet-4-5, opus-4-5), while older models do not.
 // See: _bmad-output/planning-artifacts/architecture.md#Epic-6
 package claude
 
@@ -34,7 +36,11 @@ func init() {
 //   - Budget clamping to model range
 //   - ZeroAllowed constraint enforcement
 //
-// Apply only processes ModeBudget and ModeNone; other modes are passed through unchanged.
+// Apply processes:
+//   - ModeBudget: manual thinking budget_tokens
+//   - ModeLevel: adaptive thinking effort (Claude 4.6)
+//   - ModeAuto: provider default adaptive/manual behavior
+//   - ModeNone: disabled
 //
 // Expected output format when enabled:
 //
@@ -42,6 +48,17 @@ func init() {
 //	  "thinking": {
 //	    "type": "enabled",
 //	    "budget_tokens": 16384
+//	  }
+//	}
+//
+// Expected output format for adaptive:
+//
+//	{
+//	  "thinking": {
+//	    "type": "adaptive"
+//	  },
+//	  "output_config": {
+//	    "effort": "high"
 //	  }
 //	}
 //
@@ -60,30 +77,91 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return body, nil
 	}
 
-	// Only process ModeBudget and ModeNone; other modes pass through
-	// (caller should use ValidateConfig first to normalize modes)
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone {
-		return body, nil
-	}
-
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		body = []byte(`{}`)
 	}
 
-	// Budget is expected to be pre-validated by ValidateConfig (clamped, ZeroAllowed enforced)
-	// Decide enabled/disabled based on budget value
-	if config.Budget == 0 {
+	supportsAdaptive := modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0
+
+	switch config.Mode {
+	case thinking.ModeNone:
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
 		return result, nil
+
+	case thinking.ModeLevel:
+		// Adaptive thinking effort is only valid when the model advertises discrete levels.
+		// (Claude 4.6 uses output_config.effort.)
+		if supportsAdaptive && config.Level != "" {
+			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+			result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
+			return result, nil
+		}
+
+		// Fallback for non-adaptive Claude models: convert level to budget_tokens.
+		if budget, ok := thinking.ConvertLevelToBudget(string(config.Level)); ok {
+			config.Mode = thinking.ModeBudget
+			config.Budget = budget
+			config.Level = ""
+		} else {
+			return body, nil
+		}
+		fallthrough
+
+	case thinking.ModeBudget:
+		// Budget is expected to be pre-validated by ValidateConfig (clamped, ZeroAllowed enforced).
+		// Decide enabled/disabled based on budget value.
+		if config.Budget == 0 {
+			result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
+			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+			result, _ = sjson.DeleteBytes(result, "output_config.effort")
+			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+				result, _ = sjson.DeleteBytes(result, "output_config")
+			}
+			return result, nil
+		}
+
+		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
+		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
+
+		// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint).
+		result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
+		return result, nil
+
+	case thinking.ModeAuto:
+		// For Claude 4.6 models, auto maps to adaptive thinking with upstream defaults.
+		if supportsAdaptive {
+			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+			// Explicit effort is optional for adaptive thinking; omit it to allow upstream default.
+			result, _ = sjson.DeleteBytes(result, "output_config.effort")
+			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+				result, _ = sjson.DeleteBytes(result, "output_config")
+			}
+			return result, nil
+		}
+
+		// Legacy fallback: enable thinking without specifying budget_tokens.
+		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
+		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
+		return result, nil
+
+	default:
+		return body, nil
 	}
-
-	result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
-	result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
-
-	// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint)
-	result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
-	return result, nil
 }
 
 // normalizeClaudeBudget applies Claude-specific constraints to ensure max_tokens > budget_tokens.
@@ -141,7 +219,7 @@ func (a *Applier) effectiveMaxTokens(body []byte, modelInfo *registry.ModelInfo)
 }
 
 func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
+	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto && config.Mode != thinking.ModeLevel {
 		return body, nil
 	}
 
@@ -153,14 +231,36 @@ func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte,
 	case thinking.ModeNone:
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
 		return result, nil
 	case thinking.ModeAuto:
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
+		return result, nil
+	case thinking.ModeLevel:
+		// For user-defined models, interpret ModeLevel as Claude adaptive thinking effort.
+		// Upstream is responsible for validating whether the target model supports it.
+		if config.Level == "" {
+			return body, nil
+		}
+		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
 		return result, nil
 	default:
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
 		return result, nil
 	}
 }

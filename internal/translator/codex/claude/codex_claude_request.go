@@ -160,7 +160,51 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						flushMessage()
 						functionCallOutputMessage := `{"type":"function_call_output"}`
 						functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "call_id", messageContentResult.Get("tool_use_id").String())
-						functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
+
+						contentResult := messageContentResult.Get("content")
+						if contentResult.IsArray() {
+							toolResultContentIndex := 0
+							toolResultContent := `[]`
+							contentResults := contentResult.Array()
+							for k := 0; k < len(contentResults); k++ {
+								toolResultContentType := contentResults[k].Get("type").String()
+								if toolResultContentType == "image" {
+									sourceResult := contentResults[k].Get("source")
+									if sourceResult.Exists() {
+										data := sourceResult.Get("data").String()
+										if data == "" {
+											data = sourceResult.Get("base64").String()
+										}
+										if data != "" {
+											mediaType := sourceResult.Get("media_type").String()
+											if mediaType == "" {
+												mediaType = sourceResult.Get("mime_type").String()
+											}
+											if mediaType == "" {
+												mediaType = "application/octet-stream"
+											}
+											dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
+
+											toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.type", toolResultContentIndex), "input_image")
+											toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.image_url", toolResultContentIndex), dataURL)
+											toolResultContentIndex++
+										}
+									}
+								} else if toolResultContentType == "text" {
+									toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.type", toolResultContentIndex), "input_text")
+									toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.text", toolResultContentIndex), contentResults[k].Get("text").String())
+									toolResultContentIndex++
+								}
+							}
+							if toolResultContent != `[]` {
+								functionCallOutputMessage, _ = sjson.SetRaw(functionCallOutputMessage, "output", toolResultContent)
+							} else {
+								functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
+							}
+						} else {
+							functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
+						}
+
 						template, _ = sjson.SetRaw(template, "input.-1", functionCallOutputMessage)
 					}
 				}
@@ -211,6 +255,8 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			tool, _ = sjson.SetRaw(tool, "parameters", normalizeToolParameters(toolResult.Get("input_schema").Raw))
 			tool, _ = sjson.Delete(tool, "input_schema")
 			tool, _ = sjson.Delete(tool, "parameters.$schema")
+			tool, _ = sjson.Delete(tool, "cache_control")
+			tool, _ = sjson.Delete(tool, "defer_loading")
 			tool, _ = sjson.Set(tool, "strict", false)
 			template, _ = sjson.SetRaw(template, "tools.-1", tool)
 		}
@@ -231,9 +277,17 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				}
 			}
 		case "adaptive", "auto":
-			// Claude adaptive/auto means "enable with max capacity"; keep it as highest level
-			// and let ApplyThinking normalize per target model capability.
-			reasoningEffort = string(thinking.LevelXHigh)
+			// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
+			// Pass through directly; ApplyThinking handles clamping to target model's levels.
+			effort := ""
+			if v := rootResult.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
+				effort = strings.ToLower(strings.TrimSpace(v.String()))
+			}
+			if effort != "" {
+				reasoningEffort = effort
+			} else {
+				reasoningEffort = string(thinking.LevelXHigh)
+			}
 		case "disabled":
 			if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
 				reasoningEffort = effort
