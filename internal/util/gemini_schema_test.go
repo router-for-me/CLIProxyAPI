@@ -921,6 +921,38 @@ func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *test
 	compareJSON(t, expected, result)
 }
 
+func TestCleanJSONSchemaForGemini_RemovesDeprecatedField(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"old_field": {
+				"type": "string",
+				"deprecated": true
+			},
+			"deprecated": {
+				"type": "string",
+				"description": "property named deprecated should not be removed"
+			}
+		}
+	}`
+
+	expected := `{
+		"type": "object",
+		"properties": {
+			"old_field": {
+				"type": "string"
+			},
+			"deprecated": {
+				"type": "string",
+				"description": "property named deprecated should not be removed"
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	compareJSON(t, expected, result)
+}
+
 func TestRemoveExtensionFields(t *testing.T) {
 	tests := []struct {
 		name     string
