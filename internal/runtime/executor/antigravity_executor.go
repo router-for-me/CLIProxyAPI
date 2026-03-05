@@ -680,22 +680,11 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 		return m
 	}
 
-	streamModelName := ""
-	for _, scanLine := range bytes.Split(stream, []byte("\n")) {
-		if mv := gjson.GetBytes(bytes.TrimSpace(scanLine), "response.modelVersion"); mv.Exists() && mv.String() != "" {
-			streamModelName = mv.String()
-			break
-		}
-	}
-	thinkingParser := NewThinkingTagParser(streamModelName)
-
 	for _, line := range bytes.Split(stream, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 || !gjson.ValidBytes(trimmed) {
 			continue
 		}
-
-		trimmed = thinkingParser.Process(trimmed)
 
 		root := gjson.ParseBytes(trimmed)
 		responseNode := root.Get("response")

@@ -14,28 +14,15 @@ const (
 	maxTagBufferLen  = 12
 )
 
-var thinkingStartPartials = []string{
-	"<thinking",
-	"<thinkin",
-	"<thinki",
-	"<think",
-	"<thin",
-	"<thi",
-	"<th",
-	"<t",
-	"<",
-}
+var thinkingStartPartials = generatePartials(thinkingStartTag)
+var thinkingEndPartials = generatePartials(thinkingEndTag)
 
-var thinkingEndPartials = []string{
-	"</thinking",
-	"</thinkin",
-	"</thinki",
-	"</think",
-	"</thin",
-	"</thi",
-	"</th",
-	"</t",
-	"</",
+func generatePartials(tag string) []string {
+	partials := make([]string, 0, len(tag)-1)
+	for i := len(tag) - 1; i > 0; i-- {
+		partials = append(partials, tag[:i])
+	}
+	return partials
 }
 
 type ThinkingTagParser struct {
@@ -129,10 +116,17 @@ func (p *ThinkingTagParser) Process(payload []byte) []byte {
 			if segment.text == "" {
 				continue
 			}
-			partJSON := `{}`
-			partJSON, _ = sjson.Set(partJSON, "text", segment.text)
+			partJSON, err := sjson.Set("{}", "text", segment.text)
+			if err != nil {
+				log.Errorf("antigravity executor: thinking tag parser failed to set text on part: %v", err)
+				continue
+			}
 			if segment.thought {
-				partJSON, _ = sjson.Set(partJSON, "thought", true)
+				partJSON, err = sjson.Set(partJSON, "thought", true)
+				if err != nil {
+					log.Errorf("antigravity executor: thinking tag parser failed to set thought on part: %v", err)
+					continue
+				}
 			}
 			updatedParts = append(updatedParts, partJSON)
 		}
