@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -21,7 +22,105 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+var errAuthFileTooLarge = errors.New("auth file exceeds allowed size")
+
+func (w *Watcher) readAuthFile(path string) ([]byte, error) {
+	info, errStat := os.Stat(path)
+	if errStat != nil {
+		return nil, errStat
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("auth path is directory: %s", path)
+	}
+	if info.Size() > maxAuthFileSize {
+		return nil, fmt.Errorf("%w: size=%d limit=%d", errAuthFileTooLarge, info.Size(), maxAuthFileSize)
+	}
+
+	data, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return nil, errRead
+	}
+	if int64(len(data)) > maxAuthFileSize {
+		return nil, fmt.Errorf("%w: size=%d limit=%d", errAuthFileTooLarge, len(data), maxAuthFileSize)
+	}
+	return data, nil
+}
+
+func logAuthReadFailure(path string, err error) {
+	if errors.Is(err, errAuthFileTooLarge) {
+		log.Warnf("skipping oversized auth file %s: %v", filepath.Base(path), err)
+		return
+	}
+	log.Errorf("failed to read auth file %s: %v", filepath.Base(path), err)
+}
+
+func sanitizeAuthFieldChange(change string) string {
+	trimmed := strings.TrimSpace(change)
+	if trimmed == "" {
+		return ""
+	}
+	lower := strings.ToLower(trimmed)
+	for _, keyword := range authSensitiveLogKeywords {
+		if strings.Contains(lower, keyword) {
+			return "[sensitive auth field change redacted]"
+		}
+	}
+	return trimmed
+}
+
+func (w *Watcher) isPathWithinBase(basePath, targetPath string) bool {
+	base := w.normalizeAuthPath(basePath)
+	target := w.normalizeAuthPath(targetPath)
+	if base == "" || target == "" {
+		return false
+	}
+	rel, errRel := filepath.Rel(base, target)
+	if errRel != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return !filepath.IsAbs(rel)
+}
+
+func (w *Watcher) isAuthWalkPathAllowed(path, authDir, resolvedAuthDir string) bool {
+	if !w.isPathWithinBase(authDir, path) {
+		return false
+	}
+	if strings.TrimSpace(resolvedAuthDir) == "" {
+		return true
+	}
+	resolvedPath, errEval := filepath.EvalSymlinks(path)
+	if errEval != nil {
+		log.WithError(errEval).Debugf("auth path symlink resolution failed, fallback to lexical boundary check: %s", filepath.Base(path))
+		return true
+	}
+	return w.isPathWithinBase(resolvedAuthDir, resolvedPath)
+}
+
+func (w *Watcher) invokeReloadCallback(cfg *config.Config, reason string) bool {
+	if w == nil || cfg == nil || w.reloadCallback == nil {
+		return false
+	}
+	if w.stopped.Load() {
+		if reason != "" {
+			log.Debugf("watcher stopped, skip reload callback: %s", reason)
+		}
+		return false
+	}
+	w.reloadCallback(cfg)
+	return true
+}
+
 func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) {
+	if w.stopped.Load() {
+		log.Debug("watcher stopped, skipping client reload")
+		return
+	}
 	log.Debugf("starting full client load process")
 
 	w.clientsMutex.RLock()
@@ -78,20 +177,41 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
+			resolvedWalkRoot := ""
+			if root, errEval := filepath.EvalSymlinks(resolvedAuthDir); errEval == nil {
+				resolvedWalkRoot = root
+			} else {
+				log.WithError(errEval).Debugf("failed to resolve auth walk root symlink: %s", resolvedAuthDir)
+			}
 			_ = filepath.Walk(resolvedAuthDir, func(path string, info fs.FileInfo, err error) error {
 				if err != nil {
 					return nil
 				}
+				if !w.isAuthWalkPathAllowed(path, resolvedAuthDir, resolvedWalkRoot) {
+					log.Warnf("skipping auth path outside authDir boundary: %s", path)
+					if info != nil && info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
-					if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
-						sum := sha256.Sum256(data)
-						normalizedPath := w.normalizeAuthPath(path)
-						w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
-						// Parse and cache auth content for future diff comparisons
-						var auth coreauth.Auth
-						if errParse := json.Unmarshal(data, &auth); errParse == nil {
-							w.lastAuthContents[normalizedPath] = &auth
-						}
+					data, errReadFile := w.readAuthFile(path)
+					if errReadFile != nil {
+						logAuthReadFailure(path, errReadFile)
+						return nil
+					}
+					if len(data) == 0 {
+						return nil
+					}
+					sum := sha256.Sum256(data)
+					normalizedPath := w.normalizeAuthPath(path)
+					w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
+					// Parse and cache auth content for future diff comparisons
+					var auth coreauth.Auth
+					if errParse := json.Unmarshal(data, &auth); errParse == nil {
+						w.lastAuthContents[normalizedPath] = &auth
+					} else {
+						log.Errorf("failed to parse auth file %s during hash cache preload: %v", filepath.Base(path), errParse)
 					}
 				}
 				return nil
@@ -102,9 +222,8 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 
-	if w.reloadCallback != nil {
+	if w.invokeReloadCallback(cfg, "full reload before auth refresh") {
 		log.Debugf("triggering server update callback before auth refresh")
-		w.reloadCallback(cfg)
 	}
 
 	w.refreshAuthState(forceAuthRefresh)
@@ -121,9 +240,9 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {
-	data, errRead := os.ReadFile(path)
+	data, errRead := w.readAuthFile(path)
 	if errRead != nil {
-		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
+		logAuthReadFailure(path, errRead)
 		return
 	}
 	if len(data) == 0 {
@@ -166,7 +285,9 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	if changes := diff.BuildAuthChangeDetails(oldAuth, &newAuth); len(changes) > 0 {
 		log.Debugf("auth field changes for %s:", filepath.Base(path))
 		for _, c := range changes {
-			log.Debugf("  %s", c)
+			if sanitized := sanitizeAuthFieldChange(c); sanitized != "" {
+				log.Debugf("  %s", sanitized)
+			}
 		}
 	}
 
@@ -181,10 +302,8 @@ func (w *Watcher) addOrUpdateClient(path string) {
 
 	w.refreshAuthState(false)
 
-	if w.reloadCallback != nil {
-		log.Debugf("triggering server update callback after add/update")
-		w.reloadCallback(cfg)
-	}
+	log.Debugf("triggering server update callback after add/update")
+	w.triggerServerUpdate(cfg)
 	w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
 }
 
@@ -200,10 +319,8 @@ func (w *Watcher) removeClient(path string) {
 
 	w.refreshAuthState(false)
 
-	if w.reloadCallback != nil {
-		log.Debugf("triggering server update callback after removal")
-		w.reloadCallback(cfg)
-	}
+	log.Debugf("triggering server update callback after removal")
+	w.triggerServerUpdate(cfg)
 	w.persistAuthAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path)
 }
 
@@ -219,16 +336,34 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 	if authDir == "" {
 		return 0
 	}
+	resolvedWalkRoot := ""
+	if root, errEval := filepath.EvalSymlinks(authDir); errEval == nil {
+		resolvedWalkRoot = root
+	} else {
+		log.WithError(errEval).Debugf("failed to resolve auth walk root symlink: %s", authDir)
+	}
 
 	errWalk := filepath.Walk(authDir, func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
 			log.Debugf("error accessing path %s: %v", path, err)
 			return err
 		}
+		if !w.isAuthWalkPathAllowed(path, authDir, resolvedWalkRoot) {
+			log.Warnf("skipping auth path outside authDir boundary: %s", path)
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
 			authFileCount++
 			log.Debugf("processing auth file %d: %s", authFileCount, filepath.Base(path))
-			if data, errCreate := os.ReadFile(path); errCreate == nil && len(data) > 0 {
+			data, errCreate := w.readAuthFile(path)
+			if errCreate != nil {
+				logAuthReadFailure(path, errCreate)
+				return nil
+			}
+			if len(data) > 0 {
 				successfulAuthCount++
 			}
 		}
@@ -302,4 +437,74 @@ func (w *Watcher) persistAuthAsync(message string, paths ...string) {
 			log.Errorf("failed to persist auth changes: %v", err)
 		}
 	}()
+}
+
+func (w *Watcher) stopServerUpdateTimer() {
+	w.serverUpdateMu.Lock()
+	defer w.serverUpdateMu.Unlock()
+	if w.serverUpdateTimer != nil {
+		w.serverUpdateTimer.Stop()
+		w.serverUpdateTimer = nil
+	}
+	w.serverUpdatePend = false
+}
+
+func (w *Watcher) triggerServerUpdate(cfg *config.Config) {
+	if w == nil || w.reloadCallback == nil || cfg == nil {
+		return
+	}
+	if w.stopped.Load() {
+		return
+	}
+
+	now := time.Now()
+
+	w.serverUpdateMu.Lock()
+	if w.serverUpdateLast.IsZero() || now.Sub(w.serverUpdateLast) >= serverUpdateDebounce {
+		w.serverUpdateLast = now
+		w.serverUpdateMu.Unlock()
+		w.invokeReloadCallback(cfg, "server update immediate")
+		return
+	}
+
+	if w.serverUpdatePend {
+		w.serverUpdateMu.Unlock()
+		return
+	}
+
+	delay := serverUpdateDebounce - now.Sub(w.serverUpdateLast)
+	if delay < minServerUpdateDelay {
+		delay = minServerUpdateDelay
+	}
+	w.serverUpdatePend = true
+	if w.serverUpdateTimer != nil {
+		w.serverUpdateTimer.Stop()
+	}
+	w.serverUpdateTimer = time.AfterFunc(delay, func() {
+		if w.stopped.Load() {
+			w.serverUpdateMu.Lock()
+			w.serverUpdatePend = false
+			w.serverUpdateTimer = nil
+			w.serverUpdateMu.Unlock()
+			return
+		}
+		w.clientsMutex.RLock()
+		latestCfg := w.config
+		w.clientsMutex.RUnlock()
+		if latestCfg == nil || w.stopped.Load() {
+			w.serverUpdateMu.Lock()
+			w.serverUpdatePend = false
+			w.serverUpdateTimer = nil
+			w.serverUpdateMu.Unlock()
+			return
+		}
+
+		w.serverUpdateMu.Lock()
+		w.serverUpdateLast = time.Now()
+		w.serverUpdatePend = false
+		w.serverUpdateTimer = nil
+		w.serverUpdateMu.Unlock()
+		w.invokeReloadCallback(latestCfg, "server update deferred")
+	})
+	w.serverUpdateMu.Unlock()
 }

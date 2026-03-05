@@ -69,10 +69,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
-	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
+	isAuthJSON := strings.HasSuffix(normalizedName, ".json") && pathBelongsToDir(event.Name, w.authDir) && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
@@ -125,7 +124,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 }
 
 func (w *Watcher) authFileUnchanged(path string) (bool, error) {
-	data, errRead := os.ReadFile(path)
+	data, errRead := w.readAuthFile(path)
 	if errRead != nil {
 		return false, errRead
 	}
