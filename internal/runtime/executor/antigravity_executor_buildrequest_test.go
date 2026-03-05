@@ -59,6 +59,7 @@ func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any 
 										"properties": {
 											"mode": {
 												"type": "string",
+												"deprecated": true,
 												"enum": ["a", "b"],
 												"enumTitles": ["A", "B"]
 											}
@@ -155,5 +156,8 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	}
 	if _, ok := mode["enumTitles"]; ok {
 		t.Fatalf("enumTitles should be removed from nested schema")
+	}
+	if _, ok := mode["deprecated"]; ok {
+		t.Fatalf("deprecated should be removed from nested schema")
 	}
 }
