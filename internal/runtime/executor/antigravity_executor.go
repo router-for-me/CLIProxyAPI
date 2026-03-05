@@ -541,6 +541,7 @@ attemptLoop:
 				}()
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, streamScannerBuffer)
+				thinkingParser := NewThinkingTagParser(baseModel)
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					appendAPIResponseChunk(ctx, e.cfg, line)
@@ -553,6 +554,8 @@ attemptLoop:
 					if payload == nil {
 						continue
 					}
+
+					payload = thinkingParser.Process(payload)
 
 					if detail, ok := parseAntigravityStreamUsage(payload); ok {
 						reporter.publish(ctx, detail)
@@ -677,11 +680,22 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 		return m
 	}
 
+	streamModelName := ""
+	for _, scanLine := range bytes.Split(stream, []byte("\n")) {
+		if mv := gjson.GetBytes(bytes.TrimSpace(scanLine), "response.modelVersion"); mv.Exists() && mv.String() != "" {
+			streamModelName = mv.String()
+			break
+		}
+	}
+	thinkingParser := NewThinkingTagParser(streamModelName)
+
 	for _, line := range bytes.Split(stream, []byte("\n")) {
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 || !gjson.ValidBytes(trimmed) {
 			continue
 		}
+
+		trimmed = thinkingParser.Process(trimmed)
 
 		root := gjson.ParseBytes(trimmed)
 		responseNode := root.Get("response")
@@ -932,6 +946,7 @@ attemptLoop:
 				}()
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, streamScannerBuffer)
+				thinkingParser := NewThinkingTagParser(baseModel)
 				var param any
 				for scanner.Scan() {
 					line := scanner.Bytes()
@@ -945,6 +960,8 @@ attemptLoop:
 					if payload == nil {
 						continue
 					}
+
+					payload = thinkingParser.Process(payload)
 
 					if detail, ok := parseAntigravityStreamUsage(payload); ok {
 						reporter.publish(ctx, detail)
