@@ -22,9 +22,11 @@ var (
 
 // ConvertOpenAIResponseToAnthropicParams holds parameters for response conversion
 type ConvertOpenAIResponseToAnthropicParams struct {
-	MessageID string
-	Model     string
-	CreatedAt int64
+	MessageID   string
+	Model       string
+	CreatedAt   int64
+	ToolNameMap map[string]string
+	SawToolCall bool
 	// Content accumulator for streaming
 	ContentAccumulator strings.Builder
 	// Tool calls accumulator for streaming
@@ -78,6 +80,8 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 			MessageID:                   "",
 			Model:                       "",
 			CreatedAt:                   0,
+			ToolNameMap:                 nil,
+			SawToolCall:                 false,
 			ContentAccumulator:          strings.Builder{},
 			ToolCallsAccumulator:        nil,
 			TextContentBlockStarted:     false,
@@ -97,6 +101,10 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
+	if (*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap == nil {
+		(*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+	}
+
 	// Check if this is the [DONE] marker
 	rawStr := strings.TrimSpace(string(rawJSON))
 	if rawStr == "[DONE]" {
@@ -109,6 +117,16 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 	} else {
 		return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams))
 	}
+}
+
+func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) string {
+	if param == nil {
+		return ""
+	}
+	if param.SawToolCall {
+		return "tool_calls"
+	}
+	return param.FinishReason
 }
 
 // convertOpenAIStreamingChunkToAnthropic converts OpenAI streaming chunk to Anthropic streaming events
@@ -197,6 +215,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			}
 
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+				param.SawToolCall = true
 				index := int(toolCall.Get("index").Int())
 				blockIndex := param.toolContentBlockIndex(index)
 
@@ -215,7 +234,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				// Handle function name
 				if function := toolCall.Get("function"); function.Exists() {
 					if name := function.Get("name"); name.Exists() {
-						accumulator.Name = name.String()
+						accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
 
 						stopThinkingContentBlock(param, &results)
 
@@ -246,7 +265,11 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	// Handle finish_reason (but don't send message_delta/message_stop yet)
 	if finishReason := root.Get("choices.0.finish_reason"); finishReason.Exists() && finishReason.String() != "" {
 		reason := finishReason.String()
-		param.FinishReason = reason
+		if param.SawToolCall {
+			param.FinishReason = "tool_calls"
+		} else {
+			param.FinishReason = reason
+		}
 
 		// Send content_block_stop for thinking content if needed
 		if param.ThinkingContentBlockStarted {
@@ -294,7 +317,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			inputTokens, outputTokens, cachedTokens = extractOpenAIUsage(usage)
 			// Send message_delta with usage
 			messageDeltaJSON := `{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
-			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(param.FinishReason))
+			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(effectiveOpenAIFinishReason(param)))
 			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.input_tokens", inputTokens)
 			messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "usage.output_tokens", outputTokens)
 			if cachedTokens > 0 {
@@ -348,7 +371,7 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	// If we haven't sent message_delta yet (no usage info was received), send it now
 	if param.FinishReason != "" && !param.MessageDeltaSent {
 		messageDeltaJSON := `{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
-		messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(param.FinishReason))
+		messageDeltaJSON, _ = sjson.Set(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(effectiveOpenAIFinishReason(param)))
 		results = append(results, "event: message_delta\ndata: "+messageDeltaJSON+"\n\n")
 		param.MessageDeltaSent = true
 	}
@@ -531,10 +554,10 @@ func stopTextContentBlock(param *ConvertOpenAIResponseToAnthropicParams, results
 // Returns:
 //   - string: An Anthropic-compatible JSON response.
 func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
+	toolNameMap := util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", root.Get("id").String())
 	out, _ = sjson.Set(out, "model", root.Get("model").String())
@@ -590,7 +613,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 									hasToolCall = true
 									toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
 									toolUse, _ = sjson.Set(toolUse, "id", tc.Get("id").String())
-									toolUse, _ = sjson.Set(toolUse, "name", tc.Get("function.name").String())
+									toolUse, _ = sjson.Set(toolUse, "name", util.MapToolName(toolNameMap, tc.Get("function.name").String()))
 
 									argsStr := util.FixJSON(tc.Get("function.arguments").String())
 									if argsStr != "" && gjson.Valid(argsStr) {
@@ -647,7 +670,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 					hasToolCall = true
 					toolUseBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
 					toolUseBlock, _ = sjson.Set(toolUseBlock, "id", toolCall.Get("id").String())
-					toolUseBlock, _ = sjson.Set(toolUseBlock, "name", toolCall.Get("function.name").String())
+					toolUseBlock, _ = sjson.Set(toolUseBlock, "name", util.MapToolName(toolNameMap, toolCall.Get("function.name").String()))
 
 					argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
 					if argsStr != "" && gjson.Valid(argsStr) {

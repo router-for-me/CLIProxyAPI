@@ -85,6 +85,11 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 
 					case "tool_use":
 						functionName := contentResult.Get("name").String()
+						if toolUseID := contentResult.Get("id").String(); toolUseID != "" {
+							if derived := toolNameFromClaudeToolUseID(toolUseID); derived != "" {
+								functionName = derived
+							}
+						}
 						functionArgs := contentResult.Get("input").String()
 						argsResult := gjson.Parse(functionArgs)
 						if argsResult.IsObject() && gjson.Valid(functionArgs) {
@@ -100,10 +105,9 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						if toolCallID == "" {
 							return true
 						}
-						funcName := toolCallID
-						toolCallIDs := strings.Split(toolCallID, "-")
-						if len(toolCallIDs) > 1 {
-							funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
+						funcName := toolNameFromClaudeToolUseID(toolCallID)
+						if funcName == "" {
+							funcName = toolCallID
 						}
 						responseData := contentResult.Get("content").Raw
 						part := `{"functionResponse":{"name":"","response":{"result":""}}}`
@@ -229,4 +233,12 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	result = common.AttachDefaultSafetySettings(result, "safetySettings")
 
 	return result
+}
+
+func toolNameFromClaudeToolUseID(toolUseID string) string {
+	parts := strings.Split(toolUseID, "-")
+	if len(parts) <= 1 {
+		return ""
+	}
+	return strings.Join(parts[0:len(parts)-1], "-")
 }
