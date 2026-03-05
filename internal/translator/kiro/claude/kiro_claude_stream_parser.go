@@ -192,8 +192,8 @@ func AnalyzeBufferedStream(chunks [][]byte) BufferedStreamResult {
 							if idx, ok := event["index"].(float64); ok {
 								currentToolIndex = int(idx)
 							}
-							// Capture tool use ID for toolResults handshake
-							if id, ok := cb["id"].(string); ok {
+							// Capture tool use ID only for web_search toolResults handshake
+							if id, ok := cb["id"].(string); ok && (currentToolName == "web_search" || currentToolName == "remote_web_search") {
 								result.WebSearchToolUseId = id
 							}
 							toolInputBuilder.Reset()

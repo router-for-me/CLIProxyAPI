@@ -605,10 +605,6 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		})
 	}
 
-	// Apply dynamic compression if total tools size exceeds threshold
-	// This prevents 500 errors when Claude Code sends too many tools
-	kiroTools = compressToolsIfNeeded(kiroTools)
-
 	return kiroTools
 }
 
@@ -858,34 +854,7 @@ func BuildUserMessageStruct(msg gjson.Result, modelID, origin string) (KiroUserI
 
 				var textContents []KiroTextContent
 
-				// Check if this tool_result contains error from our SOFT_LIMIT_REACHED tool_use
-				// The client will return an error when trying to execute a tool with marker input
-				resultStr := resultContent.String()
-				isSoftLimitError := strings.Contains(resultStr, "SOFT_LIMIT_REACHED") ||
-					strings.Contains(resultStr, "_status") ||
-					strings.Contains(resultStr, "truncated") ||
-					strings.Contains(resultStr, "missing required") ||
-					strings.Contains(resultStr, "invalid input") ||
-					strings.Contains(resultStr, "Error writing file")
-
-				if isError && isSoftLimitError {
-					// Replace error content with SOFT_LIMIT_REACHED guidance
-					log.Infof("kiro: detected SOFT_LIMIT_REACHED in tool_result for %s, replacing with guidance", toolUseID)
-					softLimitMsg := `SOFT_LIMIT_REACHED
-
-Your previous tool call was incomplete due to API output size limits.
-The content was PARTIALLY transmitted but NOT executed.
-
-REQUIRED ACTION:
-1. Split your content into smaller chunks (max 300 lines per call)
-2. For file writes: Create file with first chunk, then use append for remaining
-3. Do NOT regenerate content you already attempted - continue from where you stopped
-
-STATUS: This is NOT an error. Continue with smaller chunks.`
-					textContents = append(textContents, KiroTextContent{Text: softLimitMsg})
-					// Mark as SUCCESS so Claude doesn't treat it as a failure
-					isError = false
-				} else if resultContent.IsArray() {
+				if resultContent.IsArray() {
 					for _, item := range resultContent.Array() {
 						if item.Get("type").String() == "text" {
 							textContents = append(textContents, KiroTextContent{Text: item.Get("text").String()})
