@@ -74,8 +74,13 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	}
 
 	// Extract and set the model version.
+	cachedModel := (*param).(*ConvertCliToOpenAIParams).Model
 	if modelResult := gjson.GetBytes(rawJSON, "model"); modelResult.Exists() {
 		template, _ = sjson.Set(template, "model", modelResult.String())
+	} else if cachedModel != "" {
+		template, _ = sjson.Set(template, "model", cachedModel)
+	} else if modelName != "" {
+		template, _ = sjson.Set(template, "model", modelName)
 	}
 
 	template, _ = sjson.Set(template, "created", (*param).(*ConvertCliToOpenAIParams).CreatedAt)

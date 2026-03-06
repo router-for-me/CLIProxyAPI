@@ -193,6 +193,42 @@ func TestConvertClaudeRequestToAntigravity_ToolDeclarations(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_ToolChoice_SpecificTool(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "hi"}
+				]
+			}
+		],
+		"tools": [
+			{
+				"name": "json",
+				"description": "A JSON tool",
+				"input_schema": {
+					"type": "object",
+					"properties": {}
+				}
+			}
+		],
+		"tool_choice": {"type": "tool", "name": "json"}
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3-flash-preview", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "request.toolConfig.functionCallingConfig.mode").String(); got != "ANY" {
+		t.Fatalf("Expected toolConfig.functionCallingConfig.mode 'ANY', got '%s'", got)
+	}
+	allowed := gjson.Get(outputStr, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Array()
+	if len(allowed) != 1 || allowed[0].String() != "json" {
+		t.Fatalf("Expected allowedFunctionNames ['json'], got %s", gjson.Get(outputStr, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Raw)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolUse(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
@@ -1197,5 +1233,66 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 	}
 	if !found {
 		t.Errorf("Interleaved thinking hint should be in created systemInstruction, got: %v", sysInstruction.Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_AdaptiveThinking_EffortLevels(t *testing.T) {
+	tests := []struct {
+		name     string
+		effort   string
+		expected string
+	}{
+		{"low", "low", "low"},
+		{"medium", "medium", "medium"},
+		{"high", "high", "high"},
+		{"max", "max", "high"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"model": "claude-opus-4-6-thinking",
+				"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
+				"thinking": {"type": "adaptive"},
+				"output_config": {"effort": "` + tt.effort + `"}
+			}`)
+
+			output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+			outputStr := string(output)
+
+			thinkingConfig := gjson.Get(outputStr, "request.generationConfig.thinkingConfig")
+			if !thinkingConfig.Exists() {
+				t.Fatal("thinkingConfig should exist for adaptive thinking")
+			}
+			if thinkingConfig.Get("thinkingLevel").String() != tt.expected {
+				t.Errorf("Expected thinkingLevel %q, got %q", tt.expected, thinkingConfig.Get("thinkingLevel").String())
+			}
+			if !thinkingConfig.Get("includeThoughts").Bool() {
+				t.Error("includeThoughts should be true")
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_AdaptiveThinking_NoEffort(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}],
+		"thinking": {"type": "adaptive"}
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	thinkingConfig := gjson.Get(outputStr, "request.generationConfig.thinkingConfig")
+	if !thinkingConfig.Exists() {
+		t.Fatal("thinkingConfig should exist for adaptive thinking without effort")
+	}
+	if thinkingConfig.Get("thinkingLevel").String() != "high" {
+		t.Errorf("Expected default thinkingLevel \"high\", got %q", thinkingConfig.Get("thinkingLevel").String())
+	}
+	if !thinkingConfig.Get("includeThoughts").Bool() {
+		t.Error("includeThoughts should be true")
 	}
 }

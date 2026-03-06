@@ -156,6 +156,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 				tool, _ = sjson.Delete(tool, "input_examples")
 				tool, _ = sjson.Delete(tool, "type")
 				tool, _ = sjson.Delete(tool, "cache_control")
+				tool, _ = sjson.Delete(tool, "defer_loading")
 				if gjson.Valid(tool) && gjson.Parse(tool).IsObject() {
 					if !hasTools {
 						out, _ = sjson.SetRaw(out, "request.tools", `[{"functionDeclarations":[]}]`)
@@ -168,6 +169,33 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 		})
 		if !hasTools {
 			out, _ = sjson.Delete(out, "request.tools")
+		}
+	}
+
+	// tool_choice
+	toolChoiceResult := gjson.GetBytes(rawJSON, "tool_choice")
+	if toolChoiceResult.Exists() {
+		toolChoiceType := ""
+		toolChoiceName := ""
+		if toolChoiceResult.IsObject() {
+			toolChoiceType = toolChoiceResult.Get("type").String()
+			toolChoiceName = toolChoiceResult.Get("name").String()
+		} else if toolChoiceResult.Type == gjson.String {
+			toolChoiceType = toolChoiceResult.String()
+		}
+
+		switch toolChoiceType {
+		case "auto":
+			out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.mode", "AUTO")
+		case "none":
+			out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.mode", "NONE")
+		case "any":
+			out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
+		case "tool":
+			out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
+			if toolChoiceName != "" {
+				out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{toolChoiceName})
+			}
 		}
 	}
 
