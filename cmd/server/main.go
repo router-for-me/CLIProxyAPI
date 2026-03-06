@@ -69,6 +69,7 @@ func main() {
 	var kimiLogin bool
 	var projectID string
 	var vertexImport string
+	var vertexImportPrefix string
 	var configPath string
 	var password string
 	var tuiMode bool
@@ -89,6 +90,7 @@ func main() {
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
+	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
@@ -459,7 +461,7 @@ func main() {
 
 	if vertexImport != "" {
 		// Handle Vertex service account import
-		cmd.DoVertexImport(cfg, vertexImport)
+		cmd.DoVertexImport(cfg, vertexImport, vertexImportPrefix)
 	} else if login {
 		// Handle Google/Gemini login
 		cmd.DoLogin(cfg, projectID, options)
