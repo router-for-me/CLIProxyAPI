@@ -82,12 +82,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	endpoint := "/chat/completions"
-	if opts.Alt == "responses/compact" {
-		to = sdktranslator.FromString("openai-response")
-		endpoint = "/responses/compact"
-	}
+	route := resolveOpenAICompatRoute(from, opts.Alt, baseModel)
+	to := route.to
+	endpoint := route.endpoint
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -189,7 +186,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
+	route := resolveOpenAICompatRoute(from, "", baseModel)
+	to := route.to
+	endpoint := route.endpoint
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -205,7 +204,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -274,6 +273,21 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}
+
+			if route.responsesPassthrough {
+				// For /v1/responses passthrough, forward event: and data: SSE lines
+				// to preserve the full SSE framing that the handler expects.
+				// Skip empty lines to avoid double-framing with the downstream handler.
+				if len(line) == 0 {
+					continue
+				}
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
+				for i := range chunks {
+					out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+				}
+				continue
+			}
+
 			if len(line) == 0 {
 				continue
 			}
@@ -396,3 +410,41 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+// openaiCompatRoute holds the resolved routing decision for an OpenAI-compat request.
+type openaiCompatRoute struct {
+	to                   sdktranslator.Format
+	endpoint             string
+	responsesPassthrough bool
+}
+
+// resolveOpenAICompatRoute determines the target format, endpoint, and whether to use
+// raw SSE passthrough based on the source format, alt parameter, and model name.
+func resolveOpenAICompatRoute(from sdktranslator.Format, alt, model string) openaiCompatRoute {
+	if alt == "responses/compact" {
+		return openaiCompatRoute{
+			to:       sdktranslator.FromString("openai-response"),
+			endpoint: "/responses/compact",
+		}
+	}
+	if from == sdktranslator.FromString("openai-response") && shouldPassthroughResponsesAPI(model) {
+		return openaiCompatRoute{
+			to:                   sdktranslator.FromString("openai-response"),
+			endpoint:             "/responses",
+			responsesPassthrough: true,
+		}
+	}
+	return openaiCompatRoute{
+		to:       sdktranslator.FromString("openai"),
+		endpoint: "/chat/completions",
+	}
+}
+
+// shouldPassthroughResponsesAPI returns true for OpenAI models whose Responses API
+// requests should not be down-converted to /v1/chat/completions. This is a heuristic
+// that currently targets GPT-5-family models, which reject reasoning_effort + function
+// tools on the Chat Completions endpoint. Models like gpt-4o and o3 support both
+// endpoints and are safely down-converted.
+func shouldPassthroughResponsesAPI(model string) bool {
+	return strings.HasPrefix(strings.ToLower(model), "gpt-5")
+}

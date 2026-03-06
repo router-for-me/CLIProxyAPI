@@ -236,6 +236,11 @@ func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
 	if !usageNode.Exists() {
+		// /v1/responses streams carry usage under response.usage in the
+		// response.completed event.
+		usageNode = gjson.GetBytes(payload, "response.usage")
+	}
+	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
 	detail := usage.Detail{
@@ -243,10 +248,21 @@ func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		OutputTokens: usageNode.Get("completion_tokens").Int(),
 		TotalTokens:  usageNode.Get("total_tokens").Int(),
 	}
+	// /v1/responses uses input_tokens/output_tokens instead of prompt_tokens/completion_tokens
+	if detail.InputTokens == 0 {
+		detail.InputTokens = usageNode.Get("input_tokens").Int()
+	}
+	if detail.OutputTokens == 0 {
+		detail.OutputTokens = usageNode.Get("output_tokens").Int()
+	}
 	if cached := usageNode.Get("prompt_tokens_details.cached_tokens"); cached.Exists() {
+		detail.CachedTokens = cached.Int()
+	} else if cached := usageNode.Get("input_tokens_details.cached_tokens"); cached.Exists() {
 		detail.CachedTokens = cached.Int()
 	}
 	if reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
+		detail.ReasoningTokens = reasoning.Int()
+	} else if reasoning := usageNode.Get("output_tokens_details.reasoning_tokens"); reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
 	}
 	return detail, true
