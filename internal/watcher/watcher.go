@@ -101,6 +101,7 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 		}
 		if provider, ok := store.(authDirProvider); ok {
 			if fixed := strings.TrimSpace(provider.AuthDir()); fixed != "" {
+				w.authDir = fixed
 				w.mirroredAuthDir = fixed
 				log.Debugf("mirrored auth directory locked to %s", fixed)
 			}
@@ -146,5 +147,15 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RLock()
 	cfg := w.config
 	w.clientsMutex.RUnlock()
-	return snapshotCoreAuths(cfg, w.authDir)
+	return snapshotCoreAuths(cfg, w.effectiveAuthDir())
+}
+
+func (w *Watcher) effectiveAuthDir() string {
+	if w == nil {
+		return ""
+	}
+	if fixed := strings.TrimSpace(w.mirroredAuthDir); fixed != "" {
+		return fixed
+	}
+	return w.authDir
 }

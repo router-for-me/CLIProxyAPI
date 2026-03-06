@@ -244,9 +244,10 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.List()
+	fileInfoIndex := buildAuthDirFileInfoIndex(h.cfg.AuthDir)
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
-		if entry := h.buildAuthFileEntry(auth); entry != nil {
+		if entry := h.buildAuthFileEntry(auth, h.cfg.AuthDir, fileInfoIndex); entry != nil {
 			files = append(files, entry)
 		}
 	}
@@ -340,7 +341,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 	c.JSON(200, gin.H{"files": files})
 }
 
-func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
+func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, authDir string, fileInfoIndex map[string]os.FileInfo) gin.H {
 	if auth == nil {
 		return nil
 	}
@@ -399,10 +400,10 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if path != "" {
 		entry["path"] = path
 		entry["source"] = "file"
-		if info, err := os.Stat(path); err == nil {
+		if info, exists, err := resolveAuthFileInfo(authDir, fileInfoIndex, path); err == nil && exists {
 			entry["size"] = info.Size()
 			entry["modtime"] = info.ModTime()
-		} else if os.IsNotExist(err) {
+		} else if err == nil && !exists {
 			// Hide credentials removed from disk but still lingering in memory.
 			if !runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")) {
 				return nil
@@ -476,6 +477,52 @@ func authEmail(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+func buildAuthDirFileInfoIndex(authDir string) map[string]os.FileInfo {
+	authDir = strings.TrimSpace(authDir)
+	if authDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(authDir)
+	if err != nil {
+		return nil
+	}
+	index := make(map[string]os.FileInfo, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, errInfo := entry.Info()
+		if errInfo != nil {
+			continue
+		}
+		index[strings.ToLower(entry.Name())] = info
+	}
+	return index
+}
+
+func resolveAuthFileInfo(authDir string, fileInfoIndex map[string]os.FileInfo, path string) (os.FileInfo, bool, error) {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "" || cleanPath == "." {
+		return nil, false, nil
+	}
+	cleanAuthDir := filepath.Clean(strings.TrimSpace(authDir))
+	if cleanAuthDir != "" && cleanAuthDir != "." {
+		if rel, err := filepath.Rel(cleanAuthDir, cleanPath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			if info, ok := fileInfoIndex[strings.ToLower(filepath.Base(cleanPath))]; ok {
+				return info, true, nil
+			}
+		}
+	}
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return info, true, nil
 }
 
 func authAttribute(auth *coreauth.Auth, key string) string {

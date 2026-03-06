@@ -80,7 +80,7 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 func (w *Watcher) refreshAuthState(force bool) {
 	w.clientsMutex.RLock()
 	cfg := w.config
-	authDir := w.authDir
+	authDir := w.effectiveAuthDir()
 	w.clientsMutex.RUnlock()
 	auths := snapshotCoreAuthsFunc(cfg, authDir)
 	w.clientsMutex.Lock()
@@ -277,3 +277,4 @@ func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
 
 	return out
 }
+

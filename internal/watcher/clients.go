@@ -199,7 +199,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	// Build synthesized auth entries for this single file only.
 	sctx := &synthesizer.SynthesisContext{
 		Config:      w.config,
-		AuthDir:     w.authDir,
+		AuthDir:     w.effectiveAuthDir(),
 		Now:         time.Now(),
 		IDGenerator: synthesizer.NewStableIDGenerator(),
 	}
@@ -369,3 +369,4 @@ func (w *Watcher) persistAuthAsync(message string, paths ...string) {
 		}
 	}()
 }
+
