@@ -38,6 +38,8 @@ type oaiToResponsesState struct {
 	// function item done state
 	FuncArgsDone map[int]bool
 	FuncItemDone map[int]bool
+	// Accumulated annotations (url_citation) from OpenAI web search
+	AnnotationsRaw []string
 	// usage aggregation
 	PromptTokens     int64
 	CachedTokens     int64
@@ -232,6 +234,15 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					st.MsgTextBuf[idx].WriteString(c.String())
 				}
 
+				// Handle annotations (url_citation from web search)
+				if annotations := delta.Get("annotations"); annotations.Exists() && annotations.IsArray() {
+					annotations.ForEach(func(_, ann gjson.Result) bool {
+						compacted := strings.ReplaceAll(strings.ReplaceAll(ann.Raw, "\n", ""), "\r", "")
+						st.AnnotationsRaw = append(st.AnnotationsRaw, compacted)
+						return true
+					})
+				}
+
 				// reasoning_content (OpenAI reasoning incremental text)
 				if rc := delta.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
 					// On first appearance, add reasoning item and part
@@ -386,6 +397,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							partDone, _ = sjson.Set(partDone, "output_index", i)
 							partDone, _ = sjson.Set(partDone, "content_index", 0)
 							partDone, _ = sjson.Set(partDone, "part.text", fullText)
+							if len(st.AnnotationsRaw) > 0 {
+								for _, raw := range st.AnnotationsRaw {
+									partDone, _ = sjson.SetRaw(partDone, "part.annotations.-1", raw)
+								}
+							}
 							out = append(out, emitRespEvent("response.content_part.done", partDone))
 
 							itemDone := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}`
@@ -393,6 +409,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							itemDone, _ = sjson.Set(itemDone, "output_index", i)
 							itemDone, _ = sjson.Set(itemDone, "item.id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
 							itemDone, _ = sjson.Set(itemDone, "item.content.0.text", fullText)
+							if len(st.AnnotationsRaw) > 0 {
+								for _, raw := range st.AnnotationsRaw {
+									itemDone, _ = sjson.SetRaw(itemDone, "item.content.0.annotations.-1", raw)
+								}
+							}
 							out = append(out, emitRespEvent("response.output_item.done", itemDone))
 							st.MsgItemDone[i] = true
 						}
@@ -544,6 +565,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
 						item, _ = sjson.Set(item, "id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
 						item, _ = sjson.Set(item, "content.0.text", txt)
+						if len(st.AnnotationsRaw) > 0 {
+							for _, raw := range st.AnnotationsRaw {
+								item, _ = sjson.SetRaw(item, "content.0.annotations.-1", raw)
+							}
+						}
 						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 					}
 				}
@@ -730,6 +756,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 					item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
 					item, _ = sjson.Set(item, "id", fmt.Sprintf("msg_%s_%d", id, int(choice.Get("index").Int())))
 					item, _ = sjson.Set(item, "content.0.text", c.String())
+					// Populate annotations from message if present
+					if annotations := msg.Get("annotations"); annotations.Exists() && annotations.IsArray() && len(annotations.Array()) > 0 {
+						annotations.ForEach(func(_, ann gjson.Result) bool {
+							compacted := strings.ReplaceAll(strings.ReplaceAll(ann.Raw, "\n", ""), "\r", "")
+							item, _ = sjson.SetRaw(item, "content.0.annotations.-1", compacted)
+							return true
+						})
+					}
 					outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 				}
 
