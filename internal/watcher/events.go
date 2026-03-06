@@ -124,7 +124,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 }
 
 func (w *Watcher) authFileUnchanged(path string) (bool, error) {
-	data, errRead := w.readAuthFile(path)
+	data, errRead := os.ReadFile(path)
 	if errRead != nil {
 		return false, errRead
 	}
