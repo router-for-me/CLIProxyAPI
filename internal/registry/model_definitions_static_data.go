@@ -827,6 +827,20 @@ func GetOpenAIModels() []*ModelInfo {
 			SupportedParameters: []string{"tools"},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
+		{
+			ID:                  "gpt-5.4",
+			Object:              "model",
+			Created:             1772668800,
+			OwnedBy:             "openai",
+			Type:                "openai",
+			Version:             "gpt-5.4",
+			DisplayName:         "GPT 5.4",
+			Description:         "Stable version of GPT 5.4",
+			ContextLength:       1_050_000,
+			MaxCompletionTokens: 128000,
+			SupportedParameters: []string{"tools"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+		},
 	}
 }
 
