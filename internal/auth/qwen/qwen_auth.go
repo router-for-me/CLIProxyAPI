@@ -235,7 +235,7 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 		data.Set("device_code", deviceCode)
 		data.Set("code_verifier", codeVerifier)
 
-		resp, err := http.PostForm(QwenOAuthTokenEndpoint, data)
+		resp, err := qa.postForm(QwenOAuthTokenEndpoint, data)
 		if err != nil {
 			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
 			time.Sleep(pollInterval)
@@ -310,6 +310,20 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 	return nil, fmt.Errorf("authentication timeout. Please restart the authentication process")
 }
 
+func (qa *QwenAuth) postForm(endpoint string, data url.Values) (*http.Response, error) {
+	client := qa.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	return client.Do(req)
+}
+
 // RefreshTokensWithRetry attempts to refresh tokens with a specified number of retries upon failure.
 func (o *QwenAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*QwenTokenData, error) {
 	var lastErr error
@@ -357,3 +371,11 @@ func (o *QwenAuth) UpdateTokenStorage(storage *QwenTokenStorage, tokenData *Qwen
 	storage.ResourceURL = tokenData.ResourceURL
 	storage.Expire = tokenData.Expire
 }
+
+
+
+
+
+
+
+
