@@ -38,6 +38,7 @@ type Handler struct {
 	cfg                 *config.Config
 	configFilePath      string
 	mu                  sync.Mutex
+	stateMu             sync.RWMutex
 	attemptsMu          sync.Mutex
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
@@ -104,17 +105,43 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 	return NewHandler(cfg, "", manager)
 }
 
+// StateMiddleware serializes management runtime state access so request handlers,
+// hot-reload updates and persistence do not observe partially-updated in-memory state.
+func (h *Handler) StateMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		h.stateMu.Lock()
+		defer h.stateMu.Unlock()
+		c.Next()
+	}
+}
+
 // SetConfig updates the in-memory config reference when the server hot-reloads.
-func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
+func (h *Handler) SetConfig(cfg *config.Config) {
+	h.stateMu.Lock()
+	h.cfg = cfg
+	h.stateMu.Unlock()
+}
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
-func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = manager }
+func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
+	h.stateMu.Lock()
+	h.authManager = manager
+	h.stateMu.Unlock()
+}
 
 // SetUsageStatistics allows replacing the usage statistics reference.
-func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
+func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) {
+	h.stateMu.Lock()
+	h.usageStats = stats
+	h.stateMu.Unlock()
+}
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
-func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
+func (h *Handler) SetLocalPassword(password string) {
+	h.stateMu.Lock()
+	h.localPassword = password
+	h.stateMu.Unlock()
+}
 
 // SetLogDirectory updates the directory where main.log should be looked up.
 func (h *Handler) SetLogDirectory(dir string) {
@@ -126,12 +153,16 @@ func (h *Handler) SetLogDirectory(dir string) {
 			dir = abs
 		}
 	}
+	h.stateMu.Lock()
 	h.logDir = dir
+	h.stateMu.Unlock()
 }
 
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
+	h.stateMu.Lock()
 	h.postAuthHook = hook
+	h.stateMu.Unlock()
 }
 
 // Middleware enforces access control for management endpoints.
@@ -321,3 +352,5 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	set(*body.Value)
 	h.persist(c)
 }
+
+

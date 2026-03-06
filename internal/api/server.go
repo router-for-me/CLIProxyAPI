@@ -19,7 +19,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/access"
+    "github.com/router-for-me/CLIProxyAPI/v6/internal/access"
+    configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
@@ -195,6 +196,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	for i := range opts {
 		opts[i](optionState)
 	}
+	if accessManager == nil {
+		log.Warn("access manager was nil, creating a default manager")
+		accessManager = sdkaccess.NewManager()
+		configaccess.Register(&cfg.SDKConfig)
+		accessManager.SetProviders(sdkaccess.RegisteredProviders())
+	}
+
 	// Set gin mode
 	if !cfg.Debug {
 		gin.SetMode(gin.ReleaseMode)
@@ -484,7 +492,7 @@ func (s *Server) registerManagementRoutes() {
 	log.Info("management routes registered after secret key configuration")
 
 	mgmt := s.engine.Group("/v0/management")
-	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
+	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.StateMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
@@ -1028,7 +1036,8 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
-			c.Next()
+			log.Error("authentication middleware misconfigured: access manager is nil")
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "authentication unavailable"})
 			return
 		}
 
@@ -1052,3 +1061,7 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
 }
+
+
+
+
