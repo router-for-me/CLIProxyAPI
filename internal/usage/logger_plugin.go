@@ -5,7 +5,8 @@ package usage
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,12 @@ type RequestStatistics struct {
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+
+	// cache for dayKey
+	cachedDayKey   string
+	cachedDayYear  int
+	cachedDayMonth time.Month
+	cachedDayDay   int
 }
 
 // apiStats holds aggregated metrics for a single API key.
@@ -150,6 +157,21 @@ func NewRequestStatistics() *RequestStatistics {
 	}
 }
 
+// getDayKey returns the day string formatted as YYYY-MM-DD.
+// It caches the most recent calculation to avoid the CPU and allocation overhead 
+// of calling time.Format("2006-01-02") on every single request record.
+func (s *RequestStatistics) getDayKey(timestamp time.Time) string {
+	y, m, d := timestamp.Date()
+	if y == s.cachedDayYear && m == s.cachedDayMonth && d == s.cachedDayDay && s.cachedDayKey != "" {
+		return s.cachedDayKey
+	}
+	s.cachedDayYear = y
+	s.cachedDayMonth = m
+	s.cachedDayDay = d
+	s.cachedDayKey = timestamp.Format("2006-01-02")
+	return s.cachedDayKey
+}
+
 // Record ingests a new usage record and updates the aggregates.
 func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record) {
 	if s == nil {
@@ -177,11 +199,12 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if modelName == "" {
 		modelName = "unknown"
 	}
-	dayKey := timestamp.Format("2006-01-02")
 	hourKey := timestamp.Hour()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	dayKey := s.getDayKey(timestamp)
 
 	s.totalRequests++
 	if success {
@@ -210,6 +233,10 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.tokensByHour[hourKey] += totalTokens
 }
 
+// updateAPIStats updates the model specific aggregates with a new request detail.
+// It keeps the latest 1000 details per model to prevent memory leaks from unbounded growth
+// in long-running processes or high-throughput scenarios, while still providing
+// enough history for meaningful observability.
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
 	stats.TotalRequests++
 	stats.TotalTokens += detail.Tokens.TotalTokens
@@ -221,6 +248,74 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	const maxDetails = 1000
+	if len(modelStatsValue.Details) > maxDetails {
+		cutoff := len(modelStatsValue.Details) - maxDetails + (maxDetails / 10)
+		// Use copy to shift elements to the front, preserving the backing array's capacity
+		copy(modelStatsValue.Details, modelStatsValue.Details[cutoff:])
+		modelStatsValue.Details = modelStatsValue.Details[:len(modelStatsValue.Details)-cutoff]
+	}
+}
+
+// RestoreSnapshot completely overwrites the current memory state with the provided snapshot.
+// It performs a direct state replacement rather than merging individual request details,
+// which significantly improves performance when loading initial state from disk.
+func (s *RequestStatistics) RestoreSnapshot(snapshot StatisticsSnapshot) {
+	if s == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.totalRequests = snapshot.TotalRequests
+	s.successCount = snapshot.SuccessCount
+	s.failureCount = snapshot.FailureCount
+	s.totalTokens = snapshot.TotalTokens
+
+	s.apis = make(map[string]*apiStats)
+	for apiName, apiSnapshot := range snapshot.APIs {
+		stats := &apiStats{
+			TotalRequests: apiSnapshot.TotalRequests,
+			TotalTokens:   apiSnapshot.TotalTokens,
+			Models:        make(map[string]*modelStats),
+		}
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			details := make([]RequestDetail, len(modelSnapshot.Details))
+			copy(details, modelSnapshot.Details)
+			stats.Models[modelName] = &modelStats{
+				TotalRequests: modelSnapshot.TotalRequests,
+				TotalTokens:   modelSnapshot.TotalTokens,
+				Details:       details,
+			}
+		}
+		s.apis[apiName] = stats
+	}
+
+	s.requestsByDay = make(map[string]int64)
+	for k, v := range snapshot.RequestsByDay {
+		s.requestsByDay[k] = v
+	}
+
+	s.requestsByHour = make(map[int]int64)
+	for k, v := range snapshot.RequestsByHour {
+		// handle string to int conversion for the hour map key
+		var hour int
+		hour, _ = strconv.Atoi(k)
+		s.requestsByHour[hour] = v
+	}
+
+	s.tokensByDay = make(map[string]int64)
+	for k, v := range snapshot.TokensByDay {
+		s.tokensByDay[k] = v
+	}
+
+	s.tokensByHour = make(map[int]int64)
+	for k, v := range snapshot.TokensByHour {
+		var hour int
+		hour, _ = strconv.Atoi(k)
+		s.tokensByHour[hour] = v
+	}
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
@@ -280,6 +375,69 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	}
 
 	return result
+}
+
+// WriteJSON locks the statistics and streams them directly to the provided encoder,
+// avoiding the memory allocations of a full Snapshot deep-copy.
+func (s *RequestStatistics) WriteJSON(enc *json.Encoder) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// We construct a shallow StatisticsSnapshot instead of a deep copy since we hold the read lock.
+	// This ensures we format the keys properly (e.g. padding hour strings) while avoiding 
+	// unnecessary array allocations before JSON encoding.
+
+	shallow := StatisticsSnapshot{
+		TotalRequests: s.totalRequests,
+		SuccessCount:  s.successCount,
+		FailureCount:  s.failureCount,
+		TotalTokens:   s.totalTokens,
+		APIs:          make(map[string]APISnapshot, len(s.apis)),
+		RequestsByDay: s.requestsByDay, // Maps are safe to read concurrently if we hold RLock
+		TokensByDay:   s.tokensByDay,
+	}
+
+	for apiName, stats := range s.apis {
+		apiShallow := APISnapshot{
+			TotalRequests: stats.TotalRequests,
+			TotalTokens:   stats.TotalTokens,
+			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
+		}
+		for modelName, modelStatsValue := range stats.Models {
+			// SHALLOW COPY: Just pass the slice reference!
+			apiShallow.Models[modelName] = ModelSnapshot{
+				TotalRequests: modelStatsValue.TotalRequests,
+				TotalTokens:   modelStatsValue.TotalTokens,
+				Details:       modelStatsValue.Details,
+			}
+		}
+		shallow.APIs[apiName] = apiShallow
+	}
+
+	shallow.RequestsByHour = make(map[string]int64, len(s.requestsByHour))
+	for hour, v := range s.requestsByHour {
+		shallow.RequestsByHour[formatHour(hour)] = v
+	}
+
+	shallow.TokensByHour = make(map[string]int64, len(s.tokensByHour))
+	for hour, v := range s.tokensByHour {
+		shallow.TokensByHour[formatHour(hour)] = v
+	}
+
+	return enc.Encode(shallow)
+}
+
+// GetTotalRequests returns the total number of requests without locking the whole struct if we just want to check.
+func (s *RequestStatistics) GetTotalRequests() int64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.totalRequests
 }
 
 type MergeResult struct {
@@ -366,7 +524,7 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 
 	s.updateAPIStats(stats, modelName, detail)
 
-	dayKey := detail.Timestamp.Format("2006-01-02")
+	dayKey := s.getDayKey(detail.Timestamp)
 	hourKey := detail.Timestamp.Hour()
 
 	s.requestsByDay[dayKey]++
@@ -375,23 +533,41 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	s.tokensByHour[hourKey] += totalTokens
 }
 
+// dedupKey generates a unique string identifier for a request detail to prevent 
+// processing duplicates during snapshot merges.
+// It uses strings.Builder instead of fmt.Sprintf to significantly reduce memory 
+// allocations and CPU overhead during high-volume usage tracking.
 func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
-	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
-		apiName,
-		modelName,
-		timestamp,
-		detail.Source,
-		detail.AuthIndex,
-		detail.Failed,
-		tokens.InputTokens,
-		tokens.OutputTokens,
-		tokens.ReasoningTokens,
-		tokens.CachedTokens,
-		tokens.TotalTokens,
-	)
+
+	var sb strings.Builder
+	// Rough pre-allocation: lengths of strings + approx max int lengths
+	sb.Grow(len(apiName) + len(modelName) + len(timestamp) + len(detail.Source) + len(detail.AuthIndex) + 100)
+
+	sb.WriteString(apiName)
+	sb.WriteByte('|')
+	sb.WriteString(modelName)
+	sb.WriteByte('|')
+	sb.WriteString(timestamp)
+	sb.WriteByte('|')
+	sb.WriteString(detail.Source)
+	sb.WriteByte('|')
+	sb.WriteString(detail.AuthIndex)
+	sb.WriteByte('|')
+	sb.WriteString(strconv.FormatBool(detail.Failed))
+	sb.WriteByte('|')
+	sb.WriteString(strconv.FormatInt(tokens.InputTokens, 10))
+	sb.WriteByte('|')
+	sb.WriteString(strconv.FormatInt(tokens.OutputTokens, 10))
+	sb.WriteByte('|')
+	sb.WriteString(strconv.FormatInt(tokens.ReasoningTokens, 10))
+	sb.WriteByte('|')
+	sb.WriteString(strconv.FormatInt(tokens.CachedTokens, 10))
+	sb.WriteByte('|')
+	sb.WriteString(strconv.FormatInt(tokens.TotalTokens, 10))
+
+	return sb.String()
 }
 
 func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
@@ -463,10 +639,19 @@ func normaliseTokenStats(tokens TokenStats) TokenStats {
 	return tokens
 }
 
+var hourStrings = []string{
+	"00", "01", "02", "03", "04", "05", "06", "07", "08", "09",
+	"10", "11", "12", "13", "14", "15", "16", "17", "18", "19",
+	"20", "21", "22", "23",
+}
+
+// formatHour returns the zero-padded string representation of an hour (0-23).
+// It uses a pre-allocated array of strings to avoid the high allocation 
+// cost of using fmt.Sprintf("%02d", hour) on the hot path of metrics aggregation.
 func formatHour(hour int) string {
 	if hour < 0 {
 		hour = 0
 	}
 	hour = hour % 24
-	return fmt.Sprintf("%02d", hour)
+	return hourStrings[hour]
 }
