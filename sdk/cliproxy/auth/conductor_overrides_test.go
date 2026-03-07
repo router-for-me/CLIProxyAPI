@@ -233,7 +233,7 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 
 func TestManager_ShouldRetryAfterError_NonRetryableStatuses(t *testing.T) {
 	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(3, 30*time.Second)
+	m.SetRetryConfig(3, 30*time.Second, 0)
 
 	model := "test-model"
 	next := time.Now().Add(5 * time.Second)
@@ -253,7 +253,7 @@ func TestManager_ShouldRetryAfterError_NonRetryableStatuses(t *testing.T) {
 		t.Fatalf("register auth: %v", errRegister)
 	}
 
-	_, maxWait := m.retrySettings()
+	_, _, maxWait := m.retrySettings()
 	testCases := []int{401, 402, 403, 404, 422, 429}
 	for _, status := range testCases {
 		wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: status, Message: "non-retryable"}, 0, []string{"claude"}, model, maxWait)
@@ -268,7 +268,7 @@ func TestManager_ShouldRetryAfterError_NonRetryableStatuses(t *testing.T) {
 
 func TestManager_ShouldRetryAfterError_RetriesOn408(t *testing.T) {
 	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(3, 30*time.Second)
+	m.SetRetryConfig(3, 30*time.Second, 0)
 
 	model := "test-model"
 	next := time.Now().Add(5 * time.Second)
@@ -288,7 +288,7 @@ func TestManager_ShouldRetryAfterError_RetriesOn408(t *testing.T) {
 		t.Fatalf("register auth: %v", errRegister)
 	}
 
-	_, maxWait := m.retrySettings()
+	_, _, maxWait := m.retrySettings()
 	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 408, Message: "timeout"}, 0, []string{"claude"}, model, maxWait)
 	if !shouldRetry {
 		t.Fatalf("expected shouldRetry=true for 408")
