@@ -25,6 +25,10 @@ static/*
 auths/*
 !auths/.gitkeep
 
+# Usage data
+usage/*
+!usage/.gitkeep
+
 # Documentation
 docs/*
 AGENTS.md

@@ -31,6 +31,9 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
+# Usage statistics directory (supports ~ for home directory)
+usage-dir: "./usage"
+
 # API keys for authentication
 api-keys:
   - "your-api-key-1"

@@ -146,6 +146,11 @@ type Server struct {
 	// configFilePath is the absolute path to the YAML config file for persistence.
 	configFilePath string
 
+	// usage persistence tracking
+	usagePersistenceCtx    context.Context
+	usagePersistenceCancel context.CancelFunc
+	usagePersistenceDone   <-chan struct{}
+
 	// currentPath is the absolute path to the current working directory.
 	currentPath string
 
@@ -790,6 +795,29 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
 	}
 
+	// Setup usage statistics persistence
+	persistenceCtx, persistenceCancel := context.WithCancel(context.Background())
+	s.usagePersistenceCtx = persistenceCtx
+	s.usagePersistenceCancel = persistenceCancel
+
+	usageDir := ""
+	if s.cfg != nil {
+		usageDir = s.cfg.UsageDir
+	}
+	if usageDir == "" {
+		usageDir = os.Getenv("CLI_PROXY_USAGE_DIR")
+	}
+	if usageDir == "" {
+		usageDir = filepath.Join(filepath.Dir(s.configFilePath), "usage")
+	} else if resolvedUsageDir, err := util.ResolveUsageDir(usageDir); err == nil && resolvedUsageDir != "" {
+		usageDir = resolvedUsageDir
+	}
+	if err := os.MkdirAll(usageDir, 0755); err != nil {
+		log.Errorf("failed to create usage directory %s: %v", usageDir, err)
+	}
+	usageFilePath := filepath.Join(usageDir, "usage.json")
+	s.usagePersistenceDone = usage.StartPersistence(persistenceCtx, usageFilePath, 5*time.Minute)
+
 	useTLS := s.cfg != nil && s.cfg.TLS.Enable
 	if useTLS {
 		cert := strings.TrimSpace(s.cfg.TLS.Cert)
@@ -822,6 +850,17 @@ func (s *Server) Start() error {
 //   - error: An error if the server fails to stop
 func (s *Server) Stop(ctx context.Context) error {
 	log.Debug("Stopping API server...")
+
+	if s.usagePersistenceCancel != nil {
+		s.usagePersistenceCancel()
+		if s.usagePersistenceDone != nil {
+			select {
+			case <-s.usagePersistenceDone:
+			case <-ctx.Done():
+				log.Warn("Timeout waiting for usage persistence to save")
+			}
+		}
+	}
 
 	if s.keepAliveEnabled {
 		select {
