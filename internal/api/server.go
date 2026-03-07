@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/access"
+	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
@@ -41,6 +42,11 @@ import (
 )
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+
+func writePendingOAuthCallbackFile(configAuthDir, provider, state, code, errStr string) {
+	authDir := managementHandlers.ResolveEffectiveAuthDir(configAuthDir, sdkAuth.GetTokenStore())
+	_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, errStr)
+}
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -195,6 +201,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	for i := range opts {
 		opts[i](optionState)
 	}
+	if accessManager == nil {
+		log.Warn("access manager was nil, creating a default manager")
+		accessManager = sdkaccess.NewManager()
+		configaccess.Register(&cfg.SDKConfig)
+		accessManager.SetProviders(sdkaccess.RegisteredProviders())
+	}
+
 	// Set gin mode
 	if !cfg.Debug {
 		gin.SetMode(gin.ReleaseMode)
@@ -371,7 +384,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
+			writePendingOAuthCallbackFile(s.cfg.AuthDir, "anthropic", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -385,7 +398,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
+			writePendingOAuthCallbackFile(s.cfg.AuthDir, "codex", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -399,7 +412,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
+			writePendingOAuthCallbackFile(s.cfg.AuthDir, "gemini", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -413,7 +426,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "iflow", state, code, errStr)
+			writePendingOAuthCallbackFile(s.cfg.AuthDir, "iflow", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -427,7 +440,7 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
+			writePendingOAuthCallbackFile(s.cfg.AuthDir, "antigravity", state, code, errStr)
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -484,7 +497,7 @@ func (s *Server) registerManagementRoutes() {
 	log.Info("management routes registered after secret key configuration")
 
 	mgmt := s.engine.Group("/v0/management")
-	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
+	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), s.mgmt.StateMiddleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
@@ -1028,7 +1041,8 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
-			c.Next()
+			log.Error("authentication middleware misconfigured: access manager is nil")
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "authentication unavailable"})
 			return
 		}
 

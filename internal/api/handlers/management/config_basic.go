@@ -217,6 +217,10 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 	if value < 0 {
 		value = 0
 	}
+	if value > config.MaxLogsMaxTotalSizeMB {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "logs-max-total-size-mb exceeds allowed maximum"})
+		return
+	}
 	h.cfg.LogsMaxTotalSizeMB = value
 	h.persist(c)
 }
@@ -326,3 +330,4 @@ func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
 }
+

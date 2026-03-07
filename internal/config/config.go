@@ -21,6 +21,7 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+	MaxLogsMaxTotalSizeMB        = 1024
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -596,6 +597,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.LogsMaxTotalSizeMB < 0 {
 		cfg.LogsMaxTotalSizeMB = 0
+	} else if cfg.LogsMaxTotalSizeMB > MaxLogsMaxTotalSizeMB {
+		cfg.LogsMaxTotalSizeMB = MaxLogsMaxTotalSizeMB
 	}
 
 	if cfg.ErrorLogsMaxFiles < 0 {
