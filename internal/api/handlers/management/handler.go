@@ -51,6 +51,21 @@ type Handler struct {
 	postAuthHook        coreauth.PostAuthHook
 }
 
+type authDirProvider interface {
+	AuthDir() string
+}
+
+// ResolveEffectiveAuthDir returns the runtime auth directory used by file-based flows.
+// Stores with mirrored workspaces may override the configured auth dir.
+func ResolveEffectiveAuthDir(configAuthDir string, store coreauth.Store) string {
+	if provider, ok := store.(authDirProvider); ok {
+		if dir := strings.TrimSpace(provider.AuthDir()); dir != "" {
+			return dir
+		}
+	}
+	return strings.TrimSpace(configAuthDir)
+}
+
 // NewHandler creates a new management handler instance.
 func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Manager) *Handler {
 	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
@@ -163,6 +178,17 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.stateMu.Lock()
 	h.postAuthHook = hook
 	h.stateMu.Unlock()
+}
+
+func (h *Handler) effectiveAuthDir() string {
+	if h == nil {
+		return ""
+	}
+	store := h.tokenStoreWithBaseDir()
+	if h.cfg == nil {
+		return ResolveEffectiveAuthDir("", store)
+	}
+	return ResolveEffectiveAuthDir(h.cfg.AuthDir, store)
 }
 
 // Middleware enforces access control for management endpoints.
@@ -352,5 +378,3 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	set(*body.Value)
 	h.persist(c)
 }
-
-

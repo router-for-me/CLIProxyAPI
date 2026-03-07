@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -244,10 +243,11 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.List()
-	fileInfoIndex := buildAuthDirFileInfoIndex(h.cfg.AuthDir)
+	authDir := h.effectiveAuthDir()
+	fileInfoIndex := buildAuthDirFileInfoIndex(authDir)
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
-		if entry := h.buildAuthFileEntry(auth, h.cfg.AuthDir, fileInfoIndex); entry != nil {
+		if entry := h.buildAuthFileEntry(auth, authDir, fileInfoIndex); entry != nil {
 			files = append(files, entry)
 		}
 	}
@@ -309,7 +309,8 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 
 // List auth files from disk when the auth manager is unavailable.
 func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
-	entries, err := os.ReadDir(h.cfg.AuthDir)
+	authDir := h.effectiveAuthDir()
+	entries, err := os.ReadDir(authDir)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 		return
@@ -327,7 +328,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime()}
 
 			// Read file to get type field
-			full := filepath.Join(h.cfg.AuthDir, name)
+			full := filepath.Join(authDir, name)
 			if data, errRead := os.ReadFile(full); errRead == nil {
 				typeValue := gjson.GetBytes(data, "type").String()
 				emailValue := gjson.GetBytes(data, "email").String()
@@ -554,7 +555,7 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "name must end with .json"})
 		return
 	}
-	full := filepath.Join(h.cfg.AuthDir, name)
+	full := filepath.Join(h.effectiveAuthDir(), name)
 	data, err := os.ReadFile(full)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -581,7 +582,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			c.JSON(400, gin.H{"error": "file must be .json"})
 			return
 		}
-		dst := filepath.Join(h.cfg.AuthDir, name)
+		dst := filepath.Join(h.effectiveAuthDir(), name)
 		if !filepath.IsAbs(dst) {
 			if abs, errAbs := filepath.Abs(dst); errAbs == nil {
 				dst = abs
@@ -617,7 +618,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
-	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	dst := filepath.Join(h.effectiveAuthDir(), filepath.Base(name))
 	if !filepath.IsAbs(dst) {
 		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
 			dst = abs
@@ -642,7 +643,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	if all := c.Query("all"); all == "true" || all == "1" || all == "*" {
-		entries, err := os.ReadDir(h.cfg.AuthDir)
+		entries, err := os.ReadDir(h.effectiveAuthDir())
 		if err != nil {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 			return
@@ -656,7 +657,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			if !strings.HasSuffix(strings.ToLower(name), ".json") {
 				continue
 			}
-			full := filepath.Join(h.cfg.AuthDir, name)
+			full := filepath.Join(h.effectiveAuthDir(), name)
 			if !filepath.IsAbs(full) {
 				if abs, errAbs := filepath.Abs(full); errAbs == nil {
 					full = abs
@@ -680,7 +681,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		return
 	}
 
-	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	targetPath := filepath.Join(h.effectiveAuthDir(), filepath.Base(name))
 	targetID := ""
 	if targetAuth := h.findAuthForDelete(name); targetAuth != nil {
 		targetID = strings.TrimSpace(targetAuth.ID)
@@ -740,24 +741,10 @@ func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
 }
 
 func (h *Handler) authIDForPath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
+	if h == nil || h.cfg == nil {
+		return sdkAuth.NormalizeFileAuthID(path, "")
 	}
-	id := path
-	if h != nil && h.cfg != nil {
-		authDir := strings.TrimSpace(h.cfg.AuthDir)
-		if authDir != "" {
-			if rel, errRel := filepath.Rel(authDir, path); errRel == nil && rel != "" {
-				id = rel
-			}
-		}
-	}
-	// On Windows, normalize ID casing to avoid duplicate auth entries caused by case-insensitive paths.
-	if runtime.GOOS == "windows" {
-		id = strings.ToLower(id)
-	}
-	return id
+	return sdkAuth.NormalizeFileAuthID(path, h.effectiveAuthDir())
 }
 
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
@@ -1102,7 +1089,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 
 		// Helper: wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
+		waitFile := filepath.Join(h.effectiveAuthDir(), fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
 		waitForFile := func(path string, timeout time.Duration) (map[string]string, error) {
 			deadline := time.Now().Add(timeout)
 			for {
@@ -1238,7 +1225,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		}
 
 		// Wait for callback file written by server route
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-gemini-%s.oauth", state))
+		waitFile := filepath.Join(h.effectiveAuthDir(), fmt.Sprintf(".oauth-gemini-%s.oauth", state))
 		fmt.Println("Waiting for authentication callback...")
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
@@ -1506,7 +1493,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 
 		// Wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
+		waitFile := filepath.Join(h.effectiveAuthDir(), fmt.Sprintf(".oauth-codex-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
 		var code string
 		for {
@@ -1636,7 +1623,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			defer stopCallbackForwarderInstance(antigravity.CallbackPort, forwarder)
 		}
 
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
+		waitFile := filepath.Join(h.effectiveAuthDir(), fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
 		for {
@@ -1927,7 +1914,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 		}
 		fmt.Println("Waiting for authentication...")
 
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-iflow-%s.oauth", state))
+		waitFile := filepath.Join(h.effectiveAuthDir(), fmt.Sprintf(".oauth-iflow-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
 		var resultMap map[string]string
 		for {
@@ -2032,7 +2019,7 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 
 	// Check for duplicate BXAuth before authentication
 	bxAuth := iflowauth.ExtractBXAuth(cookieValue)
-	if existingFile, err := iflowauth.CheckDuplicateBXAuth(h.cfg.AuthDir, bxAuth); err != nil {
+	if existingFile, err := iflowauth.CheckDuplicateBXAuth(h.effectiveAuthDir(), bxAuth); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to check duplicate"})
 		return
 	} else if existingFile != "" {
