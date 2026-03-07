@@ -73,26 +73,52 @@ func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillInc
 	originalRequest := []byte(`{"messages":[]}`)
 	var param any
 
-	outputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"), &param)
-	if len(outputs) != 1 {
-		t.Fatalf("expected 1 output chunk, got %d", len(outputs))
+	chunks := [][]byte{
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.added\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Let me think\"}"),
+		[]byte("data: {\"type\":\"response.reasoning_summary_part.done\"}"),
+		[]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"),
 	}
 
-	lines := strings.Split(outputs[0], "\n")
-	for _, line := range lines {
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := gjson.Parse(strings.TrimPrefix(line, "data: "))
-		if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "thinking" {
-			if !data.Get("content_block.signature").Exists() {
-				t.Fatalf("thinking start block missing signature field: %s", line)
+	var outputs []string
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	thinkingStartFound := false
+	thinkingStopFound := false
+	signatureDeltaFound := false
+
+	for _, out := range outputs {
+		for _, line := range strings.Split(out, "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
 			}
-			return
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "thinking" {
+				thinkingStartFound = true
+				if !data.Get("content_block.signature").Exists() {
+					t.Fatalf("thinking start block missing signature field: %s", line)
+				}
+			}
+			if data.Get("type").String() == "content_block_stop" && data.Get("index").Int() == 0 {
+				thinkingStopFound = true
+			}
+			if data.Get("type").String() == "content_block_delta" && data.Get("delta.type").String() == "signature_delta" {
+				signatureDeltaFound = true
+			}
 		}
 	}
 
-	t.Fatal("expected thinking content_block_start event")
+	if !thinkingStartFound {
+		t.Fatal("expected thinking content_block_start event")
+	}
+	if !thinkingStopFound {
+		t.Fatal("expected thinking content_block_stop event")
+	}
+	if signatureDeltaFound {
+		t.Fatal("did not expect signature_delta without encrypted_content")
+	}
 }
 
 func TestConvertCodexResponseToClaudeNonStream_ThinkingIncludesSignature(t *testing.T) {

@@ -62,7 +62,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	output := ""
 	rootResult := gjson.ParseBytes(rawJSON)
 	params := (*param).(*ConvertCodexResponseToClaudeParams)
-	if params.ThinkingBlockOpen {
+	if params.ThinkingBlockOpen && params.ThinkingStopPending {
 		switch rootResult.Get("type").String() {
 		case "response.content_part.added", "response.completed":
 			output += finalizeCodexThinkingBlock(params)
@@ -394,11 +394,13 @@ func finalizeCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) stri
 	}
 
 	output := ""
-	signatureDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":""}}`
-	signatureDelta, _ = sjson.Set(signatureDelta, "index", params.BlockIndex)
-	signatureDelta, _ = sjson.Set(signatureDelta, "delta.signature", params.ThinkingSignature)
-	output += "event: content_block_delta\n"
-	output += fmt.Sprintf("data: %s\n\n", signatureDelta)
+	if params.ThinkingSignature != "" {
+		signatureDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":""}}`
+		signatureDelta, _ = sjson.Set(signatureDelta, "index", params.BlockIndex)
+		signatureDelta, _ = sjson.Set(signatureDelta, "delta.signature", params.ThinkingSignature)
+		output += "event: content_block_delta\n"
+		output += fmt.Sprintf("data: %s\n\n", signatureDelta)
+	}
 
 	contentBlockStop := `{"type":"content_block_stop","index":0}`
 	contentBlockStop, _ = sjson.Set(contentBlockStop, "index", params.BlockIndex)
