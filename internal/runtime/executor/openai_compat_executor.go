@@ -205,6 +205,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 
+	translated, err = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	if err != nil {
+		return nil, fmt.Errorf("openai compat executor: failed to set stream_options in payload: %w", err)
+	}
+
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
