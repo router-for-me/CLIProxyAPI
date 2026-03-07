@@ -568,7 +568,7 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "name must end with .json"})
 		return
 	}
-	full := filepath.Join(h.effectiveAuthDir(), name)
+	full := filepath.Join(h.effectiveAuthDir(), filepath.Base(name))
 	data, err := os.ReadFile(full)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -29,6 +29,7 @@ func TestDownloadAuthFile_RejectsPathTraversalSeparators(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 	tests := []string{
 		"nested/file.json",
+		"../outside.json",
 		`nested\\file.json`,
 		`C:\\temp\\file.json`,
 	}

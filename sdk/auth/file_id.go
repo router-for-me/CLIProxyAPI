@@ -18,7 +18,7 @@ func normalizeFileAuthIDForOS(path, baseDir, goos string) string {
 		return ""
 	}
 	if baseDir != "" {
-		if rel, errRel := filepath.Rel(baseDir, id); errRel == nil && rel != "" {
+		if rel, errRel := filepath.Rel(baseDir, id); errRel == nil && rel != "" && rel != "." {
 			id = rel
 		}
 	}
