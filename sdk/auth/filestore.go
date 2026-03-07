@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -24,6 +25,18 @@ type FileTokenStore struct {
 	dirLock sync.RWMutex
 	baseDir string
 }
+
+const (
+	// runtime metadata keys persist transient execution state to disk so that
+	// cooldown/error decisions survive process restarts.
+	metadataKeyStatus      = "runtime_status"
+	metadataKeyStatusMsg   = "runtime_status_message"
+	metadataKeyUnavailable = "runtime_unavailable"
+	metadataKeyQuota       = "runtime_quota"
+	metadataKeyLastError   = "runtime_last_error"
+	metadataKeyNextRetry   = "runtime_next_retry_after"
+	metadataKeyModelStates = "runtime_model_states"
+)
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
 // TokenStorage implementation embedded in the token record.
@@ -70,17 +83,20 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		SetMetadata(map[string]any)
 	}
 
+	metadata := cliproxyauth.CloneMetadata(auth.Metadata)
+	metadata["disabled"] = auth.Disabled
+	cliproxyauth.ApplyRuntimeStateToMetadata(metadata, auth)
+
 	switch {
 	case auth.Storage != nil:
 		if setter, ok := auth.Storage.(metadataSetter); ok {
-			setter.SetMetadata(auth.Metadata)
+			setter.SetMetadata(metadata)
 		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}
 	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
-		raw, errMarshal := json.Marshal(auth.Metadata)
+		raw, errMarshal := json.Marshal(metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
@@ -254,6 +270,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	cliproxyauth.RestoreRuntimeStateFromMetadata(auth, metadata)
 	return auth, nil
 }
 
@@ -446,4 +463,131 @@ func deepEqualJSON(a, b any) bool {
 	default:
 		return false
 	}
+}
+
+func cloneMetadata(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return map[string]any{}
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+// applyRuntimeStateToMetadata stores runtime-only account/model health state into
+// namespaced metadata fields so state can be restored after restart.
+func applyRuntimeStateToMetadata(metadata map[string]any, auth *cliproxyauth.Auth) {
+	if metadata == nil || auth == nil {
+		return
+	}
+
+	metadata[metadataKeyStatus] = string(auth.Status)
+	if msg := strings.TrimSpace(auth.StatusMessage); msg != "" {
+		metadata[metadataKeyStatusMsg] = msg
+	} else {
+		delete(metadata, metadataKeyStatusMsg)
+	}
+	metadata[metadataKeyUnavailable] = auth.Unavailable
+
+	if !auth.NextRetryAfter.IsZero() {
+		metadata[metadataKeyNextRetry] = auth.NextRetryAfter.UTC().Format(time.RFC3339Nano)
+	} else {
+		delete(metadata, metadataKeyNextRetry)
+	}
+
+	if !isQuotaStateZero(auth.Quota) {
+		metadata[metadataKeyQuota] = auth.Quota
+	} else {
+		delete(metadata, metadataKeyQuota)
+	}
+
+	if auth.LastError != nil {
+		metadata[metadataKeyLastError] = auth.LastError
+	} else {
+		delete(metadata, metadataKeyLastError)
+	}
+
+	if len(auth.ModelStates) > 0 {
+		metadata[metadataKeyModelStates] = auth.ModelStates
+	} else {
+		delete(metadata, metadataKeyModelStates)
+	}
+}
+
+// restoreRuntimeStateFromMetadata restores runtime-only state written by
+// applyRuntimeStateToMetadata to avoid relearning cooldown/error state on startup.
+func restoreRuntimeStateFromMetadata(auth *cliproxyauth.Auth, metadata map[string]any) {
+	if auth == nil || metadata == nil {
+		return
+	}
+
+	if persistedStatus := parseStatusAny(metadata[metadataKeyStatus]); persistedStatus != "" && !auth.Disabled {
+		auth.Status = persistedStatus
+	}
+	if msg, ok := metadata[metadataKeyStatusMsg].(string); ok {
+		auth.StatusMessage = strings.TrimSpace(msg)
+	}
+	if unavailable, okUnavailable := util.ParseBoolAny(metadata[metadataKeyUnavailable]); okUnavailable {
+		auth.Unavailable = unavailable
+	}
+	if nextRetry, okNextRetry := util.ParseTimeAny(metadata[metadataKeyNextRetry]); okNextRetry {
+		auth.NextRetryAfter = nextRetry
+	}
+
+	if quotaRaw, okQuota := metadata[metadataKeyQuota]; okQuota {
+		var quota cliproxyauth.QuotaState
+		if decodeAnyToStruct(quotaRaw, &quota) == nil {
+			auth.Quota = quota
+		}
+	}
+	if errRaw, okLastErr := metadata[metadataKeyLastError]; okLastErr {
+		var lastErr cliproxyauth.Error
+		if decodeAnyToStruct(errRaw, &lastErr) == nil && (lastErr.Message != "" || lastErr.Code != "" || lastErr.HTTPStatus > 0) {
+			auth.LastError = &lastErr
+		}
+	}
+	if statesRaw, okStates := metadata[metadataKeyModelStates]; okStates {
+		var states map[string]*cliproxyauth.ModelState
+		if decodeAnyToStruct(statesRaw, &states) == nil && len(states) > 0 {
+			auth.ModelStates = states
+		}
+	}
+
+	if auth.Disabled {
+		auth.Status = cliproxyauth.StatusDisabled
+	}
+}
+
+func decodeAnyToStruct(raw any, target any) error {
+	if raw == nil || target == nil {
+		return fmt.Errorf("decode any: nil input")
+	}
+	blob, errMarshal := json.Marshal(raw)
+	if errMarshal != nil {
+		return errMarshal
+	}
+	return json.Unmarshal(blob, target)
+}
+
+func parseStatusAny(raw any) cliproxyauth.Status {
+	s, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	status := cliproxyauth.Status(strings.TrimSpace(s))
+	switch status {
+	case cliproxyauth.StatusUnknown, cliproxyauth.StatusActive, cliproxyauth.StatusPending,
+		cliproxyauth.StatusRefreshing, cliproxyauth.StatusError, cliproxyauth.StatusDisabled:
+		return status
+	}
+	return ""
+}
+
+func isQuotaStateZero(state cliproxyauth.QuotaState) bool {
+	return !state.Exceeded &&
+		strings.TrimSpace(state.Reason) == "" &&
+		state.NextRecoverAt.IsZero() &&
+		state.BackoffLevel == 0
 }

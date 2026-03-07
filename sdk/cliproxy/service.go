@@ -290,9 +290,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		auth.CreatedAt = existing.CreatedAt
 		auth.LastRefreshedAt = existing.LastRefreshedAt
 		auth.NextRefreshAfter = existing.NextRefreshAfter
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-			auth.ModelStates = existing.ModelStates
-		}
+		preserveRuntimeStateFromExistingIfMetadataMissing(auth, existing)
 		op = "update"
 		_, err = s.coreManager.Update(ctx, auth)
 	} else {
@@ -312,6 +310,43 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	// This operation may block on network calls, but the auth configuration
 	// is already effective at this point.
 	s.registerModelsForAuth(auth)
+}
+
+func preserveRuntimeStateFromExistingIfMetadataMissing(incoming, existing *coreauth.Auth) {
+	if incoming == nil || existing == nil {
+		return
+	}
+	if coreauth.HasRuntimeStateMetadata(incoming.Metadata) {
+		return
+	}
+
+	if incoming.Disabled == existing.Disabled {
+		incoming.Status = existing.Status
+		incoming.StatusMessage = existing.StatusMessage
+	}
+	incoming.Unavailable = existing.Unavailable
+	incoming.NextRetryAfter = existing.NextRetryAfter
+	incoming.Quota = existing.Quota
+
+	if existing.LastError != nil {
+		copyErr := *existing.LastError
+		incoming.LastError = &copyErr
+	} else {
+		incoming.LastError = nil
+	}
+
+	if len(existing.ModelStates) > 0 {
+		incoming.ModelStates = make(map[string]*coreauth.ModelState, len(existing.ModelStates))
+		for model, state := range existing.ModelStates {
+			incoming.ModelStates[model] = state.Clone()
+		}
+	} else {
+		incoming.ModelStates = nil
+	}
+
+	if incoming.Disabled {
+		incoming.Status = coreauth.StatusDisabled
+	}
 }
 
 func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {

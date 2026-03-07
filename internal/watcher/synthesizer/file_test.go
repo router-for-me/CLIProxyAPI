@@ -121,6 +121,57 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_RestoresRuntimeStateFromMetadata(t *testing.T) {
+	tempDir := t.TempDir()
+	nextRetry := time.Now().UTC().Add(20 * time.Minute).Round(time.Second)
+
+	authData := map[string]any{
+		"type":                     "claude",
+		"email":                    "runtime@example.com",
+		"runtime_status":           string(coreauth.StatusError),
+		"runtime_status_message":   "cooldown",
+		"runtime_unavailable":      true,
+		"runtime_next_retry_after": nextRetry.Format(time.RFC3339Nano),
+		"runtime_last_error": map[string]any{
+			"code":        "rate_limit",
+			"message":     "too many requests",
+			"http_status": 429,
+		},
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "runtime.json"), data, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	got := auths[0]
+	if got.Status != coreauth.StatusError {
+		t.Fatalf("status=%s, want %s", got.Status, coreauth.StatusError)
+	}
+	if got.StatusMessage != "cooldown" {
+		t.Fatalf("status message=%q, want %q", got.StatusMessage, "cooldown")
+	}
+	if !got.Unavailable {
+		t.Fatalf("unavailable=false, want true")
+	}
+	if got.LastError == nil || got.LastError.HTTPStatus != 429 {
+		t.Fatalf("last error=%+v, want http_status=429", got.LastError)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 	tempDir := t.TempDir()
 

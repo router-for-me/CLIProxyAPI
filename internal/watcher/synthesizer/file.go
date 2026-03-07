@@ -117,6 +117,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		coreauth.RestoreRuntimeStateFromMetadata(a, metadata)
 		// Read priority from auth file
 		if rawPriority, ok := metadata["priority"]; ok {
 			switch v := rawPriority.(type) {
