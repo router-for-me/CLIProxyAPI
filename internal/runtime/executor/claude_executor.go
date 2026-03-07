@@ -840,6 +840,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			baseBetas += ",oauth-2025-04-20"
 		}
 	}
+	if !strings.Contains(baseBetas, "interleaved-thinking") {
+		baseBetas += ",interleaved-thinking-2025-05-14"
+	}
 
 	hasClaude1MHeader := false
 	if ginHeaders != nil {
