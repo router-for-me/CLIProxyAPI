@@ -341,6 +341,10 @@ type ClaudeKey struct {
 
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
+
+	// RemoveToolsCacheControl removes cache_control from tools for this provider.
+	// Use this for upstreams that don't support Anthropic prompt caching on tools (e.g., AWS Bedrock proxies).
+	RemoveToolsCacheControl bool `yaml:"remove-tools-cache-control,omitempty" json:"remove-tools-cache-control,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
