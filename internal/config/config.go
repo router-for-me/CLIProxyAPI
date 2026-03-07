@@ -64,6 +64,12 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// AutoUpdate enables automatic binary self-update from GitHub releases.
+	// When true, the server periodically checks for newer versions, downloads the matching
+	// platform binary, verifies its SHA256 checksum, and restarts with the new version.
+	// Usage statistics are automatically backed up and restored across updates.
+	AutoUpdate bool `yaml:"auto-update" json:"auto-update"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
