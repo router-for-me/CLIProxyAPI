@@ -148,6 +148,18 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	// Read cloak settings from auth file so that OAuth accounts can
+	// configure cloaking without a matching claude-api-key entry.
+	for _, cloakKey := range []string{
+		"cloak_mode", "cloak_strict_mode",
+		"cloak_sensitive_words", "cloak_cache_user_id",
+	} {
+		if v, ok := metadata[cloakKey].(string); ok {
+			if trimmed := strings.TrimSpace(v); trimmed != "" {
+				a.Attributes[cloakKey] = trimmed
+			}
+		}
+	}
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	if provider == "gemini-cli" {
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
