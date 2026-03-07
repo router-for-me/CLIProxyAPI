@@ -262,6 +262,50 @@ func ToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
 	return out
 }
 
+// ToolUseNameMapFromClaudeRequest returns a tool_use.id -> tool_use.name map extracted from Claude messages.
+// It is used by request translators to recover the original tool name when tool_result only carries tool_use_id.
+func ToolUseNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return nil
+	}
+
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return nil
+	}
+
+	out := map[string]string{}
+	messages.ForEach(func(_, message gjson.Result) bool {
+		contents := message.Get("content")
+		if !contents.IsArray() {
+			return true
+		}
+
+		contents.ForEach(func(_, content gjson.Result) bool {
+			if content.Get("type").String() != "tool_use" {
+				return true
+			}
+
+			toolUseID := strings.TrimSpace(content.Get("id").String())
+			toolName := strings.TrimSpace(content.Get("name").String())
+			if toolUseID == "" || toolName == "" {
+				return true
+			}
+
+			if _, exists := out[toolUseID]; !exists {
+				out[toolUseID] = toolName
+			}
+			return true
+		})
+		return true
+	})
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func MapToolName(toolNameMap map[string]string, name string) string {
 	if name == "" || toolNameMap == nil {
 		return name
