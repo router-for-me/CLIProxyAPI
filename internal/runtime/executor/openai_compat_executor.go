@@ -21,6 +21,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const openAICompatRetryErrorBodyLimit = 1 << 20
+
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
@@ -255,7 +257,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
-	if retryResp, retryErr := e.retryStreamWithoutInjectedUsage(ctx, httpClient, httpReq, translated, httpResp, autoInjectedStreamUsage); retryResp != nil || retryErr != nil {
+	if retryResp, retryErr := e.retryStreamWithoutInjectedUsage(ctx, auth, httpClient, httpReq, translated, httpResp, autoInjectedStreamUsage); retryResp != nil || retryErr != nil {
 		httpResp = retryResp
 		if retryErr != nil {
 			recordAPIResponseError(ctx, e.cfg, retryErr)
@@ -316,20 +318,27 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
-func (e *OpenAICompatExecutor) retryStreamWithoutInjectedUsage(ctx context.Context, httpClient *http.Client, httpReq *http.Request, translated []byte, httpResp *http.Response, autoInjected bool) (*http.Response, error) {
+func (e *OpenAICompatExecutor) retryStreamWithoutInjectedUsage(ctx context.Context, auth *cliproxyauth.Auth, httpClient *http.Client, httpReq *http.Request, translated []byte, httpResp *http.Response, autoInjected bool) (*http.Response, error) {
 	if !autoInjected || httpResp == nil {
 		return nil, nil
 	}
 	if httpResp.StatusCode != http.StatusBadRequest && httpResp.StatusCode != http.StatusUnprocessableEntity {
 		return nil, nil
 	}
-	body, err := io.ReadAll(httpResp.Body)
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, openAICompatRetryErrorBodyLimit+1))
 	if err != nil {
-		_ = httpResp.Body.Close()
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Warnf("openai compat executor: failed to close body after read error: %v", errClose)
+		}
 		return nil, err
 	}
 	if errClose := httpResp.Body.Close(); errClose != nil {
 		log.Errorf("openai compat executor: close fallback response body error: %v", errClose)
+	}
+	if len(body) > openAICompatRetryErrorBodyLimit {
+		log.Warnf("openai compat executor: fallback response body exceeded %d bytes; skip retry without include_usage", openAICompatRetryErrorBodyLimit)
+		httpResp.Body = io.NopCloser(bytes.NewReader(body[:openAICompatRetryErrorBodyLimit]))
+		return httpResp, nil
 	}
 	if !strings.Contains(strings.ToLower(string(body)), "stream_options") && !strings.Contains(strings.ToLower(string(body)), "include_usage") {
 		httpResp.Body = io.NopCloser(bytes.NewReader(body))
@@ -344,12 +353,22 @@ func (e *OpenAICompatExecutor) retryStreamWithoutInjectedUsage(ctx context.Conte
 		return nil, err
 	}
 	retryReq.Header = httpReq.Header.Clone()
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
 	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:      retryReq.URL.String(),
-		Method:   retryReq.Method,
-		Headers:  retryReq.Header.Clone(),
-		Body:     trimmed,
-		Provider: e.Identifier(),
+		URL:       retryReq.URL.String(),
+		Method:    retryReq.Method,
+		Headers:   retryReq.Header.Clone(),
+		Body:      trimmed,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
 	})
 	return httpClient.Do(retryReq)
 }

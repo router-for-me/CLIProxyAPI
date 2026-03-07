@@ -185,12 +185,8 @@ func parseCodexUsage(data []byte) (usage.Detail, bool) {
 		OutputTokens: usageNode.Get("output_tokens").Int(),
 		TotalTokens:  usageNode.Get("total_tokens").Int(),
 	}
-	if cached := usageNode.Get("input_tokens_details.cached_tokens"); cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
-	if reasoning := usageNode.Get("output_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
+	detail.CachedTokens = usageNode.Get("input_tokens_details.cached_tokens").Int()
+	detail.ReasoningTokens = usageNode.Get("output_tokens_details.reasoning_tokens").Int()
 	return detail, true
 }
 
@@ -216,16 +212,12 @@ func parseOpenAIUsage(data []byte) usage.Detail {
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
 	}
-	if cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
+	detail.CachedTokens = cached.Int()
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {
 		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
 	}
-	if reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
+	detail.ReasoningTokens = reasoning.Int()
 	return detail
 }
 
@@ -255,16 +247,12 @@ func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
 	}
-	if cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
+	detail.CachedTokens = cached.Int()
 	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
 	if !reasoning.Exists() {
 		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
 	}
-	if reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
+	detail.ReasoningTokens = reasoning.Int()
 	return detail, true
 }
 
