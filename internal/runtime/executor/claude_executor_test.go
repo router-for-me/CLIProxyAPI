@@ -529,6 +529,54 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_CountTokens_RemoveToolsCacheControl(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":                     "key-123",
+		"base_url":                    server.URL,
+		"remove_tools_cache_control":  "true",
+	}}
+
+	payload := []byte(`{
+		"tools": [
+			{"name":"t1","cache_control":{"type":"ephemeral"}},
+			{"name":"t2","cache_control":{"type":"ephemeral","ttl":"1h"}}
+		],
+		"system": [{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}],
+		"messages": [{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`)
+
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-haiku-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if len(seenBody) == 0 {
+		t.Fatal("expected count_tokens request body to be captured")
+	}
+	if gjson.GetBytes(seenBody, "tools.0.cache_control").Exists() {
+		t.Fatalf("tools.0.cache_control should be stripped in count_tokens")
+	}
+	if gjson.GetBytes(seenBody, "tools.1.cache_control").Exists() {
+		t.Fatalf("tools.1.cache_control should be stripped in count_tokens")
+	}
+	if got := gjson.GetBytes(seenBody, "system.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system cache_control should stay untouched, got %q", got)
+	}
+}
+
 func hasTTLOrderingViolation(payload []byte) bool {
 	seen5m := false
 	violates := false

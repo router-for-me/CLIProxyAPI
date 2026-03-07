@@ -490,6 +490,17 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = checkSystemInstructions(body)
 	}
 
+	// Apply remove-tools-cache-control stripping for count_tokens too.
+	if removeToolsCacheControl(auth) {
+		body = stripToolsCacheControl(body)
+		if countCacheControls(body) == 0 {
+			body = injectSystemCacheControl(body)
+			body = injectMessagesCacheControl(body)
+		}
+	} else if countCacheControls(body) == 0 {
+		body = ensureCacheControl(body)
+	}
+
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
 	body = normalizeCacheControlTTL(body)
